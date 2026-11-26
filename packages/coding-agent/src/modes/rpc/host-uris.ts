@@ -1,9 +1,10 @@
 import { Snowflake } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter } from "../../internal-urls";
+import { InternalUrlRouter, posixCksum, RemoteEditConflictError } from "../../internal-urls";
 import type {
 	InternalResource,
 	InternalUrl,
 	ProtocolHandler,
+	RemoteEditHooks,
 	ResolveContext,
 	SchemeSpec,
 	WriteContext,
@@ -40,6 +41,7 @@ class RpcHostUriProtocolHandler implements ProtocolHandler {
 	readonly scheme: string;
 	readonly spec: SchemeSpec;
 	readonly write?: (url: InternalUrl, content: string, context?: WriteContext) => Promise<void>;
+	readonly edit?: RemoteEditHooks;
 	readonly #bridge: RpcHostUriBridge;
 
 	constructor(definition: RpcHostUriSchemeDefinition, bridge: RpcHostUriBridge) {
@@ -50,10 +52,28 @@ class RpcHostUriProtocolHandler implements ProtocolHandler {
 			backing: "remote",
 			selectors: "none",
 			immutable: definition.immutable === true,
-			write: writable ? { via: "handler", payload: "text", scope: "workspace", tier: () => "write" } : undefined,
+			write: writable
+				? { via: "handler", payload: "text", scope: "workspace", tier: () => "write", edits: "update" }
+				: undefined,
 		};
 		if (writable) {
 			this.write = (url, content, context) => this.#bridge.requestWrite(this.scheme, url, content, context);
+			this.edit = {
+				// The host owns its URIs' identity: one spelling, one resource.
+				canonicalUrl: async url => url.href,
+				fetch: async (url, context) => {
+					const { content } = await this.resolve(url, context);
+					return { url: url.href, content, checksum: posixCksum(new TextEncoder().encode(content)) };
+				},
+				// The host protocol has no conditional write, so the check is a read just before the write.
+				update: async (url, content, checksum, context) => {
+					const current = await this.resolve(url, context);
+					if (posixCksum(new TextEncoder().encode(current.content)) !== checksum) {
+						throw new RemoteEditConflictError(url.href);
+					}
+					await this.#bridge.requestWrite(this.scheme, url, content, context);
+				},
+			};
 		}
 	}
 

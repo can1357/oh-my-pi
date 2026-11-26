@@ -29,11 +29,17 @@ import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import {
 	extractUriScheme,
 	InternalUrlRouter,
+	posixCksum,
+	RemoteEditConflictError,
+	RemoteEditMissingError,
+	type RemoteEditSource,
+	type RemoteEditTarget,
 	type ResolveContext,
 	sessionResolveContext,
 	sessionWriteContext,
 } from "../internal-urls";
-import { isRemoteTextWritable, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
+import { unwrapHashlineHeaderPath } from "../tools/hashline-header-path";
+import { isRemoteTextWritable, remoteMirrorPath, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "../tools/details/lsp";
 import { notifyWorkspaceWatchedFiles } from "../lsp/client";
@@ -373,6 +379,23 @@ interface InspectedArgs {
 interface OpenEditSession {
 	native: EditSession;
 	resolveContext: ResolveContext;
+	/** The arguments as far as they are known (partial while streaming), as JSON for {@link editInspect}. */
+	argsJson: () => string;
+	/** Set once the call runs (after approval): URL targets resolve from then on, never before. */
+	applying: boolean;
+	/** Remote mirrors this call fetched, by mirror path: the canonical URL and the checksum its write must match. */
+	fetched: Map<string, { url: string; checksum: string }>;
+}
+
+/** An edit call's state that URL resolution and writes consult. */
+type EditCall = Omit<OpenEditSession, "native">;
+
+/** Model-facing refusal of an edit operation other than an in-place update on a remote text URL. */
+function updateOnlyRefusal(scheme: string, operation: string, url: string): string {
+	if (operation === "create") {
+		return `${url} does not exist, and ${scheme}:// files can only be updated in place, so edit cannot create it; use \`write\` to create it.`;
+	}
+	return `${scheme}:// files can only be updated in place, so edit cannot ${operation} ${url}; use \`bash\` with a remote command to ${operation} it.`;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -522,6 +545,8 @@ export class EditTool implements AgentTool<TInput> {
 			init.emit(batch);
 		});
 		const editSession = open.native;
+		let streamed = "";
+		open.argsJson = () => (rawInput ? JSON.stringify({ input: streamed }) : streamed);
 		this.#sessions.delete(init.toolCallId);
 		this.#sessions.set(init.toolCallId, open);
 		while (this.#sessions.size > 32) {
@@ -532,7 +557,10 @@ export class EditTool implements AgentTool<TInput> {
 			this.#streamedArgs.delete(oldestId);
 		}
 		return {
-			push: delta => editSession.push(delta),
+			push: delta => {
+				streamed += delta;
+				editSession.push(delta);
+			},
 			end: args => {
 				editSession.finish();
 				this.#streamedArgs.set(init.toolCallId, JSON.stringify(args));
@@ -591,6 +619,9 @@ export class EditTool implements AgentTool<TInput> {
 			open.native.setArgsJson(argsJson);
 			open.native.finish();
 		}
+		open.argsJson = () => argsJson;
+		open.applying = true;
+		const current = open;
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
 		let outcome;
@@ -603,7 +634,7 @@ export class EditTool implements AgentTool<TInput> {
 							path: request.path,
 						});
 					}
-					return this.#write(request, signal);
+					return this.#write(request, current, signal);
 				},
 			);
 			if (outcome.isError && batch?.flush) {
@@ -706,13 +737,14 @@ export class EditTool implements AgentTool<TInput> {
 		onPreview?: (error: Error | null, batch: EditPreviewBatch) => void,
 	): OpenEditSession {
 		const resolveContext = sessionResolveContext(this.session, { signal });
+		const call: EditCall = { resolveContext, argsJson: () => "{}", applying: false, fetched: new Map() };
 		const native = new EditSession(
 			getEditStore(this.session),
 			this.#policy(rawInput, resolveContext),
 			onPreview,
-			(_error, url) => this.#resolveUrl(url, resolveContext),
+			(_error, url) => this.#resolveUrl(url, call),
 		);
-		return { native, resolveContext };
+		return Object.assign(call, { native });
 	}
 
 	#policy(rawInput: boolean, context: ResolveContext): EditPolicy {
@@ -744,20 +776,16 @@ export class EditTool implements AgentTool<TInput> {
 	 * A line/partial selector is refused ({@link InternalUrlRouter.peelWriteSelector}): edits
 	 * address whole files.
 	 */
-	async #resolveUrl(url: string, context: ResolveContext): Promise<EditUrlResolution> {
+	async #resolveUrl(url: string, call: EditCall): Promise<EditUrlResolution> {
 		const router = InternalUrlRouter.instance();
+		const context = call.resolveContext;
 		try {
 			const target = router.peelWriteSelector(url, "edit");
 			const scheme = extractUriScheme(target);
 			const spec = scheme === undefined ? undefined : router.spec(scheme);
 			if (!spec) return { error: `Unknown internal URL: ${url}`, planWritable: false };
-			if (isRemoteTextWritable(spec)) {
-				// Patched through a local mirror of the live remote text; `#write` sends it back.
-				const resource = await router.resolve(target, context);
-				if (resource.isDirectory) return { error: `${url} is a directory`, planWritable: false };
-				if (typeof resource.content !== "string") return { error: `${url} is binary`, planWritable: false };
-				return { path: await writeRemoteMirror(target, resource.content), planWritable: false };
-			}
+			const remote = isRemoteTextWritable(spec) ? router.remoteEdit(target) : undefined;
+			if (remote) return await this.#resolveRemote(url, remote, call);
 			if (!router.fileWritable(target)) {
 				const reason = spec.write?.via === "handler" ? "is written through `write`, not edited" : "is read-only";
 				return { error: `${url} ${reason}`, planWritable: false };
@@ -769,21 +797,101 @@ export class EditTool implements AgentTool<TInput> {
 		}
 	}
 
-	/** Send a patched remote mirror back through its scheme's handler; the mirror tracks what was written. */
-	async #writeRemote(url: string, request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
-		if (request.op !== "update" || request.content === undefined) {
-			throw new ToolError(`${url} can only be patched in place; use \`bash\` to delete or move it`, {
-				path: request.path,
-			});
+	/**
+	 * A remote text target (`spec.write.edits`) is patched through a local
+	 * mirror. Before approval (previews) nothing touches the remote host: the mirror an
+	 * earlier `read` wrote serves the preview, and a target without one is deferred.
+	 * Once the call runs, the file is fetched fresh with a checksum `#writeRemote`
+	 * must still match. Operations other than in-place updates are refused in both
+	 * phases, so a batch never writes anything around a refused remote target.
+	 */
+	async #resolveRemote(url: string, remote: RemoteEditTarget, call: EditCall): Promise<EditUrlResolution> {
+		const operation = this.#remoteOperation(url, call);
+		if (operation) return { error: updateOnlyRefusal(remote.scheme, operation, url), planWritable: false };
+		if (!call.applying) {
+			const canonical = await remote.hooks.canonicalUrl(remote.url, call.resolveContext, { localOnly: true });
+			const mirror = canonical === undefined ? undefined : remoteMirrorPath(canonical);
+			if (mirror === undefined) {
+				return {
+					error: `Preview deferred: ${url} is fetched from the remote host when the edit runs`,
+					planWritable: false,
+				};
+			}
+			return { path: mirror, planWritable: false };
 		}
-		await InternalUrlRouter.instance().write(url, request.content, sessionWriteContext(this.session, { signal }));
+		let source: RemoteEditSource;
+		try {
+			source = await remote.hooks.fetch(remote.url, call.resolveContext);
+		} catch (error) {
+			if (error instanceof RemoteEditMissingError) {
+				return { error: updateOnlyRefusal(remote.scheme, "create", url), planWritable: false };
+			}
+			throw error;
+		}
+		const mirror = await writeRemoteMirror(source.url, source.content);
+		call.fetched.set(mirror, { url: source.url, checksum: source.checksum });
+		return { path: mirror, planWritable: false };
+	}
+
+	/** `delete` or `move` when the call's arguments (partial while streaming) delete or move `url`. */
+	#remoteOperation(url: string, call: EditCall): "delete" | "move" | undefined {
+		let inspection: EditInspection;
+		try {
+			inspection = editInspect(this.mode, call.argsJson());
+		} catch {
+			return undefined;
+		}
+		const router = InternalUrlRouter.instance();
+		const names = (authored: string) =>
+			router.normalize(unwrapHashlineHeaderPath(authored).replace(/^@/, "")) === url;
+		for (const op of inspection.fileOps) {
+			if (op.kind === "delete" && names(op.path)) return "delete";
+			if (op.kind === "move" && (names(op.path) || (op.to !== undefined && names(op.to)))) return "move";
+		}
+		return undefined;
+	}
+
+	/**
+	 * Write a patched remote mirror back through its scheme's hooks, only while the
+	 * remote bytes still match what this call fetched.
+	 */
+	async #writeRemote(
+		fetched: { url: string; checksum: string },
+		request: EditWriteRequest,
+		signal?: AbortSignal,
+	): Promise<EditWriteResponse> {
+		const remote = InternalUrlRouter.instance().remoteEdit(fetched.url);
+		if (!remote) throw new ToolError(`${fetched.url} is no longer editable`, { path: request.path });
+		if (request.op !== "update" || request.content === undefined) {
+			throw new ToolError(updateOnlyRefusal(remote.scheme, request.op, fetched.url), { path: request.path });
+		}
+		try {
+			await remote.hooks.update(
+				remote.url,
+				request.content,
+				fetched.checksum,
+				sessionWriteContext(this.session, { signal }),
+			);
+		} catch (error) {
+			if (error instanceof RemoteEditConflictError) {
+				throw new ToolError(`${error.message} Re-read ${fetched.url} and retry the edit.`, { path: request.path });
+			}
+			throw error;
+		}
 		await Bun.write(request.path, request.content);
+		fetched.checksum = posixCksum(new TextEncoder().encode(request.content));
 		return { written: request.content };
 	}
 
-	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
-		const remote = remoteMirrorUrl(request.path);
-		if (remote !== undefined) return this.#writeRemote(remote, request, signal);
+	async #write(request: EditWriteRequest, call: EditCall, signal?: AbortSignal): Promise<EditWriteResponse> {
+		const fetched = call.fetched.get(request.path);
+		if (fetched) return this.#writeRemote(fetched, request, signal);
+		const unfetched = remoteMirrorUrl(request.path);
+		if (unfetched !== undefined) {
+			throw new ToolError(`${unfetched} was not fetched for this edit; re-read it and retry the edit.`, {
+				path: request.path,
+			});
+		}
 		const journaled = this.session.recordFileChange !== undefined;
 		const before = journaled ? await readSnapshot(request.path) : undefined;
 		const journal = (file: string, after: string | null, snapshot: FileSnapshot | undefined = before) => {
