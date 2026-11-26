@@ -22,12 +22,14 @@
 
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
 
+### Fixed
+
+- Fixed Vercel AI Gateway `meta/muse-spark-1.3-contributor` requests failing with HTTP 400: its output budget is capped to 131072 tokens like `1.2-contributor`, and the 1M context window is unchanged ([#10705](https://github.com/can1357/oh-my-pi/issues/10705), [#19948](https://github.com/can1357/oh-my-pi/pull/19948) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [19.2.1] - 2026-11-25
 
 ### Fixed
 
-- Fixed Vercel AI Gateway `meta/muse-spark-1.3-contributor` requests failing with HTTP 400: its output budget is capped to 131072 tokens like `1.2-contributor`, and the 1M context window is unchanged ([#10705](https://github.com/can1357/oh-my-pi/issues/10705), [#19948](https://github.com/can1357/oh-my-pi/pull/19948) by [@JamieJ5926](https://github.com/JamieJ5926))
-- A Codex service tier offered by only some logged-in accounts (such as Ultrafast) is no longer hidden when the first account's plan lacks it.
 - Fixed Codex service tiers, such as Ultrafast, being hidden for accounts that support them when the first logged-in account has a plan that does not.
 
 ## [19.2.0] - 2026-11-25
