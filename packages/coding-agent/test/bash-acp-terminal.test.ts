@@ -398,4 +398,44 @@ describe("BashTool ACP terminal routing", () => {
 		const text = result.content.find(c => c.type === "text");
 		expect(text?.text).toContain("done");
 	}, 8000);
+
+	it("reports a signal-killed terminal as 128 plus the signal number", async () => {
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-signal",
+			waitForExit: async () => ({ exitCode: null, signal: "SIGTERM" }),
+			currentOutput: async () => ({ output: "", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+
+		const result = await new BashTool(makeSession(bridge)).execute("call-signal", { command: "sleep 60" });
+
+		expect(result.isError).toBe(true);
+		expect(result.details?.exitCode).toBe(143);
+		expect(result.content.find(block => block.type === "text")?.text).toContain("Command exited with code 143");
+	});
+
+	it("keeps the bare 128 when the signal name is not in the OS table", async () => {
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-unknown-signal",
+			waitForExit: async () => ({ exitCode: null, signal: "SIGUNKNOWN" }),
+			currentOutput: async () => ({ output: "", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+
+		const result = await new BashTool(makeSession(bridge)).execute("call-unknown-signal", { command: "sleep 60" });
+
+		expect(result.isError).toBe(true);
+		expect(result.details?.exitCode).toBe(128);
+		expect(result.content.find(block => block.type === "text")?.text).toContain("Command exited with code 128");
+	});
 });
