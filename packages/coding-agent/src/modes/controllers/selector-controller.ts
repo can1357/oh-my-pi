@@ -2584,7 +2584,8 @@ export class SelectorController {
 		const { DebugSelector } = await import("../../debug");
 		this.#showInEditorArea(
 			done => DebugSelector({ host: this.ctx, onDone: done }),
-			root => firstOfKind(root, "list"),
+			// A card's `list` in Tern, the sheet's `picker` on terminal rows.
+			root => firstOfKind(root, "list", "picker"),
 		);
 	}
 
