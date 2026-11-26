@@ -937,6 +937,50 @@ describe("AgentSession retry fallback", () => {
 		},
 	);
 
+	it("gives the notice to the turn an aside delivered at the end of a run buys (retry.fallbackNotice)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackNotice": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		let asideSent = false;
+		recordRequests(
+			requestContexts,
+			model => {
+				if (model.provider === primaryModel.provider) {
+					return { throw: "overloaded_error: provider returned error 503" };
+				}
+				// Queued while the served fallback turn streams, so the end of that turn delivers it.
+				if (!asideSent) {
+					asideSent = true;
+					void session?.sendCustomMessage(
+						{ customType: "test-aside", content: "An aside for the end of the run", display: false },
+						{ deliverAs: "aside" },
+					);
+				}
+				return { content: [`ok:${model.provider}/${model.id}`] };
+			},
+			primaryModel,
+			settings,
+		);
+
+		await session?.prompt("First turn: the primary refuses, the fallback serves");
+		await session?.waitForIdle();
+
+		// The aside buys one more request in the same run, and the notice rides it.
+		expect(requestContexts).toHaveLength(3);
+		expect(requestContexts[2]).toContain("An aside for the end of the run");
+		expect(fallbackNotices(requestContexts[2])).toEqual([`Fallback: ${primarySelector} → ${fallbackSelector}`]);
+	});
+
 	it("adds no notice for a fallback move no turn was served on once the model is switched by hand (retry.fallbackNotice)", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
