@@ -151,7 +151,7 @@ import {
 	withUpstreamPinOf,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
+import { isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
@@ -595,8 +595,10 @@ import {
 	cfgSkillful,
 	cfgTierAdvisor,
 	cfgTierAnthropic,
+	cfgTierDevin,
 	cfgTierGoogle,
 	cfgTierOpenai,
+	cfgTiers,
 	cfgProvidersAnthropicSlowMode,
 	resetWindowModes,
 	resetWindowSettings,
@@ -3479,6 +3481,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgTierOpenai.listen(this, tier => this.setServiceTierFamily("openai", serviceTierSettingToTier(tier)));
 		cfgTierAnthropic.listen(this, tier => this.setServiceTierFamily("anthropic", serviceTierSettingToTier(tier)));
 		cfgTierGoogle.listen(this, tier => this.setServiceTierFamily("google", serviceTierSettingToTier(tier)));
+		cfgTierDevin.listen(this, tier => this.setServiceTierFamily("devin", serviceTierSettingToTier(tier)));
 		cfgAdvisorRuntimeInputs.listen(this, (next, previous) => {
 			// A budget/tier edit rebuilds a running advisor (both are part of its
 			// runtime signature) without overriding a session-only `/advisor` toggle.
@@ -14971,11 +14974,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				.getBranch()
 				.some(entry => entry.type === "service_tier_change");
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
-			const configuredServiceTierByFamily = buildServiceTierByFamily(
-				cfgTierOpenai.get(this.settings),
-				cfgTierAnthropic.get(this.settings),
-				cfgTierGoogle.get(this.settings),
-			);
+			const configuredServiceTierByFamily = cfgTiers.get(this.settings);
 			// Restore the thinking selector. Each change persists the configured
 			// selector (`auto` or a concrete level), so prefer it: an `auto` session
 			// resumes in auto mode (reclassifying the next turn) instead of freezing at
