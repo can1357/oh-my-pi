@@ -525,18 +525,28 @@ function openFieldLines(
 				if (r === caretRow) column.focusEnd = lines.length;
 			}
 		} else {
-			const secret = field.type === "password";
-			const value = answer.text.text;
-			const text = secret ? "•".repeat([...value].length) : value;
 			const head = `  ${bar} `;
 			const room = width - visibleWidth(head);
 			if (room <= 0) lines.push(clip(head, width));
 			else {
+				let { text, cursor } = answer.text;
+				if (field.type === "password") {
+					// Count the mask and its caret in the same units, not UTF-16 offsets.
+					let offset = 0;
+					let bullets = 0;
+					let caret = 0;
+					for (const point of text) {
+						if (offset < cursor) caret++;
+						offset += point.length;
+						bullets++;
+					}
+					text = "•".repeat(bullets);
+					cursor = caret;
+				}
 				const line = caretLine(
 					theme,
 					text,
-					// Each code point is one bullet: the caret keeps its place in a masked value.
-					secret ? value.slice(0, answer.text.cursor).length : answer.text.cursor,
+					cursor,
 					field.placeholder || undefined,
 					model.vim({ kind: "text", field: index })?.selection(),
 					room,

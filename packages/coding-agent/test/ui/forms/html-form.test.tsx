@@ -220,6 +220,41 @@ test("keeps a long ordinary input visible and editable at both ends", () => {
 	}
 });
 
+test("places the masked password caret after one bullet for an emoji", () => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><label>Code <input type="password" name="code"></label></form>`),
+		{
+			onSubmit,
+			onCancel: () => {},
+		},
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} /> }), {
+		columns: 32,
+		rows: 16,
+		theme: loadThemeSync("dark"),
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.paste("😀ab");
+		term.press("home");
+		term.press("right");
+		const spans = styledSpans(term.rows().find(row => row.includes("•")) ?? "");
+		const caret = spans.findIndex(span => span.s?.split(" ").includes("mark"));
+		expect(spans[caret]?.t).toBe("•");
+		const before = spans
+			.slice(0, caret)
+			.map(span => span.t)
+			.join("");
+		expect(before).toMatch(/│ •$/);
+		term.type("x");
+		term.press("enter");
+		expect(onSubmit).toHaveBeenCalledWith({ code: "😀xab" }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
 corpusSuite({
 	dir: "forms/html-form",
 	mount(caseName, corpusCase, env): Mounted {
