@@ -1,10 +1,9 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { ToolCall } from "../../../src/ui/transcript/tool-block";
+import { toolCall, toolCallText } from "../../helpers/tool-text";
 
 function progressEntry(description: string): AgentProgress {
 	return {
@@ -70,39 +69,36 @@ function finalSnapshot(output: string): {
 	};
 }
 
-function makeComponent(): ToolExecutionComponent {
-	const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
-	return new ToolExecutionComponent(
-		"task",
-		{ agent: "scout", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
-		{},
-		undefined,
-		ui,
-	);
+function makeCall(): ToolCall {
+	return toolCall({
+		name: "task",
+		args: { agent: "scout", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
+	});
 }
 
-describe("ToolExecutionComponent detached task lifecycle", () => {
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
+
+describe("task tool card detached lifecycle", () => {
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		await initTheme();
 	});
 
 	it("keeps accepting live progress snapshots until settlement", () => {
-		const component = makeComponent();
-		component.updateResult(asyncSnapshot("initial progress"), true);
-		component.updateResult(asyncSnapshot("latest progress"), true);
+		const call = makeCall();
+		call.updateResult(asyncSnapshot("initial progress"), true);
+		call.updateResult(asyncSnapshot("latest progress"), true);
 
-		const rendered = stripVTControlCharacters(component.render(100).join("\n"));
+		const rendered = toolCallText(call, 100);
 		expect(rendered).toContain("latest progress");
 		expect(rendered).not.toContain("initial progress");
 	});
 
 	it("applies the terminal result after live progress", () => {
-		const component = makeComponent();
-		component.updateResult(asyncSnapshot("scouting the auth flow"), true);
-		component.updateResult(finalSnapshot("found it in src/auth.ts"), false);
+		const call = makeCall();
+		call.updateResult(asyncSnapshot("scouting the auth flow"), true);
+		call.updateResult(finalSnapshot("found it in src/auth.ts"), false);
 
-		const rendered = stripVTControlCharacters(component.render(100).join("\n"));
-		expect(rendered).toContain("found it in src/auth.ts");
+		expect(toolCallText(call, 100)).toContain("found it in src/auth.ts");
 	});
 });

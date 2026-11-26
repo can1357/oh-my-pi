@@ -3,11 +3,11 @@
 use std::{
 	collections::{BTreeMap, HashSet},
 	fmt::NumBuffer,
+	ops::RangeInclusive,
 	path::Path,
-	sync::LazyLock,
 };
 
-use regex::Regex;
+use xutf::{GeneralCategory, GeneralCategoryGroup, Ucd, UnitSet};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, config::OutlineLevel, primitives};
 
@@ -156,14 +156,6 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		MinimizerOutput::transformed(text, input.len())
 	}
 }
-
-/// Date/time anchor in `ls -l` output: month-name day time-or-year.
-/// E.g.: " Apr 28 10:00 " or " Dec 25  2024 " or " 2 feb 21:35 ".
-/// The `(?i)` flag makes month names case-insensitive for non-C locales.
-/// The trailing space ensures we do not match partial tokens.
-static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)\s+(?:(?:\p{L}{3,}\.?\s+\d{1,2}|\d{1,2}\.?\s+\p{L}{3,}\.?)\s+(?:\d{4}|\d{2}:\d{2})|\d{4}[-/]\d{2}(?:[-/]\d{2})?\s+\d{2}:\d{2})\s+").unwrap()
-});
 
 fn compact_listing_output(input: &str) -> String {
 	primitives::compact_listing(input, 80)
@@ -579,46 +571,135 @@ fn compact_ls_output(input: &str) -> Option<String> {
 	Some(out)
 }
 
-fn parse_ls_long_line(line: &str) -> Option<LsEntry> {
-	let trimmed = line.trim();
-	if trimmed.starts_with("total ") || trimmed.is_empty() {
+/// Whether `s` is a run of `count` decimal digits and nothing else.
+fn digits(s: &str, count: RangeInclusive<usize>) -> bool {
+	if s.is_ascii() {
+		count.contains(&s.len()) && s.bytes().all(|byte| byte.is_ascii_digit())
+	} else {
+		count.contains(&s.chars().count())
+			&& s
+				.chars()
+				.all(|c| c.general_category() == GeneralCategory::DecimalNumber)
+	}
+}
+
+/// `Apr`, `févr.`: three or more letters, optionally abbreviated.
+fn month(field: &str) -> bool {
+	let mut seen = 0;
+	field.strip_suffix('.').unwrap_or(field).chars().all(|c| {
+		seen += 1;
+		// U+0345 case-folds to the letter iota.
+		c.is_ascii_alphabetic()
+			|| !c.is_ascii()
+				&& (c.general_category_group() == GeneralCategoryGroup::Letter || c == '\u{345}')
+	}) && seen >= 3
+}
+
+/// `10:00`.
+fn clock(field: &str) -> bool {
+	// `split_once` costs more than the whole check on a five-byte field.
+	field
+		.bytes()
+		.position(|byte| byte == b':')
+		.is_some_and(|colon| digits(&field[..colon], 2..=2) && digits(&field[colon + 1..], 2..=2))
+}
+
+/// `2024-04-28`, `2024/04`.
+fn iso_date(field: &str) -> bool {
+	let mut parts = field.split(['-', '/']);
+	parts.next().is_some_and(|year| digits(year, 4..=4))
+		&& parts.next().is_some_and(|month| digits(month, 2..=2))
+		&& parts.next().is_none_or(|day| digits(day, 2..=2))
+		&& parts.next().is_none()
+}
+
+/// How many fields the date ending at `c` spans, given the two before it:
+/// `Apr 28 10:00`, `28 Apr. 2024` (3) or `2024-04-28 10:00` (2).
+fn date_span(a: Option<&str>, b: &str, c: &str) -> Option<usize> {
+	// Every date ends in a year or a clock: four chars or more, the first
+	// a digit. Most fields stop here.
+	let bytes = c.as_bytes();
+	let digit_first = bytes
+		.first()
+		.is_some_and(|byte| byte.is_ascii_digit() || !byte.is_ascii());
+	if bytes.len() < 4 || !digit_first {
 		return None;
 	}
-
-	let date_match = LS_DATE_RE.find(line)?;
-	let name = line[date_match.end()..].to_string();
-	if matches!(name.as_str(), "." | "..") {
+	let clock = !digits(c, 4..=4);
+	if clock && !self::clock(c) {
 		return None;
 	}
+	if let Some(a) = a
+		&& (month(a) && digits(b, 1..=2)
+			|| digits(a.strip_suffix('.').unwrap_or(a), 1..=2) && month(b))
+	{
+		return Some(3);
+	}
+	(clock && iso_date(b)).then_some(2)
+}
 
-	let before_date = &line[..date_match.start()];
-	let before_parts: Vec<&str> = before_date.split_whitespace().collect();
-	if before_parts.len() < 4 {
+/// Build an entry from its mode, final pre-date fields and filename.
+fn entry(kind: u8, before: [&str; 2], name: &str) -> Option<LsEntry> {
+	if matches!(name, "." | "..") {
 		return None;
 	}
+	// The size is the last field before the date, unless that field or the
+	// one before it is a device number (`major, minor`).
+	let [major, size] = before;
+	let size = size.parse().ok().filter(|_| !major.ends_with(','));
+	Some(LsEntry { name: name.to_owned(), is_dir: kind == b'd', size, is_file: kind == b'-' })
+}
 
-	let kind = before_parts[0].chars().next()?;
-	if !matches!(kind, '-' | 'd' | 'l' | 'c' | 'b' | 's' | 'p' | 'D') {
-		return None;
-	}
-
-	// Size is the rightmost parseable u64 before the date, but skip
-	// comma-separated device major/minor pairs.
-	let mut size = None;
-	if let Some((i, part)) = before_parts.iter().enumerate().next_back() {
-		if part.ends_with(',') {
-			// Major number of a device file — skip.
-		} else if let Ok(s) = part.parse::<u64>() {
-			if i > 0 && before_parts[i - 1].ends_with(',') {
-				// This numeric field is the minor number of a device file.
-			} else {
-				size = Some(s);
-			}
+/// Find the first date anchor among the listing fields.
+fn parse<'a>(line: &'a str, fields: impl Iterator<Item = (usize, &'a str)>) -> Option<LsEntry> {
+	// The four fields before the current one, oldest first.
+	let mut recent = [""; 4];
+	let mut kind = 0;
+	// A date needs whitespace in front of it, which the first field lacks
+	// unless the row is indented.
+	let mut indented = false;
+	let mut before = None;
+	let mut end = 0;
+	for (index, (at, field)) in fields.enumerate() {
+		// The name starts at the first field after the date.
+		if let Some(before) = before {
+			return entry(kind, before, &line[at..]);
 		}
-		// Non-numeric field (e.g. owner/group word) before size: no size.
+		if index == 0 {
+			kind = field.as_bytes()[0];
+			if !matches!(kind, b'-' | b'd' | b'l' | b'c' | b'b' | b's' | b'p' | b'D') {
+				return None;
+			}
+			indented = at > 0;
+		} else if let Some(span) = date_span((index >= 2).then_some(recent[2]), recent[3], field)
+			&& let fields_before = index + 1 - span
+			&& (fields_before > 0 || indented)
+		{
+			// Mode, links, owner and group at least.
+			if fields_before < 4 {
+				return None;
+			}
+			before = Some([recent[3 - span], recent[4 - span]]);
+		}
+		recent = [recent[1], recent[2], recent[3], field];
+		end = at + field.len();
 	}
+	// A date in the last field still needs whitespace after it.
+	entry(kind, before.filter(|_| end < line.len())?, "")
+}
 
-	Some(LsEntry { name, is_dir: kind == 'd', size, is_file: kind == '-' })
+/// Parse a long listing row, including its locale-specific date and filename.
+fn parse_ls_long_line(line: &str) -> Option<LsEntry> {
+	if line.is_ascii() {
+		parse(line, UnitSet::ASCII_WHITESPACE.fields_str(line))
+	} else {
+		// Non-ASCII whitespace separates fields too.
+		let fields = line.split_whitespace();
+		parse(
+			line,
+			fields.map(|field| (line.substr_range(field).map_or(0, |range| range.start), field)),
+		)
+	}
 }
 
 fn format_human_size(size: u64) -> String {

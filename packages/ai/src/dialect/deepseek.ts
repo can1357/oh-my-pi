@@ -275,15 +275,21 @@ function advanceCodeState(state: CodeState, text: string): CodeState {
 	return { fence, run, newline };
 }
 
+interface InlineSpanProbe {
+	readonly fence: number;
+	run: number;
+	newline: boolean;
+}
+
 /**
  * Whether an inline span opened by a `fence`-long backtick run closes in
  * `text` before its paragraph ends. Markdown renders an unmatched run as plain
  * text, so only a closed span is code. `undefined` until the stream decides.
  */
-function inlineSpanCloses(text: string, fence: number, final: boolean): boolean | undefined {
-	let run = 0;
-	let newline = false;
-	for (let i = 0; i < text.length; i++) {
+function inlineSpanCloses(probe: InlineSpanProbe, text: string, from: number, final: boolean): boolean | undefined {
+	const { fence } = probe;
+	let { run, newline } = probe;
+	for (let i = from; i < text.length; i++) {
 		const c = text.charCodeAt(i);
 		if (c === BACKTICK) {
 			run++;
@@ -299,8 +305,9 @@ function inlineSpanCloses(text: string, fence: number, final: boolean): boolean 
 			newline = false;
 		}
 	}
-	if (!final) return undefined;
-	return run === fence;
+	probe.run = run;
+	probe.newline = newline;
+	return final ? run === fence : undefined;
 }
 
 type State =
@@ -342,6 +349,8 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#visibleTail = "";
 	/** Markdown code state of the visible text emitted so far. */
 	#code = OUTSIDE_CODE;
+	/** While a re-spelled token is ambiguous, only advance its closing-span probe over new bytes. */
+	#inlineProbe: InlineSpanProbe | undefined;
 	readonly #closeWait = new TerminatorWait();
 
 	constructor(options: InbandScannerOptions = {}) {
@@ -350,8 +359,14 @@ export class DeepSeekInbandScanner implements InbandScanner {
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
-		if (this.#closeWait.absorb(text)) return [];
-		this.#buffer = this.#closeWait.release(this.#buffer) + text;
+		if (this.#inlineProbe) {
+			this.#buffer += text;
+			if (inlineSpanCloses(this.#inlineProbe, text, 0, false) === undefined) return [];
+			this.#inlineProbe = undefined;
+		} else {
+			if (this.#closeWait.absorb(text)) return [];
+			this.#buffer = this.#closeWait.release(this.#buffer) + text;
+		}
 		const events = this.#consume(false);
 		// Arguments end at a template token in any accepted spelling, so defer
 		// deltas until a bar arrives — unless a fragment already pending at the
@@ -363,6 +378,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	}
 
 	flush(): InbandScanEvent[] {
+		this.#inlineProbe = undefined;
 		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#consume(true);
 	}
@@ -430,6 +446,12 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				}
 				this.#buffer = trimmed;
 				this.#stripLeadingWhitespace = false;
+			}
+			// Every outside token (including partial and re-spelled tokens) starts with '<'.
+			if (!this.#buffer.includes("<")) {
+				this.#emitText(this.#buffer, events);
+				this.#buffer = "";
+				return;
 			}
 			const match = this.#findOutsideToken(final);
 			if (typeof match === "number") {
@@ -828,8 +850,12 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			const fence = settleBacktickRun(code.fence, code.run);
 			if (fence === 0) break;
 			if (fence < 3) {
-				const closes = inlineSpanCloses(this.#buffer.slice(template.index + template.raw.length), fence, final);
-				if (closes === undefined) return template.index;
+				const probe: InlineSpanProbe = { fence, run: 0, newline: false };
+				const closes = inlineSpanCloses(probe, this.#buffer, template.index + template.raw.length, final);
+				if (closes === undefined) {
+					this.#inlineProbe = probe;
+					return template.index;
+				}
 				if (!closes) break;
 			}
 			template = findDeepSeekTemplateToken(

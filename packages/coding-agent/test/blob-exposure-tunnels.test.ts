@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -154,6 +154,33 @@ describe("tunnel URL parsers", () => {
 });
 
 describe("startExposure tunnel adapters", () => {
+	it.each(["tailscale", "ssh"] satisfies ExposureConfig["kind"][])(
+		"keeps failed %s launches from opening a Windows console",
+		async kind => {
+			const dir = fs.mkdtempSync(path.join(fakeBinDir, "hidden-"));
+			writeFakeExecutable(dir, kind, "process.exit(1);");
+			const spawn = spyOn(Bun, "spawn");
+			try {
+				await expect(
+					startExposure(
+						exposure(kind, {
+							publicBaseUrl: "https://blobs.example.test",
+							sshTarget: "localhost",
+							spawn: { cwd: dir, env: { ...process.env, PATH: dir, HOME: dir } },
+						}),
+						PORT,
+					),
+				).rejects.toThrow("exited with code 1");
+				expect(spawn).toHaveBeenCalledWith(
+					expect.arrayContaining([kind === "tailscale" ? "funnel" : "-R"]),
+					expect.objectContaining({ windowsHide: true }),
+				);
+			} finally {
+				spawn.mockRestore();
+			}
+		},
+	);
+
 	it("starts localhost.run with official SSH argv and owns its process", async () => {
 		const invocation = prepareFake('{"type":"registered","domain":"quiet-owl.lhr.life"}');
 		const active = await startExposure(exposure("localhost-run"), PORT);

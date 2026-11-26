@@ -59,7 +59,7 @@ describe("/changelog", () => {
 		const setText = vi.fn();
 		const runtime = {
 			ctx: {
-				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				composer: { setText } as unknown as InteractiveModeContext["composer"],
 				handleChangelogCommand,
 			} as unknown as InteractiveModeContext,
 		};

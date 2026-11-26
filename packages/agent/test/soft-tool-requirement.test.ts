@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type {
 	AgentContext,
@@ -199,6 +200,83 @@ describe("agentLoop soft tool requirement", () => {
 		expect(skipped).toBeDefined();
 	});
 
+	it("gives a required-tool call that fails satisfies the host's notice, not a request to call that tool again", async () => {
+		let pendingPreview = true;
+		const bashSchema = type({ command: "string" });
+		const bashTool: AgentTool<typeof bashSchema, Record<string, never>> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a shell command",
+			parameters: bashSchema,
+			async execute(_id, args) {
+				if (args.command.startsWith("resolve")) pendingPreview = false;
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		};
+		const peekTool: AgentTool<typeof emptySchema, Record<string, never>> = {
+			name: "peek",
+			label: "Peek",
+			description: "A non-resolve detour tool",
+			parameters: emptySchema,
+			async execute() {
+				return { content: [{ type: "text", text: "peeked" }], details: {} };
+			},
+		};
+		const getToolChoice = (): SoftToolRequirement | undefined =>
+			pendingPreview
+				? {
+						soft: true,
+						id: "preview-1",
+						toolName: "bash",
+						satisfies: toolCall => {
+							const command = toolCall.arguments?.command;
+							return toolCall.name === "bash" && typeof command === "string" && command.startsWith("resolve");
+						},
+						unsatisfiedNotice: toolCall =>
+							`\`${String(toolCall.arguments?.command)}\` does not finalize the preview`,
+						reminder: [
+							createUserMessage("<system-reminder>Run `resolve` to finalize the preview.</system-reminder>"),
+						],
+					}
+				: undefined;
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [bashTool, peekTool] };
+		const mock = createMockModel({
+			responses: [
+				// Turn 1: the required tool running a command that is not `resolve`, batched with a detour.
+				{
+					content: [
+						{ type: "toolCall", id: "b1", name: "bash", arguments: { command: 'ast_edit resolve "ok"' } },
+						{ type: "toolCall", id: "p1", name: "peek", arguments: {} },
+					],
+				},
+				{ content: [{ type: "toolCall", id: "b2", name: "bash", arguments: { command: 'resolve "ok"' } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolChoice,
+		};
+
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		const resultText = (toolCallId: string): string => {
+			const result = messages.find(m => m.role === "toolResult" && m.toolCallId === toolCallId);
+			if (result?.role !== "toolResult") throw new Error(`missing tool result for ${toolCallId}`);
+			return result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		};
+
+		// The wrong-command bash call is told what it ran instead of "call the `bash` tool".
+		expect(resultText("b1")).toContain('`ast_edit resolve "ok"` does not finalize the preview');
+		// The detour never called the required tool, so the host's notice is not about it.
+		expect(resultText("p1")).not.toContain("does not finalize the preview");
+		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "bash" });
+	});
+
 	it("does not yield while the requirement is unmet — escalates after a bare-text turn", async () => {
 		const h = makeSoftResolveHarness();
 		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: h.tools };
@@ -226,6 +304,57 @@ describe("agentLoop soft tool requirement", () => {
 		expect(h.resolveRuns).toBe(1);
 		expect(mock.calls.length).toBeGreaterThanOrEqual(2);
 		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "resolve" });
+	});
+
+	it("answers the calls of a turn it aborts, so continuing the run never executes them", async () => {
+		const h = makeSoftResolveHarness();
+		const mock = createMockModel({
+			responses: [
+				// The reminded turn and all three forced turns call `peek` instead.
+				{ content: [{ type: "toolCall", id: "p1", name: "peek", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "p2", name: "peek", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "p3", name: "peek", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "p4", name: "peek", arguments: {} }] },
+				// The continued run resolves.
+				{ content: [{ type: "toolCall", id: "r1", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({ streamFn: mock.stream, getToolChoice: h.getToolChoice });
+		agent.setTools(h.tools);
+
+		await agent.prompt("go");
+		const failed = agent.state.messages.at(-1);
+		expect(failed?.role === "assistant" ? failed.stopReason : undefined).toBe("error");
+
+		// What an automatic retry does: drop the failed turn, then continue the agent.
+		agent.replaceMessages(agent.state.messages.slice(0, -1));
+		await agent.continue();
+
+		expect(h.peekRuns).toBe(0);
+		expect(h.resolveRuns).toBe(1);
+	});
+
+	it("ends a turn that never meets the requirement with an error the agent loop raised, not a failed request", async () => {
+		const h = makeSoftResolveHarness();
+		let detours = 0;
+		// Every turn, forced or not, detours to peek instead of resolving.
+		const mock = createMockModel({
+			handler: () => ({ content: [{ type: "toolCall", id: `p${++detours}`, name: "peek", arguments: {} }] }),
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["sys"], tools: h.tools, messages: [] },
+			streamFn: mock.stream,
+			getToolChoice: h.getToolChoice,
+		});
+
+		await agent.prompt("go");
+
+		const last = agent.state.messages.at(-1);
+		if (last?.role !== "assistant") throw new Error("Expected the turn to end on an assistant message");
+		expect(last.stopReason).toBe("error");
+		expect(last.errorFromAgentLoop).toBe(true);
+		expect(h.peekRuns).toBe(0);
 	});
 
 	it("leaves tool_choice untouched when no requirement is pending", async () => {

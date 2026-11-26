@@ -189,4 +189,20 @@ provider "opencode-go" {
 		}
 		thinking-mode "anthropic-adaptive"
 	}
+	// Go's roster has no System One models, but a Go key is a Console key: the
+	// Console System One endpoint serves the limited-time free Jev to it
+	// (opencode.ai/docs/console/models#jev). The Go gateway path is not that
+	// endpoint, so this row keeps its own base URL.
+	seed api="typesafe" bundle="always" base-url="https://opencode.ai/inference/systemone" {
+		model "jev-1.13-free" name="Jev 1.13 Free" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+	models "jev-1.13-free" {
+		kind "judge"
+	}
 }

@@ -2,7 +2,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { sanitizeDisplayLines, sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeDisplayLines, sanitizeDisplayWarnings, shortenPath } from "../utils/render-utils";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 import type { Settings } from "../config/settings";
@@ -60,14 +60,14 @@ export function formatSessionWorktreeSummary(worktree: SessionWorktree, sourceCl
 		: sourceCleaned
 			? "uncommitted changes moved, source checkout cleaned"
 			: "uncommitted changes carried over";
-	const where = `Moved to worktree ${worktree.path} on branch ${worktree.branch}`;
+	const on = `${worktree.path} on branch ${worktree.branch}`;
 	if (worktree.ovnfs) {
 		const { checkout } = worktree.ovnfs;
-		return `${where} (ovnfs checkout ${checkout}, ${changeStatus}; \`ovnfs land ${checkout}\` lands its commits).`;
+		return `Moved to ovnfs checkout ${checkout} at ${on} (${changeStatus}; \`ovnfs land ${checkout}\` lands its commits).`;
 	}
 	const how =
 		worktree.clonedWith === undefined ? "checked out" : `cloned via ${formatIsolationBackend(worktree.clonedWith)}`;
-	return `${where} (${how}, ${changeStatus}).`;
+	return `Moved to worktree ${on} (${how}, ${changeStatus}).`;
 }
 
 /**
@@ -143,13 +143,14 @@ export async function runSessionWorktreeHook(
  * Create the worktree for `/wt`: an ovnfs checkout when `isolation.backend` is
  * auto and ovnfs is found, else a linked git worktree. Throws with a
  * user-facing message when `cwd` is not a git checkout, `branch` already
- * exists, the checkout name is taken, or git or ovnfs refuses.
+ * exists, the checkout name is taken, or git or ovnfs refuses. An ovnfs
+ * checkout records `options.session`, the session moving into it.
  */
 export async function createSessionWorktree(
 	cwd: string,
 	settings: Settings,
 	branch: string,
-	options: { keepChanges?: boolean } = {},
+	options: { keepChanges?: boolean; session?: string } = {},
 ): Promise<SessionWorktree> {
 	const keepChanges = options.keepChanges ?? true;
 	try {
@@ -179,6 +180,7 @@ export async function createSessionWorktree(
 		sourceCwd: cwd,
 		baseCommit,
 		keptChanges: keepChanges,
+		session: options.session,
 	});
 }
 

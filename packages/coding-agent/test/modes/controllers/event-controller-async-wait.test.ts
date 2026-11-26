@@ -30,8 +30,8 @@ import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import * as terminalSession from "@oh-my-pi/pi-tui/driver/session";
+import { initTheme } from "../../../src/ui/theme/service";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -134,7 +134,7 @@ describe("EventController — run paused on outside work", () => {
 		const { ctx, wake } = makeAwaitingContext(["bg_1", "bg_2"], ["Scout"]);
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		const setWorkingMessage = vi.spyOn(ctx, "setWorkingMessage");
-		const ensureLoadingAnimation = vi.spyOn(ctx, "ensureLoadingAnimation");
+		const ensureWorkingRow = vi.spyOn(ctx, "ensureWorkingRow");
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
 
@@ -145,7 +145,7 @@ describe("EventController — run paused on outside work", () => {
 		// The run goes on: nothing reports a settled status or tears the run down.
 		expect(report).not.toHaveBeenCalled();
 		expect(markActivityEnd).not.toHaveBeenCalled();
-		expect(ensureLoadingAnimation).toHaveBeenCalled();
+		expect(ensureWorkingRow).toHaveBeenCalled();
 		const label = rowLabel(setWorkingMessage);
 		expect(label).toContain("bg_1");
 		expect(label).toContain("bg_2");
@@ -180,7 +180,7 @@ describe("EventController — run paused on outside work", () => {
 		const { ctx, abort, end } = makeAwaitingContext(["bg_1"]);
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
-		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const notify = vi.spyOn(terminalSession, "notifyTerminal").mockImplementation(() => {});
 		const controller = new EventController(ctx);
 		const predict = vi.spyOn(controller.composerPrediction, "request");
 		await controller.handleEvent(yieldedPause());

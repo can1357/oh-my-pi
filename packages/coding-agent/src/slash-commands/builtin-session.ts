@@ -10,18 +10,18 @@ import {
 	renderChangelogEntries,
 	selectChangelogEntries,
 } from "../utils/changelog";
-import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
+import { jobDisplayLabel } from "../async/job-label";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
-import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
-import { shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatCoarseDuration } from "../modes/view-model/chrome/format";
+import { shortenEmbeddedPaths } from "../utils/render-utils";
+import { truncateToWidth } from "../utils/text-width";
+import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../modes/view-model/overlays/job-tree";
+import { errorMessage, sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
 import { markdownFenceFor } from "../utils/markdown-fence";
 import { openLocalFileInEditor } from "../modes/local-file-editor";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import {
 	describeRedeemOutcome,
 	formatResetUsageAccountLine,
@@ -29,7 +29,7 @@ import {
 	resolveResetUsageTarget,
 	toResetUsageAccounts,
 } from "./helpers/reset-usage";
-import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
+import type { ResetUsageAccount } from "../modes/view-model/overlays/reset-usage-selector";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import {
 	launchStatsDashboard,
@@ -37,10 +37,11 @@ import {
 	type StatsDashboardArgs,
 	type StatsDashboardLaunchResult,
 } from "./helpers/stats-dashboard";
-import { StatsNotice } from "@oh-my-pi/pi-tui/overlays/stats-notice";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { StatsNotice } from "../ui/overlays/panels/stats-notice";
 
 async function handleUsageResetCommand(
 	arg: string,
@@ -367,7 +368,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const now = Date.now();
 			const rows: string[] = [];
 			for (const row of buildJobTree([...tree.running, ...tree.recent], tree.agents, tree.rootId)) {
-				const guide = jobTreeGuide(row, theme);
+				const guide = jobTreeGuide(row, currentTheme().symbols);
 				if (row.kind === "agent") {
 					rows.push(`${guide}${row.agent.id}`);
 					continue;
@@ -380,7 +381,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				);
 				// What the job is for leads; full mode follows it with what the command does and the whole command.
 				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [jobDisplayLabel(job)];
-				const indent = jobTreeIndent(row, theme);
+				const indent = jobTreeIndent(row, currentTheme().symbols);
 				for (const entry of lines) {
 					if (!entry) continue;
 					const text = shortenEmbeddedPaths(sanitizeText(entry));
@@ -478,7 +479,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (command, runtime) => {
 			const ctx = runtime.ctx;
-			ctx.editor.setText("");
+			ctx.composer.setText("");
 			const parsed = parseStatsDashboardArgs(command.args);
 			if ("error" in parsed) {
 				ctx.showStatus(parsed.error);
@@ -486,7 +487,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			try {
 				const result = await launchSessionStatsDashboard(parsed, ctx);
-				ctx.presentCommandOutput(new StatsNotice(result.message, result.url));
+				ctx.presentCommandOutput(() => StatsNotice({ message: result.message, url: result.url }));
 			} catch (error) {
 				ctx.showError(`Stats dashboard failed: ${errorMessage(error)}`);
 			}
@@ -647,7 +648,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "branch",
 		aliases: ["rewind"],
 		icon: "branch",
-		description: "Rewind to a previous message, keeping the old path as a branch",
+		description: "Rewind to a previous message in a new session, keeping this one unchanged",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showUserMessageSelector();
 			clearSubmittedText(runtime);

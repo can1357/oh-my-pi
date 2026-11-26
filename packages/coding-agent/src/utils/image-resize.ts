@@ -1,6 +1,13 @@
-import { inflateSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
 import type { BoxEdges, ImageContent } from "@oh-my-pi/pi-ai";
+
+let zlibCache: typeof Zlib | undefined;
+function inflateSync(buf: Zlib.InputType): Buffer {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache.inflateSync(buf);
+}
 import { JUDGMENT_IMAGE_PATCH_SIDE, judgmentImagePatches } from "@oh-my-pi/pi-catalog/compat/judgment-images";
+import { parseImageMetadata } from "@oh-my-pi/pi-utils/mime";
 import { encodeRawPng } from "./png-encode";
 
 export interface ImageResizeOptions {
@@ -229,9 +236,19 @@ function readJpegHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | u
 	return undefined;
 }
 
-/** The size a PNG or JPEG header declares, without decoding the image; `undefined` for any other bytes. */
+function readWebpOrGifHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | undefined {
+	const metadata = parseImageMetadata(buffer);
+	if (metadata?.mimeType !== "image/webp" && metadata?.mimeType !== "image/gif") return undefined;
+	const { width, height, mimeType } = metadata;
+	if (!width || !height) return undefined;
+	return { width, height, mimeType };
+}
+
+/** The size an image header declares, without decoding the image; `undefined` when unavailable. */
 export function readImageHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | undefined {
-	return readPngHeaderDimensions(buffer) ?? readJpegHeaderDimensions(buffer);
+	if (buffer[0] === 0x89) return readPngHeaderDimensions(buffer);
+	if (buffer[0] === 0xff) return readJpegHeaderDimensions(buffer);
+	return readWebpOrGifHeaderDimensions(buffer);
 }
 
 /**

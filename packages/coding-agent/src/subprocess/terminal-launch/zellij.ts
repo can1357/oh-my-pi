@@ -1,4 +1,4 @@
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { hasMultiplexerSession } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { launchError, oneLineId, runStep } from "./shared";
 import type {
 	SupportedMultiplexerCapabilities,
@@ -111,7 +111,7 @@ async function requireExistingTargetTab(
 }
 
 const launchZellij: TerminalLaunchBackend<"zellij", typeof capabilities> = async (request, { environment, runCli }) => {
-	if (!hasTerminalMultiplexerSession("zellij", environment)) {
+	if (!hasMultiplexerSession("zellij", environment)) {
 		throw launchError(request, "capability", "zellij launch requires an active Zellij session.");
 	}
 	const operation = request.placement === "pane" ? "new-pane" : "new-tab";

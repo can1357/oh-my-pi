@@ -20,10 +20,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import { initTheme } from "../src/ui/theme/service";
+import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-coding-agent/session/transcript/transcript-render-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -54,10 +53,7 @@ function createFixture(opts: {
 	isTtsrAbortPending?: boolean;
 	retryAttempt?: number;
 }) {
-	const streamingComponent = new AssistantMessageComponent();
-	const updateContent = vi.spyOn(streamingComponent, "updateContent");
 	const ctx = createInteractiveModeContext({
-		streamingComponent,
 		streamingMessage: opts.streamingMessage,
 		session: {
 			isTtsrAbortPending: opts.isTtsrAbortPending ?? false,
@@ -65,13 +61,17 @@ function createFixture(opts: {
 		},
 	});
 
+	const streaming = ctx.presentAssistant();
+	ctx.streaming = streaming;
+	// What the reply is drawn from: the message_end draw.
+	const updateContent = vi.spyOn(streaming.message, "set");
 	const controller = new EventController(ctx);
 	return { controller, ctx, updateContent };
 }
 
 describe("EventController #handleMessageEnd abort labeling", () => {
 	beforeAll(async () => {
-		await initTheme(false);
+		initTheme();
 	});
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
@@ -96,7 +96,7 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 		// `updateContent` was called once with a copy whose `stopReason` is "stop".
 		// The marker on errorMessage is preserved unchanged on that display copy.
 		expect(updateContent).toHaveBeenCalledTimes(1);
-		const arg = updateContent.mock.calls[0]![0];
+		const arg = updateContent.mock.calls[0]![0]!;
 		expect(arg.stopReason).toBe("stop");
 		expect(arg.errorMessage).toBe(SILENT_ABORT_MARKER);
 
@@ -121,7 +121,7 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 
 		expect(message.errorMessage).toBeUndefined();
 		expect(updateContent).toHaveBeenCalledTimes(1);
-		const arg = updateContent.mock.calls[0]![0];
+		const arg = updateContent.mock.calls[0]![0]!;
 		expect(arg.stopReason).toBe("stop");
 		expect(arg.errorMessage).toBeUndefined();
 	});
@@ -140,7 +140,7 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 
 		// `updateContent` saw the original streaming message ref (no `{...streamingMessage, stopReason:"stop"}` spread).
 		expect(updateContent).toHaveBeenCalledTimes(1);
-		const arg = updateContent.mock.calls[0]![0];
+		const arg = updateContent.mock.calls[0]![0]!;
 		expect(arg).toBe(message);
 		expect(arg.stopReason).toBe("aborted");
 		expect(arg.errorMessage).toBe("Operation aborted");
@@ -158,7 +158,7 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 		// The Esc-interrupt reason rode the AbortController onto errorMessage; the
 		// controller must surface it verbatim instead of overwriting with "Operation aborted".
 		expect(message.errorMessage).toBe(USER_INTERRUPT_LABEL);
-		const arg = updateContent.mock.calls[0]![0];
+		const arg = updateContent.mock.calls[0]![0]!;
 		expect(arg.errorMessage).toBe(USER_INTERRUPT_LABEL);
 		expect(arg.stopReason).toBe("aborted");
 	});
@@ -182,7 +182,7 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 
 		expect(message.errorMessage).toBe("TTSR matched rule: no-unwrap");
 		expect(updateContent).toHaveBeenCalledTimes(1);
-		const arg = updateContent.mock.calls[0]![0];
+		const arg = updateContent.mock.calls[0]![0]!;
 		expect(arg.stopReason).toBe("stop");
 		// Rebuild path: the persisted aborted message renders no error line.
 		expect(resolveAssistantErrorPresentation(message)).toEqual({ kind: "none" });
