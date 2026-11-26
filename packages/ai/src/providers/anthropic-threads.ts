@@ -238,7 +238,18 @@ export class AnthropicThreadTurn {
 			}
 			request = { kind: "continue", body };
 		} else {
-			request = { kind: "create", body: { ...params, thread: { type: "create" } } };
+			// A thread past its reuse window still leaves the previous request's
+			// prompt-cache entry alive (1 h on subscriber sessions). The full body's
+			// tail breakpoint reaches it only when the turn appended fewer blocks than
+			// the ~20-block lookback, so mark the first appended block as a continue does.
+			const previous = this.#claimed ?? this.#chain.anchor;
+			const messages =
+				previous &&
+				Bun.deepEquals(previous.fingerprint, fingerprint) &&
+				extendsConversation(params.messages, previous.messages)
+					? bridgeBreakpoints(params, previous.messages.length)
+					: params.messages;
+			request = { kind: "create", body: { ...params, messages, thread: { type: "create" } } };
 		}
 		this.#planned = { params, betaHeader, fingerprint, request };
 		return request;
@@ -451,6 +462,73 @@ function continueBreakpoints(appended: MessageParam[]): MessageParam[] {
 		let changed = typeof message.content === "string";
 		const next = content.map((block, b) => {
 			if (!marked(m, b)) {
+				const stripped = withoutCacheControl(block);
+				changed ||= stripped !== block;
+				return stripped;
+			}
+			if (!isCacheable(block) || block.cache_control) return block;
+			changed = true;
+			return { ...block, cache_control: { ...template } };
+		});
+		return changed ? { ...message, content: next } : message;
+	});
+}
+
+/** Cache breakpoints Anthropic counts per request, system and tools included. */
+const MAX_REQUEST_BREAKPOINTS = 4;
+
+function headBreakpoints(params: MessageCreateParamsStreaming): number {
+	let count = 0;
+	if (Array.isArray(params.system)) {
+		for (const block of params.system) if (block.cache_control) count++;
+	}
+	for (const tool of params.tools ?? []) if ("cache_control" in tool && tool.cache_control) count++;
+	return count;
+}
+
+/**
+ * Breakpoints for a create that replays a conversation whose thread expired.
+ * The previous request's cache entry outlives the thread, but the full body's
+ * breakpoints sit on the tail and on decimation checkpoints; when the turn
+ * appended more blocks than the ~20-block lookback, none of them reaches the
+ * entry and the whole conversation is written again. This adds a breakpoint on
+ * the first block after the stored response, keeps the newest one, and keeps
+ * older ones newest first while the request stays within its breakpoint limit.
+ * Messages without a breakpoint (caching off) pass through.
+ */
+function bridgeBreakpoints(params: MessageCreateParamsStreaming, storedLength: number): MessageParam[] {
+	const messages = params.messages;
+	let template: CacheControlEphemeral | undefined;
+	let first: [number, number] | undefined;
+	const marks: Array<[number, number]> = [];
+	for (let m = 0; m < messages.length; m++) {
+		const content = messages[m].content;
+		if (typeof content === "string") {
+			if (m >= storedLength) first ??= [m, 0];
+			continue;
+		}
+		for (let b = 0; b < content.length; b++) {
+			const block = content[b];
+			if (m >= storedLength && !first && isCacheable(block)) first = [m, b];
+			if ("cache_control" in block && block.cache_control) {
+				marks.push([m, b]);
+				if (isCacheable(block)) template = block.cache_control;
+			}
+		}
+	}
+	const budget = MAX_REQUEST_BREAKPOINTS - headBreakpoints(params);
+	if (!template || !first || marks.length === 0 || budget < 2) return messages;
+	const [fm, fb] = first;
+	if (marks.some(([m, b]) => m === fm && b === fb)) return messages;
+	const keep = new Set<string>([`${fm}:${fb}`]);
+	for (let i = marks.length - 1; i >= 0 && keep.size < budget; i--) keep.add(`${marks[i][0]}:${marks[i][1]}`);
+	return messages.map((message, m) => {
+		if (m !== fm && typeof message.content === "string") return message;
+		const content: ContentBlockParam[] =
+			typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+		let changed = typeof message.content === "string";
+		const next = content.map((block, b) => {
+			if (!keep.has(`${m}:${b}`)) {
 				const stripped = withoutCacheControl(block);
 				changed ||= stripped !== block;
 				return stripped;
