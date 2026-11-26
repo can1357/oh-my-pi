@@ -2,8 +2,9 @@
  * The tray: on a native host whose `hello` advertises `tray`, a row of live
  * cards over the composer, one per running subagent and background job, in
  * place of the HUD pill. The status row above it is its header (its caption
- * while the main agent is idle). Tern owns selection, order, paging and motion; this module owns the
- * data, the words, and which card is looked at closer.
+ * while the main agent is idle). Tern owns selection, paging and motion; this module owns the
+ * data, the words, the cards' order (which Tern's cards, scrubber and dots all follow), and which
+ * card is looked at closer.
  *
  * {@link buildTrayItems} turns plain inputs into flat item faces; the
  * describers turn faces into nodes; {@link Tray} keeps what the faces need to
@@ -156,7 +157,8 @@ export class TrayMemory {
 	/**
 	 * Each agent's place, pinned the first time the tray sees it: its creation
 	 * time (spawn order; an agent restored from disk by when it was made), then
-	 * the order it was seen in. Nothing that happens to an agent later moves it.
+	 * the order it was seen in. Nothing that happens to an agent later moves it
+	 * within its group (live or settled, see {@link buildTrayItems}).
 	 */
 	readonly places = new Map<string, { at: number; seq: number }>();
 	#seq = 0;
@@ -757,12 +759,14 @@ export interface TrayBuild {
 }
 
 /**
- * The tray's cards in wire order: agents, then the session's background jobs
- * by start time, then the done card. Every card keeps its place for its life:
- * agents stand in their pinned places (see {@link TrayMemory.places}), never
- * by activity, so a new card only appends after the last of its kind. While
- * anything is live the done card stands for every finished agent without a
- * card. While nothing is (quiet) finished agents are not grouped: the newest
+ * The tray's cards in wire order: live cards (queued, running), then settled
+ * ones (done, failed, stopped) still waiting to be delivered or dismissed,
+ * then the done card. Within each group agents come first, in their pinned
+ * places (see {@link TrayMemory.places}), never by activity, then the
+ * session's background jobs by start time; so a new card only appends after
+ * the last of its kind, and settling moves a card once, into its place among
+ * the settled. While anything is live the done card stands for every finished
+ * agent without a card. While nothing is (quiet) finished agents are not grouped: the newest
  * {@link TRAY_QUIET_CARD_LIMIT} each get a settled card, and the done card
  * stands only for the earlier ones and dismissed ones. A card keeps its key
  * across the switch.
@@ -802,11 +806,13 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild 
 		const item = jobItem(input, memory, job);
 		if (item) jobs.push(item);
 	}
-	const quiet = ![...agents, ...jobs].some(item => isLive(item.status) || item.status === "failed");
-	if (!input.showAgents) return { items: jobs, quiet };
+	const cards: TrayItem[] = [...agents, ...jobs];
+	const quiet = !cards.some(item => isLive(item.status) || item.status === "failed");
+	const grouped = [...cards.filter(item => isLive(item.status)), ...cards.filter(item => !isLive(item.status))];
+	if (!input.showAgents) return { items: grouped, quiet };
 	if (!quiet) {
 		const done = doneItem(input, memory, finishedRefs(input, memory, carded), sessions, false);
-		return { items: [...agents, ...jobs, ...(done ? [done] : [])], quiet };
+		return { items: done ? [...grouped, done] : grouped, quiet };
 	}
 	// Quiet: every finished agent, carded or not, in its place; the newest get cards of their own,
 	// the earlier and the dismissed ones go to the done card.
@@ -816,14 +822,15 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild 
 	].sort((a, b) => byPlace(place(a.id), place(b.id)));
 	const shown = finished.filter(agent => !memory.dismissed.has(`agent:${agent.id}`));
 	const own = new Set(shown.slice(-TRAY_QUIET_CARD_LIMIT).map(agent => agent.id));
-	const cards: TrayItem[] = [];
+	const settled: TrayItem[] = [];
 	const rest: AgentRecordLike[] = [];
 	for (const agent of finished) {
-		if (own.has(agent.id)) cards.push(finishedAgentItem(input, memory, agent.id, sessions.get(agent.id), agent.ref));
+		if (own.has(agent.id))
+			settled.push(finishedAgentItem(input, memory, agent.id, sessions.get(agent.id), agent.ref));
 		else if (agent.ref) rest.push(agent.ref);
 	}
 	const done = doneItem(input, memory, rest, sessions, true);
-	return { items: [...cards, ...jobs, ...(done ? [done] : [])], quiet };
+	return { items: [...settled, ...jobs, ...(done ? [done] : [])], quiet };
 }
 
 /** Whether two builds show the same cards, in the same order, with the same faces (flat, compared field by field). */

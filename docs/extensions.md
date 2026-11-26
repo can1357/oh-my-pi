@@ -399,9 +399,11 @@ start one are retained as hidden next-turn messages.
 `pi.sendUserMessage(content, { deliverAs })` submits text/images without slash-command
 or prompt-template expansion. Omit `deliverAs` to start a prompt when idle;
 while streaming, omission queues a steer. Explicit `"steer"` or `"followUp"`
-queues the prompt even when idle instead of starting a turn directly. `"aside"`
-injects at the next step boundary while a run is live and starts a turn when
-idle. The message is recorded with `attribution: "user"` unless you pass
+queues the prompt. When idle, the queue drain can start a turn with that input,
+even after an extension message or a compaction summary. A deliberate user
+interrupt still holds already-queued follow-ups until explicit input resumes
+the session. `"aside"` injects at the next step boundary while a run is live
+and starts a turn when idle. The message is recorded with `attribution: "user"` unless you pass
 `attribution: "agent"`; use `"agent"` for text the extension generated or relayed
 from another agent.
 
@@ -1385,7 +1387,7 @@ A `ComposerShape` contains:
 - `sideBorders`: content rows carry side chrome with padding, so an end-of-row caret may take a padding cell.
 - `gutter`: the prompt gutter before the first row (blanks before the others).
 - `paddingX`: default padding inside the side chrome; `sideWidth(paddingX)`: cells the chrome takes on each side of a content row.
-- `top(cx)` and `bottom(cx)`: one chrome row or `undefined`; `row(cx)`: a content row in its chrome (usually one row).
+- `top(cx)` and `bottom(cx)`: one chrome row or `undefined`; `row(cx)`: return an array when its first row holds the text, or `{ rows, textRow }` to identify the text row by its zero-based index when adding chrome above it. For example, return `{ rows: [blankRow, inputRow], textRow: 1 }` to put a blank row above the input without moving the caret off the text.
 
 Every chrome context has `width`, `paddingX`, `theme`, the rounded `box` glyphs, `border(text)` (the state-colored border), `accent(text)`, `surface(text)` (the composer surface, kept across the row's own resets) and, when the composer shows one, the pre-styled `status` content with its `width`. A row context adds the styled `text` (caret included), the `pad` blanks filling it to the content width, this row's `gutter`, `first`, `last` and `overflow` (cells an end-of-row caret took from the right chrome). Every row must occupy exactly `width` visible cells.
 

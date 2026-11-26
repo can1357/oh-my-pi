@@ -74,6 +74,8 @@ import {
 	type DraftImage,
 	draftImageBlob,
 	expandAtoms,
+	type PixelSize,
+	withMarkerPixelSize,
 } from "./attachments";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -290,6 +292,8 @@ export interface ComposerOptions {
 	readonly autocompleteMaxVisible?: number;
 	/** `drawn`: the caret is drawn in the text (default); `terminal`: the hardware cursor alone shows it. */
 	readonly caret?: "drawn" | "terminal";
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	readonly imeSafeCursor?: boolean;
 	/** Symbol lookup for chip glyphs (the theme's `symbols.symbol`). */
 	readonly symbol?: (key: string) => string;
 	readonly onSubmit?: (text: string) => void;
@@ -425,6 +429,7 @@ export class Composer {
 	readonly #disableSubmit: Signal<boolean>;
 	readonly #caret: Signal<"drawn" | "terminal">;
 	readonly #slots = signal<ComposerSlots>({});
+	readonly #imeSafeCursor: Signal<boolean>;
 
 	readonly #keyHandlers: ComposerKeyHandler[] = [];
 	readonly #pasteHandlers: ComposerPasteHandler[] = [];
@@ -444,6 +449,7 @@ export class Composer {
 		this.#disableSubmit = signal(options.disableSubmit === true);
 		this.#caret = signal(options.caret ?? "drawn");
 		this.#autocomplete = options.autocomplete;
+		this.#imeSafeCursor = signal(options.imeSafeCursor === true);
 		this.#placeholder.set(options.placeholder);
 		for (const entry of options.history ?? []) this.addToHistory(entry);
 		this.#vimOn = signal(options.vim === true);
@@ -1125,6 +1131,25 @@ export class Composer {
 		return at === -1 ? undefined : this.pendingImageLinks[at];
 	}
 
+	/**
+	 * Make `image`, `size` pixels, what image chip `atom` stands for (Tern's annotator handed back
+	 * the annotated picture, maybe cropped or grown): it takes the old image's place among
+	 * {@link pendingImages}, its link is resolved anew, and the chip keeps its label and number
+	 * while its marker states the new size. An atom no longer in the draft, or whose image is no
+	 * longer pending, is ignored.
+	 */
+	replaceImage(atom: Atom, image: DraftImage, size: PixelSize): void {
+		const atoms = this.#atoms.peek();
+		const index = atoms.indexOf(atom);
+		const at = atom.image ? this.pendingImages.indexOf(atom.image) : -1;
+		if (index === -1 || at === -1) return;
+		this.pendingImages[at] = image;
+		this.pendingImageLinks[at] = undefined;
+		const expansion = atom.expansion === undefined ? undefined : withMarkerPixelSize(atom.expansion, size);
+		this.#atoms.set(atoms.with(index, { ...atom, image, expansion }));
+		this.relinkImages();
+	}
+
 	/** Make `state` the draft's atoms and attachments (chip numbering continues after them). */
 	#restoreState(state: DraftState | undefined): void {
 		const atoms = state?.atoms ?? [];
@@ -1699,6 +1724,11 @@ export class Composer {
 		this.#caret.set(caret);
 	}
 
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	setImeSafeCursor(enabled: boolean): void {
+		this.#imeSafeCursor.set(enabled);
+	}
+
 	setDisableSubmit(disabled: boolean): void {
 		this.#disableSubmit.set(disabled);
 	}
@@ -1856,6 +1886,7 @@ export class Composer {
 			...(this.#status() ? { status: this.#status() } : {}),
 			...(this.#border() ? { border: this.#border() } : {}),
 			...(this.#borderFaint() ? { borderFaint: true } : {}),
+			...(this.#imeSafeCursor() && this.#caret() === "terminal" ? { imeSafeCursor: true } : {}),
 			...(this.#faint() ? { faint: true } : {}),
 		}));
 

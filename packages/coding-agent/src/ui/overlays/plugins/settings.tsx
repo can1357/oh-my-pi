@@ -828,6 +828,7 @@ export function createPluginSettings(
 		const find = (id: string): DetailItem | undefined => current.items.find(item => item.id === id);
 		switch (event.type) {
 			case "change": {
+				if (!("item" in event)) return;
 				const item = find(event.item);
 				if (item?.toggle && typeof event.value === "boolean") applyToggle(current, item, event.value);
 				return;

@@ -67,6 +67,7 @@ export const RUNNER_APIS = [
 	"openrouter-rerank",
 	"openrouter-video",
 	"openai-transcriptions",
+	"xai-stt",
 ] as const;
 /** Kind each single-purpose runner API serves; `local-inference` hosts several kinds. */
 export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "local-inference">, ModelKind> = {
@@ -86,6 +87,7 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	"openrouter-rerank": "rerank",
 	"openrouter-video": "video",
 	"openai-transcriptions": "stt",
+	"xai-stt": "stt",
 };
 
 const RUNNER_API_KIND_BY_API: ReadonlyMap<Api, ModelKind> = new Map(Object.entries(RUNNER_API_KINDS));
@@ -1583,6 +1585,14 @@ export interface ModelAccountAccess {
 	 * account's values when multi-account rosters are unioned.
 	 */
 	antigravityWireProfiles?: Readonly<Record<string, AntigravityModelWireProfile>>;
+	/**
+	 * Service-tier ids this account's own catalog advertised for the model
+	 * (Codex `service_tiers[].id`). Tier entitlements differ per account
+	 * (Ultrafast is plan-gated), while {@link Model.serviceTiers} is the union
+	 * across accounts, so requests and credential selection read this list for
+	 * the account in hand. Absent when the account's catalog listed no tiers.
+	 */
+	serviceTiers?: readonly string[];
 }
 
 /** One Cursor `RequestedModel.parameters` entry recovered from rich discovery. */

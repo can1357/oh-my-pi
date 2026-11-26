@@ -118,11 +118,6 @@ function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): Ex
 	return Object.create(Object.getPrototypeOf(uiContext), descriptors) as ExtensionUIContext;
 }
 
-async function editDialogExternally(text: string): Promise<string | null> {
-	const command = getEditorCommand();
-	return command ? openInEditor(command, text) : null;
-}
-
 interface CollabWinner<T> {
 	source: "local" | "remote";
 	value: T | undefined;
@@ -206,6 +201,12 @@ export class ExtensionUiController {
 	 */
 	#toolUIContext: ExtensionUIContext | undefined;
 	constructor(private ctx: InteractiveModeContext) {}
+
+	/** Ctrl+G in a dialog editor: the editor gets the terminal, the TUI stops rendering and reading keys until it exits. */
+	#editDialogExternally = async (text: string): Promise<string | null> => {
+		const command = getEditorCommand();
+		return command ? this.ctx.suspend(() => openInEditor(command, text)) : null;
+	};
 
 	#syncExtensionComposerShapes(): void {
 		this.disposeComposerShapes();
@@ -526,146 +527,6 @@ export class ExtensionUiController {
 		const theme = currentTheme();
 		const text = theme.fg("accent", `${theme.symbols.symbol("status.success")} New session started`);
 		this.ctx.present(() => AnsiText({ text, padX: 1, padY: 1 }));
-	}
-
-	initializeHookRunner(uiContext: ExtensionUIContext, _hasUI: boolean): void {
-		const extensionRunner = this.ctx.session.extensionRunner;
-		if (!extensionRunner) {
-			return;
-		}
-
-		const actions: ExtensionActions = {
-			sendMessage: this.#sendExtensionMessage,
-			sendUserMessage: this.#sendExtensionUserMessage,
-			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
-			},
-			setLabel: (targetId, label) => {
-				this.ctx.sessionManager.appendLabelChange(targetId, label);
-			},
-			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
-			getAllTools: () => this.ctx.session.getAllToolInfos(),
-			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
-			getThinkingLevel: () => this.ctx.session.thinkingLevel,
-			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
-			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
-			setServiceTier: (family, tier) => this.ctx.session.setServiceTierFamily(family, tier),
-			getCommands: () => getSessionSlashCommands(this.ctx.session),
-			getSessionName: () => this.ctx.sessionManager.getSessionName(),
-			setSessionName: name => this.#updateSessionName(name),
-		};
-		const contextActions: ExtensionContextActions = {
-			getModel: () => this.ctx.session.model,
-			isIdle: () => !this.ctx.session.isStreaming,
-			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
-			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
-			shutdown: () => this.ctx.requestShutdown(),
-			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
-			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
-			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
-			sessionModes: this.ctx.sessionModes,
-			keybindings: this.ctx.keybindings,
-			getContextUsage: () => this.ctx.session.getContextUsage(),
-			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
-			getSystemPrompt: () => this.ctx.session.systemPrompt,
-			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
-			startLive: options => this.ctx.startRemoteLive(options),
-		};
-		const commandActions: ExtensionCommandContextActions = {
-			getContextUsage: () => this.ctx.session.getContextUsage(),
-			waitForIdle: () => this.ctx.session.agent.waitForIdle(),
-			reload: async () => {
-				await this.ctx.session.reload();
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				this.ctx.showStatus("Reloaded session");
-			},
-			newSession: async options => {
-				await this.ctx.prepareSessionSwitch();
-				this.ctx.clearTransientSessionUi();
-
-				// Create new session
-				this.clearExtensionTerminalInputListeners();
-				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
-				if (!success) {
-					return { cancelled: true };
-				}
-
-				// Call setup callback if provided
-				if (options?.setup) {
-					await options.setup(this.ctx.sessionManager);
-				}
-
-				// Clear UI state
-				this.ctx.clearTransientSessionUi();
-				this.ctx.resetTranscript();
-
-				this.#presentNewSessionNotice();
-				await this.ctx.reloadTodos();
-
-				return { cancelled: false };
-			},
-			branch: async entryId => {
-				await this.ctx.prepareSessionSwitch();
-				const result = await this.ctx.session.branch(entryId);
-				if (result.cancelled) {
-					return { cancelled: true };
-				}
-
-				// Update UI
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				this.ctx.composer.setDraft(result.selectedText, result.selectedImages);
-				this.ctx.showStatus("Branched to new session");
-
-				return { cancelled: false };
-			},
-			navigateTree: async (targetId, options) => {
-				const result = await this.ctx.session.navigateTree(targetId, { summarize: options?.summarize });
-				if (result.cancelled) {
-					return { cancelled: true };
-				}
-
-				// Update UI
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				if (result.editorText && !this.ctx.composer.text().trim()) {
-					this.ctx.composer.setDraft(result.editorText, result.editorImages);
-				}
-				this.ctx.showStatus("Navigated to selected point");
-
-				return { cancelled: false };
-			},
-			compact: async instructionsOrOptions => this.#handleInteractiveCompact(instructionsOrOptions),
-			switchSession: async sessionPath => {
-				await this.ctx.prepareSessionSwitch();
-				this.clearHookWidgets();
-				let modelFallbackWarning: string | undefined;
-				const result = await this.ctx.session.switchSession(sessionPath, {
-					onModelFallback: warning => {
-						modelFallbackWarning = warning;
-					},
-				});
-				if (!result) {
-					return { cancelled: true };
-				}
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
-				return { cancelled: false };
-			},
-		};
-
-		const runnerUiContext = withTerminalLauncher(uiContext, _hasUI);
-		extensionRunner.initialize(actions, contextActions, commandActions, runnerUiContext, "tui");
-		this.#syncExtensionComposerShapes();
 	}
 
 	/**
@@ -1121,7 +982,8 @@ export class ExtensionUiController {
 	/**
 	 * A guest's run through the form: every named field in order, each choice
 	 * group as a select (defaults preselected), each text field as an editor
-	 * prefilled with its value and re-asked until it passes the form's rules.
+	 * prefilled with its value. An answer breaking the form's rules is asked
+	 * again with the reason; sending the same text again keeps it.
 	 */
 	async #runGuestForm(
 		host: CollabHost,
@@ -1193,8 +1055,6 @@ export class ExtensionUiController {
 		}
 		let other: string | undefined;
 		while (true) {
-			// Mirror the local form's required check: Next appears once something is checked.
-			const canSubmit = !field.required || checked.size > 0 || other !== undefined;
 			const checkedIndices = enabled.flatMap((index, row) => (checked.has(index) ? [row] : []));
 			if (other !== undefined) checkedIndices.push(labels.length);
 			const choice = await this.#requestGuestUiString(
@@ -1202,11 +1062,11 @@ export class ExtensionUiController {
 				{
 					kind: "select",
 					title: question,
-					options: canSubmit ? [...rows, ASK_NEXT_OPTION] : rows,
+					options: [...rows, ASK_NEXT_OPTION],
 					selectionMarker: "checkbox",
 					checkedIndices,
 					markableCount: rows.length,
-					helpText: guestAskHelpText("toggle", canSubmit ? `${ASK_NEXT_OPTION} continue  ` : ""),
+					helpText: guestAskHelpText("toggle", `${ASK_NEXT_OPTION} continue  `),
 				},
 				signal,
 			);
@@ -1251,8 +1111,11 @@ export class ExtensionUiController {
 			);
 			if (input.kind !== "answered") return input;
 			// A single-line input cannot hold line breaks.
-			text = field.multiline ? input.value : input.value.replace(/[\r\n]+/g, " ");
-			const value = textValue(field, text);
+			const next = field.multiline ? input.value : input.value.replace(/[\r\n]+/g, " ");
+			const value = textValue(field, next);
+			// The reason is shown once; the same text sent back over it stands.
+			if (error !== undefined && next === text) return { kind: "answered", value };
+			text = next;
 			error = fieldError(field, value);
 			if (!error) return { kind: "answered", value };
 		}
@@ -1304,7 +1167,7 @@ export class ExtensionUiController {
 							prefill,
 							options: {
 								promptStyle: true,
-								externalEditor: editDialogExternally,
+								externalEditor: this.#editDialogExternally,
 								question: prompt.question,
 								maxHeight: this.#dialogEditorRows(),
 								...options,
@@ -1470,15 +1333,8 @@ export class ExtensionUiController {
 				const checkedIndices = question.options
 					.map((option, index) => (selected.has(option.label) ? index : -1))
 					.filter(index => index >= 0);
-				// Mirror the local dialog's Next gating: omit the Next option until
-				// at least one option is checked or a custom answer exists, so a
-				// guest cannot submit an empty multi-select result
-				// (PRRT_kwDOQxs0bc6OFbDW). The remote select has no "disabled" row
-				// concept, so we omit rather than dim it.
-				const hasAnswer = selected.size > 0 || customInput !== undefined;
-				const options = [...baseOptions, ASK_OTHER_OPTION];
-				if (hasAnswer) options.push(ASK_NEXT_OPTION);
-				options.push(ASK_CHAT_OPTION);
+				// Next is always offered: an empty answer is the guest's to give, as in the local dialog.
+				const options = [...baseOptions, ASK_OTHER_OPTION, ASK_NEXT_OPTION, ASK_CHAT_OPTION];
 				const choice = await this.#requestGuestUiString(
 					host,
 					{
@@ -1488,7 +1344,7 @@ export class ExtensionUiController {
 						selectionMarker: "checkbox",
 						checkedIndices,
 						markableCount: question.options.length,
-						helpText: guestAskHelpText("toggle", hasAnswer ? "Next → continue  " : ""),
+						helpText: guestAskHelpText("toggle", `${ASK_NEXT_OPTION} continue  `),
 					},
 					signal,
 				);
@@ -1709,7 +1565,7 @@ export class ExtensionUiController {
 						prefill,
 						options: {
 							...editorOptions,
-							externalEditor: editDialogExternally,
+							externalEditor: this.#editDialogExternally,
 							maxHeight: this.#dialogEditorRows(),
 						},
 						vim: this.ctx.dialogVim(),

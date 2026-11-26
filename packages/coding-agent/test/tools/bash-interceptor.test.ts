@@ -321,6 +321,34 @@ describe("default echo/printf redirect rule", () => {
 	});
 });
 
+describe("default Perl in-place rule", () => {
+	it.each([
+		`perl -e 'print "re-index\\n"'`,
+		"perl script.pl -i",
+		"perl -- -i",
+		"perl -e 1 -- -i",
+		"perl -e -i",
+		"perl -e'print q( -i )'",
+		"perl -I -include -e 1",
+		"perl -Ilib -MList::Util=min -e 1",
+		"perl -Ci -e 1",
+	])("does not route %s to edit", command => {
+		expect(checkBashInterception(command, ["edit"]).block).toBe(false);
+	});
+
+	it.each([
+		"perl -lpi -e 's/a/b/' f",
+		"perl -i.bak -pe 's/a/b/' f",
+		"perl -0777 -Mstrict -pi -e 1 f",
+		"perl -e 's/a/b/' -pi f",
+		"perl -I 'some lib' -ni -e 1 f",
+		"perl -C -pi -e 1 f",
+		"perl -x -pi f",
+	])("routes %s to edit", command => {
+		expect(checkBashInterception(command, ["edit"]).suggestedTool).toBe("edit");
+	});
+});
+
 describe("default grep rule and pipeline stdin", () => {
 	const tools = ["grep"];
 

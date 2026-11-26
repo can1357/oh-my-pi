@@ -15,6 +15,7 @@ export * from "./fs-error";
 export * from "./incoming-json";
 export * from "./json";
 export * from "./json-parse";
+export * from "./laps";
 export * as logger from "./logger";
 export * from "./loop-phase";
 export * from "./math-delimiters";

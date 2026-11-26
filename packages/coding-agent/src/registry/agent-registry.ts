@@ -70,6 +70,8 @@ export interface AgentRef {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Identity of the live spawner, independent of its registry name. */
+	parentSessionKey?: string;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSessionHandle | null;
@@ -117,6 +119,8 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Live identity of the session that spawned this agent. */
+	parentSessionKey?: string;
 	session: AgentSessionHandle | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
@@ -222,6 +226,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: input.displayName,
 			kind: input.kind,
 			parentId: input.parentId,
+			parentSessionKey: input.parentSessionKey,
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
@@ -266,6 +271,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: current.displayName,
 			kind: current.kind,
 			parentId: current.parentId,
+			parentSessionKey: current.parentSessionKey,
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",

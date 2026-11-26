@@ -6,6 +6,7 @@ import { normalizeOAuthCredentialExpiry, refreshProviderOAuthToken } from "../re
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
+import type { CredentialBlocks } from "./blocks";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent, redactCredentialForWire } from "./pool";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
@@ -158,6 +159,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 export interface OAuthRefresherDeps {
 	store: AuthCredentialStore;
 	pool: CredentialPool;
+	blocks: CredentialBlocks;
 	override?: AuthStorageOptions["refreshOAuthCredential"];
 	overrideMints?: AuthStorageOptions["refreshOAuthCredentialMints"];
 }
@@ -852,6 +854,7 @@ export class OAuthRefresher {
 				this.#deps.store.updateAuthCredential(row.id, merged);
 			}
 			saved = true;
+			this.#deps.blocks.clearOAuthRefreshFailure(provider, row.id);
 			if (this.#mintsLocally()) {
 				this.#rememberMint(provider, row.id, merged);
 			}
@@ -1115,7 +1118,7 @@ export class OAuthRefresher {
 				provider,
 			});
 		}
-		return this.#requestOAuthCredentialRefresh(
+		const refreshed = await this.#requestOAuthCredentialRefresh(
 			provider,
 			credential,
 			credentialId,
@@ -1123,6 +1126,8 @@ export class OAuthRefresher {
 			reason,
 			DEFAULT_OAUTH_REFRESH_TIMEOUT_MS,
 		);
+		if (credentialId !== undefined) this.#deps.blocks.clearOAuthRefreshFailure(provider, credentialId);
+		return refreshed;
 	}
 
 	async #requestOAuthCredentialRefresh(

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +8,7 @@ import { exportFromFile, exportSessionToHtml, type SessionData } from "../src/ex
 import type { SessionHeader } from "../src/session/session-entries";
 import { SessionManager } from "../src/session/session-manager";
 import { collectSubSessions } from "../src/session/sub-sessions";
+import { ensureDevelopmentViewer } from "./fixtures/development-export-viewer";
 
 /**
  * Contract: a session at `<dir>/<name>.jsonl` embeds subagent transcripts from
@@ -59,6 +60,8 @@ async function readExportData(outputPath: string): Promise<SessionData> {
 describe("collectSubSessions", () => {
 	let root: string;
 	let mainFile: string;
+
+	beforeAll(ensureDevelopmentViewer, 30_000);
 
 	beforeEach(async () => {
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-subsessions-"));

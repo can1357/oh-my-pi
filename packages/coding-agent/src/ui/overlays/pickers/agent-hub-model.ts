@@ -9,6 +9,7 @@ import { type TspSpan, type TspTone, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
 import type { AgentActivityKind, AgentActivityRow } from "../../../modes/view-model/overlays/agent-activity";
 import type { AgentMetrics } from "../../../modes/view-model/overlays/agent-hub-projection";
+import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import { type AgentRecordLike, type AgentStatus, MAIN_AGENT_ID } from "../../../registry/agent-hub-types";
 import type { ObservableSession } from "../../../task/session-observer-registry";
 import { parseThinkingLevel } from "../../../thinking/levels";
@@ -138,14 +139,6 @@ export function hubModel(ref: AgentRecordLike, observed: ObservableSession | und
 		...(level ? { level, levelColor: THINKING_COLOR[level] ?? "thinkingOff" } : {}),
 		fallback: false,
 	};
-}
-
-/** `$0.0421`, `$0.389`, `$12.30`. */
-export function formatCost(cost: number): string {
-	const amount = Number.isFinite(cost) ? cost : 0;
-	if (amount < 0.01) return `$${amount.toFixed(4)}`;
-	if (amount < 1) return `$${amount.toFixed(3)}`;
-	return `$${amount.toFixed(2)}`;
 }
 
 /** `1m5s active` (the duration's kind); undefined without a duration. */

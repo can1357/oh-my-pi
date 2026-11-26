@@ -350,6 +350,10 @@ pub struct Invocation<'a> {
 	pub vpid:      Vpid,
 	/// File-creation mask: the shell's `umask`.
 	pub umask:     u32,
+	/// Arguments that are job specs (`%1`, `%%`, `%name`) naming a job of the
+	/// invoking shell that runs a program, each with that program's OS pid:
+	/// what `jobs -x` would put in their place. Empty when none is.
+	pub jobs:      &'a [(BString, u32)],
 }
 
 /// A native command running on host threads or inline.
@@ -527,9 +531,7 @@ pub struct ProcUsage {
 	pub user_ns:              u64,
 	/// System CPU time, in nanoseconds.
 	pub sys_ns:               u64,
-	/// Largest resident set size of any one process, in bytes. On Linux a
-	/// child's peak is at least its spawner's peak at spawn time: the kernel
-	/// keeps the pre-exec address space's high-water mark.
+	/// Largest resident set size of any one process, in bytes.
 	pub max_rss:              u64,
 	/// Page faults served without I/O (page reclaims).
 	pub minor_faults:         u64,

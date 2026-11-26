@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs";
 import { pollFile } from "@oh-my-pi/pi-natives/file-poll";
-import { logger } from "@oh-my-pi/pi-utils";
+import { errorMessage, logger } from "@oh-my-pi/pi-utils";
 import type { TerminalCapabilities } from "../driver/contract";
 import { type Accessor, signal } from "../reactive";
 import { type ColorDepth, depthOf } from "./color";
@@ -58,10 +58,6 @@ const FALLBACK_THEME = "dark";
 const RELOAD_DEBOUNCE_MS = 100;
 /** Stat-poll interval for the watched custom theme file. */
 const POLL_INTERVAL_MS = 500;
-
-function message(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
 
 /**
  * Chooses and publishes the active theme. In auto mode the terminal's
@@ -127,7 +123,7 @@ export class ThemeController {
 		try {
 			this.#apply(name, loadThemeSync(name, this.options), "switch");
 		} catch (error) {
-			logger.debug("Theme loading failed, falling back to dark theme", { name, error: message(error) });
+			logger.debug("Theme loading failed, falling back to dark theme", { name, error: errorMessage(error) });
 			this.#apply(FALLBACK_THEME, loadThemeSync(FALLBACK_THEME, this.options), "switch");
 		}
 	}
@@ -163,7 +159,7 @@ export class ThemeController {
 			if (request !== this.#request) return { success: false, error: "Theme change superseded by a newer request" };
 			const fallback = await loadTheme(FALLBACK_THEME, this.options);
 			this.#apply(FALLBACK_THEME, fallback, "switch");
-			return { success: false, error: message(error) };
+			return { success: false, error: errorMessage(error) };
 		}
 	}
 
@@ -176,7 +172,7 @@ export class ThemeController {
 			this.#publish(theme, "preview");
 			return { success: true };
 		} catch (error) {
-			return { success: false, error: message(error) };
+			return { success: false, error: errorMessage(error) };
 		}
 	}
 
@@ -230,7 +226,7 @@ export class ThemeController {
 			const theme = await loadTheme(name, this.options);
 			if (request === this.#request) this.#apply(name, theme, cause);
 		} catch (error) {
-			logger.debug("Theme reload failed", { name, error: message(error) });
+			logger.debug("Theme reload failed", { name, error: errorMessage(error) });
 			if (request !== this.#request || !this.#auto) return;
 			const fallback = await loadTheme(FALLBACK_THEME, this.options);
 			if (request === this.#request) this.#apply(FALLBACK_THEME, fallback, cause);
@@ -278,7 +274,7 @@ export class ThemeController {
 			const theme = await loadTheme(name, this.options);
 			if (request === this.#request && name === this.#name) this.#publish(theme, "file");
 		} catch (error) {
-			logger.debug("Theme file reload failed; keeping the last good theme", { name, error: message(error) });
+			logger.debug("Theme file reload failed; keeping the last good theme", { name, error: errorMessage(error) });
 		}
 	}
 }

@@ -157,6 +157,7 @@ import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 import { cfgAdvisorEnabled } from "./advisor/settings";
 import { syncRelayInstallsOnStartup } from "./tools/browser/relay/installs";
 import { claimTerminal } from "./tools/browser/terminal-owner";
+import { cfgBashReapBackground } from "./exec/settings";
 import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
 import {
 	cfgAutocompleteMaxVisible,
@@ -174,6 +175,7 @@ import {
 	cfgSymbolPreset,
 	cfgThemeDark,
 	cfgThemeLight,
+	cfgTuiImeSafeCursor,
 	cfgTuiResizeScrollback,
 	cfgTuiSpinnerInterval,
 	cfgTuiVimMode,
@@ -1499,7 +1501,7 @@ export async function createSessionManager(
 			}),
 			parsed.sessionDir,
 		);
-		// Nothing to resume (none left, or the newest is open in another omp
+		// Nothing to resume (none left, or every one is open in another omp
 		// process): start up as a plain launch would.
 		if (manager.getEntries().length === 0) parsed.continue = false;
 		return manager;
@@ -2198,6 +2200,8 @@ export async function runRootCommand(
 		if (parsedArgs.offline) cfgOffline.override(settingsInstance, true);
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
+			// RPC hosts own their processes: no leftover reminder, no session-end reaping.
+			cfgBashReapBackground.override(settingsInstance, false);
 		} else if (parsedArgs.mode === "acp") {
 			applyProtocolDefaults("acp", settingsInstance);
 		}
@@ -2302,6 +2306,7 @@ export async function runRootCommand(
 			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settingsInstance),
 			vim: cfgTuiVimMode.get(settingsInstance),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),
 			theme: {
 				symbolPreset: cfgSymbolPreset.get(settingsInstance),
 				colorBlindMode: cfgColorBlindMode.get(settingsInstance),

@@ -10,9 +10,87 @@
 
 - Usage Details now includes every stored account even when inference is restricted to a session account pool ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
 - Interactive `/login` adds the new OAuth account only to the current session scope, and `/session pin` restricts pooled sessions to the selected account ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+### Breaking Changes
+
+- `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
+
+### Added
+
+- Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
+- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
+- URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
+- URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
+- Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
+
 ### Fixed
 
-- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
+- `/prewalk`, `/prewalk restart`, and `/switch` now accept `^provider/id[:level]` model references inserted by `^` completion ([#20564](https://github.com/can1357/oh-my-pi/issues/20564)).
+- Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
+- Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).
+- The focused diff in Tern's native `/git` preview now scrolls with the arrow keys, Page Up/Page Down, and Home/End ([#20537](https://github.com/can1357/oh-my-pi/issues/20537)).
+- The Bash interceptor no longer redirects read-only Perl commands mentioning `-i` to `edit`, and now recognizes clustered in-place switches such as `perl -lpi` ([#20558](https://github.com/can1357/oh-my-pi/issues/20558)).
+- In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- In Tern, the agent tray no longer keeps showing the previous session's agents after `/resume` switches to another session.
+- In Tern, finishing an annotation of a pasted image now updates its attachment, and the prompt sends the annotated image instead of the original.
+- The Gemini planning-header loop guard interrupts at most once until the model calls a tool, so long reasoning on hard or tool-free tasks finishes instead of being interrupted and restarted repeatedly.
+- The `/agents` hub accepts keys again after opening a model pattern input, the model picker, or the New agent form; the terminal no longer stops responding ([#20552](https://github.com/can1357/oh-my-pi/issues/20552))
+- The external editor (Ctrl+G) opened from an extension `ctx.ui.editor` dialog, the ask prompt, or the advisor instructions editor no longer has omp drawing over it and taking its keys ([#20546](https://github.com/can1357/oh-my-pi/pull/20546) by [@rierek](https://github.com/rierek))
+- Fixed WebP tool results showing a text placeholder instead of the image, and enabled WebP and GIF image embeds in the terminal ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
+- Extension transcript presenters' compact tool-call and read rows draw their `TspSpan` theme styles again, and consecutive compact tool, read, `!`/`$` run and message blocks pack without blank rows between them ([#20512](https://github.com/can1357/oh-my-pi/issues/20512)).
+- Restored `tui.imeSafeCursor`, which moves the prompt's bottom border to its own row so macOS IME preedit cannot displace it ([#20503](https://github.com/can1357/oh-my-pi/pull/20503) by [@SenCha930511](https://github.com/SenCha930511))
+- Re-enabling advisors reloads `WATCHDOG.yml` and its imported rules from disk ([#20541](https://github.com/can1357/oh-my-pi/issues/20541)).
+- Renaming a session from `/resume` accepts keyboard input again and returns focus to the picker after saving or cancelling ([#20548](https://github.com/can1357/oh-my-pi/issues/20548)).
+- Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
+- Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
+
+### Removed
+
+- Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+
+## [19.2.1] - 2026-11-25
+
+### Breaking Changes
+
+- Removed several internal utility exports from the coding-agent package. Import `errorMessage` from `@oh-my-pi/pi-utils/type-guards`, `flattenLine` from `@oh-my-pi/pi-tui/text/sanitize`, and `fuzzyHits` from `@oh-my-pi/pi-coding-agent/utils/fuzzy`; import `stripInlineMarkdown` from `plan-mode/plan-toc`.
+
+### Added
+
+- Background processes started by the bash tool are now detected when the agent stops, allowing them to be registered as services or terminated; background jobs using `&` are cleaned up when the session ends. Configure this behavior with `bash.reapBackground` (RPC mode does not reap processes).
+- Added the `o2ctl services` shell commands for adopting an existing process as a named service, listing services, and stopping services.
+- Agents can change their own model or a live child agent's model through the `agent://<id>/model` interface, including permitted user-tagged models, and adjust reasoning effort through `agent://<id>/effort` or a model suffix.
+- In Tern, pasted-image attachments can be opened in the image annotator; completing annotation replaces the attachment with the edited image.
+- Added `archive.transcript(id, { detail, budget, turns })` for rendering compacted, budget-limited views of previous evaluation sessions, with controls for transcript detail and turn ranges.
+
+### Changed
+
+- Session identifiers and session-file paths are now available to all commands run within a session, including evaluation shell commands, `!` commands, `/loop` conditions, and autoresearch runs.
+- Isolated subagent and `/wt` ovnfs checkouts now record the session that created or moved into them, and `ovnfs ls` displays that session after the supporting daemon is restarted.
+- `/fast` and `/fast ultra` automatically select an eligible account or stored API key, fall back to other accounts at standard speed when limits are reached, and resume using the fast account when it recovers. Refused fast-mode requests no longer disable `/fast` when another eligible credential remains available.
+- `history://<id>` now uses the enhanced transcript view with numbered turns, grouped consecutive reads and searches, and `budget`, `detail`, and `turns` query parameters.
+- Tern's agent tray now shows running and queued agents before completed agents, with each group ordered by spawn time.
+
+### Fixed
+
+- A queued or steered message keeps its queue pill until it appears in the transcript, instead of vanishing while its request is still being prepared.
+- Fixed LSP diagnostics failing to load when imported before the LSP tool.
+- Model lookups now reflect catalog changes from an extension provider’s OAuth login, including in mirrored registries.
+- Tern browser actions now report the last observed reason a target was not actionable and discard target coordinates received after the deadline.
+- Fixed checkout and workspace detection for paths inside directories whose names begin with `..`, so scoped settings, plugin roots, and folder restrictions apply correctly.
+- Fixed broadcasts arriving while a subagent is finishing so they no longer replace the subagent's final report.
+- On Linux, bash `time -l` and `time -v` now report the measured program's peak memory usage rather than the agent process's usage.
+- Fixed zsh scripts rendered in the pseudo shell so shell syntax is displayed correctly instead of replacement characters.
+- Fixed ACP session loading and resuming for saved Copilot 1M models during background model-catalog refreshes.
+- Fixed Tern browser actions that ran out of time mid-wait reporting a transport timeout instead of why the element was not actionable (disabled, covered, moving).
+- Fixed extension OAuth catalog modifiers (`oauth.modifyModels`) not rerunning on a model-catalog refresh when `models.yml` is unchanged or missing, so a login no longer leaves other providers' models unmodified until restart.
+- Fixed `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` so they apply consistently to assistant replies, thinking, user prompts, extension messages, summaries, and tool output.
+- Fixed rules supplied by extensions in configuration overlays from disappearing when the system prompt is rebuilt.
+- Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
+- Fixed resuming goals whose token budget is exhausted so they remain budget-limited, and prevented incomplete-goal reminders from asking the agent to continue while budget-limited.
+- Assistant replies show SVG fences and HTML image and page embeds inline again on terminals that support graphics ([#20508](https://github.com/can1357/oh-my-pi/issues/20508)).
 
 ## [19.2.0] - 2026-11-25
 
@@ -63,6 +141,9 @@
 - `/model` opens faster after the session's model picker has warmed up.
 - Reduced CLI bootstrap work by loading session construction, the Cursor execution bridge, peer mesh, and persisted-agent support when needed.
 - Opening a full model catalog on subsequent launches reuses unchanged catalog data instead of rebuilding it.
+- The ask dialog submits with questions left unanswered instead of reopening them; an unchecked multi-select could previously trap Enter between questions, and collab guests now get Next on a multi-select before checking anything.
+- `ask` forms no longer block Submit on `required`, `pattern`, `min`/`max` and similar rules: broken answers are flagged as you type and still sent, so you can reply to the question instead of satisfying it.
+- `--continue` (and auto-resume) now resumes the newest session that no other running omp process has open, instead of starting a new session when the most recent one is open elsewhere.
 
 ### Fixed
 
@@ -86,6 +167,7 @@
 - Fixed the shared mnemopi embedding server and local tiny-model workers staying loaded for as long as any session that used them stays open; they now unload 15 minutes after their last request ([#20452](https://github.com/can1357/oh-my-pi/issues/20452))
 - LSP `idleTimeoutMs` now shuts down idle language servers even while other processes keep changing files in the workspace; forwarded watched-file changes no longer count as activity ([#20451](https://github.com/can1357/oh-my-pi/issues/20451)).
 - Opening `/model` reuses fresh provider catalogs instead of fetching them again. F5 still forces a provider refresh.
+- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
 
 ### Removed
 

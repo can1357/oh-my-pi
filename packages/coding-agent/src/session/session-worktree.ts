@@ -143,13 +143,14 @@ export async function runSessionWorktreeHook(
  * Create the worktree for `/wt`: an ovnfs checkout when `isolation.backend` is
  * auto and ovnfs is found, else a linked git worktree. Throws with a
  * user-facing message when `cwd` is not a git checkout, `branch` already
- * exists, the checkout name is taken, or git or ovnfs refuses.
+ * exists, the checkout name is taken, or git or ovnfs refuses. An ovnfs
+ * checkout records `options.session`, the session moving into it.
  */
 export async function createSessionWorktree(
 	cwd: string,
 	settings: Settings,
 	branch: string,
-	options: { keepChanges?: boolean } = {},
+	options: { keepChanges?: boolean; session?: string } = {},
 ): Promise<SessionWorktree> {
 	const keepChanges = options.keepChanges ?? true;
 	try {
@@ -179,6 +180,7 @@ export async function createSessionWorktree(
 		sourceCwd: cwd,
 		baseCommit,
 		keptChanges: keepChanges,
+		session: options.session,
 	});
 }
 
