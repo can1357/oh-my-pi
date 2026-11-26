@@ -293,6 +293,10 @@ export interface TspCardProps {
 	inset?: boolean;
 	/** `bare`: no ring, fill or insets — a plain head row over the body, for grouped/compact presentations inside another frame. */
 	variant?: "bare";
+	/** An attachment chip (`omp.composer.chip`): what it attaches. */
+	kind?: "image" | "video" | "paste";
+	/** A pasted-text chip (`omp.composer.chip`): the full pasted text. */
+	expansion?: string;
 }
 export interface TspSectionProps {
 	head?: TspText;
