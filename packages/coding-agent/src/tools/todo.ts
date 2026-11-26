@@ -329,6 +329,50 @@ function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: st
 /** Default phase name for flat `init` and `append` to an empty list. */
 const DEFAULT_INIT_PHASE = "Tasks";
 
+/**
+ * Detect task content that is a stringified JSON object or array. Tool-argument
+ * repair upstream may stringify structured values to satisfy the `string[]`
+ * schema, so a phase object passed inside flat `items` arrives here as JSON
+ * text; storing it verbatim produces a task label that reads as raw JSON.
+ */
+function isStringifiedJsonContainer(content: string): boolean {
+	const trimmed = content.trim();
+	const isObject = trimmed.startsWith("{") && trimmed.endsWith("}");
+	const isArray = trimmed.startsWith("[") && trimmed.endsWith("]");
+	if (!isObject && !isArray) return false;
+	try {
+		const parsed: unknown = JSON.parse(trimmed);
+		return typeof parsed === "object" && parsed !== null;
+	} catch {
+		return false;
+	}
+}
+
+/** Shorten stringified JSON for an error message; phases are structured data, not prose. */
+function describeJsonContainer(content: string): string {
+	const trimmed = content.trim();
+	return trimmed.length > 60 ? `${trimmed.slice(0, 57)}...` : trimmed;
+}
+
+function guardJsonContainerItems(contents: readonly string[], errors: string[], where: "init" | "append"): boolean {
+	let rejected = false;
+	for (const content of contents) {
+		if (isStringifiedJsonContainer(content)) {
+			rejected = true;
+			errors.push(
+				`Task "${describeJsonContainer(content)}" is stringified JSON, not task text. ` + forbiddenHint(where),
+			);
+		}
+	}
+	return rejected;
+}
+
+function forbiddenHint(where: "init" | "append"): string {
+	return where === "init"
+		? 'Pass phases via list: [{ "phase": "...", "items": [...] }] instead of putting objects in items.'
+		: "Use task/phase strings, not JSON objects.";
+}
+
 function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	// Models routinely flatten the single-phase init into `{op:"init", items:[...]}`
 	// (optionally with a bare `phase`) instead of the canonical
@@ -353,6 +397,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 			errors.push(`Duplicate phase "${name}" in init list`);
 		}
 		seenPhases.add(name);
+		if (guardJsonContainerItems(listEntry.items, errors, "init")) return [];
 		const tasks: TodoItem[] = [];
 		for (const content of listEntry.items) {
 			if (seenTasks.has(content)) {
@@ -375,6 +420,8 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 		errors.push("Missing items for append operation");
 		return phases;
 	}
+
+	if (guardJsonContainerItems(entry.items, errors, "append")) return phases;
 
 	// Validate the whole batch before mutating so a failing op reports every
 	// duplicate and leaves nothing half-applied.

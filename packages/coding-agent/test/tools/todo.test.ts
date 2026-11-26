@@ -276,6 +276,59 @@ describe("TodoTool operations", () => {
 		expect(start.details?.phases[0]?.tasks.map(task => task.status)).toEqual(before);
 	});
 
+	it("rejects flat init whose items are stringified JSON phase objects", async () => {
+		const session = createSession();
+		const tool = new TodoTool(session);
+		const phaseJson = JSON.stringify({ phase: "Investigate", items: ["a", "b"] });
+
+		// Simulates the upstream argument-repair path: an object inside `items`
+		// is stringified to satisfy the string[] schema before reaching the tool.
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "Tasks", items: [phaseJson] }],
+		});
+
+		expect(result.isError).toBe(true);
+		const text = result.content.find(part => part.type === "text");
+		expect(text?.type === "text" && text.text).toContain("stringified JSON");
+		expect(text?.type === "text" && text.text).toContain("list");
+		expect(result.details?.phases).toEqual([]);
+	});
+
+	it("rejects append whose items are stringified JSON", async () => {
+		const session = createSession([
+			{
+				name: "Work",
+				tasks: [{ content: "First", status: "in_progress" }],
+			},
+		]);
+		const tool = new TodoTool(session);
+
+		const result = await tool.execute("call-1", {
+			op: "append",
+			phase: "Work",
+			items: [JSON.stringify({ items: ["Second"], phase: "Work" })],
+		});
+
+		expect(result.isError).toBe(true);
+		const text = result.content.find(part => part.type === "text");
+		expect(text?.type === "text" && text.text).toContain("stringified JSON");
+		expect(result.details?.phases[0]?.tasks).toEqual([{ content: "First", status: "in_progress" }]);
+	});
+
+	it("accepts task text that merely mentions JSON", async () => {
+		const session = createSession();
+		const tool = new TodoTool(session);
+
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "Tasks", items: ['write {"a":1} to config'] }],
+		});
+
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(['write {"a":1} to config']);
+	});
+
 	it("appends items to an existing phase", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["First"] }] });
