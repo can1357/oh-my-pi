@@ -406,12 +406,29 @@ function normalizeBashApprovalPattern(value: string): string {
 	return value.trim().replace(/\s+/gu, " ");
 }
 
-function bashApprovalPatternToRegExp(pattern: string): RegExp {
-	const escaped = normalizeBashApprovalPattern(pattern)
-		.split("*")
-		.map(part => part.replace(/[\\^$+?.()|[\]{}]/gu, "\\$&"))
-		.join(".*");
-	return new RegExp(`^${escaped}$`, "u");
+/**
+ * Matches `text` against an anchored, case-sensitive `bash.patterns` glob whose only wildcard is `*`
+ * (any run of characters). Linear in `text` per literal: the first and last literals are checked as
+ * prefix and suffix, and each middle literal takes its leftmost occurrence after the previous one,
+ * which is enough to decide a `*`-only glob. A `.*` regex backtracks polynomially on non-matching
+ * input and blocks the event loop for minutes on multi-KB commands (#20591).
+ */
+function bashApprovalPatternMatches(pattern: string, text: string): boolean {
+	const parts = pattern.split("*");
+	const head = parts[0];
+	if (parts.length === 1) return text === head;
+	const tail = parts[parts.length - 1];
+	const end = text.length - tail.length;
+	if (end < head.length || !text.startsWith(head) || !text.endsWith(tail)) return false;
+	let pos = head.length;
+	for (let i = 1; i < parts.length - 1; i++) {
+		const part = parts[i];
+		if (part.length === 0) continue;
+		const index = text.indexOf(part, pos);
+		if (index === -1 || index + part.length > end) return false;
+		pos = index + part.length;
+	}
+	return true;
 }
 
 function normalizeBashPatternApproval(value: unknown): BashPatternApproval | undefined {
@@ -447,7 +464,7 @@ function getBashApprovalPatternRules(value: unknown): BashApprovalPatternRule[] 
 function commandMatchesBashApprovalPattern(command: string, pattern: string): boolean {
 	const normalizedCommand = normalizeBashApprovalPattern(command);
 	if (normalizedCommand.length === 0) return false;
-	return bashApprovalPatternToRegExp(pattern).test(normalizedCommand);
+	return bashApprovalPatternMatches(pattern, normalizedCommand);
 }
 
 // Names match exactly: a wildcard such as `CARGO_*` would also admit
@@ -481,11 +498,10 @@ function bashCommandSegments(command: string): string[] {
 // `deny`/`prompt` matching: the rule fires when its glob matches the whole
 // command or any single segment of a compound command.
 function commandSegmentMatchesBashApprovalPattern(command: string, pattern: string): boolean {
-	const regex = bashApprovalPatternToRegExp(pattern);
 	const normalizedCommand = normalizeBashApprovalPattern(command);
 	if (normalizedCommand.length === 0) return false;
-	if (regex.test(normalizedCommand)) return true;
-	return bashCommandSegments(command).some(segment => regex.test(segment));
+	if (bashApprovalPatternMatches(pattern, normalizedCommand)) return true;
+	return bashCommandSegments(command).some(segment => bashApprovalPatternMatches(pattern, segment));
 }
 
 // A rule "applies" to a command under approval-specific semantics: `allow` must

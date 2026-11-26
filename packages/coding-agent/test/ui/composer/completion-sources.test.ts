@@ -231,7 +231,7 @@ describe("composer completion sources", () => {
 		expect(offers(composer.node, "@alpha.txt")).toBe(true);
 		expect(offers(composer.node, "@beta.txt")).toBe(false);
 		composer.clearDraft({ recall: false });
-		sendPaste(composer.node, composer.field, 'path=@"two w');
+		type(composer, 'path=@"two w');
 		await offered(composer, '@"two words.txt"');
 		composer.clearDraft({ recall: false });
 		type(composer, "use ./alp");

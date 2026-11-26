@@ -620,6 +620,26 @@ describe("tool-owned dynamic approval declarations", () => {
 		});
 	});
 
+	it("matches multi-wildcard bash patterns in linear time on long commands", () => {
+		const settingsOverrides = { "bash.patterns": [{ match: "*git* *push* *:main", approval: "deny" }] };
+		const body = Array.from({ length: 120 }, (_, i) => `git push origin feature-${i}`).join("\n");
+		const command = `cat > pushes.txt <<'EOF'\n${body}\nEOF\necho done`;
+
+		// A `.*` regex took minutes here (#20591).
+		const start = performance.now();
+		expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		expect(performance.now() - start).toBeLessThan(1000);
+		expect(bashApproval(`${command}\ngit push origin HEAD:main`, settingsOverrides)).toMatchObject({
+			policy: "deny",
+		});
+	});
+
+	it("keeps a middle glob literal from overlapping the anchored suffix", () => {
+		const settingsOverrides = { "bash.patterns": [{ match: "git *push*push", approval: "deny" }] };
+		expect(bashApproval("git push", settingsOverrides)).toBe("exec");
+		expect(bashApproval("git push && git push", settingsOverrides)).toMatchObject({ policy: "deny" });
+	});
+
 	it("keeps critical bash patterns prompt-gated unless explicitly denied", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "*", approval: "allow" }],
