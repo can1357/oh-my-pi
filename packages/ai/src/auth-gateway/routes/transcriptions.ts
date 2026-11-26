@@ -1,5 +1,5 @@
 import * as transcriptions from "../../providers/transcriptions-server";
-import { transcribeAudio } from "../../transcription";
+import { isTranscriptionApi, transcribeAudio } from "../../transcription";
 import type { TranscriptionResult } from "../../transcription/types";
 import type { AuthGatewayRouteOptions } from "../dispatch";
 import { handleUnaryGatewayRoute, type UnaryGatewayRoute } from "./unary";
@@ -10,7 +10,7 @@ const ROUTE: UnaryGatewayRoute<transcriptions.TranscriptionParsedRequest, Transc
 	parse: transcriptions.parseRequest,
 	parseErrorStatus: error => (error instanceof transcriptions.TranscriptionWireError ? error.status : 400),
 	unsupported: (model, modelId) => {
-		if (model.api === "openai-transcriptions") return undefined;
+		if (isTranscriptionApi(model.api)) return undefined;
 		return model.api === "local-inference"
 			? `Model ${modelId} runs on-device only and cannot be served by the auth gateway`
 			: `Model ${modelId} does not support audio transcription`;
