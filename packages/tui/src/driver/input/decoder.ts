@@ -24,8 +24,6 @@ export interface InputDecoderOptions extends TokenizerOptions {
 export class InputDecoder {
 	/** A cursor position request is outstanding: `CSI r ; c R` is its answer, not Ctrl/Shift+F3. */
 	cprPending = false;
-	/** win32-input-mode is on: key records are decoded and their bytes re-tokenized. */
-	win32 = false;
 
 	readonly #sink: DecoderSink;
 	readonly #main: InputTokenizer;
@@ -67,6 +65,15 @@ export class InputDecoder {
 		this.#kitty = active;
 		this.#main.kitty = active;
 		this.#relay.kitty = active;
+	}
+
+	/** win32-input-mode is on: key records are decoded and their bytes re-tokenized. */
+	get win32(): boolean {
+		return this.#main.win32;
+	}
+
+	set win32(active: boolean) {
+		this.#main.win32 = active;
 	}
 
 	set isStalled(probe: (() => boolean) | undefined) {
