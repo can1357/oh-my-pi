@@ -322,29 +322,24 @@ export class OAuthRefresher {
 				throw new AIError.ConfigurationError("OAuth exchanged token could not be saved: store stayed busy");
 			}
 			let renewed = true;
+			let leaseExpiresAt = 0;
 			try {
 				if (lease) {
-					renewed = lease.store.renewCredentialRefreshLease(
-						credentialId,
-						lease.owner,
-						Date.now() + OAUTH_REFRESH_LEASE_TTL_MS,
-					);
+					leaseExpiresAt = Date.now() + OAUTH_REFRESH_LEASE_TTL_MS;
+					renewed = lease.store.renewCredentialRefreshLease(credentialId, lease.owner, leaseExpiresAt);
 					// An expired lease no peer took is still ours: re-acquire it rather
 					// than fail the fence and drop a token the provider already minted.
 					if (!renewed) {
-						renewed = lease.store.tryAcquireCredentialRefreshLease(
-							credentialId,
-							lease.owner,
-							Date.now() + OAUTH_REFRESH_LEASE_TTL_MS,
-						);
+						renewed = lease.store.tryAcquireCredentialRefreshLease(credentialId, lease.owner, leaseExpiresAt);
 					}
 				}
+				const writeNowMs = Date.now();
 				const saved =
 					this.#deps.store.tryUpdateAuthCredentialIfMatches?.(
 						credentialId,
 						expectedData,
 						credential,
-						lease ? { owner: lease.owner, nowMs: Date.now() } : undefined,
+						lease ? { owner: lease.owner, nowMs: writeNowMs } : undefined,
 					) ?? false;
 				if (saved) return true;
 				// A peer that saved first changed the row; otherwise no peer can hold a
@@ -353,6 +348,20 @@ export class OAuthRefresher {
 				if (!stored || serializeCredential(provider, stored.credential)?.data !== expectedData) {
 					logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: renewed });
 					return false;
+				}
+				if (!lease) {
+					logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: false });
+					return false;
+				}
+				if (renewed && writeNowMs < leaseExpiresAt) {
+					const holder = lease.store.getCredentialRefreshLeaseHolder?.(credentialId);
+					if (holder?.owner === lease.owner && holder.expiresAtMs > writeNowMs) {
+						// We held a valid lease during the write and the row still matches
+						// what we read, so lease contention did not cause the refusal;
+						// retrying while holding our own lease cannot succeed.
+						logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: true });
+						return false;
+					}
 				}
 				if (!refused) {
 					logger.warn("OAuth exchanged token save refused while a peer holds the lease; retrying", {
@@ -580,7 +589,7 @@ export class OAuthRefresher {
 			if (this.#shuttingDown || options.signal?.aborted) {
 				throw new AIError.AbortError("OAuth refresh stopped before token exchange");
 			}
-			const serialized = serializeCredential(provider, current);
+			const serialized = serializeCredential(provider, row.credential);
 			if (!serialized) return { credential: current, refreshed: false, removed: false };
 			// Acquiring the lease can block on SQLite past the deadline; do not start an exchange nobody waits for.
 			if (Date.now() >= waitDeadline) return this.#budgetExceeded(provider, options, current);
