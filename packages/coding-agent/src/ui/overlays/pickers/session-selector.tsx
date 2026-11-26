@@ -395,6 +395,12 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 			try {
 				const listing = await props.loadAllSessions();
 				global.set(listing.sessions);
+				void listing.complete?.then(
+					sessions => {
+						if (alive) global.set(sessions);
+					},
+					() => {},
+				);
 				message.set(undefined);
 			} catch (err) {
 				toggling = false;

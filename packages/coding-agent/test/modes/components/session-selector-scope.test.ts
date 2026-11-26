@@ -63,6 +63,41 @@ describe("session selector scope toggle", () => {
 		}
 	});
 
+	it("replaces preliminary all-project rows with completed folder metadata", async () => {
+		const complete = Promise.withResolvers<SessionSelectorEntry[]>();
+		const preliminary = [
+			sessionEntry("local", "Local", "2024-01-02T00:00:00Z", {
+				path: "/sessions/local.jsonl",
+				cwd: "",
+			}),
+			sessionEntry("remote", "Remote", "2024-01-02T00:00:00Z", {
+				path: "/sessions/remote.jsonl",
+				cwd: "",
+			}),
+		];
+		const completed = [
+			createSession("local", "Local", "/work/current"),
+			createSession("remote", "Remote", "/work/other-project"),
+		];
+		const picker = mountSessionSelector({
+			sessions: [completed[0]!],
+			loadAllSessions: async () => ({ sessions: preliminary, complete: complete.promise }),
+		});
+		try {
+			picker.press("tab");
+			await settle();
+			expect(picker.screen()).toContain("(all projects)");
+			expect(picker.screen()).not.toContain("other-project");
+
+			complete.resolve(completed);
+			await complete.promise;
+			await settle();
+			expect(picker.screen()).toContain("other-project");
+		} finally {
+			picker.term.dispose();
+		}
+	});
+
 	it("shows directories in folder scope only when the list spans worktrees, across a Tab round-trip", async () => {
 		const single = mountSessionSelector({
 			sessions: [createSession("a", "Alpha", "/work/repo"), createSession("b", "Beta", "/work/repo")],
