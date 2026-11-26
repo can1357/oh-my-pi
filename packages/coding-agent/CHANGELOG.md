@@ -14,39 +14,11 @@
 - `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
 - The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- The subagents HUD mutes the status mark, and tray cards mark, subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so they stand apart from subagents doing work
-- Retry fallbacks now record why they switched models on the fallback's `model_change` entry: the model left, the trigger (`request-error`, `agent-loop`, `usage-preflight`, or `missing-credential`), and the error or condition. A fallback after the agent loop stopped a turn itself, such as a soft tool requirement the model never met, is announced as `Turn stopped: …` instead of `Request failed: …` ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
-- The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Added the `gitlab` tool (`gitlab.enabled`, default off) covering project/file/issue reads, MR creation/updating/worktree checkout/push, discussions/notes/resolution, project/group/global search, and CI pipeline/job watching and logs, and expanded `mr://` URLs to support MR listings (`mr://`, `mr://<host>/<group>/<project>`) and cached MR overviews (`mr://<iid>`) alongside existing `/diff` slices ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
-- Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
-- The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal
-- The shell's `stat` builtin now supports every BSD option and format directive, including `-l`, `-F`, `-r`, and `%Y`, `%Z`, `%f`, `%v`
-- The shell's `ast-grep` builtin now runs `ast-grep test` (with snapshots, `--update-all`, `--filter`, and `--skip-snapshot-tests`), scaffolding with `ast-grep new -y`, and `--inspect` on `run`/`scan`; `lsp`, `completions`, and `--interactive` remain unsupported
-- The shell's `fd` builtin now runs commands for its results with `-x`/`--exec` and `-X`/`--exec-batch` (with `--batch-size`), lists them with `-l`/`--list-details`, and matches whole names with `--exact`; these options used to fail
-- Added `discovery.type: openrouter` for `models.yml` providers that front OpenRouter under their own URL and key: their model list now comes from OpenRouter's public catalog, and requests follow OpenRouter's request format.
-- With Vim editing mode on, `Ctrl+R` in Normal mode redoes instead of opening history search; history search stays on `Ctrl+R` in Insert mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added Vim mode to ask-form textareas, one-line text fields, "Other" answers, option notes, and text prompts: `Escape` leaves Insert mode first instead of discarding what you typed, and `j`/`k` move between a form's option rows ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added `tui.vimYankToClipboard` (off by default, as in Vim): turn it on to make every yank copy to the system clipboard, not just `"+y`/`"*y` ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added Vim `/` and `?` in Normal mode to open prompt-history search, the same as `Ctrl+R`, and `"+p` to put the system clipboard ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added Vim `:` in Normal mode on an empty prompt: it starts a slash command, opening the command menu as a typed `/` does ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added `tui.vimStartMode` (`/settings` → Interaction → "Vim Start Mode"): `normal` starts each prompt, and dialog text boxes, in Vim Normal mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- With Vim editing mode on, Normal-mode `k`/`j` (and Up/Down) past the first or last line step through prompt history, as in zsh's vi mode; `j` past the newest prompt brings back your draft with its pastes, attachments, and undo history, and edits made to a recalled prompt are kept until you send. `k` off the top first moves into a waiting question box, as Insert-mode Up does ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added `tui.vimShowCommand` (on by default): the status line echoes a half-typed Vim command (`15d` before its last `d`), also when **Vim Mode Indicator** is set to hidden ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added `archive.calls`, `archive.grep`, `archive.stats`, and `archive.messages` to the eval `archive` object: list past tool calls with their results and the reasoning before them, regex-search thinking, replies, arguments, and results, count calls and errors by tool, day, model, version, project, or session, and read a transcript's records whole; `subagents: true` adds the subagent transcripts of the sessions in scope
-- Added `since`/`until` to every `archive` listing: an age like `8d`, an ISO date, or a date-time narrows projects, sessions, search, prompts, recaps, and activity to that window
 - Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
 
 ### Changed
 
-- The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- With Vim editing mode on, `y` no longer copies to the system clipboard; use `"+y` / `"*y`, or turn on `tui.vimYankToClipboard` to get the old behavior ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- With Vim editing mode on, the prompt after a message you send starts in **Vim Start Mode** (Insert by default) instead of staying in the mode you sent it from ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-
-### Changed
-
-- The bash tool's description tells the agent to run a system program by path (`/usr/bin/x`) only after the builtin's output proved wrong.
-- The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
-- When `bash.patterns` allow rules can skip an approval prompt, the bash tool's description tells the agent which shell syntax (unquoted operators, `$`/backtick expansions) disqualifies them ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
 - Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
 - URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
 - URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
@@ -56,17 +28,9 @@
 ### Changed
 
 - `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
-- The bash tool's description tells the agent to run a system program by path (`/usr/bin/x`) only after the builtin's output proved wrong.
-- The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
-- Clarified the `bash` tool prompt to name `local://<N>.log` on the output-truncation hint and, when bash pattern approval is active, to explain that shell control operators and `$`/backticks disqualify allow rules and force a prompt ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
+- When `bash.patterns` allow rules can skip an approval prompt, the bash tool's description tells the agent which shell syntax (unquoted operators, `$`/backtick expansions) disqualifies them ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
 
 ### Fixed
-- Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
-- Images reach each request as the receiving model needs them: after switching to a text-only model, queued and earlier images are described by the vision model (once per image, reused across turns and resumes); after switching to a vision model, they are sent as images again with no stale description. Compaction and branch summaries and advisor reviews carry the descriptions whenever their model or the session's cannot see images, and a failed description is retried instead of sticking ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
-- Edit cards in hashline, sloppy and magic modes name their target file again instead of `…`: while a call streams, and in the Agent Hub transcript of a subagent
-- Extensions importing `@oh-my-pi/omptype` resolve to the host's copy, so they load offline and after Bun prunes the package's cached registry manifest; the bare import used to fall back to the install cache and fail the extension load
-- `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
-- Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
 - Pasting text that ends in an `@name` no longer opens the file completion list, so the next Enter sends the message instead of replacing the name with a file ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
@@ -109,6 +73,7 @@
 - Renaming a session from `/resume` accepts keyboard input again and returns focus to the picker after saving or cancelling ([#20548](https://github.com/can1357/oh-my-pi/issues/20548)).
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
+- Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
 
 ### Removed
 
