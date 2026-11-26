@@ -2,12 +2,13 @@ import * as os from "node:os";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
-import { prompt, toError } from "@oh-my-pi/pi-utils";
+import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
-import { LIVE_DELEGATION_MESSAGE_TYPE } from "../session/messages";
+import { LIVE_DELEGATION_MESSAGE_TYPE, LIVE_ENDED_MESSAGE_TYPE } from "../session/messages";
 import agentFinalMessageTemplate from "./prompts/agent-final-message.md" with { type: "text" };
+import liveEndedTemplate from "./prompts/live-ended.md" with { type: "text" };
 import liveInstructionsTemplate from "./prompts/live-instructions.md" with { type: "text" };
 import {
 	buildDelegationContextAppend,
@@ -118,6 +119,8 @@ export class LiveSessionController {
 	#emittedInputLevel = -1;
 	#emittedOutputLevel = -1;
 	#activeDelegationId: string | undefined;
+	/** Whether a spoken request reached the coding agent, which must then hear that the call ended. */
+	#delegated = false;
 	#userTranscript = "";
 	#assistantTranscript = "";
 	#userTranscriptFinal = false;
@@ -303,6 +306,22 @@ export class LiveSessionController {
 			}
 		}
 
+		if (this.#delegated) {
+			void this.#session
+				.sendCustomMessage(
+					{
+						customType: LIVE_ENDED_MESSAGE_TYPE,
+						content: prompt.render(liveEndedTemplate),
+						display: false,
+						attribution: "agent",
+					},
+					{ deliverAs: "nextTurn" },
+				)
+				.catch(cause => {
+					logger.warn("Live session end notice was not delivered", { error: toError(cause).message });
+				});
+		}
+
 		if (cleanupError) this.#emitPhaseSafely("error");
 		this.#emitTerminal(cleanupError);
 	}
@@ -354,6 +373,7 @@ export class LiveSessionController {
 		if (!request) return;
 		this.#activeDelegationId = event.item.id;
 		this.#refreshAudioPhase();
+		this.#delegated = true;
 		void this.#session
 			.sendCustomMessage(
 				{
