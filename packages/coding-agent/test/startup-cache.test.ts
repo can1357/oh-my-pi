@@ -16,7 +16,8 @@ import {
 } from "../src/modes/startup-composer";
 import { getCurrentThemeName, initTheme } from "../src/ui/theme/service";
 import { StartupCache } from "../src/modes/interactive/startup-cache";
-import type { StatusPrediction } from "../src/modes/interactive/status-prediction";
+import { predictedStatusLine, type StatusPrediction } from "../src/modes/interactive/status-prediction";
+import { effectiveStatusSettings, segmentView } from "../src/ui/status/segments";
 import { createModeTerminal } from "./helpers/mode-terminal";
 
 const prediction: StatusPrediction = {
@@ -95,7 +96,11 @@ describe("interactive mode status prediction", () => {
 		dir = TempDir.createSync("@pi-status-prediction-");
 		cache = StartupCache.open(path.join(dir.path(), "composer.db"));
 		vi.spyOn(startupCache, "sharedStartupCache").mockReturnValue(cache);
-		await Settings.init({ inMemory: true, cwd: dir.path() });
+		await Settings.init({
+			inMemory: true,
+			cwd: dir.path(),
+			overrides: { "statusLine.segmentOptions": { model: { showProvider: true } } },
+		});
 		authStorage = await AuthStorage.create(path.join(dir.path(), "auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -113,6 +118,12 @@ describe("interactive mode status prediction", () => {
 		const predicted = cache.read(getProjectDir()).status;
 		expect(predicted?.facts.model?.id).toBe("claude-sonnet-4-5");
 		expect(predicted?.facts.model?.contextWindow).toBe(model.contextWindow ?? undefined);
+		// The cached bar carries the session's provider, not just the fixture-supplied one.
+		const bar = predictedStatusLine(predicted!, dir.path());
+		const label = segmentView("model", bar.facts(), effectiveStatusSettings(bar.settings()))
+			?.spans.map(part => part.t)
+			.join("");
+		expect(label).toContain("anthropic/");
 	});
 });
 
