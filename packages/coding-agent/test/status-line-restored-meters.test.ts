@@ -121,4 +121,27 @@ describe("active time per session", () => {
 		(main as unknown as { sessionFile: string }).sessionFile = "/s/resumed.jsonl";
 		expect(line.activeMs()).toBe(0);
 	});
+
+	it("opens a fresh meter only while the session's run goes on across the file change", () => {
+		vi.useFakeTimers();
+		setSystemTime(2_000_000);
+		// `/fork` or `/wt` while the run waits on background work: same session, new file, run still open.
+		const forked = statusSession({ sessionFile: "/s/main.jsonl", runStartedAt: 2_000_000 });
+		const forkedLine = statusLine(forked, BARE);
+		forkedLine.markActivityStart();
+		setSystemTime(2_005_000);
+		Object.assign(forked, { sessionFile: "/s/forked.jsonl" });
+		forkedLine.refresh();
+		expect(forkedLine.facts().turnStartedAt).toBe(2_005_000);
+		setSystemTime(2_007_000);
+		expect(forkedLine.activeMs()).toBe(2_000);
+
+		// `/resume` after a run that closed without `agent_end`: its window was left open, the run is over.
+		const resumed = statusSession({ sessionFile: "/s/main.jsonl" });
+		const resumedLine = statusLine(resumed, BARE);
+		resumedLine.markActivityStart();
+		Object.assign(resumed, { sessionFile: "/s/resumed.jsonl" });
+		resumedLine.refresh();
+		expect(resumedLine.facts().turnStartedAt).toBeUndefined();
+	});
 });
