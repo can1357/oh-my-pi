@@ -12,6 +12,7 @@
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
 - The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Pasting a pdf, docx, pptx, xlsx, or epub file path into the prompt attaches the document as markdown text (the same conversion as `read`, capped like an `@` mention) instead of inserting the raw path ([#9931](https://github.com/can1357/oh-my-pi/issues/9931), [#19172](https://github.com/can1357/oh-my-pi/pull/19172) by [@Skare69](https://github.com/Skare69))
 
 ### Changed
 

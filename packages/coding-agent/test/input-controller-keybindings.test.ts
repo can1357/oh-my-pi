@@ -8,6 +8,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { ComposerOwner, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { imageAttachmentSource } from "@oh-my-pi/pi-coding-agent/utils/image-source";
+import { MAX_AUTO_READ_TEXT_BYTES } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import * as markit from "@oh-my-pi/pi-coding-agent/utils/markit";
 import type { KeyEvent, UiNode } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { InputEvent } from "@oh-my-pi/pi-tui/driver/index";
@@ -1177,6 +1179,97 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Video paste is not supported in this prompt");
 		expect(context.spies.shellPaste).toHaveBeenCalledWith(videoPath);
 		expect(attachImage).not.toHaveBeenCalled();
+	});
+
+	describe("document path paste (#9931)", () => {
+		async function writeDoc(name: string, bytes: string | Uint8Array = "%PDF-stub"): Promise<string> {
+			const file = tempDir.join(name);
+			await Bun.write(file, bytes);
+			return file;
+		}
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		it("converts a pasted document path into a wrapped markdown chip", async () => {
+			const docPath = await writeDoc("report.pdf");
+			const context = createPromptContext();
+			const converted = vi
+				.spyOn(markit, "convertFileWithMarkit")
+				.mockResolvedValue({ ok: true, content: "# Quarterly report\n\nRevenue is up." });
+			await new InputController(context.ctx).handleImagePathPaste(docPath);
+
+			expect(converted).toHaveBeenCalledWith(docPath);
+			expect(context.editor.expandedText()).toContain(
+				"<attachment>\n# Quarterly report\n\nRevenue is up.\n</attachment>",
+			);
+			expect(context.editor.text()).not.toContain(docPath);
+			expect(context.ctx.showStatus).toHaveBeenLastCalledWith("Attached report.pdf as markdown text");
+		});
+
+		it("pastes the path back with the reason when conversion fails", async () => {
+			const docPath = await writeDoc("broken.docx");
+			const context = createPromptContext();
+			vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({
+				ok: false,
+				content: "",
+				error: "corrupt archive",
+			});
+			await new InputController(context.ctx).handleImagePathPaste(docPath);
+
+			expect(context.editor.text()).toContain(docPath);
+			expect(context.ctx.showStatus).toHaveBeenLastCalledWith("Document paste failed: corrupt archive");
+		});
+
+		it("pastes the path back without converting a missing or oversized document", async () => {
+			const big = await writeDoc("huge.pdf", new Uint8Array(MAX_AUTO_READ_TEXT_BYTES + 1));
+			const missing = tempDir.join("gone.pdf");
+			const context = createPromptContext();
+			const converted = vi.spyOn(markit, "convertFileWithMarkit");
+			const controller = new InputController(context.ctx);
+			await controller.handleImagePathPaste(missing);
+			expect(context.ctx.showStatus).toHaveBeenLastCalledWith("Document paste failed: gone.pdf not found");
+			await controller.handleImagePathPaste(big);
+			expect(context.ctx.showStatus).toHaveBeenLastCalledWith(
+				expect.stringMatching(/^Document paste failed: huge\.pdf is .+ paste limit$/),
+			);
+
+			expect(converted).not.toHaveBeenCalled();
+			expect(context.editor.text()).toContain(missing);
+			expect(context.editor.text()).toContain(big);
+		});
+
+		it("keeps a pasted document path as text and says why in an image-accepting prompt", async () => {
+			const docPath = await writeDoc("notes.pdf");
+			const context = createPromptContext();
+			const { attachImage } = createPrompt(context, { acceptImages: true });
+
+			await new InputController(context.ctx).handleImagePathPaste(docPath);
+
+			expect(context.ctx.showStatus).toHaveBeenCalledWith("Document paste is not supported in this prompt");
+			expect(context.spies.shellPaste).toHaveBeenCalledWith(docPath);
+			expect(attachImage).not.toHaveBeenCalled();
+		});
+
+		it("routes only all-attachable composer pastes to the path handler", async () => {
+			const context = createPromptContext();
+			const controller = new InputController(context.ctx);
+			const attach = vi.spyOn(controller, "handleImagePathPaste").mockResolvedValue();
+			controller.setupKeyHandlers();
+
+			context.input.paste(context.ctx, "/tmp/reports/q3.pdf /tmp/shot.png");
+			// The paths attach one after another; let the queued second call run.
+			await Bun.sleep(0);
+			expect(attach.mock.calls.map(call => call[0])).toEqual(["/tmp/reports/q3.pdf", "/tmp/shot.png"]);
+
+			attach.mockClear();
+			for (const verbatim of ["/tmp/notes.txt", "/tmp/projects", "/tmp/q3.pdf /tmp/notes.txt"]) {
+				context.editor.setText("");
+				context.input.paste(context.ctx, verbatim);
+				expect(context.editor.text()).toBe(verbatim);
+			}
+			expect(attach).not.toHaveBeenCalled();
+		});
 	});
 
 	it("refuses a clipboard image in a prompt that did not opt in", async () => {

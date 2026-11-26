@@ -1,4 +1,5 @@
 import * as url from "node:url";
+import { isConvertibleDocumentPath } from "../../../utils/markit";
 import { isVideoPath } from "../../../utils/video-preview";
 
 /** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
@@ -206,6 +207,17 @@ export function extractImagePastePathsFromText(text: string): string[] | undefin
 	if (paths !== undefined) return paths.every(isPreviewableAttachmentPath) ? paths : undefined;
 	const wholePath = extractWholeTextAttachmentPath(text);
 	return wholePath ? [wholePath] : undefined;
+}
+
+/**
+ * The main composer's attachment paths: like {@link extractImagePastePathsFromText}, but a
+ * segment may also be a document markit converts (#9931). Any other payload, plain files and
+ * directories included, returns undefined so the composer pastes it verbatim.
+ */
+export function extractComposerPastePathsFromText(text: string): string[] | undefined {
+	const paths = extractPastePathsFromText(text);
+	if (paths?.every(path => isPreviewableAttachmentPath(path) || isConvertibleDocumentPath(path))) return paths;
+	return extractImagePastePathsFromText(text);
 }
 
 /**
