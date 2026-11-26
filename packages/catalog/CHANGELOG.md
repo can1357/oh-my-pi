@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed Vercel AI Gateway `meta/muse-spark-1.3-contributor` requests failing with HTTP 400: its output budget is capped to 131072 tokens like `1.2-contributor`, and the 1M context window is unchanged ([#10705](https://github.com/can1357/oh-my-pi/issues/10705), [#19948](https://github.com/can1357/oh-my-pi/pull/19948) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Added
