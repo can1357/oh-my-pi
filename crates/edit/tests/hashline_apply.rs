@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use omp_edit::{
 	modes::hashline::{
@@ -838,7 +838,7 @@ fn empty_paste_drop_removes_the_incomplete_preview_op() {
 #[test]
 fn recovery_remaps_a_uniform_line_shift() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery.rs");
+	let path = &omp_edit::Location::Disk("/tmp/recovery.rs".into());
 	let previous = "fn f() {\n\told();\n}\n";
 	let tag = store.record(path, previous, None);
 	let edit = replacement(2, 2, &["\tnew();"], 1);
@@ -865,7 +865,7 @@ fn recovery_refuses_a_remap_of_a_body_written_for_the_current_line() {
 	// current file and paired it with the old tag; remapping would replace
 	// `drive home`.
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-current-line.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-current-line.txt".into());
 	let tag = store.record(path, ERRANDS, None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -881,7 +881,7 @@ fn recovery_refuses_a_remap_of_a_body_written_for_the_current_line() {
 #[test]
 fn recovery_remaps_a_body_written_for_the_tagged_line() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-tagged-line.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-tagged-line.txt".into());
 	let tag = store.record(path, ERRANDS, None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -915,7 +915,7 @@ fn recovery_skips_the_body_check_past_its_comparison_budget() {
 		.collect::<Vec<_>>();
 	let body = body.iter().map(String::as_str).collect::<Vec<_>>();
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-budget.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-budget.txt".into());
 	let tag = store.record(path, &tagged, None);
 	let current = format!("{}\n{tagged}", current_rows.join("\n"));
 	let recovered = try_recover(&store, RecoveryArgs {
@@ -948,7 +948,7 @@ fn recovery_budgets_the_body_check_in_chars_not_bytes() {
 		.collect::<Vec<_>>();
 	let body = body.iter().map(String::as_str).collect::<Vec<_>>();
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-budget-chars.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-budget-chars.txt".into());
 	let tag = store.record(path, &tagged, None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -986,7 +986,7 @@ fn recovery_shares_one_comparison_budget_across_hunks() {
 	let mut edits = replacement(1, 48, &first_body, 1);
 	edits.extend(replacement(49, 96, &second_body, 2));
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-shared-budget.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-shared-budget.txt".into());
 	let tag = store.record(path, &tagged, None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -1011,7 +1011,7 @@ fn recovery_remaps_a_shifted_range_that_overlaps_its_kept_line() {
 	// Shifted by one, the authored window (blank, `alpha line`) shares
 	// `alpha line` with the tagged range; the blank must not tip it.
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-overlap.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-overlap.txt".into());
 	let tag = store.record(path, "intro text\n\nalpha line\nobsolete line\nend text\n", None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -1028,7 +1028,7 @@ fn recovery_remaps_a_shifted_range_that_overlaps_its_kept_line() {
 #[test]
 fn recovery_remaps_a_filled_blank_line_next_to_a_similar_line() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-blank-fill.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-blank-fill.txt".into());
 	let tag = store.record(path, "first line here\n\nthird line here\n", None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -1045,7 +1045,7 @@ fn recovery_remaps_a_filled_blank_line_next_to_a_similar_line() {
 #[test]
 fn recovery_remaps_a_short_body_next_to_a_short_line() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-short.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-short.txt".into());
 	let tag = store.record(path, "header\nx\nlong legacy line\ntail\n", None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -1062,7 +1062,7 @@ fn recovery_remaps_a_short_body_next_to_a_short_line() {
 #[test]
 fn recovery_remaps_a_rewrite_loosely_like_the_neighboring_line() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-rewrite.rs");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-rewrite.rs".into());
 	let previous = "fn f() -> u32 {\n\tlet computed = 1;\n\tpanic!(\"not implemented\");\n}\n";
 	let tag = store.record(path, previous, None);
 	let recovered = try_recover(&store, RecoveryArgs {
@@ -1085,7 +1085,7 @@ fn recovery_refuses_a_shifted_remap_that_breaks_the_parse() {
 	// Meant after the current `"z": 0,` (line 2); the remap lands the entry
 	// after `"a": 1`, which has no trailing comma.
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-breaks-parse.json");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-breaks-parse.json".into());
 	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -1101,7 +1101,7 @@ fn recovery_refuses_a_shifted_remap_that_breaks_the_parse() {
 #[test]
 fn recovery_remaps_a_shifted_insert_that_keeps_the_parse() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-keeps-parse.json");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-keeps-parse.json".into());
 	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
@@ -1119,7 +1119,7 @@ fn recovery_remaps_a_shifted_insert_that_keeps_the_parse() {
 #[test]
 fn recovery_parse_refusal_leaves_the_clipboard_untouched() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-refused-cut.json");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-refused-cut.json".into());
 	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
 	let cut = Edit::Cut {
 		range:    ParsedRange { start: Anchor { line: 2 }, end: Anchor { line: 2 } },
@@ -1148,7 +1148,7 @@ fn recovery_parse_refusal_leaves_the_clipboard_untouched() {
 #[test]
 fn recovery_publishes_the_registers_of_an_accepted_remap() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-accepted-cut.txt");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-accepted-cut.txt".into());
 	let tag = store.record(path, "a\nb\nc\n", None);
 	let cut = Edit::Cut {
 		range:    ParsedRange { start: Anchor { line: 2 }, end: Anchor { line: 2 } },
@@ -1173,7 +1173,7 @@ fn recovery_publishes_the_registers_of_an_accepted_remap() {
 #[test]
 fn recovery_rejects_a_changed_anchor() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-changed.rs");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-changed.rs".into());
 	let previous = "a\nold\nc";
 	let tag = store.record(path, previous, None);
 	let recovered = try_recover(&store, RecoveryArgs {
@@ -1190,7 +1190,7 @@ fn recovery_rejects_a_changed_anchor() {
 #[test]
 fn recovery_replays_unchanged_anchor_onto_current_session_text() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-session.ts");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-session.ts".into());
 	let previous = "L1\nL2\nL3\nL4\nL5\nL6\n";
 	let tag = store.record(path, previous, None);
 	let current = "L1\nL2\nL3\nL4\nL5-CHANGED\nL6\n";
@@ -1212,7 +1212,7 @@ fn recovery_replays_unchanged_anchor_onto_current_session_text() {
 #[test]
 fn recovery_remaps_after_a_prior_deletion() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-deletion.ts");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-deletion.ts".into());
 	let previous = "L1\nL2\nL3\nL4\nL5\nL6\n";
 	let tag = store.record(path, previous, None);
 	let current = "L1\nL3\nL4\nL5\nL6\n";
@@ -1232,7 +1232,7 @@ fn recovery_remaps_after_a_prior_deletion() {
 #[test]
 fn recovery_refuses_an_isolated_unique_line_without_neighbor_offset() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-isolated.ts");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-isolated.ts".into());
 	let previous = "L1\nL2\nL3\nL4\nT\nL6\n";
 	let tag = store.record(path, previous, None);
 	let recovered = try_recover(&store, RecoveryArgs {
@@ -1249,7 +1249,7 @@ fn recovery_refuses_an_isolated_unique_line_without_neighbor_offset() {
 #[test]
 fn recovery_remaps_duplicate_range_when_context_matches() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-duplicate-valid.ts");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-duplicate-valid.ts".into());
 	let previous = "alpha\nDUP\nbeta\nDUP\nomega\n";
 	let tag = store.record(path, previous, None);
 	let current = "alpha\nINSERTED\nDUP\nbeta\nDUP\nomega\n";
@@ -1284,7 +1284,7 @@ fn recovery_uses_the_most_recent_snapshot_when_tags_collide() {
 	let tag = file_hash(&older);
 	assert_eq!(file_hash(&newer), tag);
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-collision.ts");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-collision.ts".into());
 	store.record(path, &older, None);
 	store.record(path, &newer, None);
 	let current = format!("{newer}drifted trailer\n");
@@ -1303,7 +1303,7 @@ fn recovery_uses_the_most_recent_snapshot_when_tags_collide() {
 #[test]
 fn recovery_rejects_ambiguous_duplicate_anchor_context() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-duplicate.rs");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-duplicate.rs".into());
 	let previous = "start\nDUP\nmid\nDUP\ntail";
 	let tag = store.record(path, previous, None);
 	let recovered = try_recover(&store, RecoveryArgs {
@@ -1323,7 +1323,7 @@ fn recovery_refuses_a_remap_into_a_sibling_construct() {
 	// identical row of the newly added list `b`: a uniform offset with
 	// matching neighbors, landing the insert in the wrong list.
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-sibling.py");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-sibling.py".into());
 	let previous = "cfg = {\n    \"a\": [\n        \"shared\",\n    ],\n}\n";
 	let current = "cfg = {\n    \"a\": [\n        \"changed\",\n    ],\n    \"b\": [\n        \
 	               \"shared\",\n    ],\n}\n";
@@ -1342,7 +1342,7 @@ fn recovery_refuses_a_remap_into_a_sibling_construct() {
 #[test]
 fn recovery_remaps_a_shift_inside_the_same_construct() {
 	let store = EditStore::new();
-	let path = Path::new("/tmp/recovery-same-construct.py");
+	let path = &omp_edit::Location::Disk("/tmp/recovery-same-construct.py".into());
 	let previous = "def f():\n    old()\n";
 	let tag = store.record(path, previous, None);
 	let recovered = try_recover(&store, RecoveryArgs {

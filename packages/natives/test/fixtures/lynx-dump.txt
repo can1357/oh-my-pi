@@ -1,0 +1,41 @@
+                                                                                                                       Browser dump
+
+   Documentation / Examples
+
+Read the whole page
+
+     A text browser includes "quotes", [DEL: deletions :DEL] and [INS: insertions :INS] .
+
+    Y. Lists may omit end tags
+    Z. And contain sublists
+          + Nested point
+
+   Option
+          Description
+   Flag
+          Meaning
+
+   Preferences
+
+   Name ________ [X] ( ) (*) [Custom_]
+   line 1_
+   line 2_
+
+   CAPTION: Summary
+
+    Key   Value
+   Length 1 km
+
+   Outer
+   Inner Row
+   Continued End
+
+   IFRAME: Reference
+   Offline fallback
+
+first
+        indented
+
+last
+
+   Visible without scripting.
