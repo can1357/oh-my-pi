@@ -205,6 +205,34 @@ describe("hostCommandUrls", () => {
 		}
 	});
 
+	it("keeps omp's URLs behind env options, uv run options, an empty exec name, and coproc", async () => {
+		const anyBacking: UrlBacking = async url => `/host/${url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "")}`;
+		const hostAny = (command: string) => hostCommandUrls(command, anyBacking);
+		expect(await hostAny("env --chdir local://dir -S omp read skill://tdd")).toBe(
+			"env --chdir /host/dir -S omp read skill://tdd",
+		);
+		expect(await hostAny("env --chdir /tmp -S grep omp skill://tdd")).toBe("env --chdir /tmp -S grep omp /host/tdd");
+		expect(await hostAny("uv run --no-project --color never omp read skill://tdd")).toBe(
+			"uv run --no-project --color never omp read skill://tdd",
+		);
+		expect(await hostAny("uv run --link-mode copy omp read skill://tdd")).toBe(
+			"uv run --link-mode copy omp read skill://tdd",
+		);
+		expect(await hostAny("uv run --resolution lowest omp read skill://tdd")).toBe(
+			"uv run --resolution lowest omp read skill://tdd",
+		);
+		expect(await hostAny("uv run --color never grep omp skill://tdd")).toBe(
+			"uv run --color never grep omp /host/tdd",
+		);
+		expect(await hostAny("exec -a '' omp read skill://tdd")).toBe("exec -a '' omp read skill://tdd");
+		expect(await hostAny("exec -a '' grep omp skill://tdd")).toBe("exec -a '' grep omp /host/tdd");
+		expect(await hostAny("coproc omp read skill://tdd")).toBe("coproc omp read skill://tdd");
+		expect(await hostAny("coproc { omp read skill://tdd; }")).toBe("coproc { omp read skill://tdd; }");
+		expect(await hostAny("coproc NAME { omp read skill://tdd; }")).toBe("coproc NAME { omp read skill://tdd; }");
+		expect(await hostAny("coproc NAME { cat skill://tdd; }")).toBe("coproc NAME { cat /host/tdd; }");
+		expect(await hostAny("coproc grep omp skill://tdd")).toBe("coproc grep omp /host/tdd");
+	});
+
 	it("treats a here-document body as input, not command text", async () => {
 		const command = [
 			"python3 - local://args.json <<'PY' && cat local://after.txt",

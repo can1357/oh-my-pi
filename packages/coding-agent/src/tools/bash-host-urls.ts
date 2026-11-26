@@ -41,6 +41,12 @@ const WORD_SAFE = /^[A-Za-z0-9_./:@%+=,-]+$/;
 const GLOB_RUN = /([*?[\]{}]+)/;
 
 const PREFIX_KEYWORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!", "{"]);
+/** Words that begin a compound command, so `coproc NAME { … }` keeps NAME as the coprocess name. */
+const COMPOUND_COMMAND = new Set(["{", "if", "while", "until", "for", "case", "select", "[["]);
+
+function isCompoundCommand(word: { raw: string; value: string } | undefined): boolean {
+	return word !== undefined && word.raw === word.value && COMPOUND_COMMAND.has(word.value);
+}
 
 /** Whether `url` names nothing below its scheme: a bare root, or one followed by words. */
 function namesNothing(url: string): boolean {
@@ -88,60 +94,6 @@ function isRedirectSeparator(tokens: readonly ShellToken[], index: number, start
 }
 
 /**
- * Quote-removed word with bash line continuations deleted.
- *
- * `lexShellCommand` keeps a backslash followed by a newline and glues it to
- * the next text, so a continued `omp` is not seen as the command name. Bash
- * deletes that pair before the command runs, including inside double quotes.
- * A single-quoted pair stays literal.
- */
-function continuedWord(raw: string): string {
-	let value = "";
-	let inSingle = false;
-	let inDouble = false;
-	for (let i = 0; i < raw.length; i++) {
-		const ch = raw[i];
-		if (inSingle) {
-			if (ch === "'") inSingle = false;
-			else value += ch;
-			continue;
-		}
-		if (inDouble) {
-			if (ch === "\\" && i + 1 < raw.length) {
-				const next = raw[i + 1];
-				if (next === "\n") {
-					i++;
-					continue;
-				}
-				if (next === '"' || next === "\\" || next === "$" || next === "`") {
-					value += next;
-					i++;
-					continue;
-				}
-			}
-			if (ch === '"') inDouble = false;
-			else value += ch;
-			continue;
-		}
-		if (ch === "'") {
-			inSingle = true;
-		} else if (ch === '"') {
-			inDouble = true;
-		} else if (ch === "\\" && i + 1 < raw.length) {
-			if (raw[i + 1] === "\n") {
-				i++;
-				continue;
-			}
-			value += raw[i + 1];
-			i++;
-		} else {
-			value += ch;
-		}
-	}
-	return value;
-}
-
-/**
  * Token indices in `tokens[start..end]` whose literal URLs belong to `omp` itself
  * (directly or behind launchers), so their bare/option URLs stay as written while
  * redirections, wrapper options, and `$(…)` substitutions are still rewritten.
@@ -163,12 +115,11 @@ function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: num
 		if (ATTACHED_REDIRECT.test(token.raw)) {
 			continue;
 		}
-		// Bash deletes a backslash-newline before it runs the command. The raw
-		// spelling stays in the rewritten command; only the launcher walk uses
-		// the word bash will see. A continuation by itself is not a command word.
-		const value = !cmd && token.raw.includes("\\\n") ? continuedWord(token.raw) : token.value;
-		if (value.length === 0) continue;
-		words.push({ index: i, raw: token.raw, value });
+		// Bash deletes a backslash-newline before it runs the command (`lexShellCommand` with
+		// `joinContinuations`). A continuation by itself is not a word. A quoted empty word is
+		// (`exec -a '' omp`): dropping it makes the next word the option's value.
+		if (token.value.length === 0 && !/['"]/.test(token.raw)) continue;
+		words.push({ index: i, raw: token.raw, value: token.value });
 	}
 
 	let cmdStart = 0;
@@ -183,6 +134,14 @@ function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: num
 			// `function name { … }`: the body's commands are commands of their own.
 			if (w.raw === w.value && w.value === "function" && words[cmdStart + 2]?.raw === "{") {
 				cmdStart += 2;
+				continue;
+			}
+			// `coproc [NAME] command`. A name is present only when a compound command follows it;
+			// a simple command starts at the next word (`coproc omp read …`).
+			if (w.raw === w.value && w.value === "coproc") {
+				const next = words[cmdStart + 1];
+				const after = words[cmdStart + 2];
+				cmdStart += next && !isCompoundCommand(next) && isCompoundCommand(after) ? 2 : 1;
 				continue;
 			}
 			if (isShellEnvironmentAssignment(w.raw)) {
@@ -297,7 +256,7 @@ class HostUrls {
 	/** Command text without here-document bodies, word by word. */
 	async #code(text: string): Promise<string> {
 		if (!text.includes("://")) return text;
-		const tokens = lexShellCommand(text);
+		const tokens = lexShellCommand(text, { joinContinuations: !this.#cmd });
 		let out = "";
 		let start = 0;
 		while (start < tokens.length) {

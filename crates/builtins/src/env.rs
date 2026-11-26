@@ -332,19 +332,40 @@ fn long_option(name: &[u8]) -> Option<(&'static str, bool)> {
 	candidates.next().is_none().then_some(first)
 }
 
-/// Walks the options of `argv` (they end at the first operand) for the first
-/// `-S` or whitespace short option.
-fn scan_options(argv: &[OsString]) -> Option<Found> {
+/// What [`scan_env_options`] stopped at.
+enum EnvScan {
+	Split(EnvSplit),
+	/// A whitespace character used as a short option.
+	Space(u8),
+	None,
+}
+
+/// A `-S` among the options, in the form both the builtin and the shell's
+/// launcher walk need.
+struct EnvSplit {
+	/// Word index of the option carrying `-S`.
+	option_at:    usize,
+	/// 1 if the value is in that word, 2 if it is the next word.
+	words:        usize,
+	/// Byte length of the short-option prefix before `-S` (`-v` of `-vS…`).
+	prefix_len:   usize,
+	/// Byte offset of the command line in the value word. The value word is
+	/// `option_at` when `words == 1`, otherwise `option_at + 1`.
+	value_offset: usize,
+	debug:        bool,
+}
+
+/// Walks the options of `words` (they end at the first operand) for the first
+/// `-S` or whitespace short option. Long options that take a separate value
+/// (`--chdir DIR`) consume that value, including unambiguous prefixes.
+fn scan_env_options<W: AsRef<[u8]>>(words: &[W]) -> EnvScan {
 	let mut debug = false;
 	let mut index = 1;
-	while let Some(word) = argv.get(index) {
-		let bytes = os_bytes_lossy(word);
-		if bytes.as_ref() == b"--" || bytes.len() < 2 || bytes[0] != b'-' {
-			return None;
+	while let Some(word) = words.get(index) {
+		let bytes = word.as_ref();
+		if bytes == b"--" || bytes.len() < 2 || bytes[0] != b'-' {
+			return EnvScan::None;
 		}
-		let next = argv
-			.get(index + 1)
-			.map(|word| os_bytes_lossy(word).into_owned());
 		if let Some(long) = bytes.strip_prefix(b"--") {
 			let (name, value) = match memchr::memchr(b'=', long) {
 				Some(eq) => (&long[..eq], Some(&long[eq + 1..])),
@@ -352,12 +373,22 @@ fn scan_options(argv: &[OsString]) -> Option<Found> {
 			};
 			match long_option(name) {
 				Some((options::SPLIT_STRING, _)) => {
-					let (string, words) = match value {
-						Some(value) => (value.to_vec(), 1),
-						None => (next?, 2),
+					let (word_count, value_offset) = match value {
+						Some(_) => (1, b"--".len() + name.len() + 1),
+						None => {
+							if words.get(index + 1).is_none() {
+								return EnvScan::None;
+							}
+							(2, 0)
+						},
 					};
-					let found = SplitString { index, words, prefix: None, string, debug };
-					return Some(Found::SplitString(found));
+					return EnvScan::Split(EnvSplit {
+						option_at: index,
+						words: word_count,
+						prefix_len: 0,
+						value_offset,
+						debug,
+					});
 				},
 				Some((options::DEBUG, _)) => debug = true,
 				Some((_, true)) if value.is_none() => index += 1,
@@ -370,14 +401,21 @@ fn scan_options(argv: &[OsString]) -> Option<Found> {
 			let rest = &bytes[at + 1..];
 			match c {
 				b'S' => {
-					let (string, words) = if rest.is_empty() {
-						(next?, 2)
+					let (word_count, value_offset) = if rest.is_empty() {
+						if words.get(index + 1).is_none() {
+							return EnvScan::None;
+						}
+						(2, 0)
 					} else {
-						(rest.to_vec(), 1)
+						(1, at + 1)
 					};
-					let prefix = (at > 1).then(|| os_string(&bytes[..at]));
-					let found = SplitString { index, words, prefix, string, debug };
-					return Some(Found::SplitString(found));
+					return EnvScan::Split(EnvSplit {
+						option_at: index,
+						words: word_count,
+						prefix_len: if at > 1 { at } else { 0 },
+						value_offset,
+						debug,
+					});
 				},
 				b'a' | b'C' | b'u' => {
 					if rest.is_empty() {
@@ -386,13 +424,61 @@ fn scan_options(argv: &[OsString]) -> Option<Found> {
 					break;
 				},
 				b'v' => debug = true,
-				c if C_ISSPACE_CHARS.contains(&c) => return Some(Found::Space(c)),
+				c if C_ISSPACE_CHARS.contains(&c) => return EnvScan::Space(c),
 				_ => {},
 			}
 		}
 		index += 1;
 	}
-	None
+	EnvScan::None
+}
+
+/// Where `env`'s `-S`/`--split-string` command line starts in `words`
+/// (`words[0]` is `env`).
+///
+/// The pair is the word index and the byte offset in that word. A separate
+/// value (`-S omp`, `--chdir /tmp -S omp`) is offset 0 in the next word. An
+/// attached value (`-Somp`, `--split-string=omp`) is the offset past the
+/// option. `None` when this invocation has no `-S`.
+///
+/// The walk is the same one the builtin uses, so a long option's value is
+/// not mistaken for the command line.
+pub fn env_split_string<W: AsRef<[u8]>>(words: &[W]) -> Option<(usize, usize)> {
+	match scan_env_options(words) {
+		EnvScan::Split(split) => Some(if split.words == 2 {
+			(split.option_at + 1, 0)
+		} else {
+			(split.option_at, split.value_offset)
+		}),
+		EnvScan::Space(_) | EnvScan::None => None,
+	}
+}
+
+/// Walks the options of `argv` (they end at the first operand) for the first
+/// `-S` or whitespace short option.
+fn scan_options(argv: &[OsString]) -> Option<Found> {
+	let bytes: Vec<_> = argv.iter().map(|word| os_bytes_lossy(word)).collect();
+	match scan_env_options(&bytes) {
+		EnvScan::Split(split) => {
+			let option = bytes.get(split.option_at)?.as_ref();
+			let (string, prefix) = if split.words == 2 {
+				(bytes.get(split.option_at + 1)?.as_ref().to_vec(), None)
+			} else {
+				let string = option.get(split.value_offset..)?.to_vec();
+				let prefix = (split.prefix_len > 0).then(|| os_string(&option[..split.prefix_len]));
+				(string, prefix)
+			};
+			Some(Found::SplitString(SplitString {
+				index: split.option_at,
+				words: split.words,
+				prefix,
+				string,
+				debug: split.debug,
+			}))
+		},
+		EnvScan::Space(c) => Some(Found::Space(c)),
+		EnvScan::None => None,
+	}
 }
 
 /// The exit status `env` stops with; the diagnostic is already written.
@@ -1797,5 +1883,40 @@ mod tests {
 		let (code, out, _) = env(&["-S--version"]).await;
 		assert_eq!(code, 0);
 		assert!(out.starts_with("env "), "{out}");
+	}
+
+	#[test]
+	fn split_string_scan_skips_long_option_values() {
+		let argv: Vec<OsString> = ["env", "--chdir", "/tmp", "-S", "echo hi"]
+			.into_iter()
+			.map(OsString::from)
+			.collect();
+		let super::Found::SplitString(found) = super::scan_options(&argv).expect("-S") else {
+			panic!("expected -S");
+		};
+		assert_eq!(found.index, 3);
+		assert_eq!(found.words, 2);
+		assert_eq!(found.string, b"echo hi");
+		assert!(found.prefix.is_none());
+		assert!(!found.debug);
+
+		let clustered: Vec<OsString> = ["env", "-vSomp"].into_iter().map(OsString::from).collect();
+		let super::Found::SplitString(found) = super::scan_options(&clustered).expect("-S") else {
+			panic!("expected -S");
+		};
+		assert_eq!(found.index, 1);
+		assert_eq!(found.words, 1);
+		assert_eq!(found.string, b"omp");
+		assert_eq!(found.prefix, Some(OsString::from("-v")));
+		assert!(found.debug);
+
+		assert_eq!(
+			super::env_split_string(&["/usr/bin/env", "--ch", "/tmp", "-S", "omp"]),
+			Some((4, 0))
+		);
+		assert_eq!(
+			super::env_split_string(&["env", "--split-string=omp", "read"]),
+			Some((1, "--split-string=".len()))
+		);
 	}
 }

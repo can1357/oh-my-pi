@@ -30,13 +30,23 @@ export function tokenizeShellSegments(command: string): string[][] {
 /** One lexical piece of a shell command: a word, or the whitespace/operator run between words. */
 export type ShellToken = { kind: "word"; raw: string; value: string } | { kind: "separator"; raw: string };
 
+/** Options for {@link lexShellCommand}. */
+export type LexShellCommandOptions = {
+	/**
+	 * Delete bash line continuations (a backslash followed by a newline) from each word's `value`,
+	 * including inside double quotes. A single-quoted continuation stays literal. `raw` is unchanged.
+	 */
+	joinContinuations?: boolean;
+};
+
 /**
  * Lex a command into words and separators with their source text, so callers can rewrite words
  * and reassemble the command. Word boundaries match {@link tokenizeShellSegments}: `value` is the
  * quote/escape-removed word, `raw` its verbatim spelling; separators are runs of spaces, tabs, and
  * the operator characters `\n ; & | ( )`.
  */
-export function lexShellCommand(command: string): ShellToken[] {
+export function lexShellCommand(command: string, options?: LexShellCommandOptions): ShellToken[] {
+	const joinContinuations = options?.joinContinuations === true;
 	const tokens: ShellToken[] = [];
 	let value = "";
 	let wordStart = -1;
@@ -67,6 +77,10 @@ export function lexShellCommand(command: string): ShellToken[] {
 		if (inDouble) {
 			if (ch === "\\" && i + 1 < command.length) {
 				const next = command[i + 1];
+				if (joinContinuations && next === "\n") {
+					i++;
+					continue;
+				}
 				if (next === '"' || next === "\\" || next === "$" || next === "`") {
 					value += next;
 					i++;
@@ -97,8 +111,12 @@ export function lexShellCommand(command: string): ShellToken[] {
 		} else if (ch === '"') {
 			inDouble = true;
 		} else if (ch === "\\" && i + 1 < command.length) {
-			value += command[i + 1];
-			i++;
+			if (joinContinuations && command[i + 1] === "\n") {
+				i++;
+			} else {
+				value += command[i + 1];
+				i++;
+			}
 		} else {
 			value += ch;
 		}

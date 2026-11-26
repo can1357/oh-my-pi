@@ -275,6 +275,10 @@ mod xargs;
 #[cfg(feature = "util.yes")]
 mod yes;
 
+/// Where `env -S` / `--split-string` starts the command line. The shell's
+/// launcher walk uses the same option scan as the `env` builtin.
+#[cfg(feature = "util.env")]
+pub use env::env_split_string;
 pub use duration::parse_duration;
 pub use host::{panic_scope_active, rayon_global_pool_available, set_rayon_global_pool_available};
 /// The process table the process builtins read, and the liveness state of an

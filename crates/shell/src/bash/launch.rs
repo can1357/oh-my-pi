@@ -154,9 +154,10 @@ fn skip_options<W: AsRef<[u8]>>(
 fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, usize, bool)> {
 	let skip = match command_name(words.first()?.as_ref(), windows)? {
 		"env" => {
-			// `-S`/`--split-string` takes the command line it splits into the
-			// words it runs: `env -S omp read x` runs `omp read x`.
-			if let Some((at, offset)) = env_split_value(words) {
+			// `-S`/`--split-string` is the command line `env` runs. The walk
+			// is `env`'s own, so a value before `-S` (`--chdir /tmp`) is not
+			// taken as that command line.
+			if let Some((at, offset)) = omp_builtins::env_split_string(words) {
 				let packed = words.get(at).is_some_and(|word| {
 					let bytes = word.as_ref();
 					bytes
@@ -268,10 +269,13 @@ fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, 
 			b"c",
 			&[],
 		)?,
+		// Value-taking options from `uv run --help`. A missing one hides the
+		// command behind its value (`uv run --color never omp`). `-s` is
+		// `--script`: no positional command runs.
 		"uv" if words.get(1).is_some_and(|w| w.as_ref() == b"run") => skip_options(
 			words,
 			2,
-			b"wpifm",
+			b"CPwpifm",
 			&[
 				"--with",
 				"--with-editable",
@@ -295,8 +299,32 @@ fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, 
 				"--module",
 				"--script",
 				"--gui-script",
+				"--no-extra",
+				"--no-editable-package",
+				"--python-platform",
+				"--index-strategy",
+				"--keyring-provider",
+				"--upgrade-package",
+				"--upgrade-group",
+				"--resolution",
+				"--prerelease",
+				"--prerelease-package",
+				"--fork-strategy",
+				"--exclude-newer",
+				"--exclude-newer-package",
+				"--no-sources-package",
+				"--reinstall-package",
+				"--link-mode",
+				"--config-setting",
+				"--config-settings-package",
+				"--no-build-isolation-package",
+				"--no-build-package",
+				"--no-binary-package",
+				"--refresh-package",
+				"--color",
+				"--allow-insecure-host",
 			],
-			b"m",
+			b"ms",
 			&["--module", "--script", "--gui-script"],
 		)?,
 		"ssh" => {
@@ -308,50 +336,51 @@ fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, 
 	Some((skip, false, 0, false))
 }
 
-/// The word `env -S`/`--split-string` takes, and the byte offset in it where
-/// the command line starts: `env -S omp read x` (word 2), `env -Somp` (word 1,
-/// offset 2), `env --split-string=omp read x` (word 1, offset 15).
-fn env_split_value<W: AsRef<[u8]>>(words: &[W]) -> Option<(usize, usize)> {
-	let mut i = 1;
-	while let Some(word) = words.get(i) {
-		let w = word.as_ref();
-		if w == b"--" || w == b"-" || !w.starts_with(b"-") {
-			return None;
-		}
-		if let Some(rest) = w.strip_prefix(b"--split-string") {
-			return if rest.is_empty() {
-				Some((i + 1, 0))
-			} else if rest.starts_with(b"=") {
-				Some((i, b"--split-string=".len()))
-			} else {
-				None
-			};
-		}
-		if w.starts_with(b"--") {
-			i += 1;
-			continue;
-		}
-		for (k, &c) in w.iter().enumerate().skip(1) {
-			match c {
-				// `-S` takes the command line: the next word, or attached.
-				b'S' => {
-					return Some(if k + 1 < w.len() {
-						(i, k + 1)
-					} else {
-						(i + 1, 0)
-					});
-				},
-				// Options taking a value: `-u NAME`, `-C DIR`, `-a NAME`.
-				b'u' | b'C' | b'a' => {
-					if k + 1 == w.len() {
-						i += 1;
-					}
-					break;
-				},
-				_ => {},
-			}
-		}
-		i += 1;
+#[cfg(test)]
+mod tests {
+	use super::launch;
+
+	#[test]
+	fn env_long_option_value_does_not_hide_the_split_command() {
+		let words = ["/usr/bin/env", "--chdir", "/tmp", "-S", "omp", "read", "x"];
+		let found = launch(&words);
+		assert_eq!(found.at, 4);
+		assert_eq!(found.program(&words), Some("omp"));
+		assert!(!found.packed);
+
+		// Unambiguous prefix of `--chdir`, as `env` itself accepts.
+		let prefixed = ["env", "--ch", "/tmp", "-S", "omp", "read", "x"];
+		assert_eq!(launch(&prefixed).program(&prefixed), Some("omp"));
+
+		let unset = ["env", "--unset", "FOO", "-S", "omp"];
+		assert_eq!(launch(&unset).program(&unset), Some("omp"));
+
+		let short = ["env", "-u", "FOO", "-S", "omp"];
+		assert_eq!(launch(&short).program(&short), Some("omp"));
+
+		let packed = ["env", "--chdir", "/tmp", "-S", "omp read x"];
+		let packed_launch = launch(&packed);
+		assert_eq!(packed_launch.at, 4);
+		assert!(packed_launch.packed);
+		assert_eq!(packed_launch.program(&packed), Some("omp"));
+
+		let other = ["/usr/bin/env", "--chdir", "/tmp", "-S", "grep", "omp", "x"];
+		assert_eq!(launch(&other).program(&other), Some("grep"));
 	}
-	None
+
+	#[test]
+	fn uv_run_value_options_do_not_hide_the_command() {
+		let color = ["uv", "run", "--no-project", "--color", "never", "omp", "read", "x"];
+		assert_eq!(launch(&color).at, 5);
+		assert_eq!(launch(&color).program(&color), Some("omp"));
+
+		let link = ["uv", "run", "--link-mode", "copy", "omp"];
+		assert_eq!(launch(&link).program(&link), Some("omp"));
+
+		let resolution = ["uv", "run", "--resolution", "lowest", "omp"];
+		assert_eq!(launch(&resolution).program(&resolution), Some("omp"));
+
+		let other = ["uv", "run", "--color", "never", "grep", "omp"];
+		assert_eq!(launch(&other).program(&other), Some("grep"));
+	}
 }

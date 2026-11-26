@@ -18,6 +18,28 @@ describe("lexShellCommand", () => {
 			"1",
 		]);
 	});
+
+	it("drops a backslash-newline from the word value only when asked, and keeps the raw spelling", () => {
+		const command = "nice \\\nomp";
+		expect(
+			lexShellCommand(command)
+				.filter(token => token.kind === "word")
+				.map(token => token.value),
+		).toEqual(["nice", "\nomp"]);
+		const joined = lexShellCommand(command, { joinContinuations: true });
+		expect(joined.map(token => token.raw).join("")).toBe(command);
+		expect(joined.filter(token => token.kind === "word").map(token => token.value)).toEqual(["nice", "omp"]);
+		expect(
+			lexShellCommand('echo "a\\\nb"', { joinContinuations: true })
+				.filter(token => token.kind === "word")
+				.map(token => token.value),
+		).toEqual(["echo", "ab"]);
+		expect(
+			lexShellCommand("echo 'a\\\nb'", { joinContinuations: true })
+				.filter(token => token.kind === "word")
+				.map(token => token.value),
+		).toEqual(["echo", "a\\\nb"]);
+	});
 });
 
 describe("extractLeadingCdTarget", () => {
