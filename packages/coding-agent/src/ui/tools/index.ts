@@ -12,6 +12,7 @@ import "./autoresearch";
 import "./goal";
 import "./debug";
 import "./github";
+import "./gitlab";
 import "./think";
 import "./propose";
 import "./resolve";
