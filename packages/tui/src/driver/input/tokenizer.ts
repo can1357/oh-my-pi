@@ -183,6 +183,8 @@ interface PasteState {
 export class InputTokenizer {
 	/** The kitty keyboard protocol is active: a bare ESC is always the head of a sequence. */
 	kitty = false;
+	/** The raw stream can carry win32-input-mode CSI key records. */
+	win32 = false;
 	/** Whether the event loop was stalled (a multi-line burst is then batched typing, not a paste). */
 	isStalled: (() => boolean) | undefined;
 
@@ -586,11 +588,21 @@ export class InputTokenizer {
 		} else {
 			timeout = this.#keyTimeout;
 		}
-		this.#cancelPartial = this.#clock.schedule(timeout, () => {
-			this.#cancelPartial = null;
-			this.#scan(true);
-		});
+		this.#cancelPartial = this.#clock.schedule(
+			timeout,
+			this.win32 && (head === ESC || head[1] === "[")
+				? () => {
+						// An overdue timer can run before stdin delivers the rest of the record.
+						this.#cancelPartial = this.#clock.schedule(0, this.#flushPartial);
+					}
+				: this.#flushPartial,
+		);
 	}
+
+	readonly #flushPartial = (): void => {
+		this.#cancelPartial = null;
+		this.#scan(true);
+	};
 
 	#trackString(): void {
 		if (!this.#str) this.#str = { lastRead: this.#clock.now(), suspects: [], resumed: false };
