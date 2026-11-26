@@ -2624,11 +2624,12 @@ export function convertMessages(
 		context.messages,
 		model,
 		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
-		maxNormalizedToolCallIdLength,
-		duplicateToolCallIdSuffixPrefix,
-		compat,
-		undefined,
-		declaredToolNames,
+		{
+			maxNormalizedToolCallIdLength,
+			duplicateToolCallIdSuffixPrefix,
+			targetCompat: compat,
+			declaredToolNames,
+		},
 	);
 
 	const remappedToolCallIds = new Map<string, string[]>();

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { convertMessages, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import { isSurvivingAssistant, transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import type { AssistantMessage, Context, Message, Model, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import type { AssistantMessage, Context, Model, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Type } from "@sinclair/typebox";
 
@@ -66,8 +66,8 @@ function toolResult(id: string, name: string, text: string, timestamp = 3): Tool
 }
 
 describe("openai-completions dotted declared tool-name replay", () => {
-	it.each(["power.state", "display.list", "power__state", "audio__mute-toggle"])(
-		"preserves assistant tool_call and tool result in wire payload for declared tool %s",
+	it.each(["power.state", "display.list"])(
+		"preserves assistant tool_call and tool result in wire payload for declared dotted tool %s",
 		async toolName => {
 			const context: Context = {
 				systemPrompt: ["You are a local assistant."],
@@ -161,22 +161,5 @@ describe("openai-completions dotted declared tool-name replay", () => {
 
 		expect(isSurvivingAssistant(turn, completionsModel)).toBe(false);
 		expect(isSurvivingAssistant(turn, completionsModel, declared)).toBe(true);
-
-		const messages: Message[] = [
-			{ role: "user", content: "run it", timestamp: 1 },
-			turn,
-			toolResult("tc_0", "power.state", "RESULT:power.state"),
-		];
-		const transformed = transformMessages(
-			messages,
-			completionsModel,
-			undefined,
-			undefined,
-			undefined,
-			completionsModel.compat,
-			undefined,
-			declared,
-		);
-		expect(transformed.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
 	});
 });

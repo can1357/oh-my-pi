@@ -415,9 +415,7 @@ function isMalformedToolCall(
 	declaredToolNames?: ReadonlySet<string>,
 ): boolean {
 	if (isMalformedToolCallId(block.id)) return true;
-	if (typeof block.name === "string" && block.name.trim().length > 0 && declaredToolNames?.has(block.name)) {
-		return false;
-	}
+	if (declaredToolNames?.has(block.name)) return false;
 	return isMalformedToolCallName(block.name, allowedName, maxLength);
 }
 
@@ -946,16 +944,27 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 	});
 }
 
+export interface TransformMessagesOptions<TApi extends Api = Api> {
+	maxNormalizedToolCallIdLength?: number;
+	duplicateToolCallIdSuffixPrefix?: string;
+	targetCompat?: Model<TApi>["compat"];
+	targetCredentialId?: number;
+	declaredToolNames?: ReadonlySet<string>;
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
-	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
-	duplicateToolCallIdSuffixPrefix = "_dup",
-	targetCompat: Model<TApi>["compat"] = model.compat,
-	targetCredentialId?: number,
-	declaredToolNames?: ReadonlySet<string>,
+	options?: TransformMessagesOptions<TApi>,
 ): Message[] {
+	const {
+		maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
+		duplicateToolCallIdSuffixPrefix = "_dup",
+		targetCompat = model.compat,
+		targetCredentialId,
+		declaredToolNames,
+	} = options ?? {};
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
 	// block errors from LLM providers (e.g. invalid_prompt).

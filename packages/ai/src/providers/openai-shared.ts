@@ -2347,9 +2347,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		options.context.messages,
 		options.model,
 		normalizeResponsesToolCallIdForTransform,
-		undefined,
-		undefined,
-		filteredCompat,
+		{ targetCompat: filteredCompat },
 	);
 	const filterReasoning = <T extends { type?: string }>(items: T[], dropEncrypted: boolean): T[] =>
 		options.nativeHistory?.filterReasoning
