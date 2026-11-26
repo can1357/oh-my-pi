@@ -78,6 +78,11 @@ export interface SlashCommandRuntime {
 	signal?: AbortSignal;
 	/** Emit text to the operator. TUI maps to `ctx.showStatus`, ACP to `sessionUpdate`. */
 	output: (text: string) => Promise<void> | void;
+	/**
+	 * Show a titled read-only listing (TUI: `ctx.showCommandReport`, like `/mcp list`). Absent where the
+	 * host has no report surface (ACP, RPC, print); callers then emit the listing through `output`.
+	 */
+	report?: (title: string, text: string) => void;
 	/** Re-advertise the available command list (no-op outside ACP). */
 	refreshCommands: () => Promise<void> | void;
 	/**
