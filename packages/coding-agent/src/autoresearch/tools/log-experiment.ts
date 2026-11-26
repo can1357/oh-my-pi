@@ -1,4 +1,3 @@
-import { logExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -8,17 +7,11 @@ import type { ToolDefinition } from "../../extensibility/extensions";
 
 import { computeRunModifiedPaths, getCurrentAutoresearchBranch, parseWorkDirDirtyPaths } from "../git";
 import { ensureNumericMetricMap, mergeAsi, pathMatchesSpec, sanitizeAsi, tryGitPrefix, tryGitStatus } from "../helpers";
-import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { currentResults, findBaselineSecondary } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import { formatNum } from "../tool-details";
+import { currentResults, findBaselineSecondary } from "../results-data";
 import { buildExperimentState, computeConfidence, findBestKeptMetric } from "../state";
 import { openAutoresearchStorageIfExists, type SessionRow } from "../storage";
-import type {
-	ASIData,
-	ExperimentResult,
-	ExperimentState,
-	LogDetails,
-	NumericMetricMap,
-} from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { ASIData, ExperimentResult, ExperimentState, LogDetails, NumericMetricMap } from "../tool-details";
 import type { AutoresearchToolFactoryOptions } from "../types";
 
 const EXPERIMENT_TOOL_NAMES = ["init_experiment", "run_experiment", "log_experiment", "update_notes"];
@@ -43,7 +36,6 @@ export function createLogExperimentTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof logExperimentSchema, LogDetails> {
 	return {
-		...logExperimentToolRenderer,
 		name: "log_experiment",
 		label: "Log Experiment",
 		description:

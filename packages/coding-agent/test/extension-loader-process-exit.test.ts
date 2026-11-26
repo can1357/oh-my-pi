@@ -179,7 +179,7 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 const dir = TempDir.createSync("@omp-deferred-quit-");
@@ -196,8 +196,6 @@ const session = new AgentSession({
 	modelRegistry: registry,
 });
 const mode = new InteractiveMode(session, "test");
-mode.ui.requestRender = () => {};
-mode.ui.terminal.drainInput = async () => {};
 postmortem.register("probe-cleanup", () => {
 	auth.close();
 	dir.removeSync();

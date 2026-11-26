@@ -11,12 +11,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { IpcConnection, Process, reapChild } from "@oh-my-pi/pi-natives";
-import { type FileLockHandle, logger, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { errorMessage, type FileLockHandle, logger, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
+import { ToolError } from "../tools/tool-errors";
 import { hostHasInheritableConsole, shouldHideKernelWindow } from "../eval/py/spawn-options";
 import { stageRunnerScript } from "../eval/runner-cache";
 import type { DisasmBackend, WorkerRuntime } from "./backend";
-import { errorMessage, type WorkerState } from "./protocol";
+import type { WorkerState } from "./protocol";
 import { type DatabaseLocation, databaseRef, type FatSelection } from "./store";
 
 /** How long a worker gets to answer after an interrupt before it is killed. */

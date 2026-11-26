@@ -1487,7 +1487,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(chainFor(session)).toEqual({ keys: [role], candidates: [] });
 
 			// A runtime fallback answers; resume must still restore the primary as the default.
-			session.sessionManager.appendModelChange(fallback, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			session.sessionManager.appendModelChange(fallback, EPHEMERAL_MODEL_CHANGE_ROLE, {
+				fallback: { from: primary, trigger: "request-error" },
+			});
 			session.sessionManager.appendMessage({
 				role: "assistant",
 				content: [{ type: "text", text: "done" }],
@@ -2016,7 +2018,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			sessionManager.appendModelChange("anthropic/claude-sonnet-4-5");
 			sessionManager.appendThinkingLevelChange(Effort.High);
 			// A `:xhigh` chain entry: the hop records the fallback model, then the entry's level.
-			sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, {
+				fallback: { from: "anthropic/claude-sonnet-4-5", trigger: "request-error" },
+			});
 			sessionManager.appendThinkingLevelChange(Effort.XHigh, Effort.XHigh);
 			if (userPick) sessionManager.appendThinkingLevelChange(userPick, userPick);
 			sessionManager.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });

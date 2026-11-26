@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
-import type { AnnotationOverlayDraft } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { AnnotationReviewModel } from "@oh-my-pi/pi-coding-agent/ui/overlays/panels/annotation-review-model";
+import type { AnnotationOverlayDraft } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/annotation-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	annotationDraftKey,
@@ -30,7 +30,7 @@ describe("annotation drafts", () => {
 			editor: { fileIndex: 0, sourceIndex: 1, scope: "line", text: "unfinished" },
 		};
 		const overlay = (restoreDraft = vi.fn()) =>
-			({ getDraft: () => state, restoreDraft }) as unknown as AnnotationOverlay;
+			({ getDraft: () => state, restoreDraft }) as unknown as AnnotationReviewModel;
 
 		const first = await openAnnotationDraft(session, { kind: "diff", target });
 		first.restore(overlay());

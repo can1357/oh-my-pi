@@ -7,11 +7,11 @@
 - Entry: `packages/coding-agent/src/tools/ask.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/ask.md`
 - Key collaborators:
-   - `packages/tui/src/html-form/parse.ts` — `parseHtmlForm`: sections, fields, hidden inputs
-   - `packages/tui/src/html-form/data.ts` — form data shape, defaults, field questions, validation
-   - `packages/tui/src/html-form/dialog.ts` — `HtmlFormDialog`, the interactive form
+   - `packages/coding-agent/src/tools/html-form/parse.ts` — `parseHtmlForm`: sections, fields, hidden inputs
+   - `packages/coding-agent/src/tools/html-form/data.ts` — form data shape, defaults, field questions, validation
+   - `packages/coding-agent/src/ui/forms/html-form/html-form.tsx` — `HtmlFormDialog`, the interactive form
    - `packages/coding-agent/src/modes/settings.ts` — `ask.timeout` / `ask.notify` defaults
-   - `packages/tui/src/tools/ask.ts` — call/result rendering
+   - `packages/coding-agent/src/ui/tools/ask.tsx` — call/result rendering
 
 ## Inputs
 

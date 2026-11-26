@@ -7,8 +7,8 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "../utils/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
 	resolveAgentModelSelection,
@@ -39,8 +39,9 @@ import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-h
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { journalCompletion } from "../session/model-usage-journal";
-import { AUTO_THINKING, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, type TaskEffort } from "../thinking/levels";
 import type { ToolSession } from "../tools";
+import { owningSessionId } from "../tools/session-id";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -62,15 +63,15 @@ import {
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { ovnfsWorkspace } from "./ovnfs";
-import { resolveSpawnPolicy } from "./spawn-policy";
-import { type AgentDefinition, canSpawnAtDepth } from "./types";
+import { resolveSpawnPolicy, spawnDenial } from "./spawn-policy";
+import type { AgentDefinition } from "./types";
 import type {
 	AgentProgress,
 	SingleResult,
 	StructuredSubagentOutput,
 	StructuredSubagentSchemaMode,
 	StructuredSubagentSchemaSource,
-} from "@oh-my-pi/pi-tui/tools/task";
+} from "./task-details";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import { parseIsolationBackend } from "./worktree";
 
@@ -84,7 +85,6 @@ import {
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
-	cfgTaskMaxRecursionDepth,
 	cfgTaskPerCallModel,
 	ovnfsCommand,
 	perCallModelEnabled,
@@ -273,10 +273,25 @@ const ASSIGNMENT_SLOT = "\u0000assignment\u0000";
  * padding), so inline and file-backed instructions reach the subagent identically.
  */
 export function renderSubagentUserPrompt(assignment: string): string {
-	const text = assignment.trim().replace(/\r\n?/g, "\n");
 	return prompt
 		.render(subagentUserPromptTemplate, { assignment: ASSIGNMENT_SLOT })
-		.replace(ASSIGNMENT_SLOT, () => text);
+		.replace(ASSIGNMENT_SLOT, () => assignment.trim().replace(/\r\n?/g, "\n"));
+}
+
+/**
+ * The prompts a spawn goes out in: `task` first, then the executor sends each later `steps` prompt
+ * once the previous one was delivered. A lone step is the whole assignment: it goes out verbatim,
+ * without step framing or the assignment wrapper.
+ */
+function spawnPrompts(
+	request: StructuredSubagentRequest,
+	structured: boolean,
+): Pick<ExecutorOptions, "task" | "steps"> {
+	const steps = request.steps ?? [];
+	if (steps.length === 1) return { task: steps[0].trim().replace(/\r\n?/g, "\n") };
+	if (steps.length === 0) return { task: renderSubagentUserPrompt(request.assignment) };
+	const prompts = renderStepPrompts(steps, structured);
+	return { task: renderSubagentUserPrompt(prompts[0]), steps: prompts };
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {
@@ -329,31 +344,6 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 		throw new StructuredSubagentError(
 			"preflight",
 			"Subagent isolation, apply, and merge controls are unavailable in plan mode.",
-		);
-	}
-}
-
-function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
-	const taskDepth = request.session.taskDepth ?? 0;
-	const maxDepth = cfgTaskMaxRecursionDepth.get(request.session.settings);
-	if (!canSpawnAtDepth(maxDepth, taskDepth)) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Cannot spawn another agent at task depth ${taskDepth}; maximum depth is ${maxDepth}.`,
-		);
-	}
-	const blockedAgent = request.blockedAgent ?? $env.PI_BLOCKED_AGENT;
-	if (blockedAgent && blockedAgent === agentName) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Cannot spawn ${blockedAgent} agent from within itself (recursion prevention). Use a different agent type.`,
-		);
-	}
-	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
-	if (!spawnPolicy.enabled || (spawnPolicy.allowedAgents !== null && !spawnPolicy.allowedAgents.includes(agentName))) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Cannot spawn '${agentName}'. Allowed: ${spawnPolicy.allowedErrorText}`,
 		);
 	}
 }
@@ -515,7 +505,8 @@ export async function resolveEffectiveSubagentPolicy(
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	assertPlanControlsAllowed(request, planMode);
-	assertDepthAndSpawnAllowed(request, agentName);
+	const denial = spawnDenial(request.session, agentName, request.blockedAgent);
+	if (denial) throw new StructuredSubagentError("preflight", denial);
 
 	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
 	const sessionAgents = request.session.getSessionAgents?.() ?? [];
@@ -780,7 +771,6 @@ function buildExecutorOptions(
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
-	const steps = request.steps?.length ? renderStepPrompts(request.steps, policy.structured) : undefined;
 	return {
 		cwd: session.cwd,
 		costGate: session.costGate,
@@ -788,9 +778,7 @@ function buildExecutorOptions(
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
-		// A stepped spawn starts on its first step prompt; the executor sends the rest.
-		task: renderSubagentUserPrompt(steps ? steps[0] : request.assignment),
-		steps,
+		...spawnPrompts(request, policy.structured),
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
 		planReference: undefined,
@@ -871,6 +859,7 @@ function buildExecutorOptions(
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
+		parentSessionKey: session.getAgentSession?.()?.instanceKey,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};
@@ -887,11 +876,14 @@ async function loadPlanReference(
 	);
 }
 
-/** Isolated runs work in ovnfs checkouts when `isolation.backend` is auto and ovnfs is found, else in native clones. */
-function openIsolatedWorkspace(settings: Settings): OpenWorkspace {
-	const backend = cfgIsolationBackend.get(settings);
-	const ovnfs = backend === "auto" ? ovnfsCommand(settings) : undefined;
-	return ovnfs ? ovnfsWorkspace(ovnfs) : nativeWorkspace(parseIsolationBackend(backend));
+/**
+ * Isolated runs `session` spawns work in ovnfs checkouts, which record it, when
+ * `isolation.backend` is auto and ovnfs is found, else in native clones.
+ */
+function openIsolatedWorkspace(session: ToolSession): OpenWorkspace {
+	const backend = cfgIsolationBackend.get(session.settings);
+	const ovnfs = backend === "auto" ? ovnfsCommand(session.settings) : undefined;
+	return ovnfs ? ovnfsWorkspace(ovnfs, owningSessionId(session)) : nativeWorkspace(parseIsolationBackend(backend));
 }
 
 function buildFailureResult(
@@ -1083,7 +1075,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				result = await runIsolatedSubprocess({
 					baseOptions,
 					context: isolationContext,
-					openWorkspace: openIsolatedWorkspace(request.session.settings),
+					openWorkspace: openIsolatedWorkspace(request.session),
 					agentId: id,
 					mergeMode: policy.mergeMode,
 					artifactsDir: lease.artifactsDir,

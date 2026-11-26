@@ -3,6 +3,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
@@ -11,9 +12,9 @@ import {
 } from "../config/model-resolver";
 import imageQuestionSystemPromptTemplate from "../prompts/tools/image-question-system.md" with { type: "text" };
 import { journalCompletion } from "../session/model-usage-journal";
-import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking/levels";
 import type { ToolSession } from "../tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import type { LoadedImageInput } from "./image-loading";
 
 import { cfgImagesBlockImages } from "../modes/settings";
@@ -32,16 +33,27 @@ export interface ImageQuestionResult {
 	usage: Usage;
 }
 
-/** Resolve the vision model used by `read <image>?q=<question>`. */
+/**
+ * Resolve the vision model used by `read <image>?q=<question>`. Offline mode
+ * (`models.offline`) keeps every candidate on the active model's provider.
+ */
 export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQuestionModel {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) {
 		throw new ToolError("Model registry is unavailable for image questions.");
 	}
 
-	const availableModels = modelRegistry.getAvailable();
-	if (availableModels.length === 0) {
-		throw new ToolError("No models available for image questions.");
+	// Offline mode reads only the active provider's catalog; an empty one reaches the offline error below.
+	const offline = cfgOffline.get(session.settings);
+	const offlineProvider = offline ? session.getActiveModel?.()?.provider : undefined;
+	let availableModels: Model<Api>[] = [];
+	if (!offline) {
+		availableModels = modelRegistry.getAvailable();
+		if (availableModels.length === 0) {
+			throw new ToolError("No models available for image questions.");
+		}
+	} else if (offlineProvider) {
+		availableModels = modelRegistry.getAvailableForProviders(new Set([offlineProvider]));
 	}
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
@@ -68,6 +80,13 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 		candidate => candidate.provider === activeProvider && sendsImageInputOnWire(candidate),
 	);
 	model ??= availableModels.find(candidate => sendsImageInputOnWire(candidate));
+	if (!model && offline) {
+		throw new ToolError(
+			offlineProvider
+				? `Offline mode (models.offline) keeps image questions on the active model's provider (${offlineProvider}), which has no image-capable model.`
+				: "Offline mode (models.offline) keeps image questions on the active model's provider, and there is no active model.",
+		);
+	}
 	if (!model) {
 		const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
 		if (!textOnly) throw new ToolError("Unable to resolve a model for image questions.");

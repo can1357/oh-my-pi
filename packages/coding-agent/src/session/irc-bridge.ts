@@ -1,6 +1,6 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { type IrcMessage } from "../irc/irc-types";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -27,8 +27,9 @@ export class IrcBridge {
 	/** A subagent's records from anyone but its parent: answered in their own turn, never by
 	 *  extending a finished one (whose text is the subagent's result). */
 	readonly #peerMessages = new WeakSet<AgentMessage>();
-	/** Queued broadcast legs and progress notes: they ask nothing of the recipient, so they
-	 *  inject at the next step boundary like any record but never cut a `wait` short. */
+	/** Queued peer broadcast legs and progress notes: they ask nothing of the recipient, so
+	 *  they inject at the next step boundary like any record but never cut a `wait` short.
+	 *  A broadcast leg from the recipient's ancestor does interrupt and is not kept here. */
 	readonly #quietRecords = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
@@ -56,7 +57,8 @@ export class IrcBridge {
 		return this.#peerMessages.has(record);
 	}
 
-	/** Whether an incoming message can interrupt a wait: anything queued but a broadcast or progress note. */
+	/** Whether an incoming message can interrupt a wait: anything queued but a peer
+	 *  broadcast or progress note. */
 	hasInterrupts(): boolean {
 		return this.#interrupts.some(record => !this.#quietRecords.has(record));
 	}
@@ -195,8 +197,8 @@ export class IrcBridge {
 		const fromParent = parentId === msg.from;
 		// A subagent's result answers its parent, and its run may be waiting on its
 		// own descendants, whose questions it must see in-run. Anyone else's
-		// message, or a broadcast leg (which asks no one in particular), gets a
-		// turn of its own.
+		// message, or a broadcast leg, gets a turn of its own: a broadcast asks
+		// everyone, so answering it must never replace a finished report.
 		let fromDescendant = false;
 		const seen = new Set<string>();
 		for (
@@ -210,6 +212,19 @@ export class IrcBridge {
 			}
 			seen.add(id);
 		}
+		// The recipient's ancestor: its parent, grandparent, and so on. The main
+		// agent is the only broadcaster and every subagent descends from it, so a
+		// broadcast leg from it interrupts a busy descendant (ending its `wait`)
+		// rather than waiting quietly for the next step boundary.
+		let fromAncestor = false;
+		const walked = new Set<string>();
+		for (let id = parentId; id !== undefined && !walked.has(id); id = registry.get(id)?.parentId) {
+			if (id === msg.from) {
+				fromAncestor = true;
+				break;
+			}
+			walked.add(id);
+		}
 		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
@@ -221,9 +236,10 @@ export class IrcBridge {
 			msg.wakeRelay !== true &&
 			msg.broadcast !== true &&
 			msg.progress !== true;
-		// A broadcast leg or progress note asks nothing of the recipient, so a
-		// busy one reads it at its next step boundary without being interrupted.
-		const quiet = msg.broadcast === true || msg.progress === true;
+		// A progress note, or a broadcast leg from a peer rather than the
+		// recipient's ancestor, asks nothing of the recipient, so a busy one reads
+		// it at its next step boundary without being interrupted.
+		const quiet = msg.progress === true || (msg.broadcast === true && !fromAncestor);
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -246,6 +262,7 @@ export class IrcBridge {
 			details: {
 				id: msg.id,
 				from: msg.from,
+				...(msg.fromLabel ? { fromLabel: msg.fromLabel } : {}),
 				message: msg.body,
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),

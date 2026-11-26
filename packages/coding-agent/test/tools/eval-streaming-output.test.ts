@@ -1,22 +1,25 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
-import type { EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
-import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
+import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/eval";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { evalToolRenderer } from "@oh-my-pi/pi-tui/tools/eval";
-import { stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { stripOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { removeWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { toolText } from "../helpers/tool-text";
 
 import { cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function makeSession(settings = Settings.isolated()): ToolSession {
 	return {
@@ -177,14 +180,12 @@ describe("EvalTool live stdout streaming", () => {
 				expect(Boolean(result.details?.meta?.truncation)).toBe(respilled);
 				expect(saveArtifact).not.toHaveBeenCalled();
 
-				const uiTheme = await getThemeByName("dark");
-				if (!uiTheme) throw new Error("Expected dark theme");
-				const rendered = sanitizeText(
-					evalToolRenderer
-						.renderResult(result, { expanded: false, isPartial: false }, uiTheme)
-						.render(160)
-						.join("\n"),
-				);
+				const rendered = toolText({
+					name: "eval",
+					args: { language: "js", code: "print('output')" },
+					result,
+					width: 160,
+				});
 				expect(rendered).toContain("not saved completely");
 				expect(rendered).not.toMatch(/local:\/\/\d+\.log/);
 			} finally {

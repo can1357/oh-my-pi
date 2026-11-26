@@ -2,6 +2,73 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+- Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
+
+### Changed
+
+- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Claude usage reports now label a Team premium seat as "Team 5x" instead of "Max 5x" ([#20677](https://github.com/can1357/oh-my-pi/pull/20677) by [@ndecool](https://github.com/ndecool))
+- Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
+- The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
+- Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
+- Fixed a cancelled inference request still being sent through a custom fetch that ignores the abort signal, when the cancel came while the request body was being prepared ([#20673](https://github.com/can1357/oh-my-pi/pull/20673) by [@sjawhar](https://github.com/sjawhar))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Fast-tier requests now prefer eligible credentials, including Codex plans with Ultrafast, Claude accounts with fast mode, and stored or environment API keys. Eligible accounts continue serving on paid overage and within their reserve, while normal load balancing resumes when the requested tier is unavailable or refused.
+
+### Changed
+
+- Embeddings, transcription, and video errors now present upstream error messages clearly when available instead of exposing raw JSON response bodies.
+
+### Fixed
+
+- Fixed Codex requests incorrectly sending a service tier to accounts whose plans do not support it.
+- Successful OAuth token refreshes now restore normal account selection after a temporary refresh outage.
+
+## [19.2.0] - 2026-11-25
+
+### Breaking Changes
+
+- maxInFlightRequests limits are now scoped per process unless the host configures a ProviderSlotBroker; the previous cross-process lease-directory mechanism has been removed.
+
+### Added
+
+- Added ProviderSlotBroker support through configureProviderSlotBroker(broker), allowing hosts such as coding-agent to coordinate maxInFlightRequests limits across processes.
+- Added AssistantMessage.errorFromAgentLoop to distinguish errors caused by the agent loop from errors returned by the provider.
+- OpenAI- and Anthropic-compatible requests to custom hosts now include an x-session-id header when the host does not provide its own session header, preserving conversation affinity through gateways and proxies. Official OpenAI, Anthropic, and Codex APIs are unchanged.
+- Added an "Anthropic (Claude Pro/Max, 1-year token)" login that lasts a year instead of 30 days and never refreshes; image uploads to Anthropic's Files API stay with the regular login.
+- Added regional and custom endpoint selection to /login otari, storing non-US endpoints with the account so EU and self-hosted deployments do not need OTARI_BASE_URL configured separately.
+
+### Changed
+
+- Requests waiting for maxInFlightRequests capacity now begin immediately when capacity is released, rather than relying on periodic polling.
+- omp auth-gateway now preserves Codex session and thread headers and uses Claude Code and OpenCode session identifiers for prompt-cache affinity, improving cache reuse through the gateway.
+- Anthropic (Claude Pro/Max) logins now refresh the way Claude Code 2.1.332 does and are disabled only when Anthropic rejects the refresh token with `invalid_grant`; a failed background refresh no longer fails requests while the access token is still valid, and a 403 "OAuth token has been revoked" refreshes the same login before switching accounts.
+- Reduced CPU spent scanning streamed DeepSeek prose and long inline code spans that quote template tokens.
+
+### Fixed
+
+- Fixed generate_image edits through OpenAI-compatible gateways that rejected the documented JSON image-edit format.
+- Anthropic OAuth accounts explicitly rejected by an organization are now excluded from account rotation for seven days, including across sessions and restarts.
+- Fixed text-encoded tool calls from DeepSeek, Kimi K2, and Qwen models on OpenRouter Responses-compatible routes, allowing them to stream as normal tool calls instead of failing or triggering retries.
+- Fixed GitHub Copilot Gemini requests failing when MCP tool schemas contain union types such as ["string", "null"].
+- Reduced duplicate retries for openai-completions streams that receive an HTTP 500 response.
+- Fixed omp usage for Synthetic weekly-only plans so it displays weekly credit usage and the next regeneration time.
+- Fixed antigravity-cli quota exhaustion and unavailable-model handling so affected accounts are correctly rotated or blocked and reported reset times are honored.
+- Fixed Gemini models on OpenRouter losing reasoning during long tool-call loops.
+- Fixed prompt-cache misses for /btw and other side turns on OpenCode Go and Zen.
+- Fixed antigravity-cli losing conversation context during OAuth refreshes and when restoring saved turns after generation metadata compaction.
+
 ## [19.1.1] - 2026-11-23
 
 ### Added
@@ -2133,27 +2200,4 @@
 - Fixed every Claude (`anthropic-messages`) model on the `opencode-zen` provider failing with `401 Missing API key`: the gateway requires `x-api-key`, so `opencode-zen` now uses X-Api-Key auth like `opencode-go`/`umans` instead of bearer-only, and no longer sends the `context_management` field its Anthropic proxy rejects on thinking requests ([#6510](https://github.com/can1357/oh-my-pi/issues/6510)).
 - Fixed Anthropic native server-tool blocks being dropped from persisted assistant turns, preserving signed web-search continuations in their original response order ([#6495](https://github.com/can1357/oh-my-pi/issues/6495))
 
-## [17.1.1] - 2026-07-24
-
-### Added
-
-- Added `setCodexAttestationProvider` API for injecting `x-oai-attestation` headers in ChatGPT-OAuth Codex requests
-- Added OAuth account session pinning and active status tracking in storage
-- Added OpenAI Responses native computer-use transport, including batched actions and exact `computer_call`/`computer_call_output` replay with pending/acknowledged safety checks and `image_url`/`file_id` output references. Models without native support receive the same action surface as a regular function tool; provider-specific tool-choice forcing is used where supported.
-- Added `PI_CODEX_RESPONSES_LITE` to override the catalog-selected Codex Responses transport for diagnostics (`1`/`true` forces Lite; `0`/`false` forces the standard body).
-- Added caller-owned `cachedContent` on `google-generative-ai` and `google-vertex` GenerateContent options: pass an opaque cache resource name through the shared builder (blank values rejected); no create/refresh/delete lifecycle and no guessed model/project/location validation; existing `cachedContentTokenCount` → `Usage.cacheRead` normalization is unchanged.
-- Added Anthropic extra-usage reporting across `omp usage`, interactive `/usage`, and ACP `/usage`: the OAuth usage endpoint's authoritative `spend` payload (or legacy `extra_usage` fallback when absent) is normalized into a `Claude Extra Usage` USD row; capped accounts show limit/remaining/fractions and status, while uncapped spend exposes only its absolute used amount—rendered as `$… used` in CLI/TUI and `123.45 usd used` in ACP—without a fabricated cap, percentage, or status. ([#5575](https://github.com/can1357/oh-my-pi/issues/5575))
-- Added process-scoped OAuth account pools for trusted auth-broker clients via `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`, consistently filtering snapshots, streaming updates, refreshes, and usage reports to selected OAuth identities while leaving API-key credentials and the shared encrypted snapshot cache unrestricted.
-- Added opt-in Vercel AI Gateway automatic prompt caching for OpenAI Chat Completions while preserving `only` and `order` routing preferences.
-- Added Vercel AI Gateway Responses cache anchors and cache lifetimes, emitted only with automatic caching.
-- Added opt-in OpenAI GPT-5.6 explicit prompt-cache controls for Responses and Chat Completions. Existing requests remain implicit; the policy marks at most one existing stable-history block and is rejected locally on unsupported explicit routes.
-- Forwarded `statefulResponses` through `streamSimple`, so diagnostic callers can explicitly disable OpenAI Responses `previous_response_id` chaining.
-- Added native QwenCloud Token Plan API-key login, model discovery, and an optional interactive console-Cookie prompt for 5-hour and 7-day quota reporting ([#6151](https://github.com/can1357/oh-my-pi/issues/6151)).
-- Added model-scoped usage health and same-provider reselection for native coding-plan credential pools, preserving OAuth/login-pool precedence, scoped broker blocks, sibling rotation state, and conservative unknown-account handling while excluding ordinary configured API keys ([#5018](https://github.com/can1357/oh-my-pi/issues/5018)).
-
-### Fixed
-
-- Fixed stateful OpenAI Responses explicit cache breakpoints being restored onto edited historical messages, ensuring full replays recompute the latest stable cache boundary.
-- Fixed ChatGPT Codex standard and Lite transports rejecting or hiding native computer-use payloads by unrolling the tool definition, forced choice, `computer_call`, and `computer_call_output` into ordinary function-tool forms.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@02eb912b7688](https://github.com/can1357/oh-my-pi/blob/02eb912b76887f1a06bc65e2352ef96742ec1067/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@483bfd489943](https://github.com/can1357/oh-my-pi/blob/483bfd48994357938b5996cfabec020e388ee87b/packages/ai/CHANGELOG.md).

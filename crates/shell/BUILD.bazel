@@ -19,6 +19,7 @@ cargo_build_script(
 
 rust_library(
     name = "shell",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(
         ["src/**/*.rs"],
         exclude = ["src/bin/**"],
@@ -54,6 +55,7 @@ rust_library(
 # disposition it was started with.
 rust_binary(
     name = "obash",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/bin/obash/**/*.rs"]),
     aliases = aliases(),
     crate_name = "obash",

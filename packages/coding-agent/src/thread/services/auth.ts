@@ -304,6 +304,10 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"limits.markReached": (storage, provider, sessionId, options) =>
 			storage.limits.markReached(provider, sessionId, options),
 		"limits.rotate": (storage, provider, sessionId, options) => storage.limits.rotate(provider, sessionId, options),
+		"limits.markServiceTierUnavailable": (storage, provider, options) =>
+			storage.limits.markServiceTierUnavailable(provider, options),
+		"limits.rearmServiceTier": (storage, provider, serviceTier, modelId) =>
+			storage.limits.rearmServiceTier(provider, serviceTier, modelId),
 		"limits.invalidateMatching": (storage, provider, apiKey, options) =>
 			storage.limits.invalidateMatching(provider, apiKey, options),
 
