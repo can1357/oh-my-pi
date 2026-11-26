@@ -377,6 +377,8 @@ export class MCPManager implements MCPManagerApi {
 	#pendingConnections = new Map<string, Promise<HostedMCPConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#startupUpdates = new Map<string, Promise<void>>();
+	/** The latest automatic retry of each startup connect that timed out (other reconnects are not here). */
+	#startupRetries = new Map<string, Promise<unknown>>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
 	/** Newest connect/reconnect failure per server, cleared when it connects; explains "not connected". */
@@ -1055,6 +1057,7 @@ export class MCPManager implements MCPManagerApi {
 								})
 							: undefined;
 						const retry = this.reconnectServer(name);
+						this.#startupRetries.set(name, retry);
 						if (stopForwarding) void retry.then(stopForwarding, stopForwarding);
 						else void retry;
 					}
@@ -1298,12 +1301,16 @@ export class MCPManager implements MCPManagerApi {
 
 	/**
 	 * Settles once the servers connecting now have published their tools (the owner's tool-change
-	 * callback awaited) or failed, each bounded by its connect timeout. Unlike {@link waitForStartup},
-	 * it waits neither on reconnects and reloads (a timed-out connect's retry, `/mcp reload`,
-	 * `tools/list_changed`) nor on connects started later.
+	 * callback awaited) or failed. A connect that timed out counts until its automatic retry has
+	 * settled and the owner refresh that retry started has drained. Each step is bounded by the
+	 * connect timeout. Unlike {@link waitForStartup}, it waits neither on other reconnects and reloads
+	 * (`/mcp reload`, `tools/list_changed`) nor on connects started later.
 	 */
 	async waitForPendingConnects(): Promise<void> {
 		await Promise.allSettled([...this.#startupUpdates.values()]);
+		await Promise.allSettled([...this.#startupRetries.values()]);
+		// A retry fires the owner callback without awaiting it (`#connectAndWireServer`).
+		await this.#ownerToolsRun?.catch(() => {});
 	}
 
 	/**
@@ -1544,6 +1551,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#startupServers.delete(name);
 		this.#startupFailures.delete(name);
 		this.#startupUpdates.delete(name);
+		this.#startupRetries.delete(name);
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
@@ -1600,6 +1608,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
 		this.#startupUpdates.clear();
+		this.#startupRetries.clear();
 		this.#startupServers.clear();
 		this.#startupFailures.clear();
 		this.#pendingReconnections.clear();

@@ -174,6 +174,34 @@ describe("MCPManager on a scripted host", () => {
 		expect(reconnected).toBe(false);
 	});
 
+	it("waits on a timed-out startup connect's retry and the tool refresh it starts", async () => {
+		// The first discovery never answers, so the startup connect times out and retries; the retry is answered.
+		const answered = answers["server/discover"];
+		let discovers = 0;
+		answers["server/discover"] = (message, tunnel) => (++discovers === 1 ? undefined : answered?.(message, tunnel));
+		const refreshing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(async tools => {
+			if (tools.length === 0) return;
+			refreshing.resolve();
+			await release.promise;
+		});
+		// A real 50 ms connect timeout: the timeout is what starts the retry under test.
+		await manager.connectServers({ [SERVER]: { type: "http", url: URL, timeout: 50 } }, {});
+		let waited = false;
+		const waiting = manager.waitForPendingConnects().then(() => {
+			waited = true;
+		});
+
+		// The retry mounted the tools and the owner's refresh is still running: the startup is not over.
+		await refreshing.promise;
+		await settled();
+		expect(waited).toBe(false);
+		release.resolve();
+		await waiting;
+		expect(manager.getTools()).toHaveLength(1);
+	});
+
 	it("reports a reauth reconnect by its outcome, not by the link being attached", async () => {
 		const config: MCPHttpServerConfig = { type: "http", url: URL };
 		await connect(config);

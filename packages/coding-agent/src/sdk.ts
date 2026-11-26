@@ -3099,7 +3099,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					initialMcpDiscovery = discovery;
 					liveSession.setPendingMCPDiscovery(discovery);
 					// Servers still connecting when discovery returns mount later through `onToolsChanged`; the
-					// startup connect lasts until each of them has connected or failed (reloads and retries excluded).
+					// startup connect lasts until each of them has connected or failed, a timed-out one's
+					// automatic retry included (other reconnects and reloads excluded).
 					liveSession.setMCPStartupConnecting(discovery.then(() => deferredMCPManager.waitForPendingConnects()));
 				};
 			} else {
