@@ -129,13 +129,17 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 		await manager.ensureOnDisk();
 		throwIfAborted(signal);
 		const currentManager = getExperimentalContextSession(this.session);
+		// Entries appended to this branch while the disk write awaits (tool-event journal writes) keep the
+		// captured leaf on it, so the note still belongs there; only a captured leaf that left it is a switch.
+		const leafLeftBranch =
+			branchLeafId !== undefined && !manager.getBranch().some(entry => entry.id === branchLeafId);
 		if (
 			currentManager !== manager ||
 			this.session.isDisposed?.() ||
 			!ownerId ||
 			this.session.getSessionId?.() !== ownerId ||
 			manager.getSessionId?.() !== ownerId ||
-			manager.getBranch().at(-1)?.id !== branchLeafId
+			leafLeftBranch
 		) {
 			throw new ToolError("Experimental context notes were not saved because the session branch changed.");
 		}

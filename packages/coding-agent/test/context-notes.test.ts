@@ -194,17 +194,52 @@ describe("experimental context notes", () => {
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
 		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
 		if (!tool) throw new Error("expected context notes tool");
+		const root = sessionManager.appendCustomEntry("turn_root");
+		sessionManager.appendCustomEntry("turn_seed");
 		const pendingEnsure = Promise.withResolvers<void>();
 		const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
 		try {
 			const pendingWrite = tool.execute("stale-branch", { text: "must not persist" });
 			await Promise.resolve();
+			// A real branch switch: the captured leaf is left behind on a sibling lineage.
+			sessionManager.branch(root);
 			sessionManager.appendCustomEntry("test_branch_change");
 			pendingEnsure.resolve();
 			await expect(pendingWrite).rejects.toThrow("session branch changed");
 			expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
 		} finally {
 			ensureSpy.mockRestore();
+		}
+	});
+
+	it("saves notes when journal entries land on the resumed branch while the write is pending", async () => {
+		using tempDir = TempDir.createSync("@omp-context-notes-resume-growth-");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const sessionManager = SessionManager.create(tempDir.path(), sessionDir);
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
+		if (!tool) throw new Error("expected context notes tool");
+		const saved = await tool.execute("before-rollover", { text: "notebook before the rollover" });
+		if (!saved.details?.entryId) throw new Error("expected a saved notes entry id");
+		// A context rollover moves the leaf past the notebook; the session is then resumed.
+		sessionManager.appendCompaction("rollover summary", undefined, saved.details.entryId, 0);
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("expected persisted session file");
+		await sessionManager.close();
+
+		const resumed = await SessionManager.open(sessionFile, sessionDir);
+		try {
+			const resumedTool = ContextNotesTool.createIf(toolSession(settings, resumed));
+			if (!resumedTool) throw new Error("expected context notes tool on the resumed session");
+			const pendingWrite = resumedTool.execute("after-resume", { text: "notebook after the resume" });
+			// Tool-event journal entries land on the same branch while the write awaits disk preparation.
+			resumed.appendCustomEntry("tool_execution_start");
+			await expect(pendingWrite).resolves.toMatchObject({
+				content: [{ type: "text", text: "Context notes saved." }],
+			});
+			expect(getContextNotes(resumed.getBranch())).toMatchObject({ text: "notebook after the resume" });
+		} finally {
+			await resumed.close();
 		}
 	});
 
