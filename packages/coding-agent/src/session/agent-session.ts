@@ -3097,6 +3097,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			memoryPrompt: config.advisorMemoryPrompt,
 			configs: config.advisorConfigs,
 			configWarnings: config.advisorConfigWarnings,
+			configDir: config.advisorConfigDir,
 			streamFn: config.advisorStreamFn,
 			createTransformProviderContext:
 				config.createAdvisorTransformProviderContext ??
@@ -16972,6 +16973,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		sharedMaxNotesPerUpdate?: number,
 	): number {
 		return this.#advisors.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
+	}
+
+	/** Reload the advisor roster and its imported instructions from disk. */
+	reloadAdvisorConfigs(): Promise<{ count: number; warnings: string[] }> {
+		return this.#advisors.reloadConfigs();
 	}
 
 	/**

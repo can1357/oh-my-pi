@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
 - `SqlSessionStorage` with `createTable: false` refuses to start until the session table has a `byte_len` column and a `<table>_parts` table exists; docs/session.md gives the DDL, backfill, and rollback for each dialect. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - `SessionStorage` requires two new members: `writeTextNoReplace(path, content)` and `renameNoReplace(path, nextPath)`, each rejecting with `EEXIST` when the destination is taken rather than replacing it. A session store implemented outside this repository must add both; the tree copy and the tree move call them directly, so a store without them fails with `TypeError: storage.writeTextNoReplace is not a function`. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - `SqlSessionStorage` refuses table names longer than 57 characters, leaving room for the `<table>_parts` table. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
@@ -11,12 +12,38 @@
 
 ### Added
 
+- Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Sessions can now be stored in PostgreSQL, MySQL, or SQLite instead of JSONL files: set `session.storage: sql` and point `session.sql.dsnFile` at a file holding the connection string (or set `OMP_SESSION_STORAGE=sql` and `OMP_SESSION_SQL_DSN_FILE`); `--resume`, `--continue`, the session picker, and listing follow the same store, and joining a collab session needs file storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Under `session.storage: sql`, a resume of a session whose transcript is still a file on disk goes on using that file when the database cannot be reached, warning with the connection file and the reason and appending a line to `session.sql.fallbackLedger` (default `<agentDir>/session-sql-fallbacks.jsonl`); a fallback that cannot be recorded refuses too, a new session still refuses to start — including `--fork`, a foreign import, the resume picker, and a session already moved away — and a session that has already written to the database halts instead of continuing in a file ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 
+### Changed
+
+- Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
+- URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
+- URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
+- Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
+
 ### Fixed
 
+- `/prewalk`, `/prewalk restart`, and `/switch` now accept `^provider/id[:level]` model references inserted by `^` completion ([#20564](https://github.com/can1357/oh-my-pi/issues/20564)).
+- Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
+- Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).
+- The focused diff in Tern's native `/git` preview now scrolls with the arrow keys, Page Up/Page Down, and Home/End ([#20537](https://github.com/can1357/oh-my-pi/issues/20537)).
+- The Bash interceptor no longer redirects read-only Perl commands mentioning `-i` to `edit`, and now recognizes clustered in-place switches such as `perl -lpi` ([#20558](https://github.com/can1357/oh-my-pi/issues/20558)).
+- In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- In Tern, the agent tray no longer keeps showing the previous session's agents after `/resume` switches to another session.
+- In Tern, finishing an annotation of a pasted image now updates its attachment, and the prompt sends the annotated image instead of the original.
+- The Gemini planning-header loop guard interrupts at most once until the model calls a tool, so long reasoning on hard or tool-free tasks finishes instead of being interrupted and restarted repeatedly.
+- The `/agents` hub accepts keys again after opening a model pattern input, the model picker, or the New agent form; the terminal no longer stops responding ([#20552](https://github.com/can1357/oh-my-pi/issues/20552))
+- The external editor (Ctrl+G) opened from an extension `ctx.ui.editor` dialog, the ask prompt, or the advisor instructions editor no longer has omp drawing over it and taking its keys ([#20546](https://github.com/can1357/oh-my-pi/pull/20546) by [@rierek](https://github.com/rierek))
+- Fixed WebP tool results showing a text placeholder instead of the image, and enabled WebP and GIF image embeds in the terminal ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
+- Extension transcript presenters' compact tool-call and read rows draw their `TspSpan` theme styles again, and consecutive compact tool, read, `!`/`$` run and message blocks pack without blank rows between them ([#20512](https://github.com/can1357/oh-my-pi/issues/20512)).
+- Restored `tui.imeSafeCursor`, which moves the prompt's bottom border to its own row so macOS IME preedit cannot displace it ([#20503](https://github.com/can1357/oh-my-pi/pull/20503) by [@SenCha930511](https://github.com/SenCha930511))
+- Re-enabling advisors reloads `WATCHDOG.yml` and its imported rules from disk ([#20541](https://github.com/can1357/oh-my-pi/issues/20541)).
+- Renaming a session from `/resume` accepts keyboard input again and returns focus to the picker after saving or cancelling ([#20548](https://github.com/can1357/oh-my-pi/issues/20548)).
+- Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
+- Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Turn recovery's discard of a failed turn no longer stops a SQL- or Redis-stored session from saving when another process appended to it; the discard is refused and the session is left as it was. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - On SQL and Redis session storage, a session that another omp process (such as `omp --resume` in another terminal) writes to at the same time goes on saving: every entry of both processes is kept once, in the same session, where before the session's later entries were no longer saved. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the debug menu's "Clear artifact cache" deleting whole project directories, session transcripts included; it now removes only tool output files older than 30 days and keeps transcripts, subagent outputs, `/btw` conversations and drafts. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
@@ -36,6 +63,11 @@
 - Fixed a `session.sql.dsnFile` whose contents are not a connection URL surfacing the driver's parse error (which embeds the connection string) instead of a refusal that names only the variable and the path. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - SQL and Redis session storage no longer warn `Session persistence failed: Session file changed before rewrite` when a new session writes again before its first save lands, as every `omp -p` run and every `/btw` branch did. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Fixed SQL session storage holding Bun's default ten database connections per omp process; configured PostgreSQL and MySQL stores now use at most two and release them after five seconds of inactivity. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+
+### Removed
+
+- Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

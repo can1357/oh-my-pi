@@ -74,7 +74,21 @@ export interface ComposerRowContext extends ComposerChromeContext {
 	readonly last: boolean;
 	/** Cells an end-of-row caret took from the right chrome's padding. */
 	readonly overflow: number;
+	/**
+	 * The last row of a side-bordered shape when the IME-safe layout is on: nothing is drawn right of the
+	 * text (the box moves its bottom border to its own row), so IME preedit cannot push chrome onto the next row.
+	 */
+	readonly imeSafeCursorTail?: boolean;
 }
+
+/** Terminal rows for one editor row; arrays place the text on their first row. */
+export type ComposerRowRender =
+	| string[]
+	| {
+			readonly rows: readonly string[];
+			/** Zero-based index in `rows` of the row containing the editor text. */
+			readonly textRow: number;
+	  };
 
 /** A composer shape (see the module docs). */
 export interface ComposerShape {
@@ -101,10 +115,16 @@ export interface ComposerShape {
 	sideWidth(paddingX: number): number;
 	/** Top chrome row, if any. */
 	top?(cx: ComposerChromeContext): string | undefined;
-	/** A content row in its chrome (usually one row). */
-	row(cx: ComposerRowContext): string[];
+	/** A content row in its chrome, with an explicit text position when chrome precedes it. */
+	row(cx: ComposerRowContext): ComposerRowRender;
 	/** Bottom chrome row, if any. */
 	bottom?(cx: ComposerChromeContext): string | undefined;
+}
+
+/** Paint a shape's content rows for surfaces that do not position a terminal caret. */
+export function composerRowLines(shape: ComposerShape, cx: ComposerRowContext): readonly string[] {
+	const rendered = shape.row(cx);
+	return Array.isArray(rendered) ? rendered : rendered.rows;
 }
 
 const shapes = new Map<string, ComposerShape>();
@@ -206,6 +226,11 @@ const box: ComposerShape = {
 	row(cx) {
 		const { box: g, paddingX } = cx;
 		const cells = rightCells(cx);
+		if (cx.last && cx.imeSafeCursorTail) {
+			const left = cx.border(`${g.vertical}${" ".repeat(paddingX)}`);
+			const bottom = cx.border(`${g.bottomLeft}${g.horizontal.repeat(Math.max(0, cx.width - 2))}${g.bottomRight}`);
+			return [`${left}${cx.text}`, bottom];
+		}
 		if (cx.last) {
 			const left = cx.border(`${g.bottomLeft}${g.horizontal}${" ".repeat(Math.max(0, paddingX - 1))}`);
 			const right = cx.border(
@@ -308,6 +333,8 @@ const field: ComposerShape = {
 	paddingX: 1,
 	sideWidth: paddingX => paddingX + 1,
 	row(cx) {
+		if (cx.imeSafeCursorTail)
+			return [cx.accent("▐") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
 		const interior = `${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}${cx.pad}${" ".repeat(rightCells(cx) - 1)}`;
 		return [cx.accent("▐") + cx.surface(interior) + cx.accent("▌")];
 	},
@@ -325,6 +352,8 @@ const rail: ComposerShape = {
 	paddingX: 1,
 	sideWidth: paddingX => paddingX + 1,
 	row(cx) {
+		if (cx.imeSafeCursorTail)
+			return [cx.accent("▎") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
 		const fill = Math.max(0, cx.paddingX + 1 - cx.overflow);
 		return [
 			cx.accent("▎") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}${cx.pad}${" ".repeat(fill)}`),

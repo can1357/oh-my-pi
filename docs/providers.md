@@ -204,6 +204,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                      |
 | `qianfan`                        | `QIANFAN_API_KEY`                                                                   |
 | `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                      |
+| `refuseless`                     | `REFUSELESS_API_KEY`                                                                |
 | `synthetic`                      | `SYNTHETIC_API_KEY`                                                                 |
 | `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                              |
 | `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                           |

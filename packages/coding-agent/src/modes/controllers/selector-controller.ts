@@ -9,12 +9,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { actionKey, formatKeyHint } from "../../ui/keys/hints";
 import { getAgentDir, getProjectDir, logger, normalizePathForComparison, sanitizeText } from "@oh-my-pi/pi-utils";
 import { ADVISOR_DEFAULT_TOOL_NAMES } from "../../advisor/advise-tool";
-import {
-	discoverAdvisorConfigs,
-	loadWatchdogConfigFile,
-	resolveAdvisorConfigEditPath,
-	saveWatchdogConfigFile,
-} from "../../advisor/config";
+import { loadWatchdogConfigFile, resolveAdvisorConfigEditPath, saveWatchdogConfigFile } from "../../advisor/config";
 import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "../../advisor/advisor-config-types";
 import { showGitOverlay } from "../../cli/git-tui";
@@ -123,7 +118,7 @@ import { LoginDialog, LoginDialogState } from "../../ui/overlays/panels/login-di
 import { UsageDashboard } from "../../ui/overlays/panels/usage-dashboard";
 import { UsageDashboardModel } from "../../ui/overlays/panels/usage-dashboard-model";
 import { AgentHub, type AgentHubHandle, type AgentHubProps } from "../../ui/overlays/pickers/agent-hub";
-import { AgentsHub } from "../../ui/overlays/pickers/agents-hub";
+import { AgentsHub, type AgentsHubHandle } from "../../ui/overlays/pickers/agents-hub";
 import { CopySelector } from "../../ui/overlays/pickers/copy-selector";
 import { HistorySearch } from "../../ui/overlays/pickers/history-search";
 import { LogoutAccountSelector } from "../../ui/overlays/pickers/logout-account-selector";
@@ -134,7 +129,11 @@ import { type OAuthAuthState, OAuthSelector } from "../../ui/overlays/pickers/oa
 import { ResetUsageSelector } from "../../ui/overlays/pickers/reset-usage-selector";
 import { RewindSelector, rewindTargets } from "../../ui/overlays/pickers/rewind-selector";
 import { SessionAccountSelector } from "../../ui/overlays/pickers/session-account-selector";
-import { SessionSelector, type SessionSelectorProps } from "../../ui/overlays/pickers/session-selector";
+import {
+	SessionSelector,
+	sessionSelectorFocus,
+	type SessionSelectorProps,
+} from "../../ui/overlays/pickers/session-selector";
 import { ThinkingSelector } from "../../ui/overlays/pickers/thinking-selector";
 import { TreeSelector } from "../../ui/overlays/pickers/tree-selector";
 import { PluginSelector } from "../../ui/overlays/plugins/selector";
@@ -530,7 +529,7 @@ export class SelectorController {
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
 					const command = getEditorCommand();
-					return command ? openInEditor(command, text) : Promise.resolve(null);
+					return command ? this.ctx.suspend(() => openInEditor(command, text)) : Promise.resolve(null);
 				},
 				scopedModels: this.ctx.session.scopedModels,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
@@ -543,17 +542,10 @@ export class SelectorController {
 				loadDoc: async scope => loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs)),
 				save: async (scope, doc) => {
 					await saveWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs), doc);
-					// Re-discover the merged roster (project + user) so the live advisors
-					// reflect cross-level precedence, not just the edited file.
-					const discovered = await discoverAdvisorConfigs(cwd, agentDir);
-					const count = this.ctx.session.applyAdvisorConfigs(
-						discovered.advisors,
-						discovered.sharedInstructions,
-						discovered.sharedMaxNotesPerUpdate,
-					);
+					const { count, warnings } = await this.ctx.session.reloadAdvisorConfigs();
 					this.ctx.statusLine.refresh();
-					if (discovered.warnings.length > 0) {
-						this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(discovered.warnings).join("; ")}`);
+					if (warnings.length > 0) {
+						this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(warnings).join("; ")}`);
 					}
 					this.ctx.showStatus(
 						count > 0
@@ -683,19 +675,24 @@ export class SelectorController {
 			model => this.ctx.session.effectiveServiceTier(model),
 		);
 		const size = this.ctx.shell.size;
-		let reload: (() => Promise<void>) | undefined;
-		const handle = this.#showFullscreenMenu("agents-dashboard", menu, () =>
-			AgentsHub({
-				deps,
-				rows: () => size().rows,
-				onCancel: () => this.#closeMenu(menu),
-				ref: hub => {
-					reload = hub.reload;
-				},
-			}),
+		let hub: AgentsHubHandle | undefined;
+		const handle = this.#showFullscreenMenu(
+			"agents-dashboard",
+			menu,
+			() =>
+				AgentsHub({
+					deps,
+					rows: () => size().rows,
+					onCancel: () => this.#closeMenu(menu),
+					ref: instance => {
+						hub = instance;
+					},
+				}),
+			// The hub swaps its root (picker ↔ card): keys go through the layer, not a node it replaces.
+			{ onKey: key => hub?.onKey(key) ?? false },
 		);
 		try {
-			await reload?.();
+			await hub?.reload();
 		} catch (error) {
 			// A dashboard that never loaded must not block the next `/agents`.
 			handle.close();
@@ -2088,7 +2085,7 @@ export class SelectorController {
 						},
 					}),
 				),
-			{ focus: layerContent },
+			{ focus: sessionSelectorFocus },
 		);
 	}
 

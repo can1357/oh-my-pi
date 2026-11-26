@@ -9,10 +9,11 @@ import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
 import type { InteractiveModeContext } from "../modes/types";
+import type { AgentSession } from "../session/agent-session";
 import { sanitizeDisplayLine } from "../extensibility/inventory/display-text";
 import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "../modes/view-model/overlays/copy-targets";
 import { applyBrowserModeChange } from "../tools/browser";
-import { shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { sanitizeDisplayWarnings, shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { truncateToWidth } from "../utils/text-width";
 import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
@@ -71,6 +72,14 @@ function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: 
 	showCollabQrCode(ctx, view ? host.webViewLink : host.webLink);
 }
 
+async function enableAdvisor(session: AgentSession, warn: (text: string) => Promise<void> | void): Promise<boolean> {
+	if (session.isAdvisorEnabled()) return session.setAdvisorEnabled(true);
+	const { warnings } = await session.reloadAdvisorConfigs();
+	const active = session.setAdvisorEnabled(true);
+	if (warnings.length > 0) await warn(`WATCHDOG.yml: ${sanitizeDisplayWarnings(warnings).join("; ")}`);
+	return active;
+}
+
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "advisor",
@@ -96,8 +105,10 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		handle: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb || verb === "toggle") {
-				const active = runtime.session.toggleAdvisorEnabled();
-				const configured = runtime.session.isAdvisorEnabled();
+				const configured = !runtime.session.isAdvisorEnabled();
+				const active = configured
+					? await enableAdvisor(runtime.session, text => runtime.output(text))
+					: runtime.session.setAdvisorEnabled(false);
 				if (active) {
 					await runtime.output("Advisor enabled.");
 				} else if (configured) {
@@ -108,7 +119,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return commandConsumed();
 			}
 			if (verb === "on") {
-				const active = runtime.session.setAdvisorEnabled(true);
+				const active = await enableAdvisor(runtime.session, text => runtime.output(text));
 				await runtime.output(
 					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);
@@ -140,8 +151,10 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb || verb === "toggle") {
-				const active = runtime.ctx.session.toggleAdvisorEnabled();
-				const configured = runtime.ctx.session.isAdvisorEnabled();
+				const configured = !runtime.ctx.session.isAdvisorEnabled();
+				const active = configured
+					? await enableAdvisor(runtime.ctx.session, text => runtime.ctx.showWarning(text))
+					: runtime.ctx.session.setAdvisorEnabled(false);
 				if (active) {
 					runtime.ctx.showStatus("Advisor enabled.");
 				} else if (configured) {
@@ -154,7 +167,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			if (verb === "on") {
-				const active = runtime.ctx.session.setAdvisorEnabled(true);
+				const active = await enableAdvisor(runtime.ctx.session, text => runtime.ctx.showWarning(text));
 				runtime.ctx.showStatus(
 					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);

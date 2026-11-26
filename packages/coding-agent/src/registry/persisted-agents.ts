@@ -118,6 +118,16 @@ export function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: s
 	return file === root || file.startsWith(`${artifactRoot}${path.sep}`);
 }
 
+/**
+ * Whether `ref` is an agent of the session whose transcript is `rootSessionFile`: the
+ * process-global registry keeps earlier sessions' agents (a `/resume` leaves the last one's
+ * behind), whose transcripts sit outside its artifacts tree. File-less refs belong, and so does
+ * every ref while there is no root to compare against.
+ */
+export function isSessionTreeRef(ref: { sessionFile: string | null }, rootSessionFile: string | undefined): boolean {
+	return !rootSessionFile || !ref.sessionFile || sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile);
+}
+
 /** Keep old parked trees out of a new/current session's model-facing roster. */
 export function isCurrentSessionRosterRef(
 	ref: { status: string; sessionFile: string | null },

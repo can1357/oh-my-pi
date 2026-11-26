@@ -25,6 +25,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { modelMentionSelector } from "../session/model-mention-syntax";
 import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "../thinking/levels";
 import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, usage } from "./helpers/parse";
@@ -50,9 +51,10 @@ export function refreshStatusLine(ctx: InteractiveModeContext): void {
 }
 
 /**
- * Resolve a `/model` / `/switch` selector the way `omp bench` and `--model`
- * do: exact `provider/id`, fuzzy ids (`opus`), role aliases (`@smol`, `smol`),
- * and `:level` thinking suffixes. Unqualified selectors prefer the session's
+ * Resolve a `/model` / `/switch` / `/prewalk` selector the way `omp bench` and
+ * `--model` do: exact `provider/id`, fuzzy ids (`opus`), role aliases (`@smol`,
+ * `smol`), and `:level` thinking suffixes. A leading `^` (the composer's model
+ * mention completion) is accepted. Unqualified selectors prefer the session's
  * `--models` scope, else the authenticated set, before the full catalog.
  */
 function resolveSessionModelSelector(
@@ -62,7 +64,7 @@ function resolveSessionModelSelector(
 ): ResolveCliModelResult {
 	const scoped = session.scopedModels.map(entry => entry.model);
 	return resolveCliModel({
-		cliModel: selector,
+		cliModel: modelMentionSelector(selector),
 		modelRegistry: session.modelRegistry,
 		availableModels: scoped.length > 0 ? scoped : undefined,
 		settings,

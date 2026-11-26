@@ -242,7 +242,7 @@ describe("single-instance menus", () => {
 		const failed = Promise.withResolvers<void>();
 		let load: () => Promise<void> = () => failed.promise;
 		const hubs = spyOn(agentsHubModule, "AgentsHub").mockImplementation(props => {
-			props.ref?.({ reload: () => load() });
+			props.ref?.({ reload: () => load(), onKey: () => false });
 			return screen();
 		});
 		const { ctx, overlays } = shellContext({

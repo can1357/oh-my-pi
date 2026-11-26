@@ -44,6 +44,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// (modalModelManagerOptions discovers it live per token plus endpoint),
 	// so no rows are frozen into the bundled catalog.
 	"modal",
+	// Refuseless rows are a KDL seed that refuselessModelManagerOptions serves
+	// until keyed discovery replaces it; the bundled catalog gains the seed
+	// rows at the next regeneration.
+	"refuseless",
 	// Clef judges are a `bundle="always"` KDL seed that
 	// cloudflareWorkersAiModelManagerOptions serves at runtime; the bundled
 	// catalog gains the rows at the next regeneration.
