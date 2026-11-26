@@ -17,7 +17,7 @@
  * positions throw rather than land somewhere else, until a new screenshot replaces the frame.
  */
 import type { ImageSize } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 
 /** Where a viewport lies on the screenshot of it the model was shown. */
 export interface PointerFrame {

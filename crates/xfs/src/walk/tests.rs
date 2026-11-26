@@ -281,6 +281,47 @@ async fn ancestor_rules_covering_the_root_are_dropped() {
 	assert!(paths(repo.path(), &opts).await.is_empty());
 }
 
+/// A linked worktree's `.git` file names its git dir, whose `commondir`
+/// names the repository's: that `info/exclude` applies as it does in the
+/// main worktree. A submodule's git dir has no `commondir`; its own exclude
+/// file applies. Both hold for a walk rooted at the worktree and below it,
+/// and for the tree walker with and without read-ahead.
+#[tokio::test(flavor = "multi_thread")]
+async fn linked_worktrees_and_submodules_honour_their_git_dirs_exclude() {
+	let tmp = make_tree("linked", &[
+		"main/.git/info/exclude=/sub/excluded.md\n",
+		"main/.git/worktrees/wt/commondir=../..\n",
+		"main/.git/modules/m/info/exclude=dropped.txt\n",
+		"main/sub/excluded.md",
+		"main/sub/kept.md",
+		"main/m/.git=gitdir: ../.git/modules/m\n",
+		"main/m/dropped.txt",
+		"main/m/kept.txt",
+		"wt/sub/excluded.md",
+		"wt/sub/kept.md",
+	]);
+	let git_dir = tmp.path().join("main/.git/worktrees/wt");
+	std::fs::write(tmp.path().join("wt/.git"), format!("gitdir: {}\r\n", git_dir.display()))
+		.expect("write .git file");
+	let opts = Options { gitignore: true, ..Default::default() };
+	let tree = TreeOptions { gitignore: true, hidden: false, skip_git: true, ..Default::default() };
+	let cases = [
+		("main", vec!["m", "m/kept.txt", "sub", "sub/kept.md"]),
+		("wt", vec!["sub", "sub/kept.md"]),
+		("wt/sub", vec!["kept.md"]),
+		("main/m", vec!["kept.txt"]),
+	];
+	for (root, want) in cases {
+		let root = tmp.path().join(root);
+		let want = sorted(want);
+		assert_eq!(paths(&root, &opts).await, want, "{}", root.display());
+		for workers in [1, 4] {
+			let tree = TreeOptions { workers: Some(workers), ..tree.clone() };
+			assert_eq!(tree_paths(&root, &tree).await, want, "{} tree", root.display());
+		}
+	}
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sorted_collect_matches_full_path_order() {
 	let tmp = make_tree("order", &["a/x", "a-b", "a.c", "B", "_", "a/y/z", "a0", "é"]);
@@ -923,6 +964,28 @@ async fn cache_follows_tree_changes() {
 	}
 }
 
+/// A linked worktree's exclude file lives in the shared git dir, outside the
+/// cached directory; creating it must still invalidate the cached root.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_revalidates_a_linked_worktrees_exclude() {
+	let tmp = make_tree("cache-linked", &[
+		"main/.git/info/",
+		"main/.git/worktrees/wt/commondir=../..\n",
+		"wt/a.txt",
+		"wt/b.txt",
+	]);
+	let git_dir = tmp.path().join("main/.git/worktrees/wt");
+	std::fs::write(tmp.path().join("wt/.git"), format!("gitdir: {}\n", git_dir.display()))
+		.expect("write .git file");
+	let root = tmp.path().join("wt");
+	let cache = leaked_cache(1 << 20);
+	let opts = Options { gitignore: true, ..Default::default() };
+	settle();
+	cached_matches_fresh(&root, cache, &opts).await;
+	std::fs::write(tmp.path().join("main/.git/info/exclude"), "a.txt\n").expect("write exclude");
+	assert_eq!(cached_matches_fresh(&root, cache, &opts).await, ["b.txt"]);
+}
+
 /// A change in the same timestamp tick as a listing leaves the directory's
 /// stamp unchanged, so a just-modified directory must not be served from
 /// the cache.
@@ -1507,4 +1570,58 @@ async fn a_caller_held_stop_ends_the_record_loop() {
 	.await
 	.expect("collect");
 	assert_eq!(seen.load(Ordering::Acquire), 0, "a walk started stopped still examined entries");
+}
+
+/// A walk started under [`Stop::scope`] ends on that flag, set by something
+/// that neither drives nor drops the walk, and a walk ending on its own does
+/// not set it for the others in the scope.
+///
+/// This is how a native call's cancellation reaches its walks: the caller's
+/// aborts land only when a filesystem worker next polls the aborted task, and
+/// with several walks in flight every worker is busy in a walker's listing
+/// loop, so the walks ran on over the whole tree after their caller gave up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scope_stop_ends_walks_started_under_it() {
+	let names: Vec<String> = (0..512).map(|index| format!("f{index}")).collect();
+	let specs: Vec<&str> = names.iter().map(String::as_str).collect();
+	let tmp = make_tree("scope-stop", &specs);
+	let root = tmp.path().to_path_buf();
+
+	let scope = Stop::new();
+	let flag = scope.clone();
+	let (finished, stopped) = scope
+		.clone()
+		.scope(async move {
+			// Ends on its own: the scope must still be clear afterwards.
+			let finished = Arc::new(AtomicUsize::new(0));
+			let counted = Arc::clone(&finished);
+			collect(&Fs::native(), &root, &Options::default(), false, move |_, _| {
+				counted.fetch_add(1, Ordering::AcqRel);
+				Action::Stop
+			})
+			.await
+			.expect("collect");
+			assert!(!flag.stopped(), "a walk ending set the scope flag every other walk reads");
+
+			// The scope flag set partway, by neither the visitor's verdict nor
+			// this walk's own halt.
+			let stopped = Arc::new(AtomicUsize::new(0));
+			let counted = Arc::clone(&stopped);
+			collect(&Fs::native(), &root, &Options::default(), false, move |_, _| {
+				if counted.fetch_add(1, Ordering::AcqRel) == 0 {
+					flag.stop();
+				}
+				Action::Skip
+			})
+			.await
+			.expect("collect");
+			(finished.load(Ordering::Acquire), stopped.load(Ordering::Acquire))
+		})
+		.await;
+	assert_eq!(finished, 1, "a visitor's stop did not end its own walk");
+	assert_eq!(
+		stopped, 1,
+		"the walk examined further entries after its scope's flag was set, so cancelling a native \
+		 call leaves its walks running"
+	);
 }

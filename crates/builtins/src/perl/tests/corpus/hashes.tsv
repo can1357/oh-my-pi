@@ -1,0 +1,23 @@
+# Perl corpus: hashes. Format and regeneration: crates/builtins/src/perl/tests.rs.
+autoquote	my %h=(foo=>6,bar=>2); print "$h{foo}|$h{bar}\n";	6|2␊
+clear	my %h=(a=>3,b=>5); %h=(); print scalar(keys %h),"\n";	0␊
+copy	my %a=(x=>8); my %b=%a; $b{x}=9; print "$a{x}|$b{x}\n";	8|9␊
+delete-missing	my %h; print defined(delete $h{a})?1:0,"\n";	0␊
+delete	my %h=(a=>3,b=>5); print delete($h{a}),"|",join(',',sort keys %h),"\n";	3|b␊
+each-exhausted	my %h=(only=>3); each %h; my $v=each %h; print defined($v)?1:0,"\n";	0␊
+each-reset	my %h=(a=>3,b=>5,c=>7); my $first=each %h; keys %h; my $again=each %h; print $first eq $again ? 1:0,"\n";	1␊
+each	my %h=(a=>3,b=>5,c=>7); my @r; while(my ($k,$v)=each %h) { push @r,"$k=$v" } print join(',',sort @r),"\n";	a=3,b=5,c=7␊
+exists-missing	my %h; print exists $h{no}?1:0,"\n";	0␊
+exists-undef	my %h=(yes=>undef); print exists $h{yes}?1:0,'|',defined $h{yes}?1:0,"\n";	1|0␊
+flatten	my %h=(only=>7); print join('|',%h),"\n";	only|7␊
+key-dash	my %h=(-foo=>7); print $h{'-foo'},"\n";	7␊
+key-empty	my %h=(''=>8); print $h{''},"\n";	8␊
+key-nul	my %h=("a\0b"=>8,a=>5); print $h{"a\0b"},"|$h{a}\n";	8|5␊
+key-numeric	my %h=(1=>'one'); print "$h{1}|",$h{'1'},"\n";	one|one␊
+keys-scalar	my %h=(a=>3,b=>5); my $n=keys %h; print "$n\n";	2␊
+keys	my %h=(z=>1,a=>2,m=>3); print join(',',sort keys %h),"\n";	a,m,z␊
+last-duplicate	my %h=(foo=>1,foo=>2); print "$h{foo}\n";	2␊
+odd-pairs	use warnings; my %h=("a","b","c"); print join(',',sort keys %h),"\n";	a,c␊	stderr=Odd number of elements in hash assignment at odd-pairs.pl line 1.␊
+reverse-pairs	my %h=reverse(a=>1,b=>2); print "$h{1}|$h{2}\n";	a|b␊
+values-alias	my %h=(a=>3,b=>5); for (values %h) { $_*=2 } print "$h{a}|$h{b}\n";	6|10␊
+values	my %h=(z=>7,a=>8,m=>9); print join(',',sort {$a<=>$b} values %h),"\n";	7,8,9␊

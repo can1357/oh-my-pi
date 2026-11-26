@@ -186,10 +186,10 @@ roles under `type: "message"`:
 | `developer`              | pi-ai         | Developer-role instruction turn.                                                  |
 | `assistant`              | pi-ai         | Model turn; tool calls live in its `content` as `{ "type": "toolCall" }` blocks.  |
 | `toolResult`             | pi-ai         | Result of one tool call — **not** `tool_result`. Carries `toolCallId`/`toolName`. |
-| `bashExecution`          | pi-tui        | Standalone `!`-bash run.                                                          |
-| `pythonExecution`        | pi-tui        | Standalone Python run.                                                            |
-| `hookMessage`            | pi-tui        | Legacy hook-injected message, retained for migration; new code uses `custom`.     |
-| `fileMention`            | pi-tui        | Inlined `@file` mention contents.                                                 |
+| `bashExecution`          | coding-agent  | Standalone `!`-bash run.                                                          |
+| `pythonExecution`        | coding-agent  | Standalone Python run.                                                            |
+| `hookMessage`            | coding-agent  | Legacy hook-injected message, retained for migration; new code uses `custom`.     |
+| `fileMention`            | coding-agent  | Inlined `@file` mention contents.                                                 |
 
 Branch and compaction summary roles are synthesized from dedicated top-level entries
 during session-context reconstruction. Extension messages sent through `pi.sendMessage`
@@ -210,7 +210,7 @@ a message role. An extension keying off `message.role` that matches snake_case c
 `toolResult` (and every other camelCase role) — no error is raised. Match the camelCase
 values above verbatim. The base roles are `Message` in `packages/ai/src/types.ts`; the rest
 are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.ts`,
-`packages/tui/src/chat/messages.ts`). Coding-agent re-exports the custom types and
+`packages/coding-agent/src/session/transcript/messages.ts`). Coding-agent re-exports the custom types and
 converts them for provider context in `packages/coding-agent/src/session/messages.ts`.
 
 ### `model_usage`
@@ -305,6 +305,29 @@ its count and `duration` are still visible.
 `resolvedModelIsFallback` optionally marks a retry-fallback transition. The
 reserved role `fallback` is ephemeral: model restoration prefers the configured
 default instead of restoring that role's temporary model.
+
+A retry fallback's entry also carries `fallback`: the model it left (`from`),
+what moved it (`trigger`: `request-error`, `agent-loop` when the agent loop
+stopped the turn itself and no request failed, `usage-preflight`, or
+`missing-credential`), and the error or condition (`reason`):
+
+```json
+{
+	"type": "model_change",
+	"model": "openai/gpt-4o",
+	"role": "fallback",
+	"resolvedModelIsFallback": true,
+	"fallback": {
+		"from": "anthropic/claude-sonnet-4-5",
+		"trigger": "agent-loop",
+		"reason": "Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop."
+	}
+}
+```
+
+Anonymized exports keep `from` with the same model-identity rule as `model`,
+keep `trigger`, and redact `reason` like `errorMessage`, since a provider error
+can echo request content.
 
 ### `service_tier_change`
 

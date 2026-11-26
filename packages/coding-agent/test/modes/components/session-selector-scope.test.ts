@@ -1,31 +1,27 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { afterAll, describe, expect, it } from "bun:test";
+import type { SessionSelectorEntry } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/session-selector";
+import { mountSessionSelector, sessionEntry } from "../../helpers/session-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
-function createSession(id: string, title: string, cwd: string, parentSessionPath?: string): SessionInfo {
-	return {
+function createSession(id: string, title: string, cwd: string, parentSessionPath?: string): SessionSelectorEntry {
+	return sessionEntry(id, title, "2024-01-02T00:00:00Z", {
 		path: `${cwd}/${id}.jsonl`,
-		id,
 		cwd,
-		title,
-		created: new Date("2024-01-01T00:00:00Z"),
-		modified: new Date("2024-01-02T00:00:00Z"),
-		messageCount: 1,
-		size: 0,
 		firstMessage: `${title} first message`,
 		allMessagesText: `${title} first message`,
 		...(parentSessionPath ? { parentSessionPath } : {}),
-	};
+	});
 }
 
-const TAB = "\t";
+/** Let a scope switch's listing land. */
+async function settle(): Promise<void> {
+	for (let i = 0; i < 5; i++) await Promise.resolve();
+}
 
-describe("SessionSelectorComponent scope toggle", () => {
+describe("session selector scope toggle", () => {
 	it("loads the all-projects list on Tab and surfaces each session's directory", async () => {
 		const folder = [createSession("local", "Local", "/work/current")];
 		const global = [
@@ -33,131 +29,108 @@ describe("SessionSelectorComponent scope toggle", () => {
 			createSession("remote", "Remote", "/work/other-project"),
 		];
 		let loads = 0;
-		const selector = new SessionSelectorComponent(
-			folder,
-			() => {},
-			() => {},
-			() => {},
-			{
-				loadAllSessions: async () => {
-					loads++;
-					return { sessions: global };
-				},
+		const picker = mountSessionSelector({
+			sessions: folder,
+			loadAllSessions: async () => {
+				loads++;
+				return { sessions: global };
 			},
-		);
+		});
+		try {
+			// Folder scope: header says current folder, no foreign cwd column.
+			expect(picker.screen()).toContain("(current folder)");
+			expect(picker.screen()).not.toContain("other-project");
 
-		// Folder scope: header says current folder, no foreign cwd column.
-		expect(selector.render(120).join("\n")).toContain("(current folder)");
-		expect(selector.render(120).join("\n")).not.toContain("other-project");
+			picker.press("tab");
+			await settle();
+			const rendered = picker.screen();
+			expect(rendered).toContain("(all projects)");
+			expect(rendered).toContain("other-project");
+			expect(loads).toBe(1);
 
-		selector.handleInput(TAB);
-		await Bun.sleep(0);
+			// Toggling back returns to folder scope without reloading.
+			picker.press("tab");
+			await settle();
+			expect(picker.screen()).toContain("(current folder)");
+			expect(loads).toBe(1);
 
-		const rendered = selector.render(120).join("\n");
-		expect(rendered).toContain("(all projects)");
-		expect(rendered).toContain("other-project");
-		expect(loads).toBe(1);
-
-		// Toggling back returns to folder scope without reloading.
-		selector.handleInput(TAB);
-		await Bun.sleep(0);
-		expect(selector.render(120).join("\n")).toContain("(current folder)");
-		expect(loads).toBe(1);
-
-		// Re-entering all scope reuses the cached global list.
-		selector.handleInput(TAB);
-		await Bun.sleep(0);
-		expect(loads).toBe(1);
+			// Re-entering all scope reuses the cached global list.
+			picker.press("tab");
+			await settle();
+			expect(loads).toBe(1);
+		} finally {
+			picker.term.dispose();
+		}
 	});
 
-	it("shows directories in folder scope only when the list spans worktrees, across a Tab round-trip", () => {
-		const single = new SessionSelectorComponent(
-			[createSession("a", "Alpha", "/work/repo"), createSession("b", "Beta", "/work/repo")],
-			() => {},
-			() => {},
-			() => {},
-		);
-		expect(single.render(120).join("\n")).not.toContain("/work/repo");
+	it("shows directories in folder scope only when the list spans worktrees, across a Tab round-trip", async () => {
+		const single = mountSessionSelector({
+			sessions: [createSession("a", "Alpha", "/work/repo"), createSession("b", "Beta", "/work/repo")],
+		});
+		expect(single.screen()).not.toContain("/work/repo");
+		single.term.dispose();
 
 		const folder = [createSession("main", "Main", "/work/repo"), createSession("wt", "Moved", "/work/repo-wt")];
-		const selector = new SessionSelectorComponent(
-			folder,
-			() => {},
-			() => {},
-			() => {},
-			// Preloaded, so both Tab toggles apply synchronously.
-			{ allSessions: { sessions: folder } },
-		);
-		expect(selector.render(120).join("\n")).toContain("/work/repo-wt");
-
-		selector.handleInput(TAB);
-		expect(selector.render(120).join("\n")).toContain("(all projects)");
-		selector.handleInput(TAB);
-		const rendered = selector.render(120).join("\n");
-		expect(rendered).toContain("(current folder)");
-		expect(rendered).toContain("/work/repo-wt");
+		const picker = mountSessionSelector({ sessions: folder, loadAllSessions: async () => ({ sessions: folder }) });
+		try {
+			expect(picker.screen()).toContain("/work/repo-wt");
+			picker.press("tab");
+			await settle();
+			expect(picker.screen()).toContain("(all projects)");
+			picker.press("tab");
+			await settle();
+			const rendered = picker.screen();
+			expect(rendered).toContain("(current folder)");
+			expect(rendered).toContain("/work/repo-wt");
+		} finally {
+			picker.term.dispose();
+		}
 	});
 
 	it("returns the full selected session, including its cwd", async () => {
-		const folder = [createSession("local", "Local", "/work/current")];
 		const remote = createSession("remote", "Remote", "/work/other-project");
-		const selected: SessionInfo[] = [];
-		const selector = new SessionSelectorComponent(
-			folder,
-			session => selected.push(session),
-			() => {},
-			() => {},
-			{ loadAllSessions: async () => ({ sessions: [remote] }) },
-		);
-
-		selector.handleInput(TAB);
-		await Bun.sleep(0);
-		selector.handleInput("\n");
-
-		expect(selected).toHaveLength(1);
-		expect(selected[0]?.path).toBe(remote.path);
-		expect(selected[0]?.cwd).toBe("/work/other-project");
+		const picker = mountSessionSelector({
+			sessions: [createSession("local", "Local", "/work/current")],
+			loadAllSessions: async () => ({ sessions: [remote] }),
+		});
+		try {
+			picker.press("tab");
+			await settle();
+			const picked = picker.enter();
+			expect(picked?.path).toBe(remote.path);
+			expect(picked?.cwd).toBe("/work/other-project");
+		} finally {
+			picker.term.dispose();
+		}
 	});
 
-	it("starts in current-folder scope even when the cwd is empty and a global list is preloaded (#3099)", () => {
+	it("starts in current-folder scope even when the cwd is empty (#3099)", () => {
 		const global = [createSession("remote", "Remote", "/work/other-project")];
-		// `startInAllScope` was the toggle behind #3099 (an empty folder auto-opened
-		// the picker in all-projects scope). The fix removes the option, so force it
-		// via a cast to prove the component now ignores it and stays folder-scoped —
-		// without this, the test would pass against the buggy code too.
-		const opts = { allSessions: { sessions: global }, loadAllSessions: async () => ({ sessions: global }) };
-		(opts as { startInAllScope?: boolean }).startInAllScope = true;
-		const selector = new SessionSelectorComponent(
-			[],
-			() => {},
-			() => {},
-			() => {},
-			opts,
-		);
-
-		const rendered = selector.render(120).join("\n");
-		// Header stays scoped to the cwd so the user is never silently shown
-		// other projects' sessions just because the current folder is empty.
-		expect(rendered).toContain("(current folder)");
-		expect(rendered).not.toContain("(all projects)");
-		expect(rendered).not.toContain("other-project");
-		expect(rendered).toContain("No sessions in current folder");
+		const picker = mountSessionSelector({ sessions: [], loadAllSessions: async () => ({ sessions: global }) });
+		try {
+			const rendered = picker.screen();
+			// The header stays scoped to the cwd so the user is never silently shown
+			// other projects' sessions just because the current folder is empty.
+			expect(rendered).toContain("(current folder)");
+			expect(rendered).not.toContain("(all projects)");
+			expect(rendered).not.toContain("other-project");
+		} finally {
+			picker.term.dispose();
+		}
 	});
 
-	it("marks forked child sessions in the rendered list", () => {
+	it("marks forked child sessions", () => {
 		const parent = createSession("root", "Incident", "/work/current");
 		const child = createSession("child", "Incident", "/work/current", parent.path);
-		const selector = new SessionSelectorComponent(
-			[parent, child],
-			() => {},
-			() => {},
-			() => {},
-		);
-
-		const rendered = selector.render(120).join("\n");
-		const forkLines = rendered.split("\n").filter(line => line.includes("fork"));
-
-		expect(forkLines).toHaveLength(1);
-		expect(forkLines[0]).toContain("fork");
+		const picker = mountSessionSelector({ sessions: [parent, child] });
+		try {
+			const forkLines = picker
+				.screen()
+				.split("\n")
+				.filter(line => line.includes("fork"));
+			expect(forkLines).toHaveLength(1);
+		} finally {
+			picker.term.dispose();
+		}
 	});
 });

@@ -26,6 +26,14 @@ export interface BashApprovalPatternRule {
 const EMPTY_BASH_PATTERNS: BashApprovalPatternRule[] = [];
 
 const EMPTY_STRING_ARRAY: string[] = [];
+
+// Perl keeps reading switches after consuming an argument to -e/-E, -I, or -m/-M.
+// Treat quoted and escaped text as part of that argument, not as more switches.
+const PERL_ARGUMENT = String.raw`(?:[^ \t\r\n;|&<>()'"\\]|\\[^\n]|'[^']*'|"(?:[^"\\]|\\[\s\S])*")+`;
+const PERL_SWITCH_CLUSTER = "(?:[0-7acfglnpSstTuUwWX]|d(?!t?[:=])|V(?!:))*";
+const PERL_SWITCH_VALUE = String.raw`(?:[eEImM](?:${PERL_ARGUMENT}|[ \t]+(?!#)${PERL_ARGUMENT})|(?:[CDFx]|dt?[:=]|V:)(?:${PERL_ARGUMENT})?)`;
+const PERL_IN_PLACE_PATTERN = String.raw`^[ \t]*perl[ \t]+(?:-(?=[^ \t\r\n-])${PERL_SWITCH_CLUSTER}${PERL_SWITCH_VALUE}?[ \t]+)*-${PERL_SWITCH_CLUSTER}i`;
+
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		// `cat` that sends stdout to a file or reads a heredoc writes rather than
@@ -55,7 +63,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		message: "Use the `edit` tool instead of sed -i. It provides diff preview and fuzzy matching.",
 	},
 	{
-		pattern: "^\\s*perl\\s+.*-[pn]?i",
+		pattern: PERL_IN_PLACE_PATTERN,
 		tool: "edit",
 		message: "Use the `edit` tool instead of perl -i. It provides diff preview and fuzzy matching.",
 	},
@@ -152,6 +160,19 @@ export const cfgBashAutoBackgroundEnabled = register({
 	},
 });
 
+export const cfgBashReapBackground = register({
+	id: "bash.reapBackground",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Reap Background Processes",
+		description:
+			"Remind the agent about processes its bash calls left running (`cmd &`, `nohup`) when it stops, and kill the `&` ones at session end unless registered as services; off in RPC mode",
+	},
+});
+
 export const cfgBashGitGuard = register({
 	id: "bash.gitGuard",
 	type: "boolean",
@@ -224,7 +245,7 @@ export const cfgBashDirenv = register({
 		group: "Bash",
 		label: "direnv Auto-Load",
 		description:
-			"Auto-load a repo's direnv/devenv `.envrc` into the bash session so devenv tools and env vars are present without manual `direnv exec`. Honors direnv's allow list: an `.envrc` you haven't `direnv allow`ed is never executed",
+			"Load project environment variables with the embedded direnv builtin, honoring direnv's allow and deny rules",
 	},
 });
 
@@ -237,7 +258,7 @@ export const cfgBashDirenvLoadTimeoutMs = register({
 		group: "Bash",
 		label: "direnv Load Timeout (ms)",
 		description:
-			"Max wait for the first `direnv export` (a cold devenv shell can be slow); on timeout the session runs without the direnv env",
+			"Max wait for embedded .envrc evaluation (a cold devenv shell can be slow); on timeout the session runs without its exports",
 	},
 });
 

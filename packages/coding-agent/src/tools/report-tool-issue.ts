@@ -40,12 +40,12 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
 import type { Settings } from "..";
 import type { Tool, ToolSession } from "./index";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { BUILTIN_TOOL_NAMES, isMCPToolName } from "./builtin-names";
 import { toolCommandCallName } from "./tool-commands";
 
-import { REPORT_ISSUE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
-import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { REPORT_ISSUE_COMMAND_NAME } from "./report-issue-command";
+import { truncateHeadBytes } from "./streaming-output";
 
 import { cfgDevAutoqa, cfgDevAutoqaConsent, cfgDevAutoqaPushEndpoint, cfgDevAutoqaPushToken } from "./settings";
 

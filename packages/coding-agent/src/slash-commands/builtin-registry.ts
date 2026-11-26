@@ -1,6 +1,7 @@
 import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
-import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+import type { AutocompleteItem } from "../autocomplete/autocomplete";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { reportTextView } from "../modes/controllers/command-views";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import { BUILTIN_COMMIT_SLASH_COMMANDS } from "./builtin-commit";
 import {
@@ -162,7 +163,7 @@ export async function executeBuiltinSlashCommand(
 		runtime.ctx.showStatus(`/${command.name} is host-only during a collab session`);
 		// A detached draft already left the editor: give it back, images included.
 		if (runtime.draftDetached) {
-			restoreDetachedDraft(runtime.ctx.editor, parsed.text, runtime.input?.images, runtime.input?.imageLinks);
+			restoreDetachedDraft(runtime.ctx.composer, parsed.text, runtime.input?.images, runtime.input?.imageLinks);
 		} else {
 			clearSubmittedText(runtime);
 		}
@@ -188,6 +189,9 @@ export async function executeBuiltinSlashCommand(
 			cwd: ctx.sessionManager.getCwd(),
 			output: (text: string) => {
 				ctx.showStatus(text);
+			},
+			report: (title: string, text: string) => {
+				ctx.showCommandReport({ title, body: () => reportTextView(text.trim()) });
 			},
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),

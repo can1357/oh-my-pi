@@ -242,7 +242,7 @@ const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
 
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
 const SHELL_ASSIGNMENT_NAME = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/u;
-const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
+const SHELL_REINTERPRET_OPTION = /^(?:-[^-\s]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
 export const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
 	"\r": true,

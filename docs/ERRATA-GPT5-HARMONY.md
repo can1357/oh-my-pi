@@ -35,7 +35,7 @@ Current behavior is implemented in
   shape beginning with `@`, truncating at the contaminated line and appending
   `*** Abort`. That `edit` gate does not match the current native hashline
   `[PATH#TAG]` envelope (`packages/coding-agent/src/edit/index.ts`,
-  `packages/tui/src/tools/hashline-format.ts`); it is not evidence that current
+  `packages/coding-agent/src/tools/hashline-format.ts`); it is not evidence that current
   hashline calls recover. Apply-patch envelopes and JSON-schema edit inputs
   also fail the helper's eligibility check and use abort/retry when bounded
   detection is supplied.

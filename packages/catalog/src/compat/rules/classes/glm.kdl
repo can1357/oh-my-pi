@@ -109,7 +109,7 @@ class "glm" {
 	// and documents the same low/high/max values (docs.mistral.ai/inference/conversations/reasoning).
 	models "*glm-5.3" "*glm-5.3-air" "*glm-5.3-turbo" "*glm-5.3-flash" "*glm-5.3-flashx" "*glm-5.3:*" \
 		"*glm-5.3-flash-uncensored" "*glm-5.3-free" "*glm-5.3-highspeed" "*glm-5.3-fast" "*glm-5.3-flash-lab" \
-		"*glm-5-3" "*glm-5-3-flash" priority=10 {
+		"*glm-5-3" "*glm-5-3-flash" "*glm-5.4" "*glm-5.4:*" "*glm-5-4" priority=10 {
 		thinking-default-level "max"
 		thinking-efforts "low" "high" "max"
 		thinking-requires-effort #true
