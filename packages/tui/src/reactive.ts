@@ -18,6 +18,11 @@
  * host prop bindings) created under it read the epoch, so bumping it
  * re-derives every themed value without recreating structure.
  *
+ * Errors. A computed whose run throws caches the error and rethrows it on
+ * every read until a source changes, like a value. An effect's error
+ * propagates to whoever triggered it; a flush still runs every queued
+ * effect, then rethrows.
+ *
  * @example
  * const count = signal(1);
  * const doubled = computed(() => count() * 2);
@@ -128,6 +133,7 @@ function notify(source: Source): void {
 
 function flush(): void {
 	batchDepth++;
+	const errors: unknown[] = [];
 	try {
 		let runs = 0;
 		while (pendingEffects.length > 0) {
@@ -138,12 +144,20 @@ function flush(): void {
 					pendingEffects = [];
 					throw new Error("reactive flush did not settle: an effect keeps writing a signal it reads");
 				}
-				if (!effect.disposed) effect.refresh();
+				if (effect.disposed) continue;
+				// Keep draining: a dequeued effect left unrun stays stale, and no later write re-queues it.
+				try {
+					effect.refresh();
+				} catch (error) {
+					errors.push(error);
+				}
 			}
 		}
 	} finally {
 		batchDepth--;
 	}
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, "reactive effects failed");
 }
 
 class SignalNode<T> implements Source {
@@ -181,6 +195,8 @@ class Computation<T> extends Owner implements Source {
 	readonly #tracksEpoch: boolean;
 	/** Whether a run completed, so `value` is a real previous value for `equals`. */
 	#settled = false;
+	/** The error the last run threw, rethrown by `read` until a source changes; null after a clean run. */
+	#failure: { error: unknown } | null = null;
 
 	constructor(fn: (previous: T | undefined) => T, isEffect: boolean, equals: Equals<T> | false, tracksEpoch: boolean) {
 		super(currentOwner);
@@ -195,6 +211,7 @@ class Computation<T> extends Owner implements Source {
 		if (this.disposed) return this.value as T;
 		this.refresh();
 		track(this);
+		if (this.#failure) throw this.#failure.error;
 		return this.value as T;
 	}
 
@@ -224,19 +241,33 @@ class Computation<T> extends Owner implements Source {
 		currentOwner = this;
 		currentObserver = this as Computation<unknown>;
 		currentSources = sources;
-		let next: T;
+		let next = this.value as T;
+		let failure: { error: unknown } | null = null;
 		try {
 			if (this.#tracksEpoch) this.epoch?.();
 			next = this.#fn(this.value);
+		} catch (error) {
+			// An effect has no reader to rethrow to later; a computed keeps the error as its result.
+			if (this.isEffect) throw error;
+			failure = { error };
 		} finally {
 			currentOwner = prevOwner;
 			currentObserver = prevObserver;
 			currentSources = prevSources;
 			this.#resubscribe(sources);
 		}
-		const changed = !this.#settled || this.#equals === false || !this.#equals(this.value as T, next);
-		this.#settled = true;
-		this.value = next;
+		// Failing, or recovering from a failure, changes what a reader sees whatever the values compare as.
+		const changed =
+			failure !== null ||
+			this.#failure !== null ||
+			!this.#settled ||
+			this.#equals === false ||
+			!this.#equals(this.value as T, next);
+		this.#failure = failure;
+		if (!failure) {
+			this.#settled = true;
+			this.value = next;
+		}
 		// Observers mid-check rerun; a clean observer is the one pulling this value right now.
 		if (changed && this.observers) {
 			for (const observer of this.observers) if (observer.state === CHECK) observer.state = DIRTY;
