@@ -24,7 +24,7 @@ import {
 	type ServerVersionMap,
 	unreportedSummary,
 } from "./diagnostics";
-import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type FileDiagnosticsResult, FileFormatResult } from "../tools/details/lsp";
 import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
 import { FileChangeType, type LspClient, type ServerConfig } from "./types";
 import { summarizeDiagnosticMessages } from "./utils";

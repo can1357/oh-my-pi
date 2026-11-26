@@ -4,14 +4,18 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { ModelCycleTrack } from "../src/ui/dock";
+import { createModeTerminal, renderRows } from "./helpers/mode-terminal";
+import { nativeShell } from "./helpers/native-shell";
 
+/** The model-cycle track above the prompt. */
 function renderCycle(mode: InteractiveMode): string {
-	return Bun.stripANSI(mode.modelCycleContainer.render(120).join("\n"));
+	return renderRows(() => ModelCycleTrack({ model: mode.hud.modelCycle })).join("\n");
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -31,7 +35,7 @@ describe("InteractiveMode model-cycle track", () => {
 	let mode: InteractiveMode;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 	});
 
 	beforeEach(async () => {
@@ -51,7 +55,15 @@ describe("InteractiveMode model-cycle track", () => {
 			settings: Settings.isolated({}),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {
@@ -64,26 +76,44 @@ describe("InteractiveMode model-cycle track", () => {
 		resetSettingsForTest();
 	});
 
+	it("opens a searchable session picker when Tern clicks the model chip without losing the draft", async () => {
+		await using ui = await nativeShell(mode.shell);
+		mode.composer.setText("unfinished draft");
+		ui.click("row", "model");
+
+		expect(ui.node("picker").parent).toBe("layer");
+		ui.type("sonnet");
+		expect(ui.node("picker").p.query).toBe("sonnet");
+		expect(mode.composer.text()).toBe("unfinished draft");
+	});
+
+	it("opens the context report from its meter and returns to the draft on Close", async () => {
+		await using ui = await nativeShell(mode.shell);
+		mode.composer.setText("unsent draft");
+		ui.click("meter", "context");
+		expect(ui.node("list", "categories").c).toContain(ui.node("item", "free").id);
+		ui.click("button", "close");
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(mode.composer.text()).toBe("unsent draft");
+	});
+
 	it("renders into the anchored container, not the chat scrollback", () => {
-		const before = mode.chatContainer.children.length;
+		const before = mode.shell.transcript.blocks().length;
 		mode.showModelCycleTrack([{ label: "default>slow" }], 0);
 
 		expect(renderCycle(mode)).toContain("default>slow");
 		// The whole point of the move: the track never lands in the scrollback,
 		// which is where back-to-back appends used to stack duplicates.
-		expect(mode.chatContainer.children.length).toBe(before);
+		expect(mode.shell.transcript.blocks().length).toBe(before);
 	});
 
 	it("rebuilds in place without stacking duplicate tracks on repeated cycles", () => {
 		mode.showModelCycleTrack([{ label: "track-one" }], 0);
-		const childCountAfterFirst = mode.modelCycleContainer.children.length;
 		mode.showModelCycleTrack([{ label: "track-two" }], 0);
 
 		const rendered = renderCycle(mode);
 		expect(rendered).not.toContain("track-one");
 		expect(countOccurrences(rendered, "track-two")).toBe(1);
-		// Cleared + rebuilt each cycle, so the child count never grows.
-		expect(mode.modelCycleContainer.children.length).toBe(childCountAfterFirst);
 	});
 
 	it("auto-clears the track after lingering", () => {

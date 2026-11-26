@@ -5,7 +5,11 @@ import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, type Context, Effort, type Model, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { AUTO_PREWALK_TIMEOUT_MS, type PrewalkRoute } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
+import {
+	AUTO_PREWALK_ESCALATE_TIMEOUT_MS,
+	AUTO_PREWALK_TIMEOUT_MS,
+	type PrewalkRoute,
+} from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -17,13 +21,14 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import {
 	cfgPrewalkAuto,
 	cfgPrewalkAutoTarget,
+	cfgPrewalkFrom,
 	cfgRetryBaseDelayMs,
 	cfgRetryFallbackChains,
 	cfgRetryFallbackRevertPolicy,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
@@ -153,7 +158,7 @@ describe("AgentSession auto-prewalk", () => {
 	const asked = (calls: JudgeCall[]) => calls.filter(call => call.questions.includes("route"));
 
 	interface FixtureOptions {
-		auto?: "off" | "suggest" | "on";
+		auto?: "off" | "suggest" | "on" | "escalate";
 		primary?: Model;
 		target?: Model;
 		/** Credential the native judge (default true). */
@@ -245,7 +250,7 @@ describe("AgentSession auto-prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus: vi.fn(),
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		return {
@@ -879,6 +884,240 @@ describe("AgentSession auto-prewalk", () => {
 			await f.session.prompt(TASK);
 
 			expect(f.requested.slice(boundary)).toEqual([f.primary.id, f.primary.id, f.target.id]);
+		});
+	});
+
+	describe("escalate", () => {
+		const planner = modelOrThrow("claude-opus-4-5");
+		const plannerSelector = `${planner.provider}/${planner.id}`;
+		const SECOND_TASK = "trace the cache layer, then fix the eviction bug";
+
+		function escalating(responses: MockResponse[], options: FixtureOptions = {}) {
+			const f = createFixture(responses, { auto: "escalate", ...options });
+			cfgPrewalkFrom.set(f.settings, plannerSelector);
+			return f;
+		}
+
+		it("judges on the starting model, plans on prewalk.from, hands off, and starts the next task where this one started", async () => {
+			const calls = stubJudge([PREWALK, DIRECT]);
+			const f = escalating([...cycle(), done("two")]);
+			cfgPrewalkFrom.set(f.settings, `${plannerSelector}:low`);
+			const published: string[] = [];
+			f.session.subscribe(event => {
+				if (event.type === "model_changed" || event.type === "thinking_level_changed") published.push(event.type);
+			});
+
+			await f.session.prompt(TASK);
+			expect(asked(calls)[0]?.model).toBe(f.primary.id);
+			expect(f.requested).toEqual([planner.id, planner.id, f.target.id]);
+			expect(f.efforts[0]).toBe(Effort.Low);
+			// The planner switch publishes like any model change: the model first, then its effort.
+			expect(published.slice(0, 2)).toEqual(["model_changed", "thinking_level_changed"]);
+			expect(f.nudges[0]).toContain("prewalk-plan");
+
+			await f.session.prompt("task two");
+			expect(f.requested.at(-1)).toBe(f.primary.id);
+			expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+		});
+
+		it("hands an effort-only planner back to the starting effort with @initial, without a model change", async () => {
+			stubJudge([PREWALK, DIRECT]);
+			const f = escalating([...cycle(), done("two")]);
+			cfgPrewalkFrom.set(f.settings, `${f.primary.provider}/${f.primary.id}:low`);
+			cfgPrewalkAutoTarget.set(f.settings, "@initial");
+
+			await f.session.prompt(TASK);
+			await f.session.prompt("task two");
+
+			expect(f.requested).toEqual(Array(4).fill(f.primary.id));
+			expect(f.efforts).toEqual([Effort.Low, Effort.Low, Effort.High, Effort.High]);
+			// Only the effort moved, so no temporary model change (and its provider-session reset) was recorded.
+			expect(f.session.sessionManager.getSessionLocalModelChange()).toBeUndefined();
+		});
+
+		it("hands an effort-only planner back to an unset starting effort with @initial", async () => {
+			stubJudge([PREWALK, DIRECT]);
+			const f = escalating([...cycle(), done("two")]);
+			cfgPrewalkFrom.set(f.settings, `${f.primary.provider}/${f.primary.id}:low`);
+			cfgPrewalkAutoTarget.set(f.settings, "@initial");
+			f.session.setThinkingLevel(undefined);
+
+			await f.session.prompt(TASK);
+			await f.session.prompt("task two");
+
+			expect(f.efforts).toEqual([Effort.Low, Effort.Low, undefined, undefined]);
+			expect(f.session.configuredThinkingLevel()).toBeUndefined();
+		});
+
+		it("does not arm @initial for a task escalate left where it started", async () => {
+			stubJudge([PREWALK]);
+			const f = escalating([done("one")]);
+			cfgPrewalkFrom.set(f.settings, `${f.primary.provider}/${f.primary.id}`);
+			cfgPrewalkAutoTarget.set(f.settings, "@initial");
+
+			await f.session.prompt(TASK);
+
+			expect(f.requested).toEqual([f.primary.id]);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			expect(f.notices).toEqual([]);
+		});
+
+		it.each([
+			["is the active model", "anthropic/claude-sonnet-4-5", true, 0, AUTO_PREWALK_TIMEOUT_MS],
+			["cannot be resolved", "anthropic/claude-missing-9", true, 1, AUTO_PREWALK_TIMEOUT_MS],
+			["has no credential", plannerSelector, false, 1, AUTO_PREWALK_ESCALATE_TIMEOUT_MS],
+		] as const)(
+			"plans on the active model, as under on, when prewalk.from %s",
+			async (_case, from, credential, warnings, budget) => {
+				stubJudge([PREWALK, PREWALK]);
+				const f = escalating([...cycle(), ...cycle()]);
+				cfgPrewalkFrom.set(f.settings, from);
+				if (!credential) {
+					const getApiKey = f.session.modelRegistry.getApiKey.bind(f.session.modelRegistry);
+					vi.spyOn(f.session.modelRegistry, "getApiKey").mockImplementation((model, ...rest) =>
+						model.id === planner.id ? Promise.resolve(undefined) : getApiKey(model, ...rest),
+					);
+				}
+				// Only a planner `escalate` can move to holds setup on the short budget; otherwise the judge keeps `on`'s.
+				// The other budget times out, so each task arms only if its judge ran on `budget`.
+				const other =
+					budget === AUTO_PREWALK_TIMEOUT_MS ? AUTO_PREWALK_ESCALATE_TIMEOUT_MS : AUTO_PREWALK_TIMEOUT_MS;
+				const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+				vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+					ms === other ? AbortSignal.abort(new DOMException("timed out", "TimeoutError")) : realTimeout(ms),
+				);
+
+				await f.session.prompt(TASK);
+				await f.session.prompt(SECOND_TASK);
+
+				expect(f.requested).toEqual([
+					f.primary.id,
+					f.primary.id,
+					f.target.id,
+					f.primary.id,
+					f.primary.id,
+					f.target.id,
+				]);
+				expect(f.notices.filter(notice => notice.startsWith("Auto-prewalk:"))).toHaveLength(warnings);
+			},
+		);
+
+		it("leaves the task where it is when the judge runs past the escalate budget", async () => {
+			stubJudge([PREWALK]);
+			const f = escalating([done("one")]);
+			const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+			vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+				ms === AUTO_PREWALK_ESCALATE_TIMEOUT_MS
+					? AbortSignal.abort(new DOMException("timed out", "TimeoutError"))
+					: realTimeout(ms),
+			);
+
+			await f.session.prompt(TASK);
+
+			expect(f.requested).toEqual([f.primary.id]);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+		});
+
+		it("stays on the planner after an Esc, and starts the next task where the aborted one started", async () => {
+			stubJudge([PREWALK, DIRECT]);
+			let escaped = false;
+			const f = escalating([done("interrupted"), done("two")], {
+				beforeStream: async () => {
+					if (escaped) return;
+					escaped = true;
+					void f.session.abort();
+				},
+			});
+
+			await f.session.prompt(TASK).catch(() => {});
+			await f.session.waitForIdle();
+			expect(f.session.model?.id).toBe(planner.id);
+
+			await f.session.prompt("task two");
+			expect(f.requested.at(-1)).toBe(f.primary.id);
+		});
+
+		it("keeps an explicit pick made on the planner for the next task", async () => {
+			stubJudge([PREWALK, DIRECT]);
+			const manual = modelOrThrow("claude-opus-4-6");
+			const f = escalating([{ content: ["planning"] }, { content: ["still planning"] }, done("two")]);
+
+			await f.session.prompt(TASK);
+			await f.session.setModel(manual);
+			await f.session.prompt("task two");
+
+			expect(f.requested).toEqual([planner.id, planner.id, manual.id]);
+		});
+
+		it("keeps a thinking-level pick made while the judge runs, instead of moving the task to the planner", async () => {
+			const hold = Promise.withResolvers<void>();
+			const requested = Promise.withResolvers<void>();
+			stubJudge([PREWALK], { hold: hold.promise, requested: requested.resolve });
+			const f = escalating(cycle());
+
+			const task = f.session.prompt(TASK);
+			await requested.promise;
+			f.session.setThinkingLevel(Effort.Low);
+			hold.resolve();
+			await task;
+
+			expect(f.requested).toEqual([f.primary.id, f.primary.id, f.target.id]);
+			expect(f.efforts[0]).toBe(Effort.Low);
+		});
+
+		it("warns once and hands off to the default target when @initial is set without escalate", async () => {
+			stubJudge([PREWALK, PREWALK]);
+			const f = createFixture([...cycle(), ...cycle()], { auto: "on" });
+			cfgPrewalkAutoTarget.set(f.settings, "@initial");
+
+			await f.session.prompt(TASK);
+			await f.session.prompt(SECOND_TASK);
+
+			expect(f.requested).toEqual([
+				f.primary.id,
+				f.primary.id,
+				f.target.id,
+				f.primary.id,
+				f.primary.id,
+				f.target.id,
+			]);
+			expect(f.notices.filter(notice => notice.includes("@initial"))).toHaveLength(1);
+		});
+
+		it("suggest names the planner escalate would move a front-loaded task to", async () => {
+			stubJudge([PREWALK]);
+			const f = createFixture([done("one")], { auto: "suggest" });
+			cfgPrewalkFrom.set(f.settings, plannerSelector);
+
+			await f.session.prompt(TASK);
+
+			expect(f.notices).toEqual([`Auto-prewalk: prewalk 0.90; escalate would plan on ${plannerSelector}`]);
+			expect(f.requested).toEqual([f.primary.id]);
+		});
+
+		it("keeps the planner and its decision when a queued follow-up's preparation is retried", async () => {
+			const calls = stubJudge([DIRECT, PREWALK]);
+			const f = escalating([done("first"), ...cycle()]);
+			let queued = false;
+			f.session.agent.setOnBeforeYield(async () => {
+				if (queued) return;
+				queued = true;
+				await f.session.followUp(TASK);
+			});
+			let plannerSwitches = 0;
+			f.session.subscribe(event => {
+				if (event.type !== "model_changed" || f.session.model?.id !== planner.id) return;
+				// A queue edit right after the switch drops the claimed preparation, so the follow-up is prepared again.
+				if (plannerSwitches++ === 0) f.session.agent.replaceQueue("followUp", f.session.agent.peekFollowUpQueue());
+			});
+
+			await f.session.prompt("explain the sync engine");
+			await f.session.waitForIdle();
+
+			expect(asked(calls)).toHaveLength(2);
+			expect(plannerSwitches).toBe(1);
+			expect(f.requested).toEqual([f.primary.id, planner.id, planner.id, f.target.id]);
+			expect(f.nudges[1]).toContain("prewalk-plan");
 		});
 	});
 

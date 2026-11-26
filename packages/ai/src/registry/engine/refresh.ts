@@ -5,7 +5,7 @@
  */
 import type { CompiledAuthProvider, CompiledRefresh } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../../error";
-import { claudeCodeSdkVersion } from "../../providers/claude-code-fingerprint";
+import { claudeCodeAxiosVersion } from "../../providers/claude-code-fingerprint";
 import type { OAuthRefreshReason } from "../../auth/types";
 import type { OAuthCredentials } from "../oauth/types";
 import {
@@ -63,6 +63,7 @@ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 
 function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider): Refresher {
 	const provider = policy.id;
+	const scope = rule.scopes?.join(" ");
 	return async (credentials, signal, reason) => {
 		for (const field of rule.require) {
 			if (!credentials[field as keyof OAuthCredentials]) {
@@ -75,7 +76,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 		throwIfCancelled(signal);
 		const client = await loginClient(policy, signal);
 		const hookHeaders = rule.headersHook ? (await loadHeadersHook(rule.headersHook))() : undefined;
-		const context = { provider, fetch, signal, headers: hookHeaders };
+		const context = { provider, fetch, signal, headers: hookHeaders, deadGrant: rule.deadGrant };
 		const vars: TemplateVars = {
 			refresh_token: credentials.refresh,
 			client_id: client.clientId,
@@ -83,22 +84,35 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 			redirect_uri: client.redirectUri,
 			base: client.base,
 			auth: client.auth,
-			claude_code_sdk_version: claudeCodeSdkVersion,
+			claude_code_axios_version: claudeCodeAxiosVersion,
 			refresh_reason: refreshReasonParam(reason),
 		};
-		const { body } = await postTokenRequest(
-			rule.token,
-			{
-				grant_type: "refresh_token",
-				client_id: client.clientId,
-				client_secret: client.clientSecret,
-				refresh_token: credentials.refresh,
-				organization_id: credentials.activeOrganizationId,
-			},
-			vars,
-			context,
-			"token-refresh",
-		);
+		const exchange = (requestedScope: string | undefined) =>
+			postTokenRequest(
+				rule.token,
+				{
+					grant_type: "refresh_token",
+					refresh_token: credentials.refresh,
+					client_id: client.clientId,
+					client_secret: client.clientSecret,
+					scope: requestedScope,
+					organization_id: credentials.activeOrganizationId,
+				},
+				vars,
+				context,
+				"token-refresh",
+			);
+		let body: unknown;
+		try {
+			({ body } = await exchange(scope));
+		} catch (error) {
+			// A grant issued before a requested scope existed is refused whole;
+			// omitting `scope` reissues the scopes it already holds (RFC 6749 §6).
+			const scopeRefused =
+				error instanceof AIError.OAuthError && error.status === 400 && error.code === "invalid_scope";
+			if (scope === undefined || !scopeRefused) throw error;
+			({ body } = await exchange(undefined));
+		}
 		throwIfCancelled(signal);
 		let refreshed = mapCredentials(rule.credential, body, provider, credentials);
 		refreshed = await applyUserinfo(rule.userinfo, refreshed, context);

@@ -1,4 +1,4 @@
-import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
+import type { ExtensionDashboardRuntime } from "../../../extensibility/inventory/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
 import type { EffectiveExtensionRoots } from "../../../capability/types";
@@ -44,7 +44,7 @@ export function createExtensionDashboardRuntime(options: {
 		async persistMcpToggle(name, enabled, sourcePath) {
 			await setMcpServerEnabled({
 				userPath: getMCPConfigPath("user", cwd),
-				projectPath: getMCPConfigPath("project", cwd),
+				projectPath: cfgMcpEnableProjectConfig.get(settings) ? getMCPConfigPath("project", cwd) : undefined,
 				sourcePath,
 				name,
 				enabled,

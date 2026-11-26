@@ -104,9 +104,8 @@ function normalizeTree(node: TreeNodeLike): TreeNodeLike {
 /** Props with every `TspText` field's icons normalized; the same object when nothing changed. */
 export function normalizeIconProps(
 	kind: TspKind,
-	props: Readonly<Record<string, unknown>> | undefined,
-): Readonly<Record<string, unknown>> | undefined {
-	if (!props) return props;
+	props: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
 	let out: Record<string, unknown> | undefined;
 	const put = (key: string, value: unknown): void => {
 		if (value === props[key]) return;
@@ -115,8 +114,8 @@ export function normalizeIconProps(
 	};
 	// A plain `text` label holding an icon becomes spans.
 	if ((kind === "text" || kind === "shimmer") && typeof props.text === "string" && PUA.test(props.text)) {
-		put("text", undefined);
-		put("spans", normalizeIconSpans([{ t: props.text }]));
+		const { text, ...rest } = props;
+		out = { ...rest, spans: normalizeIconSpans([{ t: text }]) };
 	}
 	for (const key of TEXT_FIELDS[kind] ?? []) {
 		const value = (out ?? props)[key];

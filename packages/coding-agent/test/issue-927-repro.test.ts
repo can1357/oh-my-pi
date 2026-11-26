@@ -5,12 +5,13 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("issue #927 optimistic pending spinner", () => {
 	let authStorage: AuthStorage;
@@ -46,9 +47,16 @@ describe("issue #927 optimistic pending spinner", () => {
 			modelRegistry,
 		});
 		vi.spyOn(session, "prompt").mockResolvedValue(true);
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		mode.addMessageToChat = vi.fn();
-		mode.ui.requestRender = vi.fn();
 	});
 
 	afterEach(async () => {
@@ -63,14 +71,14 @@ describe("issue #927 optimistic pending spinner", () => {
 
 	it("clears the optimistic loading animation when prompt returns without a model turn", async () => {
 		const input = mode.startPendingSubmission({ text: "/extension-no-turn" });
-		expect(mode.loadingAnimation).toBeDefined();
+		expect(mode.working).toBe("turn");
 		expect(mode.optimisticUserMessageSignature).toBe("/extension-no-turn\u00000");
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(mode.loadingAnimation).toBeUndefined();
+		expect(mode.working).toBeUndefined();
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
 		expect(mode.locallySubmittedUserSignatures.has("/extension-no-turn\u00000")).toBe(false);
-		expect(mode.statusContainer.children.length).toBe(0);
+		expect(mode.hud.status.row()).toBeUndefined();
 	});
 });

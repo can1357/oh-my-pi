@@ -7,7 +7,6 @@
  * here first.
  */
 import { tryParseJson } from "@oh-my-pi/pi-utils";
-import { decodeHNText } from "../../scrapers/hackernews";
 import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import { SearchProviderError, type SearchResponse, type SearchSource } from "../types";
 import { clampNumResults, dateToAgeSeconds, recencyAfterDate } from "../utils";
@@ -109,6 +108,30 @@ function storySnippet(hit: HNHit, text: string | undefined): string {
 function commentTitle(hit: HNHit): string {
 	const by = hit.author ? `Comment by ${hit.author}` : "Comment";
 	return hit.story_title ? `${by} on: ${hit.story_title}` : by;
+}
+
+/** Convert Hacker News story or comment HTML to Markdown-flavored text. */
+function decodeHNText(html: string): string {
+	return html
+		.replace(/<p>/g, "\n\n")
+		.replace(/<\/p>/g, "")
+		.replace(/<pre><code>/g, "\n```\n")
+		.replace(/<\/code><\/pre>/g, "\n```\n")
+		.replace(/<code>/g, "`")
+		.replace(/<\/code>/g, "`")
+		.replace(/<i>/g, "*")
+		.replace(/<\/i>/g, "*")
+		.replace(/<a href="([^"]+)"[^>]*>([^<]*)<\/a>/g, "[$2]($1)")
+		.replace(/<[^>]+>/g, "")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&amp;/g, "&")
+		.replace(/&quot;/g, '"')
+		.replace(/&#0?39;/g, "'")
+		.replace(/&#x27;/g, "'")
+		.replace(/&#x2F;/g, "/")
+		.replace(/&nbsp;/g, " ")
+		.trim();
 }
 
 /**
