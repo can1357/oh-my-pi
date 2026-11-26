@@ -357,7 +357,9 @@ export class EventController {
 	// seals it in place; the turn boundary seals the final snapshot.
 	#displaceableTodo: { readonly tool: PendingTool; readonly id: string } | undefined = undefined;
 	// Call ids of `todo` snapshots a later update found in terminal scrollback and kept there: a
-	// transcript rebuild keeps them too instead of collapsing to the newest snapshot.
+	// transcript rebuild keeps them too instead of collapsing to the newest snapshot. Cleared by
+	// `resetTranscriptAnchors()`: the rebuild after it rewrites scrollback anyway and collapses to
+	// the newest snapshot, as a resume in a fresh process does.
 	readonly #todoSnapshotsInHistory = new Set<string>();
 	// Most recent TTSR notification block. A new ttsr_triggered event merges its
 	// rules into this block while it is still the (live-region) transcript tail.
@@ -1245,6 +1247,7 @@ export class EventController {
 		this.#liveIrcCards.clear();
 		this.#displaceablePollComponent = undefined;
 		this.#displaceableTodo = undefined;
+		this.#todoSnapshotsInHistory.clear();
 		this.#lastTtsrNotification = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
