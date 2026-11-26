@@ -199,9 +199,37 @@ function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
 	);
 }
 
+function isEncryptedReasoningOwnershipError(error: unknown): boolean {
+	return (
+		error instanceof OpenAIHttpError &&
+		error.status === 400 &&
+		/reasoning.*encrypted_content.*not issued to this caller/i.test(error.message)
+	);
+}
+
+function dropEncryptedReasoningItems(input: ResponseInput, rejected: ReadonlySet<string>): boolean {
+	let write = 0;
+	for (let read = 0; read < input.length; read++) {
+		const item = input[read];
+		if (
+			item.type === "reasoning" &&
+			typeof item.encrypted_content === "string" &&
+			rejected.has(item.encrypted_content)
+		)
+			continue;
+		if (write !== read) input[write] = item;
+		write++;
+	}
+	if (write === input.length) return false;
+	input.length = write;
+	return true;
+}
+
 interface OpenAIResponsesProviderSessionState
 	extends ProviderSessionState, OpenAIStrictToolsState, OpenAIReasoningEffortFallbackState {
 	nativeHistoryReplayWarmed: boolean;
+	/** Blobs present in a request rejected for reasoning ownership; later responses may issue valid new blobs. */
+	rejectedEncryptedReasoning?: Set<string>;
 	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
 	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
@@ -239,6 +267,7 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 		effortControls: new Map(),
 		close: () => {
 			state.nativeHistoryReplayWarmed = false;
+			state.rejectedEncryptedReasoning = undefined;
 			state.chains.clear();
 			state.effortControls.clear();
 			clearOpenAIStrictToolsState(state);
@@ -303,11 +332,9 @@ function resetOpenAIResponsesChainState(state: OpenAIResponsesChainState): void 
  * baseline minted by one credential is dead weight the moment the session is
  * switched to a sibling account — the next delta request answers
  * `Previous response not found` and burns a turn re-learning that. Everything
- * else this record holds describes the *deployment*, not the account
- * (strict-tools demotion, reasoning-effort fallback, native-history-replay
- * warmup, the chaining circuit breaker), and is deliberately preserved:
- * re-learning an endpoint's limits on every credential switch is the cost this
- * state exists to avoid.
+ * else this record holds describes the deployment, not the account, and stays
+ * intact. A confirmed encrypted-reasoning ownership rejection remains active
+ * because the persisted history still holds the old blobs.
  */
 export function resetOpenAIResponsesAccountScopedState(states: Map<string, ProviderSessionState>): void {
 	for (const [key, value] of states) {
@@ -623,6 +650,7 @@ const streamOpenAIResponsesOnce = (
 				}
 			};
 			let strictRetryAvailable = true;
+			let ownershipRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -670,6 +698,27 @@ const streamOpenAIResponsesOnce = (
 								key: activeReasoningEffortFallbackKey,
 								fallback: reasoningEffortFallback,
 							};
+							continue;
+						}
+						if (
+							ownershipRetryAvailable &&
+							!requestSignal.aborted &&
+							isEncryptedReasoningOwnershipError(error) &&
+							Array.isArray(chained.params.input) &&
+							chained.params.input.some(
+								item => item.type === "reasoning" && typeof item.encrypted_content === "string",
+							)
+						) {
+							ownershipRetryAvailable = false;
+							const rejected = providerSessionState?.rejectedEncryptedReasoning ?? new Set<string>();
+							for (const item of chained.params.input) {
+								if (item.type === "reasoning" && typeof item.encrypted_content === "string")
+									rejected.add(item.encrypted_content);
+							}
+							dropEncryptedReasoningItems(chained.params.input, rejected);
+							if (Array.isArray(activeParams.input)) dropEncryptedReasoningItems(activeParams.input, rejected);
+							if (providerSessionState) providerSessionState.rejectedEncryptedReasoning = rejected;
+							activeRawRequestDump.body = chained.params;
 							continue;
 						}
 						const compiledGrammarTooLarge =
@@ -1217,6 +1266,11 @@ export function buildParams(
 			canReconstructReasoningReplay,
 		repairOrphanOutputs: true,
 	});
+	if (providerSessionState?.rejectedEncryptedReasoning) {
+		// Native history, reconstructed signatures and compaction snapshots can
+		// all contain rejected blobs; preserve reasoning issued after recovery.
+		dropEncryptedReasoningItems(messages, providerSessionState.rejectedEncryptedReasoning);
+	}
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	let systemInstructions: string | undefined;

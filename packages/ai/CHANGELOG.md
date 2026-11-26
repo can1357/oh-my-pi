@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Responses sessions getting stuck on HTTP 400 after a credential change when earlier turns contain encrypted reasoning; affected sessions now continue without losing conversation history.
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed
