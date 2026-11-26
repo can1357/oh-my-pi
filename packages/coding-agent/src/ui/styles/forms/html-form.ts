@@ -154,10 +154,11 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** Crop a styled input around the caret, marking the edges with more text. */
 function caretViewport(theme: Theme, line: string, width: number, caretEnd: number, caretWidth: number): string {
+	if (width < caretWidth) return theme.style("inverse", " ");
 	line = replaceTabs(line);
 	const cells = visibleWidth(line);
 	if (cells <= width) return line;
-	if (width <= caretWidth) return sliceColumns(line, caretEnd - caretWidth, caretEnd - caretWidth + width);
+	if (width === caretWidth) return sliceColumns(line, caretEnd - caretWidth, caretEnd);
 	const left = caretEnd >= width;
 	const room = width - Number(left);
 	const start = left ? Math.min(cells - room, Math.max(1, caretEnd - Math.max(caretWidth, Math.ceil(room / 2)))) : 0;

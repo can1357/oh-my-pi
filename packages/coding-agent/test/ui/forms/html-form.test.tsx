@@ -181,6 +181,9 @@ test.each(["radio", "checkbox"])("keeps a long %s Other answer visible and edita
 		expect(term.screen().join("\n")).toMatch(/Other: ‹.*at sunrise界/);
 		term.press("left");
 		expect(highlighted(term.rows())).toContain("界");
+		term.resize(16, 16);
+		expect(highlighted(term.rows().filter(row => row.includes("Other:")))).toEqual([" "]);
+		term.resize(42, 16);
 		term.press("delete");
 		term.type("!");
 		term.press("home");
