@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `issue://` and `pr://` reads showing pre-edit state after a Bash `gh issue` or `gh pr` command that names several numbers or puts a value flag such as `--parent` before the number; every number the command names is now reloaded on the next read ([#10626](https://github.com/can1357/oh-my-pi/issues/10626), [#19949](https://github.com/can1357/oh-my-pi/pull/19949) by [@JamieJ5926](https://github.com/JamieJ5926))
 ### Breaking Changes
 
 - `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.

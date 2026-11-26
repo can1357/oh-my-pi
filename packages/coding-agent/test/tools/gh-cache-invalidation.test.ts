@@ -164,6 +164,36 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		expect(getCached(REPO, "pr", 3, true)?.rendered).toBe(`pr-${REPO}-3`);
 	});
 
+	it("drops the edited issue, not the parent named by --parent", () => {
+		seedIssue(23);
+		seedIssue(100);
+		invalidateGithubCacheForBashCommand("gh issue edit --parent 100 23");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 100, true)?.rendered).toBe(`issue-${REPO}-100`);
+	});
+
+	it("drops every issue number one gh issue edit names", () => {
+		seedIssue(23);
+		seedIssue(34);
+		invalidateGithubCacheForBashCommand("gh issue edit 23 34 --add-label bug");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 34, true)).toBeNull();
+	});
+
+	it("skips the values of --attach and gh issue develop --name", () => {
+		seedIssue(23);
+		seedIssue(2024);
+		invalidateGithubCacheForBashCommand("gh issue comment --attach 2024 23");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 2024, true)?.rendered).toBe(`issue-${REPO}-2024`);
+		clearAll();
+		seedIssue(23);
+		seedIssue(7);
+		invalidateGithubCacheForBashCommand("gh issue develop --name 7 23");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 7, true)?.rendered).toBe(`issue-${REPO}-7`);
+	});
+
 	it("falls back to repo-wide invalidation for current-branch `gh pr merge`", () => {
 		seedPr(7);
 		invalidateGithubCacheForBashCommand("gh pr merge --squash --delete-branch");
