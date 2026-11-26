@@ -93,6 +93,8 @@ export interface DisplayFlags {
 	readonly renderEmbeds: Signal<boolean>;
 	/** Cell size when the terminal supports inline pictures. */
 	readonly figureCell: Signal<FigureCell | undefined>;
+	/** Rows a reply's figure may take (a share of the terminal's); undefined: as tall as it draws. */
+	readonly figureRows: Signal<number | undefined>;
 	/** Tables get charts (the main session's do, a focused subagent's do not). */
 	readonly tableCharts: Accessor<boolean>;
 	/** Show bash commands through the shell engine's presentation (`display.shellVisualization`). */
@@ -297,6 +299,7 @@ export class TranscriptPresenter {
 			renderSvg: display.renderSvg,
 			renderEmbeds: display.renderEmbeds,
 			figureCell: display.figureCell,
+			figureRows: display.figureRows,
 			embedHost: { cwd: () => sessionManager.getCwd(), capturePage },
 			showToolResultImages: () => !display.hideToolActivity(),
 			tableCharts: display.tableCharts,
