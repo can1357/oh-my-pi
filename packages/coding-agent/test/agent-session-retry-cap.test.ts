@@ -377,6 +377,43 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
+	it("resumes after a gateway quota 429 with an ISO reset inside the default delay cap", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model");
+		const resetAt = Date.now() + 120_000;
+		const mock = createMockModel({
+			responses: [
+				{ throw: `429 rests until ${new Date(resetAt).toISOString()} (quota)` },
+				{ content: ["Recovered"] },
+			],
+		});
+		const requests: number[] = [];
+		const agent = new Agent({
+			getApiKey: () => "anthropic-test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requests.push(Date.now());
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("Wait for the gateway quota reset");
+		await session.waitForIdle();
+
+		expect(requests).toHaveLength(2);
+		expect(requests[1]).toBeGreaterThanOrEqual(resetAt);
+		expect(requests[1]).toBeLessThan(resetAt + 5_000);
+		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "Recovered" });
+	});
+
 	it("uses the Coding Plan endpoint reset time for a custom provider's automatic retry", async () => {
 		const bundled = getBundledModel("zhipu-coding-plan", "glm-5.3-flashx");
 		if (!bundled) throw new Error("Expected bundled Zhipu Coding Plan model");

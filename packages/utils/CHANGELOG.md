@@ -11,6 +11,7 @@
 ### Fixed
 
 - Fixed `parseImageMetadata` omitting the dimensions of lossless WebP (VP8L) headers shorter than 30 bytes ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
+- Retry hints recognize timezone-qualified `rests until` timestamps in gateway quota errors ([#20647](https://github.com/can1357/oh-my-pi/issues/20647)).
 
 ## [19.2.1] - 2026-11-25
 

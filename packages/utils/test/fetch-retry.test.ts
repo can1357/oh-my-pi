@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
@@ -311,6 +311,21 @@ describe("extractRetryHint", () => {
 		const hint = extractRetryHint(undefined, `Your limit will reset at ${timestamp}`);
 		expect(hint).toBeDefined();
 		expect(Math.abs(hint! - expected)).toBeLessThan(100);
+	});
+
+	it("uses the explicit offset in a gateway reset and waits for the longer hint", () => {
+		const clock = vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 10, 25, 14, 28));
+		try {
+			const body = "429 rests until 2026-11-25T16:30:00.123+02:00 (quota)";
+			expect(extractRetryHint(undefined, `${body} retry-after-ms=5000`)).toBe(120_123);
+			expect(extractRetryHint(undefined, `${body} retry-after-ms=180000`)).toBe(180_000);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("does not infer a timezone for a gateway reset with no offset", () => {
+		expect(extractRetryHint(undefined, "429 rests until 2099-11-25T14:30:00 (quota)")).toBeUndefined();
 	});
 
 	it("prefers an absolute account reset over retry-after-ms", () => {

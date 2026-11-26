@@ -30,10 +30,14 @@ const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-
 // Google Cloud Code Assist structured RPC error timestamp ("quotaResetTimeStamp": "2026-10-31T20:38:36Z")
 const GOOGLE_RPC_RESET_TIMESTAMP_PATTERN =
 	/"quotaResetTimeStamp":\s*"([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z)"/i;
+// Gateway quota cooldown: "rests until 2026-11-25T14:30:00Z (quota)".
+const RESTS_UNTIL_PATTERN =
+	/\brests\s+until\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\b/i;
 const RESET_AT_PATTERNS: readonly RegExp[] = [
 	WILL_RESET_AT_PATTERN,
 	CN_RESET_AT_PATTERN,
 	GOOGLE_RPC_RESET_TIMESTAMP_PATTERN,
+	RESTS_UNTIL_PATTERN,
 ];
 // "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
 const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
@@ -73,6 +77,7 @@ export interface RetryHintOptions {
  *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置` / `"quotaResetTimeStamp": "..."`
  *    (a provider offset makes a naive wall clock authoritative; otherwise it
  *    resolves only when no relative signal is present)
+ *  - `rests until 2026-11-25T14:30:00Z (quota)` (requires an explicit timezone)
  *
  * Returns `undefined` if no signal is found, or `0` when the provider
  * explicitly asks for an immediate retry (`retry-after…=0`, or an absolute
