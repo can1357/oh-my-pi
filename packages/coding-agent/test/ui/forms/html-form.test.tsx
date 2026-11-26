@@ -11,6 +11,7 @@ import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { styledSpans } from "@oh-my-pi/pi-tui/text/styled-spans";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { parseHtmlForm } from "../../../src/tools/html-form/parse";
 import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
 import "../../../src/ui/styles/panels/ask-dialog";
@@ -117,6 +118,44 @@ test("terminal: a <mark> in an option row is highlighted, wrapped rows too", () 
 	const long = highlighted(paint(`<mark>${WORDS}</mark>`));
 	expect(long.length).toBeGreaterThan(1);
 	expect(long.join(" ")).toBe(WORDS);
+});
+
+test("wraps a long textarea line and keeps the caret row visible in a short terminal", () => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><label>Notes <textarea name="notes" rows="4"></textarea></label></form>`),
+		{ onSubmit, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 12} /> }), {
+		columns: 42,
+		rows: 12,
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		const start = "Use the marked trail rather than the road.";
+		term.type(start);
+		expect(term.screen().some(row => row.includes("Use the marked trail"))).toBe(true);
+		expect(term.screen().some(row => row.includes("the road.▏"))).toBe(true);
+		expect(term.screen().join("\n")).not.toContain("…");
+
+		// Up steps to the wrapped row above, keeping the caret's column, instead of leaving the field.
+		term.press("up");
+		term.type("X");
+		const edited = start.replace("Use the m", "Use the mX");
+		expect(term.screen().some(row => row.includes("Use the mXarked"))).toBe(true);
+		term.press("end");
+
+		const suffix = " Follow the signs by the river and continue past the bridge.".repeat(4) + " Meet at sunrise.";
+		term.paste(suffix);
+		expect(term.screen().join("\n")).toContain("at sunrise.▏");
+		term.press("home");
+		expect(term.screen().join("\n")).toContain("Use the mXarked trail");
+		expect(term.screen().join("\n")).not.toContain("at sunrise.");
+		term.press("enter");
+		expect(onSubmit).toHaveBeenCalledWith({ notes: edited + suffix }, []);
+	} finally {
+		term.dispose();
+	}
 });
 
 corpusSuite({
