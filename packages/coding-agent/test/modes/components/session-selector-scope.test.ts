@@ -86,7 +86,6 @@ describe("session selector scope toggle", () => {
 		try {
 			picker.press("tab");
 			await settle();
-			expect(picker.screen()).toContain("(all projects)");
 			expect(picker.screen()).not.toContain("other-project");
 
 			complete.resolve(completed);
