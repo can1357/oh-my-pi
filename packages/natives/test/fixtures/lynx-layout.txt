@@ -1,0 +1,27 @@
+   #Next chapter Feed
+
+                                                                                                                                                                                                                                          Release notes
+
+   Left again
+
+   Illustration: Plan and [LINK]-[USEMAP:map.png].
+                                                                                                                                                                                        ___________________________________________________________
+
+     Key            Value
+     Size           Large
+
+     WARNING: Caution
+
+     FOOTNOTE: Source
+
+  "A  B"        C
+x₂
+
+
+next
+
+<b>literal &amp; text</b>
+
+   [MATH: x<sup>2</sup> & y :MATH]
+   Done.
+   [Size] ___ units

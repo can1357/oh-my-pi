@@ -23,7 +23,7 @@ export type DownloadUnit = "bytes" | "steps";
 export interface DownloadActivity {
 	/** Unique for the lifetime of the process. */
 	id: number;
-	/** What is being fetched, e.g. `SmolLM2-135M` or `yt-dlp`. */
+	/** What is being fetched, e.g. `SmolLM2-135M` or `Chromium`. */
 	label: string;
 	/** Current step or file, e.g. `model.safetensors` or `installing mlx-lm`. */
 	detail?: string;
