@@ -361,7 +361,10 @@ function resultView(
 		isError: result.isError === true,
 		isPartial: state.isPartial,
 	});
-	if (!details) {
+	// An aborted or synthetic TASK result persists details without `results`
+	// (`{}`, `{"__synthetic":true,…}`): render it as the plain result, or the
+	// task card throws on the missing list and a session holding one cannot resume.
+	if (!isTaskToolDetails(details)) {
 		const fallback = text.trim();
 		if (result.isError) {
 			return {

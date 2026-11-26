@@ -1,8 +1,33 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as zlib from "node:zlib";
 import { decodePng } from "@oh-my-pi/pi-coding-agent/tools/browser/screenshot";
-import { fitImage, formatDimensionNote, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import {
+	fitImage,
+	formatDimensionNote,
+	readImageHeaderDimensions,
+	resizeImage,
+} from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
+
+describe("readImageHeaderDimensions", () => {
+	it.each([
+		["WebP VP8", "524946461600000057454250565038200a0000001000009d012a41018e02", "image/webp"],
+		["WebP VP8L", "5249464612000000574542505650384c050000002f4041a300", "image/webp"],
+		["WebP VP8X", "524946461600000057454250565038580a000000000000004001008d0200", "image/webp"],
+		["GIF", "47494638396141018e02000000", "image/gif"],
+	])("supplies render dimensions and MIME type for %s", (_format, header, mimeType) => {
+		expect(readImageHeaderDimensions(Buffer.from(header, "hex"))).toEqual({ width: 321, height: 654, mimeType });
+	});
+
+	it.each([
+		["WebP VP8", "524946461600000057454250565038200a0000001000009d012a41018e"],
+		["WebP VP8L", "5249464612000000574542505650384c050000002f4041a3"],
+		["WebP VP8X", "524946461600000057454250565038580a000000000000004001008d02"],
+		["GIF", "47494638396141018e"],
+	])("does not supply render dimensions for a truncated %s header", (_format, header) => {
+		expect(readImageHeaderDimensions(Buffer.from(header, "hex"))).toBeUndefined();
+	});
+});
 
 // 1x1 red PNG (69 bytes) — used as a Bun.Image seed to synthesize larger fixtures
 // without checking binary blobs into the repo.

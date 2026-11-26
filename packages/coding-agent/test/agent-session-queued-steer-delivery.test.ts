@@ -922,7 +922,9 @@ describe("AgentSession queued steer delivery", () => {
 				]);
 				expect(removed).toBe(true);
 				expect(remaining).toEqual(queued.slice(2));
-				expect(pendingAtFirstRecord).toEqual([]);
+				// The claimed message stays listed until the transcript records it (its companion
+				// comes first), but removal can no longer reach it.
+				expect(pendingAtFirstRecord).toEqual([chip("keep B")]);
 				expect(removedAfterClaim).toBe(false);
 				const notices = session.messages.filter(
 					(message): message is CustomMessage =>

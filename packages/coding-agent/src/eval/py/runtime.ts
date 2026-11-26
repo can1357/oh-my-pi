@@ -99,7 +99,8 @@ function normalizeEnvKey(key: string): string {
 	return CASE_INSENSITIVE_ENV ? key.toUpperCase() : key;
 }
 
-function resolvePathKey(env: Record<string, string | undefined>): string {
+/** The key `env` stores PATH under: `PATH`, or on Windows whatever casing it already uses. */
+export function resolvePathKey(env: Record<string, string | undefined>): string {
 	if (!CASE_INSENSITIVE_ENV) return "PATH";
 	const match = Object.keys(env).find(candidate => candidate.toLowerCase() === "path");
 	return match ?? "PATH";

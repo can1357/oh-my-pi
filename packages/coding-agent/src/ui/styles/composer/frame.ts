@@ -30,6 +30,8 @@ export type ComposerTerm = {
 	readonly borderFaint?: boolean;
 	/** Dim every cell. */
 	readonly faint?: boolean;
+	/** Move the box bottom border to its own row while the hardware cursor is active (macOS IME preedit). */
+	readonly imeSafeCursor?: boolean;
 };
 
 const MARK = "\u0000";
@@ -100,21 +102,28 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 	if (top !== undefined) rows.push(top);
 	let cursor: Cell | undefined;
 	const fieldRows = block.rows.length > 0 ? block.rows : [""];
+	const imeSafeCursorTail = term.imeSafeCursor === true && shape.sideBorders;
 	for (let i = 0; i < fieldRows.length; i++) {
 		const text = fieldRows[i]!;
 		const width = visibleWidth(text);
-		if (block.cursor?.row === i) cursor = { row: rows.length, col: side + gutterWidth + block.cursor.col };
-		rows.push(
-			...shape.row({
-				...chrome,
-				text,
-				pad: " ".repeat(Math.max(0, contentWidth - width)),
-				gutter: i === 0 ? gutter : " ".repeat(gutterWidth),
-				first: i === 0,
-				last: i === fieldRows.length - 1,
-				overflow: Math.max(0, width - contentWidth),
-			}),
-		);
+		const rendered = shape.row({
+			...chrome,
+			text,
+			pad: " ".repeat(Math.max(0, contentWidth - width)),
+			gutter: i === 0 ? gutter : " ".repeat(gutterWidth),
+			first: i === 0,
+			last: i === fieldRows.length - 1,
+			imeSafeCursorTail: i === fieldRows.length - 1 && imeSafeCursorTail,
+			overflow: Math.max(0, width - contentWidth),
+		});
+		const textFirst = Array.isArray(rendered);
+		if (block.cursor?.row === i) {
+			cursor = {
+				row: rows.length + (textFirst ? 0 : rendered.textRow),
+				col: side + gutterWidth + block.cursor.col,
+			};
+		}
+		rows.push(...(textFirst ? rendered : rendered.rows));
 	}
 	const bottom = shape.bottom?.(chrome);
 	if (bottom !== undefined) rows.push(bottom);
