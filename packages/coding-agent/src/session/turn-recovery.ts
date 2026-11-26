@@ -1326,11 +1326,27 @@ export class TurnRecovery {
 
 		this.#unexpectedStopRetryCount++;
 		if (this.#unexpectedStopRetryCount > UNEXPECTED_STOP_MAX_RETRIES) {
+			const attempts = this.#unexpectedStopRetryCount - 1;
+			const finalError =
+				"Assistant returned an unexpected stop after retry cap; try compacting the context or switching models";
+			assistantMessage.errorMessage = finalError;
 			logger.warn("Assistant returned unexpected stop after retry cap", {
-				attempts: this.#unexpectedStopRetryCount - 1,
+				attempts,
 				model: assistantMessage.model,
 				provider: assistantMessage.provider,
 			});
+			// The capped turn stays in the transcript, so its error is persisted too;
+			// otherwise a resumed session shows it as a healthy stop.
+			await this.#host.sessionManager.rewriteEntries();
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt: this.#retryAttempt > 0 ? this.#retryAttempt : attempts,
+				finalError,
+			});
+			this.#clearPendingRetryErrors();
+			this.#retryAttempt = 0;
+			this.resolveRetry();
 			this.#unexpectedStopRetryCount = 0;
 			return false;
 		}

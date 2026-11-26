@@ -6,7 +6,7 @@ import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
@@ -402,6 +402,43 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(mock.calls).toHaveLength(4);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(3);
 		expect(warnSpy).toHaveBeenCalled();
+	});
+
+	it("ends a capped unexpected stop as a failed retry on the terminal turn", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness(
+			[
+				thinkingOnlyStop("first thought"),
+				thinkingOnlyStop("second thought"),
+				thinkingOnlyStop("third thought"),
+				thinkingOnlyStop("fourth thought"),
+			],
+			{
+				"features.unexpectedStopDetection": "smart",
+			},
+		);
+		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ type: "auto_retry_end", success: false, attempt: 3 });
+		const finalError = retryEndEvents[0]?.finalError;
+		const terminal = session.agent.state.messages.findLast(message => message.role === "assistant");
+		expect(terminal).toMatchObject({ stopReason: "stop", errorMessage: finalError });
+		expect(
+			session.sessionManager
+				.getEntries()
+				.findLast(entry => entry.type === "message" && entry.message.role === "assistant"),
+		).toMatchObject({
+			message: { errorMessage: finalError },
+		});
 	});
 
 	it("does not classify a message that contains a tool call", async () => {
