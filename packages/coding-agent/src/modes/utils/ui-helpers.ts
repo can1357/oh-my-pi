@@ -726,6 +726,8 @@ export class UiHelpers {
 					}
 					if (isBackground && !settled) {
 						pending.parkAsBackground();
+						// The call has returned; only the job is still running.
+						transcript.settle(pending.block);
 						backgroundCallIds.add(message.toolCallId);
 					} else {
 						ctx.pendingTools.delete(message.toolCallId);
