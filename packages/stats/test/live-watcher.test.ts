@@ -50,8 +50,8 @@ function nextSync(live: StatsLive): Promise<LiveStatus> {
 }
 
 describe("StatsLive session watcher", () => {
-	// Root reads every directory, so the denial this covers cannot happen.
-	it.skipIf(process.getuid?.() === 0)(
+	// Only Linux's recursive watcher reports the denied subtree as an error; root reads every directory anyway.
+	it.skipIf(process.platform !== "linux" || process.getuid?.() === 0)(
 		"syncs a written transcript while another sessions directory is unreadable",
 		async () => {
 			const locked = path.join(getSessionsDir(), "-root-only");

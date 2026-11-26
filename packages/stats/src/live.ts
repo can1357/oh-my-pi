@@ -55,6 +55,7 @@ export class StatsLive {
 	#watcher: fs.FSWatcher | null = null;
 	#fullSyncTimer: NodeJS.Timeout | null = null;
 	#debounceTimer: NodeJS.Timeout | null = null;
+	#maxWaitTimer: NodeJS.Timeout | null = null;
 	#versionTimer: NodeJS.Timeout | null = null;
 	#progressTimer: NodeJS.Timeout | null = null;
 	#retryTimer: NodeJS.Timeout | null = null;
@@ -92,13 +93,15 @@ export class StatsLive {
 		for (const timer of [
 			this.#fullSyncTimer,
 			this.#debounceTimer,
+			this.#maxWaitTimer,
 			this.#versionTimer,
 			this.#progressTimer,
 			this.#retryTimer,
 		]) {
 			clearTimeout(timer ?? undefined);
 		}
-		this.#fullSyncTimer = this.#debounceTimer = this.#versionTimer = this.#progressTimer = this.#retryTimer = null;
+		this.#fullSyncTimer = this.#debounceTimer = this.#maxWaitTimer = null;
+		this.#versionTimer = this.#progressTimer = this.#retryTimer = null;
 		this.#queued = null;
 	}
 
@@ -133,6 +136,9 @@ export class StatsLive {
 		// Targeted syncs of a file or two stay quiet; only full syncs show progress.
 		const visible = files === undefined;
 		if (visible) {
+			// Any full sync (periodic or requested) resets the schedule; the next is armed when this one ends.
+			clearTimeout(this.#fullSyncTimer ?? undefined);
+			this.#fullSyncTimer = null;
 			this.#sync = { ...this.#sync, phase: "syncing", current: 0, total: 0, processed: 0, error: null };
 			this.#emit();
 		}
@@ -259,20 +265,21 @@ export class StatsLive {
 	#watch(): void {
 		const root = getSessionsDir();
 		const pending = new Set<string>();
-		let firstPendingAt = 0;
+		const flush = () => {
+			clearTimeout(this.#debounceTimer ?? undefined);
+			clearTimeout(this.#maxWaitTimer ?? undefined);
+			this.#debounceTimer = this.#maxWaitTimer = null;
+			const files = [...pending];
+			pending.clear();
+			this.requestSync(files);
+		};
 		try {
 			this.#watcher = fs.watch(root, { recursive: true }, (_event, filename) => {
 				if (!filename?.endsWith(".jsonl") || isCompressScratchPath(filename)) return;
-				if (pending.size === 0) firstPendingAt = Date.now();
 				pending.add(path.join(root, filename));
 				clearTimeout(this.#debounceTimer ?? undefined);
-				const wait = Math.min(WATCH_DEBOUNCE_MS, Math.max(0, firstPendingAt + WATCH_MAX_WAIT_MS - Date.now()));
-				this.#debounceTimer = setTimeout(() => {
-					this.#debounceTimer = null;
-					const files = [...pending];
-					pending.clear();
-					this.requestSync(files);
-				}, wait);
+				this.#debounceTimer = setTimeout(flush, WATCH_DEBOUNCE_MS);
+				this.#maxWaitTimer ??= setTimeout(flush, WATCH_MAX_WAIT_MS);
 			});
 			this.#watcher.on("error", error => {
 				// An unreadable subtree (e.g. a root-only directory) fails only its own watch; the rest keeps reporting.
