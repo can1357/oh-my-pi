@@ -14,6 +14,10 @@
 ### Fixed
 
 - Fixed the edit tool rewriting every line of a mixed CRLF and LF file with the file's first line ending, so each untouched line now keeps its own ending ([#20390](https://github.com/can1357/oh-my-pi/pull/20390) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
+- Preserved source-code indentation and linked content cards in URL reads.
+
 - The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
 
 ## [19.2.1] - 2026-11-25

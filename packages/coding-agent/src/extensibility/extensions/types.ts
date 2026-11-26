@@ -1903,7 +1903,7 @@ export interface TodoBackendDefinition {
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
 /** Service tiers accepted by each provider family. */
-export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic"
+export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic" | "devin"
 	? "priority"
 	: Family extends "google"
 		? "flex" | "priority"

@@ -341,3 +341,72 @@ test("assistant embeds draw their image and page still, but do not load when ima
 		transcript.clear();
 	}
 });
+
+test("embeds at a reply's edges keep their image rows in the transcript block", async () => {
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const img = (alt: string) => `<img src="data:image/png;base64,${PNG_1X1}" alt="${alt}">`;
+	const text = [img("Lead"), "", "Between", "", img("Tail")].join("\n");
+	const block = transcript.append(() => (
+		<AssistantMessageBlock
+			model={{ message: assistant([{ type: "text", text }], 2), finalized: true, renderEmbeds: true }}
+		/>
+	));
+	const paint = () => paintNode(env, block.node, 80).rows.join("\n");
+	try {
+		paint();
+		transcript.settle(block);
+		await figureWorkSettled();
+		paint();
+		await images.whenEncoded();
+		expect(paint()).toMatch(/^\x1bP[\d;]*q[^\n]*\n\n[^\n]*Between[^\n]*\n\n\x1bP[\d;]*q[^\n]*$/);
+	} finally {
+		transcript.clear();
+	}
+});
+
+test("an embedded picture taller than the figure room is fitted within its rows, following the room", async () => {
+	const tall = await new Bun.Image(Buffer.from(PNG_1X1, "base64")).resize(16, 320).png().toBase64();
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const figureRows = signal(5);
+	const text = `<img src="data:image/png;base64,${tall}" alt="Tall">`;
+	const block = transcript.append(() => (
+		<AssistantMessageBlock
+			model={{ message: assistant([{ type: "text", text }], 2), finalized: true, renderEmbeds: true, figureRows }}
+		/>
+	));
+	const paint = () => paintNode(env, block.node, 80).rows.join("\n");
+	try {
+		paint();
+		transcript.settle(block);
+		await figureWorkSettled();
+		paint();
+		await images.whenEncoded();
+		// 16×320 px is 20 rows of 8×16 cells at its natural size.
+		expect(paint()).toMatch(/^\x1b7\x1b\[4A\x1bP[\d;]*q/m);
+		figureRows.set(10);
+		paint();
+		await images.whenEncoded();
+		expect(paint()).toMatch(/^\x1b7\x1b\[9A\x1bP[\d;]*q/m);
+	} finally {
+		transcript.clear();
+	}
+});
+
+test("a leading assistant image keeps all its rows while encoding and after drawing", async () => {
+	const data = await new Bun.Image(Buffer.from(PNG_1X1, "base64")).resize(48, 48).png().toBase64();
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const message = assistant([{ type: "image", mimeType: "image/png", data }], 2);
+	const block = transcript.append(() => <AssistantMessageBlock model={{ message, finalized: true }} />);
+	try {
+		expect(paintNode(env, block.node, 80).rows).toHaveLength(3);
+		await images.whenEncoded();
+		const { rows } = paintNode(env, block.node, 80);
+		expect(rows).toHaveLength(3);
+		expect(rows[2]).toMatch(/\x1b7\x1b\[2A\x1bP[\d;]*q/);
+	} finally {
+		transcript.clear();
+	}
+});

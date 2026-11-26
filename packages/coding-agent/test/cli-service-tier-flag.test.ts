@@ -48,7 +48,7 @@ describe("--service-tier", () => {
 				cwd: process.cwd(),
 				agentDir: process.cwd(),
 				modelRegistry: new ModelRegistry(authStorage),
-				settings: Settings.isolated({ "tier.anthropic": "priority" }),
+				settings: Settings.isolated({ "tier.anthropic": "priority", "tier.devin": "priority" }),
 				sessionManager,
 				openAIServiceTier: "flex",
 				disableExtensionDiscovery: true,
@@ -60,7 +60,7 @@ describe("--service-tier", () => {
 				enableLsp: false,
 			});
 			try {
-				expect(session.serviceTierByFamily).toEqual({ openai: "flex", anthropic: "priority" });
+				expect(session.serviceTierByFamily).toEqual({ openai: "flex", anthropic: "priority", devin: "priority" });
 			} finally {
 				await session.dispose();
 			}
