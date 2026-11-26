@@ -49,7 +49,10 @@ export class InputDecoder {
 		};
 		const tokens: TokenSink = {
 			sequence: seq => this.#classify(seq, true),
-			paste,
+			paste: text => {
+				this.#flushRecords();
+				paste(text);
+			},
 		};
 		const relayed: TokenSink = {
 			sequence: seq => this.#classify(seq, false),
@@ -124,6 +127,8 @@ export class InputDecoder {
 			if (!this.#processing) this.#flushRecords();
 			return;
 		}
+		// Keep a run of Win32 records together without letting later raw input overtake it.
+		if (direct) this.#flushRecords();
 		const tsp = parseTspMessage(seq);
 		if (tsp) {
 			this.#sink.input({
