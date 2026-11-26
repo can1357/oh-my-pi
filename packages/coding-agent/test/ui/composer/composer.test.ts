@@ -10,6 +10,7 @@ import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { getKeybindings, KeybindingsManager, setKeybindings } from "../../../src/config/keybindings/keybindings";
 import {
 	Composer,
@@ -216,7 +217,7 @@ describe("extension hooks", () => {
 	});
 });
 
-describe("undo", () => {
+describe("undo and redo", () => {
 	test("typing is one step per word and its blanks; ctrl+- undoes it", () => {
 		const { composer, type } = make();
 		type("one two");
@@ -224,6 +225,49 @@ describe("undo", () => {
 		expect(composer.text()).toBe("one ");
 		type("\x1f");
 		expect(composer.text()).toBe("");
+	});
+
+	test.each(["\x1e", "\x1b[54:94;6u"])("restores an undone edit with %j until a new edit replaces it", redo => {
+		const { composer, type } = make({ text: "ac" });
+		type("\x1b[D", "b", "\x1f", "\x1b[D", redo);
+		expect([composer.text(), composer.cursor()]).toEqual(["abc", 1]);
+		type("\x1f", "x", redo);
+		expect([composer.text(), composer.cursor()]).toEqual(["axc", 2]);
+	});
+
+	test("keeps the caret within the draft when redoing a deletion", () => {
+		const { composer, type } = make({ text: "abc" });
+		type("\x7f", "\x1f", "\x1e");
+		expect([composer.text(), composer.cursor()]).toEqual(["ab", 2]);
+		type("\x1f");
+		expect(composer.text()).toBe("abc");
+	});
+
+	test("uses a redo remap from keybindings.yml instead of the defaults", async () => {
+		using dir = TempDir.createSync("@omp-redo-keybindings-");
+		await Bun.write(dir.join("keybindings.yml"), "tui.editor.redo: ctrl+shift+z\n");
+		const previous = getKeybindings();
+		try {
+			KeybindingsManager.create(dir.path(), { inheritedAgentDir: dir.path() });
+			const { composer, type } = make();
+			type("draft", "\x1f", "\x1e", "\x1b[54:94;6u");
+			expect(composer.text()).toBe("");
+			type("\x1b[122:90;6u");
+			expect(composer.text()).toBe("draft");
+		} finally {
+			setKeybindings(previous);
+		}
+	});
+
+	test("keeps live dictation out of undo and redo history", () => {
+		const { composer, type } = make();
+		type("one two", "\x1f");
+		composer.setVolatileText("preview");
+		type("\x1e", "\x1f");
+		expect(composer.text()).toBe("one preview");
+		composer.clearVolatileText();
+		type("\x1e");
+		expect(composer.text()).toBe("one two");
 	});
 });
 

@@ -72,6 +72,7 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.yank": { defaultKeys: "ctrl+y", description: "Yank" },
 	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop" },
 	"tui.editor.undo": { defaultKeys: ["ctrl+-", "ctrl+_"], description: "Undo" },
+	"tui.editor.redo": { defaultKeys: ["ctrl+^", "ctrl+shift+6"], description: "Redo in the prompt editor" },
 	"tui.editor.spellingSuggestions": {
 		defaultKeys: "ctrl+.",
 		description: "Show spelling replacements",
