@@ -379,10 +379,26 @@ impl GitRepo {
 		// landed last, including when `no_verify` skips the hook.
 		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
 		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
-		// message, as under `git commit`; only the private copy is read back.
-		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
-		if !options.no_verify {
-			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
+		// message, as under `git commit`. When such a hook can run, overlapping
+		// calls hold a repository lock from this write until that hook returns,
+		// so each hook observes the message written for its own commit. The
+		// guard ends here: signing and later hooks must not keep the next
+		// commit waiting. Without a hook nobody consumes the file and the write
+		// stays best-effort.
+		let editmsg_read = !options.no_verify
+			&& (self.hook_path("commit-msg")?.is_some() || hook_configured(self, "commit-msg")?);
+		{
+			let _editmsg_lock = editmsg_read.then(|| lock_commit_editmsg(&self.info().git_dir));
+			match fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message) {
+				Ok(()) => {},
+				Err(err) if editmsg_read => {
+					return Err(Error::backend("git commit write COMMIT_EDITMSG", err));
+				},
+				Err(_) => {},
+			}
+			if !options.no_verify {
+				run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
+			}
 		}
 		let message = fs::read_to_string(&message_file.path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
@@ -1243,6 +1259,43 @@ impl Drop for CommitMessageFile {
 	fn drop(&mut self) {
 		let _ = fs::remove_file(&self.path);
 	}
+}
+
+/// Lock `.git/COMMIT_EDITMSG` so a hook that reads the documented path instead
+/// of its argument observes its own call's message. The caller holds the guard
+/// from the shared write until `commit-msg` returns, then drops it; signing and
+/// later hooks do not keep the next commit waiting.
+///
+/// The held lock is an `flock(2)` / `LockFileEx` on a persistent file inside
+/// the git dir, so it also orders commits driven by other omp processes.
+/// `git commit` takes no such lock and can still interleave.
+///
+/// An existing file is opened read-only: locking needs no write access, so a
+/// lock file owned by another user still serializes every caller. `None` means
+/// the platform refused (open or lock failure); callers then fall back to the
+/// unserialized write rather than fail a commit that ran correctly before.
+fn lock_commit_editmsg(git_dir: &Path) -> Option<fs::File> {
+	let path = git_dir.join(".omp-commit-editmsg.lock");
+	let file = match fs::File::open(&path) {
+		Ok(file) => file,
+		Err(err) if err.kind() == io::ErrorKind::NotFound => {
+			match fs::OpenOptions::new()
+				.read(true)
+				.write(true)
+				.create_new(true)
+				.open(&path)
+			{
+				Ok(file) => file,
+				// Another caller won the create; its file needs only read
+				// access to lock, same as any older lock file.
+				Err(err) if err.kind() == io::ErrorKind::AlreadyExists => fs::File::open(&path).ok()?,
+				Err(_) => return None,
+			}
+		},
+		Err(_) => return None,
+	};
+	file.lock().ok()?;
+	Some(file)
 }
 
 /// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the

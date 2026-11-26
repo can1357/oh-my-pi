@@ -83,6 +83,152 @@ describe("commitCreate message isolation", () => {
 		expect(await Bun.file(shared).text()).toBe("stolen subject\n\nstolen body\n");
 	});
 
+	test("serializes the shared COMMIT_EDITMSG through the commit-msg hook", async () => {
+		const root = await repository();
+		const gitDir = path.join(root, ".git");
+		// Legacy hooks ignore $1 and read the documented COMMIT_EDITMSG path. The
+		// hook parks after recording which call it is (its private file's name);
+		// only once released does it record the shared file it actually saw.
+		await installHook(
+			root,
+			[
+				"#!/bin/bash",
+				'name=$(basename "$1")',
+				'echo "$name" >> "$GIT_DIR/hook-ran"',
+				"end=$((SECONDS + 60))",
+				// Sleep so a parked hook does not spin a core while the test waits.
+				'while [ ! -f "$GIT_DIR/release-all" ] && [ $SECONDS -lt $end ]; do sleep 0.1; done',
+				'cat "$GIT_DIR/COMMIT_EDITMSG" > "$GIT_DIR/seen-$name"',
+				"",
+			].join("\n"),
+		);
+		const repo = vcsGitDiscover(root)!;
+		const ran = path.join(gitDir, "hook-ran");
+
+		const hookRuns = async (): Promise<string[]> => {
+			try {
+				return (await Bun.file(ran).text()).split("\n").filter(line => line.length > 0);
+			} catch {
+				return [];
+			}
+		};
+		// Bounded by a clock deadline, not a loop count, so a slow runner has the
+		// full budget to spawn the next hook.
+		const waitForHookCount = async (count: number, budgetMs: number): Promise<string[]> => {
+			const deadline = Date.now() + budgetMs;
+			let runs = await hookRuns();
+			while (runs.length < count && Date.now() < deadline) {
+				await Bun.sleep(25);
+				runs = await hookRuns();
+			}
+			return runs;
+		};
+
+		const first = repo.commitCreate("first subject\n\nfirst body\n", { allowEmpty: true });
+		// If an assertion below fails first, the commits settle after the repo is
+		// cleaned up; keep their rejections from leaking into other tests.
+		first.catch(() => {});
+		const runs1 = await waitForHookCount(1, 10_000);
+		expect(runs1).toHaveLength(1);
+		// While the first hook is parked, a second call must not reach its own
+		// hook. Without serialization it does, and the first hook then reads the
+		// second call's message.
+		const second = repo.commitCreate("second subject\n\nsecond body\n", { allowEmpty: true });
+		second.catch(() => {});
+		const runsWhileParked = await waitForHookCount(2, 2_000);
+		try {
+			expect(runsWhileParked).toHaveLength(1);
+		} finally {
+			await Bun.write(path.join(gitDir, "release-all"), "");
+		}
+		const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+		// The loser of the ref update never lands, so its hook view has to be read
+		// from the hook log after both calls settle, not from a success branch.
+		const runs = await waitForHookCount(2, 10_000);
+		expect(runs).toHaveLength(2);
+		expect(runs[0]).toBe(runs1[0]);
+		const seen = async (name: string): Promise<string> =>
+			(await Bun.file(path.join(gitDir, `seen-${name}`)).text()).trim();
+		expect(await seen(runs[0])).toBe("first subject\n\nfirst body");
+		expect(await seen(runs[1])).toBe("second subject\n\nsecond body");
+		expect([firstResult, secondResult].filter(result => result.status === "fulfilled")).toHaveLength(1);
+	}, 30_000);
+
+	test("releases the shared-message lock before the post-commit hook", async () => {
+		const root = await repository();
+		const gitDir = path.join(root, ".git");
+		await installHook(root, ["#!/bin/bash", 'echo commit-msg >> "$GIT_DIR/hook-ran"', "exit 0", ""].join("\n"));
+		const postCommit = path.join(gitDir, "hooks", "post-commit");
+		await Bun.write(
+			postCommit,
+			[
+				"#!/bin/bash",
+				'echo post-commit >> "$GIT_DIR/hook-ran"',
+				"end=$((SECONDS + 60))",
+				'while [ ! -f "$GIT_DIR/release-all" ] && [ $SECONDS -lt $end ]; do sleep 0.1; done',
+				"",
+			].join("\n"),
+		);
+		await fs.chmod(postCommit, 0o755);
+		const repo = vcsGitDiscover(root)!;
+		const ran = path.join(gitDir, "hook-ran");
+		const hookRuns = async (): Promise<string[]> => {
+			try {
+				return (await Bun.file(ran).text()).split("\n").filter(line => line.length > 0);
+			} catch {
+				return [];
+			}
+		};
+
+		const first = repo.commitCreate("first subject\n", { allowEmpty: true });
+		first.catch(() => {});
+		let second: Promise<string> | undefined;
+		try {
+			const deadline = Date.now() + 10_000;
+			let runs = await hookRuns();
+			while (!runs.includes("post-commit") && Date.now() < deadline) {
+				await Bun.sleep(25);
+				runs = await hookRuns();
+			}
+			expect(runs).toContain("post-commit");
+			// commit-msg has returned, so the next commit must be able to run its
+			// own commit-msg hook while this post-commit hook is still parked.
+			second = repo.commitCreate("second subject\n", { allowEmpty: true });
+			second.catch(() => {});
+			const secondDeadline = Date.now() + 10_000;
+			while (runs.filter(line => line === "commit-msg").length < 2 && Date.now() < secondDeadline) {
+				await Bun.sleep(25);
+				runs = await hookRuns();
+			}
+			expect(runs.filter(line => line === "commit-msg")).toHaveLength(2);
+		} finally {
+			await Bun.write(path.join(gitDir, "release-all"), "");
+			await Promise.allSettled([first, ...(second ? [second] : [])]);
+		}
+	}, 30_000);
+
+	test("rejects a hooked commit when COMMIT_EDITMSG cannot be written", async () => {
+		const root = await repository();
+		const shared = path.join(root, ".git", "COMMIT_EDITMSG");
+		await fs.rm(shared, { force: true });
+		await fs.mkdir(shared);
+		await installHook(root, "#!/bin/sh\nexit 0\n");
+		const head = await git(root, "rev-parse", "HEAD");
+		const repo = vcsGitDiscover(root)!;
+
+		await expect(repo.commitCreate("must not land\n", { allowEmpty: true })).rejects.toThrow(/COMMIT_EDITMSG/);
+		expect(await git(root, "rev-parse", "HEAD")).toBe(head);
+
+		const skipped = await repo.commitCreate("skipped the hook\n", { allowEmpty: true, noVerify: true });
+		expect(skipped).toBe(await git(root, "rev-parse", "HEAD"));
+		expect(await git(root, "log", "-1", "--format=%B")).toBe("skipped the hook");
+
+		await fs.rm(path.join(root, ".git", "hooks", "commit-msg"));
+		const unhooked = await repo.commitCreate("no hook reads it\n", { allowEmpty: true });
+		expect(unhooked).toBe(await git(root, "rev-parse", "HEAD"));
+		expect(await git(root, "log", "-1", "--format=%B")).toBe("no hook reads it");
+	});
+
 	test("leaves no message file behind when noVerify skips the hook", async () => {
 		const root = await repository();
 		const gitDir = path.join(root, ".git");
