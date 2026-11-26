@@ -1,8 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
-import { type MCPToolDetails, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { type MCPToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/mcp";
 
 import { resetSettingsForTest, Settings } from "../../src/config/settings";
 import type { CustomToolContext, CustomToolResult } from "../../src/extensibility/custom-tools/types";
@@ -12,6 +11,11 @@ import { MCPTool } from "../../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolCallParams, MCPToolCallResult, MCPToolDefinition } from "../../src/mcp/types";
 import { SessionManager } from "../../src/session/session-manager";
 import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
+import { toolText } from "../helpers/tool-text";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function toolFor(result: MCPToolCallResult | ((params: MCPToolCallParams) => MCPToolCallResult)): MCPTool {
 	const connection = {
@@ -311,14 +315,17 @@ describe("MCP result rendering with structuredContent", () => {
 	beforeAll(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		await initTheme(false, undefined, undefined, "dark", "light");
 	}, 15_000);
 
+	/** The expanded transcript card of the MCP call's result, as plain text. */
 	async function renderText(result: MCPToolCallResult): Promise<string> {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("dark theme missing");
-		const built = await build(result);
-		return Bun.stripANSI(renderMCPResult(built, { expanded: true, isPartial: false }, theme).render(160).join("\n"));
+		return toolText({
+			name: "mcp__rhizome-mcp_list_issues",
+			args: {},
+			result: await build(result),
+			expanded: true,
+			width: 160,
+		});
 	}
 
 	it("renders the appended structured payload, not just the ack", async () => {

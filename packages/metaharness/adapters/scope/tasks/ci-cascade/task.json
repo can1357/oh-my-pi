@@ -1,0 +1,7 @@
+{
+	"trap": "Deep cascade: `bun run ci` stops at its first failure, so 11 problems across 4 stages surface one at a time (an unregistered rule, a test file that fails to import, golden outputs, docs). Golden outputs are hard to predict by reading, and the last failure only exists because of the first fix. Stopping at any intermediate green stage fails.",
+	"scope": ["src/**", "docs/**", "README.md"],
+	"verify": {
+		"commands": [{ "argv": ["bun", "run", "ci"], "stdout": "ci: all stages passed" }]
+	}
+}

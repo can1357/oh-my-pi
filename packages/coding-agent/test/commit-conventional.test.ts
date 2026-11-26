@@ -81,13 +81,13 @@ describe("llm-git scope parity", () => {
 	});
 
 	test("uses the same dominant and cross-cutting scope thresholds", () => {
-		const dominant = extractScopeCandidates("90\t10\tpackages/core/a.ts\n5\t5\tpackages/ui/b.ts\n", DEFAULT_CONFIG);
+		const dominant = extractScopeCandidates("90\t10\tpackages/core/a.ts\n5\t5\tpackages/tui/b.ts\n", DEFAULT_CONFIG);
 		expect(dominant).toEqual({
 			scopeCandidates: "core (91%, moderate confidence)",
 			isWide: false,
 		});
 		const wide = extractScopeCandidates(
-			"10\t0\tpackages/core/a.ts\n10\t0\tpackages/ui/b.ts\n10\t0\tpackages/api/c.ts\n",
+			"10\t0\tpackages/core/a.ts\n10\t0\tpackages/tui/b.ts\n10\t0\tpackages/api/c.ts\n",
 			DEFAULT_CONFIG,
 		);
 		expect(wide).toEqual({ scopeCandidates: "(none - multi-component change)", isWide: true });

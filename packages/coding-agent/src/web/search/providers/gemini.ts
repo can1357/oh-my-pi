@@ -22,7 +22,8 @@ import {
 import { clampThinkingLevelForModel, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";

@@ -14,7 +14,16 @@
  * paints it. Every shown prediction later resolves exactly once, so
  * `resolved{accepted}` over `shown` is the acceptance rate.
  */
-import { type Attributes, type Counter, type Histogram, type MeterProvider, metrics } from "@opentelemetry/api";
+import type * as OtelApi from "@opentelemetry/api";
+import type { Attributes, Counter, Histogram, MeterProvider } from "@opentelemetry/api";
+
+// Lazy accessor: keeps @opentelemetry/api off interactive-mode startup until a
+// prediction metric is actually recorded without an explicit provider.
+let otelApiCache: typeof OtelApi | undefined;
+function defaultMeterProvider(): MeterProvider {
+	if (!otelApiCache) otelApiCache = require("@opentelemetry/api") as typeof OtelApi;
+	return otelApiCache.metrics.getMeterProvider();
+}
 
 /**
  * How a prediction request settled:
@@ -90,7 +99,7 @@ export function recordPredictionRequest(
 	model: string,
 	durationMs: number,
 	choices: number | undefined,
-	provider: MeterProvider = metrics.getMeterProvider(),
+	provider: MeterProvider = defaultMeterProvider(),
 ): void {
 	const attributes: Attributes = { [OUTCOME]: outcome, [MODEL]: model };
 	if (choices !== undefined) attributes[CHOICES] = choices;
@@ -103,7 +112,7 @@ export function recordPredictionRequest(
 export function recordPredictionShown(
 	model: string,
 	choices: number,
-	provider: MeterProvider = metrics.getMeterProvider(),
+	provider: MeterProvider = defaultMeterProvider(),
 ): void {
 	instruments(provider).shown.add(1, { [MODEL]: model, [CHOICES]: choices });
 }
@@ -118,7 +127,7 @@ export function recordPredictionResolved(
 	model: string,
 	choices: number,
 	shownForMs: number,
-	provider: MeterProvider = metrics.getMeterProvider(),
+	provider: MeterProvider = defaultMeterProvider(),
 ): void {
 	const { resolved, acceptDelay } = instruments(provider);
 	const attributes: Attributes = { [RESULT]: resolution.result, [MODEL]: model, [CHOICES]: choices };

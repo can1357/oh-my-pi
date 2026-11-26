@@ -1,5 +1,5 @@
 import { readShellWord } from "../tools/shell-tokenize";
-import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
+import type { LoopConditionConfig, LoopLimitRuntime } from "./view-model/status-line/loop";
 
 export type LoopLimitConfig =
 	| {

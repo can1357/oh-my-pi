@@ -18,7 +18,7 @@ Key files:
 - `packages/coding-agent/src/session/session-manager.ts` — tree data model, traversal, leaf movement, branch/session extraction
 - `packages/coding-agent/src/session/session-context.ts` — `buildSessionContext` context reconstruction (resolved root→leaf LLM context, compaction/branch-summary replay)
 - `packages/coding-agent/src/session/agent-session.ts` — `/tree` navigation flow, summarization, hook/event emission
-- `packages/tui/src/overlays/tree-selector.ts` — interactive tree UI behavior and filtering
+- `packages/coding-agent/src/ui/overlays/pickers/tree-selector.tsx` — interactive tree UI behavior and filtering
 - `packages/coding-agent/src/modes/controllers/selector-controller.ts` — selector orchestration for `/tree` and `/branch`
 - `packages/coding-agent/src/slash-commands/builtin-session.ts` — command routing (`/tree`, `/branch`)
 - `packages/coding-agent/src/modes/controllers/input-controller.ts` — double-escape behavior and `app.session.tree`/`app.session.fork` keybinding wiring

@@ -6,9 +6,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { materializeReadUrlToFile } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
+import { HttpSession } from "@oh-my-pi/pi-coding-agent/web/http-session";
 import { removeSyncWithRetries, Snowflake, spillFileName } from "@oh-my-pi/pi-utils";
+import { mockFetch } from "../helpers/fetch-mock";
 
 const ATOM = `<?xml version="1.0"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>Sample</title><entry><title>One</title><id>1</id><updated>2024-01-01T00:00:00Z</updated><content>body</content></entry></feed>`;
 const JSON_BODY = `{"alpha":1,"beta":[2,3]}`;
@@ -31,14 +32,13 @@ function makeSession(testDir: string): ToolSession {
 	};
 }
 
-function stubLoadPage(body: string, contentType: string) {
-	return vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => ({
-		ok: true,
-		status: 200,
-		finalUrl: requestedUrl,
-		contentType,
-		content: body,
-	}));
+function stubResponse(session: ToolSession, body: string, contentType: string) {
+	const request = vi.fn(
+		(_input: string | URL | Request, _init?: RequestInit) =>
+			new Response(body, { headers: { "content-type": contentType } }),
+	);
+	session.fetch = mockFetch(request);
+	return request;
 }
 
 describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw flag)", () => {
@@ -55,7 +55,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 	it("returns the raw atom feed body when :raw is set", async () => {
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
-		stubLoadPage(ATOM, "application/atom+xml");
+		stubResponse(session, ATOM, "application/atom+xml");
 
 		const result = await tool.execute("call", { path: "https://example.com/feed.xml:raw" });
 		const textBlock = result.content.find(c => c.type === "text");
@@ -70,7 +70,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 	it("returns the rendered atom feed when :raw is absent (existing behavior)", async () => {
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
-		stubLoadPage(ATOM, "application/atom+xml");
+		stubResponse(session, ATOM, "application/atom+xml");
 
 		const result = await tool.execute("call", { path: "https://example.com/feed.xml" });
 		expect(result.details?.method).toBe("feed");
@@ -79,7 +79,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 	it("returns the raw JSON body when :raw is set", async () => {
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
-		stubLoadPage(JSON_BODY, "application/json");
+		stubResponse(session, JSON_BODY, "application/json");
 
 		const result = await tool.execute("call", { path: "https://example.com/api.json:raw" });
 		const textBlock = result.content.find(c => c.type === "text");
@@ -92,7 +92,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 	it("still pretty-prints JSON when :raw is absent (existing behavior)", async () => {
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
-		stubLoadPage(JSON_BODY, "application/json");
+		stubResponse(session, JSON_BODY, "application/json");
 
 		const result = await tool.execute("call", { path: "https://example.com/api.json" });
 		const textBlock = result.content.find(c => c.type === "text");
@@ -105,13 +105,8 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
 		let body = "v1";
-		const loadPage = vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => ({
-			ok: true,
-			status: 200,
-			finalUrl: requestedUrl,
-			contentType: "text/plain",
-			content: body,
-		}));
+		const request = vi.fn(() => new Response(body, { headers: { "content-type": "text/plain" } }));
+		session.fetch = mockFetch(request);
 
 		const first = await tool.execute("first", { path: "https://example.com/live.txt:raw" });
 		body = "v2";
@@ -121,14 +116,14 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 
 		expect(firstText?.text).toBe("v1");
 		expect(secondText?.text).toBe("v2");
-		expect(loadPage).toHaveBeenCalledTimes(2);
+		expect(request).toHaveBeenCalledTimes(2);
 	});
 
 	it("returns slices of raw content when :raw is combined with a range", async () => {
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
 		const body = Array.from({ length: 20 }, (_, i) => `raw line ${i + 1}`).join("\n");
-		stubLoadPage(body, "application/json");
+		stubResponse(session, body, "application/json");
 
 		// `:raw:N-M` must skip JSON pretty-print and slice the response body.
 		const result = await tool.execute("call", { path: "https://example.com/api.json:raw:3-5" });
@@ -145,12 +140,12 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 	it("keeps body coordinates when the response adds a Notes header", async () => {
 		const session = makeSession(testDir);
 		const body = Array.from({ length: 20 }, (_, i) => `raw line ${i + 1}`).join("\n");
-		vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => ({
-			ok: true,
+		stubResponse(session, body, "text/plain");
+		vi.spyOn(HttpSession.prototype, "request").mockImplementation(async ({ url }) => ({
 			status: 200,
-			finalUrl: requestedUrl,
-			contentType: "text/plain",
-			content: body,
+			url,
+			headers: [{ name: "content-type", value: "text/plain" }],
+			body: Buffer.from(body),
 			truncated: true,
 		}));
 
@@ -290,7 +285,7 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
 		const body = Array.from({ length: 40 }, (_, i) => `content ${i + 1}`).join("\n");
-		const loadSpy = stubLoadPage(body, "text/plain");
+		const request = stubResponse(session, body, "text/plain");
 
 		const result = await tool.execute("call", { path: "https://example.com/file.txt:11-13,26-28" });
 		const text = result.content
@@ -309,7 +304,7 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 		// Elision marker between blocks
 		expect(text).toContain("…");
 		// The URL itself stays clean — no range selector ever hits the network.
-		expect(loadSpy).toHaveBeenCalledWith("https://example.com/file.txt", expect.anything());
+		expect(request).toHaveBeenCalledWith("https://example.com/file.txt", expect.anything());
 	});
 });
 
@@ -390,7 +385,7 @@ describe("read URL beyond the inline preview (regression: tail past 500,000 char
 		const tool = new ReadTool(session);
 		const marker = "COMPLETE_TAIL_MARKER";
 		const lines = Array.from({ length: 12_000 }, (_, i) => `+line-${i + 1} ${"x".repeat(80)}`);
-		stubLoadPage(`${lines.join("\n")}\n${marker}\n`, "text/plain");
+		stubResponse(session, `${lines.join("\n")}\n${marker}\n`, "text/plain");
 
 		const preview = await tool.execute("preview", { path: "https://example.com/big.diff" });
 		const artifactId = preview.details?.meta?.truncation?.artifactId;
@@ -405,9 +400,10 @@ describe("read URL beyond the inline preview (regression: tail past 500,000 char
 	});
 
 	it("shows the head of a first line over the byte budget instead of an empty body", async () => {
-		const tool = new ReadTool(makeSession(testDir));
+		const session = makeSession(testDir);
+		const tool = new ReadTool(session);
 		const firstLine = `<!DOCTYPE html><html><head>${'<meta name="k" content="v"/>'.repeat(2_000)}`;
-		stubLoadPage(`${firstLine}\n<body>tail</body></html>\n`, "text/html");
+		stubResponse(session, `${firstLine}\n<body>tail</body></html>\n`, "text/html");
 
 		const result = await tool.execute("call", { path: "https://example.com/minified.html:raw" });
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
@@ -424,14 +420,22 @@ describe("read URL beyond the inline preview (regression: tail past 500,000 char
 	it.each(truncationSourceCases)(
 		"reports truncation of the response that supplied the content: $name",
 		async ({ url, pages, method, truncated }) => {
-			vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => {
-				const page = pages[requestedUrl];
+			const session = makeSession(testDir);
+			session.fetch = mockFetch(() => new Response(null, { status: 404 }));
+			vi.spyOn(HttpSession.prototype, "request").mockImplementation(async ({ url }) => {
+				const page = pages[url];
 				return page
-					? { ok: true, status: 200, finalUrl: requestedUrl, ...page }
-					: { ok: false, status: 404, finalUrl: requestedUrl, contentType: "", content: "" };
+					? {
+							status: 200,
+							url,
+							headers: [{ name: "content-type", value: page.contentType }],
+							body: Buffer.from(page.content),
+							truncated: page.truncated,
+						}
+					: { status: 404, url, headers: [] };
 			});
 
-			const result = await new ReadTool(makeSession(testDir)).execute("call", { path: url });
+			const result = await new ReadTool(session).execute("call", { path: url });
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.details?.method).toBe(method);

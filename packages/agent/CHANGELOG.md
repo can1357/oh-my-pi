@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Agent.peekDeliveringMessages(queue?)` for queued input on its way into the next request that the transcript has not recorded yet; queue listeners hear when it lands.
+- Added `Agent.continue(signal, { queuedOnly: true })` to start an idle turn using queued input without making a separate model call for the current context.
+
+### Changed
+
+- Debug logs now time the wait between dequeuing input and the model request that carries it, by phase.
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added customizable notices for unmet soft tool requirements, allowing hosts to specify the text shown when a required tool call does not satisfy its requirement.
+- Added `AgentLoopError` and turn-level error metadata so hosts can distinguish an agent loop that ended because a soft tool requirement was not met from a failed request.
+- Added abort-signal support to provider-context transformation and side-request context building.
+- Added optional tool detachment when aborting an agent run, allowing tools that support background execution to continue instead of being terminated.
+- Agents can accept an asynchronous Cursor handler factory; a session opens its execution bridge on the first Cursor request, including after a model switch.
+
+### Fixed
+
+- Fixed DeepSeek DSML markup leaking into tool-call arguments and being executed or replayed.
+- Fixed DeepSeek DSML markup being incorrectly included in conversation history on OpenRouter Responses requests.
+- Fixed unmet soft tool requirements leaving tool calls unanswered when a run was continued or retried.
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

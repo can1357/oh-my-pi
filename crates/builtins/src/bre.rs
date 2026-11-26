@@ -1,9 +1,9 @@
-//! Shared POSIX basic-regular-expression translation.
-//!
-//! `grep`, `sed`, and `nl` accept BREs but compile them with different engines
-//! (`grep-regex` for `grep`, `fancy-regex` for the others), neither of which
-//! implements BRE syntax. This module converts a BRE into the ERE-compatible
-//! form those engines accept, so the dialect is defined in exactly one place.
+//! Translate POSIX BREs and EREs for the Rust regex engines used by
+//! `grep`, `sed`, and `nl`.
+
+#[cfg(any(feature = "util.grep", feature = "util.sed"))]
+use std::borrow::Cow;
+use std::{iter::Peekable, str::Chars};
 
 /// Whether the target engine supports back-references.
 ///
@@ -24,6 +24,8 @@ pub(crate) enum BreError {
 	/// A repetition operator with nothing to repeat, where the tools error
 	/// rather than treating the character as a literal.
 	RepetitionOperandMissing,
+	InvalidBracketComponent,
+	InvalidCharacterRange,
 }
 
 impl BreError {
@@ -31,6 +33,8 @@ impl BreError {
 	pub(crate) fn message(self) -> &'static str {
 		match self {
 			Self::RepetitionOperandMissing => "repetition-operator operand invalid",
+			Self::InvalidBracketComponent => "invalid character class, equivalence class, or collating element",
+			Self::InvalidCharacterRange => "invalid character range",
 		}
 	}
 }
@@ -38,9 +42,9 @@ impl BreError {
 /// Convert a primitive BRE pattern to a safe ERE-compatible pattern string.
 /// - Replaces `\(`, `\)`, `\?`, `\+`, `\|`, `\{` and `\}` with `(`, `)`, `?`,
 ///   `+`, `|`, `{` and `}`.
-/// - Puts single-digit back-references in non-capturing groups..
+/// - Puts single-digit back-references in non-capturing groups.
 /// - Escapes ERE-only metacharacters: `+ ? { } | ( )`.
-/// - Leaves all other characters as-is.
+/// - Translates POSIX bracket expressions.
 ///
 /// A repetition character with **no preceding atom** is emitted as a literal,
 /// per POSIX: "an asterisk that is the first character of an RE ... shall lose
@@ -159,21 +163,7 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 		} else {
 			match c {
 				'[' => {
-					// A bracket expression is NOT BRE syntax: inside it, `\`,
-					// `(`, `|` and `*` are ordinary characters. Translating
-					// through it turned `[\(]` into a group opener and broke
-					// compilation, so the whole expression is scanned as
-					// bracket syntax and copied across.
-					match take_bracket_expression(&mut chars, true) {
-						Some(body) => {
-							result.push('[');
-							result.push_str(&body);
-						},
-						// Unterminated. Measured, both tools reject it -
-						// "brackets ([ ]) not balanced" - so the half-open
-						// `[` is passed through for the engine to refuse.
-						None => result.push('['),
-					}
+					push_bracket_expression(&mut result, &mut chars)?;
 					has_atom = true;
 				},
 				'+' | '?' | '{' | '}' | '|' | '(' | ')' => {
@@ -245,7 +235,7 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 ///
 /// BSD grep differs - it anchors only at the very end of the pattern - but
 /// `\|` is itself a GNU extension, so GNU decides its semantics.
-fn ends_branch(chars: &std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+fn ends_branch(chars: &Peekable<Chars<'_>>) -> bool {
 	let mut rest = chars.clone();
 	match rest.next() {
 		None => true,
@@ -254,201 +244,164 @@ fn ends_branch(chars: &std::iter::Peekable<std::str::Chars<'_>>) -> bool {
 	}
 }
 
-/// Consume a bracket expression's body, returning it without the outer `[]`.
-///
-/// The opening `[` is already consumed. Returns `None` - advancing nothing -
-/// when the expression is unterminated.
-///
-/// With `normalize`, the body is rewritten so the engine reads it the way
-/// POSIX does: `\` has no special meaning inside a bracket expression, so it
-/// is doubled to stay a literal, and a leading `]` is escaped rather than
-/// closing the expression. Measured, `grep -c '[\(]'` selects lines holding a
-/// backslash OR a parenthesis, and `grep -c '[]x]'` selects lines holding a
-/// bracket or an `x`.
-///
-/// Without it the body is copied verbatim, which is what an already-extended
-/// pattern needs: the caller is only locating the expression so it can skip
-/// over it, and must not change how it matches.
-fn take_bracket_expression(
-	chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-	normalize: bool,
-) -> Option<String> {
+/// Append one POSIX bracket expression. The opening `[` is already consumed.
+/// As before, an unterminated outer bracket is left for the engine to reject.
+fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>) -> Result<(), BreError> {
 	let mut probe = chars.clone();
-	let mut body = String::new();
-
-	// A leading `^` negates, and a `]` immediately after that is the literal
-	// `]` rather than the terminator.
-	if probe.peek() == Some(&'^') {
-		body.push(probe.next()?);
+	let start = result.len();
+	result.push('[');
+	if probe.next_if_eq(&'^').is_some() {
+		result.push('^');
 	}
-	if probe.peek() == Some(&']') {
-		body.push_str(if normalize { r"\]" } else { "]" });
-		probe.next();
+	let leading_close = probe.next_if_eq(&']').is_some();
+	if leading_close {
+		result.push_str(r"\]");
 	}
 
+	let mut first = !leading_close;
+	let mut endpoint = leading_close;
+	let mut in_range = false;
 	while let Some(c) = probe.next() {
-		match c {
-			']' => {
-				*chars = probe;
-				return Some(body + "]");
-			},
-			// `\` is an ordinary character here; keep it one.
-			'\\' => body.push_str(if normalize { r"\\" } else { "\\" }),
-			// `[:alpha:]`, `[.x.]` and `[=x=]` carry their own terminators, so
-			// the `]` that closes them does not close the bracket expression.
-			'[' if matches!(probe.peek(), Some(':' | '.' | '=')) => {
-				let kind = probe.next()?;
-				body.push('[');
-				body.push(kind);
-				let mut previous = None;
-				loop {
-					let next = probe.next()?;
-					body.push(next);
-					if previous == Some(kind) && next == ']' {
-						break;
-					}
-					previous = Some(next);
-				}
-			},
-			_ => body.push(c),
+		if c == ']' {
+			result.push(c);
+			*chars = probe;
+			return Ok(());
 		}
+		if c == '-' && !first && !in_range && probe.peek().is_some_and(|&next| next != ']') {
+			if !endpoint {
+				return Err(BreError::InvalidCharacterRange);
+			}
+			result.push('-');
+			in_range = true;
+			continue;
+		}
+		let range_eligible = if c == '[' && matches!(probe.peek(), Some(':' | '.' | '=')) {
+			let marker = probe.next().unwrap();
+			let body_start = result.len();
+			result.push('[');
+			result.push(marker);
+			loop {
+				let next = probe.next().ok_or(BreError::InvalidBracketComponent)?;
+				if next == marker && probe.next_if_eq(&']').is_some() {
+					break;
+				}
+				result.push(next);
+			}
+			if marker == ':' {
+				// Rust recognizes the POSIX names, but silently falls back
+				// to a nested set for unknown names instead of diagnosing them.
+				if !matches!(
+					&result[body_start + 2..],
+					"alnum" | "alpha" | "blank" | "cntrl" | "digit" | "graph" | "lower"
+						| "print" | "punct" | "space" | "upper" | "xdigit"
+				) {
+					return Err(BreError::InvalidBracketComponent);
+				}
+				result.push_str(":]");
+				false
+			} else {
+				// In the default byte-order collation, a single character is
+				// its own collating symbol/equivalence class. Do not hand
+				// locale-specific multi-character elements to Rust as sets.
+				let mut body = result[body_start + 2..].chars();
+				let symbol = body.next().ok_or(BreError::InvalidBracketComponent)?;
+				if body.next().is_some() {
+					return Err(BreError::InvalidBracketComponent);
+				}
+				result.truncate(body_start);
+				push_class_literal(result, symbol);
+				marker == '.'
+			}
+		} else {
+			push_class_literal(result, c);
+			true
+		};
+		if in_range && !range_eligible {
+			return Err(BreError::InvalidCharacterRange);
+		}
+		endpoint = range_eligible && !in_range;
+		in_range = false;
+		first = false;
 	}
-	None
+
+	result.truncate(start + 1);
+	Ok(())
 }
 
-/// Make an ERE's non-interval `{` the literal both real tools treat it as.
-///
-/// POSIX leaves a `{` that opens no interval undefined, and both GNU and BSD
-/// grep take it literally, while the `regex` crate rejects the pattern
-/// outright. Measured against /usr/bin/grep:
-///
-/// ```text
-/// grep -Ec '{a}'    1, literal          regex: "repetition operator missing expression"
-/// grep -Ec 'a{'     2, literal          regex: "repetition quantifier expects a valid decimal"
-/// grep -Ec '{foo'   1, literal          regex: "repetition operator missing expression"
-/// grep -Ec 'a{1,2'  "braces not balanced"   regex: "unclosed counted repetition"
-/// ```
-///
-/// The last line is why this cannot simply escape every brace that fails to
-/// open an interval: an unterminated interval is an ERROR in both tools, and
-/// escaping it would turn a diagnosed mistake into a silent literal match.
-/// A digit after `{` is what separates the two - it marks an attempted
-/// interval, which is left for the engine to accept or reject.
-#[cfg(feature = "util.grep")]
-pub(crate) fn ere_literalize_braces(pattern: &str) -> std::borrow::Cow<'_, str> {
-	if !pattern.contains('{') {
-		return std::borrow::Cow::Borrowed(pattern);
+fn push_class_literal(result: &mut String, c: char) {
+	// Escape Rust's nested classes and set operators, as well as single
+	// backslashes and brackets that POSIX treats as ordinary characters.
+	if matches!(c, '[' | ']' | '\\' | '-' | '&' | '~' | '^') {
+		result.push('\\');
 	}
-
-	let mut result = String::with_capacity(pattern.len());
-	let mut chars = pattern.chars().peekable();
-	let mut rewrote = false;
-
-	while let Some(c) = chars.next() {
-		match c {
-			// An escape already spells out its own meaning; copy the pair.
-			'\\' => {
-				result.push('\\');
-				if let Some(escaped) = chars.next() {
-					result.push(escaped);
-				}
-			},
-			// A brace inside a bracket expression is already a literal.
-			'[' => match take_bracket_expression(&mut chars, false) {
-				Some(body) => {
-					result.push('[');
-					result.push_str(&body);
-				},
-				None => result.push('['),
-			},
-			'{' if !chars.peek().is_some_and(char::is_ascii_digit) => {
-				result.push_str(r"\{");
-				rewrote = true;
-			},
-			_ => result.push(c),
-		}
-	}
-
-	if rewrote { std::borrow::Cow::Owned(result) } else { std::borrow::Cow::Borrowed(pattern) }
+	result.push(c);
 }
 
-/// True when an ERE contains a repetition operator with nothing to repeat.
-///
-/// POSIX leaves this undefined and both GNU and BSD grep reject it:
-/// `grep -E '^+'` is "repetition-operator operand invalid". The `regex` crate
-/// instead compiles `^+` as `(?:^)+`, which matches the empty string at every
-/// line start, so without this check an invalid pattern silently selects every
-/// line - a wrong answer with a success exit status.
-#[cfg(feature = "util.grep")]
-pub(crate) fn ere_repetition_operand_missing(pattern: &str) -> bool {
+/// Translate bracket expressions in an ERE. Grep additionally treats a
+/// non-interval `{` as literal and rejects repetition without an operand.
+#[cfg(any(feature = "util.grep", feature = "util.sed"))]
+pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, BreError> {
+	let rewrite = pattern.contains('[') || (grep && pattern.contains('{'));
+	if !grep && !rewrite {
+		return Ok(Cow::Borrowed(pattern));
+	}
+
+	let mut result = if rewrite { String::with_capacity(pattern.len()) } else { String::new() };
 	let mut chars = pattern.chars().peekable();
 	let mut has_atom = false;
 	while let Some(c) = chars.next() {
 		match c {
-			// An escaped character is a literal, and therefore an atom.
 			'\\' => {
-				if chars.next().is_none() {
-					return false;
+				if rewrite {
+					result.push(c);
+				}
+				if let Some(next) = chars.next() && rewrite {
+					result.push(next);
 				}
 				has_atom = true;
+				continue;
 			},
-			// A bracket expression is one atom. `]` immediately after the
-			// opening bracket (or its negation) is a literal, not the close.
 			'[' => {
-				if chars.peek() == Some(&'^') {
-					chars.next();
-				}
-				if chars.peek() == Some(&']') {
-					chars.next();
-				}
-				for inner in chars.by_ref() {
-					if inner == ']' {
-						break;
-					}
-				}
+				push_bracket_expression(&mut result, &mut chars)?;
 				has_atom = true;
+				continue;
 			},
-			'(' | '|' => has_atom = false,
-			')' => has_atom = true,
-			// Anchors are not atoms and break adjacency to any earlier atom:
-			// `a^+` repeats the anchor, not `a`. Clear the operand state so
-			// repetition after an anchor is rejected wherever it appears.
-			'^' | '$' => has_atom = false,
-			'*' | '+' | '?' if !has_atom => return true,
-			// A `{` is only a repetition operator when it actually opens an
-			// interval. Measured: `grep -E '^{'` matches nothing and reports
-			// no error, because a `{` that cannot be parsed as `{n}`, `{n,}`
-			// or `{n,m}` is an ordinary literal - while `grep -E '{1}'` IS
-			// "repetition-operator operand invalid". Flagging every `{` here
-			// rejected patterns the real tool accepts.
-			'{' => {
-				let rest: String = chars.clone().collect();
-				if opens_interval(&rest) {
+			'(' | '|' | '^' | '$' => has_atom = false,
+			'*' | '+' | '?' if grep && !has_atom => {
+				return Err(BreError::RepetitionOperandMissing);
+			},
+			'{' if grep => {
+				if opens_interval(chars.clone()) {
 					if !has_atom {
-						return true;
+						return Err(BreError::RepetitionOperandMissing);
 					}
 				} else {
+					// Keep an attempted but malformed interval for the engine
+					// to reject, rather than turning a typo into a match.
+					if !chars.peek().is_some_and(char::is_ascii_digit) {
+						result.push('\\');
+					}
 					has_atom = true;
 				}
 			},
 			_ => has_atom = true,
 		}
+		if rewrite {
+			result.push(c);
+		}
 	}
-	false
+
+	Ok(if rewrite && result != pattern { Cow::Owned(result) } else { Cow::Borrowed(pattern) })
 }
 
-/// Whether `rest`, the text just past a `{`, completes a valid interval:
-/// `n}`, `n,}` or `n,m}`. Anything else leaves the `{` a literal.
-#[cfg(feature = "util.grep")]
-fn opens_interval(rest: &str) -> bool {
-	let mut chars = rest.chars().peekable();
-	let mut digits = 0usize;
+/// Does the text just past a `{` complete a valid interval (`n}`, `n,}` or `n,m}`)?
+#[cfg(any(feature = "util.grep", feature = "util.sed"))]
+fn opens_interval(mut chars: Peekable<Chars<'_>>) -> bool {
+	if !chars.next().is_some_and(|c| c.is_ascii_digit()) {
+		return false;
+	}
 	while chars.peek().is_some_and(char::is_ascii_digit) {
 		chars.next();
-		digits += 1;
-	}
-	if digits == 0 {
-		return false;
 	}
 	if chars.peek() == Some(&',') {
 		chars.next();
@@ -497,9 +450,34 @@ mod tests {
 	}
 
 	#[test]
-	fn test_character_classes_unchanged() {
-		assert_eq!(ere(r"[a-z]"), "[a-z]");
-		assert_eq!(ere(r"[^0-9]"), "[^0-9]");
+	fn posix_brackets_match_their_members_in_both_dialects() {
+		for (pattern, input, expected) in [
+			(r"[][\.^$*+?(){}|\\]", r"a.b[c]\^$*+?(){}|", r".[]\^$*+?(){}|"),
+			(r"[.^$*+?()[{|\\]", r"a.b[c]\^$*+?(){|", r".[\^$*+?(){|"),
+			("[.[]", "a[b", "["),
+			("[]abc]", "a]zb[c", "a]bc"),
+			("[^]abc]", "a]zb[c", "z["),
+			("[a-z]", "am-0z", "amz"),
+			("[^0-9]", "am-0z", "am-z"),
+			("[a-]", "a-_b", "a-"),
+			("[[:alpha:]-]", "A-z1_", "A-z"),
+			(r"[\\]", r"\n.]", r"\"),
+			(r"[\]", r"\n.]", r"\"),
+			(r"[\n]", r"\n.", r"\n"),
+			("[--0]", "-./01", "-./0"),
+			("[---]", "-./01", "-"),
+			("[&&~~]", "a&~b", "&~"),
+			("[[.].][.[.][=x=]]", "[]y.x", "[]x"),
+		] {
+			let check = |translated: &str| {
+				let re = regex::Regex::new(translated).unwrap_or_else(|err| panic!("{pattern}: {err}"));
+				let actual: String = re.find_iter(input).map(|m| m.as_str()).collect();
+				assert_eq!(actual, expected, "{pattern} → {translated}");
+			};
+			check(&ere(pattern));
+			#[cfg(any(feature = "util.grep", feature = "util.sed"))]
+			check(&ere_to_rust(pattern, false).unwrap());
+		}
 	}
 
 	#[test]
@@ -636,7 +614,7 @@ mod tests {
 	#[test]
 	fn ere_rejects_repetition_with_no_operand() {
 		for pattern in ["^+", "^*", "^?", "^{2}", "*x", "+", "(+)", "a|+b", "(|+)"] {
-			assert!(ere_repetition_operand_missing(pattern), "should reject {pattern}");
+			assert_eq!(ere_to_rust(pattern, true), Err(BreError::RepetitionOperandMissing), "{pattern}");
 		}
 	}
 
@@ -669,7 +647,7 @@ mod tests {
 			"^{}",
 			"{1a}",
 		] {
-			assert!(!ere_repetition_operand_missing(pattern), "should accept {pattern}");
+			assert!(ere_to_rust(pattern, true).is_ok(), "should accept {pattern}");
 		}
 	}
 
@@ -677,7 +655,7 @@ mod tests {
 	#[test]
 	fn ere_rejects_only_intervals_that_really_open() {
 		for pattern in ["{1}", "^{2}", "{3,}", "{4,5}", "(|{6})"] {
-			assert!(ere_repetition_operand_missing(pattern), "should reject {pattern}");
+			assert_eq!(ere_to_rust(pattern, true), Err(BreError::RepetitionOperandMissing), "{pattern}");
 		}
 	}
 }

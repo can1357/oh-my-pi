@@ -25,6 +25,7 @@ import { writeTar } from "@oh-my-pi/pi-coding-agent/skillshare/tar";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import type { SkillPackument, SkillVersionManifest, SkillVersionSummary } from "@oh-my-pi/pi-wire/skillshare";
+import { restoreEnvValue } from "../helpers/settings-test-state";
 
 const SCOPE = "alice";
 const NAME = "pdf-tools";
@@ -164,6 +165,7 @@ describe("installer", () => {
 	let tempHome: string;
 	let project: string;
 	let originalAgentDir: string;
+	let originalConfigDir: string | undefined;
 	let client: SkillshareClient;
 	let confirmations: string[];
 	let approve: boolean;
@@ -177,6 +179,7 @@ describe("installer", () => {
 
 	beforeEach(async () => {
 		originalAgentDir = getAgentDir();
+		originalConfigDir = process.env.PI_CONFIG_DIR;
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skillshare-install-"));
 		project = path.join(tempHome, "work", "proj");
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });
@@ -208,11 +211,13 @@ describe("installer", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		restoreEnvValue("PI_CONFIG_DIR", originalConfigDir);
 		setAgentDir(originalAgentDir);
 		await removeWithRetries(tempHome);
 	});
 
-	it("installs latest with a caret range, locks it, and unpacks with exec bits", async () => {
+	it("installs latest into the project with a caret range, lock, and exec bits when the user root is relocated", async () => {
+		restoreEnvValue("PI_CONFIG_DIR", path.join("..", "user-config"));
 		const tgz = skillTgz("1.1.0", { "scripts/run.sh": "#!/bin/sh\necho hi\n" }, ["scripts/run.sh"]);
 		registry = {
 			pk: packument([summary("1.1.0", tgz, { hasScripts: true })], { latest: "1.1.0" }),
@@ -228,6 +233,8 @@ describe("installer", () => {
 
 		expect(changes).toEqual([{ id: ID, from: undefined, to: "1.1.0", range: "^1.1.0", restored: false }]);
 		expect(confirmations).toEqual([`${ID}@1.1.0:scripts/run.sh`]);
+		expect(await Bun.file(path.join(project, "..", "user-config", "skills.json")).exists()).toBe(false);
+		expect(await Bun.file(path.join(project, "..", "user-config", "skills.lock.json")).exists()).toBe(false);
 		expect(await readSkillsManifest(path.join(project, ".omp", "skills.json"))).toEqual({
 			skills: { [ID]: "^1.1.0" },
 		});

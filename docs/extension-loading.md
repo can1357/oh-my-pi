@@ -122,11 +122,16 @@ Behavior split:
   roots from explicitly named extension packages remain eligible. Project/user
   `extensions:` settings and installed OMP extension packages are excluded from
   that sibling surface.
+- Executable custom tool and custom command modules follow the same
+  explicit-only contract: ambient `.omp/tools`, `.claude/tools`, `.codex/tools`,
+  marketplace and installed-plugin tools are not imported, and no custom
+  command modules are loaded. Tools under explicitly named extension packages'
+  `tools/` directories still load.
 
-This flag governs extension factories and OMP extension-package sibling roots;
-it is not a whole-process capability-isolation switch. Skills, MCP servers,
-tools, prompts, and rules owned by other discovery subsystems retain their own
-enable/disable controls.
+This flag governs extension factories, executable custom tool/command modules,
+and OMP extension-package sibling roots; it is not a whole-process
+capability-isolation switch. Skills, MCP servers, prompts, rules, and the
+launch directory's `.env` retain their own controls.
 
 ### Exact module allowlist
 

@@ -1,0 +1,50 @@
+{
+	"popup": {
+		"k": "overlay",
+		"key": "complete",
+		"p": {
+			"anchor": {
+				"caret": "line/input"
+			},
+			"role": "omp.autocomplete"
+		},
+		"c": [
+			{
+				"k": "col",
+				"p": {
+					"role": "omp.select"
+				},
+				"c": [
+					{
+						"k": "list",
+						"key": "list",
+						"p": {
+							"empty": "No items",
+							"max": {
+								"lines": 10
+							},
+							"selected": "docs/日本語.md"
+						},
+						"c": [
+							{
+								"k": "item",
+								"key": "docs/日本語.md",
+								"p": {
+									"label": [
+										{
+											"t": "docs/日本語.md"
+										}
+									]
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	},
+	"row": {
+		"dark": "\u001b[38;2;254;188;56m❯ docs/日本語.md\u001b[39m",
+		"light": "\u001b[38;2;90;128;128m❯ docs/日本語.md\u001b[39m"
+	}
+}

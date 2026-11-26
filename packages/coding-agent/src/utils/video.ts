@@ -9,7 +9,7 @@
  */
 import * as path from "node:path";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { isVideoPath } from "./video-preview";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { $which } from "@oh-my-pi/pi-utils/which";

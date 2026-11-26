@@ -296,7 +296,8 @@ export async function setServerForceEnabled(filePath: string, name: string, forc
 /** Paths and target state for toggling one MCP server across known config files. */
 export interface SetMcpServerEnabledOptions {
 	userPath: string;
-	projectPath: string;
+	/** Omit when project MCP config is disabled so an ignored project file is never written. */
+	projectPath?: string;
 	/**
 	 * Absolute path to the loaded row's source mcp.json. Provide ONLY for
 	 * formats this codebase owns (native `.omp/mcp.json` and `mcp-json`

@@ -34,6 +34,7 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
+	mergeLoadResults,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -75,10 +76,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 			}),
 		),
 	);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -101,10 +99,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 			}),
 		),
 	);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -122,10 +117,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 			}),
 		),
 	);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -147,10 +139,7 @@ async function loadPrompts(ctx: LoadContext): Promise<LoadResult<Prompt>> {
 			}),
 		),
 	);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -185,10 +174,7 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 			}),
 		),
 	);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // =============================================================================

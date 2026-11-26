@@ -58,7 +58,6 @@ See [docs/custom-tools.md](../../../../docs/custom-tools.md) for full documentat
 **Factory pattern:**
 
 ```typescript
-import { Text } from "@oh-my-pi/pi-tui";
 import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
 const factory: CustomToolFactory = pi => ({
@@ -87,19 +86,19 @@ export default factory;
 
 **Custom rendering:**
 
-```typescript
+Renderers return pi-tui nodes (JSX in a `.tsx` file with `/** @jsxImportSource @oh-my-pi/pi-tui */`),
+drawn in the terminal and in Tern, or a rows object `{ render(width): string[] }`, drawn in the
+terminal only. See [Migrating from pi-tui](../../../../docs/extensions.md#migrating-from-pi-tui).
+
+```tsx
 renderCall(args, options, theme) {
-  return new Text(
-    theme.fg("toolTitle", theme.bold("my_tool ")) + args.action,
-    0, 0  // No padding - Box handles it
-  );
+  return <text spans={[{ t: "my_tool ", s: "toolTitle strong" }, { t: args.action }]} />;
 },
 
 renderResult(result, { expanded, isPartial }, theme) {
-  if (isPartial) {
-    return new Text(theme.fg("warning", "Working..."), 0, 0);
-  }
-  return new Text(theme.fg("success", "✓ Done"), 0, 0);
+  // The rows escape hatch: plain strings at the given width.
+  if (isPartial) return { render: () => [theme.fg("warning", "Working...")] };
+  return { render: () => [theme.fg("success", "✓ Done")] };
 },
 ```
 
