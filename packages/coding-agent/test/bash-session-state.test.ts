@@ -94,7 +94,7 @@ it.skipIf(process.platform === "win32")(
 it.skipIf(process.platform === "win32")("keeps state and options after a call that exits non-zero", async () => {
 	const tool = bashTool();
 	await run(tool, "set -uo pipefail; PI_STATE_VAR=kept");
-	expect((await run(tool, "false")).text).toContain("Command exited with code 1");
+	expect((await run(tool, "false")).text).toContain("[exit code 1]");
 	expect((await run(tool, 'printf "%s %s" "$PI_STATE_VAR" "$-"')).text).toMatch(/^kept \S*u\S*$/);
 });
 

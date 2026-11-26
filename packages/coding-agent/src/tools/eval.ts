@@ -7,7 +7,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
-import { formatBackgroundNotice } from "./details/bash";
+import { formatBackgroundNotice, formatExitCodeNotice } from "./details/bash";
 import { replaceTabs, truncateToWidth } from "../utils/text-width";
 import { shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
@@ -1009,12 +1009,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
-					const exitLine = `Command exited with code ${result.exitCode}`;
-					const outputText = result.cancelled
-						? combinedOutput || result.output || "Command aborted"
-						: combinedOutput
-							? `${combinedOutput}\n\n${exitLine}`
-							: exitLine;
+					const exitCode = result.exitCode;
+					const outputText =
+						result.cancelled || exitCode === undefined
+							? combinedOutput || result.output || "Command aborted"
+							: combinedOutput
+								? `${combinedOutput}\n\n${formatExitCodeNotice(exitCode)}`
+								: formatExitCodeNotice(exitCode);
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					const details: EvalToolDetails = {

@@ -101,7 +101,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
   - `details.timedOut: true`: present on local, PTY, and client-terminal timeout results.
   - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
   - `details.meta.minimized`: present when the shell minimizer's text replaced the output; `{ filter, inputBytes, outputBytes, artifactId }` names the native filter (`chain` for a minimized `&&`/`;` chain), the raw and minimized byte counts, and the `bash-original` artifact holding the raw capture.
-  - non-zero exits and timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
+  - non-zero exits and timeouts return a tool result marked `isError`; definite non-zero output ends with `[exit code <n>]`.
 - Success, background start (`async: true` or auto-background):
   - `content[0].text`: optional preview tail and notices, followed by `[backgrounded as <id>, killed at <n>s total; …]` — `no deadline` under `timeout: 0`, `(<reason>)` after the id when a steer or approval prompt backgrounded it early — and the no-polling instruction (`formatBackgroundNotice` in `packages/coding-agent/src/tools/details/bash.ts`), so the model sees the job's deadline before it waits on the result. The deadline counts from job start, so an auto-backgrounded command has already spent its foreground wait.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
@@ -122,7 +122,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
 - Failure:
   - cancellation, missing exit status, validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`; timeouts return an error result.
 
-Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
+Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `[exit code <n>]`.
 
 ## Command policy and dedicated-tool routing
 
@@ -307,7 +307,7 @@ Choose the setting by the desired outcome:
 - Internal URL filesystem:
   - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable schemes, non-write mutations (`rm`, `mkdir`, …) of handler-owned schemes, and `out://` writes when `out.enabled` is off `EROFS`, appends to replace-only handler URLs and non-UTF-8 handler payloads `EINVAL`, oversize `out://` replies `EFBIG`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
 - Execution:
-  - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
+  - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `[exit code <n>]`.
   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
   - timeout -> local, PTY, and client-terminal execution return an `isError` result with `details.timedOut: true` and a timeout notice. Managed background execution records it as a failed job.
   - user abort -> `ToolAbortError` when the caller signal is aborted.

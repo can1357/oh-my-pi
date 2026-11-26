@@ -30,7 +30,7 @@
 - Local dictation now defaults to Fluid Speech Pro (`local/fluid-speech-pro`), a further-trained Parakeet TDT 0.6B v3 that stays accurate with noise or music in the room. `local/parakeet-tdt-0.6b-v3` roles and fallback chains migrate to it automatically.
 - Live voice mode now uses Codex's `gpt-live-1.1-codex` realtime model.
 - Updated the local speech runtimes to sherpa-onnx 2.0.3 and Transformers.js 4.3.2; they reinstall on first use.
-- Shortened and bracketed bash's notices, e.g. `[next call: cwd → …, set -e off]`, `[timeout clamped: 7200s → 3600s]`, `[backgrounded as bg_3, killed at 300s total; …]`; eval's background notice follows suit.
+- Shortened and bracketed bash's notices, e.g. `[next call: cwd → …, set -e off]`, `[timeout clamped: 7200s → 3600s]`, `[backgrounded as bg_3, killed at 300s total; …]`, `[took 1.23s]`, `[exit code 3]`; eval's background and exit notices follow suit.
 - `cfg://` writes to map settings such as `modelRoles` now change only the entries they name (`null` removes one), so approval prompts and transcripts show just those entries instead of the whole map, and saving one entry keeps the others in your config.
 
 ### Fixed

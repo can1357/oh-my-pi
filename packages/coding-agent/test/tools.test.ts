@@ -2464,7 +2464,7 @@ function b() {
 		it("retains wall time and exit status for slow failed commands", async () => {
 			const result = await bashTool.execute("test-call-walltime-slow", { command: "sleep 1.1; echo wt; exit 7" });
 			expect(getTextOutput(result)).toContain("wt");
-			expect(getTextOutput(result)).toMatch(/Wall time: \d+\.\d{2} seconds/);
+			expect(getTextOutput(result)).toMatch(/\[took \d+\.\d{2}s\]/);
 			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(1000);
 			expect(result.details?.exitCode).toBe(7);
 			expect(result.isError).toBe(true);
@@ -2605,7 +2605,7 @@ function b() {
 			const result = await bashTool.execute("test-call-9", { command: "exit 1" });
 			expect(result.isError).toBe(true);
 			expect(result.details?.exitCode).toBe(1);
-			expect(getTextOutput(result)).toContain("Command exited with code 1");
+			expect(getTextOutput(result)).toContain("[exit code 1]");
 		});
 
 		it("should keep short commands inline when auto-background is enabled", async () => {

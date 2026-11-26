@@ -1997,10 +1997,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					"`name` starts a long-lived service, which takes no async or timeout. Omit `name` for a finite command (async jobs included), or drop async/timeout to start a service.",
 				);
 			}
-			if (rawTimeout !== undefined)
-				pendingNotices.push("[timeout ignored: use ready.timeout]");
-			if (rawAsync === true)
-				pendingNotices.push("[async ignored: services start async]");
+			if (rawTimeout !== undefined) pendingNotices.push("[timeout ignored: use ready.timeout]");
+			if (rawAsync === true) pendingNotices.push("[async ignored: services start async]");
 			// Host and timeout configure a readiness condition without naming one.
 			if (
 				ready === undefined &&
@@ -2023,10 +2021,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// A service's regex is checked by `startService`.
 		const notify = name === undefined && notifySource !== undefined ? compileNotifyPattern(notifySource) : undefined;
 		// Tells the model which output reaches it before the command ends.
-		const notifyNotice =
-			notifySource === undefined
-				? undefined
-				: `[/${notifySource}/ matches arrive as follow-ups]`;
+		const notifyNotice = notifySource === undefined ? undefined : `[/${notifySource}/ matches arrive as follow-ups]`;
 
 		const toolCommandNameList = toolCommandNames(this.session);
 		const toolCommands = new Set(toolCommandNameList);
@@ -2154,8 +2149,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			const lines = [
 				`${daemon.key}: ${daemon.state}${pid === undefined ? "" : ` pid=${pid}`}${daemon.readyAt === undefined ? "" : " ready"}`,
 			];
-			if (service.readyTimedOut)
-				lines.push(`[not ready: timed out after ${ready?.timeout ?? 30}s]`);
+			if (service.readyTimedOut) lines.push(`[not ready: timed out after ${ready?.timeout ?? 30}s]`);
 			if (daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
 			lines.push(...pendingNotices);
 			if (notifyLine) lines.push(notifyLine);

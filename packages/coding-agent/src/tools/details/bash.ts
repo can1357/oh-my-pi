@@ -75,12 +75,12 @@ export const WALL_TIME_NOTICE_MIN_MS = 1000;
 
 /** Formats the model-facing command duration notice. */
 export function formatWallTimeNotice(wallTimeMs: number): string {
-	return `Wall time: ${formatWallTimeSeconds(wallTimeMs)} seconds`;
+	return `[took ${formatWallTimeSeconds(wallTimeMs)}s]`;
 }
 
 /** Formats the model-facing command exit status notice. */
 export function formatExitCodeNotice(exitCode: number): string {
-	return `Command exited with code ${exitCode}`;
+	return `[exit code ${exitCode}]`;
 }
 
 /** Shell arguments used to build a command preview. */
