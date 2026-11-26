@@ -128,7 +128,8 @@ interface Emitted {
 /**
  * The inline viewport's place on screen at a size, as far as the backend can tell: `below` history
  * rows were written since the screen was last cleared or resized, and once those plus the viewport
- * reached the screen's height the viewport sits at its bottom (`bottom`), holding `rows` rows.
+ * reached the screen's height the viewport sits at its bottom (`bottom`), holding `rows` rows and
+ * spanning `span` from its top (more when it shrank with no dock to pad it down).
  */
 interface Pin {
 	readonly width: number;
@@ -136,6 +137,7 @@ interface Pin {
 	readonly below: number;
 	readonly bottom: boolean;
 	readonly rows: number;
+	readonly span: number;
 }
 
 interface Placed {
@@ -917,6 +919,8 @@ export class TermBackend {
 			}
 		}
 		const viewport: string[] = [];
+		/** Viewport rows of a block whose head is in history right above the viewport: its images may reach up there. */
+		let joinedEnd = 0;
 		if (summary > 0) {
 			const theme = this.#options.theme();
 			viewport.push(truncate(theme.fg("dim", `⋯ ${summary} more running`), width, ""));
@@ -938,10 +942,11 @@ export class TermBackend {
 			for (; lead > 0; lead--) viewport.push("");
 			const start = viewport.length;
 			const top = start - from;
-			// Block rows above `from` are on screen right above it only when they are in history and the block opens the viewport.
-			const joined = start === 0 && from === skipAt(i);
 			for (let row = from; row < block.rows.length; row++) viewport.push(block.rows[row]!);
-			if (!joined) dropCutImages(viewport, start);
+			// Block rows above `from` sit right above it only when they are in history and the block opens the
+			// viewport; how many are still on screen is known once the viewport is placed (below).
+			if (start === 0 && from === skipAt(i)) joinedEnd = viewport.length;
+			else dropCutImages(viewport, start);
 			if (block.cursor && block.cursor.row >= from && this.#surface.focused())
 				cursor = { row: top + block.cursor.row, col: block.cursor.col };
 			for (const hit of block.hits ?? []) if (hit.row >= from) hits.push({ hit, top, left: 0 });
@@ -950,6 +955,7 @@ export class TermBackend {
 		if (clipped > 0) {
 			viewport.splice(0, clipped);
 			dropCutImages(viewport, 0);
+			joinedEnd = 0;
 			if (cursor) cursor = cursor.row >= clipped ? { row: cursor.row - clipped, col: cursor.col } : null;
 			for (const entry of hits) (entry as { top: number }).top -= clipped;
 		}
@@ -969,14 +975,14 @@ export class TermBackend {
 			const hold = !fresh && pin.bottom ? Math.min(height, pin.rows - written) : 0;
 			if (bottom && dockRows > 0) while (viewport.length + dockRows < hold) viewport.push("");
 			if (!bottom) free = Math.max(0, height - (below + written) - (viewport.length + dockRows));
-			this.#nextPin = {
-				width,
-				height,
-				below: below + written,
-				bottom,
-				rows: viewport.length + dockRows,
-			};
-		}
+			// The rows from the viewport's top down: a shrunk viewport keeps its top (only a dock pads it down).
+			const held = !fresh && pin.bottom ? Math.min(height, pin.span - written) : 0;
+			const span = Math.max(viewport.length + dockRows, held);
+			this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
+			// The screen rows above the viewport: everything written so far, or (at the bottom) what it leaves.
+			const above = bottom ? Math.max(0, height - span) : below + written;
+			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, above);
+		} else if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd);
 		const dockTop = viewport.length;
 		for (const placed of dock) {
 			viewport.push(...placed.block.rows);

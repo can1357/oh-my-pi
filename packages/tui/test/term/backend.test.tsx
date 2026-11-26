@@ -296,6 +296,46 @@ describe("TermBackend main surface", () => {
 		backend.stop();
 	});
 
+	it("leaves out a live image whose head went to history and scrolled off the screen", () => {
+		defineRolePainter("rows", "test.streamed-image", node => {
+			const props = node.props() as { lines: readonly string[] };
+			// A streaming head: its first three rows are final.
+			return { rows: props.lines, stable: 3 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.streamed-image" lines={["h0", "h1", ...image, "t0", "t1", "t2"]} />,
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		// The stable head (its image's first row included) went to history over a full screen: that row is off
+		// the screen, so the image's last row would draw it from the top row, over the tail.
+		expect(driver.history).toEqual(["h0", "h1", ""]);
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2", "dock"]);
+		backend.stop();
+	});
+
+	it("keeps leaving out that image once the tail shrinks under a viewport with no dock to hold it down", () => {
+		defineRolePainter("rows", "test.streamed-image-4", node => {
+			const props = node.props() as { lines: readonly string[] };
+			return { rows: props.lines, stable: 4 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const tail = signal(lines("t", 4));
+		const { driver, backend } = setup(() => (
+			<rows key="reply" role="test.streamed-image-4" lines={() => ["h0", "h1", "h2", ...image, ...tail()]} />
+		));
+		expect(driver.history).toEqual(["h0", "h1", "h2", ""]);
+		expect(driver.frames.at(-1)!.viewport.slice(0, 2)).toEqual([RESERVED_ROW, RESERVED_ROW]);
+		// The viewport shrinks in place: its top stays, so the image's first row is still off the screen.
+		tail.set(["t0"]);
+		backend.renderNow();
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0"]);
+		backend.stop();
+	});
+
 	/**
 	 * A transcript (`a` settled, `b` live) over a dock of an optional cover (a docked report, a
 	 * waiting ask: every row of it draws over the transcript) and a one-row composer.

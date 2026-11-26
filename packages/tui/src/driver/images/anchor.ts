@@ -47,12 +47,15 @@ export function reservedRows(rows: number): string[] {
 
 /**
  * Leave out the image (reserving its row instead) of every row of `rows` from `start` to `end` whose
- * image starts above `start`: the rows on screen above `start` are not the ones the image was laid
- * out on (a viewport cut them away), so it would draw over other rows. In place.
+ * image starts more than `reach` rows above `start`: only the `reach` screen rows above `start` are the
+ * ones the image was laid out on (a viewport cut the rest away, or they scrolled off the screen), so it
+ * would draw over other rows. In place.
  */
-export function dropCutImages(rows: string[], start: number, end = rows.length): void {
+export function dropCutImages(rows: string[], start: number, end = rows.length, reach = 0): void {
 	for (let row = start; row < end; row++) {
 		const anchor = ANCHOR.exec(rows[row]!);
-		if (anchor && row - Number(anchor[1]) < start) rows[row] = rows[row]!.replace(ANCHORED_IMAGE, RESERVED_ROW);
+		if (anchor && row - Number(anchor[1]) < start - reach) {
+			rows[row] = rows[row]!.replace(ANCHORED_IMAGE, RESERVED_ROW);
+		}
 	}
 }
