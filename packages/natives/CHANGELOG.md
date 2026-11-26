@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed the edit tool rewriting every line of a mixed CRLF and LF file with the file's first line ending, so each untouched line now keeps its own ending ([#20390](https://github.com/can1357/oh-my-pi/pull/20390) by [@JamieJ5926](https://github.com/JamieJ5926))
 - `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave ([#20597](https://github.com/can1357/oh-my-pi/pull/20597) by [@daandden](https://github.com/daandden))
 - Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
 - Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.

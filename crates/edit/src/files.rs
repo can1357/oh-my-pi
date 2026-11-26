@@ -23,6 +23,8 @@ use std::{
 	time::SystemTime,
 };
 
+use omp_diff::{diff_line_tokens, line_tokens_str};
+
 use crate::{
 	engine::{FileOp, Location, Resolved},
 	error::{EditError, EditResult, Rejection},
@@ -60,8 +62,113 @@ impl FileRead {
 		}
 		let mut out = String::with_capacity(self.bom.len() + after_lf.len());
 		out.push_str(self.bom);
-		out.push_str(&restore_line_endings(after_lf, self.ending));
+		if self.raw.contains("\r\n") {
+			restore_untouched_line_endings(strip_bom(&self.raw).1, &self.text, after_lf, &mut out);
+		} else {
+			out.push_str(&restore_line_endings(after_lf, self.ending));
+		}
 		Ok(out)
+	}
+}
+
+/// Writes `after_lf` into `out` in the line endings `before_raw` had, one line
+/// at a time. `before_lf` is `before_raw` with CRLF normalized to LF. A line
+/// the edit did not change keeps its own ending. A changed line keeps the
+/// ending of the removed line at the same index, else the first ending its
+/// removed run had, else the nearest original ending. An inserted line takes
+/// the nearest original ending. A line with no newline is written with none.
+fn restore_untouched_line_endings(
+	before_raw: &str,
+	before_lf: &str,
+	after_lf: &str,
+	out: &mut String,
+) {
+	let endings: Vec<&str> = before_raw
+		.split_inclusive('\n')
+		.map(line_ending_of)
+		.collect();
+	let old = line_tokens_str(before_lf);
+	let new = line_tokens_str(after_lf);
+	let mut runs = diff_line_tokens(&old, &new).into_iter().peekable();
+	let (mut old_at, mut new_at) = (0, 0);
+	while let Some(run) = runs.next() {
+		if !run.added && !run.removed {
+			let count = run.count as usize;
+			for offset in 0..count {
+				push_line(out, new[new_at + offset], endings[old_at + offset]);
+			}
+			old_at += count;
+			new_at += count;
+			continue;
+		}
+		// Consecutive removed and added runs are one changed hunk.
+		let (mut removed_len, mut added_len) = (0, 0);
+		let mut hunk = run;
+		loop {
+			let count = hunk.count as usize;
+			if hunk.removed {
+				removed_len += count;
+			} else {
+				added_len += count;
+			}
+			let Some(next) = runs.next_if(|next| next.added || next.removed) else {
+				break;
+			};
+			hunk = next;
+		}
+		let removed = old_at..old_at + removed_len;
+		let added = new_at..new_at + added_len;
+		old_at = removed.end;
+		let removed_endings = &endings[removed];
+		let first_removed = removed_endings
+			.iter()
+			.copied()
+			.find(|ending| !ending.is_empty());
+		for (offset, index) in added.clone().enumerate() {
+			let line = new[index];
+			let ending = if line.ends_with('\n') {
+				removed_endings
+					.get(offset)
+					.copied()
+					.filter(|ending| !ending.is_empty())
+					.or(first_removed)
+					.unwrap_or_else(|| nearest_ending(&endings, old_at))
+			} else {
+				""
+			};
+			push_line(out, line, ending);
+		}
+		new_at = added.end;
+	}
+}
+
+fn line_ending_of(line: &str) -> &'static str {
+	if line.ends_with("\r\n") {
+		"\r\n"
+	} else if line.ends_with('\n') {
+		"\n"
+	} else {
+		""
+	}
+}
+
+fn nearest_ending<'a>(endings: &[&'a str], at: usize) -> &'a str {
+	endings[..at]
+		.iter()
+		.rev()
+		.chain(endings[at..].iter())
+		.copied()
+		.find(|ending| !ending.is_empty())
+		.unwrap_or("\n")
+}
+
+fn push_line(out: &mut String, line: &str, ending: &str) {
+	match line.strip_suffix('\n') {
+		Some(body) => {
+			out.push_str(body);
+			out.push_str(ending);
+		},
+		None => out.push_str(line),
 	}
 }
 
@@ -431,5 +538,39 @@ mod tests {
 		files.forget_answers();
 		files.resolve("src/a.ts", true).unwrap();
 		assert_eq!(files.take_recovery_misses(), ["src/a.ts"]);
+	}
+
+	#[test]
+	fn restore_untouched_line_endings_keeps_each_untouched_line_ending() {
+		let mut out = String::new();
+		restore_untouched_line_endings(
+			"first\r\nsecond\nthird\r\nfourth\n",
+			"first\nsecond\nthird\nfourth\n",
+			"first\nsecond\nREPLACED\nfourth\n",
+			&mut out,
+		);
+		assert_eq!(out, "first\r\nsecond\nREPLACED\r\nfourth\n");
+	}
+
+	#[test]
+	fn restore_untouched_line_endings_handles_a_long_mixed_file() {
+		let before_raw: String = (0..40)
+			.map(|i| format!("line {i}{}", if i % 2 == 0 { "\r\n" } else { "\n" }))
+			.collect();
+		let before_lf = before_raw.replace("\r\n", "\n");
+		let after_lf = before_lf.replace("line 21\n", "CHANGED\n");
+		let mut out = String::new();
+		restore_untouched_line_endings(&before_raw, &before_lf, &after_lf, &mut out);
+		let expected: String = (0..40)
+			.map(|i| {
+				let body = if i == 21 {
+					"CHANGED".to_owned()
+				} else {
+					format!("line {i}")
+				};
+				format!("{body}{}", if i % 2 == 0 { "\r\n" } else { "\n" })
+			})
+			.collect();
+		assert_eq!(out, expected);
 	}
 }
