@@ -381,5 +381,19 @@ describe("extractRetryHint", () => {
 	it("still returns undefined when only elapsed account resets are present", () => {
 		const past = new Date(Date.now() - 60_000).toISOString();
 		expect(extractRetryHint(undefined, `Your limit will reset at ${past}`)).toBeUndefined();
+		expect(extractRetryHint(undefined, `429 rests until ${past} (quota)`)).toBeUndefined();
+	});
+
+	it.each([
+		["rests until", "429 rests until"],
+		["resets until", "429 resets until"],
+		["resets at", "429 resets at"],
+	])("parses '%s <ISO-8601>' quota reset timestamps", (_label, prefix) => {
+		const targetMs = Date.now() + 120_000;
+		const iso = new Date(targetMs).toISOString().replace(/\.\d{3}Z$/, "Z");
+		const expected = Date.parse(iso) - Date.now();
+		const hint = extractRetryHint(undefined, `${prefix} ${iso} (quota)`);
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
 	});
 });
