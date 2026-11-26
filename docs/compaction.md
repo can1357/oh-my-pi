@@ -493,6 +493,8 @@ Can return:
 - `context` (extra context lines injected into `<additional-context>`)
 - `preserveData` (stored on compaction entry)
 
+When several handlers return results, a field a handler returns with a value replaces the earlier value, while a handler that omits a field or sets it to `undefined` keeps the earlier one (`context: []` still replaces an earlier context). `preserveData` is shallow-merged across handlers.
+
 ### `session_compact`
 
 Post-compaction notification with saved `compactionEntry` and `fromExtension` flag.

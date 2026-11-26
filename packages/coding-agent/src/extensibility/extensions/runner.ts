@@ -46,7 +46,11 @@ import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
-import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import {
+	accumulateToolCallResult,
+	buildAggregatedToolCallResult,
+	mergeSessionCompactingResult,
+} from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
@@ -2203,6 +2207,7 @@ export class ExtensionRunner {
 		// subscribed; building `ctx` for a zero-handler event is pure waste.
 		let ctx: ExtensionContext | undefined;
 		let result: SessionBeforeEventResult | SessionCompactingResult | SessionStopEventResult | undefined;
+		let compactingResult: SessionCompactingResult | undefined;
 
 		if (this.#isSessionShutdownEvent(event)) {
 			const timeoutMs = handlerTimeoutForEvent(event.type);
@@ -2250,7 +2255,11 @@ export class ExtensionRunner {
 					}
 
 					if (event.type === "session.compacting" && handlerResult) {
-						result = handlerResult as SessionCompactingResult;
+						compactingResult = mergeSessionCompactingResult(
+							compactingResult,
+							handlerResult as SessionCompactingResult,
+						);
+						result = compactingResult;
 					}
 
 					if (event.type === "session_stop" && handlerResult) {

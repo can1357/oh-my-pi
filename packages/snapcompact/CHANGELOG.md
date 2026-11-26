@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `stripProviderCompactionPreserveData()` is exported; it removes the provider-native `openaiRemoteCompaction` and `anthropicCompaction` payloads from a `preserveData` object and returns `undefined` when no other keys are left ([#20004](https://github.com/can1357/oh-my-pi/issues/20004), [#20398](https://github.com/can1357/oh-my-pi/pull/20398) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

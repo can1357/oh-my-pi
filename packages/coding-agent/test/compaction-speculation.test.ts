@@ -7,11 +7,14 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { hindsightBackend } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
@@ -746,6 +749,61 @@ describe("async speculative compaction", () => {
 		expect(roles.slice(-2)).toEqual(["assistant", "toolResult"]);
 	});
 
+	it("hands the handoff the pre-hook snapshot when a tool result lands during session.compacting", async () => {
+		const pending = appendPendingToolCall();
+		let handoffMessages: readonly AgentMessage[] | undefined;
+		const hookEntered = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", async () => {
+					hookEntered.resolve();
+					await releaseHook.promise;
+					return undefined;
+				});
+			},
+			process.cwd(),
+			new EventBus(),
+			new ExtensionRuntime(),
+			"compacting-snapshot",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			process.cwd(),
+			sessionManager,
+			modelRegistry,
+		);
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			persistTurnMessagesForMidRunCompaction: async () => true,
+			generateHandoffDocument: async (_instructions, options) => {
+				handoffMessages = options.messages;
+				return "## Goal\nFinish once the tool returns.\n";
+			},
+			extensionRunner,
+		});
+		agent.replaceMessages([...sessionManager.buildSessionContext().messages, pending]);
+
+		const started = maintenance.startBridgeCompaction();
+		await hookEntered.promise;
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "wait",
+			content: [{ type: "text", text: "done" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(result);
+		agent.state.messages.push(result);
+		releaseHook.resolve();
+		await started;
+
+		expect(handoffMessages?.map(message => message.role)).toEqual(["user", "assistant", "user"]);
+		expect(handoffMessages?.some(message => message.role === "toolResult")).toBe(false);
+	});
+
 	it("reports whether a failed bridge reached the provider, and offers none without a bridge-capable method", async () => {
 		const pending = appendPendingToolCall();
 		let billed = false;
@@ -1198,6 +1256,41 @@ describe("async speculative compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
+	});
+
+	it("commits an armed handoff with the preserveData the session.compacting hook returned", async () => {
+		const generateHandoffDocument = vi.fn(async () => "handoff plan");
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", async () => ({ preserveData: { hookKey: "hook value" } }));
+			},
+			process.cwd(),
+			new EventBus(),
+			new ExtensionRuntime(),
+			"compacting-handoff-preserve",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			process.cwd(),
+			sessionManager,
+			modelRegistry,
+		);
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			generateHandoffDocument,
+			extensionRunner,
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		sessionManager.appendMessage(assistantMessage("brief acknowledgment", model));
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.preserveData : undefined).toMatchObject({ hookKey: "hook value" });
 	});
 
 	it("discards an armed handoff summary when post-snapshot branch growth prevents recovery headroom", async () => {

@@ -437,7 +437,8 @@ function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	const preserveData = { ...hookPreserveData, ...resultPreserveData };
+	// Fresh session.compacting keys win over keys an earlier compaction carried into the result.
+	const preserveData = { ...resultPreserveData, ...hookPreserveData };
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
 }
 
@@ -1712,7 +1713,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
+				preserveData = { ...snapcompactResult.preserveData, ...compactionPrep.preserveData };
 			} else if (selectedMethod === "handoff") {
 				if (
 					snapshot &&
@@ -1730,6 +1731,7 @@ export class SessionMaintenance {
 				shortSummary = undefined;
 				firstKeptEntryId = preparation.firstKeptEntryId;
 				tokensBefore = preparation.tokensBefore;
+				preserveData = compactionPrep.preserveData;
 			} else {
 				codexCompaction = createCodexCompactionContext({
 					trigger: "manual",
@@ -2739,15 +2741,19 @@ export class SessionMaintenance {
 		const onAttempt = (message: AssistantMessage) => {
 			if (message.usage.totalTokens > 0) run.accepted = true;
 		};
+		// The handoff request is the transcript as the preparation saw it. The session.compacting
+		// handlers below await, and a tool result that lands meanwhile must not reach the summary.
+		const liveMessages = this.#host.agent.state.messages;
+		const pendingMessage = run.bridge ? findPendingToolCall(liveMessages, message => message) : -1;
+		const handoffMessages = liveMessages.slice(0, pendingMessage < 0 ? undefined : pendingMessage);
+		const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined, signal);
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
-			const liveMessages = this.#host.agent.state.messages;
-			const pendingMessage = run.bridge ? findPendingToolCall(liveMessages, message => message) : -1;
 			const document = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
 				model,
 				autoTriggered: true,
 				signal,
-				...(pendingMessage < 0 ? {} : { messages: liveMessages.slice(0, pendingMessage) }),
+				messages: handoffMessages,
 				onAttempt,
 			});
 			if (!document) return clear();
@@ -2759,6 +2765,7 @@ export class SessionMaintenance {
 					firstKeptEntryId: preparation.firstKeptEntryId,
 					tokensBefore: preparation.tokensBefore,
 					details,
+					preserveData: compactionPrep.preserveData,
 				},
 				action: "handoff",
 				method,
@@ -2766,7 +2773,6 @@ export class SessionMaintenance {
 				contextTokensAtStart: contextTokens,
 			};
 		} else {
-			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined, signal);
 			// No hookCompaction is passed above, so "fromHook" is unreachable;
 			// the guard just narrows the union.
 			if (compactionPrep.kind === "fromHook") return clear();
@@ -4271,7 +4277,9 @@ export class SessionMaintenance {
 
 			hookContext = result?.context;
 			hookPrompt = result?.prompt;
-			preserveData = result?.preserveData;
+			// Extensions may not supply engine-owned provider replay or snapcompact archive keys.
+			preserveData = snapcompact.stripProviderCompactionPreserveData(result?.preserveData);
+			preserveData = snapcompact.stripPreservedArchive(preserveData);
 		}
 
 		if (hookCompaction) {
@@ -6307,7 +6315,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
+				preserveData = { ...snapcompactResult.preserveData, ...compactionPrep.preserveData };
 			} else {
 				const liveModel = this.#model;
 				const candidates = this.#getCompactionModelCandidates(
