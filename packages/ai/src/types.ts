@@ -1300,6 +1300,12 @@ export interface AntigravityCliPayload {
 	digest: string;
 	/** Present on the step that ended agy's turn. */
 	checkpoint?: AntigravityCliCheckpoint;
+	/**
+	 * `systemDigest` of the composed system prompt the conversation was driven
+	 * with, so a restore can tell whether a fork's history already carries it.
+	 * Absent on steps recorded before the prompt left `session/new` `_meta`.
+	 */
+	systemKey?: string;
 }
 
 export type ProviderPayload =

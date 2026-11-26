@@ -43,10 +43,12 @@ import {
 	lateToolResultPrompt,
 	planTurn,
 	replayPrompt,
+	systemDigest,
 	toolResultImagesPrompt,
 	transcriptDigest,
 } from "./reconcile";
 import type { StepWriter } from "./step-writer";
+import systemReminderTemplate from "./system-reminder.md" with { type: "text" };
 import toolResultImageReferenceTemplate from "./tool-result-image-reference.md" with { type: "text" };
 
 const AGENT_NAME = "bridge";
@@ -135,8 +137,19 @@ interface AgyProcess extends AgyTransport {
 
 interface Conversation {
 	id: string;
-	systemKey: string;
+	/**
+	 * Digest of the composed system prompt this conversation's native history
+	 * holds, recorded when the prompt carrying it was written. Undefined until
+	 * then, and for history recorded before the prompt left `_meta`.
+	 */
+	systemKey?: string;
 	loaded: boolean;
+	/**
+	 * System prompt the native history does not hold yet. agy 429s a system
+	 * prompt sent in `session/new`/`session/load` `_meta`, so it travels as the
+	 * first text item of the next prompt instead.
+	 */
+	pendingSystem?: string;
 	/** omp model id the conversation was last configured for. */
 	model?: string;
 	/** `model` value last sent to agy; differs from `model` for effort-suffixed rosters. */
@@ -249,7 +262,12 @@ export class AgyHost implements ProviderSessionState {
 			const tools = (context.tools ?? []).map(toMcpTool);
 			const toolsKey = stableStringifyJson(tools);
 			const system = (context.systemPrompt ?? []).join("\n\n");
-			const systemKey = system;
+			const systemKey = systemDigest(system);
+			// A conversation's history cannot replace the reminder it carries, and
+			// appending a second full one would grow the transcript per change, so a
+			// changed prompt reseeds from omp's transcript instead.
+			const live = this.#conversation;
+			const systemChanged = live !== undefined && live.systemKey !== undefined && live.systemKey !== systemKey;
 			const agy = this.#process;
 			const processMoves = !agy || agy.toolsKey !== toolsKey || agy.cwd !== cwd;
 			const credentialChanged = agy?.credentialVersion !== options.credentialVersion;
@@ -257,16 +275,14 @@ export class AgyHost implements ProviderSessionState {
 			const parkedTurnMoves =
 				this.#pending?.state !== "detached" &&
 				this.#pending !== undefined &&
-				(processMoves ||
-					this.#conversation?.systemKey !== systemKey ||
-					this.#conversation.model !== model.id ||
-					this.#conversation.requestedEffort !== options.reasoning);
+				(processMoves || systemChanged || live?.model !== model.id || live?.requestedEffort !== options.reasoning);
 			if (
 				plan.kind === "resume" &&
 				(!this.#conversation || parkedTurnMoves || (plan.toolResult && !this.#pending))
 			) {
 				plan = planTurn(context.messages, undefined);
 			}
+			if (systemChanged) plan = { kind: "fresh", replay: [...context.messages] };
 			if (plan.kind !== "resume") await this.#setup(this.#abandonTurn());
 			if (!this.#process || processMoves || credentialChanged) {
 				// A credential-only restart can load the same native conversation once its prompt settles.
@@ -278,10 +294,14 @@ export class AgyHost implements ProviderSessionState {
 				await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
 			}
 			let loadId: string | undefined;
+			let loadedSystemKey: string | undefined;
 			if (plan.kind === "resume") {
 				const conversation = this.#conversation;
 				if (!conversation) throw new Error("Antigravity CLI conversation was lost");
-				if (!conversation.loaded || conversation.systemKey !== systemKey) loadId = conversation.id;
+				if (!conversation.loaded) {
+					loadId = conversation.id;
+					loadedSystemKey = conversation.systemKey;
+				}
 			} else if (plan.kind === "restore") {
 				let forkId: string | undefined;
 				try {
@@ -292,11 +312,13 @@ export class AgyHost implements ProviderSessionState {
 				if (forkId) {
 					this.#ownedConversations.add(forkId);
 					loadId = forkId;
+					// The fork carries the prompt its recorded step used, not the live one's.
+					loadedSystemKey = plan.systemKey;
 				} else plan = { kind: "fresh", replay: [...context.messages] };
 			}
 			if (loadId) {
 				try {
-					await this.#setup(this.#loadConversation(loadId, system, systemKey, cwd));
+					await this.#setup(this.#loadConversation(loadId, system, systemKey, loadedSystemKey, cwd));
 				} catch (error) {
 					if (step.controller.signal.aborted) throw error;
 					// A store can outlive an incompatible native CLI version. Do not reuse a partial load.
@@ -307,15 +329,13 @@ export class AgyHost implements ProviderSessionState {
 			}
 			if (plan.kind === "fresh") {
 				await this.#setup(this.#unloadConversation());
-				const created = await this.#setup(
-					this.#requireProcess().connection.newSession({ cwd, mcpServers: [], _meta: systemMeta(system) }),
-				);
+				const created = await this.#setup(this.#requireProcess().connection.newSession({ cwd, mcpServers: [] }));
 				conversationStorePath(this.#geminiDir, created.sessionId);
 				this.#ownedConversations.add(created.sessionId);
 				this.#conversation = {
 					id: created.sessionId,
-					systemKey,
 					loaded: true,
+					pendingSystem: system || undefined,
 					agyModels: modelValues(created.configOptions),
 					defaultEffort: thoughtLevel(created.configOptions),
 				};
@@ -515,7 +535,13 @@ export class AgyHost implements ProviderSessionState {
 		}
 	}
 
-	async #loadConversation(id: string, system: string, systemKey: string, cwd: string): Promise<void> {
+	async #loadConversation(
+		id: string,
+		system: string,
+		systemKey: string,
+		loadedSystemKey: string | undefined,
+		cwd: string,
+	): Promise<void> {
 		conversationStorePath(this.#geminiDir, id);
 		const agy = this.#requireProcess();
 		await this.#unloadConversation();
@@ -523,18 +549,14 @@ export class AgyHost implements ProviderSessionState {
 		this.#loading = loading;
 		try {
 			const step = this.#step;
-			const loaded = await agy.connection.loadSession({
-				sessionId: id,
-				cwd,
-				mcpServers: [],
-				_meta: systemMeta(system),
-			});
+			const loaded = await agy.connection.loadSession({ sessionId: id, cwd, mcpServers: [] });
 			if (this.#process !== agy || step !== this.#step || step?.controller.signal.aborted)
 				throw new Error("Antigravity CLI load was interrupted");
 			this.#conversation = {
 				id,
-				systemKey,
+				systemKey: loadedSystemKey,
 				loaded: true,
+				pendingSystem: loadedSystemKey === systemKey ? undefined : system || undefined,
 				agyModels: modelValues(loaded.configOptions),
 				defaultEffort: thoughtLevel(loaded.configOptions),
 			};
@@ -577,6 +599,12 @@ export class AgyHost implements ProviderSessionState {
 	#prompt(blocks: ContentBlock[]): void {
 		const conversation = this.#conversation;
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
+		const system = conversation.pendingSystem;
+		conversation.pendingSystem = undefined;
+		const delivered = system === undefined ? blocks : [systemReminder(system), ...blocks];
+		// The history holds the prompt once this write lands; a failed write leaves it owed.
+		const previousSystemKey = conversation.systemKey;
+		if (system !== undefined) conversation.systemKey = systemDigest(system);
 		const turn: Turn = {
 			conversationId: conversation.id,
 			response: Promise.withResolvers<PromptResponse>(),
@@ -601,9 +629,11 @@ export class AgyHost implements ProviderSessionState {
 			.catch(error => this.#fail(error));
 		try {
 			void this.#requireProcess()
-				.connection.prompt({ sessionId: conversation.id, prompt: blocks })
+				.connection.prompt({ sessionId: conversation.id, prompt: delivered })
 				.then(turn.response.resolve, turn.response.reject);
 		} catch (error) {
+			conversation.systemKey = previousSystemKey;
+			conversation.pendingSystem = system;
 			turn.response.reject(error);
 		}
 	}
@@ -713,7 +743,12 @@ export class AgyHost implements ProviderSessionState {
 		step.writer.toolCall({ type: "toolCall", id, name, arguments: args });
 		step.writer.usage(this.#contextTokens);
 		const digest = transcriptDigest([...step.messages, step.writer.output]);
-		step.writer.finish("toolUse", { type: "antigravityCli", conversationId, digest });
+		step.writer.finish("toolUse", {
+			type: "antigravityCli",
+			conversationId,
+			digest,
+			systemKey: this.#conversation?.systemKey,
+		});
 		this.#ledger = { count: step.messages.length + 1, digest, pendingToolCallId: id };
 		step.done.resolve();
 		return result.promise;
@@ -848,6 +883,7 @@ export class AgyHost implements ProviderSessionState {
 			conversationId: turn.conversationId,
 			digest,
 			checkpoint,
+			systemKey: this.#conversation?.systemKey,
 		});
 		this.#ledger = { count: step.messages.length + 1, digest };
 		step.done.resolve();
@@ -937,8 +973,15 @@ async function writeAgentDefinition(geminiDir: string): Promise<void> {
 	await Bun.write(file, agentDefinition);
 }
 
-function systemMeta(system: string): Record<string, unknown> {
-	return { antigravity: { systemPrompt: { append: system } } };
+/**
+ * agy applies a system prompt only from its system-instruction slot, which the
+ * backend rejects with HTTP 429 RESOURCE_EXHAUSTED when `session/new` fills it
+ * from `_meta.antigravity.systemPrompt.append`. The same text passes the input
+ * filter as conversation content, so the prompt travels as the first item of
+ * the next `session/prompt` instead.
+ */
+function systemReminder(system: string): ContentBlock {
+	return { type: "text", text: prompt.compile(systemReminderTemplate)({ system }).trimEnd() };
 }
 
 function thoughtLevel(options: SessionConfigOption[] | null | undefined): string | undefined {

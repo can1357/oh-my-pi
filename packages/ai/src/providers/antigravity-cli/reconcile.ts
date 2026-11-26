@@ -32,6 +32,8 @@ export type TurnPlan =
 			conversationId: string;
 			digest: string;
 			checkpoint: AntigravityCliCheckpoint;
+			/** Composed system prompt digest the recorded step delivered, when it recorded one. */
+			systemKey?: string;
 			replay: Message[];
 	  }
 	| { kind: "fresh"; replay: Message[] };
@@ -67,10 +69,16 @@ export function planTurn(messages: readonly Message[], ledger: Ledger | undefine
 			conversationId: payload.conversationId,
 			digest: payload.digest,
 			checkpoint: payload.checkpoint,
+			systemKey: payload.systemKey,
 			replay: messages.slice(index + 1),
 		};
 	}
 	return { kind: "fresh", replay: [...messages] };
+}
+
+/** Fingerprint the composed system prompt a native conversation was driven with. */
+export function systemDigest(system: string): string {
+	return createHash("sha256").update(system).digest("hex");
 }
 
 /** Fingerprint model-visible ordered content, excluding timestamps, usage and presentation metadata. */
