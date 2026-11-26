@@ -68,8 +68,18 @@ fn step(pty: &mut Pty, keys: &str) -> io::Result<()> {
 	pty.settle(quiet(), STEP)
 }
 
-/// Run the case on the shell under test; the record of its steps.
-fn record(fpath: &str, setup: Setup, rc: &str, steps: &[&str], what: Record) -> io::Result<String> {
+/// Run the case on the shell under test; the record of its steps, and the
+/// first step whose screen was not drawn in time. With `drawn` (the snapshot's
+/// screens, [`drawn`]), each step also waits for its own screen before it is
+/// recorded.
+fn record(
+	fpath: &str,
+	setup: Setup,
+	rc: &str,
+	steps: &[&str],
+	what: Record,
+	drawn: Option<&[Drawn]>,
+) -> io::Result<(String, Option<usize>)> {
 	let mut rcfile = format!("fpath=( {fpath} )\n{FIXTURE}");
 	if setup == Setup::Compsys {
 		rcfile.push_str("autoload -U compinit; compinit -u -D\n");
@@ -91,9 +101,35 @@ fn record(fpath: &str, setup: Setup, rc: &str, steps: &[&str], what: Record) -> 
 	// A clean screen for the case itself.
 	step(&mut pty, "\x0c")?;
 	let mut text = String::new();
-	for keys in steps {
+	let mut late = None;
+	for (i, keys) in steps.iter().enumerate() {
 		let start = pty.output().len();
 		step(&mut pty, keys)?;
+		// Wait for the step's own screen: the screen and cursor the snapshot
+		// holds for this step. `step` returns when its own wait ends, and that
+		// wait does not look at the screen: under a loaded test run obash drew
+		// a command-name completion after `step` had returned, in one measured
+		// attempt at least 0.97 s after the step's output had been quiet for
+		// 400 ms. This is not a wait for the shell to be ready for the next
+		// key; it waits for what this step draws. A screen that came after a
+		// wait must then hold for [`HOLD`], so a change that follows it is in
+		// the record too. Once one step misses, the later ones do not wait:
+		// the record already differs.
+		if late.is_none()
+			&& let Some(want) = drawn.and_then(|d| d.get(i))
+		{
+			let shows = |s: &pty_support::vt::Screen| {
+				s.contents() == want.contents && s.cursor() == want.cursor
+			};
+			if !shows(pty.screen()) {
+				if pty.wait_screen(DRAWN, shows).is_ok() {
+					// Returns at a change within HOLD; else the screen held.
+					let _ = pty.wait_screen(HOLD, |s| !shows(s));
+				} else {
+					late = Some(i);
+				}
+			}
+		}
 		let screen = pty.screen();
 		let (row, col) = screen.cursor();
 		let _ = write!(text, "### {keys:?}\n{}\n@ {row},{col}\n", screen.contents());
@@ -102,7 +138,7 @@ fn record(fpath: &str, setup: Setup, rc: &str, steps: &[&str], what: Record) -> 
 			let _ = write!(text, "--- sgr\n{}\n", sgr_transcript(out.get(start..).unwrap_or(&out)));
 		}
 	}
-	Ok(text)
+	Ok((text, late))
 }
 
 /// Record the case and compare it with (or, blessing, write) its snapshot.
@@ -111,24 +147,94 @@ fn check(name: &str, setup: Setup, rc: &str, steps: &[&str], what: Record) {
 		eprintln!("skipped: zsh 5.9 completion functions are not installed");
 		return;
 	};
-	let got = match record(&fpath_words(&fpath), setup, rc, steps, what) {
-		Ok(text) => text,
+	let path = snapshot_path(name);
+	// Blessing writes the snapshot, so it has none to wait for.
+	let want = (!bless()).then(|| {
+		fs::read_to_string(&path).unwrap_or_else(|e| {
+			panic!("{}: {e} (write it with PI_COMP_ORACLE=1 PI_COMP_BLESS=1)", path.display())
+		})
+	});
+	let screens = want
+		.as_deref()
+		.and_then(drawn)
+		.filter(|d| d.len() == steps.len());
+	let (got, late) = match record(&fpath_words(&fpath), setup, rc, steps, what, screens.as_deref())
+	{
+		Ok(record) => record,
 		Err(e) => panic!("pty session failed: {e}"),
 	};
-	let path = snapshot_path(name);
-	if bless() {
+	let Some(want) = want else {
 		assert!(oracle(), "PI_COMP_BLESS needs PI_COMP_ORACLE (snapshots come from /bin/zsh)");
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
 		fs::write(&path, &got).unwrap();
 		return;
-	}
-	let want = fs::read_to_string(&path).unwrap_or_else(|e| {
-		panic!("{}: {e} (write it with PI_COMP_ORACLE=1 PI_COMP_BLESS=1)", path.display())
+	};
+	let late = late.map_or_else(String::new, |i| {
+		format!(
+			"step {} ({:?}) did not draw the snapshot's screen within {DRAWN:?}; the later steps did \
+			 not wait\n",
+			i + 1,
+			steps[i]
+		)
 	});
 	assert!(
 		got == want,
-		"{name}: the screens differ from zsh 5.9's\n--- zsh 5.9:\n{want}\n--- got:\n{got}"
+		"{name}: the screens differ from zsh 5.9's\n{late}--- zsh 5.9:\n{want}\n--- got:\n{got}"
 	);
+}
+
+/// Bound of a step's wait for its screen ([`record`]). The latest drawing
+/// measured under a loaded test run came at least 0.97 s after the step's
+/// quiet window; a screen that never comes costs each failing case this once.
+const DRAWN: Duration = Duration::from_secs(10);
+
+/// How long a screen that came only after [`record`]'s wait must stay as the
+/// snapshot has it before it is recorded. A change in that time is recorded
+/// and fails the case; this can fail a case, never pass one.
+const HOLD: Duration = Duration::from_millis(400);
+
+/// What a snapshot says one step leaves on the screen.
+struct Drawn {
+	/// The rows, as [`record`] writes them.
+	contents: String,
+	/// The cursor's row and column.
+	cursor:   (usize, usize),
+}
+
+/// The screen of each step of a snapshot ([`record`]'s format: `### <keys>`,
+/// the rows, `@ <row>,<col>`, and for colour cases `--- sgr` and its
+/// transcript), in order; `None` when the text does not read as one.
+fn drawn(snapshot: &str) -> Option<Vec<Drawn>> {
+	let mut starts = Vec::new();
+	let mut off = 0;
+	for line in snapshot.split_inclusive('\n') {
+		if line.starts_with("### \"") {
+			starts.push(off);
+		}
+		off += line.len();
+	}
+	if starts.first() != Some(&0) {
+		return None;
+	}
+	starts.push(snapshot.len());
+	starts
+		.windows(2)
+		.map(|w| {
+			let (_, body) = snapshot[w[0]..w[1]].split_once('\n')?;
+			let body = body
+				.split_once("\n--- sgr\n")
+				.map_or(body, |(screen, _)| screen);
+			let (contents, at) = body
+				.strip_suffix('\n')
+				.unwrap_or(body)
+				.rsplit_once("\n@ ")?;
+			let (row, col) = at.split_once(',')?;
+			Some(Drawn {
+				contents: contents.to_owned(),
+				cursor:   (row.parse().ok()?, col.parse().ok()?),
+			})
+		})
+		.collect()
 }
 
 #[test]
