@@ -292,6 +292,8 @@ export interface ComposerOptions {
 	readonly autocompleteMaxVisible?: number;
 	/** `drawn`: the caret is drawn in the text (default); `terminal`: the hardware cursor alone shows it. */
 	readonly caret?: "drawn" | "terminal";
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	readonly imeSafeCursor?: boolean;
 	/** Symbol lookup for chip glyphs (the theme's `symbols.symbol`). */
 	readonly symbol?: (key: string) => string;
 	readonly onSubmit?: (text: string) => void;
@@ -427,6 +429,7 @@ export class Composer {
 	readonly #disableSubmit: Signal<boolean>;
 	readonly #caret: Signal<"drawn" | "terminal">;
 	readonly #slots = signal<ComposerSlots>({});
+	readonly #imeSafeCursor: Signal<boolean>;
 
 	readonly #keyHandlers: ComposerKeyHandler[] = [];
 	readonly #pasteHandlers: ComposerPasteHandler[] = [];
@@ -446,6 +449,7 @@ export class Composer {
 		this.#disableSubmit = signal(options.disableSubmit === true);
 		this.#caret = signal(options.caret ?? "drawn");
 		this.#autocomplete = options.autocomplete;
+		this.#imeSafeCursor = signal(options.imeSafeCursor === true);
 		this.#placeholder.set(options.placeholder);
 		for (const entry of options.history ?? []) this.addToHistory(entry);
 		this.#vimOn = signal(options.vim === true);
@@ -1462,6 +1466,7 @@ export class Composer {
 			return;
 		}
 		const typed =
+			!event.paste &&
 			event.from === event.to &&
 			event.cursor === event.from + event.text.length &&
 			[...new Intl.Segmenter().segment(event.text)].length === 1;
@@ -1469,7 +1474,10 @@ export class Composer {
 		const previous = event.from === this.#cursor() ? this.#completion.peek() : null;
 		this.#change(event.from, event.to, event.text, event.cursor, typed ? "type" : "edit");
 		this.#atomizeTyped();
-		this.#afterEdit(event.text, event.from < event.to, force, previous);
+		// Pasted text is content, not a request to complete: a trailing `@name` must not turn the
+		// next Enter into a file pick (#20681). Tab still completes it explicitly.
+		if (event.paste) this.#closeCompletion();
+		else this.#afterEdit(event.text, event.from < event.to, force, previous);
 		this.#notifyEdit({ from: event.from, to: event.to, insert: event.text, typed });
 	}
 
@@ -1720,6 +1728,11 @@ export class Composer {
 		this.#caret.set(caret);
 	}
 
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	setImeSafeCursor(enabled: boolean): void {
+		this.#imeSafeCursor.set(enabled);
+	}
+
 	setDisableSubmit(disabled: boolean): void {
 		this.#disableSubmit.set(disabled);
 	}
@@ -1877,6 +1890,7 @@ export class Composer {
 			...(this.#status() ? { status: this.#status() } : {}),
 			...(this.#border() ? { border: this.#border() } : {}),
 			...(this.#borderFaint() ? { borderFaint: true } : {}),
+			...(this.#imeSafeCursor() && this.#caret() === "terminal" ? { imeSafeCursor: true } : {}),
 			...(this.#faint() ? { faint: true } : {}),
 		}));
 

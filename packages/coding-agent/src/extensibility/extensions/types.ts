@@ -85,7 +85,12 @@ import type { ComposerDecorator, SubmitTransform } from "../../ui/composer/compo
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "../custom-commands/bundled/annotate/annotation-types";
 export type { ComposerDecoration, ComposerDecorator, SubmitTransform } from "../../ui/composer/composer";
-export type { ComposerChromeContext, ComposerRowContext, ComposerShape } from "../../ui/styles/composer/shapes";
+export type {
+	ComposerChromeContext,
+	ComposerRowContext,
+	ComposerRowRender,
+	ComposerShape,
+} from "../../ui/styles/composer/shapes";
 import type { ModelRegistry, ProviderConfigInput } from "../../config/model-registry";
 import type { EditToolDetails } from "../../tools/details/edit";
 import type { PythonResult } from "../../eval/py/executor";
@@ -1898,7 +1903,7 @@ export interface TodoBackendDefinition {
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
 /** Service tiers accepted by each provider family. */
-export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic"
+export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic" | "devin"
 	? "priority"
 	: Family extends "google"
 		? "flex" | "priority"

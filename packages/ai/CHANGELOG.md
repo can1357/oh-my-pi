@@ -4,8 +4,10 @@
 
 ### Added
 
-- `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+- Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
+- `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
@@ -17,6 +19,11 @@
 
 ### Fixed
 
+- Claude usage reports now label a Team premium seat as "Team 5x" instead of "Max 5x" ([#20677](https://github.com/can1357/oh-my-pi/pull/20677) by [@ndecool](https://github.com/ndecool))
+- Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
+- The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
+- Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
+- Fixed a cancelled inference request still being sent through a custom fetch that ignores the abort signal, when the cancel came while the request body was being prepared ([#20673](https://github.com/can1357/oh-my-pi/pull/20673) by [@sjawhar](https://github.com/sjawhar))
 - Speech synthesis rejects a JSON error body sent with a 2xx status as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.1] - 2026-11-25

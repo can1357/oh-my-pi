@@ -106,6 +106,21 @@ impl Process {
 		self.inner.args()
 	}
 
+	/// Basename of the running process's OS executable image, not `argv[0]`.
+	/// Returns null when the image is unreadable or the process has exited.
+	#[napi]
+	pub fn executable_name(&self) -> Option<String> {
+		self.inner.executable_name()
+	}
+
+	/// Send `signal` to an owned POSIX process group, even after its leader
+	/// exits. Defaults to hard-kill. Returns false if no signal was delivered
+	/// or the platform does not support process groups.
+	#[napi]
+	pub fn kill_group(pgid: i32, signal: Option<i32>) -> bool {
+		kill_process_group(pgid, signal.unwrap_or(KILL_SIGNAL))
+	}
+
 	/// Send `signal` to this process and its descendants, children first.
 	///
 	/// On Linux and macOS the signal is forwarded as-is. On Windows there is no

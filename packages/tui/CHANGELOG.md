@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `MarkdownLook` has a required `linkUrls` field, so `setMarkdownLook` callers must pass it ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
+### Added
+
+- Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+### Added
+
+- `TextEdit.paste` marks an edit that types a bracketed paste ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
+
+### Fixed
+
+- Resizing a pane inside Herdr repaints in place instead of looping resize redraws ([#20570](https://github.com/can1357/oh-my-pi/pull/20570) by [@koeria](https://github.com/koeria))
+- A computed value whose owner was disposed no longer runs again when the values it read change, and what it created after the dispose is torn down ([#20670](https://github.com/can1357/oh-my-pi/pull/20670) by [@H4vC](https://github.com/H4vC))
+- Closing a view with tens of thousands of reactive values no longer slows down sharply as the count grows ([#20674](https://github.com/can1357/oh-my-pi/pull/20674) by [@H4vC](https://github.com/H4vC))
+- Typing in an editor holding thousands of lines is about 3x faster per keystroke ([#20659](https://github.com/can1357/oh-my-pi/pull/20659) by [@H4vC](https://github.com/H4vC))
+- Updates no longer slow down sharply when a single reactive computation reads thousands of values ([#20657](https://github.com/can1357/oh-my-pi/pull/20657) by [@H4vC](https://github.com/H4vC))
+- SIXEL and iTerm2 images no longer draw over other rows or scroll the terminal under the frame: images taller than the screen are fitted within it, and a live image whose first rows the viewport cuts off is left out until they fit ([#20620](https://github.com/can1357/oh-my-pi/pull/20620) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed fast Vietnamese Telex typing dropping or duplicating characters in Windows terminals ([#20579](https://github.com/can1357/oh-my-pi/pull/20579) by [@rk3usox3iz38wom](https://github.com/rk3usox3iz38wom)).
+- Code blocks in a streaming reply now reach scrollback line by line as they scroll off screen, instead of staying out of reach until the block ends ([#13676](https://github.com/can1357/oh-my-pi/issues/13676), [#20561](https://github.com/can1357/oh-my-pi/pull/20561) by [@Frexxis](https://github.com/Frexxis))
+- Reduced idle CPU use on Windows after `/restart` ([#20518](https://github.com/can1357/oh-my-pi/pull/20518) by [@ethancawse](https://github.com/ethancawse)).
+- Reopened lost Tern surfaces on an `unknown surface` reply, stopped frames if the reopen was rejected, and kept recognizable broken TSP replies out of the editor ([#20550](https://github.com/can1357/oh-my-pi/issues/20550)).
+- Typing in a Tern composer keeps echoing while an agent streams, instead of stalling for seconds when Tern is slow to acknowledge frames. ([#20463](https://github.com/can1357/oh-my-pi/pull/20463) by [@Xytronix](https://github.com/Xytronix))
+- `wrap` closes inverse video at each wrapped row's end, like underline and strikethrough, so inverted text no longer spills into padding and borders after it ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov)).
+- Fixed win32-input-mode key records appearing as literal composer text when the Escape timer runs before stdin delivers the rest of the record ([#20608](https://github.com/can1357/oh-my-pi/issues/20608)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

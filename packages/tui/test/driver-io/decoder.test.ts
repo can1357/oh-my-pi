@@ -287,6 +287,22 @@ describe("InputDecoder: every family, byte by byte", () => {
 		]);
 	});
 
+	it("drops a malformed TSP reply whose stalled tail starts with a space, preserving the next key", () => {
+		const { clock, decoder, keys } = setup();
+		decoder.process('\x1b_tsp;;{"ev":"error","msg":"unknown surface');
+		clock.advance(200);
+		decoder.process(' s:1"}\x1b\\x');
+		expect(keys()).toEqual(["x"]);
+	});
+
+	it("does not type the spaced tail of a TSP reply after the string watchdog expires", () => {
+		const { clock, decoder, keys } = setup();
+		decoder.process('\x1b_tsp;e;{"ev":"error","msg":"unknow');
+		clock.advance(5000);
+		decoder.process('surface s:1"}\x1b\\x');
+		expect(keys()).toEqual(["x"]);
+	});
+
 	it("routes every probe reply to its owner and never to input", () => {
 		const { bytes, events, replies } = setup();
 		bytes("\x1b[?62;4;22c");
@@ -438,6 +454,21 @@ describe("InputDecoder: win32-input-mode records", () => {
 		decoder.process(relay("\x1b[200~a"));
 		decoder.process(record(13, 28, 13, 1, 0) + relay("b\x1b[201~"));
 		expect(events).toEqual([{ type: "paste", paste: { text: "a\rb" } }]);
+	});
+
+	it("keeps Win32 Backspace before direct text in the same read", () => {
+		const { decoder, keys } = win32();
+		const backspace = record(8, 14, 8, 1, 0) + record(8, 14, 8, 0, 0);
+		decoder.process("chon");
+		decoder.process(backspace);
+		decoder.process(new TextEncoder().encode(`${backspace}ọn`));
+		expect(keys()).toEqual(["c", "h", "o", "n", "backspace", "backspace", "ọ", "n"]);
+	});
+
+	it("keeps Win32 Backspace before direct paste in the same read", () => {
+		const { decoder, events } = win32();
+		decoder.process(record(8, 14, 8, 1, 0) + "\x1b[200~ọn\x1b[201~");
+		expect(events.map(event => event.type)).toEqual(["key", "paste"]);
 	});
 
 	it("still decodes direct terminal replies and keys while records are on", () => {

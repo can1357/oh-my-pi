@@ -103,6 +103,8 @@ export type EmbedTerm = {
 	readonly still?: FigureRaster;
 	/** Where the embed's `src` points: a local file or a web page (none for `data:`). */
 	readonly link?: EmbedLink;
+	/** Rows the picture may take (the figure's room); undefined: its natural height. */
+	readonly maxRows?: number;
 };
 
 /** An embed's link target. */
@@ -220,6 +222,11 @@ export function EmbedFigure(
 			);
 		});
 	});
+	// The room follows the terminal's height without building the node again.
+	const sized = (term: EmbedTerm) => (): EmbedTerm => {
+		const rows = read(props.maxRows);
+		return rows === undefined ? term : { ...term, maxRows: rows };
+	};
 	return () => {
 		const embed = read(props.embed);
 		if (!embed) return undefined;
@@ -256,10 +263,10 @@ export function EmbedFigure(
 						role="omp.embed"
 						url={page}
 						title={embed.label.trim() || undefined}
-						term={term}
+						term={sized(term)}
 					/>
 				) : (
-					<text key={props.nodeKey} role="omp.embed" text={label} term={term} />
+					<text key={props.nodeKey} role="omp.embed" text={label} term={sized(term)} />
 				);
 			}
 			const term: EmbedTerm = { label, ...(error ? { error } : {}), ...(target ? { link: target } : {}) };
@@ -272,7 +279,7 @@ export function EmbedFigure(
 					h={raster?.h}
 					alt={label}
 					max={max}
-					term={term}
+					term={sized(term)}
 				/>
 			);
 		});
@@ -283,6 +290,6 @@ export function EmbedFigure(
 function picture(bytes: Uint8Array, mime: string | undefined): Loaded | undefined {
 	const size = readImageHeaderDimensions(bytes);
 	if (!size) return undefined;
-	const type = mime?.startsWith("image/") ? mime.split(";")[0]! : bytes[0] === 0xff ? "image/jpeg" : "image/png";
+	const type = mime?.startsWith("image/") ? mime.split(";")[0]! : size.mimeType;
 	return { status: "image", raster: { blob: registerBlob(bytes, type), w: size.width, h: size.height } };
 }

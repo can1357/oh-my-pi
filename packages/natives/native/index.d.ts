@@ -645,6 +645,17 @@ export declare class Process {
   /** Launch arguments for this process. */
   args(): Array<string>
   /**
+   * Basename of the running process's OS executable image, not `argv[0]`.
+   * Returns null when the image is unreadable or the process has exited.
+   */
+  executableName(): string | null
+  /**
+   * Send `signal` to an owned POSIX process group, even after its leader
+   * exits. Defaults to hard-kill. Returns false if no signal was delivered
+   * or the platform does not support process groups.
+   */
+  static killGroup(pgid: number, signal?: number | undefined | null): boolean
+  /**
    * Send `signal` to this process and its descendants, children first.
    *
    * On Linux and macOS the signal is forwarded as-is. On Windows there is no
@@ -740,6 +751,19 @@ export declare class PtySession {
   pauseOutput(): Promise<void>
   /** Restart reading output after `pauseOutput()`. No-op when not paused. */
   resumeOutput(): void
+}
+
+/**
+ * Reads a URL one step at a time; the host performs all network and browser
+ * I/O.
+ */
+export declare class Reader {
+  /** Create a reader. Resolve each requested step before opening another URL. */
+  constructor(options?: ReaderOptions | undefined | null)
+  /** Start reading a URL and return the first step. */
+  open(url: string): ReaderStep
+  /** Process a fetch or browser response on a worker thread. */
+  resolve(response: ReaderResponse): Promise<ReaderStep>
 }
 
 /**
@@ -2937,28 +2961,6 @@ export interface HoldOptions {
   refuseMenu?: boolean
 }
 
-/**
- * Convert HTML source to Markdown with optional preprocessing.
- *
- * # Errors
- * Returns an error if the conversion fails or the worker task aborts.
- */
-export declare function htmlToMarkdown(html: string, options?: HtmlToMarkdownOptions | undefined | null): Promise<string>
-
-/** Options for HTML to Markdown conversion. */
-export interface HtmlToMarkdownOptions {
-  /** Remove navigation elements, forms, headers, footers. */
-  cleanContent?: boolean
-  /** Skip images during conversion. */
-  skipImages?: boolean
-  /**
-   * Hidden content to keep: "drop" (default) omits it, "reachable" keeps
-   * content the page can reveal (collapsed sections, inactive tab panels),
-   * "all" also keeps `<template>` and `<noscript>` content.
-   */
-  hiddenContent?: string
-}
-
 /** One stray sloppy payload region inside prose (UTF-16 offsets). */
 export interface InlineSloppyRegion {
   start: number
@@ -3892,6 +3894,150 @@ export interface RawExit {
   signal: number | null
 }
 
+/** An HTTP header. Repeated header names are preserved in the header array. */
+export interface ReaderHeader {
+  /** Header name. */
+  name: string
+  /** Header value. */
+  value: string
+}
+
+/** Reader output and fallback options. */
+export interface ReaderOptions {
+  /** Return the decoded source instead of rendering a document. */
+  raw?: boolean
+  /** Output syntax; defaults to Markdown. */
+  format?: "markdown" | "text"
+  /** Use reader selection (the default) or keep all visible content. */
+  mode?: "auto" | "full"
+  /** Which hidden content to include; defaults to dropping it. */
+  hidden?: "drop" | "reachable" | "all"
+  /** Include images in Markdown output; defaults to true. */
+  images?: boolean
+  /** Text rendering width in columns; defaults to 250. */
+  width?: number
+  /** Permit a browser-rendered fallback if HTTP and embedded data fail. */
+  browser?: boolean
+  /** User-agent candidates for HTTP requests. */
+  userAgents?: Array<string>
+  /** Enable site-specific readers; defaults to true. */
+  sites?: boolean
+  /** Credentials for site-specific API requests. */
+  siteCredentials?: Array<ReaderSiteCredential>
+  /** Settings for site-specific readers (for example, `x.model`). */
+  siteSettings?: Array<ReaderSiteSetting>
+  /**
+   * Wall clock in ms since the Unix epoch (`Date.now()`); defaults to the
+   * system clock.
+   */
+  nowMs?: number
+  /**
+   * User-agent for site API requests that do not specify one; defaults to
+   * "omp".
+   */
+  apiUserAgent?: string
+  /** Remote readers in priority order. */
+  remote?: Array<ReaderRemoteBackend>
+  /** Try remote reading before rendering HTML locally. */
+  preferRemote?: boolean
+}
+
+/** Final result of reading a URL. */
+export interface ReaderOutput {
+  /** Whether the reader produced a page, detected a blob, or failed. */
+  kind: "page" | "blob" | "failed"
+  /** Final URL. */
+  url: string
+  /** Rendered or decoded page content. */
+  content?: string
+  /** Page output format. */
+  format?: string
+  /** Source content type for a page result. */
+  contentType?: string
+  /** Page title when available. */
+  title?: string
+  /** Strategy used to produce the page. */
+  strategy?: string
+  /** Reader verdict for a page or failed result. */
+  verdict?: string
+  /** Bot protection that answered instead of the page. */
+  wall?: string
+  /** Diagnostics from the read. */
+  notes: Array<string>
+  /** Whether a page was based on a truncated response. */
+  truncated?: boolean
+  /** Blob MIME type. */
+  mime?: string
+  /** Suggested blob file extension. */
+  extension?: string
+  /** HTTP status of the failed response or the one a page came from. */
+  status?: number
+}
+
+/** Configuration for one remote reader. */
+export interface ReaderRemoteBackend {
+  /** Remote reader service. */
+  kind: "jina" | "firecrawl" | "parallel"
+  /** API key for the service. */
+  apiKey?: string
+  /** Override the service's default base URL. */
+  baseUrl?: string
+}
+
+/** Result of the requested fetch or browser load. */
+export interface ReaderResponse {
+  /** HTTP status, or zero on a transport error. */
+  status: number
+  /** Final URL after redirects. */
+  url: string
+  /** Response headers. */
+  headers: Array<ReaderHeader>
+  /** Response bytes or UTF-8 encoded DOM from a browser load. */
+  body?: Buffer
+  /** Whether the body was cut off at the requested byte limit. */
+  truncated?: boolean
+  /** Transport failure, if any. */
+  error?: string
+}
+
+/** A credential for a site-specific reader. */
+export interface ReaderSiteCredential {
+  /** Site identifier (for example, "github"). */
+  site: string
+  /** API token for the site. */
+  token: string
+}
+
+/** A setting for site-specific readers. */
+export interface ReaderSiteSetting {
+  /** Setting key (for example, "x.model"). */
+  key: string
+  /** Setting value. */
+  value: string
+}
+
+/** The next action for the host, or the reader's final output. */
+export interface ReaderStep {
+  /** Whether to issue an HTTP request, browse, or return a final output. */
+  kind: "fetch" | "browse" | "done"
+  /** URL to fetch or browse. */
+  url?: string
+  /** HTTP method for a fetch step. */
+  method?: string
+  /** HTTP headers for a fetch step. */
+  headers?: Array<ReaderHeader>
+  /** Optional HTTP request body. */
+  body?: Buffer
+  /** Maximum number of response bytes to read. */
+  maxBytes?: number
+  /** Why this fetch is needed. */
+  purpose?: string
+  /** Which responses to retry once before resolving the fetch. */
+  retry?: "none" | "rate-limit" | "transient"
+  /** Result of a completed read. */
+  output?: ReaderOutput
+}
+
 /**
  * Read an image from the system clipboard.
  *
@@ -3915,6 +4061,25 @@ export declare function readTextFromClipboard(): Promise<string | undefined | nu
 
 /** waitpid for a direct child (also one inherited across execReplace). */
 export declare function reapChild(pid: number): Promise<RawExit>
+
+/** Render HTML as Markdown or plain text on a worker thread. */
+export declare function renderHtml(html: string, options?: RenderHtmlOptions | undefined | null): Promise<string>
+
+/** Options for rendering HTML already held by the caller. */
+export interface RenderHtmlOptions {
+  /** Output syntax; defaults to Markdown. */
+  format?: "markdown" | "text"
+  /** Use reader selection (the default) or keep all visible content. */
+  mode?: "auto" | "full"
+  /** Which hidden content to include; defaults to dropping it. */
+  hidden?: "drop" | "reachable" | "all"
+  /** Include images in Markdown output; defaults to true. */
+  images?: boolean
+  /** Text rendering width in columns; defaults to 250. */
+  width?: number
+  /** Absolute URL used to resolve relative links. */
+  baseUrl?: string
+}
 
 /**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
