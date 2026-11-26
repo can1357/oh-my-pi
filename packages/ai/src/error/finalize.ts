@@ -1,3 +1,4 @@
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { Api } from "../types";
 import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
@@ -45,7 +46,7 @@ function safeStatus(error: unknown): number | undefined {
 
 function safeErrorText(error: unknown): string {
 	try {
-		return error instanceof Error ? error.message : String(error);
+		return errorMessage(error);
 	} catch {
 		return "Unknown error";
 	}
