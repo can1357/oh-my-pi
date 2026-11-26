@@ -52,6 +52,14 @@ pub fn eval(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 /// mode). In posix mode a failure ends the shell (a special builtin, not
 /// through `command`).
 pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
+	// Internal entry point for a utility that already authorized these bytes.
+	// Without the host input this is an invalid option, never a path read.
+	if let [opt, file] = args
+		&& opt.as_slice() == b"--omp-source-snapshot"
+		&& let Some(snapshot) = ctx.vp.source_snapshot.clone()
+	{
+		return source_text(ctx, file, file, snapshot.path.as_bytes(), &[], &snapshot.bytes);
+	}
 	let (search_arg, args) = match args {
 		[p, path, rest @ ..] if p.as_slice() == b"-p" => (Some(path), rest),
 		[dd, rest @ ..] if dd.as_slice() == b"--" => (None, rest),
@@ -116,6 +124,17 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			return done(1);
 		},
 	};
+	source_text(ctx, file, &shown, &path, rest, &text)
+}
+
+fn source_text(
+	ctx: &mut Ctx<'_, '_>,
+	file: &BString,
+	shown: &BString,
+	path: &[u8],
+	rest: &[BString],
+	text: &[u8],
+) -> R {
 	// bash drops NUL bytes from a sourced file; more than 256 make it a
 	// binary file (`EX_BINARY_FILE`).
 	let nuls = text.find_iter(b"\0").count();
@@ -125,14 +144,14 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		});
 		return done(126);
 	}
-	let text = if nuls == 0 {
-		text
-	} else {
-		text.iter().copied().filter(|&c| c != 0).collect()
-	};
 	let restore = source_args(ctx, rest, true)?;
 	// As for `eval`: the file sees the caller's `$?`.
-	push_script(ctx.vp, &text, 1, ScriptKind::Source);
+	if nuls == 0 {
+		push_script(ctx.vp, text, 1, ScriptKind::Source);
+	} else {
+		let clean: Vec<_> = text.iter().copied().filter(|&c| c != 0).collect();
+		push_script(ctx.vp, &clean, 1, ScriptKind::Source);
+	}
 	// `BASH_SOURCE` shows the name as given.
 	crate::bash::vm::callstack::push_source(
 		ctx.k,
@@ -156,6 +175,11 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 /// `posixbuiltins`) and status 127; a syntax error in the file makes it
 /// 126; else the file's last status.
 pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
+	// Even if the evaluation switched modes, the private option must
+	// never become a filename lookup.
+	if matches!(args, [opt, _] if opt.as_slice() == b"--omp-source-snapshot") {
+		return source(ctx, args);
+	}
 	let Some((file, rest)) = args.split_first() else {
 		return done(0);
 	};

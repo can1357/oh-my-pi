@@ -948,6 +948,11 @@ export function getAvatarCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
 }
 
+/** Get the directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH (~/.omp/cache/bun-stub). */
+export function getBunStubDir(): string {
+	return dirs.rootSubdir(path.join("cache", "bun-stub"), "cache");
+}
+
 /** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
 export function getFastembedCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "fastembed"), "cache");
@@ -1074,11 +1079,6 @@ export function getBlobsDir(agentDir?: string): string {
 /** Get the custom themes directory (~/.omp/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "themes");
-}
-
-/** Get the tools directory (~/.omp/agent/tools). */
-export function getToolsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "tools");
 }
 
 /** Get the slash commands directory (~/.omp/agent/commands). */
