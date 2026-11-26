@@ -53,7 +53,7 @@ describe("browser URL patterns", () => {
 		expect(matchesRequest(record, { filter: "**/buyItems.php" })).toBe(false);
 	});
 
-	it("redacts credential headers in the request listing only", () => {
+	it("redacts credential headers in every request record", () => {
 		const record = {
 			id: "1",
 			seq: 1,
@@ -65,10 +65,9 @@ describe("browser URL patterns", () => {
 			responseHeaders: { "set-cookie": "sid=2" },
 			sizes: {},
 		};
-		expect(toPublicRecord(record, true)).toMatchObject({
+		expect(toPublicRecord(record)).toMatchObject({
 			requestHeaders: { Cookie: "[redacted]", accept: "*/*" },
 			responseHeaders: { "set-cookie": "[redacted]" },
 		});
-		expect(toPublicRecord(record).requestHeaders.Cookie).toBe("sid=1");
 	});
 });

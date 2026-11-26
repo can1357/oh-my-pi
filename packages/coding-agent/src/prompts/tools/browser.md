@@ -54,7 +54,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 - The cell's own `wait(handles)` waits for agents and completions, not time; `wait(ms | predicate)` sleeps or polls only inside `tab.run`.
 - URL patterns (`waitForUrl`, `waitForResponse`, `requests({filter})`): a string with `*` is a glob (`*` within a path segment, `**` across: `"**/cart.php"`), any other string a substring; or a RegExp. `route` strings are always globs.
 - `route` is declarative: matching requests are aborted or fulfilled from its options; it takes no handler.
-  - Watching traffic: `requests()` lists metadata; `request(id)` adds request and response bodies.
+  - Watching traffic: `requests()` lists metadata; `request(id)` adds request and response bodies. Credential header values (`Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`) read `[redacted]` in both.
 - Navigation and re-renders invalidate observed ids and refs: re-observe, then act in the same cell. `pushState(url)`: SPA navigation without a document load.
 - No dialog policy: alerts and beforeunload prompts auto-accept; confirms and prompts stay pending for `handleDialog`, and page calls fail naming them until answered.
 - `emulate` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides.
