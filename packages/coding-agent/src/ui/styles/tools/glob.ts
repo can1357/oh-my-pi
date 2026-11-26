@@ -1,8 +1,8 @@
 /**
- * The `glob` look: a head line (`🔍 Glob 25 files · in src · truncated`) and
- * a branch tree of the paths with file-type icons; collapsed keeps the first
- * eight under `… N more files`. Notes (limits, skipped paths) follow in the
- * warning color.
+ * The `glob` look: a head line (`🔍 Glob: src/*.ts 25 files · in src · truncated`,
+ * the globs' wildcards highlighted) and a branch tree of the paths with
+ * file-type icons; collapsed keeps the first eight under `… N more files`.
+ * Notes (limits, skipped paths) follow in the warning color.
  */
 import * as path from "node:path";
 import type { UiNode } from "@oh-my-pi/pi-tui";

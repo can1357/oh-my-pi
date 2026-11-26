@@ -164,6 +164,8 @@ export class PlanReviewModel {
 	hovered: number | undefined;
 	committed = false;
 	committedLabel: string | undefined;
+	/** The last successful local export, shown above the terminal review's key hints. */
+	saveNotice: string | undefined;
 	/** The note editor (open while annotating). */
 	annotating = false;
 	draft = { text: "", cursor: 0 };
@@ -207,6 +209,12 @@ export class PlanReviewModel {
 	/** Redraw both faces. */
 	touch(): void {
 		this.rev.set(++this.#rev);
+	}
+
+	/** Report a completed export while the terminal review obscures the transcript. */
+	setSaveNotice(message: string): void {
+		this.saveNotice = message;
+		this.touch();
 	}
 
 	// ─── Geometry ───────────────────────────────────────────────────────────

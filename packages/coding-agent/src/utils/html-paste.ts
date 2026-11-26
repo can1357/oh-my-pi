@@ -10,8 +10,7 @@
  * code block) is pasted as that text alone, as its plain text would be.
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { parseHtmlFragment, type TurndownNode } from "@oh-my-pi/pi-utils/turndown";
-import { createTurndown } from "./turndown";
+import TurndownService, { gfm, parseHtmlFragment, type TurndownNode } from "@oh-my-pi/pi-utils/turndown";
 
 /** One piece of a rich paste, in order: Markdown text or an image to attach. */
 export type HtmlPastePart = string | ImageContent;
@@ -56,9 +55,50 @@ export function htmlToPaste(html: string): HtmlPastePart[] | undefined {
 	return parts.some(part => typeof part !== "string" || part.trim()) ? parts : undefined;
 }
 
+/**
+ * The GFM converter rich pastes build on: `~~` strikethrough, unescaped heading periods, and
+ * single-space list markers, as the shared converter did before the web engine replaced it.
+ */
+function createPasteConverter(): TurndownService {
+	const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced", bulletListMarker: "-" });
+	turndown.use(gfm);
+	// GFM spec uses ~~ (double tilde), not ~ (single)
+	turndown.addRule("strikethrough", {
+		filter: ["del", "s", "strike"],
+		replacement(content) {
+			return `~~${content}~~`;
+		},
+	});
+	// Unescape the backslash turndown inserts before periods in headings ("1." -> "1\.")
+	turndown.addRule("heading", {
+		filter: ["h1", "h2", "h3", "h4", "h5", "h6"],
+		replacement(content, node) {
+			const level = Number(node.nodeName.charAt(1));
+			const cleaned = content.replace(/\\([.])/g, "$1").trim();
+			return `\n\n${"#".repeat(level)} ${cleaned}\n\n`;
+		},
+	});
+	// Single space after the marker (turndown hardcodes three)
+	turndown.addRule("listItem", {
+		filter: "li",
+		replacement(content, node, options) {
+			const body = content.replace(/^\n+/, "").replace(/\n+$/, "\n").replace(/\n/gm, "\n  ");
+			const parent = node.parentNode;
+			let prefix = `${options.bulletListMarker} `;
+			if (parent?.nodeName === "OL") {
+				const start = parent.getAttribute("start");
+				const index = node.elementIndex ?? Array.prototype.indexOf.call(parent.children, node);
+				prefix = `${(start ? Number(start) : 1) + index}. `;
+			}
+			return prefix + body + (node.nextSibling ? "\n" : "");
+		},
+	});
+	return turndown;
+}
+
 /** Markdown of `root`, its `data:` images replaced by {@link IMAGE_SLOT}s appended to `images`. */
 function convert(root: TurndownNode, images: ImageContent[]): string {
-	const turndown = createTurndown();
+	const turndown = createPasteConverter();
 	turndown.escape = text => text;
 	turndown.remove(DROPPED);
 	turndown.addRule("lineBreak", { filter: "br", replacement: () => "\n" });
