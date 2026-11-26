@@ -45,6 +45,7 @@
 - Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).
 - The focused diff in Tern's native `/git` preview now scrolls with the arrow keys, Page Up/Page Down, and Home/End ([#20537](https://github.com/can1357/oh-my-pi/issues/20537)).
 - The Bash interceptor no longer redirects read-only Perl commands mentioning `-i` to `edit`, and now recognizes clustered in-place switches such as `perl -lpi` ([#20558](https://github.com/can1357/oh-my-pi/issues/20558)).
+- `omp --help` no longer lists the unsupported `ANTHROPIC_SEARCH_BASE_URL` override ([#20562](https://github.com/can1357/oh-my-pi/pull/20562) by [@eggpeat](https://github.com/eggpeat))
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - In Tern, the agent tray no longer keeps showing the previous session's agents after `/resume` switches to another session.
 - In Tern, finishing an annotation of a pasted image now updates its attachment, and the prompt sends the annotated image instead of the original.
