@@ -67,6 +67,7 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
+import { matchesUsageAccount } from "@oh-my-pi/pi-ai/auth/usage-report";
 import type { ResetAutoRedeemMode, ResetWindow, ResetWindowModes } from "./settings";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 
@@ -689,17 +690,10 @@ export function overlayLiveResetCredits(
 ): UsageReport[] | null {
 	const merged = (reports ?? []).map(report => {
 		if (report.provider !== "openai-codex") return report;
-		const status = statuses.find(s => {
-			if (s.provider !== "openai-codex") return false;
-			const statusOrg = s.orgId?.trim().toLowerCase();
-			const reportOrg =
-				typeof report.metadata?.orgId === "string" ? report.metadata.orgId.trim().toLowerCase() : undefined;
-			if (statusOrg !== reportOrg) return false;
-			if (s.accountId && typeof report.metadata?.accountId === "string") {
-				return s.accountId === report.metadata.accountId;
-			}
-			return !!s.email && s.email === report.metadata?.email;
-		});
+		// Several matching rows means the report can't be pinned to one
+		// credential; attributing it to any of them would spend the wrong reset.
+		const matches = statuses.filter(status => matchesUsageAccount(report, status));
+		const status = matches.length === 1 ? matches[0] : undefined;
 		if (!status || status.error) return { ...report, resetCredits: undefined };
 		return {
 			...report,

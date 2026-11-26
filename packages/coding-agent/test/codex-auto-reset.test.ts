@@ -18,7 +18,7 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditAccountStatus, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
@@ -26,6 +26,7 @@ import {
 	type CodexResetPlanInput,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
+	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	resetWindowMode,
 	SALVAGE_MIN_USED_FRACTION,
@@ -54,6 +55,7 @@ const IDENTITY = { accountId: ACCOUNT_ID, email: EMAIL };
 interface AccountOpts {
 	accountId?: string | undefined;
 	email?: string | undefined;
+	orgId?: string;
 	/** Weekly usedFraction; `undefined` omits the weekly limit entirely. */
 	weeklyUsed?: number | undefined;
 	/** Weekly `resetsAt = NOW + this`; `undefined` omits the timestamp. */
@@ -130,6 +132,7 @@ function report(opts: AccountOpts = {}): UsageReport {
 		metadata: {
 			accountId,
 			email,
+			orgId: opts.orgId,
 			resetCreditCredentialId: opts.credentialId ?? CREDENTIAL_ID_BY_ACCOUNT[accountId ?? ""] ?? 100,
 			limitReached: opts.limitReached ?? true,
 		},
@@ -938,6 +941,85 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			{ reason: "blocked-account", accountKey: ACCOUNT_KEY },
 			{ reason: "expiring-credit", accountKey: "openai-codex|-|2" },
 		]);
+	});
+});
+
+describe("overlayLiveResetCredits", () => {
+	const TEAM = "acct-team";
+	const ORG = "org-team";
+	const status = (credentialId: number, email: string, active: boolean): ResetCreditAccountStatus => ({
+		provider: "openai-codex",
+		credentialId,
+		accountId: TEAM,
+		email,
+		active,
+		availableCount: 1,
+		credits: [{ id: `credit-${credentialId}`, status: "available" }],
+	});
+	const teamStatuses = [status(1, "a@team.com", false), status(2, "b@team.com", true)].map(row => ({
+		...row,
+		orgId: ORG,
+	}));
+
+	it("pins each Team member's report to its own credential, so a weekly block spends only that member's reset (#20619)", () => {
+		// Same workspace accountId, different members: A is 5h-only blocked, B is weekly blocked.
+		const reports = [
+			report({ accountId: TEAM, orgId: ORG, email: "a@team.com", primaryUsed: 1, weeklyUsed: 0.3 }),
+			report({ accountId: TEAM, orgId: ORG, email: "B@team.com", weeklyUsed: 1 }),
+		];
+		const merged = overlayLiveResetCredits(reports, teamStatuses, { synthesizeActive: true, nowMs: NOW })!;
+		expect(merged.map(r => r.metadata?.resetCreditCredentialId)).toEqual([1, 2]);
+		const plan = planCodexResetRedemptions(
+			input(merged, {
+				identity: { accountId: TEAM, orgId: ORG, email: "b@team.com" },
+				settings: {
+					modes: { "5h": "no", weekly: "yes" },
+					minBlockedMinutes: 60,
+					keepCredits: 0,
+					salvageHorizonMs: 12 * HOUR,
+				},
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", window: "weekly", target: { credentialId: 2 } },
+		]);
+	});
+
+	it("keeps one login's workspaces apart when they share the email", () => {
+		const statuses = [
+			{ ...status(1, EMAIL, false), accountId: "acct-a" },
+			{ ...status(2, EMAIL, true), accountId: "acct-b" },
+		];
+		const reports = ["acct-b", "acct-a"].map(accountId => {
+			const usage = report({ accountId });
+			return { ...usage, metadata: { ...usage.metadata, accountId: undefined } };
+		});
+		const merged = overlayLiveResetCredits(reports, statuses)!;
+		expect(merged.map(r => r.metadata?.resetCreditCredentialId)).toEqual([2, 1]);
+	});
+
+	it("does not spend a reset based on a whole report with conflicting workspace scopes", () => {
+		const usage = report({ accountId: "acct-a" });
+		const mixed = {
+			...usage,
+			metadata: { ...usage.metadata, accountId: undefined },
+			limits: usage.limits.map(limit =>
+				limit.id === "openai-codex:secondary"
+					? { ...limit, scope: { ...limit.scope, accountId: "acct-b" } }
+					: limit,
+			),
+		};
+		const merged = overlayLiveResetCredits([mixed], [{ ...status(1, EMAIL, false), accountId: "acct-a" }]);
+		expect(planCodexResetRedemptions(input(merged)).actions).toEqual([]);
+	});
+
+	it("strips credits from a report several credentials could own", () => {
+		const merged = overlayLiveResetCredits(
+			[report({ accountId: TEAM, orgId: ORG, email: undefined, credentialId: 9 })],
+			teamStatuses,
+		)!;
+		expect(merged[0]?.resetCredits).toBeUndefined();
+		expect(planCodexResetRedemptions(input(merged)).actions).toEqual([]);
 	});
 });
 

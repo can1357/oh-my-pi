@@ -1,4 +1,5 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import { matchesUsageAccount } from "@oh-my-pi/pi-ai/auth/usage-report";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
@@ -67,10 +68,6 @@ export function formatCodexUsageReportLabel(
  */
 export type ActiveAccountIdentity = OAuthAccountIdentity & { credentialId?: number };
 
-function normalizeIdentityValue(value: unknown): string | undefined {
-	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
-}
-
 /**
  * Session marker label for an active OAuth identity: the base identifier
  * (email → accountId → projectId) suffixed with the organization when present
@@ -88,33 +85,8 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
 }
 
 /**
- * True when a single usage-limit column belongs to the given OAuth identity.
- *
- * Single definition of the matching rules for both `/usage` renderers:
- * - `orgId`     ↔ report metadata `orgId` — a GATE that QUALIFIES the base
- *   identity, never a replacement for it. Mismatched org presence or
- *   different orgs never match: two subscriptions (orgs) can share one
- *   email, so an org-scoped identity matches only its own org's reports and
- *   an org-less legacy identity never claims an org-attributed report via
- *   the shared email. A SHARED org still requires the base-identity match
- *   below — Anthropic Team seats have per-user pools yet share the org id
- *   in report metadata. Only an org-only identity (no base identifiers
- *   recovered at all) matches on the org alone. When neither side carries
- *   an org, the base fallback applies unchanged (providers without orgs
- *   keep their former behavior).
- * - `email`     ↔ report metadata `email` — decisive when both sides carry
- *   one: Codex Team seats share an account id and Antigravity accounts share
- *   one Google project, so only the email tells their reports apart
- * - `accountId` ↔ report metadata `accountId`/`account_id` or `limit.scope.accountId`
- * - `projectId` ↔ report metadata `projectId` or `limit.scope.projectId`
- *   (Google-style providers key usage on the GCP project, not an account id)
- *
- * A credential-scoped identity (`credentialId` set, no OAuth identifiers — an
- * API-key account) matches only the report probed from that stored row
- * (`metadata.credentialId`). Decisive: reports without a row tag (env keys,
- * broker aggregates) can never be attributed to a pinned stored row, and
- * letting them match would merge sibling API-key accounts into one pool —
- * the exact wrong-account display this rule prevents.
+ * True when a usage column belongs to the active account. OAuth uses shared report attribution;
+ * pinned API keys require a durable row ID, including IDs carried by merged same-account reports.
  */
 export function limitMatchesActiveAccount(
 	report: UsageReport,
@@ -129,30 +101,7 @@ export function limitMatchesActiveAccount(
 		if (Array.isArray(mergedIds)) return mergedIds.includes(identity.credentialId);
 		return metadata.credentialId === identity.credentialId;
 	}
-	const activeAccountId = normalizeIdentityValue(identity.accountId);
-	const activeEmail = normalizeIdentityValue(identity.email);
-	const activeProjectId = normalizeIdentityValue(identity.projectId);
-	const activeOrgId = normalizeIdentityValue(identity.orgId);
-	const reportOrgId = normalizeIdentityValue(metadata.orgId);
-	// Org gate (see doc comment above): different/mismatched-presence orgs
-	// never match; a shared org falls through to the base checks unless the
-	// identity is org-only.
-	if (activeOrgId || reportOrgId) {
-		if (activeOrgId !== reportOrgId) return false;
-		if (!activeAccountId && !activeEmail && !activeProjectId) return true;
-	}
-	const reportEmail = normalizeIdentityValue(metadata.email);
-	if (activeEmail && reportEmail) return activeEmail === reportEmail;
-	if (activeAccountId) {
-		const reportAccountId = normalizeIdentityValue(metadata.accountId) ?? normalizeIdentityValue(metadata.account_id);
-		if (reportAccountId === activeAccountId) return true;
-		if (normalizeIdentityValue(limit.scope.accountId) === activeAccountId) return true;
-	}
-	if (activeProjectId) {
-		if (normalizeIdentityValue(metadata.projectId) === activeProjectId) return true;
-		if (normalizeIdentityValue(limit.scope.projectId) === activeProjectId) return true;
-	}
-	return false;
+	return matchesUsageAccount(report, identity, { limit, allowOrgOnly: true });
 }
 
 /** True when any limit column in `report` belongs to the given OAuth identity. */

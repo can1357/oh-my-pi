@@ -7,6 +7,7 @@ import type {
 	UsageLogger,
 	UsageReport,
 } from "../usage";
+import type { OAuthAccountIdentity } from "./types";
 
 /** Read a string identity field from report metadata. */
 export function usageReportMetadataValue(report: UsageReport, key: string): string | undefined {
@@ -18,23 +19,65 @@ export function usageReportMetadataValue(report: UsageReport, key: string): stri
 
 /** Resolve a single report-scoped account ID. */
 export function usageReportScopeAccountId(report: UsageReport): string | undefined {
-	const ids = new Set<string>();
-	for (const limit of report.limits) {
-		const accountId = limit.scope.accountId?.trim();
-		if (accountId) ids.add(accountId);
-	}
-	if (ids.size === 1) return [...ids][0];
-	return undefined;
+	return usageReportScopeId(report, "accountId") ?? undefined;
 }
 
-function usageReportScopeProjectId(report: UsageReport): string | undefined {
-	const ids = new Set<string>();
+// Null distinguishes conflicting scopes from a report that supplies no scope ID.
+function usageReportScopeId(report: UsageReport, key: "accountId" | "projectId"): string | null | undefined {
+	let id: string | undefined;
 	for (const limit of report.limits) {
-		const projectId = limit.scope.projectId?.trim();
-		if (projectId) ids.add(projectId);
+		const value = limit.scope[key]?.trim();
+		if (!value) continue;
+		if (id !== undefined && id !== value) return null;
+		id = value;
 	}
-	if (ids.size === 1) return [...ids][0];
-	return undefined;
+	return id;
+}
+
+const MEMBER_ID_FIELDS: readonly ("email" | "accountId" | "projectId")[] = ["email", "accountId", "projectId"];
+
+/**
+ * Attribute usage only when every comparable member identifier agrees and at least one matches.
+ * Account and project IDs fall back to the selected limit's scope, or a single common scope ID
+ * when matching the whole report. A shared workspace or project cannot override an email mismatch.
+ */
+export function matchesUsageAccount(
+	report: UsageReport,
+	account: OAuthAccountIdentity & { provider?: string },
+	options?: {
+		/** Match a column instead of attributing the whole report. */
+		limit?: UsageLimit;
+		/** Block healing accepts legacy reports or credentials without an org ID. */
+		allowMissingOrg?: boolean;
+		/** Active markers may use an org-only session identity. */
+		allowOrgOnly?: boolean;
+	},
+): boolean {
+	if (account.provider !== undefined && report.provider !== account.provider) return false;
+	const org = account.orgId?.trim().toLowerCase() || undefined;
+	const reportOrg = usageReportMetadataValue(report, "orgId")?.toLowerCase() || undefined;
+	if (org !== reportOrg && (!options?.allowMissingOrg || (org && reportOrg))) return false;
+
+	let comparable = false;
+	let hasMemberId = false;
+	for (const field of MEMBER_ID_FIELDS) {
+		const id = account[field]?.trim().toLowerCase();
+		if (!id) continue;
+		hasMemberId = true;
+
+		let reportId = usageReportMetadataValue(report, field);
+		if (!reportId && field === "accountId") reportId = usageReportMetadataValue(report, "account_id");
+		if (!reportId && field !== "email") {
+			const scoped = options?.limit ? options.limit.scope[field]?.trim() : usageReportScopeId(report, field);
+			if (scoped === null) return false;
+			reportId = scoped;
+		}
+		if (!reportId) continue;
+		if (reportId.toLowerCase() !== id) return false;
+		comparable = true;
+	}
+	if (!hasMemberId) return options?.allowOrgOnly === true && !!org && org === reportOrg;
+	return comparable;
 }
 
 function usageReportIdentifiers(report: UsageReport): string[] {
@@ -62,7 +105,7 @@ function usageReportIdentifiers(report: UsageReport): string[] {
 		}
 		return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);
 	}
-	const projectId = usageReportMetadataValue(report, "projectId") ?? usageReportScopeProjectId(report);
+	const projectId = usageReportMetadataValue(report, "projectId") ?? usageReportScopeId(report, "projectId");
 	// Only add project as a fallback when no email is available — two users
 	// with different emails on the same GCP project must not merge.
 	if (projectId && !email) identifiers.push(`project:${projectId}`);

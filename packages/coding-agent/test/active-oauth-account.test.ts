@@ -145,6 +145,14 @@ describe("limitMatchesActiveAccount", () => {
 		expect(limitMatchesActiveAccount(teammateReport, makeLimit({ accountId: "workspace" }), seat)).toBe(false);
 	});
 
+	test("a shared email does not mark a different workspace's scoped column active", () => {
+		const report = makeReport({ provider: "openai-codex", metadata: { email: "user@example.com" } });
+		const identity = { email: "user@example.com", accountId: "ws-personal" };
+		const scope = { provider: "openai-codex" };
+		expect(limitMatchesActiveAccount(report, makeLimit({ ...scope, accountId: "ws-team" }), identity)).toBe(false);
+		expect(limitMatchesActiveAccount(report, makeLimit({ ...scope, accountId: "ws-personal" }), identity)).toBe(true);
+	});
+
 	test("org-only active identity matches same-org reports on the org alone", () => {
 		// Login recovered neither email nor account: the org is all the session
 		// knows about itself.

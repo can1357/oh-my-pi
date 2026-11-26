@@ -6,7 +6,7 @@ import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import { isSqliteCorruptionError, resolveCredentialIdentityKey, USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
-import { isUsageLimitReached, usageReportMetadataValue, usageReportScopeAccountId } from "./usage-report";
+import { isUsageLimitReached, matchesUsageAccount } from "./usage-report";
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
 import type { AuthCredential, BlocksApi, StoredCredentialBlock } from "./types";
 
@@ -729,27 +729,11 @@ export class CredentialBlocks implements BlocksApi {
 
 	#findStoredCredentialIdsForUsageReport(report: UsageReport): number[] {
 		if (!this.supportsHealing(report.provider)) return [];
-		const email = usageReportMetadataValue(report, "email")?.toLowerCase();
-		const orgId = usageReportMetadataValue(report, "orgId");
-		const accountId = (
-			usageReportMetadataValue(report, "accountId") ?? usageReportScopeAccountId(report)
-		)?.toLowerCase();
-		if (!email && !accountId) return [];
 		const matches: number[] = [];
 		for (const entry of this.#deps.pool.entries(report.provider)) {
 			const credential = entry.credential;
 			if (credential.type !== "oauth") continue;
-			const credentialEmail = credential.email?.trim().toLowerCase();
-			const credentialAccountId = credential.accountId?.trim().toLowerCase();
-			if (orgId && credential.orgId && orgId !== credential.orgId.trim()) continue;
-			// Every identity dimension present on BOTH sides must agree — the
-			// account id is shared workspace-wide and one email can span
-			// workspaces, so a single-dimension match can cross-link siblings.
-			const emailComparable = Boolean(email && credentialEmail);
-			const accountComparable = Boolean(accountId && credentialAccountId);
-			if (!emailComparable && !accountComparable) continue;
-			if (emailComparable && credentialEmail !== email) continue;
-			if (accountComparable && credentialAccountId !== accountId) continue;
+			if (!matchesUsageAccount(report, credential, { allowMissingOrg: true })) continue;
 			matches.push(entry.id);
 		}
 		return matches;
