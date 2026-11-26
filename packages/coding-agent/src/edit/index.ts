@@ -40,13 +40,7 @@ import {
 	sessionWriteContext,
 } from "../internal-urls";
 import { unwrapHashlineHeaderPath } from "../tools/hashline-header-path";
-import {
-	DEFERRED_PREVIEW_NOTICE,
-	isRemoteTextWritable,
-	remoteMirrorPath,
-	remoteMirrorUrl,
-	writeRemoteMirror,
-} from "./remote-mirror";
+import { isRemoteTextWritable, remoteMirrorPath, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "../tools/details/lsp";
 import { notifyWorkspaceWatchedFiles } from "../lsp/client";
@@ -74,7 +68,12 @@ import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
 import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
 import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
-import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "../tools/details/edit";
+import {
+	type EditToolDetails,
+	type EditToolPerFileResult,
+	type Operation,
+	type PerFileDiffPreview,
+} from "../tools/details/edit";
 import {
 	type ApplyPatchParams,
 	applyPatchSchema,
@@ -421,9 +420,23 @@ function deferredPreview(url: string): string {
 	return `Preview deferred: ${url} is fetched from the remote host when the edit runs`;
 }
 
-/** The preview entry shown for a deferred remote file: a notice, not a failed preview. */
-function deferredPlaceholder(path: string): EditFilePreview {
-	return { path, error: DEFERRED_PREVIEW_NOTICE };
+/** What a deferred remote file's preview entry says instead of a diff. */
+const DEFERRED_PREVIEW_NOTICE = "Preview deferred: fetched when the edit runs";
+
+/** A preview entry as emitted: the engine's, or a deferred remote file's notice. */
+type SettledPreviewFile = EditFilePreview | PerFileDiffPreview;
+
+/** A preview batch as emitted, deferred remote files shown as notices. */
+interface SettledPreviewBatch extends Omit<EditPreviewBatch, "files"> {
+	files: SettledPreviewFile[];
+}
+
+/**
+ * The preview entry shown for a deferred remote file. It carries a `notice`, not an
+ * `error`: renderers show it muted and `edit.streamingAbort` never counts it as failed.
+ */
+function deferredPlaceholder(path: string): PerFileDiffPreview {
+	return { path, notice: DEFERRED_PREVIEW_NOTICE };
 }
 
 /** Whether the authored edit target `authored` names the internal URL `url` as the native engine keys it. */
@@ -637,7 +650,7 @@ export class EditTool implements AgentTool<TInput> {
 			// never waits on a lost preview.
 			settled = settled
 				.then(async () => {
-					let settledBatch = batch;
+					let settledBatch: SettledPreviewBatch = batch;
 					try {
 						settledBatch = await this.#settlePreview(batch, open, rawInput);
 					} catch (settleError) {
@@ -927,7 +940,7 @@ export class EditTool implements AgentTool<TInput> {
 			const mirror = location === undefined ? undefined : remoteMirrorPath(location);
 			if (mirror === undefined) {
 				// The engine only knows files and refusals: refuse here, and `#settlePreview`
-				// drops the refusal so only this file's preview is missing.
+				// shows the refusal as a notice, so only this file's diff waits for the fetch.
 				call.deferred.add(url);
 				return { error: deferredPreview(url), planWritable: false };
 			}
@@ -995,7 +1008,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	/** `files` with every deferral refusal replaced by its placeholder entry. */
-	#markDeferred(files: readonly EditFilePreview[], call: EditCall): EditFilePreview[] {
+	#markDeferred(files: readonly EditFilePreview[], call: EditCall): SettledPreviewFile[] {
 		return files.map(file => (this.#isDeferral(file.error, call) ? deferredPlaceholder(file.path) : file));
 	}
 
@@ -1007,7 +1020,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * whole preview: the final one is computed again without the deferred files'
 	 * sections, and those files get placeholders.
 	 */
-	async #settlePreview(batch: EditPreviewBatch, call: EditCall, rawInput: boolean): Promise<EditPreviewBatch> {
+	async #settlePreview(batch: EditPreviewBatch, call: EditCall, rawInput: boolean): Promise<SettledPreviewBatch> {
 		if (call.deferred.size === 0) return batch;
 		const atomic = batch.files.length === 1 && !batch.files[0]?.diff && this.#isDeferral(batch.files[0]?.error, call);
 		const input = this.#callArgs(call).args?.input;

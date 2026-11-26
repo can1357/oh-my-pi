@@ -20,14 +20,6 @@ const mirrorsByLocation = new Map<string, string>();
 
 const locationKey = (location: RemoteEditLocation) => `${location.target}\n${location.path}`;
 
-/**
- * The preview entry that stands in for a remote file whose preview waits for the
- * edit's fetch (no mirror existed before the call ran). It rides the entry's
- * `error` field, the only text a preview entry carries, but it is not a failure:
- * `edit.streamingAbort` skips it.
- */
-export const DEFERRED_PREVIEW_NOTICE = "Preview deferred: fetched when the edit runs";
-
 /** Characters no Windows filename may contain (`/` and NUL are invalid everywhere). */
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
 const RESERVED_WINDOWS_NAME = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i;

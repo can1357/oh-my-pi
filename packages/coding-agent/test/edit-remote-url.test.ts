@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -27,6 +27,8 @@ interface Remote {
 	io: string[];
 	/** Runs inside `update`, before its checksum comparison (a concurrent writer). */
 	beforeUpdate?: () => void;
+	/** Awaited before `locate` answers, when it returns a promise (a host lookup that never ends). */
+	holdLocate?: (url: InternalUrl) => Promise<void> | undefined;
 }
 
 /**
@@ -70,6 +72,7 @@ function registerRemote(remote: Remote): void {
 		edit: {
 			// The "destination" an alias resolves to differs per project, like an `ssh.json` alias.
 			async locate(url, context, options) {
+				await remote.holdLocate?.(url);
 				if (homeRelative(url) && !homeKnown) {
 					if (options?.localOnly) return undefined;
 					remote.io.push("home");
@@ -106,6 +109,7 @@ interface Preview {
 	displayPath?: string;
 	diff?: string;
 	error?: string;
+	notice?: string;
 }
 
 const DEFERRED = "Preview deferred: fetched when the edit runs";
@@ -224,10 +228,12 @@ describe("edit on a remote handler-written URL", () => {
 		};
 		const previews = await streamPreview(tool, "mixed", args);
 		expect(remote.io).toEqual([]);
-		// The deferred file shows a placeholder, which `edit.streamingAbort` does not count
-		// as a failed preview; the local file's preview renders.
+		// The deferred file shows a notice, not an error, so `edit.streamingAbort` does not
+		// count it as a failed preview; the local file's preview renders.
 		expect(previews).toHaveLength(2);
-		expect(previews.find(file => file.path?.includes(`/~/${unique}.py`))?.error).toBe(DEFERRED);
+		const deferred = previews.find(file => file.path?.includes(`/~/${unique}.py`));
+		expect(deferred?.notice).toBe(DEFERRED);
+		expect(deferred?.error).toBeUndefined();
 		expect(previews.find(file => file.diff !== undefined)?.diff).toContain("two");
 		expect(streamingAborts(previews)).toBe(0);
 
@@ -262,13 +268,72 @@ describe("edit on a remote handler-written URL", () => {
 		expect(remote.io).toEqual([]);
 		expect(previews).toHaveLength(2);
 		expect(previews.find(file => file.diff !== undefined)?.diff).toContain("two");
-		expect(previews.find(file => file.path === `remotetest://host/tmp/${unique}.txt`)?.error).toBe(DEFERRED);
+		const deferred = previews.find(file => file.path === `remotetest://host/tmp/${unique}.txt`);
+		expect(deferred?.notice).toBe(DEFERRED);
+		expect(deferred?.error).toBeUndefined();
 		expect(streamingAborts(previews)).toBe(0);
 
 		const result = await tool.execute("atomic", args);
 		expect(result.isError).not.toBe(true);
 		expect(remote.files.get(`/tmp/${unique}.txt`)).toBe("beta\n");
 		expect(await Bun.file(local).text()).toBe("two\n");
+	});
+
+	it("still emits the approval preview when recomputing an atomic patch never reports", async () => {
+		const { dir, remote, read, edit, unique } = setup();
+		using _dir = dir;
+		remote.files.set(`/tmp/${unique}-read.txt`, "one\n");
+		remote.files.set(`/tmp/${unique}-unread.txt`, "alpha\n");
+		await read(`remotetest://host/tmp/${unique}-read.txt`);
+		// Once the unread file is deferred, every later lookup hangs. Only the pass that
+		// recomputes the patch without the deferred section looks the read file up again.
+		let deferring = false;
+		const stuck = Promise.withResolvers<void>();
+		const hang = Promise.withResolvers<void>();
+		remote.holdLocate = url => {
+			if (deferring) {
+				stuck.resolve();
+				return hang.promise;
+			}
+			if (url.pathname.endsWith(`${unique}-unread.txt`)) deferring = true;
+			return undefined;
+		};
+		const args = {
+			input: [
+				"*** Begin Patch",
+				`*** Update File: remotetest://host/tmp/${unique}-read.txt`,
+				"@@",
+				"-one",
+				"+two",
+				`*** Update File: remotetest://host/tmp/${unique}-unread.txt`,
+				"@@",
+				"-alpha",
+				"+beta",
+				"*** End Patch",
+			].join("\n"),
+		};
+		const tool = edit("apply_patch");
+		vi.useFakeTimers();
+		let previews: Preview[];
+		try {
+			const preview = streamPreview(tool, "stuck", args);
+			await stuck.promise;
+			// Past the recomputing pass's bound (5 s): it is abandoned.
+			vi.advanceTimersByTime(5_000);
+			previews = await preview;
+		} finally {
+			vi.useRealTimers();
+			hang.resolve();
+		}
+		// The engine's own batch goes out, its deferral as a notice.
+		expect(previews.map(file => [file.notice, file.error])).toEqual([[DEFERRED, undefined]]);
+		expect(streamingAborts(previews)).toBe(0);
+
+		remote.holdLocate = undefined;
+		const result = await tool.execute("stuck", args);
+		expect(result.isError).not.toBe(true);
+		expect(remote.files.get(`/tmp/${unique}-read.txt`)).toBe("two\n");
+		expect(remote.files.get(`/tmp/${unique}-unread.txt`)).toBe("beta\n");
 	});
 
 	it("refuses an explicit remote create in the preview without contacting the host", async () => {
@@ -315,7 +380,7 @@ describe("edit on a remote handler-written URL", () => {
 		// fetch instead of diffing the first project's copy.
 		const args = { input: `${header}\nPUT 2.=2:\n+    return 2\n` };
 		const previews = await streamPreview(second.edit("hashline"), "other-target", args);
-		expect(previews.map(file => file.error)).toEqual([DEFERRED]);
+		expect(previews.map(file => [file.notice, file.error])).toEqual([[DEFERRED, undefined]]);
 		expect(first.remote.io).toEqual([]);
 	});
 
