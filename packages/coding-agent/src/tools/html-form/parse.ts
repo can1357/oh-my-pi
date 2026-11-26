@@ -1,7 +1,7 @@
 import { Comment, type Document, Element, type Node, parseHTML, Text } from "@oh-my-pi/pi-utils/dom";
 
-/** Inline emphasis a span keeps from `<code>`, `<strong>`/`<b>` and `<em>`/`<i>`. */
-export type FormSpanStyle = "code" | "strong" | "em";
+/** Inline emphasis a span keeps from `<code>`, `<strong>`/`<b>`, `<em>`/`<i>` and `<mark>`. */
+export type FormSpanStyle = "code" | "strong" | "em" | "mark";
 
 /** A run of inline text; `"\n"` inside `text` is a hard line break (`<br>`). */
 export interface FormSpan {
@@ -131,6 +131,7 @@ const STYLE_OF: Record<string, FormSpanStyle> = {
 	em: "em",
 	i: "em",
 	kbd: "code",
+	mark: "mark",
 	samp: "code",
 	strong: "strong",
 	tt: "code",

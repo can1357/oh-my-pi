@@ -85,6 +85,8 @@ export interface TextEdit {
 	readonly text: string;
 	readonly cursor: number;
 	readonly len: number;
+	/** The edit types a bracketed paste: content, not typing (no completion opens for it). */
+	readonly paste?: boolean;
 }
 
 /** One key press, release or repeat, as the driver decoded it. */

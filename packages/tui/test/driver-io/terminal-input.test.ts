@@ -253,6 +253,21 @@ describe("ProcessTerminalInput keyboard negotiation", () => {
 		expect(h.out()).toContain("\x1b[?9001l");
 	});
 
+	it("decodes a win32 Enter when its ESC timer expires before stdin delivers the rest", () => {
+		const h = setup({ conpty: true, nativeWindowsConsole: true, platform: "win32", decoder: { keyTimeout: 20 } });
+		void h.input.start();
+		h.settle();
+		h.feed("\x1b");
+		// The expiry runs first, then the stdin read, then any timer scheduled by the expiry.
+		h.clock.schedule(20, () => h.feed("[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_"));
+		h.clock.advance(50);
+		expect(h.received.map(event => (event.type === "key" ? event.key.id : event.type))).toEqual(["enter"]);
+
+		h.feed("\x1b");
+		h.clock.advance(50);
+		expect(h.received.map(event => (event.type === "key" ? event.key.id : event.type))).toEqual(["enter", "escape"]);
+	});
+
 	it("turns win32-input-mode back off when a late kitty reply arrives", () => {
 		const h = setup({ conpty: true, nativeWindowsConsole: true, platform: "win32" });
 		void h.input.start();
