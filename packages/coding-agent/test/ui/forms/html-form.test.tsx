@@ -197,6 +197,29 @@ test.each(["radio", "checkbox"])("keeps a long %s Other answer visible and edita
 	}
 });
 
+test("keeps a long ordinary input visible and editable at both ends", () => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(parseHtmlForm(`<form><label>Route <input name="route"></label></form>`), {
+		onSubmit,
+		onCancel: () => {},
+	});
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} /> }), { columns: 42, rows: 16 });
+	try {
+		term.focus(term.surface.dock()[0]!);
+		const answer = "Use the marked trail past the river and meet at sunrise";
+		term.paste(answer);
+		expect(term.screen().join("\n")).toMatch(/│ ‹.*at sunrise/);
+		term.type("!");
+		term.press("home");
+		expect(term.screen().join("\n")).toMatch(/│ Use the marked trail.*›/);
+		term.type("Please ");
+		term.press("enter");
+		expect(onSubmit).toHaveBeenCalledWith({ route: `Please ${answer}!` }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
 corpusSuite({
 	dir: "forms/html-form",
 	mount(caseName, corpusCase, env): Mounted {

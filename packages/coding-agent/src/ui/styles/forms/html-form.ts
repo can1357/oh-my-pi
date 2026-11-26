@@ -526,15 +526,23 @@ function openFieldLines(
 			}
 		} else {
 			const secret = field.type === "password";
-			const text = secret ? "•".repeat([...answer.text.text].length) : answer.text.text;
-			const line = caretLine(
-				theme,
-				text,
-				secret ? 0 : answer.text.cursor,
-				field.placeholder || undefined,
-				model.vim({ kind: "text", field: index })?.selection(),
-			);
-			lines.push(clip(`  ${bar} ${line}`, width));
+			const value = answer.text.text;
+			const text = secret ? "•".repeat([...value].length) : value;
+			const head = `  ${bar} `;
+			const room = width - visibleWidth(head);
+			if (room <= 0) lines.push(clip(head, width));
+			else {
+				const line = caretLine(
+					theme,
+					text,
+					// Each code point is one bullet: the caret keeps its place in a masked value.
+					secret ? value.slice(0, answer.text.cursor).length : answer.text.cursor,
+					field.placeholder || undefined,
+					model.vim({ kind: "text", field: index })?.selection(),
+					room,
+				);
+				lines.push(head + line);
+			}
 		}
 		if (error) lines.push(clip(`    ${theme.fg("error", error)}`, width));
 	}
