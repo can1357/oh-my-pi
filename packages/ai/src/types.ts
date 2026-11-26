@@ -144,6 +144,8 @@ export type CacheRetention = "none" | "short" | "long";
  *   otherwise.
  * - Direct Anthropic: `"priority"` is translated into `speed: "fast"` plus the
  *   fast-mode beta on supported Opus models. Other tiers are ignored.
+ * - Devin: `"priority"` sends the model's fast-lane wire id
+ *   ({@link Model.priorityLane}). Other tiers are ignored.
  *
  * Per-family scoping is expressed by {@link ServiceTierByFamily}, not by
  * scoped sentinel values — see {@link serviceTierFamily}.
@@ -151,7 +153,10 @@ export type CacheRetention = "none" | "short" | "long";
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast";
 
 /** Provider families that expose an independent service-tier knob. */
-export type ServiceTierFamily = "openai" | "anthropic" | "google";
+export const SERVICE_TIER_FAMILIES = ["openai", "anthropic", "google", "devin"] as const;
+
+/** One of {@link SERVICE_TIER_FAMILIES}. */
+export type ServiceTierFamily = (typeof SERVICE_TIER_FAMILIES)[number];
 
 /**
  * Per-family service-tier selection. A request consults only the entry for the
@@ -161,7 +166,8 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "identity"> & Partial<Pick<Model, "serviceTiers">>;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "identity"> &
+	Partial<Pick<Model, "serviceTiers" | "priorityLane">>;
 // The service-tier matrix below intentionally stays in TypeScript rather than
 // the KDL compat tree: `shouldSendServiceTier` accepts bare provider strings
 // (agent telemetry, google-shared header placement) and the stats parser
@@ -198,9 +204,11 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
  * anthropic family even though its provider is `amazon-bedrock`/`google-vertex`.
  * Custom OpenAI-compatible relays that serve OpenAI model ids are OpenAI family
  * too unless the provider owns a separate tier control (Fireworks) or rejects
- * OpenAI's service-tier field (GitHub Copilot).
+ * OpenAI's service-tier field (GitHub Copilot). Devin models with a fast lane
+ * share one `devin` knob whatever lineage they serve.
  */
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
+	if (model.api === "devin-agent") return model.priorityLane ? "devin" : undefined;
 	const provider = model.provider;
 	if (provider === "openrouter") {
 		if (model.identity.class === "anthropic") return "anthropic";
@@ -321,8 +329,9 @@ export function serviceTierOffersByAccount(
  * True when `priority` will actually be realized on the wire for `model`.
  * Direct Anthropic realizes fast mode; OpenAI/Google/Fireworks emit the
  * service-tier field; OpenRouter realizes it only for its OpenAI- and
- * Google-family upstreams. Bedrock/Vertex Claude and OpenRouter Anthropic
- * models do not realize priority and return `false`.
+ * Google-family upstreams; Devin routes to the model's fast lane.
+ * Bedrock/Vertex Claude and OpenRouter Anthropic models do not realize
+ * priority and return `false`.
  */
 export function realizesPriorityServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -330,6 +339,7 @@ export function realizesPriorityServiceTier(
 ): boolean {
 	if (serviceTier !== "priority") return false;
 	if (model.provider === "anthropic") return true;
+	if (model.api === "devin-agent") return model.priorityLane !== undefined;
 	if (model.provider === "openrouter") {
 		const family = serviceTierFamily(model);
 		return family === "openai" || family === "google";
@@ -408,7 +418,7 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	if (typeof value === "object") {
 		const src = value as Record<string, unknown>;
 		const out: ServiceTierByFamily = {};
-		for (const family of ["openai", "anthropic", "google"] as const) {
+		for (const family of SERVICE_TIER_FAMILIES) {
 			const tier = src[family];
 			if (
 				tier === "auto" ||

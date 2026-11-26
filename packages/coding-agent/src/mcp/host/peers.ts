@@ -932,7 +932,12 @@ function httpStatusOf(error: MCPTransportError): number | undefined {
 		: undefined;
 }
 
-const LEGACY_HTTP_STATUS: Record<number, true> = { 400: true, 404: true, 405: true };
+/**
+ * Statuses a handshake-era endpoint gives a POST it cannot read as one of its
+ * own requests; 415 is rmcp 0.2, which fails to deserialize an unknown
+ * method. Auth challenges (401/403) are never among them.
+ */
+const LEGACY_HTTP_STATUS: Record<number, true> = { 400: true, 404: true, 405: true, 415: true };
 
 async function probeHttp(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
 	const modern = upstreamFor(spec, "modern");

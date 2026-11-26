@@ -30,7 +30,6 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "./magic-keywords";
 import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
@@ -55,13 +54,7 @@ import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
-import {
-	cfgDefaultThinkingLevel,
-	cfgProvidersFireworksTier,
-	cfgTierAnthropic,
-	cfgTierGoogle,
-	cfgTierOpenai,
-} from "./settings";
+import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier, cfgTiers } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
 /**
@@ -877,13 +870,7 @@ export class ModelControls {
 	 * Feeds the next launch's startup status prepaint.
 	 */
 	isFastModeConfiguredFor(model: Model): boolean {
-		const settings = this.#host.settings;
-		const tiers = buildServiceTierByFamily(
-			cfgTierOpenai.get(settings),
-			cfgTierAnthropic.get(settings),
-			cfgTierGoogle.get(settings),
-		);
-		return this.#realizesFastTier(model, tiers);
+		return this.#realizesFastTier(model, cfgTiers.get(this.#host.settings));
 	}
 
 	#realizesFastTier(model: Model, tiers: ServiceTierByFamily): boolean {

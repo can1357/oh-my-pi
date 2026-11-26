@@ -36,6 +36,7 @@ import {
 	untrack,
 	useContext,
 } from "@oh-my-pi/pi-tui";
+import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { mountNode, type ViewEntry, ViewList } from "./views";
@@ -221,12 +222,9 @@ export class Transcript {
 	 * block had rows there.
 	 */
 	retain(keep: ReadonlySet<TranscriptBlock>): void {
-		let retired = false;
-		for (const block of this.#blocks.peek()) {
-			if (keep.has(block)) continue;
-			retired ||= this.retired(block);
-			this.#blocks.remove(block);
-		}
+		// Asked before the removed blocks are disposed.
+		const retired = this.#blocks.peek().some(block => !keep.has(block) && this.retired(block));
+		this.#blocks.retain(block => keep.has(block));
 		if (retired) this.#host?.replayHistory();
 	}
 
@@ -431,9 +429,12 @@ function buildTree(node: UiNode): void {
 /** SGR that fills a cell without text: a background color, or inverse video. */
 const FILLED_ROW = /\x1b\[(?:[0-9:]*;)*(?:48[;:]|7[;m])/;
 
-/** A row with nothing on it: no text and no fill (the padding rows of a bubble or an inverse notice box are not blank). */
+/**
+ * A row with nothing on it: no text, no fill (the padding rows of a bubble or an inverse notice box
+ * are not blank) and no image.
+ */
 function blankRow(row: string): boolean {
-	return stripEscapes(row).trim() === "" && !FILLED_ROW.test(row);
+	return stripEscapes(row).trim() === "" && !FILLED_ROW.test(row) && !holdsImage(row);
 }
 
 /**
