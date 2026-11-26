@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Blob-broker tunnels no longer flash console windows on Windows, including when a tunnel fails to start and is retried ([#20599](https://github.com/can1357/oh-my-pi/issues/20599)).
 - `/prewalk`, `/prewalk restart`, and `/switch` now accept `^provider/id[:level]` model references inserted by `^` completion ([#20564](https://github.com/can1357/oh-my-pi/issues/20564)).
 - Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
 - Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).
