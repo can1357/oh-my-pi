@@ -4,7 +4,7 @@ import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { forEachInSlices, readModelCache, writeModelCacheAsync } from "./model-cache";
-import { type GeneratedProvider, getBundledModels } from "./models";
+import { getBundledModelSlice, isBundledModelSlice } from "./models";
 import { TimeBasedCostShape } from "./pricing";
 import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
@@ -260,7 +260,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const restorableHeaderFallback = options.restorableHeaderFallback;
 	const staticModels = options.staticModels
 		? materializeStaticModels<TApi>(options.staticModels)
-		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
+		: (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]);
 	const modelsDevAdditiveStaticModelIds =
 		options.modelsDev?.additiveOnly && staticModels.length > 0
 			? new Set(staticModels.map(model => model.id))
@@ -705,18 +705,21 @@ export interface StaticFingerprintPolicy {
 	additive?: boolean;
 }
 
-/**
- * Return the versioned content identity for a static provider slice. Callers
- * may mutate or freeze their arrays, so every call observes current content
- * and never attaches a stale sidecar fingerprint to caller-owned data.
- */
+const bundledContentHashes = new WeakMap<object, string>();
+
+/** Return the versioned identity, always observing current content for caller-owned models. */
 export function fingerprintStaticModels<TApi extends Api>(
 	models: readonly (ModelSpec<TApi> | Model<TApi>)[],
 	policy: StaticFingerprintPolicy = {},
 ): string {
 	const policyKey = `${policy.authoritative ? ":authoritative" : ""}${policy.additive ? ":additive" : ""}`;
 	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:empty`;
-	return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${Bun.hash(JSON.stringify(models)).toString(36)}`;
+	let hash = bundledContentHashes.get(models);
+	if (hash === undefined) {
+		hash = Bun.hash(JSON.stringify(models)).toString(36);
+		if (isBundledModelSlice(models)) bundledContentHashes.set(models, hash);
+	}
+	return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${hash}`;
 }
 
 function mergeDynamicModel<TApi extends Api>(

@@ -26,7 +26,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { VersionUpdate } from "@oh-my-pi/pi-tui/prompt/welcome";
+import type { VersionUpdate } from "../modes/view-model/prompt/welcome";
 import {
 	APP_NAME,
 	compareVersions,

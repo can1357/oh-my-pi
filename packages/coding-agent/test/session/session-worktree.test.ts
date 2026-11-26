@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { clearWorktrees, listWorktrees } from "../../src/cli/worktree-cli";

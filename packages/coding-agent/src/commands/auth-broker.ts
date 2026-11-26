@@ -10,7 +10,7 @@ import {
 	runAuthBrokerCommand,
 } from "../cli/auth-broker-cli";
 import { authBrokerHelp as commandHelp } from "../cli/command-help";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 export default class AuthBroker extends Command {
 	static description = commandHelp.description;
@@ -99,7 +99,7 @@ export default class AuthBroker extends Command {
 				trustProxyHeaders: flags["trust-proxy-headers"],
 			},
 		};
-		await initTheme();
+		initTheme();
 		await runAuthBrokerCommand(cmd);
 	}
 }

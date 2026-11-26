@@ -13,7 +13,7 @@ import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
-import { OAUTH_REFRESH_SKEW_MS, type OAuthRefresher } from "./refresh";
+import { type OAuthRefresher, oauthRefreshSkewMs } from "./refresh";
 import type { CredentialSelector } from "./select";
 import type {
 	AuthAccountPolicy,
@@ -316,7 +316,7 @@ export class OAuthAccounts implements OAuthApi {
 				if (options?.refresh === "valid-only") {
 					const { expires } = normalizeOAuthCredentialExpiry(provider, selection.credential);
 					// Same freshness test as the refresher: anything it would refresh is skipped.
-					if (Date.now() + OAUTH_REFRESH_SKEW_MS >= expires) {
+					if (Date.now() + oauthRefreshSkewMs(provider) >= expires) {
 						return {
 							ok: false,
 							skipped: "expired",

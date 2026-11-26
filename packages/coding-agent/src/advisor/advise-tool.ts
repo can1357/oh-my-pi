@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
-import { type AdvisorSeverity, type AdvisorNote } from "@oh-my-pi/pi-tui/chat/messages";
-export { type AdvisorSeverity, type AdvisorNote, type AdvisorMessageDetails } from "@oh-my-pi/pi-tui/chat/messages";
+import { type AdvisorSeverity, type AdvisorNote } from "../session/transcript/messages";
+export { type AdvisorSeverity, type AdvisorNote, type AdvisorMessageDetails } from "../session/transcript/messages";
 import type {
 	AgentIdentity,
 	AgentTelemetryConfig,

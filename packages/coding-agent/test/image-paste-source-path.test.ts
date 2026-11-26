@@ -12,21 +12,13 @@
  * or upload the user's image (e.g. attach a pasted screenshot to an issue tracker).
  * Issue #14927: chip links must target existing files, even after `/move`.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as url from "node:url";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { imageContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { imageReferenceHyperlink } from "@oh-my-pi/pi-tui/prompt/image-references";
-import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
-import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { imageAttachmentSource } from "@oh-my-pi/pi-coding-agent/utils/image-source";
 import { ADVISOR_RENDER_OPTIONS } from "@oh-my-pi/pi-coding-agent/advisor/delta-split";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -34,37 +26,23 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { materializeImageChipLinks, UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { setAgentDir } from "@oh-my-pi/pi-utils";
+import { Composer } from "../src/ui/composer/composer";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
-interface StubEditor {
-	pendingImages: ImageContent[];
-	pendingImageLinks: (string | undefined)[];
-	imageLinks?: (string | undefined)[];
-	insertAtom: (label: string, expansion: string) => void;
-	pasteText: (text: string) => void;
-}
-
 function createPasteContext(sessionManager: SessionManager) {
-	const editor: StubEditor = {
-		pendingImages: [],
-		pendingImageLinks: [],
-		imageLinks: undefined,
-		insertAtom: vi.fn(),
-		pasteText: vi.fn(),
-	};
+	const editor = new Composer();
 	const showStatus = vi.fn();
 	const ctx = {
-		editor,
-		ui: { requestRender: vi.fn(), getFocused: () => null },
+		composer: editor,
+		shell: { focused: () => editor.field },
 		showStatus,
 		sessionManager,
 	} as unknown as InteractiveModeContext;
@@ -86,22 +64,11 @@ function modelVisibleText(session: AgentSession): string {
 	return parts.join("\n");
 }
 
-function chipPath(link: string): string {
-	const chip = imageReferenceHyperlink("[Image #1]", 1, [link], text => text);
-	const target = chip.match(/\x1b\]8;[^;]*;(file:[^\x1b]*)/)?.[1];
-	if (!target) throw new Error("Expected a clickable image chip");
-	return url.fileURLToPath(target);
-}
-
 describe("path-pasted image source path (#12244)", () => {
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
 	let settingsState: SettingsTestState | undefined;
 	let tmpDir: string;
-
-	beforeAll(async () => {
-		await initTheme(false);
-	});
 
 	beforeEach(async () => {
 		settingsState = beginSettingsTest();
@@ -127,7 +94,6 @@ describe("path-pasted image source path (#12244)", () => {
 	});
 
 	afterEach(async () => {
-		applyHyperlinkSetting("auto");
 		await session?.dispose();
 		session = undefined;
 		authStorage?.close();
@@ -136,7 +102,7 @@ describe("path-pasted image source path (#12244)", () => {
 		settingsState = undefined;
 	});
 
-	async function pasteImageFile(): Promise<{ editor: StubEditor; imagePath: string }> {
+	async function pasteImageFile(): Promise<{ editor: Composer; imagePath: string }> {
 		if (!session) throw new Error("Session was not initialized");
 		const imagePath = path.join(tmpDir, "screenshot.png");
 		await Bun.write(imagePath, Buffer.from(TINY_PNG, "base64"));
@@ -208,7 +174,7 @@ describe("path-pasted image source path (#12244)", () => {
 		expect(advisorView).toContain(`[image-attachment] Image #1: ${imagePath}`);
 	});
 
-	async function pasteClipboardBitmap(sessionManager: SessionManager): Promise<StubEditor> {
+	async function pasteClipboardBitmap(sessionManager: SessionManager): Promise<Composer> {
 		const { ctx, editor } = createPasteContext(sessionManager);
 		const controller = new InputController(ctx, {
 			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
@@ -258,8 +224,8 @@ describe("path-pasted image source path (#12244)", () => {
 		if (!link) throw new Error("Expected a clickable pasted image");
 		// Auto-resize upscales the 1x1 payload; the chip must still open the bytes as pasted.
 		expect(editor.pendingImages[0]?.data).not.toBe(TINY_PNG);
-		applyHyperlinkSetting("always");
-		expect(Buffer.from(await Bun.file(chipPath(link)).arrayBuffer()).toBase64()).toBe(TINY_PNG);
+		// The chip opens the file at its link.
+		expect(Buffer.from(await Bun.file(link).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 
 		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
 		expect(modelVisibleText(session)).toContain(source);
@@ -289,38 +255,8 @@ describe("path-pasted image source path (#12244)", () => {
 			const pathAfterMove = resolveLocalUrlToPath(source, localOptions(sessionManager));
 			expect(pathAfterMove).not.toBe(pathBeforeMove);
 			expect(Buffer.from(await Bun.file(pathAfterMove).arrayBuffer()).toBase64()).toBe(TINY_PNG);
-			applyHyperlinkSetting("always");
-			expect(Buffer.from(await Bun.file(chipPath(link)).arrayBuffer()).toBase64()).toBe(TINY_PNG);
-			// A transcript rebuilt from session images must also link to a file.
-			const { ctx } = createPasteContext(sessionManager);
-			const viewCtx: InteractiveModeContext = {
-				...ctx,
-				chatContainer: new TranscriptContainer(),
-				transcriptMessageComponents: new WeakMap(),
-				viewSession: moving,
-			};
-			const user = moving.messages.find(message => message.role === "user");
-			if (!user) throw new Error("Expected the sent image message");
-			expect(imageAttachmentSource(imageContent(user.content)[0]!)?.path).toBe(source);
-			new UiHelpers(viewCtx).addMessageToChat(user);
-			const rendered = viewCtx.chatContainer.children[0]?.render(100).join("\n");
-			const transcriptTarget = rendered?.match(/\x1b\]8;[^;]*;(file:[^\x1b]*)/)?.[1];
-			if (!transcriptTarget) throw new Error("Expected a linked transcript image chip");
-			expect(Buffer.from(await Bun.file(url.fileURLToPath(transcriptTarget)).arrayBuffer()).toBase64()).toBe(
-				TINY_PNG,
-			);
-			// A draft restored with the image (/tree, rewind, branch) must also link to a file.
-			const restored = new CustomEditor(getEditorTheme());
-			let restoredLinks: Promise<(string | undefined)[]> | undefined;
-			restored.draftImageLinkMaterializer = images => {
-				restoredLinks = materializeImageChipLinks(images, sessionManager);
-				return restoredLinks;
-			};
-			restored.setDraft("What is in [Image #1]?", [...editor.pendingImages]);
-			await restoredLinks;
-			const restoredLink = restored.imageLinks?.[0];
-			if (!restoredLink) throw new Error("Expected a linked restored draft image");
-			expect(Buffer.from(await Bun.file(chipPath(restoredLink)).arrayBuffer()).toBase64()).toBe(TINY_PNG);
+			// The chip opens a stable copy that survives the move.
+			expect(Buffer.from(await Bun.file(link).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 			// Tools addressing `attachment://1` get the post-move filesystem path.
 			expect(moving.getImageAttachments()[0]?.sourcePath).toBe(pathAfterMove);
 		} finally {

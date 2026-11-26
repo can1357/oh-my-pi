@@ -11,7 +11,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";

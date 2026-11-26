@@ -154,8 +154,6 @@ function runnerWith(sessionManager: SessionManager, select: ExtensionUIContext["
 			getEditorText: () => "",
 			editor: async () => undefined,
 			addAutocompleteProvider: () => {},
-			setEditorComponent: () => {},
-			getEditorComponent: () => undefined,
 			get theme() {
 				return {} as never;
 			},

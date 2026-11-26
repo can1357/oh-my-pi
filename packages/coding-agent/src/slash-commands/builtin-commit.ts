@@ -1,9 +1,9 @@
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { errorMessage, prompt } from "@oh-my-pi/pi-utils";
 import { draftFor } from "../commit/selective/prelude-definition";
 import commitRequestTemplate from "../prompts/commit-request.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { errorMessage, usage } from "./helpers/parse";
+import { usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
 /** Recent commit subjects shown to the agent for style. */

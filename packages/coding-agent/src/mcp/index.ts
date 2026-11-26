@@ -38,4 +38,4 @@ export type {
 	MCPResourceContent,
 	MCPResourceLinkContent,
 	MCPContent,
-} from "@oh-my-pi/pi-tui/tools/mcp";
+} from "../tools/details/mcp";

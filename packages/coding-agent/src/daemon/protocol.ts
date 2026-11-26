@@ -9,7 +9,7 @@
  *
  * Implementations: `server.ts` (daemon), `client.ts` ({@link DaemonClient}).
  */
-import type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot } from "./daemon-types";
 
 export type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot };
 
@@ -73,6 +73,12 @@ export interface OpenRequest {
 	label?: string;
 	/** `proc` units: the command. Module kinds ignore it. */
 	proc?: ProcSpec;
+	/**
+	 * `proc` units: pid of a running process of the daemon's user to supervise in place of
+	 * launching `proc` (see {@link UnitSnapshot.adopted}). Refused while a live unit has this
+	 * identity or already owns the pid.
+	 */
+	adopt?: number;
 	/** Module-specific launch parameters, read only when the unit is created. */
 	params?: unknown;
 	/** Overrides of the kind's default policy. */

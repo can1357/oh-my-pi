@@ -1,14 +1,18 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
-import { TUI, type TuiPaint } from "@oh-my-pi/pi-tui";
-import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
+import type { PresentedFrame } from "@oh-my-pi/pi-tui";
+import type { StreamFrameSource } from "../../src/stream/paint-encoder";
 import { streamSocketEndpoint } from "../../src/stream/paths";
 import { StreamPublisher } from "../../src/stream/publisher";
 import { STREAM_LOCAL_PROTO, type StreamSessionFrame } from "../../src/stream/protocol";
 import { StreamRedactor } from "../../src/stream/redactor";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -54,24 +58,25 @@ describe("StreamPublisher", () => {
 			await fs.rm(cwd, { recursive: true, force: true });
 		});
 
-		const tui = new TUI(new VirtualTerminal(80, 24));
-		let listener: ((paint: TuiPaint) => void) | null = null;
-		const originalAddPaintListener = tui.addPaintListener.bind(tui);
-		spyOn(tui, "addPaintListener").mockImplementation(next => {
-			listener = next;
-			const unsubscribe = originalAddPaintListener(next);
-			return () => {
-				listener = null;
-				unsubscribe();
-			};
-		});
+		// The interactive mode's terminal renderer, reduced to the frames it presents.
+		let listener: ((frame: PresentedFrame) => void) | null = null;
+		const frameSource: StreamFrameSource = {
+			size: () => ({ columns: 80, rows: 24 }),
+			current: () => undefined,
+			onFrame: next => {
+				listener = next;
+				return () => {
+					listener = null;
+				};
+			},
+		};
 		const statuses: Array<{ viewers: number } | null> = [];
 		const detached = Promise.withResolvers<void>();
 		const publisher = await StreamPublisher.connect({
 			cwd,
 			sessionId: "session-1",
 			title: "publisher-test",
-			tui,
+			frames: frameSource,
 			redactor: await StreamRedactor.load(cwd, ["secret-[a-z]+"]),
 			onStatus: status => {
 				statuses.push(status);
@@ -87,6 +92,7 @@ describe("StreamPublisher", () => {
 				viewport,
 				reset: options?.reset ?? false,
 				alt: false,
+				cursor: null,
 				columns: 80,
 				rows: 24,
 			});
@@ -122,6 +128,52 @@ describe("StreamPublisher", () => {
 		await detached.promise;
 		expect(listener).toBeNull();
 		expect(statuses).toEqual([{ viewers: 0 }, null]);
-		expect(() => tui.renderNow()).not.toThrow();
+	});
+});
+
+describe("StreamPublisher under Tern", () => {
+	it("publishes only its hello when the renderer presents no frames (native rendering, as the old TUI's)", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stream-native-"));
+		const endpoint = await streamSocketEndpoint(cwd);
+		const frames: StreamSessionFrame[] = [];
+		const welcomed = Promise.withResolvers<void>();
+		let peer: IpcConnection | undefined;
+		const server = await IpcServer.listen(endpoint, { framing: "lines" }, conn => {
+			peer = conn;
+			conn.start(
+				line => {
+					const frame = JSON.parse(line) as StreamSessionFrame;
+					frames.push(frame);
+					if (frame.t !== "hello") return;
+					conn.send(JSON.stringify({ t: "welcome", proto: STREAM_LOCAL_PROTO, channel: "test", url: "test" }));
+					welcomed.resolve();
+				},
+				() => {},
+			);
+		});
+		cleanup.push(async () => {
+			peer?.destroy();
+			await server.close();
+			await fs.rm(cwd, { recursive: true, force: true });
+		});
+		// A native host's `onFrame` never fires: Tern draws the surface itself.
+		const native: StreamFrameSource = {
+			size: () => ({ columns: 80, rows: 24 }),
+			current: () => undefined,
+			onFrame: () => () => {},
+		};
+		const publisher = await StreamPublisher.connect({
+			cwd,
+			sessionId: "session-native",
+			title: "native",
+			frames: native,
+			redactor: await StreamRedactor.load(cwd, []),
+			onStatus: () => {},
+		});
+		cleanup.push(async () => publisher?.dispose());
+		expect(publisher).not.toBeNull();
+		await welcomed.promise;
+		await Bun.sleep(50);
+		expect(frames.map(frame => frame.t)).toEqual(["hello"]);
 	});
 });
