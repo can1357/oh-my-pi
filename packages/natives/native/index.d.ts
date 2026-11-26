@@ -4604,6 +4604,22 @@ export interface ShellFsStatFs {
   nameMax?: number | bigint
 }
 
+/**
+ * The local target command of `words` after walking past known launchers.
+ *
+ * Returns `null` when the target runs remotely (`ssh`) or no command word
+ * remains.
+ */
+export declare function shellLaunch(words: Array<string>, windows?: boolean | undefined | null): ShellLaunch | null
+
+/** The local target command of `words` after walking past known launchers. */
+export interface ShellLaunch {
+  /** Index of the word naming the program. */
+  index: number
+  /** The program's name, past an option carrying it (`env -S=omp`). */
+  program: string
+}
+
 /** Options for configuring a persistent shell session. */
 export interface ShellOptions {
   /** Environment variables to apply once per session. */

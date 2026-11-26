@@ -101,20 +101,35 @@ impl Rest {
 /// containing `://`, or an environment value that is one): then it resolves
 /// first, else it spawns as it is.
 pub(super) fn names_url(spec: &SpawnSpec<'_>) -> bool {
-	is_url(spec.path)
-		|| is_url(spec.cwd)
-		|| (!runs_omp(spec.argv)
-			&& (spec.argv.iter().skip(1).any(|arg| arg.contains_str("://"))
-				|| spec.env.iter().any(|(name, value)| env_url(name, value))))
+	if is_url(spec.path) || is_url(spec.cwd) {
+		return true;
+	}
+	let omp_at = omp_argv_index(spec.path.as_bytes(), spec.argv);
+	let argv_end = omp_at.unwrap_or(spec.argv.len());
+	spec.argv[..argv_end]
+		.iter()
+		.skip(1)
+		.any(|arg| arg.contains_str("://"))
+		// The program `omp` itself may be file-backed (`nice local://bin/omp`).
+		|| omp_at.is_some_and(|at| spec.argv.get(at).is_some_and(|arg| arg.contains_str("://")))
+		|| (omp_at != Some(0) && spec.env.iter().any(|(name, value)| env_url(name, value)))
 }
 
-/// Whether `argv` runs `omp`: as the program, or as the command a wrapper
-/// (`nice omp …`, `npx omp …`) is given ahead of any URL.
-fn runs_omp(argv: &[BString]) -> bool {
-	argv
-		.iter()
-		.take_while(|arg| !arg.contains_str("://"))
-		.any(|arg| is_omp(arg))
+/// Index of `omp` in `argv` when `path`/`argv` invokes `omp` locally: `0` when
+/// `omp` is the spawned program itself, or the target index behind known
+/// wrappers (`nice`, `nohup`, `npx`, `bunx`, `sudo`, `env`, `time`, `xargs`,
+/// `uv run`, …) and their options. Returns `None` for non-`omp` commands and
+/// remote (`ssh`) launches.
+fn omp_argv_index(path: &[u8], argv: &[BString]) -> Option<usize> {
+	if is_omp(path) {
+		return Some(0);
+	}
+	let launch = crate::bash::launch::launch(argv);
+	if launch.remote {
+		return None;
+	}
+	let program = launch.program(argv)?;
+	is_omp(program.as_bytes()).then_some(launch.at)
 }
 
 /// Whether `word` names the `omp` program, by any path.
@@ -238,10 +253,14 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 		},
 		_ => names.path.clone(),
 	};
-	let literal = runs_omp(&names.argv);
+	let omp_at = omp_argv_index(&names.path, &names.argv);
 	let mut argv = Vec::with_capacity(names.argv.len());
 	for (i, arg) in names.argv.iter().enumerate() {
-		let host = if i == 0 || literal {
+		let host = if i == 0 || omp_at.is_some_and(|at| i > at) {
+			None
+		} else if omp_at == Some(i) && arg.iter().any(u8::is_ascii_whitespace) {
+			// A command line split into words (`env -S "omp read x"`): its
+			// words are the program's own and cannot be resolved apart.
 			None
 		} else {
 			host_arg(fs, arg.as_bstr()).await
@@ -250,7 +269,7 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 	}
 	// What the child's environment says differently from the shell's.
 	let mut hosted: Vec<(BString, BString)> = Vec::new();
-	if !literal {
+	if omp_at != Some(0) {
 		for (name, value) in names.env.iter() {
 			if env_url(name, value)
 				&& let Some(host) = host_arg(fs, value).await
@@ -362,4 +381,71 @@ fn names_nothing(text: &str) -> bool {
 		let rest = text[scheme.len() + 3..].trim_start_matches('/');
 		rest.trim_end_matches('/').is_empty() || rest.starts_with(char::is_whitespace)
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn bvec(items: &[&str]) -> Vec<BString> {
+		items.iter().map(|s| BString::from(*s)).collect()
+	}
+
+	#[test]
+	fn omp_argv_index_matches_only_program_or_wrapped_command() {
+		for non_omp in [
+			&["grep", "omp", "local://out.txt"][..],
+			&["nice", "-n", "5", "grep", "omp", "local://out.txt"][..],
+			&["npx", "--cache", "omp", "eslint", "local://app.ts"][..],
+			&["npx", "-p", "omp", "eslint", "local://app.ts"][..],
+			&["npx", "-c", "omp read local://out.txt"][..],
+			&["env", "-u", "omp", "grep", "x", "local://out.txt"][..],
+			&["env", "--", "-flag=/opt/omp", "grep", "x", "local://out.txt"][..],
+			&["env", "-", "tool.name=/opt/omp", "grep", "x", "local://out.txt"][..],
+			&["timeout", "30", "grep", "omp", "local://out.txt"][..],
+			&["command", "-v", "omp", "local://out.txt"][..],
+			&["setsid", "grep", "omp", "local://out.txt"][..],
+			&["uv", "run", "-m", "omp", "local://out.txt"][..],
+			&["ssh", "host", "omp", "read", "local://out.txt"][..],
+			&["env", "-S", "grep", "omp", "local://out.txt"][..],
+		] {
+			let args = bvec(non_omp);
+			assert_eq!(
+				omp_argv_index(args[0].as_bytes(), &args),
+				None,
+				"expected None for {non_omp:?}"
+			);
+		}
+
+		for (omp_cmd, expected_at) in [
+			(&["omp", "read", "local://out.txt"][..], 0),
+			(&["/usr/local/bin/omp", "read", "local://out.txt"][..], 0),
+			(&["nice", "-n", "5", "omp", "read", "local://out.txt"][..], 3),
+			(&["nice", "-10", "omp", "read", "local://out.txt"][..], 2),
+			(&["sudo", "-u", "root", "FOO=bar", "nice", "omp", "read", "local://out.txt"][..], 5),
+			(&["/usr/bin/env", "-C", "local://dir", "omp", "--version"][..], 3),
+			(&["/usr/bin/env", "-", "FOO=local://a", "omp", "read", "local://out.txt"][..], 3),
+			(&["npx", "--loglevel", "warn", "omp", "read", "local://out.txt"][..], 3),
+			(&["bunx", "--minimum-release-age", "86400", "omp", "read", "local://out.txt"][..], 3),
+			(&["timeout", "-k", "5", "30", "omp", "read", "local://out.txt"][..], 4),
+			(&["nohup", "omp", "read", "local://out.txt"][..], 1),
+			(&["setsid", "omp", "read", "local://out.txt"][..], 1),
+			(&["time", "FOO=bar", "omp", "read", "local://out.txt"][..], 2),
+			(&["stdbuf", "-oL", "omp", "read", "local://out.txt"][..], 2),
+			(&["xargs", "-a", "local://list", "omp", "read", "local://out.txt"][..], 3),
+			(&["ifne", "omp", "read", "local://out.txt"][..], 1),
+			(&["uv", "run", "-w", "requests", "omp", "read", "local://out.txt"][..], 4),
+			(&["env", "-S", "omp", "read", "local://out.txt"][..], 2),
+			(&["env", "--split-string", "omp", "read", "local://out.txt"][..], 2),
+			(&["env", "-Somp", "read", "local://out.txt"][..], 1),
+			(&["env", "--split-string=omp", "read", "local://out.txt"][..], 1),
+		] {
+			let args = bvec(omp_cmd);
+			assert_eq!(
+				omp_argv_index(args[0].as_bytes(), &args),
+				Some(expected_at),
+				"expected Some({expected_at}) for {omp_cmd:?}"
+			);
+		}
+	}
 }

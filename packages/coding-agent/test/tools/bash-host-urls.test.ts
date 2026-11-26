@@ -88,6 +88,86 @@ describe("hostCommandUrls", () => {
 		);
 	});
 
+	it("rewrites URLs when omp is an argument or option value, and skips only when omp is the command", async () => {
+		expect(await host("grep omp local://out.txt")).toBe("grep omp /host/out.txt");
+		expect(await host("rg -n 'omp' local://SKILL.md")).toBe("rg -n 'omp' /host/SKILL.md");
+		expect(await host("ls ./omp local://dir")).toBe("ls ./omp /host/dir");
+		expect(await host("nice -n 5 grep omp local://out.txt")).toBe("nice -n 5 grep omp /host/out.txt");
+		expect(await host("npx --cache omp eslint local://app.ts")).toBe("npx --cache omp eslint /host/app.ts");
+		expect(await host("npx -p omp eslint local://app.ts")).toBe("npx -p omp eslint /host/app.ts");
+		expect(await host("npx --loglevel warn omp read local://x.md:1")).toBe(
+			"npx --loglevel warn omp read local://x.md:1",
+		);
+		expect(await host("bunx --minimum-release-age 86400 --registry https://r.test omp read local://book.md:1")).toBe(
+			"bunx --minimum-release-age 86400 --registry https://r.test omp read local://book.md:1",
+		);
+		expect(await host("env -u omp grep x local://out.txt")).toBe("env -u omp grep x /host/out.txt");
+		expect(await host("env -- -flag=/opt/omp grep x local://out.txt")).toBe(
+			"env -- -flag=/opt/omp grep x /host/out.txt",
+		);
+		expect(await host("env - tool.name=/opt/omp grep x local://out.txt")).toBe(
+			"env - tool.name=/opt/omp grep x /host/out.txt",
+		);
+		expect(await host("env - omp read local://x.md:1")).toBe("env - omp read local://x.md:1");
+		expect(await host("timeout -k 5 30 omp read local://x.md && timeout 30 grep omp local://x.md")).toBe(
+			"timeout -k 5 30 omp read local://x.md && timeout 30 grep omp /host/x.md",
+		);
+		expect(await host("setsid omp read local://x.md:1 && setsid grep omp local://x.md")).toBe(
+			"setsid omp read local://x.md:1 && setsid grep omp /host/x.md",
+		);
+		expect(await host("xargs -n 1 omp read local://x.md && xargs -n 1 grep omp local://x.md")).toBe(
+			"xargs -n 1 omp read local://x.md && xargs -n 1 grep omp /host/x.md",
+		);
+		expect(await host("ifne omp read local://x.md && ifne grep omp local://x.md")).toBe(
+			"ifne omp read local://x.md && ifne grep omp /host/x.md",
+		);
+		expect(await host("REF=local://ref.txt omp read local://x.md && REF=local://ref.txt cat local://x.md")).toBe(
+			"REF=local://ref.txt omp read local://x.md && REF=/host/ref.txt cat /host/x.md",
+		);
+		expect(await host("if omp read local://x.md; then cat local://y.md; fi")).toBe(
+			"if omp read local://x.md; then cat /host/y.md; fi",
+		);
+		expect(await host("if grep omp local://x.md; then :; fi")).toBe("if grep omp /host/x.md; then :; fi");
+		expect(await host("echo hi >& local://out.txt")).toBe("echo hi >& /host/out.txt");
+		expect(await host("xargs -a local://list omp read local://x.md")).toBe(
+			"xargs -a /host/list omp read local://x.md",
+		);
+		expect(await host("/usr/bin/env -C local://dir omp --version")).toBe("/usr/bin/env -C /host/dir omp --version");
+		expect(await host("uv run omp read local://x.md && uv run -m omp local://x.md")).toBe(
+			"uv run omp read local://x.md && uv run -m omp /host/x.md",
+		);
+		expect(await host("uv run --directory local://proj omp read local://x.md")).toBe(
+			"uv run --directory /host/proj omp read local://x.md",
+		);
+		expect(await host(`REF="$(cat local://ref.txt)" omp --version`)).toBe(`REF="$(cat /host/ref.txt)" omp --version`);
+		expect(await host(`omp read "$(cat local://ref.txt)" local://x.md`)).toBe(
+			`omp read "$(cat /host/ref.txt)" local://x.md`,
+		);
+		expect(await host("2>/dev/null omp read local://x.md")).toBe("2>/dev/null omp read local://x.md");
+		expect(await host("2> /dev/null omp read local://x.md")).toBe("2> /dev/null omp read local://x.md");
+		expect(await host("2>&1 omp read local://x.md")).toBe("2>&1 omp read local://x.md");
+		expect(await host("nice -n 5 2>/dev/null omp read local://x.md")).toBe(
+			"nice -n 5 2>/dev/null omp read local://x.md",
+		);
+		expect(await host("2>local://err.log omp read local://x.md > local://out.txt")).toBe(
+			"2>/host/err.log omp read local://x.md > /host/out.txt",
+		);
+		expect(await host("ssh host omp read local://x.md")).toBe("ssh host omp read /host/x.md");
+	});
+
+	it("keeps omp's URLs when it is the command a split-string option runs, and resolves a file-backed omp", async () => {
+		const anyBacking: UrlBacking = async url => `/host/${url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "")}`;
+		const hostAny = (command: string) => hostCommandUrls(command, anyBacking);
+		expect(await hostAny("env -S omp read skill://tdd")).toBe("env -S omp read skill://tdd");
+		expect(await hostAny("env --split-string omp read skill://tdd")).toBe("env --split-string omp read skill://tdd");
+		expect(await hostAny("env -Somp read skill://tdd")).toBe("env -Somp read skill://tdd");
+		expect(await hostAny("env -S grep omp skill://tdd")).toBe("env -S grep omp /host/tdd");
+		expect(await hostAny("function f { omp read skill://tdd; }; f")).toBe("function f { omp read skill://tdd; }; f");
+		expect(await hostAny("function f { cat skill://tdd; }; f")).toBe("function f { cat /host/tdd; }; f");
+		expect(await hostAny("local://bin/omp --version")).toBe("/host/bin/omp --version");
+		expect(await hostAny("local://bin/omp read local://x.md")).toBe("/host/bin/omp read local://x.md");
+	});
+
 	it("treats a here-document body as input, not command text", async () => {
 		const command = [
 			"python3 - local://args.json <<'PY' && cat local://after.txt",

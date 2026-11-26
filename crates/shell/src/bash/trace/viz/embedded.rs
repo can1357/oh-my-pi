@@ -2,6 +2,7 @@
 use std::path::Path;
 
 use super::model::{Layers, NodeKey, Segment};
+use crate::bash::launch::{is_assignment, launch};
 
 /// Shells whose `-c` operand, or stdin, is a shell script.
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
@@ -15,135 +16,6 @@ fn sets(word: &str, flag: char) -> bool {
 	word
 		.strip_prefix('-')
 		.is_some_and(|flags| !flags.starts_with('-') && flags.contains(flag))
-}
-
-/// `NAME=VALUE`, as `env` and `sudo` take before the command they run.
-fn assignment(word: &str) -> bool {
-	word.split_once('=').is_some_and(|(name, _)| {
-		name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-			&& name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-	})
-}
-
-/// Index of the first operand from `from` on, past the options; `takes_value`
-/// names the options whose value is the next word.
-fn operand(words: &[String], from: usize, takes_value: impl Fn(&str) -> bool) -> usize {
-	let mut i = from;
-	while let Some(word) = words.get(i) {
-		if word == "--" {
-			return i + 1;
-		}
-		if !word.starts_with('-') || word == "-" {
-			break;
-		}
-		i += if takes_value(word) { 2 } else { 1 };
-	}
-	i
-}
-
-/// Words a launcher at the start of `words` takes before the command it runs
-/// (`timeout 5 cmd` → 2), and whether that command runs on an `ssh` host.
-fn launcher(words: &[String]) -> Option<(usize, bool)> {
-	let skip = match basename(words.first()?) {
-		"env" => {
-			let at = operand(words, 1, |w| {
-				matches!(w, "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string" | "-P")
-			});
-			at + words.iter().skip(at).take_while(|w| assignment(w)).count()
-		},
-		"sudo" | "doas" => {
-			let at = operand(words, 1, |w| {
-				matches!(
-					w,
-					"-u"
-						| "-g"
-						| "-C"
-						| "-D"
-						| "-h"
-						| "-p"
-						| "-R"
-						| "-r"
-						| "-T"
-						| "-t"
-						| "-U"
-						| "--user"
-						| "--group"
-						| "--close-from"
-						| "--chdir"
-						| "--host"
-						| "--prompt"
-						| "--chroot"
-						| "--role"
-						| "--command-timeout"
-						| "--type"
-						| "--other-user"
-				)
-			});
-			at + words.iter().skip(at).take_while(|w| assignment(w)).count()
-		},
-		// The first operand is the duration.
-		"timeout" | "gtimeout" => {
-			operand(words, 1, |w| matches!(w, "-s" | "--signal" | "-k" | "--kill-after")) + 1
-		},
-		"nice" => operand(words, 1, |w| matches!(w, "-n" | "--adjustment")),
-		"nohup" | "time" => operand(words, 1, |w| matches!(w, "-o" | "--output" | "-f" | "--format")),
-		"stdbuf" => {
-			operand(words, 1, |w| matches!(w, "-i" | "-o" | "-e" | "--input" | "--output" | "--error"))
-		},
-		"exec" => operand(words, 1, |w| w == "-a"),
-		"uv" if words.get(1).is_some_and(|w| w == "run") => operand(words, 2, |w| {
-			matches!(
-				w,
-				"--with"
-					| "--with-editable"
-					| "--with-requirements"
-					| "-p"
-					| "--python"
-					| "--package"
-					| "--project"
-					| "--directory"
-					| "--env-file"
-					| "--extra"
-					| "--group"
-					| "--only-group"
-					| "--no-group"
-					| "--index"
-					| "--default-index"
-					| "-i"
-					| "--index-url"
-					| "--extra-index-url"
-					| "-f"
-					| "--find-links"
-					| "--config-file"
-					| "--cache-dir"
-			)
-		}),
-		"ssh" => {
-			let host = operand(words, 1, |w| w.len() == 2 && "pilojFSLRDWbcEemOQw".contains(&w[1..]));
-			return (host < words.len()).then_some((host + 1, true));
-		},
-		_ => return None,
-	};
-	Some((skip, false))
-}
-
-/// A command line past its launchers (`env`, `timeout`, `sudo`, `uv run`,
-/// `ssh host`, …).
-struct Launch {
-	/// Index of the word naming the program; for `ssh`, of its first remote
-	/// word, if any (none: the remote login shell runs stdin).
-	at:     usize,
-	/// The program runs on an `ssh` host.
-	remote: bool,
-}
-
-fn launch(words: &[String]) -> Launch {
-	let mut launch = Launch { at: 0, remote: false };
-	while let Some((skip, remote)) = launcher(&words[launch.at..]) {
-		launch.at = (launch.at + skip).min(words.len());
-		launch.remote |= remote;
-	}
-	launch
 }
 
 /// The word holding a shell script the command line runs, and whether it runs
@@ -173,9 +45,10 @@ pub fn argument_language(words: &[String], index: usize) -> Option<&'static str>
 	if shell_script(words).is_some_and(|(at, _)| at == index) {
 		return Some("bash");
 	}
-	let at = launch(words).at;
+	let launch = launch(words);
+	let at = launch.at;
 	let (args, index) = (&words[at..], index.checked_sub(at)?);
-	let command = basename(args.first()?);
+	let command = basename(launch.program(words)?);
 	let previous = index
 		.checked_sub(1)
 		.and_then(|i| args.get(i))
@@ -300,7 +173,7 @@ fn shebang(body: &str) -> Option<&'static str> {
 	let mut words = line.split_ascii_whitespace();
 	let program = words.next()?;
 	if basename(program) == "env" {
-		return interpreter(words.find(|w| !w.starts_with('-') && !assignment(w))?);
+		return interpreter(words.find(|w| !w.starts_with('-') && !is_assignment(w.as_bytes()))?);
 	}
 	interpreter(program)
 }

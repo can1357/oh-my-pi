@@ -12,10 +12,10 @@
  * external's arguments. Everything else is left exactly as written.
  */
 import * as fs from "node:fs/promises";
-import { ShellFsOp } from "@oh-my-pi/pi-natives";
+import { ShellFsOp, shellLaunch } from "@oh-my-pi/pi-natives";
 import { isCmdShell } from "@oh-my-pi/pi-utils/procmgr";
 import type { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
-import { lexShellCommand } from "./shell-tokenize";
+import { isShellEnvironmentAssignment, lexShellCommand, type ShellToken } from "./shell-tokenize";
 
 /** The host path backing `url`, or `undefined` when nothing backs it or it cannot be resolved. */
 export type UrlBacking = (url: string) => Promise<string | undefined>;
@@ -32,10 +32,15 @@ export function urlBacking(filesystem: InternalUrlFilesystem): UrlBacking {
 const URL_ROOT = /^[A-Za-z][A-Za-z0-9+.-]+:\/\//;
 /** An unquoted redirection operator attached to its target (`<local://in`, `2>>local://log`). */
 const REDIRECT = /^\d*(?:<>|>>|<|>)/;
-/** `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`: a here-document and its delimiter. */
+/** A bare unquoted redirection operator whose target is the next word (`>`, `2>>`, `<<-`). */
+const BARE_REDIRECT = /^\d*(?:<>|>>|<<<|<<-?|[<>])$/;
+/** An unquoted redirection operator with or without an attached target (`2>/dev/null`, `>out`). */
+const ATTACHED_REDIRECT = /^\d*(?:<>|>>|<<<|<<-?|[<>])/;
 const HEREDOC = /(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))/g;
 const WORD_SAFE = /^[A-Za-z0-9_./:@%+=,-]+$/;
 const GLOB_RUN = /([*?[\]{}]+)/;
+
+const PREFIX_KEYWORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!", "{"]);
 
 /** Whether `url` names nothing below its scheme: a bare root, or one followed by words. */
 function namesNothing(url: string): boolean {
@@ -62,6 +67,97 @@ function urlStart(text: string): number | undefined {
 function isOmp(word: string): boolean {
 	const name = word.slice(Math.max(word.lastIndexOf("/"), word.lastIndexOf("\\")) + 1).toLowerCase();
 	return name === "omp" || name === "omp.exe";
+}
+
+/** Whether a `&` or `|` separator token is part of a redirection operator (`2>&1`, `&>/dev/null`, `>|out`). */
+function isRedirectSeparator(tokens: readonly ShellToken[], index: number, start: number): boolean {
+	const raw = tokens[index].raw;
+	if (/^&[ \t]*$/.test(raw) && index > start) {
+		const prev = tokens[index - 1];
+		if (prev.kind === "word" && /^\d*[<>]$/.test(prev.raw)) return true;
+	}
+	if (/^[ \t]*&$/.test(raw) && index + 1 < tokens.length) {
+		const next = tokens[index + 1];
+		if (next.kind === "word" && next.raw.startsWith(">")) return true;
+	}
+	if (/^\|[ \t]*$/.test(raw) && index > start) {
+		const prev = tokens[index - 1];
+		if (prev.kind === "word" && /^\d*>$/.test(prev.raw)) return true;
+	}
+	return false;
+}
+
+/**
+ * Token indices in `tokens[start..end]` whose literal URLs belong to `omp` itself
+ * (directly or behind launchers), so their bare/option URLs stay as written while
+ * redirections, wrapper options, and `$(…)` substitutions are still rewritten.
+ */
+function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: number, cmd: boolean): Set<number> {
+	const words: { index: number; raw: string; value: string }[] = [];
+	let skipTarget = false;
+	for (let i = start; i < end; i++) {
+		const token = tokens[i];
+		if (token.kind !== "word") continue;
+		if (skipTarget) {
+			skipTarget = false;
+			continue;
+		}
+		if (BARE_REDIRECT.test(token.raw)) {
+			skipTarget = true;
+			continue;
+		}
+		if (ATTACHED_REDIRECT.test(token.raw)) {
+			continue;
+		}
+		words.push({ index: i, raw: token.raw, value: token.value });
+	}
+
+	let cmdStart = 0;
+	const leadingAssignIndices: number[] = [];
+	if (!cmd) {
+		while (cmdStart < words.length) {
+			const w = words[cmdStart];
+			if (w.raw === w.value && PREFIX_KEYWORDS.has(w.value)) {
+				cmdStart++;
+				continue;
+			}
+			// `function name { … }`: the body's commands are commands of their own.
+			if (w.raw === w.value && w.value === "function" && words[cmdStart + 2]?.raw === "{") {
+				cmdStart += 2;
+				continue;
+			}
+			if (isShellEnvironmentAssignment(w.raw)) {
+				leadingAssignIndices.push(w.index);
+				cmdStart++;
+				continue;
+			}
+			break;
+		}
+	}
+
+	const cmdWords = words.slice(cmdStart);
+	if (cmdWords.length === 0) return new Set();
+	const launch = shellLaunch(
+		cmdWords.map(w => w.value),
+		cmd || undefined,
+	);
+	if (launch === null || launch.index >= cmdWords.length || !isOmp(launch.program)) {
+		return new Set();
+	}
+
+	const literal = new Set<number>();
+	// Leading shell assignments belong to `omp` itself only when invoked directly (not behind a wrapper).
+	if (launch.index === 0) {
+		for (const idx of leadingAssignIndices) literal.add(idx);
+	}
+	// The program word resolves like any other (a file-backed `omp` must run), unless it
+	// carries a whole command line (`env -S "omp read x"`), whose words cannot be rewritten apart.
+	const program = cmdWords[launch.index];
+	if (/\s/.test(program.value)) literal.add(program.index);
+	for (let i = launch.index + 1; i < cmdWords.length; i++) {
+		literal.add(cmdWords[i].index);
+	}
+	return literal;
 }
 
 /** `text` as one literal shell word. */
@@ -141,27 +237,40 @@ class HostUrls {
 	/** Command text without here-document bodies, word by word. */
 	async #code(text: string): Promise<string> {
 		if (!text.includes("://")) return text;
+		const tokens = lexShellCommand(text);
 		let out = "";
-		// `omp` resolves the URLs it is given itself (`omp read skill://x:1-20`): once a command
-		// names it ahead of any URL, the rest of that command is its own.
-		let omp = false;
-		let sawUrl = false;
-		for (const token of lexShellCommand(text)) {
-			if (token.kind === "separator") {
-				if (/[\n;&|()]/.test(token.raw)) {
-					omp = false;
-					sawUrl = false;
+		let start = 0;
+		while (start < tokens.length) {
+			let end = start;
+			while (
+				end < tokens.length &&
+				!(
+					tokens[end].kind === "separator" &&
+					/[\n;&|()]/.test(tokens[end].raw) &&
+					!isRedirectSeparator(tokens, end, start)
+				)
+			) {
+				end++;
+			}
+			// `omp` resolves the URLs it is given itself (`omp read skill://x:1-20`): exempt only
+			// `omp`'s own command words (and direct leading assignments), while still rewriting
+			// wrapper options, redirections, and nested `$(…)` substitutions.
+			const literal = ompLiteralTokens(tokens, start, end, this.#cmd);
+			for (let i = start; i < end; i++) {
+				const token = tokens[i];
+				if (token.kind === "separator" || !token.value.includes("://")) {
+					out += token.raw;
+				} else if (literal.has(i)) {
+					out += token.raw.includes("$(") ? await this.#substitutions(token.raw) : token.raw;
+				} else {
+					out += await this.#word(token.raw, token.value);
 				}
-				out += token.raw;
-				continue;
 			}
-			if (!token.value.includes("://")) {
-				omp ||= !sawUrl && isOmp(token.value);
-				out += token.raw;
-				continue;
+			if (end < tokens.length) {
+				out += tokens[end].raw;
+				end++;
 			}
-			sawUrl = true;
-			out += omp ? token.raw : await this.#word(token.raw, token.value);
+			start = end;
 		}
 		return out;
 	}

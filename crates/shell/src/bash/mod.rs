@@ -49,6 +49,7 @@ mod image;
 mod indexed_array;
 pub mod invocation;
 pub mod ir;
+pub mod launch;
 mod mem;
 mod mem_store;
 mod packed_names;
