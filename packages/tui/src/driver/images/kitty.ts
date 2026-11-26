@@ -195,6 +195,7 @@ const PLACEHOLDER_TERMINALS: Record<string, true> = {
 	ghostty: true,
 	rio: true,
 	otty: true,
+	rex: true,
 	tern: true,
 	monstar: true,
 };

@@ -129,7 +129,7 @@ describe("kitty Unicode placeholders", () => {
 	});
 
 	it("is enabled only for terminals that render virtual placements, with env overrides", () => {
-		for (const id of ["kitty", "ghostty", "rio", "otty", "tern"])
+		for (const id of ["kitty", "ghostty", "rio", "otty", "rex", "tern"])
 			expect(kittyPlaceholdersSupported(id, {})).toBe(true);
 		for (const id of ["wezterm", "warp", "base", "iterm2", "alacritty"]) {
 			expect(kittyPlaceholdersSupported(id, {})).toBe(false);
