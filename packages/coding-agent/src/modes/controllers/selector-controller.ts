@@ -111,7 +111,6 @@ import {
 	AgentTranscriptViewerModel,
 	type ViewerTranscriptActions,
 } from "../../ui/overlays/panels/agent-transcript-viewer-model";
-import { BorderedLoader } from "../../ui/overlays/panels/bordered-loader";
 import { ExtensionDashboard } from "../../ui/overlays/panels/extensions-dashboard";
 import { ExtensionDashboardModel } from "../../ui/overlays/panels/extensions-dashboard-model";
 import { LoginDialog, LoginDialogState } from "../../ui/overlays/panels/login-dialog";
@@ -325,20 +324,22 @@ export class SelectorController {
 	}
 
 	/**
-	 * Put a loader on screen before a picker that draws the session's history: the terminal
-	 * paints such a picker in one frame that takes a while on a long session, and until then
-	 * the keypress showed nothing. Tern draws the history itself and needs none.
+	 * Say the history is loading before a picker that draws it: the terminal paints such a picker in
+	 * one frame that takes a while on a long session, and until then the keypress showed nothing.
+	 * The notice takes the composer hint's place, so nothing on screen moves. Tern draws the history
+	 * itself: it presents no terminal frame, and the notice comes and goes unseen.
 	 */
 	async #presentHistoryLoader(): Promise<void> {
-		const host = this.ctx.shell.host;
-		if (!host || host.native) return;
-		// Holding focus keeps keys typed meanwhile off the hidden composer, and its caret from showing through.
-		const loader = this.ctx.shell.overlays.show(() =>
-			bottomSheetView("history-loader", BorderedLoader({ message: "Loading the session history…" })),
-		);
+		const composer = this.ctx.composer;
+		const symbols = currentTheme().symbols;
+		composer.setNotice([
+			{ t: symbols.symbol("status.pending"), s: "accent" },
+			{ t: " " },
+			{ t: "Loading the session history…", s: "dim em" },
+		]);
 		await this.ctx.shell.nextFrame();
-		// The caller opens its picker before the next frame: the loader stays up while that frame paints.
-		loader.close();
+		// The caller opens its picker before the next frame: the notice stays on screen while that frame paints.
+		composer.setNotice(undefined);
 	}
 
 	showSettingsSelector(): void {

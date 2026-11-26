@@ -1,6 +1,7 @@
 /**
  * A history picker's first paint can take hundreds of milliseconds on a long session: the
- * terminal shows a loader frame first, and the next frame shows the picker in its place.
+ * terminal first presents a frame saying the history is loading, in the composer hint's place,
+ * and the next frame shows the picker.
  */
 import { afterEach, beforeAll, beforeEach, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -75,20 +76,30 @@ afterEach(async () => {
 	resetSettingsForTest();
 });
 
-it("presents a loader frame, then the picker in the next frame", async () => {
+it("says the history is loading in the composer hint's place, then shows the picker in the next frame", async () => {
 	await mode.init({ suppressWelcomeIntro: true });
+	await mode.renderInitialMessages();
 	void mode.getUserInput();
 	await term.settle();
+	const steady = term.screen();
 
-	const frames: string[] = [];
-	const stopWatching = mode.shell.host!.onFrame(frame => frames.push(Bun.stripANSI(frame.viewport.join("\n"))));
+	// The memory terminal feeds the screen as frames are written: each entry is the screen one frame left.
+	const screens: string[][] = [];
+	const stopWatching = mode.shell.host!.onFrame(() => screens.push(term.screen()));
 	await mode.showUserMessageSelector();
 	await mode.shell.nextFrame();
 	stopWatching();
 
-	// The picker's first frame directly follows the loader's: no frame in between shows neither.
-	expect(frames.at(-1)).toContain(PICKER);
-	expect(frames.at(-1)).not.toContain(LOADER);
-	expect(frames.at(-2)).toContain(LOADER);
-	expect(frames.at(-2)).not.toContain(PICKER);
+	// The loading frame moves nothing: it differs from the screen before it in one row, the composer's.
+	const loading = screens.at(-2)!;
+	expect(loading).toHaveLength(steady.length);
+	const changed = loading.flatMap((row, index) => (row === steady[index] ? [] : [row]));
+	expect(changed).toHaveLength(1);
+	expect(changed[0]).toContain(LOADER);
+	expect(loading.join("\n")).not.toContain(PICKER);
+
+	// The picker's first frame directly follows it.
+	const picker = screens.at(-1)!.join("\n");
+	expect(picker).toContain(PICKER);
+	expect(picker).not.toContain(LOADER);
 });

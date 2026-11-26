@@ -75,12 +75,12 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 			appendLabelChange: vi.fn(),
 			getSessionName: () => undefined,
 		},
-		shell: { size: () => ({ columns: 120, rows: 40 }) },
+		shell: { size: () => ({ columns: 120, rows: 40 }), nextFrame: async () => {} },
 		showEditorAreaDialog: vi.fn((factory: () => JSXNode) => {
 			view = createRoot(() => factory() as UiNode);
 			return { node: view, closed: false, close: vi.fn() };
 		}),
-		composer: { text: () => "", setText: vi.fn(), addKeyHandler: vi.fn(() => () => {}) },
+		composer: { text: () => "", setText: vi.fn(), setNotice: vi.fn(), addKeyHandler: vi.fn(() => () => {}) },
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		showHookSelector,
