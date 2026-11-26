@@ -2843,6 +2843,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
+			recordCellToolCall: (call, result) => session.recordCellToolCall(call, result),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			getCallContext: (toolCallId, source) => {
@@ -5358,6 +5359,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			state: new ToolConversationState(),
 			// An advisor is a conversation of its own with no hidden-message channel: its preludes stay read-first.
 			noteEvalPreludeCall: undefined,
+			// An advisor's cell calls are its own: the primary's tool-call loop guard does not count them.
+			recordCellToolCall: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},

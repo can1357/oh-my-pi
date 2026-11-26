@@ -5133,6 +5133,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		if (event.type === "turn_start") {
+			this.#loopGuards.startTurn();
 			this.#advisors.onPrimaryTurnStart();
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, this.#goalUsage());
 		}
@@ -12130,6 +12131,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	commitTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+	}
+
+	/** Counts a tool call a cell made through the eval bridge in the tool-call loop guard. */
+	recordCellToolCall(call: ToolCall, result: AgentToolResult | undefined): void {
+		this.#loopGuards.recordCellCall(call, result);
 	}
 
 	/** `todo.backend` when this main session mirrors its list to an extension backend. */

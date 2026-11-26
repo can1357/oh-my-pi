@@ -339,6 +339,44 @@ else:
 		}
 	}, 15_000);
 
+	it("counts reads the shadow cell claimed in the cell's loop guard", async () => {
+		const calls: FakeCall[] = [];
+		const readTool = makeFakeTool("read", calls, {
+			content: [{ type: "text", text: "file body" }],
+		});
+		const shadowCell = {
+			async claim() {
+				return { content: [{ type: "text", text: "file body" }] };
+			},
+		} as unknown as EvalShadowCellSession;
+		const recorded: Array<{ name: string; text: string | undefined }> = [];
+		const toolSession = {
+			getToolByName: (name: string) => (name === readTool.name ? readTool : undefined),
+			recordCellToolCall: (call: { name: string }, result: AgentToolResult | undefined) => {
+				const block = result?.content[0];
+				recorded.push({ name: call.name, text: block?.type === "text" ? block.text : undefined });
+			},
+		} as unknown as ToolSession;
+		const info = await ensurePyToolBridge();
+		const sessionId = `py-loop-guard-${crypto.randomUUID()}`;
+		const unregister = registerPyToolBridge(sessionId, "run", { toolSession, shadowCell });
+		try {
+			const code = `for _ in range(5):
+    print(await __omp_with_call_site__("py:0", tool.read, {"path": "foo.txt"}))
+`;
+			const output = await runPrelude(code, {
+				PI_TOOL_BRIDGE_URL: info.url,
+				PI_TOOL_BRIDGE_TOKEN: info.token,
+				PI_TOOL_BRIDGE_SESSION: sessionId,
+			});
+			expect(output).toBe("file body\n".repeat(5));
+			expect(calls).toHaveLength(0);
+			expect(recorded).toEqual(Array.from({ length: 5 }, () => ({ name: "read", text: "file body" })));
+		} finally {
+			unregister();
+		}
+	}, 15_000);
+
 	it("force-stops with an in-flight response without an unhandled socket rejection", async () => {
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

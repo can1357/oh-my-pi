@@ -1,6 +1,20 @@
-import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentOptions,
+	AgentTelemetryConfig,
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+} from "@oh-my-pi/pi-agent-core";
 import type { ToolConversationState } from "./tool-state";
-import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
+import type {
+	FetchImpl,
+	ImageContent,
+	Message,
+	Model,
+	ServiceTierByFamily,
+	ToolCall,
+	ToolChoice,
+} from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { NotifyBatch } from "../async/notify";
@@ -515,6 +529,8 @@ export interface ToolSession {
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Counts a tool call a cell made through the eval bridge in the tool-call loop guard of its turn. */
+	recordCellToolCall?: (call: ToolCall, result: AgentToolResult | undefined) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

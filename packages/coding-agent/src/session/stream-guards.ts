@@ -2,12 +2,17 @@ import {
 	type Agent,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentToolResult,
 	type AgentTurnEndContext,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, AssistantMessageEvent, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import { GeminiHeaderRunDetector } from "@oh-my-pi/pi-ai/utils/thinking-loop";
-import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
+import {
+	type RepeatedToolCallDetection,
+	ToolCallLoopGuard,
+	type ToolCallLoopGuardOptions,
+} from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
@@ -210,20 +215,48 @@ export class LoopGuards {
 	#headerReminderSequence: number | undefined;
 	#toolCallLoopGuard: ToolCallLoopGuard | undefined;
 	#toolCallLoopGuardSettingsKey: string | undefined;
+	/** Repetition among the calls the current turn's cells made, reset when a turn starts and when it ends. */
+	#cellCallGuard: ToolCallLoopGuard | undefined;
+	#cellCallDetection: RepeatedToolCallDetection | undefined;
 
 	constructor(host: StreamGuardsHost) {
 		this.#host = host;
 	}
 
+	/** Starts a turn with no cell calls counted: a cell that ran between turns (a user `$` command) is not this turn's. */
+	startTurn(): void {
+		this.#cellCallGuard = undefined;
+		this.#cellCallDetection = undefined;
+	}
+
 	/** Records a completed turn and injects a redirect when calls repeat. */
 	recordTurn(messages: AgentMessage[], context: AgentTurnEndContext | undefined): void {
+		const cellDetection = this.#cellCallDetection;
+		this.#cellCallGuard = undefined;
+		this.#cellCallDetection = undefined;
 		if (context?.message.role !== "assistant") return;
-		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
-			message: context.message,
-			toolResults: context.toolResults,
-			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
-		});
+		const detection =
+			this.#activeToolCallLoopGuard()?.recordTurn({
+				message: context.message,
+				toolResults: context.toolResults,
+				injectedContext: (context.additionalMessages?.length ?? 0) > 0,
+			}) ?? cellDetection;
 		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
+	}
+
+	/**
+	 * Counts a tool call a cell made through the eval bridge, as the model's own call of this turn would count.
+	 * A repetition it shows is redirected when the turn ends.
+	 */
+	recordCellCall(call: ToolCall, result: AgentToolResult | undefined): void {
+		const options = this.#toolCallLoopGuardOptions();
+		if (!options) return;
+		this.#cellCallGuard ??= new ToolCallLoopGuard(options);
+		const detection = this.#cellCallGuard.recordCall(
+			call,
+			result && { toolCallId: call.id, content: result.content, useless: result.useless },
+		);
+		if (detection) this.#cellCallDetection ??= detection;
 	}
 
 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
@@ -242,23 +275,28 @@ export class LoopGuards {
 		if (event.type === "text_start" || event.type === "toolcall_start") detector.reset();
 	}
 
+	#toolCallLoopGuardOptions(): ToolCallLoopGuardOptions | undefined {
+		if (cfgModelToolCallLoopGuardEnabled.get(this.#host.settings) !== true) return undefined;
+		const exemptTools = cfgModelToolCallLoopGuardExemptTools
+			.get(this.#host.settings)
+			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
+		return {
+			threshold: cfgModelToolCallLoopGuardThreshold.get(this.#host.settings),
+			exemptTools,
+			exemptionAlias: toolCommandCallName,
+		};
+	}
+
 	#activeToolCallLoopGuard(): ToolCallLoopGuard | undefined {
-		if (cfgModelToolCallLoopGuardEnabled.get(this.#host.settings) !== true) {
+		const options = this.#toolCallLoopGuardOptions();
+		if (!options) {
 			this.#toolCallLoopGuard = undefined;
 			this.#toolCallLoopGuardSettingsKey = undefined;
 			return undefined;
 		}
-		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
-		const exemptTools = cfgModelToolCallLoopGuardExemptTools
-			.get(this.#host.settings)
-			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
-		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
+		const settingsKey = `${options.threshold}:${JSON.stringify(options.exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
-			this.#toolCallLoopGuard = new ToolCallLoopGuard({
-				threshold,
-				exemptTools,
-				exemptionAlias: toolCommandCallName,
-			});
+			this.#toolCallLoopGuard = new ToolCallLoopGuard(options);
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
 		}
 		return this.#toolCallLoopGuard;

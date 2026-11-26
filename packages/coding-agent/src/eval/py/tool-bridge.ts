@@ -10,7 +10,7 @@
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
-import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent, recordCellToolCall } from "../js/tool-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 
 export interface PyToolBridgeEntry {
@@ -125,7 +125,10 @@ async function callSessionToolPromptOnAbort(
 		if (claimSignal?.aborted || entry.abortRequested?.()) {
 			throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
 		}
-		if (claimed) return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
+		if (claimed) {
+			recordCellToolCall({ session: entry.toolSession }, `py-${name}-${crypto.randomUUID()}`, name, args, claimed);
+			return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
+		}
 	}
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,

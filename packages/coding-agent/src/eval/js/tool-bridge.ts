@@ -4,7 +4,7 @@ import {
 	type AgentToolUpdateCallback,
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
-import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { type ImageContent, type ToolCall, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
@@ -324,6 +324,20 @@ async function runEvalMcpCall(args: unknown, options: ToolBridgeOptions): Promis
 	}
 }
 
+/** Counts a call a cell made through the bridge in the session's tool-call loop guard, as the model's own call would count. */
+export function recordCellToolCall(
+	options: ToolBridgeOptions,
+	id: string,
+	name: string,
+	args: unknown,
+	result: AgentToolResult | undefined,
+): void {
+	options.session.recordCellToolCall?.(
+		{ type: "toolCall", id, name, arguments: args as ToolCall["arguments"] },
+		result,
+	);
+}
+
 /**
  * Validate, authorize and run one session tool for a cell, as its direct call
  * would; reports failures as status events. Returns the canonical name and the
@@ -358,6 +372,7 @@ async function runSessionTool(
 			"payload",
 		);
 	} catch (error) {
+		recordCellToolCall(options, toolCallId, name, validationArgs, undefined);
 		options.emitStatus?.({
 			op: name,
 			error: error instanceof Error ? error.message : String(error),
@@ -380,7 +395,10 @@ async function runSessionTool(
 			options.signal,
 		);
 		options.signal?.throwIfAborted();
-		if (claimed) return { name, args: validatedArgs, result: claimed };
+		if (claimed) {
+			recordCellToolCall(options, toolCallId, name, validatedArgs, claimed);
+			return { name, args: validatedArgs, result: claimed };
+		}
 	}
 	let settled = false;
 	const isMcpTool = "mcpServerName" in tool && typeof tool.mcpServerName === "string";
@@ -424,8 +442,10 @@ async function runSessionTool(
 			if (!options.onReply) throw new ToolError(NO_REPLY_SINK);
 			for (const text of replies) options.onReply(text);
 		}
+		recordCellToolCall(options, toolCallId, name, validatedArgs, result);
 		return { name, args: validatedArgs, result };
 	} catch (error) {
+		recordCellToolCall(options, toolCallId, name, validatedArgs, undefined);
 		options.emitStatus?.({
 			op: name,
 			error: error instanceof Error ? error.message : String(error),
