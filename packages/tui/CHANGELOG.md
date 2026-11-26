@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `PI_CELL_SIZE=<width>x<height>` to pin the cell size that sizes inline images, for terminals that report a wrong one (for example over Windows OpenSSH)
+- Added `PI_CELL_SIZE=<width>x<height>` to pin the cell size that sizes inline images, for terminals that report a wrong one (for example over Windows OpenSSH) ([#20632](https://github.com/can1357/oh-my-pi/pull/20632) by [@disberd](https://github.com/disberd))
 
 ### Fixed
 
