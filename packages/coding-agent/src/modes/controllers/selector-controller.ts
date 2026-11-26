@@ -151,6 +151,7 @@ import {
 	outcomeLinesView,
 	REWIND_PAGE,
 	successText,
+	transcriptFocus,
 	usageDashboardView,
 } from "./selector-views";
 
@@ -2665,7 +2666,7 @@ export class SelectorController {
 				viewer = this.ctx.shell.overlays.show(
 					() => fullscreenMenuView("agent-transcript", AgentTranscriptViewer({ model })),
 					{
-						focus: root => firstOfKind(root, "editor"),
+						focus: transcriptFocus,
 						onClose: () => {
 							viewer = undefined;
 							model.dispose();
