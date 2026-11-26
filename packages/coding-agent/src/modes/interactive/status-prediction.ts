@@ -126,6 +126,7 @@ function isModel(value: unknown): value is StatusModel {
 		isString(value.id) &&
 		isBoolean(value.thinking) &&
 		isOptional(value.name, isString) &&
+		isOptional(value.provider, isString) &&
 		isOptional(value.contextWindow, isNumber)
 	);
 }
