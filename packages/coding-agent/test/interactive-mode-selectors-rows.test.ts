@@ -59,18 +59,26 @@ describe("inline selectors on terminal rows", () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.settle();
-		const row = (label: string): string => term.screen().find(line => line.includes(label)) ?? "";
+		/** What the screen draws before `label` on its row (the selection marker lives there); undefined off screen. */
+		const lead = (label: string): string | undefined => {
+			const line = term.screen().find(candidate => candidate.includes(label));
+			return line?.slice(0, line.indexOf(label));
+		};
 
 		await mode.showDebugSelector();
 		await term.waitFor(screen => screen.some(line => line.includes("Debug Tools")));
-		const first = row("Open: artifact folder");
-		const second = row("Report: performance issue");
+		const selected = lead("Open: artifact folder");
+		const plain = lead("Report: performance issue");
+		expect(selected).not.toBe(plain);
 
-		// The selection marker leaves the first row for the second. The waits stay under the test's
-		// own timeout, so a menu that ignores its keys fails with the screen it left.
+		// Both rows stay on screen and trade leads: the marker moved and the sheet is still open. The
+		// waits stay under the test's own timeout, so a menu that ignores its keys fails with the
+		// screen it left.
 		term.press("down");
-		await term.waitFor(() => row("Open: artifact folder") !== first, 2000);
-		expect(row("Report: performance issue")).not.toBe(second);
+		await term.waitFor(
+			() => lead("Report: performance issue") === selected && lead("Open: artifact folder") === plain,
+			2000,
+		);
 
 		term.press("escape");
 		await term.waitFor(screen => !screen.some(line => line.includes("Debug Tools")), 2000);
