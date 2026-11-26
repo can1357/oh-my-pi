@@ -647,8 +647,6 @@ impl Sub {
 			Self::Reset => &[
 				"auto-advance",
 				"hard",
-				"help",
-				"help-all",
 				"intent-to-add",
 				"inter-hunk-context",
 				"keep",
@@ -669,8 +667,6 @@ impl Sub {
 				"detach",
 				"force",
 				"guess",
-				"help",
-				"help-all",
 				"ignore-other-worktrees",
 				"ignore-skip-worktree-bits",
 				"inter-hunk-context",
@@ -697,8 +693,6 @@ impl Sub {
 				"force",
 				"force-create",
 				"guess",
-				"help",
-				"help-all",
 				"ignore-other-worktrees",
 				"merge",
 				"orphan",
@@ -710,8 +704,6 @@ impl Sub {
 			],
 			Self::Restore => &[
 				"conflict",
-				"help",
-				"help-all",
 				"ignore-skip-worktree-bits",
 				"ignore-unmerged",
 				"inter-hunk-context",
@@ -744,8 +736,6 @@ impl Sub {
 				"force-rebase",
 				"fork-point",
 				"gpg-sign",
-				"help",
-				"help-all",
 				"ignore-whitespace",
 				"interactive",
 				"keep-base",
@@ -784,8 +774,6 @@ impl Sub {
 				"ff-only",
 				"file",
 				"gpg-sign",
-				"help",
-				"help-all",
 				"into-name",
 				"log",
 				"message",
@@ -820,8 +808,6 @@ impl Sub {
 				"ff-only",
 				"force",
 				"gpg-sign",
-				"help",
-				"help-all",
 				"ipv4",
 				"ipv6",
 				"jobs",
@@ -863,8 +849,6 @@ impl Sub {
 				"empty",
 				"ff",
 				"gpg-sign",
-				"help",
-				"help-all",
 				"keep-redundant-commits",
 				"mainline",
 				"quit",
@@ -881,8 +865,6 @@ impl Sub {
 				"continue",
 				"edit",
 				"gpg-sign",
-				"help",
-				"help-all",
 				"mainline",
 				"quit",
 				"reference",
@@ -907,8 +889,6 @@ impl Sub {
 				"file",
 				"fixup",
 				"gpg-sign",
-				"help",
-				"help-all",
 				"include",
 				"inter-hunk-context",
 				"interactive",
@@ -936,9 +916,7 @@ impl Sub {
 				"verbose",
 				"verify",
 			],
-			Self::Clean => {
-				&["dry-run", "exclude", "force", "help", "help-all", "interactive", "quiet"]
-			},
+			Self::Clean => &["dry-run", "exclude", "force", "interactive", "quiet"],
 		}
 	}
 }
@@ -1124,6 +1102,9 @@ enum Stash {
 	Clear,
 }
 
+/// Whether git prints usage instead of running: `-h`, `--help`, or
+/// `--help-all`. Git does not expand abbreviations to these, so they stay out
+/// of [`Sub::long_options`]; `--h` there abbreviates `reset --hard`.
 fn is_help(args: &[Arg<'_>]) -> bool {
 	args
 		.iter()
@@ -1738,6 +1719,8 @@ mod tests {
 			("commit --amend --short --no-porcelain", "CommitAmend"),
 			("checkout --help", "Allow"),
 			("reset --hard --help", "Allow"),
+			("reset --h", "Destructive"),
+			("clean --help", "Allow"),
 			("checkout :(literal).", "Destructive"),
 			("checkout :!foo", "Destructive"),
 			("checkout **", "Destructive"),
