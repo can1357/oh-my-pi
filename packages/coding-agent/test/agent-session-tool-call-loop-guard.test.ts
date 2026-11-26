@@ -198,4 +198,76 @@ describe("AgentSession tool-call loop guard", () => {
 			),
 		).toHaveLength(redirects);
 	});
+
+	it.each([
+		{
+			scenario: "repeated vibe_wait poll on a still-running worker",
+			name: "vibe_wait",
+			args: { sessions: ["worker"], timeout: 600 },
+			result:
+				"Still running: `worker`.\nWait window elapsed before any turn settled — re-issue vibe_wait to keep waiting.",
+			useless: true,
+			redirects: 0,
+		},
+		{
+			scenario: "repeated empty vibe_wait poll with no worker in flight",
+			name: "vibe_wait",
+			args: { sessions: ["worker"], timeout: 600 },
+			result: "No turns in flight to wait for.",
+			useless: true,
+			noop: true,
+			redirects: 1,
+		},
+		{
+			scenario: "repeated bash command",
+			name: "bash",
+			args: { command: "pytest -q" },
+			result: "1263 passed, 4 skipped",
+			useless: false,
+			redirects: 1,
+		},
+	])("applies the default exempt list to $scenario", async ({ name, args, result, useless, noop, redirects }) => {
+		const tool: AgentTool = {
+			name,
+			label: name,
+			description: `Mock ${name} tool`,
+			parameters: type({ "sessions?": "string[]", "timeout?": "number", "command?": "string" }),
+			execute: async () => ({ content: [{ type: "text", text: result }], useless, noop }),
+		};
+		const toolCallTurn = { content: [{ type: "toolCall" as const, name, arguments: args }] };
+		const mock = createMockModel({
+			provider: "openai",
+			responses: [...Array.from({ length: 5 }, () => toolCallTurn), { content: ["Finished waiting."] }],
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 5,
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([[name, tool]]),
+		});
+
+		await session.prompt("wait for the worker");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(6);
+		expect(session.agent.state.messages.filter(message => message.role === "toolResult")).toHaveLength(5);
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "tool-call-loop-redirect",
+			),
+		).toHaveLength(redirects);
+	});
 });

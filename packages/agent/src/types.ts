@@ -1089,6 +1089,8 @@ export interface AgentToolResult<T = any, _TInput = unknown> {
 	providerMetadata?: ToolResultProviderMetadata;
 	/** Marks the result as contextually useless: safe for compaction to elide once consumed (e.g. zero matches, wait timeout). Ignored when isError is set. */
 	useless?: boolean;
+	/** Marks a poll with nothing to wait for. The loop guard counts it like any other call, exemption or not. Ignored when isError is set. */
+	noop?: boolean;
 }
 
 // Callback for streaming tool execution updates

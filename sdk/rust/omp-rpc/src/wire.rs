@@ -1125,6 +1125,7 @@ pub struct ToolResultMessage {
 	pub attribution: Option<Attribution>,
 	pub pruned_at: Option<f64>,
 	pub useless: Option<bool>,
+	pub noop: Option<bool>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -1162,6 +1163,9 @@ impl Serialize for ToolResultMessage {
 		if let Some(value) = &self.useless {
 			map.serialize_entry("useless", value)?;
 		}
+		if let Some(value) = &self.noop {
+			map.serialize_entry("noop", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"role" if self.role.is_some() => continue,
@@ -1174,6 +1178,7 @@ impl Serialize for ToolResultMessage {
 				"attribution" if self.attribution.is_some() => continue,
 				"prunedAt" if self.pruned_at.is_some() => continue,
 				"useless" if self.useless.is_some() => continue,
+				"noop" if self.noop.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -1196,6 +1201,7 @@ impl<'de> Deserialize<'de> for ToolResultMessage {
 			attribution: take(&mut extra, "attribution"),
 			pruned_at: take(&mut extra, "prunedAt"),
 			useless: take(&mut extra, "useless"),
+			noop: take(&mut extra, "noop"),
 			extra,
 		})
 	}
@@ -4952,6 +4958,8 @@ pub struct HostToolResultPayload {
 	pub is_error: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub useless: Option<bool>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub noop: Option<bool>,
 	#[serde(rename = "providerMetadata", default, skip_serializing_if = "Option::is_none")]
 	pub provider_metadata: Option<Map<String, Value>>,
 }

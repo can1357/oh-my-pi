@@ -147,6 +147,7 @@ pub(crate) fn text_payload(text: String, details: Option<Value>) -> HostToolResu
 		details,
 		is_error: None,
 		useless: None,
+		noop: None,
 		provider_metadata: None,
 	}
 }

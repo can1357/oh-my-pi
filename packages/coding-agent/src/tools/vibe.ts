@@ -189,7 +189,7 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 			},
 		};
 		if (outcome.settled.length === 0 && outcome.stillRunning.length === 0) {
-			return { ...textResult("No turns in flight to wait for.", details), useless: true };
+			return { ...textResult("No turns in flight to wait for.", details), useless: true, noop: true };
 		}
 		const lines: string[] = [];
 		for (const entry of outcome.settled) {

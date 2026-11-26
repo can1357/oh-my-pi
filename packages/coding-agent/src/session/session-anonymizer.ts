@@ -95,6 +95,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"credentialId",
 		"isError",
 		"useless",
+		"noop",
 		"prunedAt",
 		"exitCode",
 		"cancelled",

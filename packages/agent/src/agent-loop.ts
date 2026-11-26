@@ -600,6 +600,7 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 	// Tools may flag the result contextually useless (zero matches, elapsed
 	// wait) so compaction can elide it once consumed. Errors are never useless.
 	const useless = Boolean(rawObj && "useless" in rawObj && rawObj.useless);
+	const noop = Boolean(rawObj && "noop" in rawObj && rawObj.noop);
 
 	if (!Array.isArray(rawContent)) {
 		return {
@@ -656,6 +657,7 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 			providerMetadata,
 			...(isError ? { isError: true } : {}),
 			...(useless && !isError ? { useless: true } : {}),
+			...(noop && !isError ? { noop: true } : {}),
 		},
 		malformed: invalidBlocks > 0 || providerMetadataResult.malformed,
 	};
@@ -3659,6 +3661,7 @@ async function executeToolCalls(
 			providerMetadata: result.providerMetadata,
 			isError,
 			...(result.useless && !isError ? { useless: true } : {}),
+			...(result.noop && !isError ? { noop: true } : {}),
 			timestamp: Date.now(),
 		};
 		record.result = result;
@@ -3885,6 +3888,7 @@ async function executeToolCalls(
 							isError: after.isError ?? result.isError,
 							providerMetadata: after.providerMetadata ?? result.providerMetadata,
 							useless: after.useless ?? result.useless,
+							noop: result.noop,
 						});
 						result = coerced.result;
 						isError = coerced.malformed || (after.isError ?? isError);

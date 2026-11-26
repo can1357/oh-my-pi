@@ -1407,6 +1407,9 @@
 				},
 				"useless": {
 					"type": "boolean"
+				},
+				"noop": {
+					"type": "boolean"
 				}
 			},
 			"required": [
@@ -6011,6 +6014,9 @@
 					"type": "boolean"
 				},
 				"useless": {
+					"type": "boolean"
+				},
+				"noop": {
 					"type": "boolean"
 				},
 				"providerMetadata": {

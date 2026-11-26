@@ -127,4 +127,14 @@ describe("vibe wait completion classification", () => {
 		expect(outcome.timedOut).toBe(false);
 		expect(outcome.settled[0]).toMatchObject({ id: WORKER, jobId: turn.jobId, status: "cancelled" });
 	});
+
+	it("marks an empty poll with no worker in flight as noop, and a poll with a worker in flight as not noop", async () => {
+		const empty = await new VibeWaitTool(session).execute("wait-empty", { timeout: 0.01 }, undefined);
+		expect(empty.noop).toBe(true);
+		expect(empty.useless).toBe(true);
+
+		startTurn();
+		const running = await new VibeWaitTool(session).execute("wait-running", { timeout: 0.01 }, undefined);
+		expect(running.noop).not.toBe(true);
+	});
 });

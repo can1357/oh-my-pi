@@ -154,6 +154,7 @@ export interface ToolResultMessage {
 	attribution?: Attribution;
 	prunedAt?: number;
 	useless?: boolean;
+	noop?: boolean;
 }
 
 export interface BashExecutionMessage {
@@ -1531,6 +1532,7 @@ export interface HostToolResultPayload {
 	details?: unknown;
 	isError?: boolean;
 	useless?: boolean;
+	noop?: boolean;
 	providerMetadata?: Record<string, unknown>;
 }
 

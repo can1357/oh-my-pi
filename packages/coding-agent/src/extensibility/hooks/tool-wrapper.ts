@@ -120,6 +120,8 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					details: (resultResult.details ?? result.details) as TDetails,
 					// A patch rewrites what the model sees; it never turns a failed call into a success.
 					...(result.isError === true ? { isError: true } : {}),
+					...(result.useless ? { useless: true } : {}),
+					...(result.noop ? { noop: true } : {}),
 				};
 			}
 

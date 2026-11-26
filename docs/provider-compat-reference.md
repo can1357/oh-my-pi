@@ -279,7 +279,7 @@ Used when native tool APIs are unavailable, or when history must be re-encoded f
 
 ### Edge guards
 
-- **`utils/tool-call-loop-guard.ts`**: `ToolCallLoopGuard` canonicalizes arguments (sorted keys, `i` / legacy `__intent` stripped) and compares sorted whole-turn call sets across consecutive turns. At the configured repetition threshold it returns a `RepeatedToolCallDetection`; no-call turns and all-exempt turns reset the counter.
+- **`utils/tool-call-loop-guard.ts`**: `ToolCallLoopGuard` canonicalizes arguments (sorted keys, `i` / legacy `__intent` stripped) and compares sorted whole-turn call sets across consecutive turns. At the configured repetition threshold it returns a `RepeatedToolCallDetection`; no-call turns reset the counter. An all-exempt turn is skipped when every result is `useless` and no context was injected, and resets the counter otherwise. A poll flagged `noop` is never exempt, so it counts like any other call.
 - **`utils/deterministic-id.ts`**: `deterministicUuid(seed)` (SHA-256 → UUID shape) stabilizes Cursor/Devin history message IDs. Missing tool-call IDs use provider-specific fallbacks; Google uses `nextToolCallId`.
 - **`providers/transform-messages.ts`**: shared pre-flight pass — tool-call dedup, sanitization, id normalization — before provider-specific conversion.
 
