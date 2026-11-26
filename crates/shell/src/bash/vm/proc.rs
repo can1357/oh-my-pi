@@ -22,47 +22,47 @@ use crate::bash::{
 
 /// A green thread: its scripts, frames, fds, cwd and global state.
 pub struct Vproc {
-	pub vpid:          Vpid,
-	pub parent:        Option<Vpid>,
+	pub vpid:            Vpid,
+	pub parent:          Option<Vpid>,
 	/// Scripts queued on this vproc (root only); the front one runs.
-	pub runs:          VecDeque<Run>,
+	pub runs:            VecDeque<Run>,
 	/// Activation stack.
-	pub frames:        Vec<Frame>,
+	pub frames:          Vec<Frame>,
 	/// Function-local scopes, innermost last.
-	pub scopes:        Vec<Scope>,
-	pub fds:           FdTable,
-	pub cwd:           BString,
+	pub scopes:          Vec<Scope>,
+	pub fds:             FdTable,
+	pub cwd:             BString,
 	/// `$?`.
-	pub status:        i32,
+	pub status:          i32,
 	/// `PIPESTATUS` of the last pipeline.
-	pub pipestatus:    Vec<i32>,
+	pub pipestatus:      Vec<i32>,
 	/// A forked vproc's global state: its parent's at the fork, then its
 	/// own writes (copy-on-write; see `state`). `None` for the root vproc,
 	/// whose global state is the store.
-	pub image:         Option<Image>,
+	pub image:           Option<Image>,
 	/// A forked vproc's locale-variable count (`state::locale_token`): the
 	/// root's at the fork, `None` once it assigned a locale variable.
-	pub locale_gen:    Option<u64>,
+	pub locale_gen:      Option<u64>,
 	/// Diagnostics waiting to be written to their fds.
-	pub out:           VecDeque<PendingWrite>,
-	pub blocked:       Option<Blocked>,
+	pub out:             VecDeque<PendingWrite>,
+	pub blocked:         Option<Blocked>,
 	/// Signal traps deferred until the foreground command completes.
-	pub pending_traps: SigSet,
+	pub pending_traps:   SigSet,
 	/// Stopped by a virtual `STOP` (job control).
-	pub stopped:       bool,
+	pub stopped:         bool,
 	/// Exit once its frames are done (subshell vprocs).
-	pub transient:     bool,
+	pub transient:       bool,
 	/// Set when this vproc's EXIT trap has been started. A root vproc keeps
 	/// the same flag per run ([`Run::exit_trap_started`]); a forked subshell
 	/// has no `Run`, and its `own_traps`, `trap_frames` and the frame scans
 	/// all go back to their pre-trap values once the trap's frame is popped,
 	/// so without this the trap could start a second time.
-	pub exit_trap_run: bool,
+	pub exit_trap_run:   bool,
 	/// Background jobs not yet waited for or reported, current/previous
 	/// job and the `SIGCHLD` trap runs owed.
-	pub jobs:          JobTable,
+	pub jobs:            JobTable,
 	/// `$!`: the last asynchronous child and the OS pid it is known by.
-	pub last_bg:       LastBg,
+	pub last_bg:         LastBg,
 	/// Cleared scratches kept for the next ops (allocation reuse), at most
 	/// one per nesting level a caller's op parks at (a function call keeps
 	/// its op's scratch while the body needs another); never serialized.
@@ -70,67 +70,69 @@ pub struct Vproc {
 		clippy::vec_box,
 		reason = "the boxes move between frames (`Frame::scratch`) and this pool without copying"
 	)]
-	pub spare:         Vec<Box<Scratch>>,
+	pub spare:           Vec<Box<Scratch>>,
 	/// `getopts` progress between calls.
-	pub getopts:       GetoptsState,
+	pub getopts:         GetoptsState,
 	/// Open process-substitution fds: `(frame depth, fd)`, the depth being
 	/// the frame count when the op that opened it ran.
-	pub procsubs:      Vec<(u32, i32)>,
+	pub procsubs:        Vec<(u32, i32)>,
 	/// Coprocesses not reaped yet.
-	pub coprocs:       Vec<Coproc>,
+	pub coprocs:         Vec<Coproc>,
 	/// `set -o` states saved by `local -` in functions that returned, to
 	/// restore before the next op.
-	pub restore_opts:  Vec<BString>,
+	pub restore_opts:    Vec<BString>,
 	/// Limits `ulimit` set in this vproc or inherited from its parent;
 	/// passed to externals, never applied to the host process.
-	pub rlimits:       Vec<(crate::bash::host::Rlimit, Option<u64>, Option<u64>)>,
+	pub rlimits:         Vec<(crate::bash::host::Rlimit, Option<u64>, Option<u64>)>,
 	/// Host lineage, inherited from the parent (set by
 	/// [`super::ShellApi::run_subshell_in`]) and passed to externals.
-	pub lineage:       crate::bash::host::Lineage,
+	pub lineage:         crate::bash::host::Lineage,
+	/// Private input of a source loader in this command tree, if any.
+	pub source_snapshot: Option<Arc<omp_builtins::extras::SourceSnapshot>>,
 	/// Resource usage of the externals this vproc waited for and of its
 	/// ended child vprocs ([`crate::bash::ProcUsage`]); boxed on the first
 	/// one, so an idle vproc pays a pointer. Not imaged.
-	pub usage:         Option<Box<crate::bash::host::ProcUsage>>,
+	pub usage:           Option<Box<crate::bash::host::ProcUsage>>,
 	/// `set -x` nesting this vproc starts at, beyond the first level (bash's
 	/// `indirection_level`): its parent's, plus one in a command
 	/// substitution.
-	pub trace_base:    u32,
+	pub trace_base:      u32,
 	/// `$BASH_SUBSHELL`: the subshell nesting (0 for the shell itself and a
 	/// nested shell). A field, not an image record: a record would cost
 	/// every subshell a ~530-byte map allocation (idle vproc ≤ 2 KiB).
-	pub subshell:      u32,
+	pub subshell:        u32,
 	/// The command being run (`BASH_COMMAND`): its unit and syntax node.
 	/// Externalized by unit id (a trap action continuing after a restore
 	/// still names the trapped command).
-	pub command:       Option<(Arc<Unit>, u32)>,
+	pub command:         Option<(Arc<Unit>, u32)>,
 	/// Pushes onto bash's call-stack arrays (`FUNCNAME`, `BASH_SOURCE`,
 	/// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`), oldest first; a subshell
 	/// starts with its parent's.
-	pub calls:         Vec<super::callstack::Call>,
+	pub calls:           Vec<super::callstack::Call>,
 	/// The traps this vproc set itself: a subshell lists its parent's but
 	/// runs only its own (ERR, DEBUG and RETURN also under
 	/// `errtrace`/`functrace`; bash 5.3 keeps listing inherited signal
 	/// traps until the subshell changes one).
-	pub own_traps:     OwnTraps,
+	pub own_traps:       OwnTraps,
 	/// Trap-action frames ([`ScriptKind::Trap`]) on `frames`: zero lets
 	/// the per-op checks (cancellation, `BASH_COMMAND`, a trap inside its
 	/// own action) skip their frame scans. Kept by
 	/// [`super::exec::push_script`], [`super::exec::pop_frame`] and the
 	/// frame restore; never serialized (recounted from the frames).
-	pub trap_frames:   u32,
+	pub trap_frames:     u32,
 	/// Current mode: the emulation its code runs under, set by
 	/// `emulate`, a mode-switching function call (restored on return) and
 	/// a run's explicit mode; inherited by children. The root's is written
 	/// through as `MiscKey::Mode`. Every event reports it.
-	pub mode:          ModeId,
+	pub mode:            ModeId,
 	/// zsh state of a vproc running zsh or mode-switching code (`None` for
 	/// pure bash: nothing to keep, nothing to check).
-	pub zsh:           Option<Box<VprocZsh>>,
+	pub zsh:             Option<Box<VprocZsh>>,
 	/// The line editor's state ([`super::zle::Zle`]): keymaps, widgets,
 	/// kill ring and the line being edited; created when ZLE is first used.
 	/// Inherited (copied) by children; never serialized: a restored shell
 	/// starts with zsh's defaults and no line in progress.
-	pub zle:           Option<Box<super::zle::Zle>>,
+	pub zle:             Option<Box<super::zle::Zle>>,
 }
 
 /// The terminal of the session a vproc runs in when it is not the shell's

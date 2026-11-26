@@ -293,6 +293,10 @@ export interface TspCardProps {
 	inset?: boolean;
 	/** `bare`: no ring, fill or insets — a plain head row over the body, for grouped/compact presentations inside another frame. */
 	variant?: "bare";
+	/** An attachment chip (`omp.composer.chip`): what it attaches. */
+	kind?: "image" | "video" | "paste";
+	/** A pasted-text chip (`omp.composer.chip`): the full pasted text. */
+	expansion?: string;
 }
 export interface TspSectionProps {
 	head?: TspText;
@@ -986,8 +990,6 @@ export interface TspPrefsProps {
 	lead?: string;
 	/** The program's search text; non-empty switches the page to search results. */
 	query?: string;
-	/** Caret as a UTF-16 offset into `query` while the program's search field has it; absent: no caret. */
-	cursor?: number;
 	sections: readonly TspPrefsSection[];
 	/** Row with keyboard focus (the program's selection). */
 	focus?: string | null;

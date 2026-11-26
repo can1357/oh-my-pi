@@ -22,6 +22,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		let pattern = self.interpolate(&src.bytes, location.clone(), Mode::Pattern { extended, interpolate: false })?;
 		let expr = Expr {
 			location: location.clone(),
+			cache: NodeCache::default(),
 			kind: ExprKind::Regex(RegexExpr { kind: RegexKind::Compile, pattern, modifiers: if extended { vec![b'x'] } else { Vec::new() } }),
 		};
 		let stmt = Stmt { location: location.clone(), label: None, kind: StmtKind::Expr(expr) };
@@ -67,6 +68,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 					if at > start {
 						words.push(Expr {
 							location: Location { file: location.file.clone(), line },
+							cache: NodeCache::default(),
 							kind: ExprKind::String(self.pstr(&quoted.bytes[start..at])),
 						});
 					}
@@ -77,8 +79,8 @@ impl<'s, 'h> Parser<'s, 'h> {
 				}
 				// `qw` is parenthesized list syntax: scalar context observes its final word,
 				// and it is not flattened by an enclosing comma expression.
-				let list = Expr { location: location.clone(), kind: ExprKind::List(words) };
-				Ok(Expr { location, kind: ExprKind::Group(Box::new(list)) })
+				let list = Expr { location: location.clone(), cache: NodeCache::default(), kind: ExprKind::List(words) };
+				Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::Group(Box::new(list)) })
 			}
 			Builtin::Qq | Builtin::Qx => {
 				let literal = op == Builtin::Qx && self.lex.source.get(self.lex.pos) == Some(&b'\'');
@@ -103,14 +105,14 @@ impl<'s, 'h> Parser<'s, 'h> {
 		self.lex.rewind(&token);
 		let quote = self.scan(QuoteScan::Double, None)?;
 		let location = token.location;
-		if quote.bytes.is_empty() { return Ok(Expr { location, kind: ExprKind::Readline(Readline::Argv(false)) }); }
+		if quote.bytes.is_empty() { return Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::Readline(Readline::Argv(false)) }); }
 		let name = |src: &[u8]| name_end(src, 0, self.lex.utf8) == Some(src.len());
 		if name(&quote.bytes) {
-			return Ok(Expr { location, kind: ExprKind::Readline(Readline::Handle(self.name(&quote.bytes))) });
+			return Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::Readline(Readline::Handle(self.name(&quote.bytes))) });
 		}
 		if let Some(tail) = quote.bytes.strip_prefix(b"$") && name(tail) {
-			let var = Expr { location: quote.location, kind: ExprKind::Variable(Sigil::Scalar, self.name(tail)) };
-			return Ok(Expr { location, kind: ExprKind::Readline(Readline::Scalar(Box::new(var))) });
+			let var = Expr { location: quote.location, cache: NodeCache::default(), kind: ExprKind::Variable(Sigil::Scalar, self.name(tail)) };
+			return Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::Readline(Readline::Scalar(Box::new(var))) });
 		}
 		let parts = self.interpolate(&quote.bytes, quote.location, Mode::String)?;
 		Ok(quote_value(location, QuoteKind::Glob, parts))
@@ -125,12 +127,12 @@ impl<'s, 'h> Parser<'s, 'h> {
 		if self.lex.source[self.lex.pos..].starts_with(b">>") {
 			self.lex.advance(self.lex.pos + 2);
 			self.finish_raw_token();
-			return Ok(Expr { location, kind: ExprKind::Readline(Readline::Argv(true)) });
+			return Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::Readline(Readline::Argv(true)) });
 		}
 		let here = self.lex.heredoc().map_err(|err| self.lex_error(err))?;
 		self.finish_raw_token();
 		if here.kind == HereKind::Literal {
-			return Ok(Expr { location, kind: ExprKind::String(self.pstr(&here.bytes)) });
+			return Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::String(self.pstr(&here.bytes)) });
 		}
 		let parts = self.interpolate(&here.bytes, here.location, Mode::String)?;
 		Ok(if here.kind == HereKind::Command { self.command_value(location, parts) } else { quote_value(location, QuoteKind::String, parts) })
@@ -204,7 +206,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 		} else if builtin == Builtin::Qr { RegexKind::Compile }
 		else { RegexKind::Match(first.delimiter == u32::from(b'?')) };
-		Ok(Expr { location, kind: ExprKind::Regex(RegexExpr { kind, pattern, modifiers }) })
+		Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::Regex(RegexExpr { kind, pattern, modifiers }) })
 	}
 
 	fn regex_modifiers(&mut self, builtin: Builtin) -> ResultOf<Vec<u8>> {
@@ -365,7 +367,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 					lit.bytes.extend(std::iter::repeat_n(b'\\', pairs));
 				} else if mode == Mode::Replacement && matches!(escaped, b'1'..=b'9') && !bytes.get(at).is_some_and(u8::is_ascii_digit) {
 					flush(&mut parts, &mut lit);
-					let expr = Expr { location: location.clone(), kind: ExprKind::Variable(Sigil::Scalar, char::from(escaped).to_string().into()) };
+					let expr = Expr { location: location.clone(), cache: NodeCache::default(), kind: ExprKind::Variable(Sigil::Scalar, char::from(escaped).to_string().into()) };
 					parts.push(QuotePart::Expr(expr, false));
 				} else {
 					let (cp, end) = string_escape(bytes, at, escaped, utf8).map_err(|message| self.diagnostic(location.clone(), message))?;
@@ -461,12 +463,12 @@ impl<'s, 'h> Parser<'s, 'h> {
 
 fn quote_value(location: Location, kind: QuoteKind, mut parts: Vec<QuotePart>) -> Expr {
 	if kind == QuoteKind::String {
-		if parts.is_empty() { return Expr { location, kind: ExprKind::String(PStr::default()) }; }
+		if parts.is_empty() { return Expr { location, cache: NodeCache::default(), kind: ExprKind::String(PStr::default()) }; }
 		if let [QuotePart::Literal(_)] = parts.as_slice() && let Some(QuotePart::Literal(lit)) = parts.pop() {
-			return Expr { location, kind: ExprKind::String(lit) };
+			return Expr { location, cache: NodeCache::default(), kind: ExprKind::String(lit) };
 		}
 	}
-	Expr { location, kind: ExprKind::Quote(kind, parts) }
+	Expr { location, cache: NodeCache::default(), kind: ExprKind::Quote(kind, parts) }
 }
 
 fn append(lit: &mut PStr, raw: &[u8], source_utf8: bool) {

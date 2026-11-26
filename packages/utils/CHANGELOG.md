@@ -4,7 +4,25 @@
 
 ### Added
 
-- Added `pathExists()`, which reports a missing path as `false` and rethrows any other filesystem error ([#20483](https://github.com/can1357/oh-my-pi/pull/20483) by [@H4vC](https://github.com/H4vC))
+- Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+### Breaking Changes
+
+- Removed the unused `getToolsDir()` export. Custom tool discovery is unchanged.
+### Fixed
+
+- Fixed `parseImageMetadata` omitting the dimensions of lossless WebP (VP8L) headers shorter than 30 bytes ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added path utilities for checking whether a path exists and whether it is lexically contained within another path without resolving symlinks.
+- Added `errorMessage()` to `@oh-my-pi/pi-utils/type-guards` for retrieving message text from thrown values.
+- Added `Laps` for timing the phases of a multi-step async path as one log record.
+
+### Fixed
+
+- Fixed path containment checks for files and directories whose names begin with `..`.
 
 ## [19.2.0] - 2026-11-25
 

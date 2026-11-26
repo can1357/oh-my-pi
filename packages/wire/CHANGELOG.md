@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Added
 
-- Added the TSP `annotate` image action and its `change` event carrying the annotated picture (`TspPicture`).
+- Added the TSP `annotate` image action, including its `change` event for delivering the annotated picture.
+- Added shared collab link support for generating, formatting, parsing, and normalizing relay-based collaboration links.
 
 ## [19.2.0] - 2026-11-25
 

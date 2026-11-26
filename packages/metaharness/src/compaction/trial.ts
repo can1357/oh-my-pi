@@ -24,7 +24,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { errorMessage, prompt } from "@oh-my-pi/pi-utils";
 import { benchSettingsYaml } from "../bench-settings";
 import type { Subprocess } from "bun";
 import { type FreshStart, HISTORY_DIR } from "./fresh";
@@ -743,8 +743,4 @@ function formatDuration(seconds: number): string {
 	return hours > 0
 		? `${hours}h${minutes.toString().padStart(2, "0")}m`
 		: `${minutes}m${(seconds % 60).toString().padStart(2, "0")}s`;
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }

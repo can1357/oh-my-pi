@@ -305,7 +305,9 @@ pub(super) fn no_autodie(i: &mut Interp<'_>, a: Vec<Sv>, _: Cx) -> PResult<Ret> 
 /// Convert a failed builtin result into an `autodie::exception`.
 pub(super) fn autodie_result(i: &mut Interp<'_>, name: &str, result: PResult<Ret>) -> PResult<Ret> {
 	let result = result?;
-	let name = name.trim_start_matches("CORE::");
+	// Called after every builtin: the common no-autodie case must cost one length check.
+	if i.hints().autodie.is_empty() { return Ok(result); }
+	let name = name.strip_prefix("CORE::").unwrap_or(name);
 	if !i.hints().autodie.iter().any(|n| n == name) { return Ok(result); }
 	let (context, value) = match &result {
 		Ret::One(v) => ("scalar", v.clone()),

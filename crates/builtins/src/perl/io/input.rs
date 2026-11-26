@@ -199,6 +199,25 @@ impl Input {
 		Ok(())
 	}
 
+	/// The usual short raw record fits in lookahead. Move whole buffers when possible;
+	/// otherwise copy just the returned record into its recycled, independently owned SV.
+	#[inline]
+	pub(super) fn buffered_record(&mut self, delim: u8, spare: &mut Vec<u8>) -> Option<Vec<u8>> {
+		if self.direct || !self.partial.is_empty() { return None; }
+		let len = memchr(delim, &self.buf[self.start..self.end])? + 1;
+		if self.start == 0 && len == self.end && spare.capacity() >= self.buf.len() {
+			std::mem::swap(&mut self.buf, spare);
+			spare.truncate(len);
+			self.start = 0;
+			self.end = 0;
+			self.offset = self.offset.saturating_add(len as u64);
+		} else {
+			spare.extend_from_slice(&self.buf[self.start..self.start + len]);
+			self.consume(len, false);
+		}
+		Some(std::mem::take(spare))
+	}
+
 	/// Seed the next record allocation without discarding an interrupted record.
 	pub(super) fn reuse(&mut self, spare: &mut Vec<u8>) {
 		if self.partial.capacity() == 0 {
@@ -232,8 +251,19 @@ impl Input {
 					if logical == byte { return Ok(()); }
 				} else {
 					let len = found.map_or(bytes.len(), |at| at + 1);
-					out.extend_from_slice(&bytes[..len]);
-					self.consume(len, false);
+					if len >= CHUNK / 2 && len == bytes.len() && self.start == 0 && out.is_empty() {
+						// A whole refill belongs to this record. Transfer it rather
+						// than copying it into another allocation (including when
+						// this is the first fragment of a multi-buffer line).
+						std::mem::swap(out, &mut self.buf);
+						out.truncate(len);
+						self.start = 0;
+						self.end = 0;
+						self.offset = self.offset.saturating_add(len as u64);
+					} else {
+						out.extend_from_slice(&self.buf[self.start..self.start + len]);
+						self.consume(len, false);
+					}
 					if found.is_some() { return Ok(()); }
 				}
 			}

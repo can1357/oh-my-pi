@@ -104,7 +104,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { registerPersistedSubagents } from "../registry/persisted-agents";
+import { isSessionTreeRef, registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "./view-model/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
@@ -282,6 +282,7 @@ import type {
 } from "./types";
 import type { TodoItem, TodoPhase } from "../tools/details/todo";
 import type { ConversationPosition } from "./utils/conversation-position";
+import { DEFAULT_FIGURE_CELL, type FigureCell } from "../ui/transcript/figures/svg";
 import { setImageBlobWriter } from "../ui/transcript/image-links";
 import { followInlineImageLimits } from "../ui/transcript/messages/image";
 import { imageLinksForMessage, UiHelpers } from "./utils/ui-helpers";
@@ -419,7 +420,7 @@ import { PLAN_SAVE_SHEET, PlanSave } from "../ui/overlays/panels/plan-save";
 import { SESSION_INFO_SHEET, SessionInfo } from "../ui/overlays/panels/session-info";
 import { JOBS_SHEET, JobsPanel } from "../ui/overlays/pickers/jobs-panel";
 import { hasExtensionLinks, LinkBrowser, type LinkReply } from "../ui/overlays/pickers/link-browser";
-import { sheetScreen, showSheet } from "../ui/overlays/sheet";
+import { showSheet } from "../ui/overlays/sheet";
 import {
 	type BlockOptions,
 	type InputInterceptor,
@@ -692,6 +693,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		proseOnlyThinking: signal(true),
 		expandThinkingBlocks: signal(false),
 		showImages: signal(true),
+		renderSvg: signal(true),
+		renderEmbeds: signal(true),
+		figureCell: signal<FigureCell | undefined>(undefined),
 		tableCharts: () => this.tableChartsVisible,
 		shellVisualization: signal(true),
 		mcpMarkdown: signal(false),
@@ -1429,6 +1433,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				vim: cfgTuiVimMode.get(settings),
 				autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 				hardwareCursor: cfgShowHardwareCursor.get(settings),
+				imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
 			});
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
@@ -1551,17 +1556,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeInlineImageLimits = followInlineImageLimits(() => this.shell.size().rows);
 		this.#tray = new TrayFeed(
 			{
-				input: () =>
-					collectTrayInput({
+				input: () => {
+					// A collab guest's registry mirrors the host's session: every agent in it is the session's.
+					const root = this.collabGuest ? undefined : this.sessionManager.getSessionFile();
+					return collectTrayInput({
 						observers: this.#observerRegistry,
-						refs: getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).list(),
+						refs: getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global())
+							.list()
+							.filter(ref => isSessionTreeRef(ref, root)),
 						manager: this.session.asyncJobManager,
 						snapshot: () => this.session.getAsyncJobSnapshot({ recentLimit: Number.POSITIVE_INFINITY }),
 						irc: IrcBus.existing(),
 						showAgents: cfgDisplayPinnedAgents.get(settings) !== "off",
 						canFocus: this.collabGuest === undefined,
 						reviving: this.#trayReviving,
-					}),
+					});
+				},
 				main: () => this.#trayMain.state(id => runsInlineAgent(this.#observerRegistry.getSessions(), id)),
 				focusAgent: id => {
 					this.focusAgentSession(id).catch((error: unknown) =>
@@ -1773,6 +1783,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		const host = this.shell.host;
 		if (!host) return;
+		const updateFigureCell = (): void => {
+			const caps = host.driver.capabilities;
+			const next = caps.images ? (caps.cell ?? DEFAULT_FIGURE_CELL) : undefined;
+			const current = this.#display.figureCell.peek();
+			if (current?.w !== next?.w || current?.h !== next?.h) this.#display.figureCell.set(next);
+		};
+		updateFigureCell();
 		// A confirmed Glyph Protocol handshake means omp's own icons render without a Nerd Font, so
 		// the unconfigured `unicode` preset is upgraded to `nerd` for this session. The setting is
 		// left alone (it travels to terminals where the upgrade would show tofu); an explicit
@@ -1789,6 +1806,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		upgradeGlyphs();
 		this.#eventBusUnsubscribers.push(
 			host.driver.onCapabilities(upgradeGlyphs),
+			host.driver.onCapabilities(updateFigureCell),
 			followTerminal(host.driver),
 			host.onFrame(frame => (this.#lastFrame = frame)),
 		);
@@ -2856,6 +2874,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				timeoutMs: cfgLoopConditionTimeoutMs.get(settings),
 				signal: controller.signal,
 				sessionId,
+				sessionFile: this.sessionManager.getSessionFile(),
 				isSessionCurrent: () => this.sessionManager.getSessionId() === sessionId,
 			});
 		} finally {
@@ -3506,6 +3525,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#syncTranscriptDisplaySettings(): void {
 		const display = this.#display;
 		display.showImages.set(cfgTerminalShowImages.get(this.settings));
+		display.renderSvg.set(cfgTuiRenderSvg.get(this.settings));
+		display.renderEmbeds.set(cfgTuiRenderEmbeds.get(this.settings));
 		display.shellVisualization.set(cfgDisplayShellVisualization.get(this.settings));
 		display.mcpMarkdown.set(cfgMcpRenderMarkdownResults.get(this.settings));
 		display.readPreview.set(cfgReadToolResultPreview.get(this.settings));
@@ -3527,6 +3548,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		if (any("showHardwareCursor"))
 			this.composer.setCaret(cfgShowHardwareCursor.get(this.settings) ? "terminal" : "drawn");
+		if (any("tui.imeSafeCursor")) this.#frame.setImeSafeCursor(cfgTuiImeSafeCursor.get(this.settings));
 		if (any("autocompleteMaxVisible"))
 			this.composer.setAutocompleteMaxVisible(cfgAutocompleteMaxVisible.get(this.settings));
 		if (any("composer.shape")) this.syncComposerShape();
@@ -3595,7 +3617,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			rebuildChat = true;
 		}
-		if (any("tui.colorfulMarkdown", "tui.renderMermaid")) {
+		if (any("tui.colorfulMarkdown", "tui.renderMermaid", "tui.renderSvg", "tui.renderEmbeds")) {
 			this.#syncTranscriptDisplaySettings();
 			resetDisplay = true;
 		}
@@ -5367,26 +5389,21 @@ export class InteractiveMode implements InteractiveModeContext {
 						handle.close();
 					},
 				}),
-			{ onClose: () => resolve(result) },
+			{
+				focus: root => root.children().find(node => node.kind === "input") ?? root,
+				onClose: () => resolve(result),
+			},
 		);
 		return (await promise)?.path;
 	}
 
 	/**
-	 * The plan review's Save: write `planContent` to `presetPath`, or to a path the
-	 * operator picks (prefilled), and report it. The review stays open: its focus
-	 * comes back after the path prompt.
+	 * Export the plan to a chosen or preset path without resolving the review.
+	 * The review owns focus again when the path sheet closes.
 	 */
 	async #savePlan(planContent: string, title: string, presetPath?: string): Promise<void> {
-		let selectedPath = presetPath;
-		if (selectedPath === undefined) {
-			try {
-				selectedPath = await this.#promptPlanSavePath(planContent, title);
-			} finally {
-				const review = this.#planReviewOverlayHandle;
-				if (review && !review.closed) this.shell.focus(sheetScreen(this.shell, review));
-			}
-		}
+		const review = presetPath === undefined ? this.#planReview : undefined;
+		const selectedPath = presetPath ?? (await this.#promptPlanSavePath(planContent, title));
 		if (!selectedPath) return;
 
 		let destination: string;
@@ -5404,7 +5421,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			return;
 		}
-		this.showStatus(`Saved plan to ${shortenPath(destination)}`);
+		const message = `Saved plan to ${shortenPath(destination)}`;
+		if (review && this.#planReview === review && !this.shell.native()) review.setSaveNotice(message);
+		this.showStatus(message);
 	}
 
 	async #openPlanInExternalEditor(planFilePath: string): Promise<void> {

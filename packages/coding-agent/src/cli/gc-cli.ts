@@ -7,6 +7,7 @@ import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { isCompressScratchPath } from "@oh-my-pi/omp-stats/parser";
 import {
+	errorMessage,
 	formatBytes,
 	getAgentDir,
 	getBlobsDir,
@@ -392,10 +393,6 @@ export function collectGcErrors(result: GcResult): string[] {
 
 function getArchivedSessionsDir(agentDir: string): string {
 	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function codeOf(error: unknown): string | undefined {

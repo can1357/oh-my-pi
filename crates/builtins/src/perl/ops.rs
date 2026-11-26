@@ -64,8 +64,18 @@ pub(in crate::perl) fn div(a: Num, b: Num) -> Result<Num, &'static str> {
 }
 
 /// Compute a remainder with the sign of the divisor and Perl's UV-sized truncation rule.
+#[inline]
 pub(in crate::perl) fn modulo(a: Num, b: Num) -> Result<Num, &'static str> {
-	if let (Num::Int(a), Num::Int(b)) = (a, b) && a >= 0 && b > 0 { return Ok(Num::Int(a % b)); }
+	if let (Num::Int(a), Num::Int(b)) = (a, b) {
+		if b == 0 { return Err("Illegal modulus zero"); }
+		// MIN % -1 is zero too. Adjust Rust's dividend-sign remainder to the divisor's sign.
+		let r = a.wrapping_rem(b);
+		return Ok(Num::Int(if r != 0 && (r ^ b) < 0 { r + b } else { r }));
+	}
+	mixed_modulo(a, b)
+}
+
+fn mixed_modulo(a: Num, b: Num) -> Result<Num, &'static str> {
 	fn trunc_mag(n: Num) -> Option<i128> {
 		match n {
 			Num::Float(f) if f.abs() < U64_LIMIT => Some(f as i128),

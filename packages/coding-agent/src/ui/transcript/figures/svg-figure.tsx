@@ -45,7 +45,7 @@ export type RasterState =
 /** What a figure's rasters depend on. */
 export interface FigureOptions {
 	/** The terminal's cell in device pixels (default 8×16). */
-	readonly cell?: Reactive<FigureCell>;
+	readonly cell?: Reactive<FigureCell | undefined>;
 	/** Rows a figure may take (the viewport's share); undefined: as tall as it draws. */
 	readonly maxRows?: Reactive<number | undefined>;
 	/** The theme figure tokens resolve in (default the active one). */
@@ -136,11 +136,13 @@ export function RasterImage(props: {
 	readonly raster: FigureRaster;
 	readonly role: string;
 	readonly name?: string;
+	readonly nodeKey?: string;
 	readonly term?: Readonly<Record<string, unknown>>;
 }): JSXNode {
 	const raster = props.raster;
 	return (
 		<image
+			key={props.nodeKey}
 			role={props.role}
 			blob={raster.blob}
 			w={raster.w}

@@ -21,6 +21,7 @@ import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { MODEL_KINDS, type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { batch, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatModelSelectorValue, parseModelString, splitUpstreamRouting } from "../../../config/model-selector";
 import {
@@ -201,10 +202,6 @@ function printable(key: KeyEvent): string | undefined {
 	return text !== undefined && text !== "" && !/[\x00-\x1f\x7f]/.test(text) ? text : undefined;
 }
 
-function errorText(cause: unknown): string {
-	return cause instanceof Error ? cause.message : String(cause);
-}
-
 /** The hub state. */
 export class ModelHubState {
 	readonly source: ModelHubSource;
@@ -300,7 +297,7 @@ export class ModelHubState {
 					if (changed) return this.#afterRegistryRefresh();
 				})
 				.catch(error => {
-					this.#configError = errorText(error);
+					this.#configError = errorMessage(error);
 				})
 				.finally(() => {
 					this.#catalogRefreshing = false;
@@ -1003,7 +1000,7 @@ export class ModelHubState {
 			else await this.registry.refreshProvider(providerId, "online");
 			await this.#afterRegistryRefresh(providerId);
 		} catch (error) {
-			this.#configError = errorText(error);
+			this.#configError = errorMessage(error);
 		} finally {
 			this.#setProviderRefreshing(providerId, false);
 			if (!this.#disposed && this.#pendingCredentialRefreshes.delete(providerId)) {

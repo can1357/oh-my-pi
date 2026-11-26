@@ -24,6 +24,21 @@ impl MatchState {
 		Self { subject, captures, regex, plain_source: None, offsets: OnceCell::new() }
 	}
 
+	/// After the first successful match, the previous registers are dead in
+	/// this scope. Reuse their PV for the output only if no other scope, hash
+	/// view or search snapshot still observes it.
+	pub(super) fn result_buffer(interp: &mut Interp<'_>) -> Vec<u8> {
+		interp.set_last_match(None);
+		if let Some(state) = interp.rx.spare_match.as_mut().and_then(Rc::get_mut)
+			&& let Some(s) = Rc::get_mut(&mut state.subject)
+		{
+			state.plain_source = None;
+			let mut buffer = std::mem::take(&mut s.bytes);
+			buffer.clear();
+			buffer
+		} else { Vec::new() }
+	}
+
 	pub(super) fn install_plain(interp: &mut Interp<'_>, cell: &super::Sv, source: std::borrow::Cow<'_, PStr>, captures: Captures, regex: Rc<Regex>) {
 		// A saved dynamic scope (or an observed %+ hash) must retain the
 		// old state's identity. Recycle only after dropping the active slot.

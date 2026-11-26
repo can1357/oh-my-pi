@@ -236,6 +236,9 @@ impl Layers {
 
 	pub(super) fn crlf(self) -> bool { self.crlf || self.outer_crlf }
 
+	/// A record already consists of the exact unflagged bytes delivered to Perl.
+	pub(super) fn raw_bytes(self) -> bool { !self.utf8 && self.codec == Codec::Plain && !self.crlf() }
+
 	/// An explicit `:perlio` buffer, which delays in-memory writes until a flush.
 	pub(super) fn explicit_perlio(self) -> bool { self.explicit & BUFFER != 0 && self.buffer == BufferStyle::Perlio }
 	pub(super) fn unbuffered(self) -> bool { self.buffer == BufferStyle::Unix }

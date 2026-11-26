@@ -6,7 +6,9 @@ use super::*;
 
 impl Interp<'_> {
 	pub(super) fn transform(&mut self, grep: bool, call: &Call, cx: Cx) -> PResult<Ret> {
-		if !grep && let Some(result) = self.map_numeric_range(call, cx)? { return Ok(result); }
+		if !grep && let Some((count, values)) = self.map_numeric_range(call, cx, std::convert::identity)? {
+			return Ok(if cx == Cx::List { Ret::Many(values) } else { Ret::One(Value::Int(count as i64)) });
+		}
 		let mut values = Vec::new();
 		let count = if grep {
 			self.grep_each(call, |interp, sv| {
@@ -89,7 +91,7 @@ impl Interp<'_> {
 	/// expression which can execute Perl, neither the temporary topic cell nor any
 	/// other input cell's identity can be observed. Materialize the remaining cells
 	/// *before* such an expression (references, tied FETCH, warning handlers, etc).
-	fn map_numeric_range(&mut self, call: &Call, cx: Cx) -> PResult<Option<Ret>> {
+	fn map_numeric_range<T>(&mut self, call: &Call, cx: Cx, wrap: impl Fn(Value) -> T) -> PResult<Option<(usize, Vec<T>)>> {
 		if !self.quiet_statement() || !self.active_hints.constant_overloads.is_empty() { return Ok(None); }
 		let (expr, loc) = match &call.slot {
 			Some(CallSlot::Block(b)) => match b.stmts.as_slice() {
@@ -114,30 +116,80 @@ impl Interp<'_> {
 		let mut values = Vec::new();
 		if cx == Cx::List && values.try_reserve_exact(len as usize).is_err() { return Ok(None); }
 		let mut count = 0usize;
-		let counter = new_sv(Value::Undef);
-		let remainder = self.with_topic(counter.clone(), |i| {
+		let mut emit = |interp: &mut Self, value: Num| {
+			if count == 0 && let Some(loc) = loc { interp.statement_location(loc); }
+			if cx == Cx::List { values.push(wrap(value.into_value())); }
+			count += 1;
+		};
+		let mut steps = [(Binary::Add, Num::Int(0)); 4];
+		let remainder = if let Some(steps) = self.topic_arithmetic(expr, &mut steps) {
+			// `$_` is an IV supplied by the range, not a shadowing lexical. No cell or
+			// dynamic topic binding is observable until an operation needs the general path.
+			let integer = self.active_hints.integer;
+			let mut remainder = None;
 			for n in lo..=hi {
-				if i.is_cancelled() { return Err(Flow::Cancelled); }
-				counter.set(Value::Int(n));
-				let Some(value) = i.plain_numeric_expr(expr) else { return Ok(Some(n)); };
-				if let Some(loc) = loc { i.statement_location(loc); }
-				if cx == Cx::List {
-					values.push(value.into_value());
-				}
-				count += 1;
+				if self.is_cancelled() { return Err(Flow::Cancelled); }
+				let result = steps.iter().rev().try_fold(Num::Int(n), |lhs, &(op, rhs)| eval::arithmetic(op, lhs, rhs, integer));
+				let Ok(value) = result else { remainder = Some(n); break; };
+				emit(self, value);
 			}
-			Ok(None)
-		})?;
+			remainder
+		} else {
+			let counter = new_sv(Value::Undef);
+			self.with_topic(counter.clone(), |i| {
+				for n in lo..=hi {
+					if i.is_cancelled() { return Err(Flow::Cancelled); }
+					counter.set(Value::Int(n));
+					let Some(value) = i.plain_numeric_expr(expr) else { return Ok(Some(n)); };
+					emit(i, value);
+				}
+				Ok(None)
+			})?
+		};
 		if let Some(n) = remainder {
 			let tail: Vec<_> = (n..=hi).map(|n| new_sv(Value::Int(n))).collect();
 			for alias in tail {
 				self.poll()?;
 				let ret = self.with_topic(alias, |i| i.map_values(call))?;
-				count = count.saturating_add(match &ret { Ret::One(_) => 1, Ret::Many(v) => v.len() });
-				if cx == Cx::List { ret.append_to(&mut values); }
+				match ret {
+					Ret::One(v) => { count = count.saturating_add(1); if cx == Cx::List { values.push(wrap(v)); } }
+					Ret::Many(v) => { count = count.saturating_add(v.len()); if cx == Cx::List { values.extend(v.into_iter().map(&wrap)); } }
+				}
 			}
 		}
-		Ok(Some(if cx == Cx::List { Ret::Many(values) } else { Ret::One(Value::Int(count as i64)) }))
+		Ok(Some((count, values)))
+	}
+
+	/// Decode a bounded, left-associative arithmetic tree once for the whole range.
+	/// Literals have already been checked for constant overloading by the caller.
+	fn topic_arithmetic<'a>(&self, mut expr: &Expr, steps: &'a mut [(Binary, Num)]) -> Option<&'a [(Binary, Num)]> {
+		let mut len = 0;
+		while let ExprKind::Binary(op @ (Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod | Binary::Pow), lhs, rhs) = &expr.kind {
+			let step = steps.get_mut(len)?;
+			let operand = match rhs.kind {
+				ExprKind::Int(n) => Num::Int(n), ExprKind::UInt(n) => Num::UInt(n), ExprKind::Float(n) => Num::Float(n), _ => return None,
+			};
+			*step = (*op, operand);
+			len += 1;
+			expr = lhs;
+		}
+		let ExprKind::Variable(Sigil::Scalar, name) = &expr.kind else { return None; };
+		(name.as_ref() == "_" && self.pad_slot(Sigil::Scalar, name).is_none() && len != 0).then_some(&steps[..len])
+	}
+
+	/// A plain array assignment consumes independent writable cells, not source aliases.
+	/// Keep the usual RHS location, depth guard and pending-flow boundaries.
+	pub(super) fn transform_array_rhs(&mut self, rhs: &Expr) -> PResult<Option<Vec<Sv>>> {
+		let ExprKind::Call(call @ Call { target: CallTarget::Builtin(b @ (Builtin::Map | Builtin::Sort), origin), .. }) = &rhs.kind else { return Ok(None); };
+		if !self.builtin_uses_core(*b, *origin) || self.pending.is_some() { return Ok(None); }
+		self.at_location(&rhs.location, |i| i.nested(|i| {
+			let result = match b {
+				Builtin::Map => i.map_numeric_range(call, Cx::List, new_sv).map(|v| v.map(|(_, cells)| cells)),
+				_ => i.sort_array_cells(call).map(Some),
+			};
+			if let Some(flow) = i.take_pending() { return Err(flow); }
+			result
+		}))
 	}
 
 	pub(super) fn sort_values(&mut self, call: &Call, cx: Cx) -> PResult<Ret> {
@@ -145,13 +197,92 @@ impl Interp<'_> {
 			if let Some(args) = &call.args { self.eval(args, Cx::List)?; }
 			return Ok(Ret::One(Value::Undef));
 		}
+		if let Some(values) = self.dense_integer_values(call, std::convert::identity)? { return Ok(Ret::Many(values)); }
 		let (values, order) = self.sort_plan(call)?;
-		order.into_iter().map(|ix| self.read_sv(&values[ix])).collect::<PResult<Vec<_>>>().map(Ret::Many)
+		let mut out = Vec::with_capacity(values.len());
+		for ix in order {
+			let sv = &values[ix];
+			out.push(if self.transferable(sv) { sv.replace(Value::Undef) } else { self.read_sv(sv)? });
+		}
+		Ok(Ret::Many(out))
 	}
 
 	pub(super) fn sort_aliases(&mut self, call: &Call) -> PResult<Vec<Sv>> {
 		let (values, order) = self.sort_plan(call)?;
-		Ok(order.into_iter().map(|ix| values[ix].clone()).collect())
+		Ok(reorder(values, order))
+	}
+
+	/// Only these cells can be used as if freshly allocated by array assignment.
+	fn transferable(&self, sv: &Sv) -> bool {
+		Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0 && !sv.registered()
+			&& !sv.is_magical() && !sv.is_blessed() && !self.is_readonly_sv(sv)
+	}
+
+	fn sort_array_cells(&mut self, call: &Call) -> PResult<Vec<Sv>> {
+		if let Some(cells) = self.dense_integer_values(call, new_sv)? { return Ok(cells); }
+		let (mut values, order) = self.sort_plan(call)?;
+		if values.iter().any(|sv| sv.is_magical()) {
+			// FETCH or a weak reference can observe any source, even one we have
+			// already visited. Keep the inputs alive and read in sorted order.
+			let mut out = Vec::with_capacity(values.len());
+			for ix in order { out.push(new_sv(self.read_sv(&values[ix])?)); }
+			return Ok(out);
+		}
+		for sv in &mut values {
+			if self.transferable(sv) { sv.set_pos(None); }
+			else { *sv = new_sv(sv.get()); }
+		}
+		Ok(reorder(values, order))
+	}
+
+	/// A dense array of *pure IVs* loses nothing by sorting the counts instead of
+	/// the elements. Equal IVs are indistinguishable only in copying (not aliasing)
+	/// context. Do not resolve/evaluate any general list operand speculatively.
+	fn dense_integer_values<T>(&self, call: &Call, wrap: impl Fn(Value) -> T) -> PResult<Option<Vec<T>>> {
+		if !self.quiet_statement() { return Ok(None); }
+		let Some(descending) = self.numeric_sort_direction(call.slot.as_ref()) else { return Ok(None); };
+		let Some(mut arg) = call.args.as_deref().map(ungroup) else { return Ok(None); };
+		if let ExprKind::List(args) = &arg.kind && let [item] = args.as_slice() { arg = ungroup(item); }
+		let ExprKind::Variable(Sigil::Array, name) = &arg.kind else { return Ok(None); };
+		if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) { return Ok(None); }
+		let Some(vars::Slot::Array(av)) = self.pad_slot(Sigil::Array, name) else { return Ok(None); };
+		if self.tied_array(av).is_some() { return Ok(None); }
+		let elems = av.elems();
+		if elems.len() < 256 { return Ok(None); }
+		let limit = (elems.len() / 2).min(65536) as u64;
+		let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+		for chunk in elems.chunks(4096) {
+			if self.is_cancelled() { return Err(Flow::Cancelled); }
+			for sv in chunk {
+				let Some(v) = sv.plain_value() else { return Ok(None); };
+				let Value::Int(n) = *v else { return Ok(None); };
+				lo = lo.min(n);
+				hi = hi.max(n);
+				if hi.abs_diff(lo) >= limit { return Ok(None); }
+			}
+		}
+		let mut counts = vec![0usize; (hi - lo) as usize + 1];
+		for chunk in elems.chunks(4096) {
+			if self.is_cancelled() { return Err(Flow::Cancelled); }
+			for sv in chunk {
+				// No Perl can run between the validation and histogram passes.
+				let v = sv.try_value().expect("validated ordinary scalar");
+				let Value::Int(n) = *v else { unreachable!() };
+				counts[(n - lo) as usize] += 1;
+			}
+		}
+		let mut out = Vec::with_capacity(elems.len());
+		let mut emit = |bin: usize| -> PResult<()> {
+			let n = lo + bin as i64;
+			for _ in 0..counts[bin] {
+				if out.len() % 4096 == 0 && self.is_cancelled() { return Err(Flow::Cancelled); }
+				out.push(wrap(Value::Int(n)));
+			}
+			Ok(())
+		};
+		if descending { (0..counts.len()).rev().try_for_each(&mut emit)?; }
+		else { (0..counts.len()).try_for_each(&mut emit)?; }
+		Ok(Some(out))
 	}
 
 	fn sort_plan(&mut self, call: &Call) -> PResult<(Vec<Sv>, Vec<usize>)> {
@@ -246,12 +377,7 @@ impl Interp<'_> {
 				if matches!(&*value, Value::Ref(r) if r.blessed().is_some()) { None } else { Some(value.to_pstr()) }
 			}).collect::<Option<Vec<_>>>().map(SortKeys::String);
 		}
-		let Some(CallSlot::Block(b)) = slot else { return None; };
-		let [Stmt { kind: StmtKind::Expr(e), .. }] = b.stmts.as_slice() else { return None; };
-		let ExprKind::Binary(Binary::Cmp, left, right) = &ungroup(e).kind else { return None; };
-		let (ExprKind::Variable(Sigil::Scalar, l), ExprKind::Variable(Sigil::Scalar, r)) = (&ungroup(left).kind, &ungroup(right).kind) else { return None; };
-		let descending = match (l.as_ref(), r.as_ref()) { ("a", "b") => false, ("b", "a") => true, _ => return None };
-		if self.lookup_pad(Sigil::Scalar, l).is_some() || self.lookup_pad(Sigil::Scalar, r).is_some() { return None; }
+		let descending = self.numeric_sort_direction(slot)?;
 		let integer = self.hints().integer;
 		let keys = values.iter().map(|s| match &*s.try_value().ok()? {
 			value @ (Value::Int(_) | Value::UInt(_) | Value::Num(_) | Value::Dual(_)) => {
@@ -260,6 +386,16 @@ impl Interp<'_> {
 			_ => None,
 		}).collect::<Option<Vec<_>>>()?;
 		Some(SortKeys::Number(keys, descending))
+	}
+
+	fn numeric_sort_direction(&self, slot: Option<&CallSlot>) -> Option<bool> {
+		let Some(CallSlot::Block(b)) = slot else { return None; };
+		let [Stmt { kind: StmtKind::Expr(e), .. }] = b.stmts.as_slice() else { return None; };
+		let ExprKind::Binary(Binary::Cmp, left, right) = &ungroup(e).kind else { return None; };
+		let (ExprKind::Variable(Sigil::Scalar, l), ExprKind::Variable(Sigil::Scalar, r)) = (&ungroup(left).kind, &ungroup(right).kind) else { return None; };
+		let descending = match (l.as_ref(), r.as_ref()) { ("a", "b") => false, ("b", "a") => true, _ => return None };
+		if self.pad_slot(Sigil::Scalar, l).is_some() || self.pad_slot(Sigil::Scalar, r).is_some() { return None; }
+		Some(descending)
 	}
 
 	fn sort_compare(&mut self, a: &Sv, b: &Sv, slot: Option<&CallSlot>, cv: Option<&Cv>) -> PResult<Ordering> {
@@ -289,6 +425,21 @@ impl Interp<'_> {
 		gb.scalar.replace(old_b);
 		Ok(self.numify(&result?.scalar())?.to_f64().partial_cmp(&0.0).unwrap_or(Ordering::Equal))
 	}
+}
+
+/// `order[dst]` names a source element. Consume its permutation cycles without
+/// cloning any cells or allocating another result vector.
+fn reorder(mut values: Vec<Sv>, mut order: Vec<usize>) -> Vec<Sv> {
+	for start in 0..order.len() {
+		let mut dst = start;
+		loop {
+			let src = std::mem::replace(&mut order[dst], dst);
+			if src == start { break; }
+			values.swap(dst, src);
+			dst = src;
+		}
+	}
+	values
 }
 
 enum SortKeys { Number(Vec<Num>, bool), String(Vec<PStr>) }

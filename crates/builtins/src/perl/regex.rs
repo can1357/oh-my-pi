@@ -414,6 +414,10 @@ impl Regex {
 	/// Whether the pattern contains a `\G` assertion.
 	pub fn uses_g(&self) -> bool { self.facts.g_anchor }
 
+	/// With no cursor-dependent anchor or named verb, successive searches
+	/// for a constant replacement need not publish intermediate match state.
+	pub fn plain_sub_iterations(&self) -> bool { !self.facts.g_anchor && !self.facts.may_mark }
+
 	/// Upper bound in input bytes for a consuming prefix before `\G`.
 	/// `None` means the prefix could be arbitrarily wide.
 	pub fn g_rewind(&self) -> Option<usize> {
@@ -1279,6 +1283,8 @@ struct Facts {
 	g_anchor: bool,
 	g_rewind: bool,
 	g_unbounded: bool,
+	/// A named verb can publish REGMARK/REGERROR between substitutions.
+	may_mark: bool,
 	/// The pattern begins with `\G`, so every match starts at the `\G` position.
 	g_leading: bool,
 	/// A `|` at the top level makes a leading assertion optional.
@@ -2203,6 +2209,7 @@ impl<'a> Scanner<'a> {
 				return Err(self.err(&format!("Unknown verb pattern '{shown}'"), self.pos));
 			}
 		}
+		self.facts.may_mark |= end < close;
 		// Some PCRE2 releases reject arguments on these verbs. MARK
 		// provides Perl's successful-path mark without changing control flow.
 		if end < close && matches!(verb, b"ACCEPT" | b"COMMIT" | b"FAIL" | b"F") {

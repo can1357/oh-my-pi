@@ -4,7 +4,7 @@ use super::{refalias::{RefPlace, RefTarget}, *};
 
 #[derive(Clone)]
 pub(super) enum Slot { Scalar(Sv), Array(Av), Hash(Hv), Code(Cv), Glob(Gv), Our(Rc<str>) }
-pub(super) type Pad = Vec<(Sigil, Rc<str>, Slot)>;
+pub(super) type Pad = Vec<(usize, Slot)>;
 
 /// Compiled name operands address a dense register of visible pad locations. The register
 /// contains indices, never strong cell references: rebinding and scope-exit destruction
@@ -15,7 +15,11 @@ struct PadLocation { frame: usize, scope: usize, offset: usize }
 
 #[derive(Default)]
 pub(super) struct Lexicals {
-	ids: FxHashMap<(u8, Rc<str>), usize>,
+	// The insertion index is the register ID; retain the spelling once for string eval.
+	names: indexmap::IndexSet<(Sigil, Rc<str>), rustc_hash::FxBuildHasher>,
+	// A declaration's compile-time cell is consumed on its first execution. Distinguish
+	// shadowing declaration sites by identity, not by the spelling they share.
+	prepared: Vec<Vec<(Rc<str>, Slot)>>,
 	// Holding the AST name keeps the address key valid even for parser callbacks before validation.
 	sites: FxHashMap<(usize, u8), (Rc<str>, usize)>,
 	visible: Vec<PadLocation>,
@@ -32,18 +36,33 @@ impl Lexicals {
 	}
 
 	pub(super) fn resolve(&mut self, sigil: Sigil, name: &Rc<str>) -> usize {
-		self.resolve_name(slot_sigil(sigil) as u8, name)
+		let sigil = slot_sigil(sigil);
+		let site = (name.as_ptr() as usize, sigil as u8);
+		if let Some((_, id)) = self.sites.get(&site) { return *id; }
+		let (id, new) = self.names.insert_full((sigil, name.clone()));
+		if new { self.visible.push(PadLocation { frame: usize::MAX, ..PadLocation::default() }); }
+		self.sites.insert(site, (name.clone(), id));
+		id
 	}
 
-	pub(super) fn resolve_name(&mut self, sigil: u8, name: &Rc<str>) -> usize {
-		if let Some((_, id)) = self.sites.get(&(name.as_ptr() as usize, sigil)) { return *id; }
-		let id = *self.ids.entry((sigil, name.clone())).or_insert_with(|| {
-			let id = self.visible.len();
-			self.visible.push(PadLocation { frame: usize::MAX, ..PadLocation::default() });
-			id
-		});
-		self.sites.insert((name.as_ptr() as usize, sigil), (name.clone(), id));
+	pub(super) fn spelling(&self, id: usize) -> &(Sigil, Rc<str>) {
+		self.names.get_index(id).expect("installed lexical register")
+	}
+
+	#[inline]
+	fn declaration_id(&mut self, e: &Expr, sigil: Sigil, name: &Rc<str>) -> usize {
+		let cached = e.cache.lexical.get();
+		if cached != 0 { return (cached - 1) as usize; }
+		let id = self.resolve(sigil, name);
+		e.cache.lexical.set(u32::try_from(id + 1).unwrap_or(0));
 		id
+	}
+
+	#[inline]
+	fn take_prepared(&mut self, id: usize, name: &Rc<str>) -> Option<Slot> {
+		let cells = self.prepared.get_mut(id)?;
+		let i = cells.iter().position(|(site, _)| Rc::ptr_eq(site, name))?;
+		Some(cells.swap_remove(i).1)
 	}
 
 	#[inline]
@@ -69,6 +88,17 @@ pub(super) struct NameMemo {
 	qualified: Rc<str>,
 	/// The glob, valid while `Interp::symbol_generation` is unchanged.
 	glob: Option<(u64, Gv)>,
+}
+
+/// A compiled package operand. Never retain the slot itself: `local`, `*glob = ...`,
+/// foreach aliases and sub arguments can all replace it without mutating the stash.
+pub(super) struct GlobalSite {
+	name: Rc<str>,
+	package: Rc<str>,
+	generation: u64,
+	glob: std::rc::Weak<value::GlobBody>,
+	sigil: Option<Sigil>, // None: a non-vivifying named-call lookup
+	topic_or_args: bool,
 }
 
 /// Bound on `Interp::names` (dynamically built names would otherwise accumulate).
@@ -102,35 +132,23 @@ enum Element { Array(Av, i64), Hash(Hv, HKey) }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CellAccess { Read, Write, Match }
 
-/// Format an IV/UV exactly as Perl's decimal scalar string, without allocating a temporary key.
-fn decimal_key(mut n: u64, negative: bool, buf: &mut [u8; 20]) -> &[u8] {
-	let mut i = buf.len();
-	loop {
-		i -= 1;
-		buf[i] = b'0' + (n % 10) as u8;
-		n /= 10;
-		if n == 0 { break; }
-	}
-	if negative { i -= 1; buf[i] = b'-'; }
-	&buf[i..]
+/// Only the offset/capture spellings can yield a transient match aggregate. Most variable
+/// names (including `$c` and `$F`) need just the last-byte rejection.
+#[inline]
+fn possible_match_aggregate(name: &str) -> bool {
+	matches!(name.as_bytes().last(), Some(b'+' | b'-' | b'E' | b'L' | b'}'))
+		&& matches!(name.rsplit("::").next(), Some("+" | "-" | "^CAPTURE" | "^CAPTURE_ALL" | "{+}" | "{-}" | "{^CAPTURE}" | "{^CAPTURE_ALL}"))
 }
 
 /// Lookup in a plain, unrestricted hash. The map takes ownership of the key bytes only on insertion.
+#[inline]
 fn byte_hash_cell(h: &Hv, bytes: &[u8], utf8: bool, create: bool) -> Option<Option<Sv>> {
-	use indexmap::map::raw_entry_v1::{RawEntryApiV1, RawEntryMut};
-	use std::hash::BuildHasher;
-
 	let key = value::HKeyRef::new(bytes, utf8)?;
-	if !create { return Some(h.entries().get(&key).cloned()); }
-	let mut entries = h.entries_mut();
-	let hash = entries.hasher().hash_one(&key);
-	Some(Some(match entries.raw_entry_mut_v1().from_key_hashed_nocheck(hash, &key) {
-		RawEntryMut::Occupied(entry) => entry.get().clone(),
-		RawEntryMut::Vacant(entry) => {
-			let owned = HKey::from_pstr(PStr::new(bytes.to_vec(), utf8));
-			entry.insert_hashed_nocheck(hash, owned, new_sv(Value::Undef)).1.clone()
-		}
-	}))
+	if let Some(cell) = h.entries().get(&key) { return Some(Some(cell.clone())); }
+	if !create { return Some(None); }
+	let cell = new_sv(Value::Undef);
+	h.entries_mut().insert(HKey::from_pstr(PStr::new(bytes.to_vec(), false)), cell.clone());
+	Some(Some(cell))
 }
 
 
@@ -149,6 +167,10 @@ fn last_separator(name: &str) -> Option<usize> {
 const SPECIAL_NAMES: &[&str] = &["main::_", "main::/", "main::.", "main::|", "main::,", "main::\\", "main::\"", "main::;",
 	"main::ARGV", "main::0", "main::@", "main::!", "main::^W", "main::?", "main::^T"];
 pub(super) const SPECIAL_GLOBS: usize = SPECIAL_NAMES.len();
+
+/// Fixed runtime operands; discriminants index SPECIAL_NAMES.
+#[derive(Clone, Copy)]
+pub(in crate::perl) enum SpecialGlob { Topic = 0, InputSeparator = 1, LineNumber = 2, Argv = 8 }
 
 #[derive(Default)]
 pub(super) struct SpecialMemo {
@@ -250,6 +272,22 @@ impl Interp<'_> {
 		f(gv)
 	}
 
+	#[inline]
+	pub(in crate::perl) fn with_special_glob<T>(&self, key: SpecialGlob, f: impl FnOnce(Option<&Gv>) -> T) -> T {
+		if matches!(key, SpecialGlob::Argv) {
+			let specials = self.special_globs.borrow();
+			if let Some((generation, gv)) = &specials[key as usize].glob && *generation == self.symbol_generation {
+				return f(gv.as_ref());
+			}
+			drop(specials);
+			if self.exposed_stashes.contains("main") {
+				let gv = self.lookup_glob(SPECIAL_NAMES[key as usize]);
+				return f(gv.as_ref());
+			}
+		}
+		self.with_existing_special(key as usize, f)
+	}
+
 	/// Read an interpreter-maintained special without cloning its glob or scalar handle. The callback
 	/// must not re-enter symbol lookup while the cache or scalar slot is borrowed.
 	#[inline]
@@ -271,6 +309,7 @@ impl Interp<'_> {
 	pub(super) fn existing_glob(&self, qualified: &str) -> Option<Gv> {
 		if let Some(i) = special_index(qualified) { return self.with_existing_special(i, |gv| gv.cloned()); }
 		if let Some(gv) = self.memo_glob(qualified) { return Some(gv); }
+		self.materialize_host_symbol(qualified);
 		let gv = self.symbols.get(qualified)?.clone();
 		let full = self.qualify(qualified);
 		if *full == *qualified { self.remember_glob(qualified, &full, &gv); }
@@ -297,7 +336,7 @@ impl Interp<'_> {
 	}
 
 	/// Invalidate memoized globs after a symbol-table change.
-	fn symbols_changed(&mut self) { self.symbol_generation = self.symbol_generation.wrapping_add(1); }
+	pub(in crate::perl) fn symbols_changed(&mut self) { self.symbol_generation = self.symbol_generation.wrapping_add(1); }
 
 	fn qualify_uncached(&self, name: &str) -> Rc<str> {
 		if let Some(tail) = name.strip_prefix("::") {
@@ -376,6 +415,7 @@ impl Interp<'_> {
 	}
 
 	pub(super) fn lookup_glob(&self, qualified: &str) -> Option<Gv> {
+		self.materialize_host_symbol(qualified);
 		let (pkg, name) = split_glob(qualified);
 		if !self.exposed_stashes.contains(pkg) { return self.symbols.get(qualified).cloned(); }
 		self.stashes.get(pkg)?.entries().get(&hash_key(name)).and_then(|sv| {
@@ -459,9 +499,19 @@ impl Interp<'_> {
 
 	/// Package glob snapshot for operations such as `reset`.
 	pub fn package_globs(&self, pkg: &str) -> Vec<Gv> {
+		self.expose_boot_stash(pkg);
 		self.stashes.get(pkg).map_or_else(Vec::new, |stash| stash.entries().values().filter_map(|sv| {
 			match &sv.get() { Value::Glob(g) | Value::Ref(Ref::Glob(g)) => Some(g.clone()), _ => None }
 		}).collect())
+	}
+
+	/// Implicit `$_` outside a topic alias. Never retain the scalar across `local`.
+	#[inline]
+	pub(super) fn global_topic(&mut self) -> Sv {
+		let i = SpecialGlob::Topic as usize;
+		if let Some((generation, Some(gv))) = &self.special_globs.borrow()[i].glob
+			&& *generation == self.symbol_generation { return gv.scalar.borrow().clone(); }
+		self.glob(SPECIAL_NAMES[i]).scalar.borrow().clone()
 	}
 
 	/// Fetch the scalar slot of the given package symbol.
@@ -496,6 +546,7 @@ impl Interp<'_> {
 		if let Some(pkg) = name.strip_suffix("::") {
 			let pkg = if pkg.is_empty() { "main" } else { pkg };
 			if self.exposed_stashes.insert(Rc::from(pkg)) { self.symbols_changed(); }
+			self.expose_boot_stash(pkg);
 			return self.stash(pkg);
 		}
 		self.glob(&name).hash.borrow().clone()
@@ -522,13 +573,16 @@ impl Interp<'_> {
 	}
 
 	fn predeclare(&mut self, kind: DeclKind, e: &Expr, package: &str) {
-		match &ungroup(e).kind {
+		let e = ungroup(e);
+		match &e.kind {
 			ExprKind::List(items) => for e in items { self.predeclare(kind, e, package); },
 			ExprKind::Unary(Unary::Reference, e) => self.predeclare(kind, e, package),
 			ExprKind::Variable(sigil, name) => {
 				let slot = self.fresh_binding(kind, *sigil, name, package);
-				self.declared_slots.insert(Rc::as_ptr(name) as *const () as usize, (name.clone(), slot.clone()));
-				if let Some(pad) = self.compile_pads.last_mut() { pad.push((slot_sigil(*sigil), name.clone(), slot)); }
+				let id = self.lexicals.declaration_id(e, *sigil, name);
+				if self.lexicals.prepared.len() <= id { self.lexicals.prepared.resize_with(id + 1, Vec::new); }
+				self.lexicals.prepared[id].push((name.clone(), slot.clone()));
+				if let Some(pad) = self.compile_pads.last_mut() { pad.push((id, slot)); }
 			}
 			_ => {}
 		}
@@ -561,12 +615,12 @@ impl Interp<'_> {
 		}).collect();
 		locations.sort_unstable_by(|a, b| b.cmp(a));
 		locations.into_iter().map(|(scope, offset)| {
-			let (sigil, name, slot) = &self.scopes[scope].pad[offset];
+			let (id, slot) = &self.scopes[scope].pad[offset];
 			let slot = match slot {
-				Slot::Scalar(sv) if sv.registered() && self.readonly_literals.contains_key(&(Rc::as_ptr(sv) as usize)) => Slot::Scalar(new_sv(sv.get())),
+				Slot::Scalar(sv) if sv.literal_readonly() => Slot::Scalar(new_sv(sv.get())),
 				other => other.clone(),
 			};
-			(*sigil, name.clone(), slot)
+			(*id, slot)
 		}).collect()
 	}
 
@@ -577,7 +631,7 @@ impl Interp<'_> {
 		let outer = std::mem::replace(&mut self.scopes, stack);
 		self.lexicals.frame += 1;
 		self.push_scope();
-		for (sigil, name, slot) in pad { self.put_pad(*sigil, name.clone(), slot.clone()); }
+		for (id, slot) in pad { self.put_resolved_pad(*id, slot.clone()); }
 		outer
 	}
 
@@ -679,15 +733,18 @@ impl Interp<'_> {
 		if let Some(scope) = self.scopes.last_mut() { scope.undo.push(restore); }
 	}
 
-	#[inline]
+	#[inline(always)]
 	pub(super) fn commit_declarations(&mut self) {
+		if self.scopes.last().is_some_and(|s| !s.declarations.is_empty()) { self.publish_declarations(); }
+	}
+
+	#[inline(never)]
+	fn publish_declarations(&mut self) {
 		let depth = self.scopes.len();
-		let Some(scope) = self.scopes.last_mut() else { return };
-		if scope.declarations.is_empty() { return; }
+		let scope = &mut self.scopes[depth - 1];
 		let offset = scope.pad.len();
-		for (i, (sigil, name, _)) in scope.declarations.iter().enumerate() {
-			let id = self.lexicals.resolve(*sigil, name);
-			self.lexicals.install(id, depth - 1, offset + i);
+		for (i, (id, _)) in scope.declarations.iter().enumerate() {
+			self.lexicals.install(*id, depth - 1, offset + i);
 		}
 		scope.pad.append(&mut scope.declarations);
 	}
@@ -698,30 +755,30 @@ impl Interp<'_> {
 	}
 
 	pub(super) fn extend_pad(&mut self, bindings: Pad) {
-		for (sigil, name, slot) in bindings { self.put_pad(sigil, name, slot); }
+		for (id, slot) in bindings { self.put_resolved_pad(id, slot); }
 	}
 
 	pub(super) fn put_pad(&mut self, sigil: Sigil, name: Rc<str>, slot: Slot) {
 		let id = self.lexicals.resolve(sigil, &name);
-		self.put_resolved_pad(id, sigil, name, slot);
+		self.put_resolved_pad(id, slot);
 	}
 
 	#[inline]
-	pub(super) fn put_resolved_pad(&mut self, id: usize, sigil: Sigil, name: Rc<str>, slot: Slot) {
+	pub(super) fn put_resolved_pad(&mut self, id: usize, slot: Slot) {
 		let depth = self.scopes.len();
 		if let Some(scope) = self.scopes.last_mut() {
 			self.lexicals.install(id, depth - 1, scope.pad.len());
-			scope.pad.push((slot_sigil(sigil), name, slot));
+			scope.pad.push((id, slot));
 		}
 	}
 
 	/// Temporarily publish a foreach lexical in the loop scope for a no-callback numeric
 	/// statement. A failed probe performs no write and the normal iteration starts afresh.
-	pub(super) fn try_numeric_iteration(&mut self, id: usize, name: &Rc<str>, alias: &Sv, e: &Expr) -> bool {
+	pub(super) fn try_numeric_iteration(&mut self, id: usize, alias: &Sv, e: &Expr) -> bool {
 		let depth = self.scopes.len();
 		let Some(scope) = self.scopes.last_mut() else { return false; };
 		let offset = scope.pad.len();
-		scope.pad.push((Sigil::Scalar, name.clone(), Slot::Scalar(alias.clone())));
+		scope.pad.push((id, Slot::Scalar(alias.clone())));
 		let old = std::mem::replace(&mut self.lexicals.visible[id], PadLocation { frame: self.lexicals.frame, scope: depth - 1, offset });
 		let ran = self.try_plain_binary(e, Cx::Void).is_some();
 		self.lexicals.visible[id] = old;
@@ -735,19 +792,41 @@ impl Interp<'_> {
 	#[inline]
 	pub(super) fn pad_slot(&self, sigil: Sigil, name: &str) -> Option<&Slot> {
 		let (scope, offset) = self.pad_position(sigil, name)?;
-		Some(&self.scopes[scope].pad[offset].2)
+		Some(&self.scopes[scope].pad[offset].1)
+	}
+
+	/// `e` is the variable (or named call) node, addressed with its compiled sigil.
+	#[inline(always)]
+	pub(super) fn pad_slot_at(&self, e: &Expr, sigil: Sigil, name: &str) -> Option<&Slot> {
+		let (scope, offset) = self.pad_position_at(e, sigil, name)?;
+		Some(&self.scopes[scope].pad[offset].1)
+	}
+
+	#[inline(always)]
+	pub(super) fn pad_position_at(&self, e: &Expr, sigil: Sigil, name: &str) -> Option<(usize, usize)> {
+		let cached = e.cache.lexical.get();
+		if cached == 0 { return self.pad_position(sigil, name); }
+		self.register_position((cached - 1) as usize)
+	}
+
+	#[inline(always)]
+	fn register_position(&self, id: usize) -> Option<(usize, usize)> {
+		let loc = self.lexicals.visible[id];
+		(loc.frame == self.lexicals.frame).then_some((loc.scope, loc.offset))
 	}
 
 	/// Physical location of a visible binding, for replacing a pad cell by refalias.
 	#[inline]
 	pub(super) fn pad_position(&self, sigil: Sigil, name: &str) -> Option<(usize, usize)> {
 		if let Some(id) = self.lexicals.operand(sigil, name) {
-			let loc = self.lexicals.visible[id];
-			return (loc.frame == self.lexicals.frame).then_some((loc.scope, loc.offset));
+			return self.register_position(id);
 		}
 		let sigil = slot_sigil(sigil);
 		self.scopes.iter().enumerate().rev().find_map(|(scope, s)| {
-			s.pad.iter().rposition(|(s, n, _)| *s == sigil && n.as_ref() == name).map(|offset| (scope, offset))
+			s.pad.iter().rposition(|(id, _)| {
+				let (s, n) = self.lexicals.spelling(*id);
+				*s == sigil && n.as_ref() == name
+			}).map(|offset| (scope, offset))
 		})
 	}
 
@@ -787,6 +866,118 @@ impl Interp<'_> {
 		})
 	}
 
+	#[inline]
+	fn global_site(&self, e: &Expr, sigil: Option<Sigil>, name: &str) -> Option<&GlobalSite> {
+		let i = e.cache.global.get().checked_sub(1)?;
+		let site = self.global_sites.get(i as usize)?;
+		(site.generation == self.symbol_generation && site.sigil == sigil
+			&& std::ptr::eq(site.name.as_ref(), name) && Rc::ptr_eq(&site.package, &self.package)).then_some(site)
+	}
+
+	fn remember_site(&mut self, e: &Expr, sigil: Option<Sigil>, name: &Rc<str>, full: &str, gv: &Gv, topic_or_args: bool) {
+		if self.exposed_stashes.contains(split_glob(full).0) { return; }
+		let site = GlobalSite { name: name.clone(), package: self.package.clone(), generation: self.symbol_generation,
+			glob: Rc::downgrade(gv), sigil, topic_or_args };
+		let i = e.cache.global.get().wrapping_sub(1) as usize;
+		if let Some(old) = self.global_sites.get_mut(i) { *old = site; return; }
+		// Bound memory for repeated string evals; displaced sites miss by name identity.
+		let i = if self.global_sites.len() < NAME_MEMO_LIMIT {
+			self.global_sites.push(site);
+			self.global_sites.len() - 1
+		} else {
+			let i = (e as *const Expr as usize / std::mem::align_of::<Expr>()) % NAME_MEMO_LIMIT;
+			self.global_sites[i] = site;
+			i
+		};
+		e.cache.global.set(i as u32 + 1);
+	}
+
+	/// Non-vivifying package lookup for a named sub. No negative entries: a stash upgrade or
+	/// AUTOLOAD must still see the original absence.
+	pub(super) fn cached_glob_at(&mut self, e: &Expr, name: &str) -> Option<Gv> {
+		if let Some(site) = self.global_site(e, None, name) && let Some(gv) = site.glob.upgrade() { return Some(gv); }
+		let gv = self.find_glob(name)?;
+		let origin = match &e.kind {
+			ExprKind::Variable(_, n) | ExprKind::Call(Call { target: CallTarget::Named(n, _), .. }) => n,
+			_ => return Some(gv),
+		};
+		if std::ptr::eq(origin.as_ref(), name) {
+			let full = self.qualify(name);
+			self.remember_site(e, None, origin, &full, &gv, false);
+		}
+		Some(gv)
+	}
+
+	#[inline]
+	fn cached_package_slot(&self, e: &Expr, sigil: Sigil, name: &str) -> Option<Slot> {
+		let site = self.global_site(e, Some(sigil), name)?;
+		if site.topic_or_args {
+			if sigil == Sigil::Scalar && let Some(topic) = self.topics.last() { return Some(Slot::Scalar(topic.clone())); }
+			if sigil == Sigil::Array && let Some((_, av, _)) = self.active_subs.last() { return Some(Slot::Array(av.clone())); }
+		}
+		let gv = site.glob.upgrade()?;
+		Some(match sigil {
+			Sigil::Scalar => Slot::Scalar(gv.scalar.borrow().clone()),
+			Sigil::Array => Slot::Array(gv.array.borrow().clone()),
+			Sigil::Hash => Slot::Hash(gv.hash.borrow().clone()),
+			Sigil::Glob => Slot::Glob(gv),
+			Sigil::Code => Slot::Code(gv.code.borrow().as_ref()?.clone()),
+			Sigil::LastIndex => return None,
+		})
+	}
+
+	/// A resolved lexical register or an indexed package operand. Only the latter needs
+	/// generation and package validation; on both paths the returned cell is the current slot.
+	#[inline]
+	pub(super) fn variable_slot_at(&mut self, e: &Expr, sigil: Sigil, name: &str) -> PResult<Slot> {
+		let sigil = slot_sigil(sigil);
+		let our = match self.pad_slot_at(e, sigil, name) {
+			Some(Slot::Our(q)) => Some(q),
+			Some(slot) => return Ok(slot.clone()),
+			None => None,
+		};
+		let lookup = our.map_or(name, |q| q.as_ref());
+		if let Some(slot) = self.cached_package_slot(e, sigil, lookup) { return Ok(slot); }
+		let our = our.cloned();
+		Ok(self.resolve_package_site(e, sigil, name, our))
+	}
+
+	fn resolve_package_site(&mut self, e: &Expr, sigil: Sigil, raw: &str, our: Option<Rc<str>>) -> Slot {
+		let normalized;
+		let name: &str = if let Some(q) = &our { q.as_ref() }
+			else if raw.starts_with("::") || raw.starts_with("main::") { normalized = self.qualify(raw); &normalized }
+			else { raw };
+		let topic_or_args = matches!(name, "_" | "main::_");
+		if topic_or_args {
+			if sigil == Sigil::Scalar && let Some(sv) = self.topics.last() { return Slot::Scalar(sv.clone()); }
+			if sigil == Sigil::Array && let Some((_, av, _)) = self.active_subs.last() { return Slot::Array(av.clone()); }
+		}
+		let full = self.qualify(name);
+		// Package stashes and noncanonical package spellings need the normal resolution rules.
+		if sigil == Sigil::Hash && full.ends_with("::") || name.is_empty() || full.starts_with("::")
+			|| full.strip_prefix("main::").is_some_and(has_separator) {
+			return self.package_slot(sigil, name);
+		}
+		// English import bumps symbol_generation. Cache the actual target glob, not
+		// its scalar, so that localization through either spelling remains visible.
+		let alias = if sigil == Sigil::Scalar { modules::english_alias(self, &full) } else { None };
+		let gv = self.glob(alias.unwrap_or(name));
+		let origin = our.as_ref().or_else(|| match &e.kind {
+			ExprKind::Variable(_, n) if std::ptr::eq(n.as_ref(), raw) => Some(n),
+			_ => None,
+		});
+		if let Some(origin) = origin && alias.is_none_or(|q| !self.exposed_stashes.contains(split_glob(q).0)) {
+			self.remember_site(e, Some(sigil), origin, &full, &gv, topic_or_args);
+		}
+		match sigil {
+			Sigil::Scalar => Slot::Scalar(gv.scalar.borrow().clone()),
+			Sigil::Array | Sigil::LastIndex => Slot::Array(gv.array.borrow().clone()),
+			Sigil::Hash => Slot::Hash(gv.hash.borrow().clone()),
+			Sigil::Glob => Slot::Glob(gv),
+			Sigil::Code => Slot::Code(self.code_slot(&gv)),
+		}
+	}
+
 	fn package_slot(&mut self, sigil: Sigil, name: &str) -> Slot {
 		match slot_sigil(sigil) {
 			Sigil::Scalar if matches!(name, "_" | "main::_") => Slot::Scalar(self.topic()),
@@ -803,7 +994,8 @@ impl Interp<'_> {
 	}
 
 	/// Current topic; a foreach, map, grep or given can temporarily alias it.
-	pub fn topic(&mut self) -> Sv { self.topics.last().cloned().unwrap_or_else(|| self.sv("main::_")) }
+	#[inline]
+	pub fn topic(&mut self) -> Sv { self.topics.last().cloned().unwrap_or_else(|| self.global_topic()) }
 
 	/// Run with a dynamically scoped topic alias.
 	pub fn with_topic<T>(&mut self, sv: Sv, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
@@ -934,15 +1126,11 @@ impl Interp<'_> {
 	}
 
 	/// Whether a scalar slot is protected against ordinary Perl assignment.
-	pub fn is_readonly_sv(&self, sv: &Sv) -> bool {
-		// Both read-only registries hold a weak reference for the lifetime of their mark.
-		Rc::weak_count(sv) != 0 && (sv.registered() && self.readonly_literals.contains_key(&(Rc::as_ptr(sv) as usize)) || modules::readonly_sv(self, sv))
-	}
+	#[inline]
+	pub fn is_readonly_sv(&self, sv: &Sv) -> bool { sv.readonly() }
 
-	fn store_sv(&mut self, sv: &Sv, value: Value) -> PResult<Option<Value>> {
-		// Read-only marks and writable special registrations both retain a Weak. All other
-		// scalar writes need only track a potential cycle, replace the value and clear pos.
-		if Rc::weak_count(sv) == 0 && !sv.has_read_magic() {
+	pub(super) fn store_sv(&mut self, sv: &Sv, value: Value) -> PResult<Option<Value>> {
+		if !sv.registered() && !sv.has_read_magic() {
 			value::track_cell(sv, &value);
 			sv.set(value);
 			sv.set_pos(None);
@@ -1107,19 +1295,19 @@ impl Interp<'_> {
 
 	fn select_aggregate(&mut self, base: &Expr, sigil: Sigil, arrow: bool, vivify: bool) -> PResult<Option<Slot>> {
 		if !arrow {
-			if let ExprKind::Variable(_, name) = &ungroup(base).kind {
-				// No identifier is a capture aggregate. Resolve its AST name directly, once.
-				if name.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') && !has_separator(name) {
-					return self.variable_slot(sigil, name).map(Some);
+			let base = ungroup(base);
+			if let ExprKind::Variable(_, name) = &base.kind {
+				if !possible_match_aggregate(name) {
+					return self.variable_slot_at(base, sigil, name).map(Some);
 				}
 				// A lexical aggregate is never one of the match-variable arrays/hashes.
-				if let Some(slot @ (Slot::Array(_) | Slot::Hash(_))) = self.pad_slot(sigil, name) { return Ok(Some(slot.clone())); }
+				if let Some(slot @ (Slot::Array(_) | Slot::Hash(_))) = self.pad_slot_at(base, sigil, name) { return Ok(Some(slot.clone())); }
 				let qual = self.qualify(name);
 				if let Some(name) = qual.strip_prefix("main::") {
 					if sigil == Sigil::Array && let Some(v) = rx::match_array(self, name) { return Ok(Some(Slot::Array(new_av(v)))); }
 					if sigil == Sigil::Hash && let Some(h) = rx::match_hv(self, name) { return Ok(Some(Slot::Hash(h))); }
 				}
-				return self.variable_slot(sigil, name).map(Some);
+				return self.variable_slot_at(base, sigil, name).map(Some);
 			}
 			if let ExprKind::Deref(_, source) = &ungroup(base).kind { return self.deref(sigil, source, vivify).map(Some); }
 		}
@@ -1141,16 +1329,18 @@ impl Interp<'_> {
 	/// Only peek at expressions that cannot run code or warn; all magic goes through ordinary evaluation.
 	fn subscript_source(&mut self, key: &Expr) -> PResult<Option<Sv>> {
 		match &key.kind {
-			ExprKind::Variable(Sigil::Scalar, name) => Ok(match self.pad_slot(Sigil::Scalar, name) {
+			ExprKind::Variable(Sigil::Scalar, name) => Ok(match self.pad_slot_at(key, Sigil::Scalar, name) {
 				Some(Slot::Scalar(s)) => Some(s.clone()),
-				None if name.as_ref() == "_" => Some(self.topic()),
+				None if name.as_ref() == "_" || plain_lower_name(name) => match self.variable_slot_at(key, Sigil::Scalar, name)? {
+					Slot::Scalar(sv) => Some(sv), _ => None,
+				},
 				_ => None,
 			}),
 			ExprKind::Select(base, Select::ArrayElement(false), index)
 				if let ExprKind::Int(i) = &index.kind && (self.in_constant || self.active_hints.constant_overloads.is_empty())
 					&& let ExprKind::Variable(_, name) = &base.kind
-					&& name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && !has_separator(name) => {
-				let Slot::Array(a) = self.variable_slot(Sigil::Array, name)? else { return Ok(None); };
+					&& !possible_match_aggregate(name) => {
+				let Slot::Array(a) = self.variable_slot_at(base, Sigil::Array, name)? else { return Ok(None); };
 				if self.tied_array(&a).is_some() { return Ok(None); }
 				let elems = a.elems();
 				let i = if *i < 0 { (elems.len() as i64).saturating_add(*i) } else { *i };
@@ -1175,13 +1365,15 @@ impl Interp<'_> {
 		let v = self.eval_scalar(key)?;
 		// Evaluating the key can change the hash (including tying or restricting it).
 		if let Value::Int(_) | Value::UInt(_) = v && Rc::weak_count(h) == 0 && self.tied_hash(h).is_none() {
-			let mut buf = [0; 20];
-			let bytes = match &v {
-				Value::Int(i) => decimal_key(i.unsigned_abs(), *i < 0, &mut buf),
-				Value::UInt(u) => decimal_key(*u, false, &mut buf),
-				_ => &[],
-			};
-			if let Some(cell) = byte_hash_cell(h, bytes, false, create) { return Ok(cell); }
+			match v {
+				Value::UInt(u) => return Ok(h.unsigned_cell(u, create)),
+				Value::Int(i) if i >= 0 => return Ok(h.unsigned_cell(i as u64, create)),
+				Value::Int(i) => {
+					let mut buf = [0; 20];
+					if let Some(cell) = byte_hash_cell(h, value::decimal_key(i.unsigned_abs(), true, &mut buf), false, create) { return Ok(cell); }
+				}
+				_ => {}
+			}
 		}
 		let s = self.stringify_owned(v)?;
 		self.hash_cell(h, HKey::from_pstr(s), create)
@@ -1382,7 +1574,7 @@ impl Interp<'_> {
 			ExprKind::Select(base, select @ (Select::ArrayElement(_) | Select::HashElement(_)), key) => {
 				self.selection_cell(base, *select, key, CellAccess::Match)
 			}
-			ExprKind::Variable(Sigil::Scalar, name) if self.readonly_scalar(name) => self.eval_scalar(e).map(|v| Some(new_sv(v))),
+			ExprKind::Variable(Sigil::Scalar, name) if name.as_ref() != "_" && self.readonly_scalar(name) => self.eval_scalar(e).map(|v| Some(new_sv(v))),
 			_ => self.eval_lvalue(e).map(Some),
 		}
 	}
@@ -1391,10 +1583,31 @@ impl Interp<'_> {
 	pub fn eval_lvalue(&mut self, e: &Expr) -> PResult<Sv> {
 		let e = ungroup(e);
 		// The location and recursion guard only affect observable results on the slow path.
-		if self.depth < 8192 && let ExprKind::Variable(Sigil::Scalar, name) = &e.kind
-			&& let Some(Slot::Scalar(cell)) = self.pad_slot(Sigil::Scalar, name) {
-			return Ok(cell.clone());
+		if self.depth < 8192 && let ExprKind::Variable(Sigil::Scalar, name) = &e.kind {
+			match self.pad_slot_at(e, Sigil::Scalar, name) {
+				Some(Slot::Scalar(cell)) => return Ok(cell.clone()),
+				None if name.as_ref() == "_" || plain_lower_name(name) => {
+					if let Some(Slot::Scalar(cell)) = self.cached_package_slot(e, Sigil::Scalar, name) { return Ok(cell); }
+					if let Slot::Scalar(cell) = self.resolve_package_site(e, Sigil::Scalar, name, None) { return Ok(cell); }
+				}
+				_ => {}
+			}
 		}
+		// Unsigned numeric subscripts into plain named hashes cannot warn or run Perl.
+		// Probe only already-resolved storage: a miss must leave the regular vivifying,
+		// tied/restricted, depth- and location-aware path untouched.
+		if self.depth < 8188 && self.pending.is_none()
+			&& let ExprKind::Select(base, Select::HashElement(false), key) = &e.kind
+			&& let ExprKind::Variable(_, name) = &base.kind && !possible_match_aggregate(name)
+			&& let Some(h) = (match self.pad_slot_at(base, Sigil::Hash, name) {
+				Some(Slot::Hash(h)) => Some(h.clone()),
+				None => match self.cached_package_slot(base, Sigil::Hash, name) { Some(Slot::Hash(h)) => Some(h), _ => None },
+				_ => None,
+			})
+			&& Rc::weak_count(&h) == 0 && self.tied_hash(&h).is_none()
+			&& let Some(n) = self.plain_numeric_expr(key)
+			&& let Some(n) = (match n { Num::Int(i) => u64::try_from(i).ok(), Num::UInt(u) => Some(u), _ => None })
+			&& let Some(sv) = h.unsigned_cell(n, true) { return Ok(sv); }
 		self.at_location(&e.location, |this| this.nested(|this| this.lvalue_inner(e)))
 	}
 
@@ -1416,19 +1629,18 @@ impl Interp<'_> {
 				return self.eval_lvalue(last);
 			}
 			ExprKind::Variable(Sigil::Scalar, name) if plain_lower_name(name) => {
-				if let Slot::Scalar(cell) = self.variable_slot(Sigil::Scalar, name)? { return Ok(cell); }
+				if let Slot::Scalar(cell) = self.variable_slot_at(e, Sigil::Scalar, name)? { return Ok(cell); }
 			}
 			ExprKind::Variable(Sigil::Scalar, name) => {
 				// Lexicals never carry special-variable magic: skip the global checks.
-				match self.pad_slot(Sigil::Scalar, name) {
+				match self.pad_slot_at(e, Sigil::Scalar, name) {
 					Some(Slot::Scalar(s)) => return Ok(s.clone()),
-					// The global topic `$_` is never read-only or magical by name.
-					None if name.as_ref() == "_" => return Ok(self.topic()),
+					None if name.as_ref() == "_" => if let Slot::Scalar(s) = self.variable_slot_at(e, Sigil::Scalar, name)? { return Ok(s); },
 					_ => {}
 				}
 				self.check_scalar_write(name)?;
 				if let Some(v) = self.magic_scalar(name) { self.sv(&self.qualify(name)).replace(v); }
-				if let Slot::Scalar(s) = self.variable_slot(Sigil::Scalar, name)? { return Ok(s); }
+				if let Slot::Scalar(s) = self.variable_slot_at(e, Sigil::Scalar, name)? { return Ok(s); }
 			}
 			ExprKind::Deref(Sigil::Scalar, from) => if let Slot::Scalar(s) = self.deref(Sigil::Scalar, from, true)? { return Ok(s); },
 			ExprKind::Select(base, select @ (Select::ArrayElement(_) | Select::HashElement(_)), key) => {
@@ -1455,7 +1667,7 @@ impl Interp<'_> {
 				return Ok(sv);
 			}
 			ExprKind::Variable(Sigil::LastIndex, name) => {
-				if let Slot::Array(av) = self.variable_slot(Sigil::Array, name)? { return Ok(new_lvalue(Lvalue::LastIndex(av))); }
+				if let Slot::Array(av) = self.variable_slot_at(e, Sigil::Array, name)? { return Ok(new_lvalue(Lvalue::LastIndex(av))); }
 			}
 			ExprKind::Deref(Sigil::LastIndex, source) => {
 				if let Slot::Array(av) = self.deref(Sigil::Array, source, true)? { return Ok(new_lvalue(Lvalue::LastIndex(av))); }
@@ -1475,9 +1687,9 @@ impl Interp<'_> {
 		let e = ungroup(e);
 		let slot = match &e.kind {
 			ExprKind::Variable(Sigil::Array, name) => {
-				let name_qualified = self.qualify(name);
-				if let Some(name) = name_qualified.strip_prefix("main::") && let Some(v) = rx::match_array(self, name) { return Ok(new_av(v)); }
-				self.variable_slot(Sigil::Array, name)?
+				if possible_match_aggregate(name) && let Some(name) = self.qualify(name).strip_prefix("main::")
+					&& let Some(v) = rx::match_array(self, name) { return Ok(new_av(v)); }
+				self.variable_slot_at(e, Sigil::Array, name)?
 			}
 			ExprKind::Deref(Sigil::Array, source) => self.deref(Sigil::Array, source, true)?,
 			ExprKind::Declare(kind, _, target, _) => {
@@ -1494,10 +1706,9 @@ impl Interp<'_> {
 		let e = ungroup(e);
 		let slot = match &e.kind {
 			ExprKind::Variable(Sigil::Hash, name) => {
-				let qual = self.qualify(name);
-				// %+ / %- are one container per match, so `each` iterates them (rx::match_hv).
-				if let Some(name) = qual.strip_prefix("main::") && let Some(h) = rx::match_hv(self, name) { return Ok(h); }
-				self.variable_slot(Sigil::Hash, name)?
+				if possible_match_aggregate(name) && let Some(name) = self.qualify(name).strip_prefix("main::")
+					&& let Some(h) = rx::match_hv(self, name) { return Ok(h); }
+				self.variable_slot_at(e, Sigil::Hash, name)?
 			}
 			ExprKind::Deref(Sigil::Hash, source) => self.deref(Sigil::Hash, source, true)?,
 			ExprKind::Declare(kind, _, target, _) => {
@@ -1532,8 +1743,8 @@ impl Interp<'_> {
 		}
 	}
 
-	pub(super) fn eval_var(&mut self, sigil: Sigil, name: &str, cx: Cx) -> PResult<Ret> {
-		let our = match self.lookup_pad(sigil, name) {
+	pub(super) fn eval_var(&mut self, e: &Expr, sigil: Sigil, name: &str, cx: Cx) -> PResult<Ret> {
+		let our = match self.pad_slot_at(e, sigil, name).cloned() {
 			Some(Slot::Our(qualified)) => Some(qualified),
 			Some(slot) => return self.slot_value(slot, sigil, cx),
 			None if matches!(sigil, Sigil::Array | Sigil::LastIndex) && name == "_" => {
@@ -1545,6 +1756,13 @@ impl Interp<'_> {
 				None
 			}
 		};
+		// Only aggregate names with punctuation can denote match captures. Scalar
+		// read magic was handled above; ordinary package cells may now use the node cache.
+		if !matches!(sigil, Sigil::Array | Sigil::LastIndex | Sigil::Hash)
+			|| name.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') && !has_separator(name) {
+			let slot = self.variable_slot_at(e, sigil, name)?;
+			return self.slot_value(slot, sigil, cx);
+		}
 		let qual = self.qualify(name);
 		if let Some(name) = qual.strip_prefix("main::") {
 			if matches!(sigil, Sigil::Array | Sigil::LastIndex) && let Some(v) = rx::match_array(self, name) {
@@ -1631,7 +1849,7 @@ impl Interp<'_> {
 					ExprKind::Variable(Sigil::Hash, _) => return Ok(Ret::One(Value::Ref(Ref::Hash(self.eval_hash(base)?)))),
 					_ => {}
 				},
-				ExprKind::Variable(Sigil::Code, name) => if let Slot::Code(c) = self.variable_slot(Sigil::Code, name)? { return Ok(Ret::One(Value::Ref(Ref::Code(c)))); },
+				ExprKind::Variable(Sigil::Code, name) => if let Slot::Code(c) = self.variable_slot_at(base, Sigil::Code, name)? { return Ok(Ret::One(Value::Ref(Ref::Code(c)))); },
 				ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) => if let Slot::Code(c) = self.variable_slot(Sigil::Code, name)? { return Ok(Ret::One(Value::Ref(Ref::Code(c)))); },
 				ExprKind::Variable(Sigil::Glob, name) => return Ok(Ret::One(Value::Ref(Ref::Glob(self.glob(name))))),
 				ExprKind::Deref(Sigil::Code, source) | ExprKind::Call(Call { target: CallTarget::Code(source, true), args: None, .. }) => {
@@ -1656,7 +1874,7 @@ impl Interp<'_> {
 		let mut references = Vec::new();
 		for part in parts {
 			if let ExprKind::Variable(Sigil::Code, name) = &ungroup(part).kind {
-				if let Slot::Code(c) = self.variable_slot(Sigil::Code, name)? { references.push(Value::Ref(Ref::Code(c))); }
+				if let Slot::Code(c) = self.variable_slot_at(ungroup(part), Sigil::Code, name)? { references.push(Value::Ref(Ref::Code(c))); }
 				continue;
 			}
 			references.extend(self.eval_aliases(part)?.into_iter().map(|s| Value::Ref(Ref::Scalar(s))));
@@ -1665,17 +1883,17 @@ impl Interp<'_> {
 		else { Ok(Ret::One(references.pop().unwrap_or(Value::Undef))) }
 	}
 
-	fn declare_one(&mut self, kind: DeclKind, target: &Expr) -> PResult<(Target<'static>, Option<(Sigil, Rc<str>, Slot)>)> {
+	fn declare_one(&mut self, kind: DeclKind, target: &Expr) -> PResult<(Target<'static>, Option<(usize, Slot)>)> {
 		if matches!(&target.kind, ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Undef, _), args: None, .. })) {
 			return Ok((Target::Skip, None));
 		}
 		if kind == DeclKind::Local { return self.local_target(target).map(|t| (t, None)); }
 		let ExprKind::Variable(sigil, name) = &target.kind else { return Err(self.die_msg("Can't declare this expression")); };
-		let id = Rc::as_ptr(name) as *const () as usize;
-		let slot = self.declared_slots.remove(&id).map_or_else(
-			|| self.fresh_binding(kind, *sigil, name, &self.package), |(_, slot)| slot);
+		let id = self.lexicals.declaration_id(target, *sigil, name);
+		let prepared = self.lexicals.take_prepared(id, name);
+		let slot = prepared.unwrap_or_else(|| self.fresh_binding(kind, *sigil, name, &self.package));
 		let place = match &slot { Slot::Our(q) => self.package_slot(*sigil, q), _ => slot.clone() };
-		Ok((Self::slot_target(place, *sigil), Some((*sigil, name.clone(), slot))))
+		Ok((Self::slot_target(place, *sigil), Some((id, slot))))
 	}
 
 	fn slot_target(slot: Slot, sigil: Sigil) -> Target<'static> {
@@ -1714,7 +1932,17 @@ impl Interp<'_> {
 		if kind == DeclKind::State {
 			let pad = self.persistent.borrow().vars.get(&site).cloned();
 			if let Some(pad) = pad {
-				let targets = pad.iter().map(|(sigil, _, slot)| Self::slot_target(slot.clone(), *sigil)).collect();
+				// The register for `$#a` is `@a`'s. Recover the *target* sigil from
+				// the declaration, not the canonical register (also handles `undef` holes).
+				fn state_targets(e: &Expr, slots: &mut std::slice::Iter<'_, (usize, Slot)>, out: &mut Vec<Target<'static>>) {
+					match &ungroup(e).kind {
+						ExprKind::List(items) => for item in items { state_targets(item, slots, out); },
+						ExprKind::Variable(sigil, _) => if let Some((_, slot)) = slots.next() { out.push(Interp::slot_target(slot.clone(), *sigil)); },
+						_ => {}
+					}
+				}
+				let mut targets = Vec::with_capacity(pad.len());
+				state_targets(target, &mut pad.iter(), &mut targets);
 				self.introduce_declarations(kind, pad);
 				return Ok(targets);
 			}
@@ -1831,7 +2059,7 @@ impl Interp<'_> {
 				let name = value.to_pstr();
 				let qualified = self.qualify(&name.to_string_lossy());
 				self.symbolic(*sigil, &value)?;
-				let target = Expr { location: e.location.clone(), kind: ExprKind::Variable(*sigil, qualified) };
+				let target = Expr { location: e.location.clone(), cache: NodeCache::default(), kind: ExprKind::Variable(*sigil, qualified) };
 				return self.local_target(&target);
 			}
 		}
@@ -1938,7 +2166,7 @@ impl Interp<'_> {
 			}
 			ExprKind::Variable(Sigil::Array | Sigil::Hash | Sigil::Glob | Sigil::LastIndex, _) | ExprKind::Deref(Sigil::Array | Sigil::Hash | Sigil::Glob | Sigil::LastIndex, _) => {
 				let (sigil, slot) = match &e.kind {
-					ExprKind::Variable(sigil, name) => (*sigil, self.variable_slot(*sigil, name)?),
+					ExprKind::Variable(sigil, name) => (*sigil, self.variable_slot_at(e, *sigil, name)?),
 					ExprKind::Deref(sigil, source) => (*sigil, self.deref(*sigil, source, true)?),
 					_ => return Err(self.die_msg("Can't modify this expression")),
 				};
@@ -2115,7 +2343,7 @@ impl Interp<'_> {
 			let mut used = 0;
 			for sv in &mut elems {
 				let Some(v) = values.next() else { break; };
-				if Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0 && !sv.is_magical() && !sv.is_blessed() {
+				if Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0 && !sv.is_magical() && !sv.registered() && !sv.is_blessed() {
 					value::track_cell(sv, &v);
 					sv.set(v);
 					sv.set_pos(None);
@@ -2140,9 +2368,16 @@ impl Interp<'_> {
 	}
 
 	fn assign_my_scalar(&mut self, item: &Expr, value: Value) -> PResult<()> {
-		let (target, binding) = self.declare_one(DeclKind::My, item)?;
-		if let Some(binding) = binding && let Some(scope) = self.scopes.last_mut() { scope.declarations.push(binding); }
-		if let Target::Scalar(sv) = target { self.write_sv(&sv, value)?; }
+		let ExprKind::Variable(Sigil::Scalar, name) = &item.kind else { return Err(self.die_msg("Can't declare this expression")); };
+		let id = self.lexicals.declaration_id(item, Sigil::Scalar, name);
+		if let Some(slot) = self.lexicals.take_prepared(id, name) {
+			// BEGIN/code compiled against the initial pad may already have observed this cell.
+			let target = match &slot { Slot::Scalar(sv) => Some(sv.clone()), _ => None };
+			if let Some(scope) = self.scopes.last_mut() { scope.declarations.push((id, slot)); }
+			if let Some(sv) = target { self.write_sv(&sv, value)?; }
+		} else if let Some(scope) = self.scopes.last_mut() {
+			scope.declarations.push((id, Slot::Scalar(new_sv(value))));
+		}
 		Ok(())
 	}
 
@@ -2152,7 +2387,7 @@ impl Interp<'_> {
 		if !capture && self.pending.is_none() && self.depth < 8192
 			&& let ExprKind::Variable(Sigil::Array, args) = &rhs.kind && args.as_ref() == "_"
 			&& let ExprKind::Declare(DeclKind::My, _, inner, attrs) = &ungroup(lhs).kind && attrs.is_empty()
-			&& self.pad_slot(Sigil::Array, args).is_none() && let Some((_, av, _)) = self.active_subs.last()
+			&& self.pad_slot_at(rhs, Sigil::Array, args).is_none() && let Some((_, av, _)) = self.active_subs.last()
 			&& self.tied_array(av).is_none() {
 			let item = match &ungroup(inner).kind {
 				ExprKind::List(items) if items.len() == 1 => ungroup(&items[0]),
@@ -2173,10 +2408,47 @@ impl Interp<'_> {
 				}
 			}
 		}
+		let lhs = ungroup(lhs);
+		// Only split directly into an already-live destination. Resolving a missing LHS
+		// before evaluating the RHS could vivify a glob, changing observable evaluation order.
+		if let ExprKind::Variable(Sigil::Array, name) = &lhs.kind
+			&& let ExprKind::Call(call @ Call { target: CallTarget::Builtin(Builtin::Split, origin), .. }) = &rhs.kind
+			&& self.depth < 8188 && self.pending.is_none() && self.active_hints.autodie.is_empty()
+			&& self.builtin_uses_core(Builtin::Split, *origin) {
+			let array = match self.pad_slot_at(lhs, Sigil::Array, name) {
+				Some(Slot::Array(av)) => Some(av.clone()),
+				slot => {
+					let name = match slot { Some(Slot::Our(q)) => q.as_ref(), _ => name.as_ref() };
+					match self.cached_package_slot(lhs, Sigil::Array, name) { Some(Slot::Array(av)) => Some(av), _ => None }
+				}
+			};
+			if let Some(array) = array && Rc::weak_count(&array) == 0 && self.tied_array(&array).is_none()
+				&& let Some(count) = rx::split_into_array(self, call, &array)? {
+				self.array_changed(&array)?;
+				return Ok((count, if capture { array.elems().clone() } else { Vec::new() }));
+			}
+		}
+		let bare_array = matches!(&lhs.kind, ExprKind::Variable(Sigil::Array, _));
+		let my_array = matches!(&lhs.kind, ExprKind::Declare(DeclKind::My, None, target, attrs) if attrs.is_empty()
+			&& matches!(&ungroup(target).kind, ExprKind::Variable(Sigil::Array, _)));
+		if (bare_array || my_array) && let Some(cells) = self.transform_array_rhs(rhs)? {
+			let count = cells.len();
+			let mut targets = Vec::new();
+			self.collect_targets(lhs, &mut targets)?;
+			let Some(Target::Array(array)) = targets.pop() else { return Err(self.die_msg("Not an ARRAY reference")); };
+			if self.tied_array(&array).is_some() || modules::readonly_array(self, &array) {
+				self.assign_array(&array, cells.into_iter().map(|sv| sv.get()))?;
+			} else {
+				if Rc::weak_count(&array) != 0 { self.data.reset_array(&array); }
+				array.replace_elems(cells);
+				self.array_changed(&array)?;
+			}
+			return Ok((count, if capture { self.eval_array_aliases(&array, false)? } else { Vec::new() }));
+		}
 		let mut values = self.eval_list(rhs)?;
 		let count = values.len();
-		if let ExprKind::Variable(Sigil::Array, name) = &ungroup(lhs).kind
-			&& let Slot::Array(a) = self.variable_slot(Sigil::Array, name)? {
+		if let ExprKind::Variable(Sigil::Array, name) = &lhs.kind
+			&& let Slot::Array(a) = self.variable_slot_at(lhs, Sigil::Array, name)? {
 			self.assign_array(&a, values.drain(..))?;
 			if matches!(&ungroup(rhs).kind, ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Split, _), .. })) {
 				rx::recycle_list(self, values);
@@ -2240,7 +2512,7 @@ impl Interp<'_> {
 			if matches!(&target.kind, ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _)
 				| ExprKind::Select(_, Select::ArrayElement(_) | Select::HashElement(_), _)) {
 				let sv = match &target.kind {
-					ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot(Sigil::Scalar, name) => sv.clone(),
+					ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot_at(target, Sigil::Scalar, name) => sv.clone(),
 					_ => self.eval_lvalue(target)?,
 				};
 				if cx == Cx::Void { self.store_sv(&sv, value)?; return Ok(Ret::One(Value::Undef)); }
@@ -2465,7 +2737,7 @@ impl Interp<'_> {
 		if self.pending.is_some() || self.depth >= 8190 { return None; }
 		match &e.kind {
 			ExprKind::Variable(Sigil::Scalar, name) if plain_lower_name(name) => {
-				match self.pad_slot(Sigil::Scalar, name) { Some(Slot::Scalar(sv)) => Some(sv.clone()), _ => None }
+				match self.pad_slot_at(e, Sigil::Scalar, name) { Some(Slot::Scalar(sv)) => Some(sv.clone()), _ => None }
 			}
 			ExprKind::Int(n) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(self.readonly_alias(Value::Int(*n))),
 			_ => None,
@@ -2480,13 +2752,8 @@ impl Interp<'_> {
 	}
 
 	pub(super) fn readonly_alias(&mut self, value: Value) -> Sv {
-		if self.readonly_literals.len() >= self.readonly_sweep {
-			self.readonly_literals.retain(|_, sv| sv.strong_count() != 0);
-			self.readonly_sweep = self.readonly_literals.len().saturating_mul(2).max(256);
-		}
 		let sv = new_sv(value);
-		sv.register();
-		self.readonly_literals.insert(Rc::as_ptr(&sv) as usize, Rc::downgrade(&sv));
+		sv.mark_literal();
 		sv
 	}
 
