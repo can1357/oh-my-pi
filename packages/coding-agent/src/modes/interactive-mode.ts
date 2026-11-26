@@ -280,7 +280,7 @@ import type {
 } from "./types";
 import type { TodoItem, TodoPhase } from "../tools/details/todo";
 import type { ConversationPosition } from "./utils/conversation-position";
-import { DEFAULT_FIGURE_CELL, type FigureCell } from "../ui/transcript/figures/svg";
+import { DEFAULT_FIGURE_CELL, type FigureCell, figureMaxRows } from "../ui/transcript/figures/svg";
 import { setImageBlobWriter } from "../ui/transcript/image-links";
 import { followInlineImageLimits } from "../ui/transcript/messages/image";
 import { imageLinksForMessage, UiHelpers } from "./utils/ui-helpers";
@@ -388,6 +388,7 @@ import {
 	type JSXNode,
 	jsx,
 	type KeyEvent,
+	nativeRendering,
 	type PresentedFrame,
 	type Signal,
 	signal,
@@ -694,6 +695,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		renderSvg: signal(true),
 		renderEmbeds: signal(true),
 		figureCell: signal<FigureCell | undefined>(undefined),
+		// Set with the terminal's rows (see `init`): a signal, so a resize that keeps the share redraws nothing.
+		figureRows: signal<number | undefined>(undefined),
 		tableCharts: () => this.tableChartsVisible,
 		shellVisualization: signal(true),
 		mcpMarkdown: signal(false),
@@ -1611,7 +1614,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#effect(() => {
 			const { rows } = this.shell.size();
 			this.shell.native();
+			// Tern lays figures out itself: its rasters keep their full size.
+			const figureRows = nativeRendering() ? undefined : figureMaxRows(rows);
 			untrack(() => {
+				this.#display.figureRows.set(figureRows);
 				this.#syncEditorMaxHeight();
 				// A short terminal folds the plan into the status row.
 				this.hud.todo.compact.set(rows < TODO_COMPACT_ROWS);
@@ -3393,7 +3399,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.clearOptimisticUserMessage();
 		this.#working.setMessage(undefined);
 		if (submission.customType === "goal-continuation") this.#releaseGoalContinuationTurn();
-		this.#working.clear("turn");
+		this.clearWorking("turn");
 		if (!submission.customType && !preserveDraft) {
 			// Enter clears the submitted draft before this cancellation can run.
 			// Keep anything typed or attached since then, after the recovered input.
@@ -3481,9 +3487,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			pendingSubmissionDispose?.();
 			this.#optimisticUserMessageBlocks = [];
 			this.#working.setMessage(undefined);
-			// A run paused on outside work keeps its working row, which names the
-			// wait; the next loop or the run's `agent_end` tears it down.
-			if (!this.#eventController.isAwaitingAsyncWork()) this.clearWorking("turn");
+			this.clearWorking("turn");
 		}
 	}
 
@@ -7298,6 +7302,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	clearWorking(kind?: WorkingKind): boolean {
 		const cleared = this.#working.clear(kind);
+		// Whatever took the row down (the turn's own submission, an error, a maintenance step), a run
+		// that yielded and still waits on outside work gets its row back naming the wait.
+		if (cleared) this.#eventController.restoreAsyncWait();
 		// Synced even when another path took the row down first: the composer's Stop also follows
 		// `session.isStreaming`, which a stopped turn clears only after its submission returned.
 		this.#syncComposerState();
