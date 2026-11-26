@@ -67,6 +67,7 @@ interface FakeAcpBuiltinSession {
 	refreshSkillsAndCommands(): Promise<void>;
 	refreshProjectScope(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
+	agent: { appendMessage(message: unknown): void };
 	commitTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
 	getHindsightSessionState(): undefined;
@@ -164,6 +165,9 @@ function createRuntime() {
 			this._todoPhases = phases;
 			fakeSessionManager.appendCustomEntry("user_todo_edit", { phases });
 		},
+		agent: {
+			appendMessage(_message: unknown) {},
+		},
 		async refreshBaseSystemPrompt() {},
 		// Headless `/move` and `/wt` rebind memory for the destination project.
 		getHindsightSessionState: () => undefined,
@@ -216,6 +220,9 @@ function createRuntime() {
 		appendCustomEntry(customType: string, data?: unknown): string {
 			this._customEntries.push({ customType, data });
 			return "fake-entry-id";
+		},
+		appendMessage(_message: unknown): string {
+			return "fake-message-id";
 		},
 		async flush() {
 			this._flushed = true;

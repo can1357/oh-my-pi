@@ -1,19 +1,21 @@
 import * as fs from "node:fs/promises";
 import {
-	applyOpsToPhases,
 	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
 } from "../../tools/todo";
 import type { TodoPhase } from "../../tools/details/todo";
+import { titleCaseSentence, titleCaseWords } from "../../slash-commands/helpers/todo";
 import {
+	applyTodoMutation,
+	applyTodoStart,
+	commitTodoUserEdit,
 	findPhaseFuzzy,
-	findTaskFuzzy,
-	titleCaseSentence,
-	titleCaseWords,
 	tokenize,
-} from "../../slash-commands/helpers/todo";
+	type TodoCommandOutcome,
+	type TodoUserEditHost,
+} from "../../tools/todo-command";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -33,24 +35,6 @@ const USAGE = [
 	"  /todo drop   [<task|phase>]        Mark task/phase/all abandoned",
 	"  /todo rm     [<task|phase>]        Remove task/phase/all",
 ].join("\n");
-
-// =============================================================================
-// Build system reminder
-// =============================================================================
-
-function buildSystemReminder(action: string, phases: TodoPhase[], removed = false): string {
-	const md = phases.length === 0 ? "(empty)" : phasesToMarkdown(phases).trimEnd();
-	const lines = ["<system-reminder>", `The user manually modified the todo list (${action}).`];
-	if (removed) {
-		lines.push(
-			phases.length === 0
-				? "The user intentionally cleared the todo list. Do NOT recreate or re-populate it unless the user explicitly asks; continue the current request without a todo list."
-				: "The user intentionally removed the entries no longer shown below. Do NOT re-add them unless the user explicitly asks.",
-		);
-	}
-	lines.push("Current todo list:", "", md, "</system-reminder>");
-	return lines.join("\n");
-}
 
 export class TodoCommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
@@ -230,101 +214,17 @@ export class TodoCommandController {
 	// ------------------------------------------------------------- start / done / drop / rm
 
 	#start(rest: string): void {
-		if (!rest) {
-			this.ctx.showError("Usage: /todo start <task>");
-			return;
-		}
-		const current = this.#currentPhases();
-		const hit = findTaskFuzzy(current, rest);
-		if (!hit) {
-			this.ctx.showError(`No task matched "${rest}". Use /todo to list current tasks.`);
-			return;
-		}
-		const { phases, errors } = applyOpsToPhases(current, [{ op: "start", task: hit.task.content }]);
-		if (errors.length > 0) {
-			this.ctx.showError(errors.join("; "));
-			return;
-		}
-		this.#commit(phases, `/todo start ${hit.task.content}`);
-		this.ctx.showStatus(`Started: ${hit.task.content}`);
+		this.#show(applyTodoStart(this.#editHost(), this.#currentPhases(), rest));
 	}
 
 	#mutateStatus(rest: string, target: "completed" | "abandoned"): void {
-		const op = target === "completed" ? "done" : "drop";
-		const current = this.#currentPhases();
-		const trimmed = rest.trim();
-		if (!trimmed) {
-			// no-arg: apply to all. The tool refuses a bare done/drop, so every task is named.
-			const all = current.flatMap(phase => phase.tasks.map(task => task.content));
-			const { phases, errors } =
-				all.length > 0 ? applyOpsToPhases(current, [{ op, task: all }]) : { phases: current, errors: [] };
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
-			}
-			this.#commit(phases, `/todo ${op} (all)`);
-			this.ctx.showStatus(`Marked all tasks ${target}.`);
-			return;
-		}
-
-		const taskHit = findTaskFuzzy(current, trimmed);
-		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
-			}
-			this.#commit(phases, `/todo ${op} ${taskHit.task.content}`);
-			this.ctx.showStatus(`Marked ${target}: ${taskHit.task.content}`);
-			return;
-		}
-
-		const phaseHit = findPhaseFuzzy(current, trimmed);
-		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
-			}
-			this.#commit(phases, `/todo ${op} ${phaseHit.name}`);
-			this.ctx.showStatus(`Marked phase ${phaseHit.name} ${target}.`);
-			return;
-		}
-
-		this.ctx.showError(`No task or phase matched "${trimmed}".`);
+		this.#show(
+			applyTodoMutation(this.#editHost(), this.#currentPhases(), target === "completed" ? "done" : "drop", rest),
+		);
 	}
 
 	#remove(rest: string): void {
-		const current = this.#currentPhases();
-		const trimmed = rest.trim();
-		if (!trimmed) {
-			this.#commit([], "/todo rm (all)", { removed: true });
-			this.ctx.showStatus("Cleared all todos.");
-			return;
-		}
-		const taskHit = findTaskFuzzy(current, trimmed);
-		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
-			}
-			this.#commit(phases, `/todo rm ${taskHit.task.content}`, { removed: true });
-			this.ctx.showStatus(`Removed: ${taskHit.task.content}`);
-			return;
-		}
-		const phaseHit = findPhaseFuzzy(current, trimmed);
-		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
-			}
-			this.#commit(phases, `/todo rm ${phaseHit.name}`, { removed: true });
-			this.ctx.showStatus(`Removed phase: ${phaseHit.name}`);
-			return;
-		}
-		this.ctx.showError(`No task or phase matched "${trimmed}".`);
+		this.#show(applyTodoMutation(this.#editHost(), this.#currentPhases(), "rm", rest));
 	}
 
 	// ------------------------------------------------------------- editor
@@ -363,22 +263,27 @@ export class TodoCommandController {
 		}
 	}
 
-	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// Commit first so HUD visibility binds to the new canonical source.
-		this.ctx.session.commitTodoPhases(nextPhases);
-		this.ctx.setTodos(nextPhases);
+	#show(outcome: TodoCommandOutcome): void {
+		if (!outcome.ok) {
+			this.ctx.showError(outcome.error);
+			return;
+		}
+		this.ctx.showStatus(outcome.status);
+	}
 
-		// 3. Inject system reminder so the agent learns about the change next turn.
-		//    Removals carry explicit intent so the agent does not rebuild the
-		//    cleared/removed items on its next turn (issue #5258).
-		const reminderText = buildSystemReminder(action, nextPhases, opts?.removed ?? false);
-		const message = {
-			role: "developer" as const,
-			content: [{ type: "text" as const, text: reminderText }],
-			attribution: "user" as const,
-			timestamp: Date.now(),
+	#editHost(): TodoUserEditHost {
+		return {
+			commitTodoPhases: phases => this.ctx.session.commitTodoPhases(phases),
+			setTodos: phases => this.ctx.setTodos(phases),
+			appendMessage: message => {
+				this.ctx.agent.appendMessage(message);
+				this.ctx.sessionManager.appendMessage(message);
+			},
 		};
-		this.ctx.agent.appendMessage(message);
-		this.ctx.sessionManager.appendMessage(message);
+	}
+
+	#commit(nextPhases: TodoPhase[], action: string): void {
+		// Commit first so HUD visibility binds to the new canonical source.
+		commitTodoUserEdit(this.#editHost(), nextPhases, action);
 	}
 }

@@ -186,4 +186,26 @@ describe("TodoCommandController", () => {
 
 		expect(reminderTextFrom(ctx)).not.toMatch(/Do NOT/i);
 	});
+
+	it('removes the task Ship it for /todo rm "Ship it" and keeps the phase Notes for "Ship it"', async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-rm-quoted-"));
+		const phaseName = 'Notes for "Ship it"';
+		const phases: TodoPhase[] = [
+			{ name: phaseName, tasks: [{ content: "Keep the notes", status: "pending" }] },
+			{ name: "Release", tasks: [{ content: "Ship it", status: "pending" }] },
+		];
+		const ctx = createContext(tempRoot, phases);
+		const controller = new TodoCommandController(ctx);
+
+		await controller.handleTodoCommand('rm "Ship it"');
+
+		expect(ctx.showError).not.toHaveBeenCalled();
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("Ship it"));
+		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith([
+			{ name: phaseName, tasks: [{ content: "Keep the notes", status: "in_progress" }] },
+			{ name: "Release", tasks: [] },
+		]);
+		expect(reminderTextFrom(ctx)).toContain("Keep the notes");
+		expect(reminderTextFrom(ctx)).toContain(phaseName);
+	});
 });

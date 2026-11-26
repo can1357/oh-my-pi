@@ -241,6 +241,23 @@ describe("TodoTool operations", () => {
 		expect(removed.details?.phases.map(phase => phase.tasks.map(task => task.content))).toEqual([["a1"], ["b1"]]);
 	});
 
+	it("accepts repeated task names in a single call when only one matching task exists", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "A", items: ["a1", "a2", "a3"] }],
+		});
+
+		const done = await tool.execute("call-2", { op: "done", task: ["a1", "a1"] });
+		expect(done.isError).toBeUndefined();
+		expect(done.details?.completedTasks).toEqual([{ phase: "A", content: "a1" }]);
+		expect(done.details?.phases[0]?.tasks.map(task => task.status)).toEqual(["completed", "in_progress", "pending"]);
+
+		const removed = await tool.execute("call-3", { op: "rm", task: ["a2", "a2"] });
+		expect(removed.isError).toBeUndefined();
+		expect(removed.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["a1", "a3"]);
+	});
+
 	it("splits a flattened task string like a path list, preferring verbatim content", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "A", items: ["Fix foo, bar", "a1", "a2", "a3"] }] });
