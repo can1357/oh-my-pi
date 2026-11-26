@@ -15,6 +15,13 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 export const PX_PER_ROW = 16;
 /** Longest raster edge in device pixels (the rasterizer's surface cap). */
 const MAX_EDGE_PX = 4096;
+/** Share of the terminal's rows one figure may fill, so it fits on screen whole. */
+const FIGURE_VIEWPORT_SHARE = 0.8;
+
+/** Rows one figure may take on a terminal `viewportRows` rows tall. */
+export function figureMaxRows(viewportRows: number): number {
+	return Math.max(1, Math.floor(viewportRows * FIGURE_VIEWPORT_SHARE));
+}
 
 /** A terminal cell in device pixels. */
 export interface FigureCell {

@@ -1,5 +1,6 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { signal } from "@oh-my-pi/pi-tui";
+import { expect, test } from "bun:test";
+import { createRoot, signal } from "@oh-my-pi/pi-tui";
 import {
 	DEFAULT_FIGURE_CELL,
 	type Embed,
@@ -37,6 +38,41 @@ figureSuite("svg-figure", corpusCase => {
 			} else throw new Error(`unknown stage ${label}`);
 		},
 	};
+});
+
+test("a room change redraws an SVG only when one of the rooms cuts it", async () => {
+	const room = signal<number | undefined>(40);
+	let raster!: SvgRaster;
+	const dispose = createRoot(dispose => {
+		raster = new SvgRaster({ cell, maxRows: room });
+		return dispose;
+	});
+	const drawn = () => {
+		const state = raster.state();
+		if (state.status !== "ready") throw new Error(`raster ${state.status}`);
+		return state.raster;
+	};
+	try {
+		// Four rows tall at its natural size.
+		raster.update(`<svg width="80" height="${4 * cell.h}"><rect width="80" height="${4 * cell.h}"/></svg>`, true);
+		await figureWorkSettled();
+		const natural = drawn();
+		expect(natural.h).toBe(4 * cell.h);
+
+		room.set(20);
+		await figureWorkSettled();
+		expect(drawn()).toBe(natural);
+
+		room.set(2);
+		await figureWorkSettled();
+		expect(drawn().h).toBeLessThanOrEqual(2 * cell.h);
+
+		room.set(20);
+		await figureWorkSettled();
+		expect(drawn().h).toBe(natural.h);
+	} finally {
+		dispose();
+	}
 });
 
 figureSuite("fence-figure", corpusCase => {
