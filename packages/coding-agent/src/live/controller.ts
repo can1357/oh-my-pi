@@ -119,8 +119,8 @@ export class LiveSessionController {
 	#emittedInputLevel = -1;
 	#emittedOutputLevel = -1;
 	#activeDelegationId: string | undefined;
-	/** Whether a spoken request reached the coding agent, which must then hear that the call ended. */
-	#delegated = false;
+	/** Transcript that received a spoken request; only it must hear that the call ended. */
+	#delegatedSessionId: string | undefined;
 	#userTranscript = "";
 	#assistantTranscript = "";
 	#userTranscriptFinal = false;
@@ -306,7 +306,7 @@ export class LiveSessionController {
 			}
 		}
 
-		if (this.#delegated) {
+		if (this.#delegatedSessionId && this.#delegatedSessionId === this.#session.sessionManager.getSessionId()) {
 			void this.#session
 				.sendCustomMessage(
 					{
@@ -373,7 +373,7 @@ export class LiveSessionController {
 		if (!request) return;
 		this.#activeDelegationId = event.item.id;
 		this.#refreshAudioPhase();
-		this.#delegated = true;
+		this.#delegatedSessionId = this.#session.sessionManager.getSessionId();
 		void this.#session
 			.sendCustomMessage(
 				{
