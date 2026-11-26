@@ -110,6 +110,18 @@ export interface CredentialSelectorDeps {
 	strategies: RankingStrategyResolver;
 }
 
+/**
+ * A session pin keeps serving while the provider's warm window holds. A provider with no
+ * `stickyWarmMs` keeps it indefinitely; a pin predating `lastUsedAtMs` counts as warm.
+ */
+function isSessionPinWarm(strategy: CredentialRankingStrategy | undefined, lastUsedAtMs: number | undefined): boolean {
+	return (
+		strategy?.stickyWarmMs === undefined ||
+		lastUsedAtMs === undefined ||
+		Date.now() - lastUsedAtMs < strategy.stickyWarmMs
+	);
+}
+
 /** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
 export class CredentialSelector {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
@@ -360,6 +372,9 @@ export class CredentialSelector {
 		};
 		const blockScope = strategy.blockScope?.(rankingContext);
 		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
+		const pinned = this.#pinnedApiKeySelection(provider, sessionId, credentials, providerKey, strategy, blockScopes);
+		if (pinned) return pinned;
+
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
@@ -372,6 +387,27 @@ export class CredentialSelector {
 			blockScopes,
 		});
 		return candidates[0]?.selection ?? fallback;
+	}
+
+	/**
+	 * The session's pinned API key while it is still a candidate, unblocked, and inside the
+	 * provider's warm window. Usage ranking runs only when this returns undefined, so a session
+	 * keeps its key until a real failure blocks it. Called only for a provider with a ranking
+	 * strategy: a provider without one keeps its hashed per-session order.
+	 */
+	#pinnedApiKeySelection(
+		provider: string,
+		sessionId: string | undefined,
+		credentials: readonly ApiKeySelection[],
+		providerKey: string,
+		strategy: CredentialRankingStrategy,
+		blockScopes: readonly string[],
+	): ApiKeySelection | undefined {
+		const pin = this.#deps.affinity.get(provider, sessionId);
+		if (pin?.type !== "api_key") return undefined;
+		const selection = credentials.find(entry => entry.index === pin.index);
+		if (!selection || this.#deps.blocks.isBlocked(provider, providerKey, pin.index, blockScopes)) return undefined;
+		return isSessionPinWarm(strategy, pin.lastUsedAtMs) ? selection : undefined;
 	}
 
 	/**
@@ -752,10 +788,7 @@ export class CredentialSelector {
 		// rank. Legacy pins predating `lastUsedAtMs` count as warm until the next resolve rewrites the row.
 		const sessionPreferredLastUsedAtMs =
 			sessionCredential?.type === "oauth" ? sessionCredential.lastUsedAtMs : undefined;
-		const sessionPreferredIsWarm =
-			strategy?.stickyWarmMs === undefined ||
-			sessionPreferredLastUsedAtMs === undefined ||
-			Date.now() - sessionPreferredLastUsedAtMs < strategy.stickyWarmMs;
+		const sessionPreferredIsWarm = isSessionPinWarm(strategy, sessionPreferredLastUsedAtMs);
 		const sessionPreferredIsAvailable =
 			sessionPreferredIndex !== undefined &&
 			sessionPreferredCanRefreshOrUse &&
