@@ -3,6 +3,7 @@ import type { Api, Message, Model } from "@oh-my-pi/pi-ai";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import {
@@ -106,7 +107,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		expect(ollama).toBeDefined();
 		const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
 
-		const result = await normalizeModelContextImages([webp], { model: ollama });
+		const result = await normalizeModelContextImages([webp], { model: ollama, autoResize: true });
 		expect(result).toHaveLength(1);
 		const mime = result![0]!.mimeType;
 		expect(mime).not.toBe("image/webp");
@@ -118,7 +119,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		expect(anthropic).toBeDefined();
 		const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
 
-		const result = await normalizeModelContextImages([webp], { model: anthropic });
+		const result = await normalizeModelContextImages([webp], { model: anthropic, autoResize: true });
 
 		expect(result?.[0]?.mimeType).toBe("image/webp");
 	});
@@ -130,10 +131,12 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		const first = await normalizeModelContextImages([webp], {
 			model,
 			resize: { maxWidth: 120, maxHeight: 120, minDimension: 1 },
+			autoResize: true,
 		});
 		const second = await normalizeModelContextImages([webp], {
 			model,
 			resize: { maxWidth: 60, maxHeight: 60, minDimension: 1 },
+			autoResize: true,
 		});
 		const firstMetadata = await new Bun.Image(Buffer.from(first![0]!.data, "base64")).metadata();
 		const secondMetadata = await new Bun.Image(Buffer.from(second![0]!.data, "base64")).metadata();
@@ -151,6 +154,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 
 		const result = await normalizeModelContextImages([corrupt], {
 			model: buildStbVisionModel("managed-primary"),
+			autoResize: true,
 		});
 
 		expect(result).toEqual([corrupt]);
@@ -176,6 +180,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		};
 		const boundary = new SessionProviderBoundary({
 			model: () => buildStbVisionModel("managed-primary"),
+			settings: Settings.isolated(),
 		} as never);
 
 		const normalized = await boundary.normalizeAgentMessageImages(message);
@@ -205,7 +210,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 			},
 		];
 
-		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 		const resultMessage = result[0]!;
 		expect(resultMessage.role).toBe("toolResult");
 		if (resultMessage.role !== "toolResult") throw new Error("Expected tool result message");
@@ -247,7 +252,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 			timestamp: 1,
 		};
 
-		const messages = await normalizeModelContextMessages([message], model);
+		const messages = await normalizeModelContextMessages([message], model, true);
 		const normalizedMessage = messages[0]!;
 		expect(normalizedMessage.role).toBe("user");
 		if (normalizedMessage.role !== "user") throw new Error("Expected user message");
@@ -286,7 +291,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		};
 		const message: Message = { role: "user", content: "inspect native image", providerPayload, timestamp: 1 };
 
-		const messages = await normalizeModelContextMessages([message], model);
+		const messages = await normalizeModelContextMessages([message], model, true);
 		const normalizedMessage = messages[0]!;
 		expect(normalizedMessage.role).toBe("user");
 		if (normalizedMessage.role !== "user") throw new Error("Expected user message");
@@ -307,6 +312,31 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		expect(serializedWire).not.toContain(webp);
 	});
 
+	test("keeps a WebP retained only in native Responses history at full size when autoResize is off", async () => {
+		const model = buildStbVisionModel("managed-primary", "openai-responses");
+		const webp = await makeRedWebP(2048, 1024);
+		const providerPayload = {
+			type: "openaiResponsesHistory" as const,
+			provider: model.provider,
+			dt: true,
+			items: [
+				{
+					type: "message",
+					role: "user",
+					content: [{ type: "input_image", image_url: `data:image/webp;base64,${webp}` }],
+				},
+			],
+		};
+		const message: Message = { role: "user", content: "inspect native image", providerPayload, timestamp: 1 };
+
+		const messages = await normalizeModelContextMessages([message], model, false);
+		const replayed = new RegExp("data:(image/[a-z]+);base64,([A-Za-z0-9+/=]+)").exec(JSON.stringify(messages[0]));
+		if (!replayed) throw new Error("Expected a replayed native image");
+		expect(replayed[1]).not.toBe("image/webp");
+		const metadata = await new Bun.Image(Buffer.from(replayed[2]!, "base64")).metadata();
+		expect({ width: metadata.width, height: metadata.height }).toEqual({ width: 2048, height: 1024 });
+	});
+
 	test("replaces an undecodable historical WebP with an omission note", async () => {
 		const corrupt = {
 			type: "image" as const,
@@ -324,7 +354,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 			},
 		];
 
-		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+		const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 		const resultMessage = result[0]!;
 		expect(resultMessage.role).toBe("toolResult");
 		if (resultMessage.role !== "toolResult") throw new Error("Expected tool result message");
@@ -353,7 +383,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 				},
 			] as unknown as Message[];
 
-			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 			const resultMessage = result[0]!;
 			expect(resultMessage.role).toBe("toolResult");
 			if (resultMessage.role !== "toolResult") throw new Error("Expected tool result message");
@@ -381,7 +411,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 				},
 			] as unknown as Message[];
 
-			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"));
+			const result = await normalizeModelContextMessages(messages, buildStbVisionModel("managed-primary"), true);
 			expect(result).toBe(messages);
 			expect((result[0]!.content as unknown[])[0]).toBe(malformedImage);
 		}

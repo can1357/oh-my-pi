@@ -556,9 +556,10 @@ export class ChainJudge implements Judge {
 				: async (model, kind) => {
 						if (kind === "local") return undefined;
 						const fitted = kind === "native" ? await fitNativeImages(model, requestImages) : undefined;
+						// Judge images are not user attachments, so they keep the cap.
 						const images = fitted
 							? fitted.map(fit => fit.image)
-							: ((await normalizeModelContextImages([...requestImages], { model })) ?? []);
+							: ((await normalizeModelContextImages([...requestImages], { model, autoResize: true })) ?? []);
 						return { images, fitted };
 					},
 		);

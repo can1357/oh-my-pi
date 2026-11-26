@@ -61,13 +61,10 @@ function imageFromBase64DataUrl(imageUrl: unknown): ImageContent | undefined {
 }
 
 function modelBoundaryImageCacheKey(image: ImageContent, resize: ImageResizeOptions | undefined): string {
-	const resizeKey = JSON.stringify([
-		resize?.maxWidth,
-		resize?.maxHeight,
-		resize?.minDimension,
-		resize?.maxBytes,
-		resize?.jpegQuality,
-	]);
+	// String, not JSON: JSON.stringify turns Infinity into null, which would collide with an unset cap.
+	const resizeKey = [resize?.maxWidth, resize?.maxHeight, resize?.minDimension, resize?.maxBytes, resize?.jpegQuality]
+		.map(value => String(value))
+		.join(",");
 	return `${resizeKey}:${image.mimeType}:${image.data.length}:${image.data.slice(0, 32)}:${image.data.slice(-32)}:${String(Bun.hash(image.data))}`;
 }
 
@@ -103,24 +100,27 @@ async function memoizedStbImageNormalization(
 	return normalized ? { ...image, ...normalized } : null;
 }
 
-async function normalizeNativeResponsesImagePart(part: unknown): Promise<unknown> {
+async function normalizeNativeResponsesImagePart(part: unknown, autoResize: boolean): Promise<unknown> {
 	if (!isRecord(part) || part.type !== "input_image") return part;
 	const image = imageFromBase64DataUrl(part.image_url);
 	if (!image || !isWebPImage(image)) return part;
-	const normalized = await memoizedStbImageNormalization(image, undefined);
+	const normalized = await memoizedStbImageNormalization(image, webpConversionResize(autoResize));
 	if (!normalized) return createNativeUndecodableStbImageOmission();
 	return { ...part, image_url: `data:${normalized.mimeType};base64,${normalized.data}` };
 }
 
-async function normalizeNativeResponsesItem(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-	const normalizedItem = await normalizeNativeResponsesImagePart(item);
+async function normalizeNativeResponsesItem(
+	item: Record<string, unknown>,
+	autoResize: boolean,
+): Promise<Record<string, unknown>> {
+	const normalizedItem = await normalizeNativeResponsesImagePart(item, autoResize);
 	if (normalizedItem !== item) return normalizedItem as Record<string, unknown>;
 	if (!Array.isArray(item.content)) return item;
 
 	let content: unknown[] | undefined;
 	for (let index = 0; index < item.content.length; index++) {
 		const part = item.content[index];
-		const normalizedPart = await normalizeNativeResponsesImagePart(part);
+		const normalizedPart = await normalizeNativeResponsesImagePart(part, autoResize);
 		if (normalizedPart !== part) content ??= item.content.slice(0, index);
 		content?.push(normalizedPart);
 	}
@@ -129,12 +129,13 @@ async function normalizeNativeResponsesItem(item: Record<string, unknown>): Prom
 
 async function normalizeNativeResponsesHistoryPayload(
 	payload: ProviderPayload | undefined,
+	autoResize: boolean,
 ): Promise<ProviderPayload | undefined> {
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return payload;
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
 		const item = payload.items[index]!;
-		const normalizedItem = await normalizeNativeResponsesItem(item);
+		const normalizedItem = await normalizeNativeResponsesItem(item, autoResize);
 		if (normalizedItem !== item) items ??= payload.items.slice(0, index);
 		items?.push(normalizedItem);
 	}
@@ -245,6 +246,18 @@ export interface NormalizeModelContextImagesOptions {
 	/** Model the images are bound for; used to derive encoder constraints (WebP exclusion for Ollama). */
 	model?: Model;
 	resize?: ImageResizeOptions;
+	/** `images.autoResize`. When false, images keep their size except WebP for models that cannot decode it. */
+	autoResize: boolean;
+}
+
+/**
+ * Resize for the WebP re-encode a model that cannot decode WebP needs. With autoResize
+ * off the re-encode still happens but carries no caps; minDimension 0 turns off the lift
+ * floor so the image keeps its size. Admission and history replay both use it.
+ */
+function webpConversionResize(autoResize: boolean, resize?: ImageResizeOptions): ImageResizeOptions | undefined {
+	if (autoResize) return resize;
+	return { ...resize, maxWidth: Infinity, maxHeight: Infinity, maxBytes: Infinity, minDimension: 0 };
 }
 
 /**
@@ -256,22 +269,29 @@ export interface NormalizeModelContextImagesOptions {
  */
 export async function normalizeModelContextImages(
 	images: ImageContent[] | undefined,
-	options?: NormalizeModelContextImagesOptions,
+	options: NormalizeModelContextImagesOptions,
 ): Promise<ImageContent[] | undefined> {
 	if (!images || images.length === 0) return undefined;
-	const excludesWebP = modelLacksWebpSupport(options?.model);
+	const excludesWebP = modelLacksWebpSupport(options.model);
 	const resize: ImageResizeOptions | undefined = excludesWebP
-		? { ...options?.resize, excludeWebP: true }
-		: options?.resize;
+		? { ...options.resize, excludeWebP: true }
+		: options.resize;
 	const normalized: ImageContent[] = [];
 	for (const image of images) {
 		try {
 			if (excludesWebP && isWebPImage(image)) {
-				const converted = await memoizedStbImageNormalization(image, options?.resize);
+				const converted = await memoizedStbImageNormalization(
+					image,
+					webpConversionResize(options.autoResize, options.resize),
+				);
 				// Mixed-content callers reassemble normalized images positionally, so
 				// preserve one output slot per input. The provider-boundary pass replaces
 				// an undecodable WebP with an omission note before dispatch.
 				normalized.push(converted ?? image);
+				continue;
+			}
+			if (!options.autoResize) {
+				normalized.push(image);
 				continue;
 			}
 			const resized = await resizeImage(image, resize);
@@ -289,15 +309,20 @@ export async function normalizeModelContextImages(
  * Rewrites historical/resumed WebP blocks in the ephemeral provider request.
  * Persisted session messages remain untouched, while STB-backed local servers
  * never receive a format they cannot decode.
+ * `autoResize` is `images.autoResize`: off keeps the re-encoded WebP at full size, as admission does.
  */
-export async function normalizeModelContextMessages(messages: Message[], model: Model | undefined): Promise<Message[]> {
+export async function normalizeModelContextMessages(
+	messages: Message[],
+	model: Model | undefined,
+	autoResize: boolean,
+): Promise<Message[]> {
 	if (!modelLacksWebpSupport(model)) return messages;
 	let output: Message[] | undefined;
 	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
 		const message = messages[messageIndex]!;
 		const hasNativePayload = message.role === "user" || message.role === "developer";
 		const normalizedProviderPayload = hasNativePayload
-			? await normalizeNativeResponsesHistoryPayload(message.providerPayload)
+			? await normalizeNativeResponsesHistoryPayload(message.providerPayload, autoResize)
 			: undefined;
 		const providerPayloadChanged = hasNativePayload && normalizedProviderPayload !== message.providerPayload;
 		let content: Array<(typeof message.content)[number]> | undefined;
@@ -309,7 +334,7 @@ export async function normalizeModelContextMessages(messages: Message[], model: 
 					continue;
 				}
 				content ??= message.content.slice(0, partIndex);
-				const normalized = await memoizedStbImageNormalization(part, undefined);
+				const normalized = await memoizedStbImageNormalization(part, webpConversionResize(autoResize));
 				content.push(normalized ?? createUndecodableStbImageOmission());
 			}
 		}
@@ -332,8 +357,12 @@ export async function normalizeModelContextMessages(messages: Message[], model: 
 }
 
 /** Normalizes historical image blocks in an ephemeral provider request. */
-export async function normalizeProviderContextImagesForModel(context: Context, model: Model): Promise<Context> {
-	const messages = await normalizeModelContextMessages(context.messages, model);
+export async function normalizeProviderContextImagesForModel(
+	context: Context,
+	model: Model,
+	autoResize: boolean,
+): Promise<Context> {
+	const messages = await normalizeModelContextMessages(context.messages, model, autoResize);
 	return messages === context.messages ? context : { ...context, messages };
 }
 

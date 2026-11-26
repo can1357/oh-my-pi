@@ -53,7 +53,7 @@ describe("normalizeModelContextImages", () => {
 		const wide = { type: "image" as const, data: await makeRedPng(2000, 1500), mimeType: "image/png" };
 		const tall = { type: "image" as const, data: await makeRedPng(1200, 2200), mimeType: "image/png" };
 
-		const result = await normalizeModelContextImages([wide, tall]);
+		const result = await normalizeModelContextImages([wide, tall], { autoResize: true });
 
 		expect(result).toHaveLength(2);
 		expect(result?.[0]?.type).toBe("image");

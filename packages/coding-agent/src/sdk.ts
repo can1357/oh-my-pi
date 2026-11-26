@@ -450,6 +450,7 @@ import { cfgDisabledProviders, cfgEnabledModels, cfgEnabledProviders, cfgModelRo
 import { cfgEditRecoverInlineEdits } from "./edit/settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import {
+	cfgImagesAutoResize,
 	cfgImagesBlockImages,
 	cfgStartupQuiet,
 	cfgTuiReactions,
@@ -4980,7 +4981,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				transformed = capArchiveFrameBytes(transformed, transformModel);
 				transformed = await snapcompactInline.transform(transformed, transformModel);
 				transformed = clampProviderContextImages(transformed, transformModel);
-				transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
+				transformed = await normalizeProviderContextImagesForModel(
+					transformed,
+					transformModel,
+					cfgImagesAutoResize.get(settings),
+				);
 				// After the model-specific normalizers: they carry better wording for the
 				// cases they own (STB WebP), so this stays the backstop for everything
 				// else, and it runs before the blob broker uploads any of these bytes.
