@@ -637,13 +637,17 @@ fn drop_repeated_rails(tree: &Tree, dropped: &mut [bool]) {
 	let mut rails: HashMap<String, Vec<usize>> = HashMap::new();
 	for (index, node) in walk(nodes, dropped, 0..nodes.len()) {
 		let Node::Tag(tag) = node else { continue };
-		if matches!(tag.name(), "html" | "body" | "table" | "thead" | "tbody" | "tr" | "td" | "th")
+		if matches!(tag.name(), "html" | "body" | "pre" | "code" | "table" | "thead" | "tbody" | "tr" | "td" | "th")
+			|| has_role(tag, &["table", "grid", "treegrid"])
 			|| nodes[tag.children.clone()].iter().any(
 				|node| matches!(node, Node::Tag(inner) if matches!(inner.name(), "a" | "pre" | "code")),
 			)
 			|| std::iter::successors(tree.parent(index), |&parent| tree.parent(parent))
 				.filter_map(|parent| tree.tag(parent))
-				.any(|parent| matches!(parent.name(), "pre" | "code" | "table"))
+				.any(|parent| {
+					matches!(parent.name(), "pre" | "code" | "table")
+						|| has_role(parent, &["table", "grid", "treegrid"])
+				})
 		{
 			continue;
 		}
@@ -1703,7 +1707,15 @@ fn is_pager(nodes: &[Node], tag: &Element) -> bool {
 	};
 	let last = texts.next_back().unwrap_or(first);
 	[first, last].into_iter().any(|text| {
-		if text.starts_with(ARROWS) || text.ends_with(ARROWS) {
+		// A whole linked card can end in a decorative arrow without being a
+		// previous/next control.
+		if (text.starts_with(ARROWS) || text.ends_with(ARROWS))
+			&& nodes[tag.children.clone()]
+				.iter()
+				.filter(|node| card_block(nodes, node))
+				.nth(1)
+				.is_none()
+		{
 			return true;
 		}
 		let word = text.trim_matches(|ch: char| ARROWS.contains(&ch) || ch.is_whitespace());
@@ -2050,13 +2062,15 @@ fn narrow_to_region(tree: &Tree, dropped: &mut [bool], controlled: &[bool]) -> O
 /// A link holding at least two text blocks (a title and a description).
 fn is_card(nodes: &[Node], dropped: &[bool], link: &Element) -> bool {
 	walk(nodes, dropped, link.children.clone())
-		.filter(|(_, node)| {
-			matches!(node, Node::Tag(block)
-				if (matches!(block.name(), "div" | "p" | "section") || is_heading(block.name()))
-					&& direct_text(nodes, block))
-		})
+		.filter(|(_, node)| card_block(nodes, node))
 		.nth(1)
 		.is_some()
+}
+
+fn card_block(nodes: &[Node], node: &Node) -> bool {
+	matches!(node, Node::Tag(block)
+		if (matches!(block.name(), "div" | "p" | "section") || is_heading(block.name()))
+			&& direct_text(nodes, block))
 }
 
 /// Whether an element has a non-blank text node among its own children.
@@ -2295,7 +2309,7 @@ fn names_chrome(tag: &Element) -> bool {
 		return false;
 	}
 	class_and_id(tag).any(|token| {
-		if token.contains(':') || token.starts_with("border-") {
+		if token.contains(':') || token.starts_with("border-") || token == "text-nav" {
 			return false;
 		}
 		let mut version = false;

@@ -266,6 +266,67 @@ mod tests {
 		"The researchers compared notes, checked the evidence, and revised the report. ";
 
 	#[test]
+	fn reader_preserves_repeated_code_and_aria_table_cells() {
+		let line = "<span>const repeatedValue</span><span> = veryLongObjectName.</span>\
+		            <span>getImportantValue</span><span>(anotherArgument);</span>";
+		let rail = "<span>First navigation label</span><span>Second navigation label</span>\
+		            <span>Third navigation label</span><span>Fourth navigation label</span>";
+		let html = format!(
+			"<main><h1>Source listing</h1><p>{}</p>\
+			 <div role='table' data-markdown-slug='js'>\
+			 <div role='row'><code role='cell'>{line}</code></div>\
+			 <div role='row'><code role='cell'>{line}</code></div>\
+			 <div role='row'><div role='cell'>{line}</div></div>\
+			 <div role='row'><div role='cell'>{line}</div></div></div>\
+			 <code>{line}</code><code>{line}</code>\
+			 <div>{rail}</div><div>{rail}</div></main>",
+			PROSE.repeat(4)
+		);
+		let output = selected(&html, reader);
+		assert_eq!(output.matches("getImportantValue").count(), 6, "{output}");
+		assert!(!output.contains("First navigation label"), "{output}");
+	}
+
+	#[test]
+	fn reader_keeps_linked_cards_with_arrow_but_drops_pagers() {
+		let html = format!(
+			"<main><h1>GPU prices</h1><p>{}</p><h2>Shop by memory</h2>\
+			 <div><a href='/4gb'><p>Cheapest 4GB GPU</p>\
+			 <p>Example GPU · €659</p><span>See all GPUs</span><span>→</span></a>\
+			 <a href='/8gb'><p>Cheapest 8GB GPU</p>\
+			 <p>Another GPU · €437</p><span>See all GPUs</span><span>→</span></a></div>\
+			 <a href='/next'>Next →</a></main>",
+			PROSE.repeat(3)
+		);
+		let output = selected(&html, reader);
+		for text in ["Cheapest 4GB GPU", "Example GPU", "Cheapest 8GB GPU", "Another GPU"] {
+			assert!(output.contains(text), "{text} missing from {output}");
+		}
+		assert!(!output.contains("Next →"), "{output}");
+	}
+
+	#[test]
+	fn reader_keeps_text_nav_color_utility_but_drops_navigation() {
+		let html = format!(
+			"<main><h1>Installation</h1><p>{}</p>\
+			 <div class='text-nav text-muted'>Invites are going out to our mailing list</div>\
+			 <h2>Linux <span class='text-nav'>Server only</span></h2>\
+			 <p class='text-nav'>Install the server using these instructions.</p>\
+			 <div class='nav'>Unrelated navigation</div></main>",
+			PROSE.repeat(3)
+		);
+		let output = selected(&html, reader);
+		for text in [
+			"Invites are going out to our mailing list",
+			"Server only",
+			"Install the server using these instructions.",
+		] {
+			assert!(output.contains(text), "{text} missing from {output}");
+		}
+		assert!(!output.contains("Unrelated navigation"), "{output}");
+	}
+
+	#[test]
 	fn reader_keeps_login_instructions_next_to_sign_in_actions() {
 		let html = format!(
 			"<main><h1>First API call</h1><div><div>Log in to the account</div>\

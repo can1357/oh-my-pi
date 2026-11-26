@@ -614,6 +614,9 @@ impl<'a> Writer<'a> {
 			return;
 		}
 		if self.inline_only == 0 {
+			if self.source_table(el) {
+				return;
+			}
 			if let Some(level) = self.heading_level(el) {
 				return self.heading(el, level);
 			}
@@ -1108,6 +1111,103 @@ impl<'a> Writer<'a> {
 				Node::Tag(el) => self.code_text(el.children.clone(), out, code_only),
 			}
 		}
+	}
+
+	/// A language-labelled ARIA table with one code cell per row represents
+	/// source lines rather than a data table. Keep each row, including blanks.
+	fn source_table(&mut self, el: &'a Element) -> bool {
+		if !el.attr("role").is_some_and(|role| role.trim().eq_ignore_ascii_case("table")) {
+			return false;
+		}
+		let Some(lang) = el.attr("data-markdown-slug").map(str::trim).filter(|lang| is_lang(lang)) else {
+			return false;
+		};
+		let mut code = String::new();
+		let mut rows = 0;
+		if !self.source_rows(el.children.clone(), &mut code, &mut rows) || rows == 0 {
+			return false;
+		}
+		let fence = "`".repeat(longest_run(&code, '`').max(2) + 1);
+		self.flush();
+		self.gap();
+		self.line(&[&fence, lang]);
+		for line in code.split_terminator('\n') {
+			self.line(&[line]);
+		}
+		self.line(&[&fence]);
+		self.gap();
+		true
+	}
+
+	/// Row groups may be wrapped in unlabelled structural divs, including
+	/// nested groups used to keep source lines together.
+	fn source_rows(&self, range: Range<usize>, code: &mut String, rows: &mut usize) -> bool {
+		for node in self.siblings(range) {
+			let row = match node {
+				Node::Text(text) if text.chars().all(is_ws) => continue,
+				Node::Tag(row) => row,
+				_ => return false,
+			};
+			let role = row.attr("role").map(str::trim);
+			if !role.is_some_and(|role| role.eq_ignore_ascii_case("row")) {
+				if row.name() == "div"
+					&& (role.is_none() || role.is_some_and(|role| role.eq_ignore_ascii_case("rowgroup")))
+					&& self.source_rows(row.children.clone(), code, rows)
+				{
+					continue;
+				}
+				return false;
+			}
+			let mut cell = None;
+			for node in self.siblings(row.children.clone()) {
+				if let Node::Tag(tag) = node
+					&& tag.name() == "code"
+					&& tag.attr("role").is_some_and(|role| role.trim().eq_ignore_ascii_case("cell"))
+				{
+					if cell.replace(tag).is_some() {
+						return false;
+					}
+				}
+			}
+			let Some(cell) = cell else {
+				// Selection can drop an individual code cell while retaining
+				// its row. Respect that omission without rejecting all the
+				// other source lines.
+				let mut index = row.children.start;
+				let mut dropped_cell = false;
+				while index < row.children.end {
+					let node = &self.nodes[index];
+					if let Node::Tag(tag) = node {
+						if tag.name() == "code"
+							&& tag.attr("role").is_some_and(|role| role.trim().eq_ignore_ascii_case("cell"))
+							&& self.dropped.get(index).copied().unwrap_or(false)
+						{
+							dropped_cell = true;
+						}
+						index = tag.children.end.max(index + 1);
+					} else {
+						index += 1;
+					}
+				}
+				if dropped_cell {
+					continue;
+				}
+				return false;
+			};
+			let start = code.len();
+			self.code_text(cell.children.clone(), code, false);
+			// The HTML source may include a newline before the closing code
+			// tag; the row boundary already supplies that line break.
+			if code[start..].ends_with('\n') {
+				code.pop();
+				if code[start..].ends_with('\r') {
+					code.pop();
+				}
+			}
+			code.push('\n');
+			*rows += 1;
+		}
+		true
 	}
 
 	fn pre(&mut self, el: &'a Element) {
@@ -2893,6 +2993,66 @@ mod tests {
 			md("<h3>Heading</h3><p>&nbsp;</p><p>4&nbsp;GB</p><p>&nbsp;&nbsp;</p><p>End</p>"),
 			"### Heading\n\n4\u{a0}GB\n\nEnd\n",
 		);
+	}
+
+	#[test]
+	fn language_labelled_source_rows_preserve_code_layout() {
+		assert_eq!(
+			md("<div role=\"table\" data-markdown-slug=\"js\">\
+			    <div role=\"row\"><div role=\"cell\">1</div><code role=\"cell\"><span>if (x) {</span>\n</code></div>\
+			    <div><div role=\"row\"><div role=\"cell\">2</div><code role=\"cell\">  run();\n</code></div>\
+			    <div role=\"rowgroup\"><div role=\"row\"><div role=\"cell\">3</div><code role=\"cell\">\n</code></div></div></div>\
+			    <div role=\"row\"><div role=\"cell\">4</div><code role=\"cell\">}\n</code></div>\
+			    </div>"),
+			"```js\nif (x) {\n  run();\n\n}\n```\n",
+		);
+		assert_eq!(
+			md("<div role=\"table\" data-markdown-slug=\"js\"><div role=\"row\"><div role=\"cell\">ordinary data</div></div></div>"),
+			"ordinary data\n",
+		);
+	}
+
+	#[test]
+	fn source_table_keeps_other_rows_when_a_code_cell_is_dropped() {
+		let html = "<div role=\"table\" data-markdown-slug=\"js\">\
+		    <div role=\"row\"><code role=\"cell\">first\n</code></div>\
+		    <div role=\"row\"><code role=\"cell\">excluded\n</code></div>\
+		    <div role=\"row\"><code role=\"cell\">last\n</code></div></div>";
+		let nodes = parse(html).unwrap();
+		let mut selection = Selection {
+			root: 0..nodes.len(),
+			dropped: vec![false; nodes.len()],
+			recoverable_only: false,
+		};
+		let excluded = nodes.iter().enumerate().find_map(|(index, node)| match node {
+			Node::Tag(tag) if tag.name() == "code"
+				&& nodes[tag.children.clone()].iter().any(|node| matches!(node, Node::Text(text) if text.contains("excluded"))) => Some(index),
+			_ => None,
+		}).unwrap();
+		selection.dropped[excluded] = true;
+		assert_eq!(write(&nodes, &selection, None, true), "```js\nfirst\nlast\n```\n");
+	}
+
+	#[test]
+	fn source_rows_survive_reader_selection() {
+		let html = "<html><body><div id=\"scrolling\"><div id=\"content\" class=\"content source-listing not-diff\">\
+		    <div id=\"file\" class=\"file\" role=\"table\" data-markdown-slug=\"js\">\
+		    <div role=\"row\" id=\"line-1\" class=\"source-line-with-number\">\
+		    <div role=\"cell\"><div role=\"button\" aria-expanded=\"false\" class=\"cov-strip cov-uncovered\" aria-label=\"uncovered\"></div></div>\
+		    <div role=\"cell\"><div class=\"blame-strip c2\" data-blame=\"abc\" role=\"button\"></div></div>\
+		    <div role=\"cell\" class=\"line-number\" data-line-number=\"1\"></div>\
+		    <code role=\"cell\" class=\"source-line\"><span class=\"syn_comment\">/* Header */</span>\n</code></div>\
+		    <div class=\"nesting-container nesting-depth-0\" data-nesting-sym=\"1-0\">\
+		    <div role=\"row\" id=\"line-2\" class=\"source-line-with-number nesting-sticky-line\">\
+		    <div role=\"cell\" class=\"line-number\" data-line-number=\"2\"></div>\
+		    <code role=\"cell\" class=\"source-line\">  <span class=\"syn_reserved\">return</span> value;\n</code></div>\
+		    <div role=\"row\" id=\"line-3\" class=\"source-line-with-number\">\
+		    <div role=\"cell\" class=\"line-number\" data-line-number=\"3\"></div>\
+		    <code role=\"cell\" class=\"source-line\">\n</code></div></div>\
+		    </div></div></div></body></html>";
+		let nodes = parse(html).unwrap();
+		let selection = crate::select::reader(&nodes, crate::Hidden::Drop);
+		assert_eq!(write(&nodes, &selection, None, true), "```js\n/* Header */\n  return value;\n\n```\n");
 	}
 
 	#[test]
