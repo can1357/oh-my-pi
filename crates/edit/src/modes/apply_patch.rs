@@ -4,21 +4,20 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	path::{Path, PathBuf},
-	sync::{Arc, LazyLock},
+	sync::Arc,
 };
-
-use regex::Regex;
 
 use super::patch::{Operation, PatchEngine, PatchInput, stage_patch};
 use crate::{
 	engine::{
-		EditMode, FileOp, FileOpIntent, Inspection, ModeEngine, PreviewFile, Resolved, StagedFile,
+		EditMode, FileOp, FileOpIntent, Inspection, Location, ModeEngine, PreviewFile, Resolved,
+		StagedFile,
 	},
 	error::{EditError, Rejection},
 	files::{FileRead, FileSource},
-	notebook::{is_notebook_path, notebook_to_editable_text},
-	path_policy::{PathPolicy, canonical_key},
+	notebook::notebook_to_editable_text,
+	path_policy::PathPolicy,
+	scan::{keyword, space},
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{LineEnding, detect_line_ending, js_trim, normalize_to_lf, strip_bom},
@@ -31,22 +30,52 @@ const DELETE_FILE_MARKER: &str = "*** Delete File: ";
 const UPDATE_FILE_MARKER: &str = "*** Update File: ";
 const MOVE_TO_MARKER: &str = "*** Move to: ";
 
-static PATH_NOISE_FILE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^\s*\*{3}\s*(?:Add|Update|Delete)\s+File\s*:\s*")
-		.expect("valid path-noise regex")
-});
-static PATH_NOISE_MOVE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^\s*\*{3}\s*Move\s+to\s*:\s*").expect("valid move-noise regex")
-});
-static ENVELOPE_PATH: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?m)^\s*\*{3}\s+(?:Add|Update|Delete)\s+File\s*:\s*(\S.*?)\s*$")
-		.expect("valid apply-patch path regex")
-});
+/// Strips a file or move header accidentally nested in a path.
+fn strip_path_header<'a>(value: &'a str, verbs: &[&str], noun: &str) -> Option<&'a str> {
+	let rest = value.trim_start().strip_prefix("***")?.trim_start();
+	let rest = verbs.iter().find_map(|verb| keyword(rest, verb))?;
+	let rest = keyword(space(rest)?, noun)?;
+	Some(rest.trim_start().strip_prefix(':')?.trim_start())
+}
 
 /// Remove an accidentally nested apply-patch header from a path.
 pub fn strip_apply_patch_path_noise(value: &str) -> String {
-	let value = PATH_NOISE_FILE.replace(value, "");
-	PATH_NOISE_MOVE.replace(&value, "").into_owned()
+	let value = strip_path_header(value, &["Add", "Update", "Delete"], "File").unwrap_or(value);
+	strip_path_header(value, &["Move"], "to")
+		.unwrap_or(value)
+		.to_owned()
+}
+
+/// Parses a case-sensitive file header and finds the start of its path.
+fn envelope_path_start(line: &str) -> Option<&str> {
+	let rest = space(line.strip_prefix("***")?)?;
+	let rest = rest
+		.strip_prefix("Add")
+		.or_else(|| rest.strip_prefix("Update"))
+		.or_else(|| rest.strip_prefix("Delete"))?;
+	let rest = space(rest)?.strip_prefix("File")?;
+	let path = rest.trim_start().strip_prefix(':')?.trim_start();
+	(!path.is_empty()).then_some(path)
+}
+
+/// Finds authored paths in an envelope, including headers with wrapped
+/// whitespace.
+fn envelope_paths(mut input: &str) -> impl Iterator<Item = &str> {
+	std::iter::from_fn(move || {
+		loop {
+			let line = input.trim_start();
+			if line.is_empty() {
+				return None;
+			}
+			if let Some(path) = envelope_path_start(line) {
+				let (path, rest) = path.split_once('\n').unwrap_or((path, ""));
+				// Any remaining whitespace is also skipped before the next header.
+				input = rest;
+				return Some(path.trim_end());
+			}
+			input = line.split_once('\n')?.1;
+		}
+	})
 }
 
 /// One parsed Codex envelope entry.
@@ -276,22 +305,22 @@ enum VirtualFile {
 /// a path that an earlier section deleted or moved.
 struct VirtualFiles<'a> {
 	source: &'a mut dyn FileSource,
-	state:  HashMap<PathBuf, Option<VirtualFile>>,
+	state:  HashMap<Location, Option<VirtualFile>>,
 }
 
 impl VirtualFiles<'_> {
 	fn record(&mut self, file: &StagedFile) {
 		if file.op == FileOp::Delete || file.move_to.is_some() {
-			self.state.insert(canonical_key(&file.absolute), None);
+			self.state.insert(file.location.canonical_key(), None);
 		}
 		if let Some(raw) = &file.persisted {
 			let target = file
 				.move_to
 				.as_ref()
-				.map_or(&file.absolute, |to| &to.absolute);
+				.map_or(&file.location, |to| &to.location);
 			self
 				.state
-				.insert(canonical_key(target), Some(VirtualFile::Raw(raw.clone())));
+				.insert(target.canonical_key(), Some(VirtualFile::Raw(raw.clone())));
 		}
 	}
 }
@@ -303,17 +332,17 @@ impl FileSource for VirtualFiles<'_> {
 
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
 		let resolved = self.source.resolve(authored, false)?;
-		if self.state.contains_key(&canonical_key(&resolved.absolute)) || !must_exist {
+		if self.state.contains_key(&resolved.location.canonical_key()) || !must_exist {
 			return Ok(resolved);
 		}
 		self.source.resolve(authored, true)
 	}
 
-	fn exists(&mut self, absolute: &Path) -> bool {
+	fn exists(&mut self, location: &Location) -> bool {
 		self
 			.state
-			.get(&canonical_key(absolute))
-			.map_or_else(|| self.source.exists(absolute), Option::is_some)
+			.get(&location.canonical_key())
+			.map_or_else(|| self.source.exists(location), Option::is_some)
 	}
 
 	fn read(&mut self, authored: &str) -> Result<Arc<FileRead>, EditError> {
@@ -327,7 +356,7 @@ impl FileSource for VirtualFiles<'_> {
 	}
 
 	fn try_read(&mut self, resolved: &Resolved) -> Result<Option<Arc<FileRead>>, EditError> {
-		let key = canonical_key(&resolved.absolute);
+		let key = resolved.location.canonical_key();
 		let Some(state) = self.state.remove(&key) else {
 			return self.source.try_read(resolved);
 		};
@@ -344,7 +373,7 @@ impl FileSource for VirtualFiles<'_> {
 				{
 					return Err(EditError::apply(message));
 				}
-				let is_notebook = is_notebook_path(&resolved.absolute);
+				let is_notebook = resolved.location.is_notebook();
 				let (bom, body) = strip_bom(&raw);
 				let ending = if is_notebook {
 					LineEnding::Lf
@@ -419,7 +448,7 @@ fn stage_entries(
 			let resolved = files
 				.resolve(path, group[0].op != Operation::Create)
 				.map_err(|error| wrap_file_error(path, error, multiple_files))?;
-			let mut exists = files.exists(&resolved.absolute);
+			let mut exists = files.exists(&resolved.location);
 			for entry in group {
 				match entry.op {
 					Operation::Create if exists => {
@@ -506,11 +535,7 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 }
 
 fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<FileOpIntent>) {
-	let paths = ENVELOPE_PATH
-		.captures_iter(input)
-		.filter_map(|capture| capture.get(1).map(|value| value.as_str().trim().to_owned()))
-		.filter(|path| !path.is_empty())
-		.collect::<Vec<_>>();
+	let paths = envelope_paths(input).map(str::to_owned).collect::<Vec<_>>();
 	let entries = parse_apply_patch(input)
 		.or_else(|_| parse_apply_patch_streaming(input))
 		.unwrap_or_default();

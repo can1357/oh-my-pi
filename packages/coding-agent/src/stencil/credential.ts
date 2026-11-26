@@ -1,5 +1,5 @@
 import { STREAM_AUTH_ENV, STREAM_AUTH_PROVIDER } from "@oh-my-pi/pi-wire";
-import { discoverAuthStorage } from "../sdk";
+import { discoverSessionAuthStorage as discoverAuthStorage } from "../session/auth-broker-config";
 import type { AuthStorage } from "../session/auth-storage";
 
 /**

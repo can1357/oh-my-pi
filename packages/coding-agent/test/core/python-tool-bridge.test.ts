@@ -1,7 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isEvalTimeoutControlEvent } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
-import { PYTHON_PRELUDE } from "@oh-my-pi/pi-coding-agent/eval/py/prelude";
 import {
 	disposePyToolBridge,
 	ensurePyToolBridge,
@@ -9,8 +8,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { $which, isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { runPrelude } from "../eval/py/run-prelude";
 
 interface FakeCall {
 	id: string;
@@ -125,53 +125,23 @@ describe("Python tool bridge HTTP server", () => {
 			toolSession: makeSession(new Map([["constrained", constrained]])),
 		});
 		try {
-			const prelude = PYTHON_PRELUDE.replace(
-				"from __future__ import annotations",
-				"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
-			);
-			const script = `${prelude}
-__omp_run_id__ = "run"
-async def check_intent():
-    print(await tool.constrained())
-    print(await tool.constrained(i=None))
-    print(await tool.constrained(i="allowed"))
-    try:
-        await tool.constrained(i="py prelude")
-    except RuntimeError:
-        print("invalid rejected")
-    else:
-        raise AssertionError("Invalid tool-owned intent reached execution")
-asyncio.run(check_intent())
+			const code = `print(await tool.constrained())
+print(await tool.constrained(i=None))
+print(await tool.constrained(i="allowed"))
+try:
+    await tool.constrained(i="py prelude")
+except RuntimeError:
+    print("invalid rejected")
+else:
+    raise AssertionError("Invalid tool-owned intent reached execution")
 `;
-			// Feed the script over stdin: the inlined prelude exceeds Windows spawn limits via `-c`.
-			const child = Bun.spawn([Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python"), "-"], {
-				stdin: new Response(script),
-				stdout: "pipe",
-				stderr: "pipe",
-				signal: AbortSignal.timeout(10_000),
-				env: {
-					...process.env,
-					PI_TOOL_BRIDGE_URL: info.url,
-					PI_TOOL_BRIDGE_TOKEN: info.token,
-					PI_TOOL_BRIDGE_SESSION: sessionId,
-				},
+			const output = await runPrelude(code, {
+				PI_TOOL_BRIDGE_URL: info.url,
+				PI_TOOL_BRIDGE_TOKEN: info.token,
+				PI_TOOL_BRIDGE_SESSION: sessionId,
 			});
-			try {
-				const [exitCode, stdout, stderr] = await Promise.all([
-					child.exited,
-					new Response(child.stdout).text(),
-					new Response(child.stderr).text(),
-				]);
-				expect({ exitCode, stdout: stdout.replaceAll("\r\n", "\n"), stderr }).toEqual({
-					exitCode: 0,
-					stdout: "omitted\nomitted\nallowed\ninvalid rejected\n",
-					stderr: "",
-				});
-				expect(executions).toBe(3);
-			} finally {
-				child.kill();
-				await child.exited;
-			}
+			expect(output).toBe("omitted\nomitted\nallowed\ninvalid rejected\n");
+			expect(executions).toBe(3);
 		} finally {
 			unregister();
 		}
@@ -350,51 +320,20 @@ asyncio.run(check_intent())
 			shadowCell,
 		});
 		try {
-			const prelude = PYTHON_PRELUDE.replace(
-				"from __future__ import annotations",
-				"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
-			);
-			// Mirror the runner rewrite shape: `await tool.read({...})` becomes
-			// `await __omp_with_call_site__(siteId, tool.read, {...})`.
-			const script = `${prelude}
-__omp_run_id__ = "run"
-async def check_identity():
-    print(await __omp_with_call_site__("py:0", tool.read, {"path": "foo.txt"}))
-    print(await __omp_with_call_site__("py:0", tool.read, {"path": "foo.txt"}))
-asyncio.run(check_identity())
-`;
-			const child = Bun.spawn([Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python"), "-"], {
-				stdin: new Response(script),
-				stdout: "pipe",
-				stderr: "pipe",
-				signal: AbortSignal.timeout(10_000),
-				env: {
-					...process.env,
-					PI_TOOL_BRIDGE_URL: info.url,
-					PI_TOOL_BRIDGE_TOKEN: info.token,
-					PI_TOOL_BRIDGE_SESSION: sessionId,
-				},
+			const code = `for _ in range(2):
+    print(await tool.read({"path": "foo.txt"}))`;
+			const output = await runPrelude(code, {
+				PI_TOOL_BRIDGE_URL: info.url,
+				PI_TOOL_BRIDGE_TOKEN: info.token,
+				PI_TOOL_BRIDGE_SESSION: sessionId,
 			});
-			try {
-				const [exitCode, stdout, stderr] = await Promise.all([
-					child.exited,
-					new Response(child.stdout).text(),
-					new Response(child.stderr).text(),
-				]);
-				expect({ exitCode, stdout: stdout.replaceAll("\r\n", "\n"), stderr }).toEqual({
-					exitCode: 0,
-					stdout: "file body\nfile body\n",
-					stderr: "",
-				});
-				expect(claims).toEqual([
-					{ name: "read", args: { path: "foo.txt" }, identity: { siteId: "py:0", occurrence: 0 } },
-					{ name: "read", args: { path: "foo.txt" }, identity: { siteId: "py:0", occurrence: 1 } },
-				]);
-				expect(calls).toHaveLength(2);
-			} finally {
-				child.kill();
-				await child.exited;
-			}
+			expect(output).toBe("file body\nfile body\n");
+			const siteId = `py:${code.indexOf("tool.read")}`;
+			expect(claims).toEqual([
+				{ name: "read", args: { path: "foo.txt" }, identity: { siteId, occurrence: 0 } },
+				{ name: "read", args: { path: "foo.txt" }, identity: { siteId, occurrence: 1 } },
+			]);
+			expect(calls).toHaveLength(2);
 		} finally {
 			unregister();
 		}

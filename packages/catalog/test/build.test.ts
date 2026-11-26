@@ -10,7 +10,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { defaultSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels, getBundledModelSlice } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	deepinfraModelManagerOptions,
@@ -856,6 +856,23 @@ describe("openai-completions wire-quirk compat detection", () => {
 		);
 	});
 
+	it("splits multi-call assistant turns only for Llama 3 models", () => {
+		// vLLM's Llama 3 chat templates reject an assistant message with several tool
+		// calls; Llama 4's template takes parallel calls.
+		expect(resolveModelPolicy(openrouterSpec({ id: "meta-llama/llama-3.1-8b-instruct" })).compat.splitToolCalls).toBe(
+			true,
+		);
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "custom", id: "llama3.3:70b", baseUrl: "http://localhost:8000/v1" }),
+			).compat.splitToolCalls,
+		).toBe(true);
+		expect(resolveModelPolicy(openrouterSpec({ id: "meta-llama/llama-4-maverick" })).compat.splitToolCalls).toBe(
+			false,
+		);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemma-3-12b-it" })).compat.splitToolCalls).toBe(false);
+	});
+
 	it("flags cumulative reasoning deltas for MiniMax provider or id", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "minimax" })).compat.reasoningDeltasMayBeCumulative).toBe(
 			true,
@@ -1485,7 +1502,19 @@ describe("model cache materialized round trip", () => {
 		expect(fingerprintStaticModels(staticModels)).not.toBe(initial);
 
 		const frozen = Object.freeze([completionsSpec({ id: "frozen-fingerprint-model" })]);
-		expect(() => fingerprintStaticModels(frozen)).not.toThrow();
+		const initialFrozen = fingerprintStaticModels(frozen);
+		frozen[0]!.name = "Changed inside frozen array";
+		expect(fingerprintStaticModels(frozen)).not.toBe(initialFrozen);
+	});
+
+	it("preserves bundled content and policy identities across shared slice lookups", () => {
+		const shared = getBundledModelSlice("anthropic");
+		const copy = getBundledModels("anthropic");
+		expect(getBundledModelSlice("anthropic")).toBe(shared);
+		expect(Object.isFrozen(shared)).toBe(true);
+		for (const policy of [{}, { additive: true }, { authoritative: true }, { authoritative: true, additive: true }]) {
+			expect(fingerprintStaticModels(shared, policy)).toBe(fingerprintStaticModels(copy, policy));
+		}
 	});
 
 	it("uses generator-materialized bundled rows without rebuilding them", async () => {

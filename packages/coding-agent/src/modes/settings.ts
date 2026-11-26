@@ -1,28 +1,27 @@
 import { combine, effect, register, type Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
-import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
-import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { TREE_FILTER_MODES } from "./view-model/overlays/tree-selector";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
 	STATUS_LINE_PRESET_VALUES,
 	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
-} from "@oh-my-pi/pi-tui/status-line/schema";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
-import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
-import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
-import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
-import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
-import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
-import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
-import { DEFAULT_MAX_FPS, parseMaxFps, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
-import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
-import { parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
+} from "../config/status-line-schema";
+import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
+import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
+import { parseSpinnerInterval } from "../config/spinner-interval";
+import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
+import { setTightLayout } from "../ui/styles/terminal-padding";
+import { setColorBlindMode, setSymbolPreset, setThemeSlot } from "../ui/theme/service";
+import {
+	DEFAULT_INLINE_IMAGE_COLUMNS,
+	DEFAULT_INLINE_IMAGE_ROWS,
+	setInlineImageLimits,
+} from "../ui/transcript/messages/image";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -73,7 +72,7 @@ export const cfgThemeDark = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeDark, name => setAutoThemeMapping("dark", name));
+effect(cfgThemeDark, name => setThemeSlot("dark", name));
 
 export const cfgThemeLight = register({
 	id: "theme.light",
@@ -87,7 +86,7 @@ export const cfgThemeLight = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeLight, name => setAutoThemeMapping("light", name));
+effect(cfgThemeLight, name => setThemeSlot("light", name));
 
 export const cfgSymbolPreset = register({
 	id: "symbolPreset",
@@ -138,7 +137,6 @@ export const cfgComposerShape = register({
 		options: "runtime",
 	},
 });
-effect(cfgComposerShape, setEditorGapComposerShape);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",
@@ -337,23 +335,23 @@ export const cfgImagesBlockImages = register({
 	},
 });
 
+/** The width limit for transcript images, in columns. */
 export const cfgTuiMaxInlineImageColumns = register({
 	id: "tui.maxInlineImageColumns",
 	type: "number",
-	default: 100,
-	description:
-		"Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
+	default: DEFAULT_INLINE_IMAGE_COLUMNS,
+	description: `Maximum width in terminal columns for inline images (default ${DEFAULT_INLINE_IMAGE_COLUMNS}). Set to 0 for unlimited (bounded only by terminal width).`,
 });
-effect(cfgTuiMaxInlineImageColumns, setInlineImageMaxColumns);
 
+/** The height limit for transcript images, in rows. */
 export const cfgTuiMaxInlineImageRows = register({
 	id: "tui.maxInlineImageRows",
 	type: "number",
-	default: 20,
-	description:
-		"Maximum height in terminal rows for inline images (default 20). Set to 0 to use only the viewport-based limit (60% of terminal height).",
+	default: DEFAULT_INLINE_IMAGE_ROWS,
+	description: `Maximum height in terminal rows for inline images (default ${DEFAULT_INLINE_IMAGE_ROWS}). Set to 0 to use only the viewport-based limit (60% of terminal height).`,
 });
-effect(cfgTuiMaxInlineImageRows, setInlineImageMaxRows);
+
+effect(combine({ columns: cfgTuiMaxInlineImageColumns, rows: cfgTuiMaxInlineImageRows }), setInlineImageLimits);
 
 export const cfgTuiMaxInlineImages = register({
 	id: "tui.maxInlineImages",
@@ -623,7 +621,6 @@ export const cfgTuiMaxFps = register({
 		],
 	},
 });
-effect(cfgTuiMaxFps, setMaxFps);
 
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
@@ -638,9 +635,6 @@ export const cfgTuiHyperlinks = register({
 			"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 	},
 });
-// Also re-applied when a project-scoped reload (`/move`, cross-project resume, rollback) changes the
-// effective value, so pi-tui renderers gating on the shared flag track it the same instant path links do.
-effect(cfgTuiHyperlinks, applyHyperlinkSetting);
 
 export const cfgTuiMouse = register({
 	id: "tui.mouse",
@@ -657,6 +651,7 @@ export const cfgTuiMouse = register({
 	},
 });
 
+/** Whether terminal output removes a cell of horizontal padding on each side. */
 export const cfgTuiTight = register({
 	id: "tui.tight",
 	type: "boolean",
@@ -665,9 +660,12 @@ export const cfgTuiTight = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Tight Layout",
-		description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
+		description:
+			"Remove the standard one-cell horizontal inset from terminal output; message bubbles and tool frames keep their padding",
 	},
 });
+
+effect(cfgTuiTight, setTightLayout);
 
 export const cfgDisplayShimmer = register({
 	id: "display.shimmer",
@@ -714,16 +712,12 @@ export const cfgMotionResolved = combine(
 		const preset = MOTION_PRESETS[mode];
 		return {
 			spinnerInterval: spinnerInterval ?? preset.spinnerInterval,
+			titleSpinnerInterval: spinnerInterval ?? preset.titleSpinnerInterval,
 			shimmer: preset.effects ? shimmer : ("disabled" as const),
 			effects: preset.effects,
 		};
 	},
 );
-effect(cfgMotionResolved, motion => {
-	setSpinnerInterval(motion.spinnerInterval);
-	setShimmerMode(motion.shimmer);
-	setMotionEffects(motion.effects);
-});
 
 export const cfgDisplayPinnedAgents = register({
 	id: "display.pinnedAgents",
@@ -848,19 +842,17 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 		],
 	},
 });
-effect(
-	combine({
-		hideToolActivity: cfgDisplayHideToolActivity,
-		shellVisualization: cfgDisplayShellVisualization,
-		readToolResultPreview: cfgReadToolResultPreview,
-		showImages: cfgTerminalShowImages,
-		cacheMissMarker: cfgDisplayCacheMissMarker,
-		showTokenUsage: cfgDisplayShowTokenUsage,
-		showTurnTime: cfgDisplayShowTurnTime,
-		advisorCollapsedLines: cfgDisplayAdvisorCollapsedLines,
-	}),
-	setChatTranscriptDisplayPreferences,
-);
+/** Transcript display preferences the shell applies to its tool, message and image blocks. */
+export const cfgTranscriptDisplay = combine({
+	hideToolActivity: cfgDisplayHideToolActivity,
+	shellVisualization: cfgDisplayShellVisualization,
+	readToolResultPreview: cfgReadToolResultPreview,
+	showImages: cfgTerminalShowImages,
+	cacheMissMarker: cfgDisplayCacheMissMarker,
+	showTokenUsage: cfgDisplayShowTokenUsage,
+	showTurnTime: cfgDisplayShowTurnTime,
+	advisorCollapsedLines: cfgDisplayAdvisorCollapsedLines,
+});
 
 export const cfgDisplayCollapseCompacted = register({
 	id: "display.collapseCompacted",
@@ -895,7 +887,8 @@ export const cfgTuiImeSafeCursor = register({
 		tab: "appearance",
 		group: "Display",
 		label: "IME-Safe Prompt Layout",
-		description: "Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it",
+		description:
+			"Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it. Requires Show Hardware Cursor.",
 	},
 });
 
@@ -984,7 +977,57 @@ export const cfgTuiVimModeDisplay = register({
 		options: [
 			{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE, REPLACE" },
 			{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
-			{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			{
+				value: "none",
+				label: "Hidden",
+				description: "Do not show the mode; a command being typed still shows with Vim Show Command",
+			},
+		],
+	},
+});
+
+export const cfgTuiVimShowCommand = register({
+	id: "tui.vimShowCommand",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Show Command",
+		description:
+			"Show the command being typed in the status line, like Vim's showcmd: 15d before its last d. Shows even when the mode indicator is hidden",
+		condition: "vimModeEnabled",
+	},
+});
+
+export const cfgTuiVimYankToClipboard = register({
+	id: "tui.vimYankToClipboard",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Yanks Copy to Clipboard",
+		description:
+			'Every Vim yank also copies to the system clipboard, as in Vim with clipboard=unnamed. Off: only "+y and "*y do',
+		condition: "vimModeEnabled",
+	},
+});
+
+export const cfgTuiVimStartMode = register({
+	id: "tui.vimStartMode",
+	type: "enum",
+	values: ["insert", "normal"] as const,
+	default: "insert",
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Start Mode",
+		description: "Mode each new prompt starts in: at startup, after each message you send, and in dialog text boxes",
+		condition: "vimModeEnabled",
+		options: [
+			{ value: "insert", label: "Insert", description: "Type right away; Escape for Normal mode" },
+			{ value: "normal", label: "Normal", description: "Start on Vim commands; i, a, o and the like to type" },
 		],
 	},
 });
@@ -1221,7 +1264,6 @@ export const cfgEmojiAutocomplete = register({
 		description: "Suggest emojis from `:name:` shortcodes and expand text emoticons like `:D` or `:-)`",
 	},
 });
-effect(cfgEmojiAutocomplete, setEmojiAutocompleteEnabled);
 
 export const cfgPasteLargeMenuThreshold = register({
 	id: "paste.largeMenuThreshold",
@@ -1232,7 +1274,7 @@ export const cfgPasteLargeMenuThreshold = register({
 		group: "Input",
 		label: "Large Paste Menu",
 		description:
-			"When a paste reaches this many lines, offer a menu to wrap it in a code block, wrap it in XML tags, or save it to a file. 0 disables the menu (large pastes still collapse to a [Paste] marker).",
+			"When a paste reaches this many lines, offer a menu to wrap it in a code block, wrap it in XML tags, or save it to a file. 0 disables the menu (large pastes still collapse to a chip).",
 		options: [
 			{ value: "0", label: "Off" },
 			{ value: "100", label: "100 lines" },

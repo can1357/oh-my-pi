@@ -9,15 +9,10 @@ import * as fsp from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import {
-	truncateHead,
-	truncateHeadBytes,
-	truncateTail,
-	truncateTailBytes,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import type { DaemonReadySpec } from "@oh-my-pi/pi-tui/tools/daemon";
-import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { killProcessFamily, Process, type PtyRunResult, PtySession, processOutputFiles } from "@oh-my-pi/pi-natives";
+import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../tools/streaming-output";
+import type { DaemonReadySpec } from "./daemon-types";
+import { errorMessage, isEnoent, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
@@ -31,7 +26,6 @@ import {
 	DAEMON_OUTPUT_PATTERN_FLAGS,
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
-	DAEMON_RESUME_LEASE_GRACE_MS,
 	type DaemonCompletionEvent,
 	type DaemonEvent,
 	type DaemonLogs,
@@ -94,6 +88,8 @@ export interface UnitTableOptions {
 	modules: readonly DaemonModule[];
 	/** Started from a re-exec: restore `survive: "exec"` units and hold idle timers for the grace period. */
 	resumed: boolean;
+	/** How long dropped and restored leases are waited for before idle timers resume (`DAEMON_RESUME_LEASE_GRACE_MS` by default). */
+	leaseGraceMs: number;
 	/** Any unit became live or terminal; the server re-evaluates its own idle exit. */
 	onLivenessChange(): void;
 }
@@ -169,10 +165,6 @@ function isTerminal(state: UnitSnapshot["state"]): boolean {
 
 function isSettled(state: UnitSnapshot["state"]): boolean {
 	return isTerminal(state) || state === "restarting";
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function identity(kind: string, scope: UnitScope, key: string): string {
@@ -428,6 +420,17 @@ function syncReadyPending(entry: UnitEntry): void {
 	entry.snapshot.readyPending = pending.length > 0 ? pending : undefined;
 }
 
+/**
+ * Stop a process the daemon adopted rather than launched: TERM its tree, then SIGKILL its whole
+ * family. Its process group is never signalled as such: unlike a launched unit's process it need
+ * not lead one, and the group it is in may be its launcher's.
+ */
+async function terminateAdopted(target: Process, timeoutMs: number): Promise<void> {
+	target.killTree(os.constants.signals.SIGTERM);
+	if (await target.waitForExit({ timeoutMs })) return;
+	killProcessFamily([target.pid]);
+}
+
 function defaultProcPolicy(proc: ProcSpec, hold: UnitPolicy["hold"] | undefined): UnitPolicy {
 	const detached = hold === "detached";
 	return {
@@ -445,6 +448,7 @@ export class UnitTable {
 	readonly #modules = new Map<string, DaemonModule>();
 	readonly #contexts = new Map<string, ModuleContext>();
 	readonly #resumed: boolean;
+	readonly #leaseGraceMs: number;
 	readonly #onLivenessChange: () => void;
 	readonly #units = new Map<string, UnitEntry>();
 	readonly #byIdentity = new Map<string, UnitEntry>();
@@ -467,6 +471,7 @@ export class UnitTable {
 	constructor(options: UnitTableOptions) {
 		this.#store = options.store;
 		this.#resumed = options.resumed;
+		this.#leaseGraceMs = options.leaseGraceMs;
 		this.#onLivenessChange = options.onLivenessChange;
 		for (const module of options.modules) this.#modules.set(module.kind, module);
 	}
@@ -488,9 +493,9 @@ export class UnitTable {
 			}
 		}
 		if (this.#resumed) {
-			this.#holdIdleUntil = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
+			this.#holdIdleUntil = Date.now() + this.#leaseGraceMs;
 			// The daemon's own idle exit is held too; look again once the grace ends.
-			setTimeout(() => this.#onLivenessChange(), DAEMON_RESUME_LEASE_GRACE_MS + 50);
+			setTimeout(() => this.#onLivenessChange(), this.#leaseGraceMs + 50);
 			for (const fd of this.#readInheritedFds()) this.#inheritedFds.add(fd);
 		}
 		this.#store.setMeta(INHERITED_FDS_META, "[]");
@@ -573,6 +578,9 @@ export class UnitTable {
 		}
 		let entry = this.#byIdentity.get(id);
 		let created = false;
+		if (request.adopt !== undefined && entry && !isTerminal(entry.snapshot.state)) {
+			throw new Error(`Service ${request.key} already exists`);
+		}
 		if (entry && !isTerminal(entry.snapshot.state) && entry.snapshot.state !== "stopping" && !request.replace) {
 			// Adopt the live unit.
 		} else {
@@ -588,6 +596,11 @@ export class UnitTable {
 		entry.lastUsed = Date.now();
 		let lease: string | undefined;
 		if (request.lease !== false) lease = this.#addLease(entry, connection);
+		// The connection closed while this open waited for the unit, so `disconnected` already ran without this lease.
+		if (lease !== undefined && connection.closed) {
+			this.#dropConnectionLeases(connection.client.connectionId);
+			lease = undefined;
+		}
 		if (request.awaitReady !== false) {
 			try {
 				if (entry.procRuntime && entry.proc?.ready) {
@@ -632,7 +645,7 @@ export class UnitTable {
 	async mode(operation: Op<"mode">): Promise<DaemonResults["mode"]> {
 		const entry = this.#resolve(operation.unit);
 		const proc = entry.proc;
-		if (!proc || !entry.procRuntime) throw new Error(`Unit ${entry.snapshot.key} is not a supervised process`);
+		if (!entry.procRuntime) throw new Error(`Unit ${entry.snapshot.key} is not a supervised process`);
 		await this.#refreshDetached(entry);
 		if (isTerminal(entry.snapshot.state) || entry.snapshot.state === "stopping") {
 			throw new Error(`Unit ${entry.snapshot.key} is ${entry.snapshot.state}`);
@@ -644,6 +657,8 @@ export class UnitTable {
 				entry.snapshot.policy = { ...policy, hold: "detached" };
 				this.#transition(entry);
 				this.#evaluateIdle(entry);
+			} else if (!proc) {
+				throw new Error(`Unit ${entry.snapshot.key} has no launch command to relaunch detached`);
 			} else {
 				entry.proc = { ...proc, pty: false };
 				entry.snapshot.policy = { ...policy, hold: "detached", survive: "detached" };
@@ -954,14 +969,7 @@ export class UnitTable {
 	disconnected(connection: UnitConnection): void {
 		const connectionId = connection.client.connectionId;
 		this.#watchers.delete(connection);
-		// A dropped connection is not a release: give its client time to reconnect and retake the lease.
-		const graceUntil = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
-		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
-			const entry = this.#leases.get(leaseId)?.entry;
-			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
-			this.#dropLease(leaseId);
-		}
-		this.#connectionLeases.delete(connectionId);
+		this.#dropConnectionLeases(connectionId);
 		for (const [owner, registration] of this.#ownerConnections) {
 			if (registration.connection.client.connectionId === connectionId) this.#ownerConnections.delete(owner);
 		}
@@ -1248,7 +1256,11 @@ export class UnitTable {
 		request: OpenRequest,
 		existing: UnitEntry | undefined,
 	): Promise<UnitEntry> {
-		if (request.kind === "proc") return this.#createProc(request, existing);
+		if (request.kind === "proc") {
+			return request.adopt === undefined
+				? this.#createProc(request, existing)
+				: this.#adoptProc(request, request.adopt, existing);
+		}
 		const module = this.#modules.get(request.kind);
 		if (!module) throw new Error(`Unknown daemon unit kind ${request.kind}`);
 		if (existing && !isTerminal(existing.snapshot.state)) await this.#stopEntry(existing, 2_000, "replaced");
@@ -1431,6 +1443,103 @@ export class UnitTable {
 		return entry;
 	}
 
+	/**
+	 * A `proc` unit over the running process `pid` (`o2ctl services add`), watched like a re-adopted
+	 * detached unit: by pid liveness, its output read from the file its stdout (else stderr)
+	 * writes, linked in as the unit log. It is stopped through its process family and never
+	 * relaunched.
+	 */
+	async #adoptProc(request: OpenRequest, pid: number, existing: UnitEntry | undefined): Promise<UnitEntry> {
+		if (!SERVICE_NAME.test(request.key)) {
+			throw new Error("Service name must be 1-48 letters, numbers, dots, underscores, or hyphens");
+		}
+		if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`Invalid pid ${pid}`);
+		if (pid === process.pid) throw new Error("The daemon cannot adopt itself");
+		try {
+			process.kill(pid, 0);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ESRCH") throw new Error(`No process with pid ${pid}`);
+			if (code === "EPERM") throw new Error(`Process ${pid} belongs to another user`);
+			throw error;
+		}
+		const target = Process.fromPid(pid);
+		if (!target || target.status() !== "running") throw new Error(`No process with pid ${pid}`);
+		for (const other of this.#units.values()) {
+			if (!isTerminal(other.snapshot.state) && other.snapshot.pids.includes(pid)) {
+				throw new Error(`Process ${pid} already belongs to ${other.snapshot.kind} unit ${other.snapshot.key}`);
+			}
+		}
+		const policy: UnitPolicy = {
+			hold: "leases",
+			idleMs: 0,
+			onIdle: "stop",
+			...request.policy,
+			restart: "no",
+			survive: "detached",
+		};
+		await this.#enforceCap("proc", request.scope, policy.cap);
+		const now = Date.now();
+		const entry = this.#newEntry({
+			id: crypto.randomUUID(),
+			kind: "proc",
+			scope: request.scope,
+			key: request.key,
+			label: request.label ?? request.key,
+			policy,
+			now,
+			owner: request.owner,
+			supervised: false,
+		});
+		const snapshot = entry.snapshot;
+		snapshot.adopted = true;
+		snapshot.command = target.args().join(" ") || undefined;
+		snapshot.state = "running";
+		snapshot.pids = [pid];
+		entry.pidStartedAt = target.startTime() ?? undefined;
+		snapshot.startedAt = entry.pidStartedAt ?? now;
+		const files = processOutputFiles(pid);
+		const output = files.stdout ?? files.stderr;
+		const dir = unitLogDir(snapshot.id);
+		await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+		if (output !== undefined) {
+			try {
+				const logPath = path.join(dir, LOG_FILE);
+				await fsp.symlink(output, logPath);
+				// What it wrote before the adoption is in the log but not new output.
+				entry.outputOffset = (await fsp.stat(logPath)).size;
+				snapshot.outputBytes = entry.outputOffset;
+			} catch (error) {
+				await fsp.rm(dir, { recursive: true, force: true });
+				throw error;
+			}
+		}
+		if (existing) {
+			await existing.procRuntime?.log?.close();
+			entry.pendingCompletions = existing.pendingCompletions;
+			existing.pendingCompletions = [];
+			this.#removeEntry(existing);
+		}
+		const owner = request.owner;
+		entry.completion = {
+			capable: owner !== undefined && this.#subscriptions.has(owner),
+			subscriptionId: owner === undefined ? undefined : this.#subscriptions.get(owner),
+		};
+		entry.procRuntime = {
+			launch: 1,
+			stopRequested: false,
+			logReady: true,
+			portReady: true,
+			readinessBuffer: "",
+			consecutiveFailures: 0,
+			monitoring: false,
+		};
+		this.#insert(entry);
+		this.#monitorDetached(entry, entry.procRuntime.launch);
+		this.#evaluateIdle(entry);
+		return entry;
+	}
+
 	#insert(entry: UnitEntry): void {
 		this.#units.set(entry.snapshot.id, entry);
 		this.#byIdentity.set(identity(entry.snapshot.kind, entry.snapshot.scope, entry.snapshot.key), entry);
@@ -1497,6 +1606,17 @@ export class UnitTable {
 		this.#evaluateIdle(entry);
 		this.#emit(entry);
 		return leaseId;
+	}
+
+	/** Drop a lost connection's leases. Not a release: each unit waits out the reconnect grace before idling. */
+	#dropConnectionLeases(connectionId: string): void {
+		const graceUntil = Date.now() + this.#leaseGraceMs;
+		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
+			const entry = this.#leases.get(leaseId)?.entry;
+			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
+			this.#dropLease(leaseId);
+		}
+		this.#connectionLeases.delete(connectionId);
 	}
 
 	#dropLease(leaseId: string): void {
@@ -2044,7 +2164,8 @@ export class UnitTable {
 			} catch (error) {
 				logger.warn("Module unit stop failed", { id: entry.snapshot.id, error: errorMessage(error) });
 			}
-			await Promise.race([unit.exited.catch(() => undefined), Bun.sleep(timeoutMs + 1_000)]);
+			// Not a bare sleep race: its pending timer would hold a shut-down daemon open for the full timeout.
+			await withTimeout(unit.exited, timeoutMs + 1_000, "module unit exit timed out").catch(() => {});
 			this.#settleModule(entry, unit, undefined, reason);
 			return;
 		}
@@ -2072,7 +2193,9 @@ export class UnitTable {
 		this.#transition(entry);
 		const pid = entry.snapshot.pids[0];
 		const processRef = pid === undefined ? null : Process.fromPid(pid);
-		if (processRef) await processRef.terminate({ group: true, gracefulMs: timeoutMs, timeoutMs: timeoutMs + 1_000 });
+		if (processRef && entry.snapshot.adopted) await terminateAdopted(processRef, timeoutMs);
+		else if (processRef)
+			await processRef.terminate({ group: true, gracefulMs: timeoutMs, timeoutMs: timeoutMs + 1_000 });
 		else runtime.pty?.kill();
 		const settled = await this.#waitFor(entry, () => isTerminal(entry.snapshot.state), timeoutMs + 1_000);
 		if (!settled && runtime.pty) runtime.pty.kill();
@@ -2087,6 +2210,7 @@ export class UnitTable {
 		if (moduleRuntime) throw new Error(`Module unit ${entry.snapshot.key} restarts by being opened again`);
 		const runtime = entry.procRuntime;
 		if (!runtime) throw new Error(`Unit ${entry.snapshot.key} cannot be restarted`);
+		if (!entry.proc) throw new Error(`Service ${entry.snapshot.key} was adopted and has no command to restart`);
 		await this.#stopEntry(entry, 2_000, "restarting");
 		await runtime.log?.close();
 		runtime.log =
@@ -2182,17 +2306,17 @@ export class UnitTable {
 		}
 
 		const proc = stored.proc;
-		if (!proc) {
+		if (!proc && !stored.snapshot.adopted) {
 			this.#store.deleteUnit(stored.id);
 			return;
 		}
 		entry.procRuntime = {
 			launch: 1,
 			stopRequested: false,
-			logReady: !proc.ready?.log || stored.snapshot.state === "ready",
-			portReady: proc.ready?.port === undefined || stored.snapshot.state === "ready",
+			logReady: !proc?.ready?.log || stored.snapshot.state === "ready",
+			portReady: proc?.ready?.port === undefined || stored.snapshot.state === "ready",
 			readinessBuffer: "",
-			readyPattern: proc.ready?.log ? new RegExp(proc.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS) : undefined,
+			readyPattern: proc?.ready?.log ? new RegExp(proc.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS) : undefined,
 			consecutiveFailures: 0,
 			monitoring: false,
 		};
@@ -2206,7 +2330,7 @@ export class UnitTable {
 			pid !== undefined &&
 			isSameProcess(pid, stored.pidStartedAt);
 		if (alive && survive === "detached") {
-			if (stored.snapshot.state === "restarting") entry.snapshot.state = proc.ready ? "starting" : "running";
+			if (stored.snapshot.state === "restarting") entry.snapshot.state = proc?.ready ? "starting" : "running";
 			// The saved offset lags what the last daemon reported: read to the end before arming notify.
 			try {
 				await this.#readDetachedOutput(entry, runtime.launch, false);
@@ -2215,9 +2339,9 @@ export class UnitTable {
 			}
 			entry.snapshot.supervised = false;
 			// Its clients' leases died with the last daemon: give them time to reconnect and retake them.
-			entry.idleNotBefore = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
+			entry.idleNotBefore = Date.now() + this.#leaseGraceMs;
 			runtime.notify = this.#armNotify(entry);
-			if (proc.ready?.port !== undefined && entry.snapshot.state !== "ready") {
+			if (proc?.ready?.port !== undefined && entry.snapshot.state !== "ready") {
 				void this.#pollPort(entry, runtime.launch, proc.ready);
 			}
 			this.#monitorDetached(entry, runtime.launch);
@@ -2236,7 +2360,9 @@ export class UnitTable {
 			return;
 		}
 		if (wasLive && pid !== undefined && isSameProcess(pid, stored.pidStartedAt)) {
-			await Process.fromPid(pid)?.terminate({ group: true, gracefulMs: 500, timeoutMs: 2_000 });
+			const target = Process.fromPid(pid);
+			if (target && stored.snapshot.adopted) await terminateAdopted(target, 500);
+			else await target?.terminate({ group: true, gracefulMs: 500, timeoutMs: 2_000 });
 		}
 		if (wasLive) {
 			entry.snapshot.state = "exited";

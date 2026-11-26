@@ -446,6 +446,14 @@ mod background {
 			PointerEvent::Click { x, y, button, count, modifiers } => {
 				let (target, point) = child_at(root, x, y)?;
 				ensure_delivery(id, target, kind)?;
+				if button == MouseButton::Left
+					&& count == 1
+					&& modifiers == Modifiers::default()
+					&& window::native_button(target) == Some(window::NativeButton::Enabled)
+					&& window::click_ignores_point(target)
+				{
+					return window::click_button(target, root);
+				}
 				let (down, up, double, button_flag) = mouse_messages(button);
 				ensure_unmodified(
 					target,
@@ -865,6 +873,93 @@ mod background {
 			}
 		}
 		Ok(())
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use windows_sys::Win32::{
+			Graphics::Gdi::ClientToScreen,
+			UI::{
+				HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
+				WindowsAndMessaging::{
+					BS_OWNERDRAW, BS_PUSHBUTTON, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow,
+					WS_VISIBLE,
+				},
+			},
+		};
+
+		use super::*;
+		use crate::desktop::win32::window::tests::{
+			ButtonThread, button, button_parent, click_messages, clicks, pressed_at, record,
+			winforms_button_class,
+		};
+
+		fn left_click_at(button: HWND, x: i32, y: i32) -> PointerEvent {
+			let mut point = POINT { x, y };
+			// SAFETY: the fixture keeps `button` alive; `point` is writable.
+			assert_ne!(unsafe { ClientToScreen(button, &raw mut point) }, 0);
+			PointerEvent::Click {
+				x:         f64::from(point.x),
+				y:         f64::from(point.y),
+				button:    MouseButton::Left,
+				count:     1,
+				modifiers: Modifiers::default(),
+			}
+		}
+
+		#[test]
+		fn left_clicks_send_buttons_their_click_except_owner_drawn_system_buttons() {
+			// Windows made per-monitor aware report physical screen points,
+			// the coordinates pointer input takes.
+			// SAFETY: changes only this test thread's DPI context.
+			unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+			let fixture = ButtonThread::new();
+			let parent_id = fixture.run(|| {
+				// SAFETY: changes only the fixture thread's DPI context.
+				unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+				let parent = button_parent();
+				// Point lookup skips windows that are not shown.
+				// SAFETY: this thread owns parent.
+				unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
+				parent as usize
+			});
+			let parent = parent_id as HWND;
+			let id = parent.expose_provenance().to_string();
+			let mut ax = Win32Ax::new();
+
+			// The button's own synchronous click must finish before pointer
+			// returns.
+			let forms_id = fixture.run(move || {
+				let forms = button(
+					parent_id as HWND,
+					winforms_button_class(),
+					WS_VISIBLE | BS_PUSHBUTTON as u32,
+				);
+				record(forms);
+				forms as usize
+			});
+			let forms = forms_id as HWND;
+			pointer(&mut ax, &id, left_click_at(forms, 10, 10)).unwrap();
+			assert_eq!(fixture.run(|| (clicks(), click_messages())), (1, 1));
+			// SAFETY: the fixture thread owns forms.
+			fixture.run(move || unsafe { DestroyWindow(forms_id as HWND) });
+
+			// A system owner-drawn button may give the point meaning: it is
+			// pressed at the requested point, never sent its click message.
+			let drawn_id = fixture.run(move || {
+				let drawn = button(parent_id as HWND, "BUTTON", WS_VISIBLE | BS_OWNERDRAW as u32);
+				record(drawn);
+				drawn as usize
+			});
+			let drawn = drawn_id as HWND;
+			pointer(&mut ax, &id, left_click_at(drawn, 70, 15)).unwrap();
+			// The queued fixture job follows the posted mouse messages on
+			// the fixture's message loop before reading the recorded result.
+			assert_eq!(fixture.run(pressed_at), Some((70, 15)));
+			assert_eq!(fixture.run(click_messages), 0);
+			// SAFETY: the fixture thread owns parent.
+			fixture.run(move || unsafe { DestroyWindow(parent_id as HWND) });
+		}
 	}
 }
 

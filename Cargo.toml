@@ -15,6 +15,7 @@ members = [
    "crates/vcs",
    "crates/vfs",
    "crates/voice",
+   "crates/web",
    "crates/xfs",
    "crates/vendor/cfg_aliases",
    "crates/vendor/grep-searcher",
@@ -27,7 +28,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "19.1.0"
+version = "19.2.1"
 edition = "2024"
 rust-version = "1.101"
 license = "MIT"
@@ -96,7 +97,10 @@ codegen-units = 16
 
 [profile.local]
 inherits = "release"
-lto = "thin"
+# No LTO: the local addon is rebuilt on every edit, and thin LTO made each
+# rebuild spend minutes in a silent link of the cdylib while defeating
+# incremental. Shipped addons build through Bazel; `ci` keeps thin LTO.
+lto = false
 codegen-units = 16
 incremental = true
 strip = false
@@ -109,6 +113,9 @@ codegen-units = 16
 # `cargo build --profile profiling`.
 [profile.profiling]
 inherits = "release"
+# Pinned rather than inherited: a user-global config may turn `release` LTO
+# off, and profiles must match what ships.
+lto = "fat"
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 strip = false
@@ -269,6 +276,7 @@ omp-xfs = { path = "crates/xfs" }
 omp-vcs = { path = "crates/vcs" }
 omp-vfs = { path = "crates/vfs" }
 omp-builtins = { path = "crates/builtins" }
+omp-web = { path = "crates/web" }
 # Third-party crates of omp's shell engine (`crates/shell/src/bash`),
 # at the versions of the workspace it came from.
 blake3 = { version = "1.8.7", features = ["rayon"] }
@@ -296,6 +304,7 @@ flume = "0.12"
 # Serialization & Data Formats
 # ──────────────────────────────────────────────────────────────────────────────
 base64 = "0.23"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "1.1"
@@ -323,6 +332,7 @@ fontdue = { version = "0.9", default-features = false }
 # Data Structures - Collections
 # ──────────────────────────────────────────────────────────────────────────────
 phf = { version = "0.14", features = ["macros"] }
+rpds = { version = "1.2", features = ["serde"] }
 smallvec = { version = "1.16.1", features = [
    "serde",
    "write",
@@ -360,6 +370,7 @@ windows-sys = { version = "0.61", features = [
    "Win32_System_Ioctl",
    "Win32_System_JobObjects",
    "Win32_System_Pipes",
+   "Win32_System_ProcessStatus",
    "Win32_System_SystemInformation",
    "Win32_System_Threading",
 ] }
@@ -431,9 +442,8 @@ syntect = { version = "5.3", default-features = false, features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Markup Conversion
 # ──────────────────────────────────────────────────────────────────────────────
-# The version html-to-markdown-rs builds on; bump with it.
 html-escape = "0.3"
-html-to-markdown-rs = { version = "3.18.3", default-features = false }
+html5ever = "0.40.1"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization

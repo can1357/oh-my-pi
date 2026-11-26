@@ -219,6 +219,32 @@ describe("Python runner request dispatch", () => {
 		}
 	});
 
+	it("drops a stray await on a sync prelude helper only while its name binds the helper", async () => {
+		const runner = spawnRunner();
+		const run = async (id: string, code: string): Promise<RunnerFrame> => {
+			runner.send({ id, code });
+			const [done] = await collectDoneOrder(runner, new Set([id]));
+			return done;
+		};
+		try {
+			expect(
+				(await run("setup", "def sh(command):\n    return command.upper()\n__omp_register_sync_helpers(sh)"))
+					.status,
+			).toBe("ok");
+			// JS-style `await sh(...)` used to raise "'str' object can't be awaited".
+			expect((await run("awaited", 'assert await sh("ok") == "OK"')).status).toBe("ok");
+			// Rebinding in the same cell keeps the `await`: the run-time binding is async.
+			expect(
+				(await run("same-cell", 'async def sh(command):\n    return command\nassert await sh("ok") == "ok"'))
+					.status,
+			).toBe("ok");
+			// The retained async rebinding is no longer the registered helper.
+			expect((await run("later-cell", 'assert await sh("ok") == "ok"')).status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
 	it.skipIf(process.platform !== "win32")("handles shadow controls and stale shadow admission", async () => {
 		const runner = spawnRunner();
 		try {
