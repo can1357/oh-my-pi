@@ -8,7 +8,7 @@ import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { callSessionTool } from "../eval/js/tool-bridge";
 import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
-import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { enforceInlineByteCap } from "./streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import {
 	type ComputerScreenshot,
@@ -27,7 +27,7 @@ import {
 import type { ToolSession } from "./index";
 import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { throwIfAborted } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { clampTimeout } from "./tool-timeouts";
 
 import {

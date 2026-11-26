@@ -9,7 +9,6 @@ import {
 	type McpConnectionStatusEvent,
 } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -17,6 +16,8 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal, transcriptText } from "./helpers/mode-terminal";
 
 /**
  * Behavioral wiring guard for MCP startup status (mirrors
@@ -31,22 +32,13 @@ describe("InteractiveMode MCP connection status", () => {
 	let mode: InteractiveMode;
 	let session: AgentSession;
 	let tempDir: TempDir;
+	let term: ModeTerminal;
 
 	beforeAll(() => {
 		initTheme();
 	});
 
 	beforeEach(async () => {
-		// Keep ProcessTerminal.start() from probing the real terminal; the test
-		// only drives the event bus and spies on showStatus.
-		vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
-		if (typeof process.stdin.setRawMode === "function") {
-			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
-		}
-
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-interactive-mode-mcp-connecting-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -71,14 +63,14 @@ describe("InteractiveMode MCP connection status", () => {
 			modelRegistry,
 		});
 		eventBus = new EventBus();
-		mode = new InteractiveMode(session, "test", () => {}, [], undefined, eventBus);
-		// This contract is the banner wiring, not git branch watching; a real
-		// fs.watch in a parallel Bun worker can trip an unrelated-worker SIGTRAP.
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		term = createModeTerminal({ columns: 120, rows: 10 });
+		mode = new InteractiveMode(session, "test", () => {}, [], undefined, eventBus, term.frame);
 	});
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		vi.restoreAllMocks();
 		await session?.dispose();
 		authStorage?.close();
@@ -190,39 +182,35 @@ describe("InteractiveMode MCP connection status", () => {
 			serverName: "alpha",
 		} satisfies McpConnectionStatusEvent);
 
-		const transcript = mode.chatContainer.render(120).join("\n");
+		const transcript = transcriptText(mode.shell);
 		expect(transcript).toContain("A loaded");
 		expect(transcript).toContain("B loaded");
 		expect(transcript).toContain("Connected to MCP server: alpha.");
 		expect(transcript).not.toContain("Connecting to MCP servers");
 	});
 
-	it("appends the completed MCP status after its connecting line retired into scrollback", () => {
+	it("appends the completed MCP status after its connecting line retired into scrollback", async () => {
+		await term.start();
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
 			type: "connecting",
 			serverNames: ["alpha"],
 		} satisfies McpConnectionStatusEvent);
-		const connecting = mode.chatContainer.children.at(-1);
-		if (!connecting) throw new Error("Expected the connecting status to be shown");
-		mode.showHookNotify("A loaded", "info");
-		mode.showHookNotify("B loaded", "info");
-
-		const batch = mode.chatContainer.peekFinalizedBatch(120, 2);
-		if (!batch) throw new Error("Expected startup notices to retire the connecting status");
-		expect(batch.rows.join("\n")).toContain("Connecting to MCP servers: alpha");
-		expect(batch.rows.join("\n")).toContain("A loaded");
-		mode.chatContainer.acknowledgeFinalizedBatch(batch.id);
-		expect(mode.chatContainer.children).toContain(connecting);
-		expect(mode.chatContainer.canRemoveBlock(connecting)).toBe(false);
+		for (const name of ["A", "B", "C", "D", "E"]) mode.showHookNotify(`${name} loaded`, "info");
+		await term.settle();
+		// The notices pushed the connecting line into terminal history: it can no longer be replaced.
+		expect(term.scrollback().join("\n")).toContain("Connecting to MCP servers: alpha");
+		expect(term.screen().join("\n")).not.toContain("Connecting to MCP servers");
 
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
 			type: "connected",
 			serverName: "alpha",
 		} satisfies McpConnectionStatusEvent);
-		const visible = mode.chatContainer.renderViewport(120, 10, { tick: 0, now: 0 }).join("\n");
+		await term.waitFor(screen => screen.join("\n").includes("Connected to MCP server: alpha."));
+		const visible = term.screen().join("\n");
 		expect(visible).not.toContain("Connecting to MCP servers");
-		expect(visible).toContain("B loaded");
-		expect(visible).toContain("Connected to MCP server: alpha.");
+		expect(visible).toContain("E loaded");
+		// Written once, after the retired line: history is not rewritten.
+		expect(term.text().match(/Connecting to MCP servers: alpha/g)).toHaveLength(1);
 	});
 
 	it("rejects a malformed mcp:connection-status payload via the guard instead of letting it throw", () => {

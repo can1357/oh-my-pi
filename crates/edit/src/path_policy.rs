@@ -4,7 +4,7 @@
 //! (any `scheme://` registered in [`PathPolicy::url_schemes`], or the
 //! single-slash `scheme:/` spelling of a [`PathPolicy::url_alias_schemes`]
 //! entry) are opaque here: their backing files come from host answers
-//! ([`UrlResolution`]) keyed by the canonical `scheme://` URL. Any other
+//! ([`UrlAnswer`]) keyed by the canonical `scheme://` URL. Any other
 //! URI-shaped target (`scheme:/x` of a non-alias scheme, an unregistered
 //! `scheme://x` other than `file://`) is refused the way `write` refuses it,
 //! never edited as a working-tree path.
@@ -17,25 +17,45 @@ use std::{
 };
 
 use omp_xfs::{FileType, pattern::Glob};
-use regex::Regex;
+use xutf::{
+	Utf8, find_ignore_ascii_case_str, find_iter_ignore_ascii_case, rfind_ignore_ascii_case_str,
+};
 
 use crate::{
-	engine::{FileOp, Resolved},
+	engine::{FileOp, Location, Resolved},
 	error::{EditError, EditResult},
+	scan::{ends_word, is_word, keyword, starts_word},
 };
 
 /// Host answer for one internal URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UrlResolution {
-	/// Absolute backing file; `None` → the URL has no local file (the edit
-	/// fails with `error` or a generic message).
-	pub absolute:      Option<PathBuf>,
-	/// Model-facing refusal (read-only scheme, immutable, disabled…); wins
-	/// over `absolute`.
-	pub error:         Option<String>,
-	/// Writable while plan mode is active (the scheme's write scope is the
-	/// session sandbox).
-	pub plan_writable: bool,
+pub enum UrlAnswer {
+	/// A local backing file; normal filesystem canonicalization and stamps
+	/// apply.
+	Backed { path: PathBuf, plan_writable: bool },
+	/// A model-facing host refusal, propagated verbatim.
+	Refused(String),
+}
+
+impl UrlAnswer {
+	/// Map a raw host reply for `url`. A refusal wins over a backing path; a
+	/// reply with neither refuses with `No local file backs <url>`.
+	pub fn from_host(
+		url: &str,
+		path: Option<PathBuf>,
+		error: Option<String>,
+		plan_writable: bool,
+	) -> Self {
+		match (path, error) {
+			(_, Some(error)) => Self::Refused(error),
+			(Some(path), None) => Self::Backed { path, plan_writable },
+			(None, None) => Self::Refused(format!("No local file backs {url}")),
+		}
+	}
+
+	const fn plan_writable(&self) -> bool {
+		matches!(self, Self::Backed { plan_writable: true, .. })
+	}
 }
 
 /// Session-wide path policy supplied by the host once per tool call.
@@ -76,33 +96,29 @@ impl PathPolicy {
 	///
 	/// # Errors
 	/// [`EditError::UnresolvedUrl`] when a URL target has no entry in `urls`;
-	/// [`EditError::Apply`] with the host refusal verbatim,
-	/// `No local file backs <url>` when the host found no backing file, or
-	/// `Unknown URI-like edit target …` for a URI-shaped target that is
-	/// neither an internal URL nor a filesystem path.
+	/// [`EditError::Apply`] with the host refusal verbatim (see
+	/// [`UrlAnswer::from_host`]), or `Unknown URI-like edit target …` for a
+	/// URI-shaped target that is neither an internal URL nor a filesystem path.
 	pub fn resolve(
 		&self,
 		authored: &str,
-		urls: &HashMap<String, UrlResolution>,
+		urls: &HashMap<String, UrlAnswer>,
 	) -> EditResult<Resolved> {
 		let display = unwrap_hashline_header_path(authored).to_owned();
-		let absolute = match self.address(&display) {
+		let location = match self.address(&display) {
 			Address::Url(url) => {
 				let resolution = urls
 					.get(url.as_ref())
 					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
-				if let Some(error) = &resolution.error {
-					return Err(EditError::apply(error.clone()));
+				match resolution {
+					UrlAnswer::Backed { path, .. } => Location::Disk(path.clone()),
+					UrlAnswer::Refused(error) => return Err(EditError::apply(error.clone())),
 				}
-				resolution
-					.absolute
-					.clone()
-					.ok_or_else(|| EditError::apply(format!("No local file backs {url}")))?
 			},
-			Address::Path => self.resolve_path(&display),
+			Address::Path => Location::Disk(self.resolve_path(&display)),
 			Address::Refused(message) => return Err(EditError::apply(message)),
 		};
-		Ok(Resolved { absolute, display })
+		Ok(Resolved { location, display })
 	}
 
 	/// [`Self::url_target`] for an already-unwrapped display path.
@@ -178,7 +194,7 @@ impl PathPolicy {
 		display: &str,
 		op: FileOp,
 		move_to: Option<&str>,
-		urls: &HashMap<String, UrlResolution>,
+		urls: &HashMap<String, UrlAnswer>,
 	) -> EditResult<()> {
 		if !self.plan_active {
 			return Ok(());
@@ -191,9 +207,7 @@ impl PathPolicy {
 		}
 		let display = unwrap_hashline_header_path(display);
 		let writable = match self.address(display) {
-			Address::Url(url) => urls
-				.get(url.as_ref())
-				.is_some_and(|resolution| resolution.plan_writable),
+			Address::Url(url) => urls.get(url.as_ref()).is_some_and(UrlAnswer::plan_writable),
 			Address::Path => self.in_plan_writable_root(&self.resolve_path(display)),
 			Address::Refused(_) => false,
 		};
@@ -556,19 +570,19 @@ fn escape_glob_metachars(value: &str) -> String {
 /// and `PocketBase` `*.pb.js` hooks are left to the content marker check
 /// instead.
 fn generated_filename(display: &str) -> Option<String> {
-	let name = display.replace('\\', "/").rsplit('/').next()?.to_owned();
-	let patterns = [
-		r"^zz_generated\.",
-		r"\.pb\.(go|cc|h|c)$",
-		r"_pb2\.py$",
-		r"_pb2_grpc\.py$",
-		r"\.gen\.(go|ts|js|py)$",
-		r"\.swagger\.json$",
-	];
-	patterns
-		.iter()
-		.any(|p| Regex::new(p).expect("static regex").is_match(&name))
-		.then_some(name)
+	let name = display.rsplit(['/', '\\']).next()?;
+	let generated = name.starts_with("zz_generated.")
+		|| name.ends_with("_pb2.py")
+		|| name.ends_with("_pb2_grpc.py")
+		|| name.ends_with(".swagger.json")
+		|| name.rsplit_once('.').is_some_and(|(stem, ext)| {
+			let marker = stem.rsplit_once('.').map(|(_, marker)| marker);
+			matches!(
+				(marker, ext),
+				(Some("pb"), "go" | "cc" | "h" | "c") | (Some("gen"), "go" | "ts" | "js" | "py")
+			)
+		});
+	generated.then(|| name.to_owned())
 }
 
 fn detect_generated_marker(content: &str, display: &str) -> Option<String> {
@@ -577,19 +591,139 @@ fn detect_generated_marker(content: &str, display: &str) -> Option<String> {
 		return None;
 	}
 	let header = leading_comment_text(content.strip_prefix('\u{feff}').unwrap_or(content), &styles);
-	let known = r"(?:protoc(?:-gen-[\w-]+)?|sqlc|buf|swagger(?:-codegen)?|openapi(?:-generator)?|grpc-gateway|mockery|stringer|easyjson|deepcopy-gen|defaulter-gen|conversion-gen|client-gen|lister-gen|informer-gen|kysely-codegen|napi-rs)";
-	for pattern in [
-		r"(?i)@generated\b".to_owned(),
-		r"(?i)\bcode\s+generated\s+by\s+[a-z0-9_.-]+".to_owned(),
-		r"(?i)\bcode\s+generated\b.*\bdo\s+not\s+edit\b".to_owned(),
-		r"(?i)\bthis\s+file\s+was\s+automatically\s+generated\b".to_owned(),
-		format!(r"(?i)\bgenerated\s+by\s+{known}\b"),
-	] {
-		if let Some(found) = Regex::new(&pattern).expect("static regex").find(&header) {
-			return Some(found.as_str().to_owned());
+	generated_marker(&header)
+}
+
+/// Tools whose "generated by" banner is trusted, longest spelling of each
+/// first; `protoc` also covers its `protoc-gen-*` plugins.
+const TOOLS: [&str; 19] = [
+	"protoc",
+	"sqlc",
+	"buf",
+	"swagger-codegen",
+	"swagger",
+	"openapi-generator",
+	"openapi",
+	"grpc-gateway",
+	"mockery",
+	"stringer",
+	"easyjson",
+	"deepcopy-gen",
+	"defaulter-gen",
+	"conversion-gen",
+	"client-gen",
+	"lister-gen",
+	"informer-gen",
+	"kysely-codegen",
+	"napi-rs",
+];
+
+/// Strips `words` off the front of `s`, whitespace between them.
+fn phrase<'a>(mut s: &'a str, words: &[&str]) -> Option<&'a str> {
+	for (index, word) in words.iter().enumerate() {
+		if index > 0 {
+			let rest = s.trim_start();
+			if rest.len() == s.len() {
+				return None;
+			}
+			s = rest;
 		}
+		s = keyword(s, word)?;
+	}
+	Some(s)
+}
+
+/// Offsets where `word` starts a word in `text`, ignoring ASCII case.
+fn word_starts<'a>(text: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
+	find_iter_ignore_ascii_case::<Utf8>(text.as_bytes(), word.as_bytes())
+		.filter(|&at| starts_word(&text[..at]))
+}
+
+/// The first match of `words` (then `tail`) that starts a word; `tail`
+/// returns what follows the match.
+fn search<'a>(
+	text: &'a str,
+	words: &'a [&'a str],
+	tail: impl Fn(&'a str) -> Option<&'a str>,
+) -> Option<&'a str> {
+	word_starts(text, words[0]).find_map(|at| {
+		let rest = tail(phrase(&text[at..], words)?)?;
+		Some(&text[at..text.len() - rest.len()])
+	})
+}
+
+/// `code generated … do not edit`, both on one line.
+fn do_not_edit(rest: &str) -> Option<&str> {
+	if !ends_word(rest) {
+		return None;
+	}
+	let line = rest.split('\n').next().unwrap_or(rest);
+	// Use the last valid ending whose `do` begins on this line.
+	let mut limit = line.len();
+	while let Some(at) = rfind_ignore_ascii_case_str(&line[..limit], "do") {
+		if starts_word(&line[..at])
+			&& let Some(after) = phrase(&rest[at..], &["do", "not", "edit"])
+			&& ends_word(after)
+		{
+			return Some(after);
+		}
+		limit = at;
 	}
 	None
+}
+
+/// A trusted tool name after `generated by`.
+fn tool(rest: &str) -> Option<&str> {
+	let name = rest.trim_start();
+	if name.len() == rest.len() {
+		return None;
+	}
+	TOOLS.iter().find_map(|tool| {
+		let after = keyword(name, tool)?;
+		// `protoc-gen-<plugin>`: the plugin name may not end in a dash.
+		if *tool == "protoc"
+			&& let Some(plugin) = keyword(after, "-gen-")
+		{
+			let len = plugin
+				.find(|c| !(is_word(c) || c == '-'))
+				.unwrap_or(plugin.len());
+			let len = plugin[..len].trim_end_matches('-').len();
+			if len > 0 {
+				return Some(&plugin[len..]);
+			}
+		}
+		ends_word(after).then_some(after)
+	})
+}
+
+/// Finds the highest-priority generated-code marker in leading comments.
+fn generated_marker(header: &str) -> Option<String> {
+	// Every marker contains this word; most headers do not.
+	find_ignore_ascii_case_str(header, "generated")?;
+	let at_generated = find_iter_ignore_ascii_case::<Utf8>(header.as_bytes(), b"@generated")
+		.find(|&at| ends_word(&header[at + "@generated".len()..]))
+		.map(|at| &header[at..at + "@generated".len()]);
+	at_generated
+		.or_else(|| {
+			search(header, &["code", "generated", "by"], |rest| {
+				let name = rest.trim_start();
+				let len = name
+					.bytes()
+					.take_while(|byte| {
+						byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+					})
+					.count();
+				(name.len() < rest.len() && len > 0).then(|| &name[len..])
+			})
+		})
+		.or_else(|| search(header, &["code", "generated"], do_not_edit))
+		.or_else(|| {
+			search(header, &["this", "file", "was", "automatically", "generated"], |rest| {
+				ends_word(rest).then_some(rest)
+			})
+		})
+		.or_else(|| search(header, &["generated", "by"], tool))
+		.map(str::to_owned)
 }
 
 fn comment_styles(display: &str) -> Vec<&'static str> {
@@ -691,10 +825,6 @@ mod tests {
 		}
 	}
 
-	fn answer(absolute: Option<PathBuf>, error: Option<&str>, plan_writable: bool) -> UrlResolution {
-		UrlResolution { absolute, error: error.map(str::to_owned), plan_writable }
-	}
-
 	#[test]
 	fn unwraps_only_strict_hashline_headers() {
 		assert_eq!(unwrap_hashline_header_path("[src/a.ts#Ab12]  \n"), "src/a.ts");
@@ -709,20 +839,18 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let p = policy(tmp.path());
 		let urls = HashMap::new();
-		assert_eq!(p.resolve("/", &urls).unwrap().absolute, tmp.path());
-		assert_eq!(p.resolve("@~/x", &urls).unwrap().absolute, tmp.path().join("home/x"));
-		assert_eq!(p.resolve(":./x", &urls).unwrap().absolute, tmp.path().join("./x"));
+		let disk = |authored: &str| p.resolve(authored, &urls).unwrap().location;
+		assert_eq!(disk("/"), Location::Disk(tmp.path().to_owned()));
+		assert_eq!(disk("@~/x"), Location::Disk(tmp.path().join("home/x")));
+		assert_eq!(disk(":./x"), Location::Disk(tmp.path().join("./x")));
 		// The file URL's `/tmp/...` path maps to a POSIX root; on Windows it
 		// resolves onto the current drive instead (`C:\tmp\...`).
 		#[cfg(unix)]
-		assert_eq!(
-			p.resolve("file:///tmp/a%20b", &urls).unwrap().absolute,
-			PathBuf::from("/tmp/a b")
-		);
+		assert_eq!(disk("file:///tmp/a%20b"), Location::Disk("/tmp/a b".into()));
 		// Scheme-colon names without a slash, Windows drives, and `./`-prefixed
 		// URI-shaped names are plain paths.
-		assert_eq!(p.resolve("sbx:x", &urls).unwrap().absolute, tmp.path().join("sbx:x"));
-		assert_eq!(p.resolve("./other://x", &urls).unwrap().absolute, tmp.path().join("other:/x"));
+		assert_eq!(disk("sbx:x"), Location::Disk(tmp.path().join("sbx:x")));
+		assert_eq!(disk("./other://x"), Location::Disk(tmp.path().join("other:/x")));
 		assert!(p.resolve("C:/x", &urls).is_ok());
 		assert!(matches!(
 			p.resolve("[@SBX://x.md#AB12]", &urls),
@@ -818,8 +946,8 @@ mod tests {
 		let dotted = sandbox.join("link/../plan.md");
 		assert!(!refused(dotted.clone()));
 		assert_eq!(
-			p.resolve(dotted.to_str().unwrap(), &urls).unwrap().absolute,
-			sandbox.join("plan.md")
+			p.resolve(dotted.to_str().unwrap(), &urls).unwrap().location,
+			Location::Disk(sandbox.join("plan.md"))
 		);
 	}
 
@@ -835,20 +963,28 @@ mod tests {
 		assert!(files.take_unresolved().is_empty());
 
 		let backing = tmp.path().join("elsewhere/plan.md");
-		files.provide("sbx://plan.md".into(), answer(Some(backing.clone()), None, true));
+		files.provide("sbx://plan.md".into(), UrlAnswer::Backed {
+			path:          backing.clone(),
+			plan_writable: true,
+		});
 		let resolved = files.resolve("[sbx://plan.md#AB12]", true).unwrap();
-		assert_eq!(resolved.absolute, backing);
+		assert_eq!(resolved.location, Location::Disk(backing));
 		assert_eq!(resolved.display, "sbx://plan.md");
 
 		files.provide(
 			"ro://a.md".into(),
-			answer(Some(tmp.path().join("a.md")), Some("ro://a.md is read-only"), false),
+			UrlAnswer::from_host(
+				"ro://a.md",
+				Some(tmp.path().join("a.md")),
+				Some("ro://a.md is read-only".into()),
+				false,
+			),
 		);
 		assert_eq!(
 			files.resolve("ro://a.md", false).unwrap_err().to_string(),
 			"ro://a.md is read-only"
 		);
-		files.provide("ro://gone.md".into(), answer(None, None, false));
+		files.provide("ro://gone.md".into(), UrlAnswer::from_host("ro://gone.md", None, None, false));
 		assert_eq!(
 			files
 				.resolve("ro://gone.md", false)
@@ -865,8 +1001,14 @@ mod tests {
 		let mut p = policy(tmp.path());
 		p.plan_active = true;
 		let urls = HashMap::from([
-			("sbx://plan.md".to_owned(), answer(Some(tmp.path().join("x/plan.md")), None, true)),
-			("ro://a.md".to_owned(), answer(Some(tmp.path().join("sandbox/a.md")), None, false)),
+			("sbx://plan.md".to_owned(), UrlAnswer::Backed {
+				path:          tmp.path().join("x/plan.md"),
+				plan_writable: true,
+			}),
+			("ro://a.md".to_owned(), UrlAnswer::Backed {
+				path:          tmp.path().join("sandbox/a.md"),
+				plan_writable: false,
+			}),
 		]);
 		let sandboxed = tmp.path().join("sandbox/plan.md");
 		assert!(

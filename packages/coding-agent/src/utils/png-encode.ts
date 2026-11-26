@@ -1,4 +1,12 @@
-import { deflateSync, constants as zlibConstants } from "node:zlib";
+import type * as Zlib from "node:zlib";
+
+let zlibCache: typeof Zlib | undefined;
+function zlib(): typeof Zlib {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache;
+}
+
+const Z_DEFAULT_COMPRESSION = -1;
 
 export const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 
@@ -11,7 +19,7 @@ export function encodeRawPng(
 	width: number,
 	height: number,
 	channels: 3 | 4,
-	level = zlibConstants.Z_DEFAULT_COMPRESSION,
+	level = Z_DEFAULT_COMPRESSION,
 ): Buffer {
 	const stride = width * channels;
 	const scanlines = Buffer.allocUnsafe((stride + 1) * height);
@@ -28,7 +36,7 @@ export function encodeRawPng(
 	return Buffer.concat([
 		PNG_SIGNATURE,
 		pngChunk("IHDR", header),
-		pngChunk("IDAT", deflateSync(scanlines, { level })),
+		pngChunk("IDAT", zlib().deflateSync(scanlines, { level })),
 		pngChunk("IEND", new Uint8Array()),
 	]);
 }

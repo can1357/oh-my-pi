@@ -1,3 +1,4 @@
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { InteractiveModeContext } from "../modes/types";
 import { SkillshareClient } from "../skillshare/client";
 import {
@@ -12,7 +13,7 @@ import {
 	updateSkillPackages,
 } from "../skillshare/installer";
 import { clearSubmittedText } from "./helpers/draft";
-import { errorMessage, parseSubcommand } from "./helpers/parse";
+import { parseSubcommand } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
 const USAGE = [

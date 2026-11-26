@@ -16,7 +16,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { specialToolCommands } from "@oh-my-pi/pi-coding-agent/tools/resolve";
-import { REPORT_ISSUE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
+import { REPORT_ISSUE_COMMAND_NAME } from "@oh-my-pi/pi-coding-agent/tools/report-issue-command";
 import { mockFetch } from "../helpers/fetch-mock";
 
 function openTempDb(): Database {

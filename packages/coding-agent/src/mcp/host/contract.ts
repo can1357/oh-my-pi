@@ -21,7 +21,7 @@
  * declared here.
  */
 import { type } from "@oh-my-pi/omptype";
-import type { UnitPolicy } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { UnitPolicy } from "../../daemon/daemon-types";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { MCPTransportError } from "../errors";
 import type { JsonRpcError, MCPRequestIdFormat } from "../types";

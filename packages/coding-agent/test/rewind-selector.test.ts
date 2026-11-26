@@ -5,14 +5,14 @@
  * never selectable, and componentless tool results fold into the turn that
  * rendered their call so rewinding a turn keeps its tool output.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { BranchVariantPath } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/rewind-selector";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
+import { RewindSelector } from "../src/ui/overlays/pickers/rewind-selector";
+import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -21,7 +21,13 @@ const RIGHT = "\x1b[C";
 const ENTER = "\r";
 
 function entry(id: string, parentId: string | null, message: AgentMessage): SessionMessageEntry {
-	return { type: "message", id, parentId, timestamp: "2024-01-01T00:00:00Z", message };
+	return {
+		type: "message",
+		id,
+		parentId,
+		timestamp: "2024-01-01T00:00:00Z",
+		message,
+	};
 }
 
 function userMessage(text: string): AgentMessage {
@@ -33,7 +39,12 @@ function assistantWithBashCall(callId: string): AgentMessage {
 		role: "assistant",
 		content: [
 			{ type: "text", text: "Running a command." },
-			{ type: "toolCall", id: callId, name: "bash", arguments: { command: "ls" } },
+			{
+				type: "toolCall",
+				id: callId,
+				name: "bash",
+				arguments: { command: "ls" },
+			},
 		],
 		api: "anthropic-messages",
 		provider: "anthropic",
@@ -97,21 +108,19 @@ function makeSelector(
 	onSelect: (id: string) => void,
 	siblingPaths?: (entryId: string) => BranchVariantPath[],
 	entries: SessionMessageEntry[] = makeEntries(),
-): RewindSelectorComponent {
-	return new RewindSelectorComponent(entries, {
-		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
-		cwd: "/tmp",
-		requestRender: () => {},
-		siblingPaths,
-		onSelect,
-		onCancel: () => {},
+): LayerTerminal {
+	return mountRewind({ entries, siblingPaths, onSelect, onCancel: () => {} });
+}
+
+function mountRewind(props: Parameters<typeof RewindSelector>[0]): LayerTerminal {
+	return mountLayer(() => RewindSelector(props), {
+		columns: 120,
+		rows: 40,
+		fullscreen: true,
 	});
 }
 
-describe("RewindSelectorComponent", () => {
-	beforeAll(async () => {
-		await initTheme();
-	});
+describe("RewindSelector", () => {
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		setKeybindings(KeybindingsManager.inMemory());
@@ -250,7 +259,14 @@ describe("RewindSelectorComponent", () => {
 	it("slides into a sibling branch with Right and rewinds onto its entries", () => {
 		const selected: string[] = [];
 		const siblings = (entryId: string): BranchVariantPath[] =>
-			entryId === "u2" ? [{ rootId: "u2b", entries: [entry("u2b", "a2", userMessage("alternate prompt"))] }] : [];
+			entryId === "u2"
+				? [
+						{
+							rootId: "u2b",
+							entries: [entry("u2b", "a2", userMessage("alternate prompt"))],
+						},
+					]
+				: [];
 		const selector = makeSelector(id => selected.push(id), siblings);
 		selector.render(120);
 
@@ -266,50 +282,21 @@ describe("RewindSelectorComponent", () => {
 		expect(selected).toEqual(["u2b", "u2"]);
 	});
 
-	it("renders sibling branches as a half-width column strip at the fork", () => {
+	it("returns to the current path above the fork when Up leaves a sibling branch's top", () => {
+		const selected: string[] = [];
 		const siblings = (entryId: string): BranchVariantPath[] =>
 			entryId === "u2" ? [{ rootId: "u2b", entries: [entry("u2b", "a2", userMessage("alternate prompt"))] }] : [];
-		const selector = makeSelector(() => {}, siblings);
-		const lines = selector.render(120).map(line => Bun.stripANSI(line));
+		const selector = makeSelector(id => selected.push(id), siblings);
+		selector.render(120);
+
+		// Right enters the alternate column on its only turn; Up has nowhere to go inside it, so the
+		// outline lands on the turn above the fork: the reply (with its folded tool result).
+		selector.handleInput(RIGHT);
+		selector.handleInput(UP);
+		selector.handleInput(ENTER);
 		selector.dispose();
 
-		const joined = lines.join("\n");
-		// Both branch columns are visible side by side with their captions.
-		expect(joined).toContain("1/2");
-		expect(joined).toContain("current");
-		expect(joined).toContain("2/2");
-		expect(joined).toContain("alternate prompt");
-		// The shared history above the fork stays full width and un-columned.
-		expect(joined).toContain("first prompt");
-	});
-
-	it("shows a dot rail with edge ellipses when branches overflow the window", () => {
-		const siblings = (entryId: string): BranchVariantPath[] =>
-			entryId === "u2"
-				? ["b1", "b2", "b3"].map(id => ({
-						rootId: id,
-						entries: [entry(id, "a2", userMessage(`${id} prompt`))],
-					}))
-				: [];
-		const selector = makeSelector(() => {}, siblings);
-
-		const first = selector.render(120).map(line => Bun.stripANSI(line));
-		const initialRail = first.find(line => line.includes("◉"));
-		expect(initialRail).toBeDefined();
-		// Four columns, current active: one filled dot, three hollow, more to the
-		// right but nothing to the left.
-		expect(initialRail!.match(/○/g)).toHaveLength(3);
-		expect(initialRail!.trimEnd().endsWith("…")).toBe(true);
-		expect(initialRail!.trimStart().startsWith("…")).toBe(false);
-
-		selector.handleInput(RIGHT);
-		selector.handleInput(RIGHT);
-		selector.handleInput(RIGHT);
-		const slid = selector.render(120).map(line => Bun.stripANSI(line));
-		selector.dispose();
-		const slidRail = slid.find(line => line.includes("◉"));
-		// Last column active: content now overflows on the left instead.
-		expect(slidRail!.trimStart().startsWith("…")).toBe(true);
+		expect(selected).toEqual(["tr1"]);
 	});
 
 	it("outlines exactly the selected block with dotted verticals", () => {
@@ -331,15 +318,9 @@ describe("RewindSelectorComponent", () => {
 		selector.render(80);
 
 		// The rendered bash card is searchable: "ls" matches only the bash turn,
-		// so the prompts drop out of the body and Enter rewinds onto that turn.
+		// so the outline lands on it and Enter rewinds onto that turn.
 		for (const key of ["f", ..."ls"]) selector.handleInput(key);
-		const body = selector
-			.render(80)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
-		expect(body).toContain("Running a command.");
-		expect(body).not.toContain("first prompt");
-		expect(body).not.toContain("second prompt");
+		expect(selector.text(80)).toContain("1/1");
 		selector.handleInput(ENTER);
 
 		expect(selected).toEqual(["tr1"]);
@@ -366,11 +347,11 @@ describe("RewindSelectorComponent", () => {
 
 		// A word prefix is not a match.
 		for (const key of ["f", ..."prom"]) selector.handleInput(key);
-		expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain('No items match "prom"');
+		expect(selector.text(80)).toContain("no matches");
 
 		// Both words must appear: "second" rules out u1 even though it has "prompt".
 		for (const key of "pt second") selector.handleInput(key);
-		expect(Bun.stripANSI(selector.render(80).join("\n"))).not.toContain("first prompt");
+		expect(selector.text(80)).toContain("1/1");
 		selector.handleInput(ENTER);
 
 		expect(selected).toEqual(["u2"]);
@@ -378,26 +359,21 @@ describe("RewindSelectorComponent", () => {
 
 	it("matches words in scripts without spaces as substrings", () => {
 		const selected: string[] = [];
-		const selector = new RewindSelectorComponent(
-			[
+		const selector = mountRewind({
+			entries: [
 				entry("u1", null, userMessage("first prompt")),
 				entry("u2", "u1", userMessage("打开文件后输出你好世界")),
 				entry("u3", "u2", userMessage("third prompt")),
 			],
-			{
-				ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
-				cwd: "/tmp",
-				requestRender: () => {},
-				onSelect: id => selected.push(id),
-				onCancel: () => {},
-			},
-		);
+			onSelect: id => selected.push(id),
+			onCancel: () => {},
+		});
 		selector.render(80);
 
 		for (const key of ["f", ..."你好"]) selector.handleInput(key);
-		const body = Bun.stripANSI(selector.render(80).join("\n"));
-		expect(body).not.toContain('No items match "你好"');
-		expect(body).not.toContain("first prompt");
+		const body = selector.text(80);
+		expect(body).not.toContain("no matches");
+		expect(body).toContain("1/1");
 		selector.handleInput(ENTER);
 
 		expect(selected).toEqual(["u2"]);
@@ -406,10 +382,8 @@ describe("RewindSelectorComponent", () => {
 	it("Esc leaves the filter with the match kept instead of closing the selector", () => {
 		const selected: string[] = [];
 		let cancelled = false;
-		const selector = new RewindSelectorComponent(makeEntries(), {
-			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
-			cwd: "/tmp",
-			requestRender: () => {},
+		const selector = mountRewind({
+			entries: makeEntries(),
 			onSelect: id => selected.push(id),
 			onCancel: () => {
 				cancelled = true;
