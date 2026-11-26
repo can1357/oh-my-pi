@@ -1151,7 +1151,7 @@ impl<'a> Writer<'a> {
 			let role = row.attr("role").map(str::trim);
 			if !role.is_some_and(|role| role.eq_ignore_ascii_case("row")) {
 				if row.name() == "div"
-					&& (role.is_none() || role.is_some_and(|role| role.eq_ignore_ascii_case("rowgroup")))
+					&& role.is_none_or(|role| role.eq_ignore_ascii_case("rowgroup"))
 					&& self.source_rows(row.children.clone(), code, rows)
 				{
 					continue;
@@ -1163,10 +1163,9 @@ impl<'a> Writer<'a> {
 				if let Node::Tag(tag) = node
 					&& tag.name() == "code"
 					&& tag.attr("role").is_some_and(|role| role.trim().eq_ignore_ascii_case("cell"))
+					&& cell.replace(tag).is_some()
 				{
-					if cell.replace(tag).is_some() {
-						return false;
-					}
+					return false;
 				}
 			}
 			let Some(cell) = cell else {
