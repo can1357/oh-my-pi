@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- Pasting text that ends in an `@name` no longer opens the file completion list, so the next Enter sends the message instead of replacing the name with a file ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
 - Rebuilding the transcript now removes replaced blocks in one update instead of updating the view for each block ([#20658](https://github.com/can1357/oh-my-pi/pull/20658) by [@H4vC](https://github.com/H4vC))
 - Single-file reads and read preview titles now highlight the path like grouped reads (dim directory, colored file name, muted line range) instead of painting it flat in the accent color ([#20615](https://github.com/can1357/oh-my-pi/pull/20615) by [@JustasMasiulis](https://github.com/JustasMasiulis))
