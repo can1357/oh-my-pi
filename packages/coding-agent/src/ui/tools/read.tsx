@@ -13,7 +13,6 @@
  */
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type JSXNode, nativeSupports } from "@oh-my-pi/pi-tui";
-import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
 import { type ReadToolDetails, readSelectorRangeStart, splitPathAndSel } from "../../tools/details/read";
@@ -28,8 +27,7 @@ import type { ToolActivity, ToolHead, ToolPresenter, ToolResult, ToolView, ToolV
 import { resultText } from "./default";
 import { fileHref, pendingLinkPath } from "./file-common";
 import { READ_IMAGE_ROLE } from "../transcript/image-links";
-import { InlineMedia, inlineImageTerm } from "../transcript/messages/image";
-import { imageSize } from "../transcript/tool-block";
+import { ImageNode, InlineMedia } from "../transcript/messages/image";
 import { isReadableUrlPath, readUrlPresenter } from "./read-url";
 import { registerToolPresenter } from "./registry";
 import { StatsFoot } from "./search-common";
@@ -346,7 +344,6 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 		block => block.type === "image" && typeof (block as { data?: unknown }).data === "string",
 	) as { data: string; mimeType: string } | undefined;
 	if (image) {
-		const size = imageSize(image.data);
 		const detail = content.trim();
 		return {
 			head,
@@ -354,14 +351,7 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 			inline: true,
 			body: [
 				media ?? (
-					<image
-						blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
-						alt={shortenPath(suffix?.to ?? split.path) || "image"}
-						w={size?.w}
-						h={size?.h}
-						role={READ_IMAGE_ROLE}
-						term={inlineImageTerm()}
-					/>
+					<ImageNode image={image} alt={shortenPath(suffix?.to ?? split.path) || "image"} role={READ_IMAGE_ROLE} />
 				),
 				detail.length > 0 && <ansi text={detail} />,
 				foot,

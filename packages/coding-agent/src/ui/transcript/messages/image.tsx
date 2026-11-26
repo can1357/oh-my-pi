@@ -7,7 +7,7 @@
  * a graphics protocol; transcript looks fall back to a `[Image: mime]` line.
  */
 import { computed, createRoot, effect, type JSXNode, type Reactive, read, signal } from "@oh-my-pi/pi-tui";
-import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
+import { getBlob, registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import type { TspImageProps } from "@oh-my-pi/pi-wire";
 import { readImageHeaderDimensions } from "../../../utils/image-resize";
 
@@ -29,6 +29,20 @@ export function imageBlob(image: ImagePart): string {
 		blobIds.set(cacheKey, id);
 	}
 	return id;
+}
+
+/** A text substitute for an inline image, with dimensions when its header supplies them. */
+export function imagePlaceholder(block: { readonly data?: string; readonly mimeType?: string }): string {
+	const label = `[Image: [${block.mimeType ?? "image"}]`;
+	const data = block.data;
+	if (!data) return `${label}]`;
+	const header = Buffer.from(data.slice(0, 64), "base64");
+	let size = readImageHeaderDimensions(header);
+	// JPEG dimensions can follow arbitrarily long metadata segments.
+	if (!size && header[0] === 0xff && data.length > 64) {
+		size = readImageHeaderDimensions(Buffer.from(data, "base64"));
+	}
+	return `${label}${size ? ` ${size.width}x${size.height}` : ""}]`;
 }
 
 /** Props that let a terminal open `filePath` from the image (a click zooms; the menu opens the file). */
@@ -104,11 +118,6 @@ const inlineImageMax = computed<TspImageProps["max"]>(() => {
 	};
 });
 
-/** Terminal-only bounds, keeping native blob images at their natural size. */
-export function inlineImageTerm(facts?: Readonly<Record<string, unknown>>): () => Readonly<Record<string, unknown>> {
-	return () => ({ ...facts, max: inlineImageMax() });
-}
-
 function inlineMediaMax(): TspImageProps["max"] {
 	const { maxRows: rows } = inlineImageBounds();
 	return rows === undefined ? undefined : { h: `${rows}lines` };
@@ -122,6 +131,7 @@ export function InlineMedia(props: { readonly path: Reactive<string>; readonly n
 /** An `image` node for a base64 payload. */
 export function ImageNode(props: {
 	readonly image: ImagePart;
+	readonly role?: string;
 	readonly nodeKey?: string;
 	readonly alt?: string;
 	readonly title?: string;
@@ -130,18 +140,21 @@ export function ImageNode(props: {
 	/** Terminal-only look facts. */
 	readonly term?: Readonly<Record<string, unknown>>;
 }): JSXNode {
-	const size = readImageHeaderDimensions(Buffer.from(props.image.data, "base64"));
+	const blob = imageBlob(props.image);
+	const bytes = getBlob(blob)?.bytes;
+	const size = bytes && readImageHeaderDimensions(bytes);
 	return (
 		<image
 			key={props.nodeKey}
-			blob={imageBlob(props.image)}
+			blob={blob}
+			role={props.role}
 			w={size?.width}
 			h={size?.height}
 			alt={props.alt}
 			title={props.title}
 			href={() => openableImage(read(props.path)).href}
 			actions={() => openableImage(read(props.path)).actions}
-			term={inlineImageTerm(props.term)}
+			term={() => ({ ...props.term, max: inlineImageMax() })}
 		/>
 	);
 }

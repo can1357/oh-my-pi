@@ -37,7 +37,6 @@ import {
 	type TspToolProps,
 	toolIntentLabel,
 } from "@oh-my-pi/pi-wire";
-import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { readMediaPath } from "../../session/transcript/tool-execution";
 import { type ShellInspectorSource, shellVizEventAction } from "../apps/shell-visualizer/model";
@@ -48,7 +47,7 @@ import { mcpPresenter } from "../tools/mcp";
 import { toolPresenter } from "../tools/registry";
 import { settledRevision } from "../shell/transcript";
 import { presentShellScript, presentShellTrace } from "../tools/shell-viz";
-import { imageBlob, inlineImageTerm } from "./messages/image";
+import { imageBlob, ImageNode, imagePlaceholder } from "./messages/image";
 import { presenterRows } from "./figures/presented-block";
 import { RESULT_IMAGE_ROLE } from "./image-links";
 import { ShellVizState } from "./shell-viz-state";
@@ -497,23 +496,6 @@ function withImagesAsText(result: ToolCallResult): ToolCallResult {
 	return { ...result, content };
 }
 
-/** `[Image: [image/png] 1x1]`. */
-export function imagePlaceholder(block: { readonly data?: string; readonly mimeType?: string }): string {
-	const mime = block.mimeType ?? "image";
-	const size = block.data ? imageSize(block.data) : undefined;
-	return `[Image: [${mime}]${size ? ` ${size.w}x${size.h}` : ""}]`;
-}
-
-/** Pixel size of a base64 PNG/GIF/JPEG, when its header says. */
-export function imageSize(base64: string): { w: number; h: number } | undefined {
-	const bytes = Buffer.from(base64.slice(0, 64), "base64");
-	if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50)
-		return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) };
-	if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49)
-		return { w: bytes.readUInt16LE(6), h: bytes.readUInt16LE(8) };
-	return undefined;
-}
-
 /** Call view then result view: the result's head facts win; bodies stack. */
 function combineViews(call: ToolView | undefined, result: ToolView | undefined): ToolView | undefined {
 	if (!call) return result;
@@ -720,19 +702,14 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 
 /** A result's images as `image` nodes (shown under the body while images are on). */
 function imageNodes(result: ToolCallResult | undefined): JSXNode {
-	return resultImages(result).map((image, index) => {
-		const size = imageSize(image.data);
-		return (
-			<image
-				key={`img${index}`}
-				term={inlineImageTerm({ role: RESULT_IMAGE_ROLE })}
-				blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType ?? "image/png")}
-				alt={image.mimeType}
-				w={size?.w}
-				h={size?.h}
-			/>
-		);
-	});
+	return resultImages(result).map((image, index) => (
+		<ImageNode
+			nodeKey={`img${index}`}
+			image={{ data: image.data, mimeType: image.mimeType ?? "image/png" }}
+			alt={image.mimeType}
+			term={{ role: RESULT_IMAGE_ROLE }}
+		/>
+	));
 }
 
 /** Compact rows of an extension presenter, as the body text. */

@@ -143,6 +143,30 @@ test("a read picture draws once beneath the details card and only while images a
 	});
 });
 
+test.each(["jpeg", "webp"])("a fresh eval tool result draws its %s screenshot on Kitty", async format => {
+	const fixture = new Bun.Image(Buffer.from(RED_PNG, "base64")).resize(80, 40);
+	const data = await (format === "jpeg" ? fixture.jpeg() : fixture.webp()).toBase64();
+	const capabilities = (): TerminalCapabilities => ({ ...caps, images: "kitty" });
+	const images = new TerminalImages({ capabilities });
+	const env = staticEnvironment(currentTheme(), { images: driverImages(images, capabilities) });
+	const { call, node, dispose } = createRoot(dispose => {
+		const call = new ToolCall({ id: "eval", name: "eval" });
+		return { call, node: ToolBlock({ call }), dispose };
+	});
+	try {
+		if (!isUiNode(node)) throw new Error("expected a tool node");
+		call.updateResult({ content: [{ type: "image", data, mimeType: `image/${format}` }] }, false);
+		paintNode(env, node, 160);
+		await images.whenEncoded();
+		const rows = paintNode(env, node, 160).rows.join("\n");
+		expect(rows).not.toContain("[Image:");
+		expect(rows).toContain("\x1b_Ga=p");
+		expect(images.takeSequences()).toMatch(/\x1b_Ga=t,f=100,[^;]+;iVBORw0KGgo/);
+	} finally {
+		dispose();
+	}
+});
+
 test("a bash run paints a capped picture or its placeholder according to the terminal and display setting", async () => {
 	const image = await largeImage();
 	const settings = sizingSettings(() => 50);

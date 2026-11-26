@@ -11,15 +11,13 @@
  */
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { type Accessor, computed, type JSXNode, type KeyEvent, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
-import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspCardStatus, TspTone } from "@oh-my-pi/pi-wire";
 import type { MinimizedMeta, TruncationMeta } from "../../tools/output-meta-format";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice } from "../../tools/output-meta-format";
 import { formatMinimized, RunBox, RunFoot, RunInput, RunOutput, type RunState } from "../tools/run";
-import { imageBlob, inlineImageTerm } from "./messages/image";
-import { imagePlaceholder, imageSize } from "./tool-block";
+import { imageBlob, ImageNode, imagePlaceholder } from "./messages/image";
 import { ptyKeyBytes } from "../overlays/panels/pty-console";
 import { PtyReplay, styleReplayedRow } from "./pty-replay";
 
@@ -329,14 +327,7 @@ export function ExecRunBlock(props: { readonly run: ExecRun }): JSXNode {
 					</RunBox>,
 					images().list.map((image, index) =>
 						images().show ? (
-							<image
-								key={`img${index}`}
-								term={inlineImageTerm()}
-								blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
-								alt={image.mimeType}
-								w={imageSize(image.data)?.w}
-								h={imageSize(image.data)?.h}
-							/>
+							<ImageNode nodeKey={`img${index}`} image={image} alt={image.mimeType} />
 						) : (
 							<text spans={[{ t: imagePlaceholder(image), s: "muted" }]} />
 						),
