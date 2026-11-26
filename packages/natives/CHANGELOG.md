@@ -14,9 +14,9 @@
 ### Fixed
 
 - The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
-- Fixed shell `rg --null-data` printing a newline after the records it prints: matched and context records no longer get a newline after their NUL, and `-o` matches, `-c` and `--count-matches` counts, `-l` and `--files-without-match` names and the `--` between context groups end with NUL, as in ripgrep; `rg --files` still ends each path with a newline
-- Fixed shell `rg --null-data` with `-o`, `--count-matches`, `--column`, `--vimgrep` or `--replace` missing a match anchored at the end of a record, such as `rg --null-data -o '[0-9]$'`, and `rg --replace` and `--vimgrep` finding an extra empty match after the end of a line, such as `rg --replace=X 'x*'`
-- Fixed shell `grep -z` ending `-c` counts, `-l` and `-L` file names and the `--` between context groups with NUL; they end with a newline, as in GNU grep
+- Fixed shell `rg --null-data` printing a newline after the records it prints: matched and context records no longer get a newline after their NUL, and `-o` matches, `-c` and `--count-matches` counts, `-l` and `--files-without-match` names and the `--` between context groups end with NUL, as in ripgrep; `rg --files` still ends each path with a newline ([#20574](https://github.com/can1357/oh-my-pi/pull/20574) by [@sjawhar](https://github.com/sjawhar))
+- Fixed shell `rg --null-data` with `-o`, `--count-matches`, `--column`, `--vimgrep` or `--replace` missing a match anchored at the end of a record, such as `rg --null-data -o '[0-9]$'`, and `rg --replace` and `--vimgrep` finding an extra empty match after the end of a line, such as `rg --replace=X 'x*'` ([#20574](https://github.com/can1357/oh-my-pi/pull/20574) by [@sjawhar](https://github.com/sjawhar))
+- Fixed shell `grep -z` ending `-c` counts, `-l` and `-L` file names and the `--` between context groups with NUL; they end with a newline, as in GNU grep ([#20574](https://github.com/can1357/oh-my-pi/pull/20574) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.2.1] - 2026-11-25
 
