@@ -148,6 +148,11 @@ describe("getGainDashboardStats", () => {
 	it("counts the context snapcompact compactions freed, once per entry across forks and rewrites", async () => {
 		const entries = [compactionEntry("c1", "snapcompact", 1000, 400), compactionEntry("c2", "soft", 1000, 100)];
 		const parent = await writeSession("01_parent.jsonl", entries);
+		// Use distinct mtimes so sync sees the same-size rewrite even when the file clock has not ticked.
+		const originalMtime = new Date("2026-11-01T12:00:00.000Z");
+		await fs.utimes(parent, originalMtime, originalMtime);
+		// Sync the parent alone so it owns the entry, independent of how sync ranks the two files.
+		await syncAllSessions({ workers: 1 });
 		await writeSession("02_fork.jsonl", entries);
 		await syncAllSessions({ workers: 1 });
 
@@ -160,6 +165,8 @@ describe("getGainDashboardStats", () => {
 
 		// The session rewrites an entry in place when a rescue re-projects its tokensAfter.
 		await Bun.write(parent, (await Bun.file(parent).text()).replace('"tokensAfter":400', '"tokensAfter":500'));
+		const rewrittenMtime = new Date("2026-11-01T12:00:01.000Z");
+		await fs.utimes(parent, rewrittenMtime, rewrittenMtime);
 		await syncAllSessions({ workers: 1 });
 		expect((await getGainDashboardStats("all")).bySource.compaction.savedTokens).toBe(500);
 
