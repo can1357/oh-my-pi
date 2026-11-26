@@ -225,12 +225,17 @@ export function composerFacts(props: {
 				.join("") ?? "",
 	);
 
-	const modelView = computed(() =>
-		segmentView("model", props.facts(), {
-			...effective(),
-			segmentOptions: { ...effective().segmentOptions, model: { showThinkingLevel: false } },
-		}),
-	);
+	// The composer shows effort in its own chip; keep the user's other model options (`showProvider`, `display`).
+	const modelView = computed(() => {
+		const options = effective();
+		return segmentView("model", props.facts(), {
+			...options,
+			segmentOptions: {
+				...options.segmentOptions,
+				model: { ...options.segmentOptions.model, showThinkingLevel: false },
+			},
+		});
+	});
 
 	return {
 		context: (

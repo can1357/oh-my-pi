@@ -4,7 +4,7 @@
  * sized, anchored `overlay` in the surface's `layer`), and terminal rows draw
  * as the screen itself, with the look its painter gives it.
  */
-import { type Accessor, type JSX, type JSXNode, nativeRendering, type UiNode } from "@oh-my-pi/pi-tui";
+import { type Accessor, type JSX, type JSXNode, nativeRendering } from "@oh-my-pi/pi-tui";
 import type { OverlayHandle, OverlayOptions } from "../shell/overlays";
 import type { Shell } from "../shell/shell";
 
@@ -19,11 +19,6 @@ export function sheetView(native: boolean, sheet: SheetAttributes, screen: JSXNo
 			{screen}
 		</overlay>
 	);
-}
-
-/** The screen of a sheet mounted by {@link showSheet} (the node that takes its keys). */
-export function sheetScreen(shell: Pick<Shell, "native">, handle: OverlayHandle): UiNode {
-	return shell.native() ? (handle.node.children()[0] ?? handle.node) : handle.node;
 }
 
 /**

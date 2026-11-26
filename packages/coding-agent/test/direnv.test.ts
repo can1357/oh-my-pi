@@ -1,44 +1,64 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { applyDirenvPreflight, executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
-import {
-	cleanSpawnEnvForTests,
-	clearDirenvCachesForTests,
-	findEnvrc,
-	loadDirenvEnv,
-	parseDirenvExport,
-} from "@oh-my-pi/pi-coding-agent/exec/direnv";
-import { $which, TempDir } from "@oh-my-pi/pi-utils";
+import { clearDirenvCachesForTests, findEnvrc, loadDirenvEnv } from "@oh-my-pi/pi-coding-agent/exec/direnv";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
-/** Real-direnv cases need the binary on PATH; skip cleanly when it's absent so
- *  the graceful-degradation code path (returns `null`) isn't asserted against. */
-const hasDirenv = $which("direnv") !== null;
+const savedEnv: Record<string, string | undefined> = {};
 
 const tmpDirs: TempDir[] = [];
 function tmp(): string {
 	const dir = TempDir.createSync("@pi-direnv-");
 	tmpDirs.push(dir);
-	return dir.path();
+	// direnv's working directory on macOS can resolve /var to /private/var.
+	return realpathSync(dir.path());
 }
 
+beforeEach(() => {
+	const home = tmp();
+	for (const key of [
+		"HOME",
+		"XDG_DATA_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_CACHE_HOME",
+		"DIRENV_CONFIG",
+		"DIRENV_DISABLE",
+		"DIRENV_EXE_PATH",
+		"PATH",
+		"PI_DISABLE_UUTILS_BUILTINS",
+	]) {
+		savedEnv[key] = Bun.env[key];
+		if (key.startsWith("DIRENV_")) delete Bun.env[key];
+		else if (key.endsWith("_HOME") || key === "HOME") Bun.env[key] = path.join(home, key.toLowerCase());
+	}
+});
+
 afterEach(async () => {
+	for (const key in savedEnv) {
+		if (savedEnv[key] === undefined) delete Bun.env[key];
+		else Bun.env[key] = savedEnv[key];
+	}
 	for (const dir of tmpDirs.splice(0)) await dir.remove();
 	clearDirenvCachesForTests();
 });
 
-/** Explicitly `direnv allow` an `.envrc` (against the test-isolated HOME/XDG
- *  dirs). Loading now honors the allow list, so tests that expect an export
- *  must opt the file in the same way a user would. Re-run after every content
- *  change — direnv's allow entry is content-hashed. */
-async function allowEnvrc(dir: string): Promise<void> {
-	const env: Record<string, string> = {};
-	for (const key in Bun.env) {
-		const value = Bun.env[key];
-		if (value !== undefined && !key.startsWith("DIRENV_")) env[key] = value;
-	}
-	const proc = Bun.spawn(["direnv", "allow"], { cwd: dir, env, stdout: "ignore", stderr: "ignore" });
-	if ((await proc.exited) !== 0) throw new Error(`direnv allow failed in ${dir}`);
+// Independent fixtures for the format written by upstream `direnv allow`/`deny`.
+async function trustMarker(file: string, allow: boolean): Promise<string> {
+	const hash = createHash("sha256").update(`${file}\n`);
+	if (allow) hash.update(await fs.readFile(file));
+	return path.join(Bun.env.XDG_DATA_HOME!, "direnv", allow ? "allow" : "deny", hash.digest("hex"));
+}
+
+async function allowEnvrc(dir: string, name = ".envrc"): Promise<void> {
+	const file = path.join(dir, name);
+	await Bun.write(await trustMarker(file, true), `${file}\n`);
+}
+
+function configDir(): string {
+	return path.join(Bun.env.XDG_CONFIG_HOME!, "direnv");
 }
 
 describe("findEnvrc", () => {
@@ -69,56 +89,22 @@ describe("findEnvrc", () => {
 	});
 });
 
-describe("cleanSpawnEnv versioning", () => {
-	it("picks up Bun.env mutations after the first cached call", () => {
-		const marker = `OMP_DIRENV_TEST_${process.pid}`;
-		delete Bun.env[marker];
-		clearDirenvCachesForTests();
-		expect(cleanSpawnEnvForTests()[marker]).toBeUndefined();
-		// Deferred MCP discovery mutates Bun.env mid-process (sdk.ts sets
-		// EXA_API_KEY after the session is usable); a permanently cached
-		// baseline would spawn direnv with stale values forever.
-		Bun.env[marker] = "v1";
-		try {
-			expect(cleanSpawnEnvForTests()[marker]).toBe("v1");
-		} finally {
-			delete Bun.env[marker];
-			clearDirenvCachesForTests();
-		}
-	});
-});
+describe("loadDirenvEnv (embedded Bash, upstream trust format)", () => {
+	it("sources the approved bytes even if a user library replaces .envrc during startup", async () => {
+		const root = tmp();
+		const rc = path.join(root, ".envrc");
+		await Bun.write(rc, 'export PI_DIRENV_SNAPSHOT="${BASH_SOURCE[0]}"\n');
+		await Bun.write(path.join(root, "replacement"), "printf leaked > ran\nexport PI_DIRENV_SNAPSHOT=changed\n");
+		await Bun.write(
+			path.join(configDir(), "lib", "replace.sh"),
+			"if [[ -f replacement ]]; then mv -f replacement .envrc; fi\n",
+		);
+		await allowEnvrc(root);
 
-describe("parseDirenvExport", () => {
-	it("splits set values from null unsets", () => {
-		const out = parseDirenvExport('{"FOO":"bar","BAZ":null,"PATH":"/x:/y"}');
-
-		expect(out.set).toEqual({ FOO: "bar", PATH: "/x:/y" });
-		expect(out.unset).toEqual(["BAZ"]);
-	});
-
-	it("treats empty / whitespace output as no diff", () => {
-		expect(parseDirenvExport("")).toEqual({ set: {}, unset: [] });
-		expect(parseDirenvExport("  \n")).toEqual({ set: {}, unset: [] });
-	});
-});
-
-describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", () => {
-	// `direnv allow` writes a trust entry into its data dir. Redirect HOME + the
-	// XDG dirs to a throwaway tmp so real-direnv cases never leak allow state
-	// into the dev/CI user's global direnv store.
-	const savedEnv: Record<string, string | undefined> = {};
-	beforeEach(() => {
-		const home = tmp();
-		for (const key of ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]) {
-			savedEnv[key] = Bun.env[key];
-			Bun.env[key] = path.join(home, key.toLowerCase());
-		}
-	});
-	afterEach(() => {
-		for (const [key, value] of Object.entries(savedEnv)) {
-			if (value === undefined) delete Bun.env[key];
-			else Bun.env[key] = value;
-		}
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_SNAPSHOT).toBe("./.envrc");
+		expect(await Bun.file(rc).text()).toContain("=changed");
+		expect(await loadDirenvEnv(root)).toBeNull();
+		expect(await Bun.file(path.join(root, "ran")).exists()).toBe(false);
 	});
 
 	it("returns null for an .envrc the user has not allowed (never auto-allows)", async () => {
@@ -126,9 +112,10 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		// poisoned repo gets nothing until the user runs `direnv allow` — exactly
 		// the trust boundary direnv itself enforces in the user's shell.
 		const root = tmp();
-		await Bun.write(path.join(root, ".envrc"), "export DIRENV_BLOCKED_TEST=leaked\n");
+		await Bun.write(path.join(root, ".envrc"), "printf leaked > ran\nexport DIRENV_BLOCKED_TEST=leaked\n");
 
 		expect(await loadDirenvEnv(root)).toBeNull();
+		expect(await Bun.file(path.join(root, "ran")).exists()).toBe(false);
 	});
 
 	it("returns exported vars + PATH additions for an allowed .envrc", async () => {
@@ -143,13 +130,26 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		expect(diff?.set.PATH).toContain(path.join(root, "bin"));
 	});
 
+	it("uses embedded direnv even with utilities disabled and no binary on PATH", async () => {
+		const root = tmp();
+		Bun.env.PATH = root;
+		Bun.env.PI_DISABLE_UUTILS_BUILTINS = "1";
+		Bun.env.DIRENV_EXE_PATH = path.join(root, "missing-direnv");
+		await Bun.write(
+			path.join(root, ".envrc"),
+			`export PI_DIRENV_MULTILINE='line 1\nline 2' PI_DIRENV_GATE=$PI_DISABLE_UUTILS_BUILTINS\n`,
+		);
+		await allowEnvrc(root);
+		const diff = await loadDirenvEnv(root);
+		expect(diff?.set.PI_DIRENV_MULTILINE).toBe("line 1\nline 2");
+		expect(diff?.set.PI_DIRENV_GATE).toBe("1");
+	});
+
 	it("reports variables a .envrc unsets", async () => {
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "unset PI_DIRENV_UNSET_TEST\n");
 		await allowEnvrc(root);
-		// direnv emits a JSON null for a var only when it was present in the
-		// spawn env and the `.envrc` removes it, so seed it in the parent env.
-		// (Avoid a `DIRENV_`-prefixed name — the loader strips those before spawn.)
+		// A deletion only appears in the diff if the value starts in the env.
 		Bun.env.PI_DIRENV_UNSET_TEST = "present";
 		try {
 			const diff = await loadDirenvEnv(root);
@@ -164,22 +164,39 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		expect(await loadDirenvEnv(tmp())).toBeNull();
 	});
 
-	it("drops a warm export when the .envrc is denied", async () => {
+	it("applies deny precedence over a retained approval and notices revocation immediately", async () => {
 		const root = tmp();
-		await Bun.write(path.join(root, ".envrc"), "export DIRENV_DENY_TEST=allowed\n");
+		const rc = path.join(root, ".envrc");
+		await Bun.write(rc, "printf x >> runs\nexport DIRENV_DENY_TEST=allowed\n");
 		await allowEnvrc(root);
 		expect((await loadDirenvEnv(root))?.set.DIRENV_DENY_TEST).toBe("allowed");
-		const proc = Bun.spawn(["direnv", "deny"], {
-			cwd: root,
-			env: cleanSpawnEnvForTests(),
-			stdout: "ignore",
-			stderr: "ignore",
-		});
-		expect(await proc.exited).toBe(0);
+		const deny = await trustMarker(rc, false);
+		await Bun.write(deny, `${rc}\n`);
 		expect(await loadDirenvEnv(root)).toBeNull();
-		expect(await loadDirenvEnv(root)).toBeNull();
-		await allowEnvrc(root);
+		expect(await Bun.file(path.join(root, "runs")).text()).toBe("x");
+		await fs.unlink(deny);
 		expect((await loadDirenvEnv(root))?.set.DIRENV_DENY_TEST).toBe("allowed");
+		await fs.unlink(await trustMarker(rc, true));
+		expect(await loadDirenvEnv(root)).toBeNull();
+		expect(await Bun.file(path.join(root, "runs")).text()).toBe("xx");
+	});
+
+	it("honors user whitelists until a denial or a configuration change revokes them", async () => {
+		const root = tmp();
+		const rc = path.join(root, ".envrc");
+		const config = path.join(configDir(), "direnv.toml");
+		await Bun.write(rc, "export PI_DIRENV_WHITELIST=loaded\n");
+		await Bun.write(config, `[whitelist]\nexact = [${JSON.stringify(root)}]\n`);
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_WHITELIST).toBe("loaded");
+
+		const marker = await trustMarker(rc, false);
+		await Bun.write(marker, `${rc}\n`);
+		expect(await loadDirenvEnv(root)).toBeNull();
+		await fs.unlink(marker);
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_WHITELIST).toBe("loaded");
+
+		await Bun.write(config, "[whitelist]\nexact = []\n");
+		expect(await loadDirenvEnv(root)).toBeNull();
 	});
 
 	it("restarts from a clean baseline when the OMP process environment changes", async () => {
@@ -207,8 +224,153 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		expect((await loadDirenvEnv(root))?.set.DIRENV_CACHE_TEST).toBe("one");
 
 		await Bun.write(path.join(root, ".envrc"), "export DIRENV_CACHE_TEST=two\n");
+		expect(await loadDirenvEnv(root)).toBeNull();
 		await allowEnvrc(root);
 		expect((await loadDirenvEnv(root))?.set.DIRENV_CACHE_TEST).toBe("two");
+	});
+
+	it("does not reuse a parent's warm env when a nearer unapproved .envrc appears", async () => {
+		const root = tmp();
+		const child = path.join(root, "child");
+		await fs.mkdir(child);
+		await Bun.write(path.join(root, ".envrc"), "export PI_DIRENV_PARENT_TEST=approved\n");
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(child))?.set.PI_DIRENV_PARENT_TEST).toBe("approved");
+		await Bun.write(path.join(child, ".envrc"), "printf unapproved > ran\n");
+		expect(await loadDirenvEnv(child)).toBeNull();
+		expect(await Bun.file(path.join(child, "ran")).exists()).toBe(false);
+	});
+
+	it("updates exports from a source_env dependency when it changes", async () => {
+		const root = tmp();
+		const helper = path.join(root, "child", ".envrc");
+		await Bun.write(path.join(root, ".envrc"), "source_env child\n");
+		await Bun.write(helper, "printf x >> ran\nexport PI_DIRENV_NESTED=first\n");
+		await allowEnvrc(root);
+
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_NESTED).toBe("first");
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_NESTED).toBe("first");
+
+		await Bun.write(helper, "printf x >> ran\nexport PI_DIRENV_NESTED=second\n");
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_NESTED).toBe("second");
+		expect(await Bun.file(path.join(root, "child", "ran")).text()).toBe("xx");
+	});
+
+	it("does not execute the remainder when a require_allowed input is unapproved or changed", async () => {
+		const root = tmp();
+		const rc = path.join(root, ".envrc");
+		const input = path.join(root, "manifest");
+		await Bun.write(rc, "require_allowed manifest\nprintf x >> ran\nexport PI_DIRENV_REQUIRED=ok\n");
+		await Bun.write(input, "one");
+		await allowEnvrc(root);
+		expect(await loadDirenvEnv(root)).toBeNull();
+		expect(await Bun.file(path.join(root, "ran")).exists()).toBe(false);
+		const rcHash = createHash("sha256").update(`${rc}\n`).digest("hex");
+		const inputHash = createHash("sha256").update(`${input}\none`).digest("hex");
+		const marker = path.join(Bun.env.XDG_DATA_HOME!, "direnv", "allowed-required", rcHash, inputHash);
+		await Bun.write(marker, `${input}\n`);
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_REQUIRED).toBe("ok");
+		await fs.unlink(marker);
+		expect(await loadDirenvEnv(root)).toBeNull();
+		await Bun.write(marker, `${input}\n`);
+		await Bun.write(input, "two");
+		expect(await loadDirenvEnv(root)).toBeNull();
+		expect(await Bun.file(path.join(root, "ran")).text()).toBe("x");
+	});
+
+	it("parses watched dotenv files as data rather than running them as Bash", async () => {
+		const root = tmp();
+		await Bun.write(path.join(root, ".envrc"), "dotenv_if_exists config\n");
+		await Bun.write(path.join(root, "config"), `PI_DIRENV_DOTENV='$(touch ran)'\n`);
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_DOTENV).toBe("$(touch ran)");
+		expect(await Bun.file(path.join(root, "ran")).exists()).toBe(false);
+		await Bun.write(path.join(root, "config"), "PI_DIRENV_DOTENV=changed\n");
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_DOTENV).toBe("changed");
+	});
+
+	it("ignores a nearer .env when disabled and caches the actual .envrc", async () => {
+		const root = tmp();
+		const sub = path.join(root, "sub");
+		await Bun.write(path.join(sub, ".env"), "PI_DIRENV_ROOT=dotenv\n");
+		await Bun.write(path.join(configDir(), "direnvrc"), "export PI_DIRENV_ROOT=$PWD\n");
+		await Bun.write(path.join(root, ".envrc"), "printf x >> runs\n");
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(sub))?.set.PI_DIRENV_ROOT).toBe(root);
+		expect((await loadDirenvEnv(sub))?.set.PI_DIRENV_ROOT).toBe(root);
+		expect(await Bun.file(path.join(root, "runs")).text()).toBe("x");
+
+		await Bun.write(path.join(configDir(), "direnv.toml"), "[global]\nload_dotenv = true\n");
+		expect(await loadDirenvEnv(sub)).toBeNull();
+	});
+
+	it("requires approval for config-enabled .env files and loads them as data", async () => {
+		const root = tmp();
+		await Bun.write(path.join(configDir(), "direnv.toml"), "[global]\nload_dotenv = true\n");
+		await Bun.write(path.join(root, ".env"), "PI_DIRENV_AUTO_DOTENV=approved\n");
+		expect(await loadDirenvEnv(root)).toBeNull();
+		await allowEnvrc(root, ".env");
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_AUTO_DOTENV).toBe("approved");
+	});
+
+	it("parses the approved .env snapshot after direnvrc replaces the file", async () => {
+		const root = tmp();
+		await Bun.write(path.join(configDir(), "direnv.toml"), "[global]\nload_dotenv = true\n");
+		await Bun.write(path.join(root, ".env"), 'PI_DIRENV_DOTENV_SNAPSHOT="${PI_DIRENV_USER_CONFIG}:$PWD"\n');
+		await Bun.write(path.join(root, "replacement"), "PI_DIRENV_DOTENV_SNAPSHOT=replacement\n");
+		await Bun.write(
+			path.join(configDir(), "direnvrc"),
+			"export PI_DIRENV_USER_CONFIG=approved\nif [[ -f replacement ]]; then mv -f replacement .env; fi\n",
+		);
+		await allowEnvrc(root, ".env");
+
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_DOTENV_SNAPSHOT).toBe(`approved:${root}`);
+		expect(await loadDirenvEnv(root)).toBeNull();
+	});
+
+	it("sources an integrity-pinned URL and never executes content with a mismatched digest", async () => {
+		const root = tmp();
+		const script = "export PI_DIRENV_URL=approved\n";
+		const integrity = `sha256-${createHash("sha256").update(script).digest("base64")}`;
+		let response = "printf unapproved > ran\n";
+		const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(response) });
+		try {
+			await Bun.write(path.join(root, ".envrc"), `source_url '${server.url}' '${integrity}' || exit 1\n`);
+			await allowEnvrc(root);
+			expect(await loadDirenvEnv(root)).toBeNull();
+			expect(await Bun.file(path.join(root, "ran")).exists()).toBe(false);
+			response = script;
+			expect((await loadDirenvEnv(root))?.set.PI_DIRENV_URL).toBe("approved");
+		} finally {
+			await server.stop(true);
+		}
+	});
+
+	it("loads a user-supplied use devenv helper with the upstream helper surface", async () => {
+		const root = tmp();
+		await Bun.write(
+			path.join(configDir(), "lib", "devenv.sh"),
+			[
+				"use_devenv() {",
+				"  direnv_version 2.21.3 || return",
+				"  watch_file devenv.nix || return",
+				"  export PI_DIRENV_DEVENV=$1",
+				"}",
+			].join("\n"),
+		);
+		await Bun.write(path.join(root, ".envrc"), "use devenv argument\n");
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_DEVENV).toBe("argument");
+	});
+
+	it("enforces the evaluation time limit and caller cancellation", async () => {
+		const root = tmp();
+		await Bun.write(path.join(root, ".envrc"), "sleep 5\nprintf x > ran\n");
+		await allowEnvrc(root);
+		expect(await loadDirenvEnv(root, { timeoutMs: 40 })).toBeNull();
+		// A native run consumes an actual AbortSignal rather than a fake timer.
+		expect(await loadDirenvEnv(root, { signal: AbortSignal.timeout(60) })).toBeNull();
+		expect(await Bun.file(path.join(root, "ran")).exists()).toBe(false);
 	});
 
 	it("reuses a warm export but refreshes after a same-second watched file change", async () => {
@@ -232,6 +394,18 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		expect((await loadDirenvEnv(root))?.set.DIRENV_WATCH_TEST).toBe("two");
 		expect((await loadDirenvEnv(root))?.set.DIRENV_WATCH_TEST).toBe("two");
 		expect(await Bun.file(countFile).text()).toBe("xx");
+	});
+
+	it("does not cache an old value under a watch stamp acquired after evaluation", async () => {
+		const root = tmp();
+		await Bun.write(path.join(root, "value"), "first\n");
+		await Bun.write(
+			path.join(root, ".envrc"),
+			'watch_file value\nread -r PI_WATCH_VALUE < value\nexport PI_WATCH_VALUE\nprintf "next\\n" > value\n',
+		);
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(root))?.set.PI_WATCH_VALUE).toBe("first");
+		expect((await loadDirenvEnv(root))?.set.PI_WATCH_VALUE).toBe("next");
 	});
 
 	it("refreshes when a missing watched file appears or an existing one disappears", async () => {
@@ -306,22 +480,7 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 	});
 });
 
-describe.skipIf(!hasDirenv)("bash executor direnv wiring (end-to-end)", () => {
-	const savedEnv: Record<string, string | undefined> = {};
-	beforeEach(() => {
-		const home = tmp();
-		for (const key of ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]) {
-			savedEnv[key] = Bun.env[key];
-			Bun.env[key] = path.join(home, key.toLowerCase());
-		}
-	});
-	afterEach(() => {
-		for (const [key, value] of Object.entries(savedEnv)) {
-			if (value === undefined) delete Bun.env[key];
-			else Bun.env[key] = value;
-		}
-	});
-
+describe("bash executor direnv wiring (end-to-end)", () => {
 	it("exposes direnv-loaded vars to the command while per-call env still wins", async () => {
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "export DIRENV_WIRE_TEST=fromdirenv\nexport OVERRIDE_ME=fromdirenv\n");
@@ -343,7 +502,6 @@ describe.skipIf(!hasDirenv)("bash executor direnv wiring (end-to-end)", () => {
 		// caller does NOT re-supply it, so direnv's unset must strip it. `printenv`
 		// exits non-zero and prints nothing when the name is genuinely absent. A
 		// unique sessionKey forces a fresh shell that captures the var we just set.
-		// (Avoid a `DIRENV_`-prefixed name — the loader strips those before spawn.)
 		Bun.env.PI_DIRENV_UNSET_E2E = "leaked";
 		try {
 			const result = await executeBash('printenv PI_DIRENV_UNSET_E2E; printf "rc=%s" "$?"', {
@@ -358,27 +516,7 @@ describe.skipIf(!hasDirenv)("bash executor direnv wiring (end-to-end)", () => {
 	});
 });
 
-describe.skipIf(!hasDirenv)("applyDirenvPreflight (shared all-backends preflight)", () => {
-	// This helper is what the ACP client-terminal and PTY backends call so they
-	// expose the same devenv env as `executeBash`. Assert its core contract:
-	// set-merge with caller-wins, the regex-gated `unset -v` prefix, and the
-	// off/absent passthrough. HOME/XDG isolation mirrors the loader cases so
-	// `direnv allow` never touches the dev/CI user's global store.
-	const savedEnv: Record<string, string | undefined> = {};
-	beforeEach(() => {
-		const home = tmp();
-		for (const key of ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]) {
-			savedEnv[key] = Bun.env[key];
-			Bun.env[key] = path.join(home, key.toLowerCase());
-		}
-	});
-	afterEach(() => {
-		for (const [key, value] of Object.entries(savedEnv)) {
-			if (value === undefined) delete Bun.env[key];
-			else Bun.env[key] = value;
-		}
-	});
-
+describe("applyDirenvPreflight (shared all-backends preflight)", () => {
 	it("merges direnv set vars into env while the caller's env wins", async () => {
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "export DIRENV_PF_SET=fromdirenv\nexport OVERRIDE_ME=fromdirenv\n");
