@@ -1295,10 +1295,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		activity.isComposing = untrack(this.composer.text).trim() !== "";
 		activity.isReviewingPlan = this.#planReviewPick !== undefined;
 		target.enableIdleMaintenance({
-			// Idle maintenance must not run while a submitted plan is awaiting review:
-			// compaction would destroy the exploration context needed to refine the plan.
-			isBlocked: () =>
-				!activity.ready || activity.target !== target || activity.isComposing || activity.isReviewingPlan,
+			// Idle compaction must not run while a submitted plan is awaiting review:
+			// compacting would destroy the exploration context needed to refine the plan.
+			// Only compaction is gated; the recap is an ephemeral side-channel turn and
+			// does not touch the context the review depends on.
+			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			isCompactionBlocked: () => this.#planReview !== undefined,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
 			// Delivered only while unblocked, so `target` is the session on screen.
 			onRecap: recap => activity.presentRecap?.(recap),
