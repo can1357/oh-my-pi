@@ -1480,7 +1480,7 @@ describe("InputController global editor actions", () => {
 		// A second Alt+G while the picker is up must not stack another picker.
 		const field = fakeNode("input");
 		const dialog = { kind: "col", handlers: {}, children: () => [field] } as unknown as UiNode;
-		const handle: OverlayHandle = { node: dialog, closed: false, close: vi.fn() };
+		const handle: OverlayHandle = { node: dialog, closed: false, isFocused: () => false, close: vi.fn() };
 		Object.assign(context.ctx, { hookSelector: handle });
 		context.setFocused(field);
 		expect(context.press("alt+g")).toBe("unhandled");

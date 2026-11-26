@@ -293,6 +293,8 @@ export interface ExtensionWidgetOptions {
 /** An open `ExtensionUIContext.custom()` overlay. */
 export interface ExtensionOverlayHandle {
 	readonly closed: boolean;
+	/** Whether the overlay, or a node inside it, holds keyboard focus. */
+	isFocused(): boolean;
 	/** Close the overlay (idempotent); the `custom()` promise stays pending until `done` is called. */
 	close(): void;
 }

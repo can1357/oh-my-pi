@@ -1660,6 +1660,7 @@ export class ExtensionUiController {
 						get closed() {
 							return handle?.closed ?? true;
 						},
+						isFocused: () => handle?.isFocused() ?? false,
 						close: () => handle?.close(),
 					});
 					return;

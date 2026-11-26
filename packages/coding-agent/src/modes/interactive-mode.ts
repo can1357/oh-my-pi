@@ -7363,17 +7363,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		const view = mountNode(factory, "An editor-area dialog");
 		const frame = this.#frame;
 		let closed = false;
+		const holds = (): boolean => {
+			const focused = this.shell.focused();
+			return focused !== null && (focused === view.node || within(focused, view.node));
+		};
 		const handle: OverlayHandle = {
 			node: view.node,
 			get closed() {
 				return closed;
 			},
+			isFocused: () => !closed && holds(),
 			close: () => {
 				if (closed) return;
 				closed = true;
 				if (this.#editorAreaDialog === handle) this.#editorAreaDialog = undefined;
-				const focused = this.shell.focused();
-				const held = focused !== null && (focused === view.node || within(focused, view.node));
+				const held = holds();
 				if (frame.editorArea.peek() === view.node) {
 					frame.editorArea.set(undefined);
 					this.shell.setHome(this.composer.field);
