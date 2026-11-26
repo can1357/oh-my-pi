@@ -2823,18 +2823,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}));
 				}
 			}
-			if (boundary === "work") {
-				// A fallback notice joins the next step of the same run. At a stop boundary it stays queued for the
-				// next prompt: an aside there would start one more model turn.
-				const notices = this.#pendingNextTurnMessages.filter(
-					message => message.customType === MODEL_FALLBACK_NOTICE_TYPE,
-				);
-				if (notices.length > 0) {
-					this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(
-						message => message.customType !== MODEL_FALLBACK_NOTICE_TYPE,
-					);
-					thunks.push(...notices.map(notice => () => notice));
-				}
+			// A fallback notice rides a request the run makes anyway: its next step of work, or the turn an aside
+			// delivered here buys; a queued steer or follow-up takes it on delivery (#takeModelFallbackNotices).
+			// Alone at a stop boundary it stays queued: an aside there would start one more model turn.
+			for (const notice of this.#pendingNextTurnMessages) {
+				if (notice.customType !== MODEL_FALLBACK_NOTICE_TYPE) continue;
+				thunks.push(() => {
+					if (boundary !== "work" && !hasDelivery) return null;
+					if (!this.#pendingNextTurnMessages.includes(notice)) return null;
+					this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => message !== notice);
+					return notice;
+				});
 			}
 			return thunks;
 		});
@@ -9797,7 +9796,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<QueuedMessagePreparation> | undefined => {
 		const userMessages = messages.filter(isUserAuthoredQueuedMessage);
 		const first = userMessages[0];
-		if (!first) return undefined;
+		if (!first) {
+			// Nothing to prepare, but the batch buys a request: a fallback notice parked at a stop boundary rides it.
+			const parked = this.#pendingNextTurnMessages.some(
+				message => message.customType === MODEL_FALLBACK_NOTICE_TYPE,
+			);
+			return parked ? Promise.resolve({ commit: () => this.#takeModelFallbackNotices() }) : undefined;
+		}
 		const text: string[] = [];
 		const images: ImageContent[] = [];
 		for (const message of userMessages) {
@@ -9839,9 +9844,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const preparation = await pending;
 		return {
 			commit: () => {
-				const additional = preparation.commit();
-				if (additional === undefined) return undefined;
+				const prepared = preparation.commit();
+				if (prepared === undefined) return undefined;
 				this.#models.applyChillax(promptText);
+				// The batch buys a request: a fallback notice parked at a stop boundary rides it.
+				const notices = this.#takeModelFallbackNotices();
+				const additional = notices.length > 0 ? [...prepared, ...notices] : prepared;
 				if (referenced.size === 0) return additional;
 				const notice = this.#tools.takeSessionAgentNotice(
 					[...this.agent.peekUndeliveredQueuedMessages(), ...messages, ...additional],
@@ -9850,6 +9858,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				return notice ? [...additional, notice] : additional;
 			},
 		};
+	}
+
+	/** Takes the `retry.fallbackNotice` notices queued for the next prompt, for a request already committed. */
+	#takeModelFallbackNotices(): CustomMessage[] {
+		const notices = this.#pendingNextTurnMessages.filter(
+			message => message.customType === MODEL_FALLBACK_NOTICE_TYPE,
+		);
+		if (notices.length > 0) {
+			this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(
+				message => message.customType !== MODEL_FALLBACK_NOTICE_TYPE,
+			);
+		}
+		return notices;
 	}
 
 	/**

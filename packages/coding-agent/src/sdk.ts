@@ -73,6 +73,7 @@ import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry
 import {
 	disabledProviderIds,
 	formatModelStringWithRouting,
+	formatUnauthenticatedNamedModelsError,
 	getModelMatchPreferences,
 	type ModelMatchPreferences,
 	parseModelPattern,
@@ -700,6 +701,13 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated inherited retry chain for a deferred singleton pattern; empty explicitly disables fallbacks. */
 	modelPatternDefaultFallbackChain?: string[];
+	/**
+	 * Skip a deferred pattern entry whose credential does not resolve (`getApiKey` for `agentId`), so the next
+	 * entry is tried, as `resolveModelOverrideWithAuthFallback` does at spawn; when no entry has one, the session
+	 * starts with no model and `modelFallbackMessage` names them. A subagent held to its named models
+	 * (`task.namedModelFallback` off) sets it.
+	 */
+	modelPatternRequireCredential?: boolean;
 	/**
 	 * Called with the model of every main-loop request before it is sent; throw to
 	 * refuse it. Per-call `model` subagents use it so no switch reaches a model the
@@ -3547,10 +3555,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				: allEnabledModels;
 			let usageFallbackTriggered = false;
 			let usageFallbackReason: { from: string; reason: string } | undefined;
+			const uncredentialedModels: string[] = [];
 			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
 				const { pattern, retryFallback } = expandedModelPatterns[patternIndex];
 				const primary = parseModelPattern(pattern, resolutionModels, matchPreferences);
 				if (!primary.model || (retryFallback && !hasModelAuth(primary.model))) continue;
+				if (options.modelPatternRequireCredential) {
+					const primaryKey = await modelRegistry.getApiKey(primary.model, options.agentId);
+					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
+						const label = formatModelStringWithRouting(primary.model);
+						if (!uncredentialedModels.includes(label)) uncredentialedModels.push(label);
+						continue;
+					}
+				}
 				let hasUsageFallbackCandidate = false;
 				for (
 					let candidateIndex = patternIndex + 1;
@@ -3718,7 +3735,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// hint `resolveCliModel` gives before the selector was deferred here.
 				const hint =
 					deferredModelPatterns.length === 1 ? providerModelHint(deferredModelPatterns[0], allEnabledModels) : "";
-				modelFallbackMessage = `Model ${requested} not found${hint ? `.${hint}` : ""}`;
+				// Entries that resolved but had no working credentials (`modelPatternRequireCredential`) are why.
+				modelFallbackMessage =
+					uncredentialedModels.length > 0
+						? formatUnauthenticatedNamedModelsError(uncredentialedModels)
+						: `Model ${requested} not found${hint ? `.${hint}` : ""}`;
 				// A subagent whose own patterns match nothing runs on its parent's model
 				// rather than starting with none; the message names the substitution.
 				const parentFallback = options.modelPatternParentFallback

@@ -36,6 +36,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	installRetryFallbackRole,
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -897,6 +898,124 @@ describe("AgentSession retry fallback", () => {
 		expect(fallbackNotices(requestContexts[2])).toEqual([`Fallback: ${primarySelector} → ${fallbackSelector}`]);
 		expect(requestContexts[2]).toContain("overloaded_error: provider returned error 503");
 	});
+
+	it.each(["followUp", "steer"] as const)(
+		"gives an idle session the notice with its next queued %s (retry.fallbackNotice)",
+		async kind => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestContexts: string[] = [];
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackNotice": true,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			recordRequests(
+				requestContexts,
+				model =>
+					model.provider === primaryModel.provider
+						? { throw: "overloaded_error: provider returned error 503" }
+						: { content: [`ok:${model.provider}/${model.id}`] },
+				primaryModel,
+				settings,
+			);
+
+			await session?.prompt("First turn: the primary refuses");
+			await session?.waitForIdle();
+			// A queued message starts the next request without `prompt()`.
+			if (kind === "followUp") await session?.followUp("Queued: which model are you?");
+			else await session?.steer("Queued: which model are you?");
+			await session?.waitForIdle();
+
+			expect(requestContexts).toHaveLength(3);
+			expect(fallbackNotices(requestContexts[2])).toEqual([`Fallback: ${primarySelector} → ${fallbackSelector}`]);
+		},
+	);
+
+	it("adds no notice for a fallback move no turn was served on once the model is switched by hand (retry.fallbackNotice)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		const chosenModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!primaryModel || !fallbackModel || !chosenModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.fallbackNotice": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		recordRequests(
+			requestContexts,
+			model =>
+				model.provider === chosenModel.provider
+					? { content: [`ok:${model.provider}/${model.id}`] }
+					: { throw: "overloaded_error: provider returned error 503" },
+			primaryModel,
+			settings,
+		);
+
+		// The primary and its fallback both refuse, so no turn is served on the fallback.
+		await session?.prompt("First turn: every model of the chain refuses");
+		await session?.waitForIdle();
+		await session?.setModel(chosenModel);
+		await session?.prompt("Second turn on the model picked by hand");
+		await session?.waitForIdle();
+		await session?.prompt("Third turn: which model are you?");
+		await session?.waitForIdle();
+
+		expect(requestContexts.slice(-2).flatMap(fallbackNotices)).toEqual([]);
+	});
+
+	it("adds no notice in a new session for a fallback move made in the previous one (retry.fallbackNotice)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.fallbackNotice": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		let refuse = true;
+		recordRequests(
+			requestContexts,
+			model =>
+				refuse
+					? { throw: "overloaded_error: provider returned error 503" }
+					: { content: [`ok:${model.provider}/${model.id}`] },
+			primaryModel,
+			settings,
+		);
+
+		// The move to the fallback is made, but no turn is served on it before the transcript changes.
+		await session?.prompt("First turn: every model of the chain refuses");
+		await session?.waitForIdle();
+		await session?.newSession();
+		refuse = false;
+		await session?.prompt("First turn of the new session");
+		await session?.waitForIdle();
+		await session?.prompt("Second turn: which model are you?");
+		await session?.waitForIdle();
+
+		// The new session runs on the model the old one moved to; its context never named the one it left.
+		expect(`${session?.model?.provider}/${session?.model?.id}`).toBe(fallbackSelector);
+		expect(requestContexts.slice(-2).flatMap(fallbackNotices)).toEqual([]);
+	});
+
 	it("re-syncs the edit-mode system prompt after a retry-fallback model swap", async () => {
 		// A session that starts on a default-hashline model and auto-falls-back to a
 		// variant-pinned model must rebuild its base prompt so the edit-mode policy
@@ -7340,6 +7459,62 @@ describe("AgentSession retry fallback", () => {
 			isFallback: false,
 			contextWindow: baseModel.contextWindow,
 		});
+	});
+
+	it.each([
+		{ listed: false, case: "does not degrade a held Fireworks Fast model to a Standard id its list does not name" },
+		{ listed: true, case: "moves a held Fireworks Fast model to the Standard id its list names" },
+	])("$case", async ({ listed }) => {
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
+		const fastSelector = `${fastModel.provider}/${fastModel.id}`;
+		const baseSelector = `fireworks/${fastModel.id.replace(/-fast$/, "")}`;
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				// Fast refuses every request; the Standard tier answers.
+				mock.push(
+					model.id === fastModel.id
+						? { throw: "overloaded_error: provider returned error 503" }
+						: { content: ["the base model did the work"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		// The subagent's own chain holds the later entries of its list.
+		installRetryFallbackRole(settings, "subagent:held", {
+			primary: fastSelector,
+			chain: listed ? [baseSelector] : [],
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			exclusiveRetryFallbackRole: "subagent:held",
+		});
+
+		await session.prompt("Fast refuses; the subagent runs only on its list");
+		await session.waitForIdle();
+
+		if (listed) {
+			expect(requestedModels).toEqual([fastSelector, baseSelector]);
+			expect(`${session.model?.provider}/${session.model?.id}`).toBe(baseSelector);
+		} else {
+			expect(requestedModels.length).toBeGreaterThan(0);
+			expect(requestedModels).not.toContain(baseSelector);
+			expect(`${session.model?.provider}/${session.model?.id}`).toBe(fastSelector);
+		}
 	});
 
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {

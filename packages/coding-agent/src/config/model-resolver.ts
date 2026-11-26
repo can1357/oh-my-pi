@@ -2160,6 +2160,11 @@ export async function resolveModelOverrideWithAuthFallback(
 	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
 }
 
+/** Why a subagent held to its named models has none to run on: none of `models` has working credentials. */
+export function formatUnauthenticatedNamedModelsError(models: readonly string[]): string {
+	return `No working credentials for named subagent model${models.length === 1 ? "" : "s"}: ${models.join(", ")}`;
+}
+
 /**
  * Resolve a list of role patterns to the first matching model.
  */

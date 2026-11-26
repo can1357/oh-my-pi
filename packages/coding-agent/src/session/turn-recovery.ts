@@ -481,10 +481,16 @@ export class TurnRecovery {
 	 * Why the session moved off the model its context names, kept until a turn is served on another
 	 * model (`retry.fallbackNotice`). A refused attempt that moves on keeps the first cause and `from`,
 	 * so the one notice names the model that finally serves and the move that left the last served one.
+	 * Anchored like {@link #lastServed}: a move made in another transcript says nothing about this one.
 	 */
-	#servingChange: { fromSelector: string; fromIdentity: string; reason: string | undefined } | undefined;
-	/** Identity of the model the session's context last named as serving it; set by the first served turn. */
-	#contextServing: string | undefined;
+	#servingChange:
+		| { fromSelector: string; fromIdentity: string; reason: string | undefined; sessionId: string }
+		| undefined;
+	/**
+	 * Identity of the model the session's context last named as serving it; set by the first served turn.
+	 * Anchored like {@link #lastServed}.
+	 */
+	#contextServing: { identity: string; sessionId: string } | undefined;
 	/**
 	 * Session whose current model was reached by fallback routing rather than by
 	 * the configured primary, or `undefined` when it was not. Tracked separately
@@ -614,6 +620,13 @@ export class TurnRecovery {
 		}
 		if (this.#demotedReasoningOmittedFor === previousSessionId) {
 			this.#demotedReasoningOmittedFor = sessionId;
+		}
+		// A cloned transcript names what its source named, so a pending move and the named model carry over.
+		if (this.#servingChange?.sessionId === previousSessionId) {
+			this.#servingChange = { ...this.#servingChange, sessionId };
+		}
+		if (this.#contextServing?.sessionId === previousSessionId) {
+			this.#contextServing = { ...this.#contextServing, sessionId };
 		}
 	}
 
@@ -2023,10 +2036,15 @@ export class TurnRecovery {
 		return getRetryFallbackRevertPolicy(this.#host.settings);
 	}
 
-	/** Clears fallback ownership after an explicit model change or a restore. */
+	/**
+	 * Clears fallback ownership after an explicit model change or a restore. A runtime move no turn
+	 * served yet goes with it: the model that serves next was not chosen by that fallback (`/model`,
+	 * a prewalk), and a restore notes its own move after clearing.
+	 */
 	clearActiveRetryFallback(): void {
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
+		this.#servingChange = undefined;
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
@@ -2626,9 +2644,12 @@ export class TurnRecovery {
 	 * is worth retrying on the base id. Skips failures the base model shares:
 	 * context overflow (compaction's job), usage limits and auth errors (same
 	 * account/key), and turns that already emitted any replay-unsafe output.
-	 * Requires the base model to exist in the registry.
+	 * Requires the base model to exist in the registry. Never for a session held
+	 * to its own chain (`exclusiveRetryFallbackRole`): its list may not name the
+	 * base id, and when it does, the ordered chain walks to it.
 	 */
 	isFireworksFastFallbackEligible(message: AssistantMessage): boolean {
+		if (this.#exclusiveRetryFallbackRole !== undefined) return false;
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
 		if (message.stopReason !== "error") return false;
@@ -2823,28 +2844,34 @@ export class TurnRecovery {
 	/** Records that a runtime move left `fromSelector`; ignored unless `retry.fallbackNotice` is on. */
 	#noteServingChange(fromSelector: string, fromModel: Model | undefined, reason: string | undefined): void {
 		if (!cfgRetryFallbackNotice.get(this.#host.settings)) return;
-		const pending = this.#servingChange;
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const pending = this.#servingChange?.sessionId === sessionId ? this.#servingChange : undefined;
 		this.#servingChange = {
 			fromSelector: pending?.fromSelector ?? fromSelector,
 			fromIdentity: pending?.fromIdentity ?? (fromModel ? formatModelStringWithRouting(fromModel) : fromSelector),
 			reason: pending?.reason ?? reason,
+			sessionId,
 		};
 	}
 
 	/**
 	 * Gives the session's context one notice for a change of serving model, once a turn has been served on
-	 * the new one. The notice is queued for the next prompt; the aside provider moves it into the run still
-	 * going at its next step boundary, so it never lands between a tool call and its result and never starts
-	 * a turn by itself. A move that ended on the model the context already names, and a switch no fallback
-	 * caused (`/model`), add nothing.
+	 * the new one. The notice is queued for the next prompt and rides the next request the session makes
+	 * anyway: the aside provider moves it into the run still going at its next step boundary, and a queued
+	 * steer or follow-up takes it on delivery. It never lands between a tool call and its result and never
+	 * starts a turn by itself. A move that ended on the model the context already names, a switch no
+	 * fallback caused (`/model`), and a move made in another transcript add nothing.
 	 */
 	async #announceServingChange(served: ServingModel): Promise<void> {
 		if (!cfgRetryFallbackNotice.get(this.#host.settings)) return;
 		const identity = served.modelIdentity ?? served.selector;
-		const change = this.#servingChange;
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const change = this.#servingChange?.sessionId === sessionId ? this.#servingChange : undefined;
 		this.#servingChange = undefined;
-		const named = this.#contextServing ?? change?.fromIdentity;
-		this.#contextServing = identity;
+		const named =
+			(this.#contextServing?.sessionId === sessionId ? this.#contextServing.identity : undefined) ??
+			change?.fromIdentity;
+		this.#contextServing = { identity, sessionId };
 		if (!change || named === identity || !this.#host.queueHiddenNextTurnMessage) return;
 		const reason = change.reason?.trim();
 		await this.#host.queueHiddenNextTurnMessage({

@@ -30,13 +30,14 @@ import {
 } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { isAuthenticated, kNoAuth, ModelRegistry } from "../config/model-registry";
+import { ModelRegistry } from "../config/model-registry";
 import { formatModelSelectorValue } from "../config/model-selector";
 import { previewLine, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { replaceTabs } from "../utils/text-width";
 import { diffStats, type EditMode, getEditInputPaths } from "../tools/details/edit";
 import {
 	formatModelStringWithRouting,
+	formatUnauthenticatedNamedModelsError,
 	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
 	resolveAgentPrewalkPattern,
@@ -302,10 +303,6 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 /** Session-scoped role owning subagent `id`'s retry fallback chain; cold revival reinstalls it under this name. */
 export function subagentRetryFallbackRole(id: string): string {
 	return `subagent:${id}`;
-}
-
-function formatUnauthenticatedNamedModelsError(models: readonly string[]): string {
-	return `No working credentials for named subagent model${models.length === 1 ? "" : "s"}: ${models.join(", ")}.`;
 }
 
 interface SubagentRetryFallbackCandidate {
@@ -5282,6 +5279,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						deferModelPatterns && !namedModelsOnly ? options.parentActiveModelPattern : undefined,
 					modelPatternFallbackRole: deferModelPatterns ? subagentRetryFallbackRole(id) : undefined,
 					modelPatternDefaultFallbackChain: deferModelPatterns ? inheritedRetryFallbackChain : undefined,
+					modelPatternRequireCredential: deferModelPatterns && namedModelsOnly ? true : undefined,
 					thinkingLevel: effectiveThinkingLevel,
 					...(perCallModelGrants || allowedProvider !== undefined
 						? {
@@ -5403,25 +5401,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					}),
 				);
 				({ session, modelFallbackMessage } = await awaitAbortable(sessionPromise));
-				if (namedModelsOnly && !model && session.model) {
-					const deferredKey = await awaitAbortable(modelRegistry.getApiKey(session.model, id));
-					if (deferredKey !== kNoAuth && !isAuthenticated(deferredKey)) {
-						const catalog =
-							typeof modelRegistry.getAll === "function"
-								? { getAvailable: () => modelRegistry.getAll() }
-								: undefined;
-						const missing: string[] = [];
-						for (const pattern of configuredModelPatterns) {
-							const candidate = catalog ? resolveModelOverride([pattern], catalog, settings).model : undefined;
-							const label = candidate ? formatModelStringWithRouting(candidate) : pattern;
-							if (!missing.includes(label)) missing.push(label);
-						}
-						const names = missing.length > 0 ? missing : [formatModelStringWithRouting(session.model)];
-						await session.dispose();
-						sessionPromise = undefined;
-						throw new Error(formatUnauthenticatedNamedModelsError(names));
-					}
-				}
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
 				// fallback, model switch) still finds it. Consumption is gated per

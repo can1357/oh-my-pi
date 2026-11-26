@@ -1010,7 +1010,7 @@ export const cfgRetryFallbackNotice = register({
 		group: "Retry & Fallback",
 		label: "Fallback Notice",
 		description:
-			"Tell the session which model serves it when a retry fallback moves it to another model and again when it returns to its primary: one hidden notice per change, in the style of the startup `Fallback:` line, with the refusal or error behind the move. Sent only once a turn on the new model has been served: a run that goes on gets it with its next model request, otherwise it rides with the next prompt; it never starts a turn by itself. Off (the default), the session's context never names the serving model.",
+			"Tell the session which model serves it when a retry fallback moves it to another model and again when it returns to its primary: one hidden notice per change, in the style of the startup `Fallback:` line, with the refusal or error behind the move. Sent only once a turn on the new model has been served: a run that goes on gets it with its next model request, otherwise it rides with the next prompt, steer or follow-up; it never starts a turn by itself. Off (the default), the session's context never names the serving model.",
 	},
 });
 
