@@ -15978,6 +15978,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#stats.getContextUsage(options);
 	}
 
+	/** Context tokens at which threshold auto-compaction fires for the current model; `undefined` when it cannot fire. */
+	getAutoCompactionThresholdTokens(): number | undefined {
+		return this.#maintenance.autoCompactionThresholdTokens();
+	}
+
 	/**
 	 * Monotonic counter that changes whenever the in-flight pending context
 	 * snapshot is set or cleared. Status-line context memoization keys on this so

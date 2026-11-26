@@ -246,6 +246,26 @@ function hasUsableCompactionMethod(
 }
 
 /**
+ * Context tokens past which threshold auto-compaction fires for `model`, or
+ * `undefined` when it never fires there: auto-compaction off, window unknown,
+ * or neither notes-backed rollover nor a method `runAutoCompaction` could
+ * select for a threshold pass (an empty `methodOrder`, which the legacy
+ * `strategy: off` migrates to, or `snapcompact` alone on a text-only model).
+ */
+export function resolveAutoCompactionThresholdTokens(
+	settings: Settings,
+	model: Model | undefined,
+	hasRolloverTools: boolean,
+): number | undefined {
+	const compaction = resolveModelCompactionSettings(settings, model);
+	const contextWindow = model?.contextWindow ?? 0;
+	if (!compaction.enabled || !(contextWindow > 0)) return undefined;
+	const notesRollover = compaction.experimentalContextManagement === true && hasRolloverTools;
+	if (!notesRollover && !hasUsableCompactionMethod("threshold", model, compaction)) return undefined;
+	return resolveThresholdTokens(contextWindow, compaction);
+}
+
+/**
  * Concrete media-limit wording in a payload-rejection error (e.g.
  * `request_too_large: too many images`, `image count exceeds the limit of
  * 20`). `ambiguousPayloadRejection` (dual `ContextOverflow` + `PayloadRejected`)
@@ -730,6 +750,15 @@ export class SessionMaintenance {
 		return (
 			this.#compactionSettings.experimentalContextManagement === true &&
 			this.#host.hasExperimentalContextRolloverTools()
+		);
+	}
+
+	/** Where threshold auto-compaction fires for the live model; see {@link resolveAutoCompactionThresholdTokens}. */
+	autoCompactionThresholdTokens(): number | undefined {
+		return resolveAutoCompactionThresholdTokens(
+			this.#host.settings,
+			this.#model,
+			this.#host.hasExperimentalContextRolloverTools(),
 		);
 	}
 

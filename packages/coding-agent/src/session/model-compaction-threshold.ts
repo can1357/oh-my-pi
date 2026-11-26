@@ -33,21 +33,6 @@ export function resolveModelCompactionSettings(
 	return applyModelCompactionThreshold(cfgCompaction.get(scope), thresholds, model);
 }
 
-/**
- * Context tokens past which threshold auto-compaction fires for `model`: its
- * policy and window resolved as the session's `shouldCompact` check resolves
- * them. `undefined` when auto-compaction is off or the window is unknown.
- */
-export function resolveAutoCompactionThresholdTokens(
-	scope: ScopeLike,
-	model: Model | null | undefined,
-): number | undefined {
-	const settings = resolveModelCompactionSettings(scope, model);
-	const contextWindow = model?.contextWindow ?? 0;
-	if (!settings.enabled || !(contextWindow > 0)) return undefined;
-	return resolveThresholdTokens(contextWindow, settings);
-}
-
 /** Where auto-compaction triggers for `model` and which setting decides it, for the model hub preview. */
 export function describeModelCompactionPoint(scope: ScopeLike, model: Model): ModelCompactionPoint {
 	const configured = cfgCompaction.get(scope);

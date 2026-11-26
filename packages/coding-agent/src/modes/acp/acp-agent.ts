@@ -69,7 +69,6 @@ import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { resolveAutoCompactionThresholdTokens } from "../../session/model-compaction-threshold";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -2887,8 +2886,9 @@ export class AcpAgent implements Agent {
 
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
+			// Read beside the usage, before the cost await: a model switch during it must not put one model's point on another's window.
+			const thresholdTokens = record.session.getAutoCompactionThresholdTokens();
 			const cost = await this.#sessionTreeCost(record);
-			const thresholdTokens = resolveAutoCompactionThresholdTokens(record.session.settings, record.session.model);
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
