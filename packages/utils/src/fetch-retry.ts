@@ -20,9 +20,9 @@ const WILL_RESET_IN_PATTERN =
 	/(?:will\s+)?resets?\s+in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i;
 // OpenCode Go compound remainder: "Resets in 2hr 15min".
 const RESET_IN_HR_MIN_PATTERN = /resets?\s+in\s+~?\s*(\d+(?:\.\d+)?)\s*hr\s*(\d+(?:\.\d+)?)\s*min\b/i;
-// "Your limit will reset at 2026-09-01 09:44:51" / "reset at 2026-09-01T09:44:51Z"
+// "Your limit will reset at 2026-09-01 09:44:51" / "reset at 2026-09-01T09:44:51Z" / "rests until 2026-11-25T14:30:00Z"
 const WILL_RESET_AT_PATTERN =
-	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
+	/\b(?:(?:will\s+)?reset at|rests until)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
 // Both grammars carry a timezone-naive wall clock. The default reading is UTC;
 // a provider-specific offset (Z.AI/Zhipu Beijing time) is applied only through
 // `RetryHintOptions.naiveResetTimezoneOffset`, never inferred from the language.
@@ -70,7 +70,7 @@ export interface RetryHintOptions {
  *  - `"retryDelay": "34.074824224s"` / `"quotaResetDelay": "17h48m25.5s"` (JSON error detail fields)
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
  *  - `retry-after-ms=98497000` / `retry-after-ms: 7200000` / `retry-after-ms = 7200000`
- *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置` / `"quotaResetTimeStamp": "..."`
+ *  - `Your limit will reset at 2026-09-01 09:44:51` / `rests until 2026-11-25T14:30:00Z` / `将在 2026-09-01 09:44:51 重置` / `"quotaResetTimeStamp": "..."`
  *    (a provider offset makes a naive wall clock authoritative; otherwise it
  *    resolves only when no relative signal is present)
  *
