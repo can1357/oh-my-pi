@@ -17,7 +17,7 @@ direnv="$(command -v direnv)"
 
 # The command line an external program (nix-shell, flox, guix) runs to hand its
 # environment back through $DIRENV_DUMP_FILE_PATH; see direnv_load.
-__direnv_dump=("$direnv" dump)
+__direnv_dump=(sh -c 'env -0 >"$DIRENV_DUMP_FILE_PATH"')
 
 # Where direnv configuration should be stored
 direnv_config_dir="${DIRENV_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/direnv}"
@@ -288,13 +288,10 @@ dotenv_if_exists() {
 #    require_allowed pixi.toml pixi.lock
 #
 require_allowed() {
-  # Also watch these files for changes
-  watch_file "$@"
-
-  # Check if files are in the allowed-required DB
+  # Check and watch both the required files and their authorization entries.
   # Pass $PWD/.envrc as the envrc path since we're executing in the .envrc's directory
   local __direnv_out
-  __direnv_out="$("$direnv" check-required bash "$PWD/.envrc" "$@")"
+  __direnv_out="$("$direnv" check-required bash "$PWD/.envrc" "$@")" || exit 1
   eval "$__direnv_out"
 }
 
@@ -396,6 +393,25 @@ source_env() {
   fi
   popd >/dev/null || return 1
   popd >/dev/null || return 1
+}
+
+# The host already watched and approved the absolute root path. Preserve
+# source_env's directory stack and BASH_SOURCE without reopening that path.
+__direnv_source_snapshot() {
+  pushd "$(pwd 2>/dev/null)" >/dev/null || return 1
+  pushd "${1%/*}/" >/dev/null || return 1
+  log_status "loading $(user_rel_path "$1")"
+  builtin source --omp-source-snapshot "./${1##*/}"
+  local __direnv_status=$?
+  popd >/dev/null || return 1
+  popd >/dev/null || return 1
+  return "$__direnv_status"
+}
+
+__direnv_dotenv_snapshot() {
+  local __direnv_out
+  __direnv_out="$(command direnv dotenv-snapshot)" || return
+  eval "$__direnv_out"
 }
 
 # Usage: source_env_if_exists <filename>

@@ -88,6 +88,21 @@ describe("AgentSession queue_update events", () => {
 		return updates;
 	}
 
+	/** Resolves once `target`'s queue snapshot satisfies `done`: at once, or at the queue_update that makes it. */
+	function queueSettles(target: AgentSession, done: (snapshot: QueueSnapshot) => boolean): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		if (done(target.getQueuedMessages())) {
+			resolve();
+			return promise;
+		}
+		const off = target.subscribe(event => {
+			if (event.type !== "queue_update" || !done(event)) return;
+			off();
+			resolve();
+		});
+		return promise;
+	}
+
 	const CUSTOM_TYPE = "queue-update-custom";
 
 	/** A user-authored, displayable custom prompt with no `details.__queueChipText`; its content is the chip. */
@@ -272,10 +287,10 @@ describe("AgentSession queue_update events", () => {
 		await running;
 	});
 
-	it("emits the queue change when a live-steered message lands in the transcript", async () => {
-		// The other half of the claim lifecycle: without an interrupt, the
-		// finished turn records the steered message, so it stops counting as
-		// pending input and queue listeners must hear that arrival too.
+	it("keeps a live-steered message listed until the run restores it", async () => {
+		// The other half of the claim lifecycle without an interrupt: the steer
+		// stays listed while live, and when the run ends without recording it,
+		// listeners hear it stop counting as live.
 		const streaming = Promise.withResolvers<void>();
 		const claimed = Promise.withResolvers<void>();
 		const followUpStream = createMockModel({ responses: [{ content: ["answered"] }] }).stream;
@@ -321,17 +336,15 @@ describe("AgentSession queue_update events", () => {
 
 		await running;
 
-		// The transcript-arrival transition must be announced: the recorded
-		// steer leaves the live-steered set (liveSteered back to 0) while the
-		// visible queue is momentarily empty. This synthetic provider never
-		// integrates the steer into its response, so the agent afterwards
-		// restores it to the steering queue for a later turn — the arrival
-		// notification itself is this test's contract, not that restore.
-		expect(updates).toContainEqual({ steering: [], followUp: [], liveSteered: 0 });
-		expect(target.getQueuedMessages().liveSteered).toBe(0);
+		// This synthetic provider never integrates the steer into its response, so the run
+		// ends without recording it and the agent restores it to the steering queue. It never
+		// drops out of the snapshot meanwhile, and the restore is announced (liveSteered 0).
+		expect(updates.every(update => update.steering.includes("use tabs"))).toBe(true);
+		expect(updates.at(-1)).toEqual({ steering: ["use tabs"], followUp: [], liveSteered: 0 });
+		expect(target.getQueuedMessages()).toEqual(updates.at(-1)!);
 	});
 
-	it("drops a claimed custom steer from queue_update once preparation commits", async () => {
+	it("drops a claimed custom steer from queue_update once the transcript records it", async () => {
 		const probe = gatedProbe();
 		const mock = createMockModel({
 			responses: [
@@ -380,11 +393,11 @@ describe("AgentSession queue_update events", () => {
 			preparation.release();
 			await secondCallStarted.promise;
 
-			// The steer is now delivered into the transcript, so it is no longer
-			// pending input. The follow-up queued during preparation still is.
+			// The request opened, so the steer leaves the snapshot once the transcript records
+			// it. The follow-up queued during preparation stays pending.
+			await queueSettles(target, snapshot => snapshot.steering.length === 0);
 			expect(target.getQueuedMessages()).toEqual({ steering: [], followUp: ["FOLLOW_CUSTOM"], liveSteered: 0 });
 			expect(updates.at(-1)).toEqual(target.getQueuedMessages());
-			expect(updates.at(-1)!.steering).toEqual([]);
 
 			releaseSecondCall.resolve();
 			await running;
@@ -396,6 +409,60 @@ describe("AgentSession queue_update events", () => {
 			probe.releaseFirstRun();
 			preparation.release();
 			releaseSecondCall.resolve();
+			await running.catch(() => {});
+		}
+	});
+
+	it("keeps a delivered follow-up listed until the transcript records it", async () => {
+		// The follow-up leaves the queue when its turn is prepared, but the transcript records
+		// it only once that turn's request opens; a pill dropped in between leaves the message
+		// shown nowhere for as long as the request takes to set up.
+		const target = createSession([{ content: ["turn one"] }, { content: ["turn two"] }], "all");
+		const recorded = () =>
+			target.agent.state.messages.some(
+				message =>
+					message.role === "user" &&
+					(typeof message.content === "string"
+						? message.content
+						: message.content.map(part => (part.type === "text" ? part.text : "")).join("")) === "later",
+			);
+		let listed = false;
+		const recordedWhenUnlisted: boolean[] = [];
+		target.subscribe(event => {
+			if (event.type !== "queue_update") return;
+			if (event.followUp.includes("later")) listed = true;
+			else if (listed) {
+				listed = false;
+				recordedWhenUnlisted.push(recorded());
+			}
+		});
+		const requestHeld = Promise.withResolvers<void>();
+		const releaseRequest = Promise.withResolvers<void>();
+		target.agent.addBeforeModelCallHook(async () => {
+			if (target.agent.peekDeliveringMessages("followUp").length === 0) return;
+			requestHeld.resolve();
+			await releaseRequest.promise;
+		});
+		let queued = false;
+		target.agent.setOnBeforeYield(async () => {
+			if (queued) return;
+			queued = true;
+			await target.followUp("later");
+		});
+
+		const running = target.prompt("hello");
+		try {
+			await requestHeld.promise;
+			expect(recorded()).toBe(false);
+			expect(target.getQueuedMessages()).toEqual({ steering: [], followUp: ["later"], liveSteered: 0 });
+
+			releaseRequest.resolve();
+			await running;
+
+			expect(target.getQueuedMessages()).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+			expect(recordedWhenUnlisted).toEqual([true]);
+		} finally {
+			releaseRequest.resolve();
 			await running.catch(() => {});
 		}
 	});

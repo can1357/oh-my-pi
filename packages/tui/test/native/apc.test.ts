@@ -126,6 +126,23 @@ describe("TSP framing", () => {
 		}
 	});
 
+	it("decodes the annotated picture Tern hands back and rejects malformed ones", () => {
+		const picture: TspEvent = {
+			ev: "change",
+			sf: "s:1",
+			id: "a.img",
+			value: { mime: "image/jpeg", data: "QUJD", w: 640, h: 480 },
+		};
+		expect(decodeTspEvent(JSON.stringify(picture))).toEqual(picture);
+		for (const value of [
+			{ mime: "image/gif", data: "QUJD", w: 640, h: 480 },
+			{ mime: "image/png", data: 5, w: 640, h: 480 },
+			{ mime: "image/png", data: "QUJD", w: "640", h: 480 },
+			{ mime: "image/png", data: "QUJD", w: 640 },
+		])
+			expect(decodeTspEvent(JSON.stringify({ ...picture, value }))).toBeNull();
+	});
+
 	it("decodes events tolerantly and rejects malformed ones", () => {
 		expect(decodeTspEvent('{"ev":"toggle","sf":"s","id":"a","collapsed":true,"future":1}')).toEqual({
 			ev: "toggle",

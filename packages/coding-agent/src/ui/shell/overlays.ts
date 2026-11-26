@@ -5,13 +5,16 @@
  * closing it gives focus back to whatever held it before, if that node is
  * still mounted, else to the shell's default focus (the composer).
  */
-import type { Accessor, JSXNode, UiNode } from "@oh-my-pi/pi-tui";
+import { type Accessor, createRoot, type JSXNode, structuralEffect, type UiNode, untrack } from "@oh-my-pi/pi-tui";
 import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
 import { mountNode, type ViewEntry, ViewList } from "./views";
 
 /** Options of {@link Overlays.open}. */
 export interface OverlayOptions {
-	/** Take keyboard focus: the overlay itself (default), a node inside it, or none (toasts). */
+	/**
+	 * Take keyboard focus: the overlay (default), a node inside it, or none (toasts).
+	 * A selector follows replacements of its focused target without taking focus from another view.
+	 */
 	readonly focus?: boolean | ((root: UiNode) => UiNode);
 	/** Mouse reporting while this screen is on top; omitted overlays inherit the underlying setting. */
 	readonly mouse?: MouseTracking;
@@ -70,6 +73,7 @@ export class Overlays {
 			const holder = this.#focus.focused();
 			return holder !== null && (holder === view.node || within(holder, view.node));
 		};
+		let stopFocus: (() => void) | undefined;
 		const handle: OverlayHandle = {
 			node: view.node,
 			get closed() {
@@ -80,6 +84,7 @@ export class Overlays {
 				if (closed) return;
 				closed = true;
 				const held = holds();
+				stopFocus?.();
 				this.#list.remove(entry);
 				if (held) this.#focus.focus(previous && !previous.disposed ? previous : this.#focus.fallback());
 				options?.onClose?.();
@@ -88,7 +93,19 @@ export class Overlays {
 		const entry: OverlayEntry = { ...view, handle, mouse: options?.mouse };
 		this.#list.push(entry);
 		const focus = options?.focus ?? true;
-		if (focus) this.#focus.focus(focus === true ? view.node : focus(view.node));
+		if (focus === true) this.#focus.focus(view.node);
+		else if (focus) {
+			stopFocus = createRoot(dispose => {
+				let target: UiNode | undefined;
+				structuralEffect(() => {
+					const next = focus(view.node);
+					const holder = untrack(this.#focus.focused);
+					if (!target || (target.disposed && holder === target)) this.#focus.focus(next);
+					target = next;
+				});
+				return dispose;
+			});
+		}
 		return handle;
 	}
 
