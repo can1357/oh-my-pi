@@ -171,6 +171,48 @@ describe("runEvalAgent", () => {
 		expect(sessionManager.getTurnBudget().spent).toBe(4_567);
 	});
 
+	// A consumer sees agent() spawn past a Goal Mode ceiling that budget() reports as hard.
+	it("admits agent() against the ceiling budget() reports, Goal Mode included", async () => {
+		// Spawns are disabled, so a passed budget guard reaches the spawn-policy refusal instead of throwing.
+		const spawnRefusal = "spawns disabled for this agent";
+		const cases: Array<{
+			turn: { total: number | null; spent: number; hard: boolean };
+			goal?: { tokenBudget: number; tokensUsed: number };
+			error: string;
+		}> = [
+			{ turn: { total: null, spent: 0, hard: false }, error: spawnRefusal },
+			{
+				turn: { total: null, spent: 0, hard: false },
+				goal: { tokenBudget: 20, tokensUsed: 19 },
+				error: spawnRefusal,
+			},
+			{
+				turn: { total: null, spent: 0, hard: false },
+				goal: { tokenBudget: 20, tokensUsed: 20 },
+				error: "agent() blocked: Goal Mode token budget exhausted (20/20 tokens)",
+			},
+			{
+				turn: { total: 10, spent: 10, hard: true },
+				error: "agent() blocked: turn token budget exhausted (10/10 output tokens)",
+			},
+			{ turn: { total: 10, spent: 10, hard: false }, error: spawnRefusal },
+			{ turn: { total: 10, spent: 9, hard: true }, error: spawnRefusal },
+			// A +Nk! directive that has not run out takes precedence over an exhausted Goal Mode budget.
+			{ turn: { total: 10, spent: 9, hard: true }, goal: { tokenBudget: 20, tokensUsed: 20 }, error: spawnRefusal },
+		];
+		for (const { turn, goal, error } of cases) {
+			const session = {
+				cwd: "/tmp",
+				settings: Settings.isolated(),
+				getSessionSpawns: () => "",
+				getSessionFile: () => null,
+				getTurnBudget: () => turn,
+				getGoalModeState: () => (goal ? { enabled: true, goal } : undefined),
+			} as unknown as ToolSession;
+			await expect(runEvalAgent({ prompt: "local", agent: "task" }, { session })).rejects.toThrow(error);
+		}
+	});
+
 	it("does not route ordinary task subagents through the eval budget accumulator", async () => {
 		const agent: AgentDefinition = {
 			name: "task",

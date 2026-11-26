@@ -21,6 +21,7 @@ import type { NestedRepoPatch } from "../task/task-details";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
+import { resolveEvalBudget } from "./budget-bridge";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
 export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
@@ -176,10 +177,12 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 /** Register a background subagent and return its handle immediately. */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentHandleResult> {
 	const parsed = parseAgentArgs(args, options.session.settings);
-	const turnBudget = options.session.getTurnBudget?.();
-	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
+	const { budget, from } = resolveEvalBudget(options.session);
+	if (budget.hard && budget.total !== null && budget.spent >= budget.total) {
 		throw new ToolError(
-			`agent() blocked: turn token budget exhausted (${turnBudget.spent}/${turnBudget.total} output tokens). Raise or drop the +Nk! ceiling to continue.`,
+			from === "goal"
+				? `agent() blocked: Goal Mode token budget exhausted (${budget.spent}/${budget.total} tokens). Raise the Goal Mode token budget to continue.`
+				: `agent() blocked: turn token budget exhausted (${budget.spent}/${budget.total} output tokens). Raise or drop the +Nk! ceiling to continue.`,
 		);
 	}
 	if (parsed.tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
