@@ -129,8 +129,13 @@ export class SpaceHoldGesture {
 			this.#deleteTyped(this.#typed);
 			this.#resetRun();
 			this.#activeKey = candidate;
-			this.#armRelease();
-			handler.onStart();
+			try {
+				handler.onStart();
+			} finally {
+				// Arm only after onStart returns: a synchronous start (opening the microphone) can block the loop
+				// past the release window, and that block is not an idle gap between repeats.
+				if (this.#activeKey !== undefined) this.#armRelease();
+			}
 		}
 		return "swallow";
 	}
