@@ -15,6 +15,7 @@ import {
 	tokenize,
 	type TodoCommandOutcome,
 	type TodoUserEditHost,
+	type TodoUserEditVerb,
 } from "../../tools/todo-command";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -160,7 +161,7 @@ export class TodoCommandController {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
-		this.#commit(phases, `/todo import ${source}`);
+		this.#commit(phases, "import", source);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
 		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
 	}
@@ -207,7 +208,7 @@ export class TodoCommandController {
 			status: "pending",
 		});
 
-		this.#commit(next, `/todo append → ${targetPhase.name}`);
+		this.#commit(next, "append", `→ ${targetPhase.name}`);
 		this.ctx.showStatus(`Appended to ${targetPhase.name}: ${finalContent}`);
 	}
 
@@ -253,7 +254,7 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			this.#commit(parsed, "/todo edit");
+			this.#commit(parsed, "edit");
 			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
 			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
 		} catch (error) {
@@ -282,8 +283,8 @@ export class TodoCommandController {
 		};
 	}
 
-	#commit(nextPhases: TodoPhase[], action: string): void {
+	#commit(nextPhases: TodoPhase[], verb: TodoUserEditVerb, detail?: string): void {
 		// Commit first so HUD visibility binds to the new canonical source.
-		commitTodoUserEdit(this.#editHost(), nextPhases, action);
+		commitTodoUserEdit(this.#editHost(), nextPhases, verb, detail ? { detail } : undefined);
 	}
 }

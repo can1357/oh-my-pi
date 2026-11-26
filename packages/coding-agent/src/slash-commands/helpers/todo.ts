@@ -15,6 +15,7 @@ import {
 	type TodoCommandOutcome,
 	type TodoMutationVerb,
 	type TodoUserEditHost,
+	type TodoUserEditVerb,
 } from "../../tools/todo-command";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, parseSubcommand, usage } from "./parse";
@@ -44,8 +45,8 @@ function todoEditHost(runtime: SlashCommandRuntime): TodoUserEditHost {
 	};
 }
 
-function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[], action: string): void {
-	commitTodoUserEdit(todoEditHost(runtime), phases, action);
+function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[], verb: TodoUserEditVerb, detail?: string): void {
+	commitTodoUserEdit(todoEditHost(runtime), phases, verb, detail ? { detail } : undefined);
 }
 
 async function presentTodoOutcome(
@@ -113,7 +114,7 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 	}
 	const { phases, errors } = markdownToPhases(content);
 	if (errors.length > 0) return usage(`Could not parse ${target}:\n  ${errors.join("\n  ")}`, runtime);
-	commitTodos(runtime, phases, `/todo import ${target}`);
+	commitTodos(runtime, phases, "import", target);
 	const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 	await runtime.output(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`);
 	return commandConsumed();
@@ -142,7 +143,7 @@ async function handleTodoAppendCommand(restArgs: string, runtime: SlashCommandRu
 
 	const finalContent = titleCaseSentence(content);
 	targetPhase.tasks.push({ content: finalContent, status: "pending" });
-	commitTodos(runtime, next, `/todo append → ${targetPhase.name}`);
+	commitTodos(runtime, next, "append", `→ ${targetPhase.name}`);
 	await runtime.output(`Appended to ${targetPhase.name}: ${finalContent}`);
 	return commandConsumed();
 }

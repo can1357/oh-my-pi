@@ -15,6 +15,7 @@ import {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
+	TODO_USER_EDIT_DATA_MESSAGE_TYPE,
 } from "./transcript/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -49,6 +50,7 @@ export {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
+	TODO_USER_EDIT_DATA_MESSAGE_TYPE,
 } from "./transcript/messages";
 import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -1210,13 +1212,17 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			}
 			// A user-invoked skill is the user's own turn. An agent message is a user turn
 			// authored by that agent: never tool output, never developer or system authority.
+			// Todo user-edit snapshots carry user/file-sourced names and checklist text, so
+			// they stay at user precedence rather than developer precedence.
 			const ircIncoming = m.customType === "irc:incoming";
-			if (ircIncoming || isUserInvokedSkillPrompt(m)) {
+			const todoEditData = m.customType === TODO_USER_EDIT_DATA_MESSAGE_TYPE;
+			if (ircIncoming || isUserInvokedSkillPrompt(m) || todoEditData) {
 				return [
 					{
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
 						attribution: ircIncoming ? "agent" : "user",
+						...(todoEditData ? { synthetic: true } : {}),
 						timestamp: m.timestamp,
 					},
 				];

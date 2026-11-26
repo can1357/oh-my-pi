@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/todo-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { TODO_USER_EDIT_DATA_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { type TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -140,8 +141,23 @@ describe("TodoCommandController", () => {
 
 	function reminderTextFrom(ctx: InteractiveModeContext): string {
 		const appendMessage = ctx.agent.appendMessage as unknown as Mock<(message: unknown) => void>;
-		const message = appendMessage.mock.calls[0][0] as { content: Array<{ text: string }> };
-		return message.content[0].text;
+		const message = appendMessage.mock.calls[0][0] as { content: string | Array<{ text: string }> };
+		return typeof message.content === "string" ? message.content : message.content[0].text;
+	}
+
+	function snapshotMessageFrom(ctx: InteractiveModeContext): {
+		role: string;
+		customType: string;
+		display: boolean;
+		content: Array<{ text: string }>;
+	} {
+		const appendMessage = ctx.agent.appendMessage as unknown as Mock<(message: unknown) => void>;
+		return appendMessage.mock.calls[1][0] as {
+			role: string;
+			customType: string;
+			display: boolean;
+			content: Array<{ text: string }>;
+		};
 	}
 
 	it("tells the model not to recreate the list after /todo rm (all)", async () => {
@@ -205,7 +221,18 @@ describe("TodoCommandController", () => {
 			{ name: phaseName, tasks: [{ content: "Keep the notes", status: "in_progress" }] },
 			{ name: "Release", tasks: [] },
 		]);
-		expect(reminderTextFrom(ctx)).toContain("Keep the notes");
-		expect(reminderTextFrom(ctx)).toContain(phaseName);
+		expect(reminderTextFrom(ctx)).toMatch(/Do NOT re-add them/i);
+		expect(reminderTextFrom(ctx)).not.toContain("Keep the notes");
+		expect(reminderTextFrom(ctx)).not.toContain(phaseName);
+		const snapshot = snapshotMessageFrom(ctx);
+		expect(snapshot).toEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: TODO_USER_EDIT_DATA_MESSAGE_TYPE,
+				display: false,
+			}),
+		);
+		expect(snapshot.content[0].text).toContain("Keep the notes");
+		expect(snapshot.content[0].text).toContain(phaseName);
 	});
 });

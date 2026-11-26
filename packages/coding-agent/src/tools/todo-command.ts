@@ -1,22 +1,25 @@
 import type { DeveloperMessage } from "@oh-my-pi/pi-ai";
-import type { TodoItem, TodoPhase } from "./details/todo";
 import { prompt } from "@oh-my-pi/pi-utils";
+import todoUserEditData from "../prompts/system/todo-user-edit-data.md" with { type: "text" };
 import todoUserEditReminder from "../prompts/system/todo-user-edit.md" with { type: "text" };
 import { escapeHarnessTags } from "../session/harness-tags";
+import { type CustomMessage, TODO_USER_EDIT_DATA_MESSAGE_TYPE } from "../session/transcript/messages";
+import type { TodoItem, TodoPhase, TodoStatus } from "./details/todo";
 import { applyOpsToPhases, phasesToMarkdown } from "./todo";
 
 export type TodoMutationVerb = "done" | "drop" | "rm";
+export type TodoUserEditVerb = "import" | "edit" | "append" | "start" | TodoMutationVerb;
+export type TodoUserEditMessage = DeveloperMessage | CustomMessage;
 
 export type TodoCommandOutcome = { ok: true; status: string } | { ok: false; error: string };
 
 /** Where a manual `/todo` edit is saved and shown to the model. */
 export interface TodoUserEditHost {
 	commitTodoPhases(phases: TodoPhase[]): void;
-	appendMessage(message: DeveloperMessage): void;
+	appendMessage(message: TodoUserEditMessage): void;
 	/** TUI HUD refresh. ACP and RPC have no local mirror. */
 	setTodos?(phases: TodoPhase[]): void;
 }
-
 interface TodoTaskHit {
 	task: TodoItem;
 	phase: TodoPhase;
@@ -57,9 +60,9 @@ export function tokenize(input: string): string[] {
  *   a user quoted literally still reach a task that contains them
  * - the tokenized form (quotes grouped, escapes decoded, whitespace collapsed)
  */
-function nameForms(input: string): { forms: string[]; quoted: boolean } {
+function nameForms(input: string): { typed: string; forms: string[]; quoted: boolean } {
 	const typed = input.trim();
-	if (!typed) return { forms: [], quoted: false };
+	if (!typed) return { typed: "", forms: [], quoted: false };
 	const tokens = tokenize(typed);
 	const forms = [typed];
 	const singleQuoted = typed.startsWith('"') && typed.endsWith('"') && tokens.length === 1;
@@ -67,7 +70,7 @@ function nameForms(input: string): { forms: string[]; quoted: boolean } {
 	if (inner) forms.push(inner);
 	const decoded = tokens.join(" ");
 	if (decoded && decoded !== typed && decoded !== inner) forms.push(decoded);
-	return { forms, quoted: typed.includes('"') && forms.length > 1 };
+	return { typed, forms, quoted: typed.includes('"') && forms.length > 1 };
 }
 
 function exactTask(phases: readonly TodoPhase[], query: string, ignoreCase = false): TodoTaskHit | undefined {
@@ -135,19 +138,46 @@ function partialPhaseAcross(phases: readonly TodoPhase[], forms: readonly string
 	return undefined;
 }
 
-function matchTask(phases: readonly TodoPhase[], input: string): TodoTaskHit | undefined {
-	const { forms } = nameForms(input);
+function matchTaskLiteral(phases: readonly TodoPhase[], query: string): TodoTaskHit | undefined {
+	return exactTask(phases, query) ?? exactTask(phases, query, true) ?? partialTask(phases, query);
+}
+
+function matchExactTaskAcross(phases: readonly TodoPhase[], forms: readonly string[]): TodoTaskHit | undefined {
 	for (const ignoreCase of [false, true]) {
 		for (const form of forms) {
 			const hit = exactTask(phases, form, ignoreCase);
 			if (hit) return hit;
 		}
 	}
-	return partialTaskAcross(phases, forms);
+	return undefined;
+}
+
+function matchExactPhaseAcross(phases: readonly TodoPhase[], forms: readonly string[]): TodoPhase | undefined {
+	for (const ignoreCase of [false, true]) {
+		for (const form of forms) {
+			const phase = exactPhase(phases, form, ignoreCase);
+			if (phase) return phase;
+		}
+	}
+	return undefined;
+}
+
+function matchTask(phases: readonly TodoPhase[], input: string): TodoTaskHit | undefined {
+	const { typed, forms, quoted } = nameForms(input);
+	if (!typed) return undefined;
+	if (quoted) {
+		return matchExactTaskAcross(phases, forms) ?? partialTaskAcross(phases, forms);
+	}
+	const literal = matchTaskLiteral(phases, typed);
+	if (literal) return literal;
+	const fallbacks = forms.slice(1);
+	if (fallbacks.length === 0) return undefined;
+	return matchExactTaskAcross(phases, fallbacks) ?? partialTaskAcross(phases, fallbacks);
 }
 
 function matchTarget(phases: readonly TodoPhase[], input: string): { task?: TodoTaskHit; phase?: TodoPhase } {
-	const { forms, quoted } = nameForms(input);
+	const { typed, forms, quoted } = nameForms(input);
+	if (!typed) return {};
 	if (quoted) {
 		// Quoted name: every exact spelling before any loose match, so a phase
 		// that merely contains the quoted text never shadows the task itself.
@@ -165,59 +195,82 @@ function matchTarget(phases: readonly TodoPhase[], input: string): { task?: Todo
 		if (phase) return { phase };
 		return {};
 	}
-	// Unquoted: tasks win before phases, the rule /todo rm has always used.
-	for (const ignoreCase of [false, true]) {
-		for (const form of forms) {
-			const task = exactTask(phases, form, ignoreCase);
-			if (task) return { task };
-		}
-	}
-	const task = partialTaskAcross(phases, forms);
-	if (task) return { task };
-	for (const ignoreCase of [false, true]) {
-		for (const form of forms) {
-			const phase = exactPhase(phases, form, ignoreCase);
-			if (phase) return { phase };
-		}
-	}
-	const phase = partialPhaseAcross(phases, forms);
-	if (phase) return { phase };
+	// Unquoted: try the literal spelling first (tasks before phases, exact before
+	// partial) so literal backslashes never lose to an escape-decoded collision.
+	const literalTask = matchTaskLiteral(phases, typed);
+	if (literalTask) return { task: literalTask };
+	const literalPhase = findPhaseFuzzy(phases, typed);
+	if (literalPhase) return { phase: literalPhase };
+	const fallbacks = forms.slice(1);
+	if (fallbacks.length === 0) return {};
+	const decodedTask = matchExactTaskAcross(phases, fallbacks) ?? partialTaskAcross(phases, fallbacks);
+	if (decodedTask) return { task: decodedTask };
+	const decodedPhase = matchExactPhaseAcross(phases, fallbacks) ?? partialPhaseAcross(phases, fallbacks);
+	if (decodedPhase) return { phase: decodedPhase };
 	return {};
 }
 
-function reminderText(action: string, phases: TodoPhase[], removed: boolean): string {
-	// Action and checklist embed user-named tasks/phases: a crafted name must not
-	// close the reminder or forge a second harness block.
-	const markdown = phases.length === 0 ? "(empty)" : phasesToMarkdown(phases).trimEnd();
+function noticeText(verb: TodoUserEditVerb, phases: TodoPhase[], removed: boolean, hasData: boolean): string {
 	return prompt.render(todoUserEditReminder, {
-		action: escapeHarnessTags(action),
+		verb: `/todo ${verb}`,
 		removed,
 		cleared: phases.length === 0,
+		hasData,
+	});
+}
+
+function dataText(action: string, phases: TodoPhase[]): string {
+	// Action and checklist embed user- or file-named tasks/phases: deliver at
+	// user precedence and escape harness tags so they cannot forge a reminder.
+	const markdown = phases.length === 0 ? "(empty)" : phasesToMarkdown(phases).trimEnd();
+	return prompt.render(todoUserEditData, {
+		action: escapeHarnessTags(action),
 		markdown: escapeHarnessTags(markdown),
 	});
 }
 
 /** Save a user edit and tell the model the user did it, including when items were removed. */
-export function commitTodoUserEdit(host: TodoUserEditHost, phases: TodoPhase[], action: string, removed = false): void {
+export function commitTodoUserEdit(
+	host: TodoUserEditHost,
+	phases: TodoPhase[],
+	verb: TodoUserEditVerb,
+	options?: { detail?: string; removed?: boolean },
+): void {
+	const removed = options?.removed ?? false;
+	const detail = options?.detail;
+	const hasData = phases.length > 0 || detail !== undefined;
+	const timestamp = Date.now();
 	host.commitTodoPhases(phases);
 	host.setTodos?.(phases);
 	host.appendMessage({
 		role: "developer",
-		content: [{ type: "text", text: reminderText(action, phases, removed) }],
+		content: noticeText(verb, phases, removed, hasData),
 		attribution: "user",
-		timestamp: Date.now(),
+		timestamp,
 	});
+	if (hasData) {
+		const action = detail ? `/todo ${verb} ${detail}` : `/todo ${verb}`;
+		host.appendMessage({
+			role: "custom",
+			customType: TODO_USER_EDIT_DATA_MESSAGE_TYPE,
+			content: [{ type: "text", text: dataText(action, phases) }],
+			display: false,
+			attribution: "user",
+			timestamp,
+		});
+	}
 }
 
 function commitApplied(
 	host: TodoUserEditHost,
 	applied: { phases: TodoPhase[]; errors: string[] },
-	action: string,
+	verb: TodoUserEditVerb,
+	detail: string,
 	removed: boolean,
 	status: string,
 ): TodoCommandOutcome {
 	if (applied.errors.length > 0) return { ok: false, error: applied.errors.join("; ") };
-	commitTodoUserEdit(host, applied.phases, action, removed);
+	commitTodoUserEdit(host, applied.phases, verb, { detail, removed });
 	return { ok: true, status };
 }
 
@@ -230,13 +283,14 @@ export function applyTodoStart(host: TodoUserEditHost, phases: TodoPhase[], rest
 	return commitApplied(
 		host,
 		applyOpsToPhases(phases, [{ op: "start", task: hit.task.content }]),
-		`/todo start ${hit.task.content}`,
+		"start",
+		hit.task.content,
 		false,
 		`Started: ${hit.task.content}`,
 	);
 }
 
-/** `/todo done`, `/todo drop`, and `/todo rm`. A bare done/drop names every task; errors are not saved. */
+/** `/todo done`, `/todo drop`, and `/todo rm`. Bare done/drop updates every task directly; errors are not saved. */
 export function applyTodoMutation(
 	host: TodoUserEditHost,
 	phases: TodoPhase[],
@@ -246,19 +300,16 @@ export function applyTodoMutation(
 	const query = rest.trim();
 	if (!query) {
 		if (verb === "rm") {
-			commitTodoUserEdit(host, [], "/todo rm (all)", true);
+			commitTodoUserEdit(host, [], "rm", { removed: true });
 			return { ok: true, status: "Cleared all todos." };
 		}
-		const all = phases.flatMap(phase => phase.tasks.map(task => task.content));
-		const applied =
-			all.length > 0 ? applyOpsToPhases(phases, [{ op: verb, task: all }]) : { phases, errors: [] as string[] };
-		return commitApplied(
-			host,
-			applied,
-			`/todo ${verb} (all)`,
-			false,
-			verb === "done" ? "Marked all tasks completed." : "Marked all tasks abandoned.",
-		);
+		const status: TodoStatus = verb === "done" ? "completed" : "abandoned";
+		const next = phases.map(phase => ({
+			name: phase.name,
+			tasks: phase.tasks.map(task => ({ ...task, status })),
+		}));
+		commitTodoUserEdit(host, next, verb, next.length > 0 ? { detail: "(all)" } : undefined);
+		return { ok: true, status: verb === "done" ? "Marked all tasks completed." : "Marked all tasks abandoned." };
 	}
 
 	const target = matchTarget(phases, query);
@@ -273,7 +324,8 @@ export function applyTodoMutation(
 		return commitApplied(
 			host,
 			applyOpsToPhases(phases, [{ op: verb, task: content }]),
-			`/todo ${verb} ${content}`,
+			verb,
+			content,
 			verb === "rm",
 			status,
 		);
@@ -289,7 +341,8 @@ export function applyTodoMutation(
 		return commitApplied(
 			host,
 			applyOpsToPhases(phases, [{ op: verb, phase: name }]),
-			`/todo ${verb} ${name}`,
+			verb,
+			name,
 			verb === "rm",
 			status,
 		);

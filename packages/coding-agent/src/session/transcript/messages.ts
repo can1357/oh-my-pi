@@ -42,6 +42,9 @@ export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
 /** Custom message carrying a coding request delegated by the live voice model. */
 export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 
+/** Hidden custom message carrying user/file-sourced todo edit names and checklist at user precedence. */
+export const TODO_USER_EDIT_DATA_MESSAGE_TYPE = "todo-user-edit-data";
+
 /** Content shape accepted for extension-injected messages. */
 export type CustomMessageContent = string | (TextContent | ImageContent)[];
 
