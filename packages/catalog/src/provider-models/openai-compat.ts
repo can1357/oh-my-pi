@@ -9107,7 +9107,9 @@ function mapTrustedRouterModel(
 			: rawEfforts.length > 0
 				? rawEfforts.includes("none")
 				: (params?.includes("reasoning") ?? false);
-	const thinking = supportsReasoning ? mapTrustedRouterThinkingConfig(reasoning, rawEfforts, canDisable) : undefined;
+	const publishedThinking = supportsReasoning
+		? mapTrustedRouterThinkingConfig(reasoning, rawEfforts, canDisable)
+		: undefined;
 
 	const disableMode: OpenAICompat["reasoningDisableMode"] = !supportsReasoning
 		? undefined
@@ -9124,7 +9126,7 @@ function mapTrustedRouterModel(
 	const compat: OpenAICompat = {
 		// Reasons without publishing an effort ladder: never send an
 		// identity-derived `reasoning_effort` it never advertised.
-		...(supportsReasoning && thinking === undefined && { supportsReasoningEffort: false }),
+		...(supportsReasoning && publishedThinking === undefined && { supportsReasoningEffort: false }),
 		...(disableMode !== undefined && { reasoningDisableMode: disableMode }),
 		// A disableable default-off model needs an explicit switch-on when
 		// thinking is requested, or picking a thinking level leaves it off.
@@ -9137,6 +9139,19 @@ function mapTrustedRouterModel(
 		// no route accepts it, so omit `tool_choice` unless the row advertises it.
 		...(!supportsToolChoice && { supportsToolChoice: false }),
 	};
+
+	let thinking = publishedThinking;
+	if (supportsReasoning && thinking === undefined && typeof reasoning?.mandatory === "boolean") {
+		// When a ladder-free row's upstream `mandatory` flag disagrees with the
+		// identity/KDL default (e.g. a disableable `-thinking` id or a mandatory
+		// non-`-thinking` id), preserve `requiresEffort` explicitly so
+		// `buildModel` and `streamSimple` honor the row's disableability while
+		// `supportsReasoningEffort: false` keeps `reasoning_effort` off the wire.
+		const derived = resolveModelPolicy({ ...defaults, reasoning: true, thinking: undefined, compat }).thinking;
+		if (derived && Boolean(derived.requiresEffort) !== !canDisable) {
+			thinking = { ...derived, requiresEffort: !canDisable };
+		}
+	}
 
 	const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
 		? toInputCapabilities(architecture.input_modalities)

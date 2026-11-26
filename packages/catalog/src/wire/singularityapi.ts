@@ -1,3 +1,5 @@
+import { normalizeV1GatewayBaseUrl } from "./charm-hyper";
+
 /**
  * SingularityAPI gateways, shared so a host migration — or a self-hosted
  * proxy override — touches a single module.
@@ -28,7 +30,5 @@ export const SINGULARITYAPI_TECH_API_BASE_URL = "https://api.singularityapi.tech
  * provider at the other gateway, so there is no default.
  */
 export function normalizeSingularityApiBaseUrl(baseUrl: string | undefined, canonical: string): string {
-	const trimmed = baseUrl?.trim().replace(/\/+$/, "");
-	if (!trimmed) return canonical;
-	return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+	return normalizeV1GatewayBaseUrl(baseUrl, canonical);
 }

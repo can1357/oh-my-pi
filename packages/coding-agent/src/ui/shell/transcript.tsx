@@ -222,12 +222,9 @@ export class Transcript {
 	 * block had rows there.
 	 */
 	retain(keep: ReadonlySet<TranscriptBlock>): void {
-		let retired = false;
-		for (const block of this.#blocks.peek()) {
-			if (keep.has(block)) continue;
-			retired ||= this.retired(block);
-			this.#blocks.remove(block);
-		}
+		// Asked before the removed blocks are disposed.
+		const retired = this.#blocks.peek().some(block => !keep.has(block) && this.retired(block));
+		this.#blocks.retain(block => keep.has(block));
 		if (retired) this.#host?.replayHistory();
 	}
 

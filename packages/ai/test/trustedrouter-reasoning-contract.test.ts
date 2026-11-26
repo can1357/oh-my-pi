@@ -308,6 +308,31 @@ describe("TrustedRouter inference request routing", () => {
 		expect(body().reasoning_effort).toBe("high");
 	});
 
+	test("switches off a disableable ladder-free model whose id reads as reasoning-locked via streamSimple", async () => {
+		// Regression: `-thinking` implies mandatory reasoning by identity; when
+		// discovery leaves the row ladder-free (`supported_efforts: []`) with
+		// `mandatory: false`, `requiresEffort: false` must survive `buildModel`
+		// so `streamSimple` sends `reasoning: { enabled: false }` instead of
+		// clamping and turning a default-off model ON.
+		const model = await discoverModel(
+			{ mandatory: false, default_enabled: false, supported_efforts: [], default_effort: null },
+			{ id: "qwen/qwen3-235b-a22b-thinking-2507", name: "Qwen3 235B A22B Thinking 2507" },
+		);
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
+
+		const off = captureBody();
+		await streamSimple(model, context, { apiKey: "sk-tr-test", disableReasoning: true, fetch: off.fetch }).result();
+		expect(off.body().reasoning).toEqual({ enabled: false });
+		expect(off.body().reasoning_effort).toBeUndefined();
+		expect(off.body().enable_thinking).toBeUndefined();
+
+		const on = captureBody();
+		await streamSimple(model, context, { apiKey: "sk-tr-test", reasoning: Effort.High, fetch: on.fetch }).result();
+		expect(on.body().reasoning).toEqual({ enabled: true });
+		expect(on.body().reasoning_effort).toBeUndefined();
+		expect(on.body().enable_thinking).toBeUndefined();
+	});
+
 	test("omits both disable and effort fields for mandatory reasoning without an effort dial", async () => {
 		const model = await discoverModel(
 			{ mandatory: true, default_enabled: false, supported_efforts: [], default_effort: null },
@@ -316,7 +341,7 @@ describe("TrustedRouter inference request routing", () => {
 		const { body, fetch } = captureBody();
 		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
 
-		await streamOpenAICompletions(model, context, {
+		await streamSimple(model, context, {
 			apiKey: "sk-tr-test",
 			disableReasoning: true,
 			fetch,

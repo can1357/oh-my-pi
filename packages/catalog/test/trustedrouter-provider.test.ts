@@ -2,13 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { isCatalogDescriptor, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { trustedRouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { normalizeTrustedRouterBaseUrl } from "@oh-my-pi/pi-catalog/wire/trustedrouter";
 
 const MODELS_URL = "https://api.trustedrouter.com/v1/models";
@@ -463,17 +462,60 @@ describe("TrustedRouter provider discovery", () => {
 		expect(models?.[0]?.compat?.whenThinking).toBeUndefined();
 	});
 
-	test("resolves legacy nyte/* aliases to canonical trustedrouter/* presets", () => {
-		expect(resolveVariantSelector("trustedrouter", "nyte/auto")).toBe("trustedrouter/auto");
-		expect(resolveVariantSelector("trustedrouter", "nyte/auto-routing")).toBe("trustedrouter/auto");
-		expect(resolveVariantSelector("trustedrouter", "trustedrouter/auto-routing")).toBe("trustedrouter/auto");
-		expect(resolveVariantSelector("trustedrouter", "nyte/zdr")).toBe("trustedrouter/zdr");
-		expect(resolveVariantSelector("trustedrouter", "nyte/e2e")).toBe("trustedrouter/e2e");
-		expect(resolveVariantSelector("trustedrouter", "nyte/confidential")).toBe("trustedrouter/confidential");
-		expect(resolveVariantSelector("trustedrouter", "nyte/fast")).toBe("trustedrouter/fast");
-		expect(resolveVariantSelector("trustedrouter", "nyte/cheap")).toBe("trustedrouter/cheap");
-		expect(resolveVariantSelector("trustedrouter", "nyte/free")).toBe("trustedrouter/free");
-		expect(resolveVariantSelector("openrouter", "nyte/auto")).toBeUndefined();
+	test("preserves authoritative mandatory/disableable state through buildModel for ladder-free rows", async () => {
+		const { fetch } = trustedRouterModelsFetch({
+			data: [
+				{
+					// `-thinking` id implies mandatory reasoning by identity, but the row
+					// explicitly publishes `mandatory: false` without an effort ladder.
+					id: "qwen/qwen3-235b-a22b-thinking-2507",
+					name: "Qwen3 235B A22B Thinking 2507",
+					context_length: 128_000,
+					architecture: { modality: "text->text", input_modalities: ["text"], output_modalities: ["text"] },
+					pricing: { prompt: "0.00000047475", completion: "0.0000036925" },
+					top_provider: { max_completion_tokens: 16_384 },
+					supported_parameters: ["tools", "tool_choice", "max_tokens", "reasoning", "include_reasoning"],
+					reasoning: {
+						mandatory: false,
+						default_enabled: false,
+						supported_efforts: [],
+						default_effort: null,
+					},
+					trustedrouter: { supports_chat: true },
+				},
+				{
+					// Non-`-thinking` id whose row publishes `mandatory: true` without an effort ladder.
+					id: "deepseek/deepseek-r1-0528",
+					name: "DeepSeek: R1 0528",
+					context_length: 128_000,
+					architecture: { modality: "text->text", input_modalities: ["text"], output_modalities: ["text"] },
+					pricing: { prompt: "0.0000005275", completion: "0.00000226825" },
+					top_provider: { max_completion_tokens: 32_000 },
+					supported_parameters: ["tools", "max_tokens", "reasoning", "include_reasoning"],
+					reasoning: {
+						mandatory: true,
+						default_enabled: false,
+						supported_efforts: [],
+						default_effort: null,
+					},
+					trustedrouter: { supports_chat: true },
+				},
+			],
+		});
+		const specs = await trustedRouterModelManagerOptions({ fetch }).fetchDynamicModels?.();
+		const qwen = buildModel(
+			specs?.find(model => model.id === "qwen/qwen3-235b-a22b-thinking-2507") as ModelSpec<"openai-completions">,
+		);
+		expect(qwen.reasoning).toBe(true);
+		expect(qwen.thinking?.requiresEffort).toBe(false);
+		expect(qwen.compat.supportsReasoningEffort).toBe(false);
+
+		const r1 = buildModel(
+			specs?.find(model => model.id === "deepseek/deepseek-r1-0528") as ModelSpec<"openai-completions">,
+		);
+		expect(r1.reasoning).toBe(true);
+		expect(r1.thinking?.requiresEffort).toBe(true);
+		expect(r1.compat.supportsReasoningEffort).toBe(false);
 	});
 
 	test("honors baseUrl and TRUSTEDROUTER_BASE_URL overrides and normalizes /v1", async () => {
@@ -512,18 +554,6 @@ describe("TrustedRouter provider discovery", () => {
 		const models = await trustedRouterModelManagerOptions({ apiKey: "sk-tr-stale", fetch }).fetchDynamicModels?.();
 		expect(authorizations).toEqual(["Bearer sk-tr-stale", null]);
 		expect(models?.some(model => model.id === "trustedrouter/auto")).toBe(true);
-	});
-
-	test("registers runtime-only discovery descriptor without enrolling in static catalog generation", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "trustedrouter");
-		expect(descriptor).toMatchObject({
-			defaultModel: "trustedrouter/auto",
-			allowUnauthenticated: true,
-			dynamicModelsAuthoritative: true,
-			skipCrossProviderReferenceFills: true,
-		});
-		expect(isCatalogDescriptor(descriptor!)).toBe(false);
-		expect(DEFAULT_MODEL_PER_PROVIDER.trustedrouter).toBe("trustedrouter/auto");
 	});
 
 	test("caches discovered models per endpoint and serves them offline", async () => {

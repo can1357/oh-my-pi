@@ -1466,6 +1466,7 @@ export class Composer {
 			return;
 		}
 		const typed =
+			!event.paste &&
 			event.from === event.to &&
 			event.cursor === event.from + event.text.length &&
 			[...new Intl.Segmenter().segment(event.text)].length === 1;
@@ -1473,7 +1474,10 @@ export class Composer {
 		const previous = event.from === this.#cursor() ? this.#completion.peek() : null;
 		this.#change(event.from, event.to, event.text, event.cursor, typed ? "type" : "edit");
 		this.#atomizeTyped();
-		this.#afterEdit(event.text, event.from < event.to, force, previous);
+		// Pasted text is content, not a request to complete: a trailing `@name` must not turn the
+		// next Enter into a file pick (#20681). Tab still completes it explicitly.
+		if (event.paste) this.#closeCompletion();
+		else this.#afterEdit(event.text, event.from < event.to, force, previous);
 		this.#notifyEdit({ from: event.from, to: event.to, insert: event.text, typed });
 	}
 

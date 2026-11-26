@@ -9,8 +9,7 @@
 
 ### Added
 
-- Added TrustedRouter (`trustedrouter`) provider with live public `/v1/models` discovery, `trustedrouter/*` routing presets (and `nyte/*` aliases), and `/login trustedrouter` (`TRUSTEDROUTER_API_KEY`, optional `TRUSTEDROUTER_BASE_URL`, validated against `/v1/key`) ([#20621](https://github.com/can1357/oh-my-pi/pull/20621) by [@jperla](https://github.com/jperla))
-
+- Added TrustedRouter (`trustedrouter`) provider with live public `/v1/models` discovery, `trustedrouter/*` routing presets, and `/login trustedrouter` (`TRUSTEDROUTER_API_KEY`, optional `TRUSTEDROUTER_BASE_URL`, validated against `/v1/key`) ([#20621](https://github.com/can1357/oh-my-pi/pull/20621) by [@jperla](https://github.com/jperla))
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
 
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
@@ -19,6 +18,10 @@
 
 - Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Devin's Fast models (`-fast`) are no longer listed separately: each model carries its fast lane, which `/fast` switches on
+
+### Fixed
+
+- Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Added
 

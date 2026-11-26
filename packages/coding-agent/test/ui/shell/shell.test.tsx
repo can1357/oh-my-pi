@@ -1,6 +1,6 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { describe, expect, it } from "bun:test";
-import { createRoot, isSettled, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { createRoot, effect, isSettled, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { Overlays, Transcript, type TranscriptBlock } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
 
 /** The node Tern receives for a single-node block. */
@@ -88,6 +88,35 @@ describe("Transcript", () => {
 		expect(replays).toBe(1);
 		expect(transcript.length).toBe(0);
 		expect(blocks[0]!.node.disposed).toBe(true);
+	});
+
+	it("retains the kept blocks in one update of the region and replays scrollback once", () => {
+		const transcript = new Transcript();
+		const retired = new Set<UiNode>();
+		let replays = 0;
+		transcript.attach({ retired: node => retired.has(node), replayHistory: () => replays++, redescribe: () => {} });
+		const blocks = ["a", "b", "c", "d", "e"].map(t => transcript.append(() => <text text={t} />));
+		retired.add(blocks[0]!.node);
+		retired.add(blocks[2]!.node);
+		createRoot(dispose => {
+			const seen: number[] = [];
+			effect(() => {
+				seen.push(transcript.nodes().length);
+			});
+			transcript.retain(new Set([blocks[1]!, blocks[4]!]));
+			// Every removal lands in one write: the main region is recomputed once, not per removed block.
+			expect(seen).toEqual([5, 2]);
+			// Keeping every block (one of them in scrollback) writes nothing and replays nothing.
+			retired.add(blocks[1]!.node);
+			transcript.retain(new Set([blocks[1]!, blocks[4]!]));
+			expect(seen).toEqual([5, 2]);
+			expect(replays).toBe(1);
+			dispose();
+		});
+		expect(transcript.blocks()).toEqual([blocks[1]!, blocks[4]!]);
+		expect(replays).toBe(1);
+		expect([0, 2, 3].map(i => blocks[i]!.node.disposed)).toEqual([true, true, true]);
+		expect(blocks[1]!.node.disposed).toBe(false);
 	});
 });
 
