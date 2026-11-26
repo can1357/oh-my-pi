@@ -1714,7 +1714,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"status.usage": showUsage,
 				"status.cache": () => void this.handleSessionCommand(),
 				"status.path": () => openPath(this.sessionManager.getCwd()),
-				"status.tree": () => this.showTreeSelector(),
+				"status.tree": () => void this.showTreeSelector(),
 				"thinking.cycle": () => this.#inputController.cycleThinkingFromComposer(),
 				"thinking.set": value => this.#inputController.setThinkingFromComposer(value),
 				"dictation.toggle": () => void this.#toggleComposerDictation(),
@@ -7259,7 +7259,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#presenter.presentAssistant(message, options);
 	}
 
-	createTranscriptReplica(entries: readonly TranscriptEntryLike[]): TranscriptReplica {
+	createTranscriptReplica(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica {
 		return new TranscriptReplica(
 			{
 				mode: this,
@@ -7269,6 +7269,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				replaySteps: (target, context) => this.#uiHelpers.replaySteps(target, context),
 			},
 			entries,
+			clipped,
 		);
 	}
 
@@ -8233,16 +8234,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.showPluginSelector(mode);
 	}
 
-	showUserMessageSelector(startAt?: string): void {
-		this.#selectorController.showUserMessageSelector(startAt);
+	showUserMessageSelector(startAt?: string): Promise<void> {
+		return this.#selectorController.showUserMessageSelector(startAt);
 	}
 
-	showCopySelector(): void {
-		this.#selectorController.showCopySelector();
+	showCopySelector(): Promise<void> {
+		return this.#selectorController.showCopySelector();
 	}
 
-	showTreeSelector(): void {
-		this.#selectorController.showTreeSelector();
+	showTreeSelector(): Promise<void> {
+		return this.#selectorController.showTreeSelector();
 	}
 
 	showThinkingSelector(): void {
