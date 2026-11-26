@@ -257,22 +257,13 @@ export function isChromiumBrowserExecutable(exe: string): boolean {
  */
 export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
 	const args = appArgs ?? [];
-	if (!isChromiumBrowserExecutable(exe)) return args;
+	// A copy: callers append their own flags to the result, which must not reach app.args.
+	if (!isChromiumBrowserExecutable(exe)) return [...args];
 	const requestedProfile = findUserDataDirInArgs(args);
 	if (requestedProfile !== null) {
 		// Chromium accepts switch values as --name=value, not a separate argv
 		// item. Canonicalize both spellings so reuse and process launch agree.
-		const launchArgs: string[] = [];
-		for (let index = 0; index < args.length; index++) {
-			const arg = args[index]!;
-			if (arg === "--user-data-dir") {
-				if (args[index + 1] && !args[index + 1]!.startsWith("--")) index++;
-			} else if (!arg.startsWith("--user-data-dir=")) {
-				launchArgs.push(arg);
-			}
-		}
-		launchArgs.push(`--user-data-dir=${path.resolve(cwd, requestedProfile)}`);
-		return launchArgs;
+		return [...withoutUserDataDirArgs(args), `--user-data-dir=${path.resolve(cwd, requestedProfile)}`];
 	}
 	const slug = path
 		.basename(exe)
@@ -289,6 +280,25 @@ export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd
 	if (!args.some(arg => arg.startsWith("--password-store"))) launchArgs.push("--password-store=basic");
 	launchArgs.push(`--user-data-dir=${path.join(getBrowserProfilesDir(), `${slug}-${hash}`)}`);
 	return launchArgs;
+}
+
+/** `args` without their `--user-data-dir` flags, in either spelling: the profile is matched on its own. */
+function withoutUserDataDirArgs(args: string[]): string[] {
+	const rest: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg === "--user-data-dir") {
+			if (args[index + 1] && !args[index + 1]!.startsWith("--")) index++;
+		} else if (!arg.startsWith("--user-data-dir=")) {
+			rest.push(arg);
+		}
+	}
+	return rest;
+}
+
+/** The requested app.args that a running process's argv lacks, in request order. */
+function missingAppArgs(requested: string[], running: string[]): string[] {
+	return withoutUserDataDirArgs(requested).filter(arg => !running.includes(arg));
 }
 
 function normalizeUserDataDir(userDataDir: string): string {
@@ -403,11 +413,12 @@ async function findProfileLockOwner(
 /**
  * Return a reusable CDP endpoint for `exe`, or null when no instance is
  * running. Refuse to replace an occupied instance unless the caller can
- * launch an isolated profile.
+ * launch an isolated profile. A live endpoint whose command line lacks one of
+ * `requestedArgs` is refused too: attaching would report flags that never applied.
  */
 export async function findReusableCdp(
 	exe: string,
-	options: { signal?: AbortSignal; appArgs?: string[] } = {},
+	options: { signal?: AbortSignal; appArgs?: string[]; requestedArgs?: string[] } = {},
 ): Promise<{ cdpUrl: string; pid: number } | null> {
 	const requestedUserDataDir = findUserDataDirInArgs(options.appArgs);
 	const normalizedRequestedUserDataDir =
@@ -441,6 +452,7 @@ export async function findReusableCdp(
 	}
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
+	let lacking: { pid: number; missing: string[] } | null = null;
 	for (const process of candidates) {
 		let args: string[];
 		try {
@@ -463,8 +475,16 @@ export async function findReusableCdp(
 		const port = findCdpPortInArgs(args);
 		if (port === null) continue;
 		if (await probeCdpAt(port, options.signal)) {
-			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
+			const missing = missingAppArgs(options.requestedArgs ?? [], args);
+			if (missing.length === 0) return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
+			lacking ??= { pid: process.pid, missing };
 		}
+	}
+	if (lacking) {
+		const name = path.basename(exe);
+		throw new ToolError(
+			`Cannot reuse ${name} (pid ${lacking.pid}): it is already running without ${lacking.missing.join(", ")}, so the requested app.args would not apply. Close ${name} and open it again, or give app.args a different --user-data-dir to start a separate browser.`,
+		);
 	}
 	const canLaunchIsolatedProfile =
 		normalizedRequestedUserDataDir !== null &&
