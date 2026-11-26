@@ -7,6 +7,7 @@ import { expect, test, vi } from "bun:test";
 import { nativeShell } from "../../helpers/native-shell";
 import { signal } from "@oh-my-pi/pi-tui";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { parseHtmlForm } from "../../../src/tools/html-form/parse";
 import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
 import { figureWorkSettled } from "../../../src/ui/transcript/figures";
@@ -47,6 +48,42 @@ test("native form checkboxes and option-note menus reach the submitted answers",
 	expect(onSubmit).toHaveBeenCalledWith({ parts: ["leg"] }, [
 		expect.objectContaining({ name: "parts", value: "leg", text: "repair" }),
 	]);
+});
+
+test("wraps the active Other answer and keeps the edit position visible in a short terminal", () => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><p>Which route?</p>
+			<label><input type="radio" name="route" value="road">Road</label>
+			<label><input type="radio" name="route" value="trail">Trail</label>
+		</form>`),
+		{ onSubmit, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 12} /> }), {
+		columns: 42,
+		rows: 12,
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("down");
+		term.press("down");
+		const start = "Use the marked trail rather than the road.";
+		term.type(start);
+		expect(term.screen().find(row => row.includes("Other:"))).toContain("Use the marked trail");
+		expect(term.screen().some(row => row.includes("than the road."))).toBe(true);
+		expect(term.screen().join("\n")).not.toContain("…");
+
+		const suffix = " Follow the signs by the river and continue past the bridge.".repeat(4) + " Meet at sunrise.";
+		term.paste(suffix);
+		expect(term.screen().join("\n")).toContain("at sunrise.");
+		term.press("home");
+		expect(term.screen().join("\n")).toContain("Use the marked trail");
+		expect(term.screen().join("\n")).not.toContain("at sunrise.");
+		term.press("enter");
+		expect(onSubmit).toHaveBeenCalledWith({ route: start + suffix }, []);
+	} finally {
+		term.dispose();
+	}
 });
 
 corpusSuite({

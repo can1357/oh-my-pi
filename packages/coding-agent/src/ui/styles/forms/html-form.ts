@@ -14,10 +14,11 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { layoutText, rowOf } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { paintPicture } from "@oh-my-pi/pi-tui/term/painters/image";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
-import { padTo, sliceCells, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { padTo, replaceTabs, sliceCells, spaces, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
 import { spansText } from "../../../tools/html-form/parse";
 import { type FormPart, isFoldCaption } from "../../forms/html-form/layout";
@@ -301,29 +302,47 @@ function optionRows(
 		if (selected) column.focusStart = lines.length;
 		const cursor = selected ? theme.fg("accent", "❯ ") : "  ";
 		if (row === OTHER_ROW) {
-			const checked = answer.otherChosen;
+			const { other, otherChosen } = answer;
 			const editing = view.row === OTHER_ROW && view.active === index;
-			const text = editing
-				? caretLine(
-						theme,
-						answer.other.text,
-						answer.other.cursor,
-						"type your own",
-						model.vim({ kind: "other", field: index })?.selection(),
-					)
-				: answer.other.text
-					? theme.fg(
-							checked && answer.other.text.trim() ? "muted" : "text",
-							answer.other.text.replaceAll("\n", " "),
-						)
-					: theme.fg("dim", "type your own");
-			// Chosen only counts once something is typed.
-			const on = checked && answer.other.text.trim() !== "";
+			const on = otherChosen && other.text.trim() !== "";
 			const glyph = field.multi ? (on ? "☑" : "☐") : on ? "◉" : "○";
 			const label = theme.fg(selected ? "accent" : on ? "muted" : "text", "Other: ");
-			const line = `${cursor}${theme.fg(on ? "success" : "dim", glyph)} ${label}${text}`;
-			// The field being typed in cuts like an editor: its ellipsis keeps the text's style.
-			lines.push(editing ? clip(line, width) : truncate(line, width, "…"));
+			const head = `${cursor}${theme.fg(on ? "success" : "dim", glyph)} ${label}`;
+			if (editing) {
+				const headWidth = visibleWidth(head);
+				// Keep two cells for a wide grapheme and one for the end-of-row caret.
+				const inline = width - headWidth >= 3;
+				const indent = spaces(inline ? headWidth : 0);
+				if (!inline) lines.push(clip(head, width));
+				const rows = layoutText(other.text, width - indent.length - 1);
+				const caretRow = rowOf(rows, other.cursor);
+				const selection = model.vim({ kind: "other", field: index })?.selection();
+				for (const [i, part] of rows.entries()) {
+					const text = other.text.slice(part.start, part.textEnd);
+					let body = text;
+					if (selection && selection.to > selection.from) {
+						const from = Math.max(0, selection.from - part.start);
+						const to = Math.min(text.length, selection.to - part.start);
+						if (from < to) body = caretLine(theme, text, 0, undefined, { from, to });
+					} else if (i === caretRow) {
+						body = caretLine(
+							theme,
+							text,
+							other.cursor - part.start,
+							other.text === "" ? "type your own" : undefined,
+						);
+					}
+					const line = `${i === 0 && inline ? head : indent}${replaceTabs(body)}`;
+					lines.push(other.text === "" ? clip(line, width) : line);
+					// Scroll to the caret, not to the end of the draft when editing earlier text.
+					if (selected && i === caretRow) column.focusEnd = lines.length;
+				}
+			} else {
+				const text = other.text
+					? theme.fg(on ? "muted" : "text", flattenLine(other.text))
+					: theme.fg("dim", "type your own");
+				lines.push(truncate(`${head}${text}`, width, "…"));
+			}
 		} else {
 			const option = field.options[row]!;
 			const checked = answer.checked.has(row);
@@ -344,7 +363,7 @@ function optionRows(
 				);
 			});
 		}
-		if (selected) column.focusEnd = lines.length;
+		if (selected && row !== OTHER_ROW) column.focusEnd = lines.length;
 		if (view.note && view.note.field === index && view.note.option === row) {
 			const label = flattenLine(spansText(field.options[row]!.label));
 			lines.push(clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width));
@@ -575,8 +594,8 @@ function currentView(model: HtmlFormModel): View {
 }
 
 /** The tallest column any field could open (each opened as it would be now). */
-function tallest(cx: PaintContext, look: HtmlFormLook, width: number, current: View): number {
-	let max = buildColumn(cx, look, current, width).lines.length;
+function tallest(cx: PaintContext, look: HtmlFormLook, width: number, current: View, currentHeight: number): number {
+	let max = currentHeight;
 	const views: View[] = [{ ...current, active: "submit", dropdown: undefined, note: undefined }];
 	look.model.fields.forEach((_, index) => {
 		const rows = look.model.rows(index);
@@ -621,11 +640,11 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	const skip = look.skipNotice ? wrap(theme.fg("warning", `⚠ ${flattenLine(look.skipNotice)}`), inner) : [];
 	const limit = Math.max(1, Math.floor(look.terminalRows * HEIGHT_RATIO) - CHROME_ROWS);
 	let column = buildColumn(cx, look, view, inner);
-	let body = Math.min(tallest(cx, look, inner, view), limit);
+	let body = Math.min(tallest(cx, look, inner, view, column.lines.length), limit);
 	const overflow = column.lines.length > body;
 	if (overflow) {
 		column = buildColumn(cx, look, view, inner - 1);
-		body = Math.min(tallest(cx, look, inner - 1, view), limit);
+		body = Math.min(tallest(cx, look, inner - 1, view, column.lines.length), limit);
 	}
 	const rows = body - skip.length;
 	const lines = column.lines;
