@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
-import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
+import { createDraft, type SelectedChange } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
 import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -672,6 +672,87 @@ describe("selective commit flow", () => {
 			expect(() => draft.show(target)).toThrow(/No changed path matches/);
 		}
 		expect(draft.selection()).toEqual(selected);
+	});
+
+	it("refuses a bare take of a path that would add pre-existing lines, and keeps named units, grep and globs", async () => {
+		// Issue #20036: line 1 was changed outside the session and not committed; line 10 is this session's.
+		const original = Array.from({ length: 10 }, (_, i) => `line ${i + 1}\n`).join("");
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.txt"), original);
+		await git(root, ["add", "a.txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const outside = original.replace("line 1\n", "other session\n");
+		await Bun.write(path.join(root, "a.txt"), outside);
+		await write("Main", undefined, "a.txt", outside.replace("line 10\n", "main session\n"));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const selected = draft.selection();
+		expect(() => draft.take({ path: "a.txt" })).toThrow(
+			/a\.txt: take\(\) without units would add lines that are not yours: .*pre-existing/,
+		);
+		expect(draft.selection()).toEqual(selected);
+		const bothSelected: SelectedChange[] = [
+			{
+				kind: "text",
+				path: "a.txt",
+				before: { text: original, mode: "100644" },
+				after: { text: outside.replace("line 10\n", "main session\n"), mode: "100644" },
+			},
+		];
+		expect(() => draft.take({ path: "a.txt", grep: "other session" })).not.toThrow();
+		expect(draft.selection()).toEqual(bothSelected);
+		expect(draft.diff()).toContain("-line 1\n+other session\n");
+		expect(draft.diff()).toContain("-line 10\n+main session\n");
+		draft.drop({ path: "a.txt" });
+		expect(draft.selection()).toEqual([]);
+		expect(() => draft.take({ path: "a.txt", grep: "other session" })).not.toThrow();
+		expect(draft.selection()).toEqual([
+			{
+				kind: "text",
+				path: "a.txt",
+				before: { text: original, mode: "100644" },
+				after: { text: outside, mode: "100644" },
+			},
+		]);
+		expect(() => draft.take({ path: "**" })).not.toThrow();
+		expect(draft.selection()).toEqual(bothSelected);
+		expect(draft.diff()).toContain("-line 1\n+other session\n");
+		expect(draft.diff()).toContain("-line 10\n+main session\n");
+	});
+
+	it("refuses a bare take of an exact path whose name has glob characters", async () => {
+		// `[id].txt` names one file exactly; it is not a glob, so the bare take must refuse as it does for `a.txt`.
+		const original = Array.from({ length: 10 }, (_, i) => `line ${i + 1}\n`).join("");
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "[id].txt"), original);
+		await git(root, ["add", "[id].txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await Bun.write(path.join(root, "[id].txt"), original.replace("line 1\n", "other session\n"));
+		await write("Main", undefined, "[id].txt", original.replace("line 1\n", "other session\n").replace("line 10\n", "main session\n"));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(() => draft.take({ path: "[id].txt" })).toThrow(
+			/\[id\]\.txt: take\(\) without units would add lines that are not yours: .*pre-existing/,
+		);
+	});
+
+	it("refuses a bare take of a path that would add lines of an agent outside the scope", async () => {
+		const original = Array.from({ length: 10 }, (_, i) => `line ${i + 1}\n`).join("");
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.txt"), original);
+		await git(root, ["add", "a.txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const other = original.replace("line 1\n", "other session\n");
+		await write("Other", undefined, "a.txt", other);
+		await write("Main", undefined, "a.txt", other.replace("line 10\n", "main session\n"));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(() => draft.take({ path: "a.txt" })).toThrow(
+			/a\.txt: take\(\) without units would add lines that are not yours: .*Other/,
+		);
 	});
 
 	it("attributes edits journaled through a symlinked directory", async () => {

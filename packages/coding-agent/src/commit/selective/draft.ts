@@ -777,6 +777,18 @@ export class Draft {
 		const pattern = target.grep === undefined ? undefined : new RegExp(target.grep);
 		// Plan every file before changing any: a unit missing from one file rejects the whole request.
 		const plans = files.map(file => ({ file, ops: this.#targetOps(file, target.units, pattern) }));
+		// A bare path selects every unit of the file, so refuse when that adds lines of no agent in scope.
+		if (take && target.path !== undefined && !target.units?.length && pattern === undefined && !this.#isGlob(target.path)) {
+			for (const { file, ops } of plans) {
+				if (ops === "whole") continue;
+				const foreign = this.#foreignUnits(file);
+				if (foreign.length > 0) {
+					throw new Error(
+						`${file.path}: take() without units would add lines that are not yours: ${foreign.join(", ")}. Check them with show("${file.path}"), then name the units you mean to take.`,
+					);
+				}
+			}
+		}
 		let touched = 0;
 		for (const { file, ops } of plans) {
 			if (ops === "whole") {
@@ -795,6 +807,21 @@ export class Draft {
 			throw new Error(`No change line matches /${target.grep}/.`);
 		}
 		return `${take ? "Selected" : "Deselected"} ${touched} change line(s).`;
+	}
+
+	/** Units of `file` that hold lines of no agent in scope (pre-existing or another agent's) and are not yet selected. */
+	#foreignUnits(file: FileChange): string[] {
+		const { hunks } = lineAttribution(file);
+		const names: string[] = [];
+		hunks.forEach((hunk, hunkIndex) => {
+			[...hunkUnits(hunk).values()].forEach((unitOps, unitIndex) => {
+				const actor = unitOps[0].by;
+				const foreign = actor === PRE || (!isPseudoActor(actor) && !this.scope.has(actor));
+				if (!foreign || unitOps.every(op => file.selected.has(op.id))) return;
+				names.push(`${hunkIndex + 1}${unitLetter(unitIndex)} (${actorName(actor)})`);
+			});
+		});
+		return names;
 	}
 
 	/** Ops a target covers in `file`; `"whole"` for files without line attribution. */
@@ -844,11 +871,16 @@ export class Draft {
 		return matched;
 	}
 
+	/** A path argument is a glob unless it names one changed file exactly. */
+	#isGlob(target: string): boolean {
+		return /[*?[{]/.test(target) && !this.#files.some(file => file.path === target);
+	}
+
 	/** Resolve an exact path, glob, or unique path suffix. Only ambiguous suffixes throw. */
 	#resolve(target: string): FileChange[] {
 		const exact = this.#files.find(file => file.path === target);
 		if (exact) return [exact];
-		if (/[*?[{]/.test(target)) {
+		if (this.#isGlob(target)) {
 			const glob = new Bun.Glob(target);
 			return this.#files.filter(file => glob.match(file.path));
 		}
