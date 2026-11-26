@@ -1656,6 +1656,140 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(merge).toEqual({ failed: [], merged: ["omp/task/parent-only-wip"] });
 	});
 
+	// A runtime lock the isolation held when it opened but the parent never did
+	// (a Beads gate lock at the checkout root) is gone when the task ends. The
+	// deletion is not the task's change and the parent cannot apply it, so it must
+	// stay out of the captured patch while the task's own edit is still captured.
+	it("leaves a root lock only the isolation held out of the captured patch", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.rm(path.join(isolation, ".beads.gate.lock"), { force: true });
+		await fs.writeFile(
+			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
+			"line1\nline2\nline3\nline4\nLINE5-TASK-EDIT\nline6\nline7\nline8\nline9\nline10\n",
+		);
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("+LINE5-TASK-EDIT");
+		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
+
+		const patchDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-delta-"));
+		tempDirs.push(patchDir);
+		const patchFile = path.join(patchDir, "delta.patch");
+		await fs.writeFile(patchFile, delta.rootPatch);
+		await runGit(parent, ["apply", "--check", patchFile]);
+	});
+
+	// The task edits a runtime lock the isolation held and the parent never did.
+	// The edit is the task's own change, so the patch must carry the modified
+	// content as a creation the parent can apply.
+	it("captures a modified root lock the isolation held as a creation", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 3\n");
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("+pid 3");
+
+		const patchDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-delta-"));
+		tempDirs.push(patchDir);
+		const patchFile = path.join(patchDir, "delta.patch");
+		await fs.writeFile(patchFile, delta.rootPatch);
+		await runGit(parent, ["apply", "--check", patchFile]);
+	});
+
+	// The same modified lock through commit mode: the task branch carries the
+	// lock's new content and the parent merges it.
+	it("commits a modified root lock the isolation held onto the task branch", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 3\n");
+		const result = await commitToBranch(isolation, baseline, "modified-lock", undefined);
+
+		expect(result?.rootPatch ?? "").toContain("+pid 3");
+		expect(result?.branchName).toBe("omp/task/modified-lock");
+		expect(await runGit(parent, ["show", "omp/task/modified-lock:.beads.gate.lock"])).toBe("pid 3");
+
+		const merge = await mergeTaskBranches(parent, [
+			{ branchName: result!.branchName!, taskId: "modified-lock", baseSha: result!.baseSha! },
+		]);
+		expect(merge).toEqual({ failed: [], merged: ["omp/task/modified-lock"] });
+	});
+
+	// A lock the isolation held and the task left alone is not the task's change,
+	// so it stays out of the captured patch and the parent gets no stray lock file.
+	it("leaves an unchanged root lock the isolation held out of the captured patch", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.writeFile(
+			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
+			"line1\nline2\nline3\nline4\nLINE5-TASK-EDIT\nline6\nline7\nline8\nline9\nline10\n",
+		);
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("+LINE5-TASK-EDIT");
+		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
+	});
+
+	// The lock is the only untracked file at baseline, so it is last there; the new
+	// file sorts after it, so it is not last in the current patch. Its position must
+	// not make an unchanged lock look modified.
+	it("leaves an unchanged root lock out when the task adds an untracked file after it", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.writeFile(path.join(isolation, "new.txt"), "task file\n");
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("+task file");
+		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
+	});
+
+	// The lock sorts before zz.txt, so it is not last at baseline; removing zz.txt
+	// makes it last. Its position must not make an unchanged lock look modified.
+	it("leaves an unchanged root lock out when the task removes an untracked file after it", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		await fs.writeFile(path.join(isolation, "zz.txt"), "zz\n");
+		await fs.writeFile(path.join(parent, "zz.txt"), "zz\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.rm(path.join(isolation, "zz.txt"));
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("diff --git a/zz.txt b/zz.txt");
+		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
+	});
+
+	// The parent turned a directory the isolation held into a regular file after
+	// the copy. The baseline's untracked path below it is absent from the parent
+	// (lstat reports ENOTDIR, not ENOENT), so it counts as vanished and the task's
+	// own edit is still captured.
+	it("treats a baseline untracked path under a parent file as vanished", async () => {
+		await fs.mkdir(path.join(isolation, "sub"), { recursive: true });
+		await fs.writeFile(path.join(isolation, "sub", "lock.txt"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+		await fs.writeFile(path.join(parent, "sub"), "a file, not a directory\n");
+
+		await fs.writeFile(
+			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
+			"line1\nline2\nline3\nline4\nLINE5-TASK-EDIT\nline6\nline7\nline8\nline9\nline10\n",
+		);
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("+LINE5-TASK-EDIT");
+		expect(delta.rootPatch).not.toContain("sub/lock.txt");
+
+		const patchDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-delta-"));
+		tempDirs.push(patchDir);
+		const patchFile = path.join(patchDir, "delta.patch");
+		await fs.writeFile(patchFile, delta.rootPatch);
+		await runGit(parent, ["apply", "--check", patchFile]);
+	});
+
 	describe("with baseline WIP overlapping the agent's changes (#4136)", () => {
 		async function seedWipFileFromParent(destRoot: string, relPath: string): Promise<void> {
 			await fs.mkdir(path.join(destRoot, path.dirname(relPath)), { recursive: true });
