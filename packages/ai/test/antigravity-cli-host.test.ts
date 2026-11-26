@@ -22,7 +22,13 @@ import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
+import type {
+	ContentBlock,
+	NewSessionRequest,
+	PromptRequest,
+	PromptResponse,
+	SessionConfigOption,
+} from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
 	api: "antigravity-acp",
@@ -88,6 +94,7 @@ class FakeAgy implements AgyTransport {
 	readonly promptHistory: FakePrompt[] = [];
 	readonly loads: string[] = [];
 	readonly created: string[] = [];
+	readonly sessionRequests: NewSessionRequest[] = [];
 	readonly configurations: string[] = [];
 	readonly abort = new AbortController();
 	readonly exit = Promise.withResolvers<number>();
@@ -128,9 +135,10 @@ class FakeAgy implements AgyTransport {
 		this.connection = {
 			signal: this.abort.signal,
 			initialize: async () => ({ protocolVersion: 1 }),
-			newSession: async () => {
+			newSession: async params => {
 				this.currentId = crypto.randomUUID();
 				this.created.push(this.currentId);
+				this.sessionRequests.push(params);
 				return { sessionId: this.currentId, configOptions };
 			},
 			loadSession: async params => {
@@ -235,6 +243,44 @@ async function fixture(options: AgyHostOptions = {}, roster?: string[]) {
 	return { host, started, instances, dir, clock };
 }
 
+/** An agy store shaped like one agy wrote for a completed turn, so its checkpoint can be forked. */
+async function recordableStore(dir: string, id: string): Promise<Database> {
+	const store = conversationStorePath(dir, id);
+	await mkdir(path.dirname(store), { recursive: true });
+	const db = new Database(store);
+	cleanup.push(async () => {
+		db.close();
+	});
+	db.run("PRAGMA journal_mode = WAL");
+	for (const table of ["steps", "gen_metadata", "executor_metadata", "parent_references"]) {
+		db.run(`CREATE TABLE ${table} (idx INTEGER PRIMARY KEY, body TEXT)`);
+		db.run(`INSERT INTO ${table} VALUES (0, '41')`);
+	}
+	db.run("CREATE TABLE trajectory_meta (cascade_id TEXT, trajectory_id TEXT)");
+	db.run("INSERT INTO trajectory_meta VALUES (?, ?)", [id, crypto.randomUUID()]);
+	return db;
+}
+
+/** A second host over the same agy directory, as a restarted omp process would open. */
+function hostOnDir(state: { dir: string; started: Queue<FakeAgy>; clock: Clock; instances: FakeAgy[] }): AgyHost {
+	const host = new AgyHost(state.dir, {
+		startupTimeoutMs: 500,
+		cancelTimeoutMs: 60,
+		announcementTimeoutMs: 30,
+		schedule: state.clock.schedule,
+		startTransport: async input => {
+			const fake = new FakeAgy(input);
+			state.instances.push(fake);
+			state.started.push(fake);
+			return fake;
+		},
+	});
+	cleanup.push(async () => {
+		await host.dispose();
+	});
+	return host;
+}
+
 function step(
 	host: AgyHost,
 	messages: Message[],
@@ -287,6 +333,102 @@ describe("AgyHost stateful steps", () => {
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await expect(run.done).rejects.toThrow("without a usable response");
 		expect(fake.closed).toBe(true);
+	});
+	it("delivers the system prompt as the first prompt item, not as session metadata", async () => {
+		const state = await fixture();
+		const system = "You are omp's trusted coding assistant.";
+		const reminder = `<system-reminder>\n${system}\n</system-reminder>`;
+		const first = step(state.host, [user("hello")], { systemPrompt: [system] });
+		const fake = await state.started.next();
+		const opening = await fake.prompts.next();
+		expect(fake.sessionRequests).toEqual([{ cwd: process.cwd(), mcpServers: [] }]);
+		expect(opening.request.prompt).toEqual([
+			{ type: "text", text: reminder },
+			{ type: "text", text: "hello" },
+		]);
+		fake.text("Done.");
+		opening.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		// The same system prompt resumes the live session, so it is never injected twice.
+		const second = step(state.host, [user("hello"), first.writer.output, user("again")], { systemPrompt: [system] });
+		const resumed = await fake.prompts.next();
+		expect(resumed.request.prompt).toEqual([{ type: "text", text: "again" }]);
+		fake.text("Done again.");
+		resumed.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(fake.sessionRequests).toHaveLength(1);
+	});
+	it("restores a checkpoint in a fresh host without reinjecting the delivered prompt", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("remember 41")], { systemPrompt: ["System A"] });
+		const fake = await state.started.next();
+		const opening = await fake.prompts.next();
+		await recordableStore(state.dir, fake.currentId);
+		fake.text("Remembered 41.");
+		opening.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const recorded = first.writer.output.providerPayload;
+		if (recorded?.type !== "antigravityCli" || !recorded.checkpoint) throw new Error("expected a checkpoint");
+		expect(recorded.systemKey).toMatch(/^[0-9a-f]{64}$/);
+		// No live conversation exists after a restart: the fork's own recorded step decides.
+		const restarted = hostOnDir(state);
+		const next = step(restarted, [user("remember 41"), first.writer.output, user("overwrite 77")], {
+			systemPrompt: ["System A"],
+		});
+		const resumed = await state.started.next();
+		const prompt = await resumed.prompts.next();
+		expect(resumed.loads).toHaveLength(1);
+		expect(resumed.created).toEqual([]);
+		expect(prompt.request.prompt).toEqual([{ type: "text", text: "overwrite 77" }]);
+		resumed.text("Remembered 77.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+	});
+	it("injects the current prompt when restoring a conversation recorded under another one", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("remember 41")], { systemPrompt: ["System A"] });
+		const fake = await state.started.next();
+		const opening = await fake.prompts.next();
+		await recordableStore(state.dir, fake.currentId);
+		fake.text("Remembered 41.");
+		opening.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const restarted = hostOnDir(state);
+		const next = step(restarted, [user("remember 41"), first.writer.output, user("overwrite 77")], {
+			systemPrompt: ["System B"],
+		});
+		const forked = await state.started.next();
+		const prompt = await forked.prompts.next();
+		expect(forked.loads).toHaveLength(1);
+		expect(prompt.request.prompt).toEqual([
+			{ type: "text", text: "<system-reminder>\nSystem B\n</system-reminder>" },
+			{ type: "text", text: "overwrite 77" },
+		]);
+		forked.text("Remembered 77.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+	});
+	it("reseeds instead of appending a second reminder when the system prompt changes", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")], { systemPrompt: ["System A"] });
+		const fake = await state.started.next();
+		const opening = await fake.prompts.next();
+		fake.text("Done.");
+		opening.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("hello"), first.writer.output, user("again")], {
+			systemPrompt: ["System B"],
+		});
+		const reseeded = await fake.prompts.next();
+		expect(fake.created).toHaveLength(2);
+		expect(fake.loads).toEqual([]);
+		const text = textOf(reseeded.request.prompt);
+		expect(text.startsWith("<system-reminder>\nSystem B\n</system-reminder>")).toBe(true);
+		expect(text).not.toContain("System A");
+		expect(text).toContain("hello");
+		fake.text("Done again.");
+		reseeded.response.resolve({ stopReason: "end_turn" });
+		await second.done;
 	});
 	it("selects the model and thought level agy advertises, including effort-suffixed rosters", async () => {
 		const turn = async (roster: string[], efforts: (string | undefined)[]) => {
