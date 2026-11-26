@@ -49,8 +49,8 @@ export interface MarkdownOptions {
 	readonly hyperlinks?: boolean;
 	/**
 	 * Draw ` (href)` after a link label that is not the href itself (default:
-	 * the host's {@link markdownLook}). On a terminal without OSC 8 the suffix
-	 * still draws so the target stays visible.
+	 * the host's {@link markdownLook}). Only honored with `hyperlinks`: an
+	 * unlinked label alone would lose the destination.
 	 */
 	readonly linkUrls?: boolean;
 	/**
@@ -264,7 +264,7 @@ const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
  */
 function sizedHeading(r: Renderer, token: Tokens.Heading, width: number): string | undefined {
 	if (token.depth !== 1 || !r.options.textSizing) return undefined;
-	const drawn = renderInline({ ...r.inline, linkUrls: "never" }, token.tokens, PLAIN_CONTEXT);
+	const drawn = renderInline({ ...r.inline, linkUrls: false }, token.tokens, PLAIN_CONTEXT);
 	if (drawn.includes(EXTENSION_LINK_ID)) return undefined;
 	const drawnWidth = visibleWidth(drawn);
 	if (drawnWidth === 0 || drawnWidth * HEADING_SCALE > width) return undefined;
@@ -533,7 +533,7 @@ function createRenderer(tokens: readonly Token[], fullWidth: number, options: Ma
 		inline: {
 			styles,
 			hyperlinks: options.hyperlinks ?? false,
-			linkUrls: options.linkUrls,
+			linkUrls: drawsLinkUrls(options),
 			linkTarget: options.linkTarget,
 			extensionLink: extensionLinkTest(options.linkSchemes ?? []),
 			marks: options.marks,
@@ -752,7 +752,7 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.paddingX ?? 0,
 		options.colorful ?? true,
 		options.hyperlinks ?? false,
-		options.linkUrls ?? true,
+		drawsLinkUrls(options),
 		options.textSizing ?? false,
 		options.mermaid ?? true,
 		options.textStyle ?? "",
@@ -760,6 +760,11 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.linkSchemes?.join(",") ?? "",
 		links,
 	].join("|");
+}
+
+/** Whether named links draw their ` (href)` suffix: always without OSC 8, where the label alone loses the target. */
+function drawsLinkUrls(options: MarkdownOptions): boolean {
+	return options.linkUrls !== false || options.hyperlinks !== true;
 }
 
 /** The reference definitions of a lexed document, as a key part ("" when there are none). */

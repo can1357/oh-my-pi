@@ -631,7 +631,7 @@ export const cfgTuiShowLinkUrl = register({
 		group: "Display",
 		label: "Link URLs",
 		description:
-			"Show the target URL in parentheses after named markdown links (the link label stays clickable either way)",
+			"Show the target URL in parentheses after named markdown links; off only hides it where terminal hyperlinks make the label clickable",
 	},
 });
 

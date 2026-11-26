@@ -90,10 +90,10 @@ describe("assistant message mermaid markdown", () => {
 });
 
 describe("assistant message markdown look", () => {
-	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true }));
+	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true }));
 
 	it("draws headings in mdHeading when colorful Markdown is off", () => {
-		setMarkdownLook({ colorful: false, mermaid: true, linkUrls: true });
+		setMarkdownLook({ colorful: false, mermaid: true });
 		const message = createAssistantMessage("# Title\n\nbody");
 		const rows = printRows(
 			() => AssistantMessageBlock({ model: { message: signal(message), finalized: signal(true) } }),
@@ -107,7 +107,7 @@ describe("assistant message markdown look", () => {
 	});
 
 	it("keeps mermaid fences as code when mermaid rendering is off", () => {
-		setMarkdownLook({ colorful: true, mermaid: false, linkUrls: true });
+		setMarkdownLook({ colorful: true, mermaid: false });
 		expect(render(createAssistantMessage("```mermaid\nflowchart TD\n  Start-->Stop\n```"))).toContain("flowchart TD");
 	});
 });

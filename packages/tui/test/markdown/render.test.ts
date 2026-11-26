@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { cellGrid, firstCellDiff, plainRows } from "../../src/testing/cells";
 import {
 	EXTENSION_LINK_ID,
@@ -7,7 +7,7 @@ import {
 	renderMarkdownFrame,
 	takeExtensionLinks,
 } from "../../src/text/markdown";
-import { markdownLook, setMarkdownLook } from "../../src/text/markdown/look";
+import { setMarkdownLook } from "../../src/text/markdown/look";
 import { visibleWidth } from "../../src/text/width";
 import { loadThemeSync } from "../../src/theme";
 
@@ -279,15 +279,14 @@ describe("inline", () => {
 		expect(cells[text.indexOf(" (")]!.link).toBe("");
 	});
 
-	it("hides a named link's suffix when linkUrls is off, keeping it where OSC 8 is off", () => {
-		expect(plain("[docs](https://e.com/d)", 80, { linkUrls: false, hyperlinks: true })).toEqual(["docs"]);
-		expect(plain("[docs](https://e.com/d)", 80, { linkUrls: false })).toEqual(["docs (https://e.com/d)"]);
+	it("hides a named link's suffix when linkUrls is off, keeping the label linked", () => {
+		const rows = renderMarkdown("[docs](https://e.com/d)", 80, { theme, linkUrls: false, hyperlinks: true });
+		expect(plainRows(rows).map(row => row.trimEnd())).toEqual(["docs"]);
+		expect(cellGrid(rows)[0]![0]!.link).toBe("https://e.com/d");
 	});
 
-	it("never repeats the href when the label already carries it", () => {
-		expect(
-			plain("[https://e.com/d](https://e.com/d) and https://e.com/bare", 80, { linkUrls: false, hyperlinks: true }),
-		).toEqual(["https://e.com/d and https://e.com/bare"]);
+	it("keeps the suffix with linkUrls off where OSC 8 is off, without repeating bare links", () => {
+		expect(plain("[docs](https://e.com/d)", 80, { linkUrls: false })).toEqual(["docs (https://e.com/d)"]);
 		expect(plain("[a@b.co](mailto:a@b.co) and https://e.com/bare", 80, { linkUrls: false })).toEqual([
 			"a@b.co and https://e.com/bare",
 		]);
@@ -355,16 +354,15 @@ describe("inline", () => {
 });
 
 describe("host look", () => {
-	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true }));
+	afterEach(() => setMarkdownLook({ linkUrls: true }));
 
 	it("renders with the host's linkUrls when the caller leaves it unset", () => {
-		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
-		expect(markdownLook().linkUrls).toBe(false);
+		setMarkdownLook({ linkUrls: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true })).toEqual(["docs"]);
 	});
 
 	it("lets an explicit linkUrls win over the host look", () => {
-		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
+		setMarkdownLook({ linkUrls: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true, linkUrls: true })).toEqual([
 			"docs (https://e.com/d)",
 		]);
