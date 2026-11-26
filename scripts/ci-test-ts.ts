@@ -112,6 +112,7 @@ const nativeAndIntegrationPackages = [
 	"packages/tui",
 	"packages/collab-web",
 	"packages/typescript-edit-benchmark",
+	"packages/metaharness",
 ];
 
 const projectToolTestCommand: TestCommand = {

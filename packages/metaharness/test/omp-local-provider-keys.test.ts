@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { $ } from "bun";
 
 /**
  * Exercises `OmpLocal._collect_provider_keys` in agent/omp_local.py — the code
@@ -75,134 +76,160 @@ interface Case {
 	forward?: Record<string, string>;
 }
 
-function collect(cases: Case[]): Record<string, string>[] {
+async function collect(cases: Case[]): Promise<unknown> {
 	if (!PYTHON) throw new Error("python3 is required to exercise agent/omp_local.py");
-	const result = Bun.spawnSync([PYTHON, "-c", DRIVER, JSON.stringify(cases), AGENT_DIR]);
+	const result = await $`${PYTHON} -c ${DRIVER} ${JSON.stringify(cases)} ${AGENT_DIR}`.quiet().nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`python driver failed (${result.exitCode}): ${result.stderr.toString()}`);
 	}
-	return JSON.parse(result.stdout.toString()) as Record<string, string>[];
+	return JSON.parse(result.text());
 }
 
 describe("OmpLocal._collect_provider_keys (direct-auth env forwarding)", () => {
-	it("forwards COPILOT_GITHUB_TOKEN, not GITHUB_TOKEN, for github-copilot", () => {
+	it("forwards COPILOT_GITHUB_TOKEN, not GITHUB_TOKEN, for github-copilot", async () => {
 		// omp reads only COPILOT_GITHUB_TOKEN for github-copilot and refuses a
 		// generic GitHub token, so forwarding GITHUB_TOKEN leaves the container
 		// unauthenticated.
-		const [got] = collect([
-			{
-				provider: "github-copilot",
-				host: { COPILOT_GITHUB_TOKEN: "copilot-token", GITHUB_TOKEN: "generic-token" },
-			},
-		]);
-		expect(got).toEqual({ COPILOT_GITHUB_TOKEN: "copilot-token" });
+		expect(
+			await collect([
+				{
+					provider: "github-copilot",
+					host: { COPILOT_GITHUB_TOKEN: "copilot-token", GITHUB_TOKEN: "generic-token" },
+				},
+			]),
+		).toEqual([{ COPILOT_GITHUB_TOKEN: "copilot-token" }]);
 	});
 
-	it("forwards only the alias omp would pick for huggingface", () => {
+	it("forwards only the alias omp would pick for huggingface", async () => {
 		// omp's env fallback for huggingface is HUGGINGFACE_HUB_TOKEN then
 		// HF_TOKEN (first non-blank wins, trimming whitespace); forwarding both
 		// lets the shadowed token leak permissions, and spaces must not block
 		// the fallback.
-		const [both, fallback, whitespace] = collect([
-			{
-				provider: "huggingface",
-				host: { HUGGINGFACE_HUB_TOKEN: "hub-token", HF_TOKEN: "hf-token" },
-			},
-			{
-				provider: "huggingface",
-				host: { HF_TOKEN: "hf-token" },
-			},
-			{
-				provider: "huggingface",
-				host: { HUGGINGFACE_HUB_TOKEN: "   ", HF_TOKEN: "hf-token" },
-			},
-		]);
-		expect(both).toEqual({ HUGGINGFACE_HUB_TOKEN: "hub-token" });
-		expect(fallback).toEqual({ HF_TOKEN: "hf-token" });
-		expect(whitespace).toEqual({ HF_TOKEN: "hf-token" });
+		expect(
+			await collect([
+				{
+					provider: "huggingface",
+					host: { HUGGINGFACE_HUB_TOKEN: "hub-token", HF_TOKEN: "hf-token" },
+				},
+				{
+					provider: "huggingface",
+					host: { HF_TOKEN: "hf-token" },
+				},
+				{
+					provider: "huggingface",
+					host: { HUGGINGFACE_HUB_TOKEN: "   ", HF_TOKEN: "hf-token" },
+				},
+			]),
+		).toEqual([{ HUGGINGFACE_HUB_TOKEN: "hub-token" }, { HF_TOKEN: "hf-token" }, { HF_TOKEN: "hf-token" }]);
 	});
 
-	it("drops host huggingface tokens when --env supplies a non-blank credential under either name", () => {
+	it("drops host huggingface tokens when --env supplies a non-blank credential under either name", async () => {
 		// --env lands in _forward_env and must win; without suppression a host
 		// HUGGINGFACE_HUB_TOKEN would silently shadow --env HF_TOKEN, while
-		// empty or whitespace-only --env values must not block the host token.
-		const [envHf, envHub, envBlank, envWhitespace] = collect([
-			{
-				provider: "huggingface",
-				host: { HUGGINGFACE_HUB_TOKEN: "hub-token", HF_TOKEN: "hf-token" },
-				forward: { HF_TOKEN: "user-token" },
-			},
-			{
-				provider: "huggingface",
-				host: { HF_TOKEN: "hf-token" },
-				forward: { HUGGINGFACE_HUB_TOKEN: "user-token" },
-			},
-			{
-				provider: "huggingface",
-				host: { HUGGINGFACE_HUB_TOKEN: "hub-token" },
-				forward: { HF_TOKEN: "" },
-			},
-			{
-				provider: "huggingface",
-				host: { HUGGINGFACE_HUB_TOKEN: "hub-token" },
-				forward: { HF_TOKEN: "   " },
-			},
+		// empty or JS-whitespace-only --env values (including U+FEFF) must not
+		// block the host token.
+		expect(
+			await collect([
+				{
+					provider: "huggingface",
+					host: { HUGGINGFACE_HUB_TOKEN: "hub-token", HF_TOKEN: "hf-token" },
+					forward: { HF_TOKEN: "user-token" },
+				},
+				{
+					provider: "huggingface",
+					host: { HF_TOKEN: "hf-token" },
+					forward: { HUGGINGFACE_HUB_TOKEN: "user-token" },
+				},
+				{
+					provider: "huggingface",
+					host: { HUGGINGFACE_HUB_TOKEN: "hub-token" },
+					forward: { HF_TOKEN: "" },
+				},
+				{
+					provider: "huggingface",
+					host: { HUGGINGFACE_HUB_TOKEN: "hub-token" },
+					forward: { HF_TOKEN: "   " },
+				},
+				{
+					provider: "huggingface",
+					host: { HUGGINGFACE_HUB_TOKEN: "hub-token" },
+					forward: { HF_TOKEN: "\ufeff" },
+				},
+			]),
+		).toEqual([
+			{},
+			{},
+			{ HUGGINGFACE_HUB_TOKEN: "hub-token" },
+			{ HUGGINGFACE_HUB_TOKEN: "hub-token" },
+			{ HUGGINGFACE_HUB_TOKEN: "hub-token" },
 		]);
-		expect(envHf).toEqual({});
-		expect(envHub).toEqual({});
-		expect(envBlank).toEqual({ HUGGINGFACE_HUB_TOKEN: "hub-token" });
-		expect(envWhitespace).toEqual({ HUGGINGFACE_HUB_TOKEN: "hub-token" });
 	});
 
-	it("forwards only omp's winning anthropic alias, handles cleared aliases, and honors Foundry", () => {
+	it("forwards only omp's winning anthropic alias, handles cleared aliases, matches JS trim, and honors Foundry", async () => {
 		// omp's anthropic env hook picks ANTHROPIC_FOUNDRY_API_KEY when Foundry
-		// mode is enabled, otherwise ANTHROPIC_OAUTH_TOKEN then ANTHROPIC_API_KEY.
-		const [both, envOverride, oauthCleared, foundryActive, foundryNoKey, foundryDisabled] = collect([
-			{
-				provider: "anthropic",
-				host: { ANTHROPIC_API_KEY: "api-key", ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
-			},
-			{
-				provider: "anthropic",
-				host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
-				forward: { ANTHROPIC_API_KEY: "user-key" },
-			},
-			{
-				provider: "anthropic",
-				host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token", ANTHROPIC_API_KEY: "api-key" },
-				forward: { ANTHROPIC_OAUTH_TOKEN: "" },
-			},
-			{
-				provider: "anthropic",
-				host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token", ANTHROPIC_API_KEY: "api-key" },
-				forward: { CLAUDE_CODE_USE_FOUNDRY: "1", ANTHROPIC_FOUNDRY_API_KEY: "foundry-key" },
-			},
-			{
-				provider: "anthropic",
-				host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token", ANTHROPIC_API_KEY: "api-key" },
-				forward: { CLAUDE_CODE_USE_FOUNDRY: "1" },
-			},
-			{
-				provider: "anthropic",
-				host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
-				forward: { ANTHROPIC_FOUNDRY_API_KEY: "foundry-key" },
-			},
+		// mode is enabled, otherwise ANTHROPIC_OAUTH_TOKEN then ANTHROPIC_API_KEY,
+		// using JS trim() (which treats U+FEFF as blank, unlike Python strip()).
+		expect(
+			await collect([
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_API_KEY: "api-key", ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
+				},
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_OAUTH_TOKEN: "\ufeff", ANTHROPIC_API_KEY: "api-key" },
+				},
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
+					forward: { ANTHROPIC_API_KEY: "user-key" },
+				},
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token", ANTHROPIC_API_KEY: "api-key" },
+					forward: { ANTHROPIC_OAUTH_TOKEN: "" },
+				},
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token", ANTHROPIC_API_KEY: "api-key" },
+					forward: { CLAUDE_CODE_USE_FOUNDRY: "1", ANTHROPIC_FOUNDRY_API_KEY: "foundry-key" },
+				},
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token", ANTHROPIC_API_KEY: "api-key" },
+					forward: { CLAUDE_CODE_USE_FOUNDRY: "1", ANTHROPIC_FOUNDRY_API_KEY: "\ufeff" },
+				},
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token", ANTHROPIC_API_KEY: "api-key" },
+					forward: { CLAUDE_CODE_USE_FOUNDRY: "1" },
+				},
+				{
+					provider: "anthropic",
+					host: { ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
+					forward: { ANTHROPIC_FOUNDRY_API_KEY: "foundry-key" },
+				},
+			]),
+		).toEqual([
+			{ ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
+			{ ANTHROPIC_API_KEY: "api-key" },
+			{},
+			{ ANTHROPIC_API_KEY: "api-key" },
+			{},
+			{ ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
+			{ ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
+			{ ANTHROPIC_OAUTH_TOKEN: "oauth-token" },
 		]);
-		expect(both).toEqual({ ANTHROPIC_OAUTH_TOKEN: "oauth-token" });
-		expect(envOverride).toEqual({});
-		expect(oauthCleared).toEqual({ ANTHROPIC_API_KEY: "api-key" });
-		expect(foundryActive).toEqual({});
-		expect(foundryNoKey).toEqual({ ANTHROPIC_OAUTH_TOKEN: "oauth-token" });
-		expect(foundryDisabled).toEqual({ ANTHROPIC_OAUTH_TOKEN: "oauth-token" });
 	});
 
-	it("still forwards independent multi-var credentials", () => {
-		const [got] = collect([
-			{
-				provider: "amazon-bedrock",
-				host: { AWS_ACCESS_KEY_ID: "id", AWS_SECRET_ACCESS_KEY: "secret", AWS_REGION: "us-east-1" },
-			},
-		]);
-		expect(got).toEqual({ AWS_ACCESS_KEY_ID: "id", AWS_SECRET_ACCESS_KEY: "secret", AWS_REGION: "us-east-1" });
+	it("still forwards independent multi-var credentials", async () => {
+		expect(
+			await collect([
+				{
+					provider: "amazon-bedrock",
+					host: { AWS_ACCESS_KEY_ID: "id", AWS_SECRET_ACCESS_KEY: "secret", AWS_REGION: "us-east-1" },
+				},
+			]),
+		).toEqual([{ AWS_ACCESS_KEY_ID: "id", AWS_SECRET_ACCESS_KEY: "secret", AWS_REGION: "us-east-1" }]);
 	});
 });

@@ -164,6 +164,21 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+# Exact ECMAScript String.prototype.trim() characters (WhiteSpace +
+# LineTerminator), matching omp's `$pickenv()` and `isFoundryEnabled()` rather
+# than Python's `str.strip()` (which misses U+FEFF and strips U+001C-U+001F and
+# U+0085).
+_JS_WHITESPACE = (
+    "\t\n\x0b\x0c\r \xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _js_trim(value: str | None) -> str:
+    return value.strip(_JS_WHITESPACE) if value else ""
+
+
 def _yaml(tree: dict, indent: int = 0) -> str:
     """Render a nested dict of scalars/lists as YAML (config.yml subset; no anchors or multiline strings)."""
     pad = "  " * indent
@@ -571,20 +586,21 @@ class OmpLocal(BaseInstalledAgent):
         """
         if (
             provider == "anthropic"
-            and _truthy(self._forward_env.get("CLAUDE_CODE_USE_FOUNDRY", ""))
-            and (self._forward_env.get("ANTHROPIC_FOUNDRY_API_KEY") or "").strip()
+            and _js_trim(self._forward_env.get("CLAUDE_CODE_USE_FOUNDRY")).lower()
+            in ("1", "true", "yes", "on")
+            and _js_trim(self._forward_env.get("ANTHROPIC_FOUNDRY_API_KEY"))
         ):
             return {}
         env: dict[str, str] = {}
         for item in _PROVIDER_KEYS.get(provider, []):
             names = item if isinstance(item, tuple) else (item,)
-            if any((self._forward_env.get(name) or "").strip() for name in names):
+            if any(_js_trim(self._forward_env.get(name)) for name in names):
                 continue
             for name in names:
                 if name in self._forward_env:
                     continue
                 value = os.environ.get(name)
-                if value and value.strip():
+                if value and _js_trim(value):
                     env[name] = value
                     break
         return env
