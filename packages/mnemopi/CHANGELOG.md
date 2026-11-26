@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a memory store failing to open, or a model-change embedding rebuild stopping, when a memory row's content is not text: such rows, and rows without a text id, are now skipped with a warning
+
 ### Removed
 
 - Removed unused `@oh-my-pi/pi-mnemopi/config` exports: `FASTEMBED_CACHE_DIR`, `MODEL_CACHE_DIR`, `DEFAULT_LLM_MODEL_REPO`, `DEFAULT_LLM_MODEL_FILE`, `HOST_LLM_TIMEOUT_SECONDS`, `beamOptimizationsEnabled`, `embeddingsViaApi`, `isApiEmbeddingModel`, `apiEmbeddingsAvailable`, `workingMemoryMaxItems`, `episodicRecallLimit`, `sleepBatchSize`, `scratchpadMaxItems`, `tier2Days`, `tier3Days`, `degradeBatchSize`, `smartCompressEnabled`, `tier3MaxChars`, `veracityWeightOverrides`, `autoMigrateEnabled`, `llmThreads`, `llmRepo`, `llmFile`, `llmModelFiles`, `hostLlmProvider`, `hostLlmModel`, `hostLlmContext` ([#20530](https://github.com/can1357/oh-my-pi/pull/20530))

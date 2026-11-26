@@ -9,10 +9,11 @@
  */
 
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
+import { logger } from "@oh-my-pi/pi-utils";
 
 const OLD_MODEL = "BAAI/bge-small-en-v1.5";
 const NEW_MODEL = "intfloat/multilingual-e5-large";
@@ -47,6 +48,76 @@ function seedDb(model: string): { db: Database; ids: string[] } {
 
 function countEmbeddings(memory: Mnemopi): number {
 	return (memory.conn.query("SELECT COUNT(*) AS n FROM memory_embeddings").get() as { n: number }).n;
+}
+
+// A working_memory row as SQLite's `.recover` rebuilt one from a damaged file: a page of an
+// fts5 index's data table read back as a working_memory record. It keeps that page's rowid
+// ((10 << 37) + 1, segment 10 page 1), its NULL `id` (the data table's INTEGER PRIMARY KEY is
+// stored as NULL) and the page itself as BLOB `content`; every other column is at its default.
+const UNREADABLE_ROWID = 10 * 2 ** 37 + 1;
+const UNREADABLE_PAGE = new Uint8Array([0x00, 0x00, 0x03, 0x51, 0x02, 0x30, 0x31, 0x06, 0x02, 0x42]);
+
+function insertUnreadableRow(db: Database): void {
+	db.prepare("INSERT INTO working_memory (rowid, content) VALUES (?, ?)").run(UNREADABLE_ROWID, UNREADABLE_PAGE);
+}
+
+/** Inserts a working_memory row with a text id and the page as BLOB content, and returns its rowid. */
+function insertBlobContentRow(db: Database, id: string): number {
+	const insert = db.prepare("INSERT INTO working_memory (id, content) VALUES (?, ?)");
+	return Number(insert.run(id, UNREADABLE_PAGE).lastInsertRowid);
+}
+
+const SKIPPED_ROW_WARNING = "mnemopi: embedding rebuild skipped a memory row that has no text id or no text";
+const SKIPPED_ROW_FIELDS = {
+	table: "working_memory",
+	rowid: UNREADABLE_ROWID,
+	id: null,
+	idType: "null",
+	contentType: "blob",
+};
+const SKIPPED_ROWS_SUMMARY = "mnemopi: embedding rebuild skipped more memory rows that have no text id or no text";
+const REBUILT = [
+	{ memory_id: "ep-1", model: NEW_MODEL },
+	{ memory_id: "wm-1", model: NEW_MODEL },
+];
+
+/** Two live memories with no embedding at all, as an interrupted rebuild leaves them. */
+function seedUnembeddedDb(): Database {
+	const db = new Database(":memory:");
+	initBeam(db);
+	const ts = new Date().toISOString();
+	db.prepare(
+		"INSERT INTO working_memory (id, content, source, timestamp, session_id) VALUES (?, ?, 'test', ?, 'default')",
+	).run("wm-1", "alpha working memory", ts);
+	db.prepare(
+		"INSERT INTO episodic_memory (id, content, source, timestamp, session_id) VALUES (?, ?, 'test', ?, 'default')",
+	).run("ep-1", "beta episodic memory", ts);
+	return db;
+}
+
+/**
+ * Opens a store on `db` with the new model and waits for its rebuild. Returns the fields of each
+ * skipped-row warning and of each summary line it logged; a throw from `new Mnemopi()` propagates.
+ */
+async function openAndRebuild(db: Database): Promise<{ rows: unknown[]; summaries: unknown[] }> {
+	const warn = spyOn(logger, "warn").mockImplementation(() => {});
+	let memory: Mnemopi | undefined;
+	try {
+		memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider: fakeEmbed() } });
+		await memory.flushExtractions();
+		const calls = warn.mock.calls;
+		return {
+			rows: calls.filter(([text]) => text === SKIPPED_ROW_WARNING).map(([, fields]) => fields),
+			summaries: calls.filter(([text]) => text === SKIPPED_ROWS_SUMMARY).map(([, fields]) => fields),
+		};
+	} finally {
+		warn.mockRestore();
+		memory?.close();
+	}
+}
+
+function storedEmbeddings(db: Database): unknown[] {
+	return db.query("SELECT memory_id, model FROM memory_embeddings ORDER BY memory_id").all();
 }
 
 describe("reconcileEmbeddingModel on store open", () => {
@@ -267,6 +338,129 @@ describe("reconcileEmbeddingModel on store open", () => {
 			expect(rows.every(row => row.model === NEW_MODEL)).toBe(true);
 		} finally {
 			memory.close();
+			db.close();
+		}
+	});
+
+	it("opens the store and resumes the rebuild past a row with no text id or no text", async () => {
+		// The interrupted-rebuild branch runs inside the constructor. A BLOB row there used to
+		// throw out of `new Mnemopi()`, so the coding agent left the memory backend off.
+		const db = new Database(":memory:");
+		initBeam(db);
+		const ts = new Date().toISOString();
+		db.prepare(
+			"INSERT INTO working_memory (id, content, source, timestamp, session_id) VALUES (?, ?, 'test', ?, 'default')",
+		).run("wm-1", "alpha working memory", ts);
+		db.prepare(
+			"INSERT INTO episodic_memory (id, content, source, timestamp, session_id) VALUES (?, ?, 'test', ?, 'default')",
+		).run("ep-1", "beta episodic memory", ts);
+		insertUnreadableRow(db);
+
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		let memory: Mnemopi | undefined;
+		try {
+			memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider: fakeEmbed() } });
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT memory_id, model FROM memory_embeddings ORDER BY memory_id").all();
+			expect(rows).toEqual([
+				{ memory_id: "ep-1", model: NEW_MODEL },
+				{ memory_id: "wm-1", model: NEW_MODEL },
+			]);
+			const skipped = warn.mock.calls.filter(([message]) => message === SKIPPED_ROW_WARNING);
+			expect(skipped.map(([, fields]) => fields)).toEqual([SKIPPED_ROW_FIELDS]);
+		} finally {
+			warn.mockRestore();
+			memory?.close();
+			db.close();
+		}
+	});
+
+	it("finishes a model-change rebuild past a row with no text id or no text", async () => {
+		// The model-change branch rebuilds in the background. A BLOB row there aborted the whole
+		// rebuild, so every open kept the stale vectors and tried again.
+		const { db } = seedDb(OLD_MODEL);
+		insertUnreadableRow(db);
+
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+		const memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider: fakeEmbed() } });
+		try {
+			await memory.flushExtractions();
+			const rows = memory.conn.query("SELECT memory_id, model FROM memory_embeddings ORDER BY memory_id").all();
+			expect(rows).toEqual([
+				{ memory_id: "ep-1", model: NEW_MODEL },
+				{ memory_id: "wm-1", model: NEW_MODEL },
+			]);
+			const skipped = warn.mock.calls.filter(([message]) => message === SKIPPED_ROW_WARNING);
+			expect(skipped.map(([, fields]) => fields)).toEqual([SKIPPED_ROW_FIELDS]);
+		} finally {
+			warn.mockRestore();
+			memory.close();
+			db.close();
+		}
+	});
+
+	it("skips a row with a text id and BLOB content: a text id alone does not make a row embeddable", async () => {
+		// The content half of the guard stops the crash: BLOB content reached `item.content.trim()`
+		// and threw out of `new Mnemopi()`, whatever the row's id.
+		const db = seedUnembeddedDb();
+		try {
+			const rowid = insertBlobContentRow(db, "wm-blob");
+			const logged = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(logged.rows).toEqual([
+				{ table: "working_memory", rowid, id: "wm-blob", idType: "text", contentType: "blob" },
+			]);
+			expect(logged.summaries).toEqual([]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("skips a row with a NULL id and text content: text alone does not make a row embeddable", async () => {
+		// No string id can address this row, so the rebuild does not embed it either.
+		const db = seedUnembeddedDb();
+		try {
+			db.prepare("INSERT INTO working_memory (rowid, content) VALUES (?, ?)").run(
+				UNREADABLE_ROWID,
+				"gamma working memory",
+			);
+			const logged = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(logged.rows).toEqual([
+				{ table: "working_memory", rowid: UNREADABLE_ROWID, id: null, idType: "null", contentType: "text" },
+			]);
+			expect(logged.summaries).toEqual([]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("names at most 10 skipped rows at each open and counts the rest in one line", async () => {
+		// A skipped row gets no vector, so each open skips it again. A badly damaged file must not
+		// write one warning per row at every open.
+		const db = seedUnembeddedDb();
+		try {
+			for (let i = 0; i < 10; i += 1) insertBlobContentRow(db, `wm-blob-${i}`);
+			const atCap = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(atCap.rows).toHaveLength(10);
+			expect(atCap.summaries).toEqual([]);
+
+			insertBlobContentRow(db, "wm-blob-10");
+			const oneOver = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(oneOver.rows).toHaveLength(10);
+			expect(oneOver.summaries).toEqual([{ skipped: 11, logged: 10 }]);
+
+			for (let i = 11; i < 25; i += 1) insertBlobContentRow(db, `wm-blob-${i}`);
+			const pastCap = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(pastCap.rows).toHaveLength(10);
+			for (const fields of pastCap.rows) {
+				expect(fields).toMatchObject({ table: "working_memory", idType: "text", contentType: "blob" });
+			}
+			expect(pastCap.summaries).toEqual([{ skipped: 25, logged: 10 }]);
+		} finally {
 			db.close();
 		}
 	});
