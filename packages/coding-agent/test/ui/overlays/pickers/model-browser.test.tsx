@@ -131,31 +131,33 @@ test("native model browser resolves glyphs from the active theme", () => {
 		},
 	});
 	setCurrentTheme(custom);
-
-	const browser = new ModelBrowserState(settings, {});
-	browser.setRoles(roles);
-	browser.setMruOrder(settings.mruOrder);
-	browser.setPerfStats(settings.modelPerf);
-	browser.setItems(items);
-	browser.setCurrentSelector("demo/demo");
-	browser.setMaxVisible(5);
-	const term = createTestTerminal(() => ({ main: <ModelBrowser browser={browser} /> }), {
-		columns: 100,
-		rows: 40,
-		theme: custom,
-	});
 	try {
-		const root = term.surface.main()[0];
-		expect(root).toBeDefined();
-		const text = nativeText(describeTree(root!, staticEnvironment(custom), 100));
-		expect(text).toContain("@ENABLED");
-		expect(text).toContain("@CONTEXT");
-		expect(text).toContain("@INTELLIGENCE");
-		expect(text).not.toContain(previous.symbols.symbol("status.enabled"));
-		expect(text).not.toContain(previous.symbols.symbol("icon.context"));
-		expect(text).not.toContain(previous.symbols.symbol("icon.intelligence"));
+		const browser = new ModelBrowserState(settings, {});
+		browser.setRoles(roles);
+		browser.setMruOrder(settings.mruOrder);
+		browser.setPerfStats(settings.modelPerf);
+		browser.setItems(items);
+		browser.setCurrentSelector("demo/demo");
+		browser.setMaxVisible(5);
+		const term = createTestTerminal(() => ({ main: <ModelBrowser browser={browser} /> }), {
+			columns: 100,
+			rows: 40,
+			theme: custom,
+		});
+		try {
+			const root = term.surface.main()[0];
+			expect(root).toBeDefined();
+			const text = nativeText(describeTree(root!, staticEnvironment(custom), 100));
+			expect(text).toContain("@ENABLED");
+			expect(text).toContain("@CONTEXT");
+			expect(text).toContain("@INTELLIGENCE");
+			expect(text).not.toContain(previous.symbols.symbol("status.enabled"));
+			expect(text).not.toContain(previous.symbols.symbol("icon.context"));
+			expect(text).not.toContain(previous.symbols.symbol("icon.intelligence"));
+		} finally {
+			term.dispose();
+		}
 	} finally {
-		term.dispose();
 		setCurrentTheme(previous);
 	}
 });
