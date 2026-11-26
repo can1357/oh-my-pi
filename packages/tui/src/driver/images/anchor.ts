@@ -47,7 +47,7 @@ export function anchoredRows(sequence: string, rows: number): string[] {
  */
 export function anchoredRise(row: string): number {
 	if (!hasGraphics(row)) return 0;
-	const up = /\x1b7\x1b\[(\d+)A/.exec(row);
+	const up = ANCHOR.exec(row);
 	return up ? Number(up[1]) : 0;
 }
 

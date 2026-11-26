@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
-import { anchoredRows, RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { anchoredRows, RESERVED_ROW, reservedRows } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { defaultPresenter } from "../../src/ui/tools/default";
 import { legacyPresenter } from "../../src/ui/tools/legacy";
 import { type Block, type PaintImages, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
@@ -94,7 +94,7 @@ describe("tool block viewport allocation", () => {
 		// The title wraps past the first row; its tail must stay above the newest output.
 		const title = rows.join("").replace(/\s+/g, "");
 		expect(title).toContain(name);
-		expect(rows.at(-2)).toContain("line 29");
+		expect(rows.at(-1)).toContain("line 29");
 	});
 
 	it("never starts the tail inside an image, whose draw would move up over the head", () => {
@@ -105,7 +105,7 @@ describe("tool block viewport allocation", () => {
 		};
 		const call = toolCall({
 			name: "bash",
-			args: { command: "x" },
+			args: { command: "echo hi" },
 			result: {
 				content: [
 					{ type: "text", text: lines("out", 30) },
@@ -115,11 +115,14 @@ describe("tool block viewport allocation", () => {
 			expanded: true,
 		});
 
-		// Head plus three tail rows: the 4-row image cannot fit, so it is dropped whole and the rows above it fill in.
-		const { rows } = paint(call, 4, images);
-		expect(rows).toHaveLength(4);
-		expect(text(rows)[1]).toContain("out 29");
+		// The untitled frame's edge and command, then three tail rows: the 4-row image cannot fit, so it is
+		// dropped whole with its blank separator, and the rows above it fill in.
+		const { rows } = paint(call, 5, images);
+		expect(rows).toHaveLength(5);
 		expect(text(rows)[0]).toContain("╭");
+		expect(text(rows)[1]).toContain("hi");
+		expect(text(rows).slice(2, 4).join("\n")).toMatch(/out 28[\s\S]*out 29/);
+		expect(text(rows)[4]).toContain("╰");
 		rows.forEach((row, at) => {
 			const up = Number(/\x1b\[(\d+)A/.exec(row)?.[1] ?? 0);
 			for (let above = at - up; above < at; above++) expect(rows[above]?.trim()).toBe(RESERVED_ROW);
@@ -169,20 +172,56 @@ describe("tool block viewport allocation", () => {
 		call.setExecutionStarted();
 		call.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
 
-		// The box tints every row, the reserved ones too; the draw still moves up three rows. Seven rows fit
-		// pad, title, the whole image and the bottom pad; six leave no room for the image, so it is dropped.
+		// The box tints every row, the reserved ones too; the draw still moves up three rows. Six rows fit
+		// pad, the first text row and the whole image (the blank bottom pad spends no room); five leave no
+		// room for the image, so it is dropped.
 		const drawMovesOver = (rows: readonly string[]): void =>
 			rows.forEach((row, at) => {
 				const up = Number(/\x1b\[(\d+)A/.exec(row)?.[1] ?? 0);
 				for (let above = at - up; above < at; above++) expect(Bun.stripANSI(rows[above] ?? "x").trim()).toBe("");
 			});
-		const fits = paint(call, 7).rows;
-		expect(fits).toHaveLength(7);
+		const fits = paint(call, 6).rows;
+		expect(fits).toHaveLength(6);
 		expect(fits.some(row => /\x1b\[3A/.test(row))).toBe(true);
 		drawMovesOver(fits);
-		const tight = paint(call, 6).rows;
+		const tight = paint(call, 5).rows;
 		expect(tight.some(row => /\x1b\[\d+A/.test(row))).toBe(false);
 		drawMovesOver(tight);
+	});
+
+	it("spends no room on a tinted pending image's reserved rows in a boxed legacy card", () => {
+		const drawn = [...lines("text", 10).split("\n"), ...reservedRows(3)];
+		const call = new ToolCall({
+			id: "call-legacy-pending",
+			name: "ext_tool",
+			args: {},
+			presenter: legacyPresenter({ renderResult: () => ({ render: () => drawn }) }, defaultPresenter),
+		});
+		call.setArgsComplete();
+		call.setExecutionStarted();
+		call.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+		const rows = text(paint(call, 5).rows);
+		expect(rows).toHaveLength(5);
+		expect(rows[0]?.trim()).toBe("");
+		expect(rows.slice(1).map(row => row.trim())).toEqual(["text 0", "text 7", "text 8", "text 9"]);
+	});
+
+	it("keeps every row of a wrapped search header", () => {
+		const pattern = `needle_${"long_pattern_segment_".repeat(5)}end`;
+		const call = toolCall({
+			name: "grep",
+			args: { pattern, path: "packages/coding-agent/src" },
+			result: { content: [{ type: "text", text: lines("match.ts", 30) }] },
+			expanded: true,
+		});
+		const full = text(paint(call, undefined).rows).filter(row => row.trim().length > 0);
+		const head = full.findIndex(row => row.includes("match.ts"));
+		expect(head).toBeGreaterThan(1);
+
+		const rows = text(paint(call, head + 2).rows);
+		expect(rows.slice(0, head)).toEqual(full.slice(0, head));
+		expect(rows.at(-1)).toBe(full.at(-1));
 	});
 
 	it("keeps a running agent's newest rows clickable when its row run starts above the cut", () => {
