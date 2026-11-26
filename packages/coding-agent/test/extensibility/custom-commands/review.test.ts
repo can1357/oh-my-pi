@@ -1088,6 +1088,30 @@ describe("ReviewCommand", () => {
 		expect(prompt).not.toContain(rawDiff);
 	});
 
+	it("peels annotated tags before resolving a review range", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-tag-"));
+		try {
+			const repository = await initGitFixture(dir);
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await repository.stageFiles(["a.txt"]);
+			const baseCommit = await repository.commitCreate("init", {});
+			await $`git tag -a v1 -m v1`.cwd(dir).quiet();
+
+			await repository.checkoutNewBranch("feature");
+			await fs.writeFile(path.join(dir, "a.txt"), "two\n");
+			await repository.stageFiles(["a.txt"]);
+			const headCommit = await repository.commitCreate("feature-change", {});
+
+			const target = await resolveBaseBranchTarget(dir, "refs/tags/v1", "feature", { pinRange: true });
+
+			expect(target.rangeBase).toBe(baseCommit);
+			expect(target.rangeHead).toBe(headCommit);
+			expect(target.rawDiff).toContain("+two");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("keeps both sides of renamed paths in delegated large-diff assignments", () => {
 		const rename = [
 			"diff --git a/src/old.ts b/src/new.ts",

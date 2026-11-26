@@ -135,9 +135,15 @@ export async function resolveBaseBranchTarget(
 	if (!base) throw new Error("A base ref is required for PR-style review");
 	if (!head) throw new Error("A head ref is required for PR-style review");
 	const repository = vcs.requireGit(cwd);
-	const [baseSha, headSha] = await Promise.all([repository.resolveRef(base), repository.resolveRef(head)]);
-	if (!baseSha) throw new Error(`Cannot resolve base ref \`${base}\``);
-	if (!headSha) throw new Error(`Cannot resolve head ref \`${head}\``);
+	const [baseObject, headObject] = await Promise.all([repository.resolveRef(base), repository.resolveRef(head)]);
+	if (!baseObject) throw new Error(`Cannot resolve base ref \`${base}\``);
+	if (!headObject) throw new Error(`Cannot resolve head ref \`${head}\``);
+	const [baseCommit, headCommit] = await Promise.all([
+		repository.commitDetails(baseObject),
+		repository.commitDetails(headObject),
+	]);
+	const baseSha = baseCommit.sha;
+	const headSha = headCommit.sha;
 	// Resolve both ends once, then diff the merge base to the frozen head SHA.
 	// A branch moving during the review cannot change the reviewed patch.
 	const mergeBase = await repository.mergeBase(baseSha, headSha);
