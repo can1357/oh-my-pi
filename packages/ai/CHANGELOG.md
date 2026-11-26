@@ -9,6 +9,11 @@
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
 - Added `setProviderCooldownMs()` (`@oh-my-pi/pi-ai/auth/provider-cooldown`) to set how long an unattributed Google Antigravity 429 pauses the provider; `0` turns the pause off ([#19911](https://github.com/can1357/oh-my-pi/pull/19911) by [@Xytronix](https://github.com/Xytronix))
 
+### Fixed
+
+- Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+- Fixed Google Antigravity sending a 429 that names no quota through every pooled account: it now stays on the receiving account and pauses the provider ([#19911](https://github.com/can1357/oh-my-pi/pull/19911) by [@Xytronix](https://github.com/Xytronix))
+
 ### Changed
 
 - `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
@@ -20,7 +25,6 @@
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
 - Fixed a cancelled inference request still being sent through a custom fetch that ignores the abort signal, when the cancel came while the request body was being prepared ([#20673](https://github.com/can1357/oh-my-pi/pull/20673) by [@sjawhar](https://github.com/sjawhar))
-- Fixed Google Antigravity sending a 429 that names no quota through every pooled account: it now stays on the receiving account and pauses the provider ([#19911](https://github.com/can1357/oh-my-pi/pull/19911) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.1] - 2026-11-25
 
