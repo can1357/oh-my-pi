@@ -110,6 +110,8 @@ pub(super) fn names_url(spec: &SpawnSpec<'_>) -> bool {
 		.iter()
 		.skip(1)
 		.any(|arg| arg.contains_str("://"))
+		// The program `omp` itself may be file-backed (`nice local://bin/omp`).
+		|| omp_at.is_some_and(|at| spec.argv.get(at).is_some_and(|arg| arg.contains_str("://")))
 		|| (omp_at != Some(0) && spec.env.iter().any(|(name, value)| env_url(name, value)))
 }
 
@@ -123,7 +125,11 @@ fn omp_argv_index(path: &[u8], argv: &[BString]) -> Option<usize> {
 		return Some(0);
 	}
 	let launch = crate::bash::launch::launch(argv);
-	(!launch.remote && argv.get(launch.at).is_some_and(|word| is_omp(word))).then_some(launch.at)
+	if launch.remote {
+		return None;
+	}
+	let program = launch.program(argv)?;
+	is_omp(program.as_bytes()).then_some(launch.at)
 }
 
 /// Whether `word` names the `omp` program, by any path.
@@ -250,7 +256,11 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 	let omp_at = omp_argv_index(&names.path, &names.argv);
 	let mut argv = Vec::with_capacity(names.argv.len());
 	for (i, arg) in names.argv.iter().enumerate() {
-		let host = if i == 0 || omp_at.is_some_and(|at| i >= at) {
+		let host = if i == 0 || omp_at.is_some_and(|at| i > at) {
+			None
+		} else if omp_at == Some(i) && arg.iter().any(u8::is_ascii_whitespace) {
+			// A command line split into words (`env -S "omp read x"`): its
+			// words are the program's own and cannot be resolved apart.
 			None
 		} else {
 			host_arg(fs, arg.as_bstr()).await
@@ -397,6 +407,7 @@ mod tests {
 			&["setsid", "grep", "omp", "local://out.txt"][..],
 			&["uv", "run", "-m", "omp", "local://out.txt"][..],
 			&["ssh", "host", "omp", "read", "local://out.txt"][..],
+			&["env", "-S", "grep", "omp", "local://out.txt"][..],
 		] {
 			let args = bvec(non_omp);
 			assert_eq!(
@@ -424,6 +435,10 @@ mod tests {
 			(&["xargs", "-a", "local://list", "omp", "read", "local://out.txt"][..], 3),
 			(&["ifne", "omp", "read", "local://out.txt"][..], 1),
 			(&["uv", "run", "-w", "requests", "omp", "read", "local://out.txt"][..], 4),
+			(&["env", "-S", "omp", "read", "local://out.txt"][..], 2),
+			(&["env", "--split-string", "omp", "read", "local://out.txt"][..], 2),
+			(&["env", "-Somp", "read", "local://out.txt"][..], 1),
+			(&["env", "--split-string=omp", "read", "local://out.txt"][..], 1),
 		] {
 			let args = bvec(omp_cmd);
 			assert_eq!(

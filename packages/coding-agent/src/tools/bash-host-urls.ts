@@ -12,7 +12,7 @@
  * external's arguments. Everything else is left exactly as written.
  */
 import * as fs from "node:fs/promises";
-import { ShellFsOp, shellLaunchIndex } from "@oh-my-pi/pi-natives";
+import { ShellFsOp, shellLaunch } from "@oh-my-pi/pi-natives";
 import { isCmdShell } from "@oh-my-pi/pi-utils/procmgr";
 import type { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { isShellEnvironmentAssignment, lexShellCommand, type ShellToken } from "./shell-tokenize";
@@ -121,6 +121,11 @@ function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: num
 				cmdStart++;
 				continue;
 			}
+			// `function name { … }`: the body's commands are commands of their own.
+			if (w.raw === w.value && w.value === "function" && words[cmdStart + 2]?.raw === "{") {
+				cmdStart += 2;
+				continue;
+			}
 			if (isShellEnvironmentAssignment(w.raw)) {
 				leadingAssignIndices.push(w.index);
 				cmdStart++;
@@ -132,20 +137,24 @@ function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: num
 
 	const cmdWords = words.slice(cmdStart);
 	if (cmdWords.length === 0) return new Set();
-	const target = shellLaunchIndex(
+	const launch = shellLaunch(
 		cmdWords.map(w => w.value),
 		cmd || undefined,
 	);
-	if (target === null || target >= cmdWords.length || !isOmp(cmdWords[target].value)) {
+	if (launch === null || launch.index >= cmdWords.length || !isOmp(launch.program)) {
 		return new Set();
 	}
 
 	const literal = new Set<number>();
 	// Leading shell assignments belong to `omp` itself only when invoked directly (not behind a wrapper).
-	if (target === 0) {
+	if (launch.index === 0) {
 		for (const idx of leadingAssignIndices) literal.add(idx);
 	}
-	for (let i = target; i < cmdWords.length; i++) {
+	// The program word resolves like any other (a file-backed `omp` must run), unless it
+	// carries a whole command line (`env -S "omp read x"`), whose words cannot be rewritten apart.
+	const program = cmdWords[launch.index];
+	if (/\s/.test(program.value)) literal.add(program.index);
+	for (let i = launch.index + 1; i < cmdWords.length; i++) {
 		literal.add(cmdWords[i].index);
 	}
 	return literal;

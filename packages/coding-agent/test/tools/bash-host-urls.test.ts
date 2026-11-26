@@ -155,6 +155,19 @@ describe("hostCommandUrls", () => {
 		expect(await host("ssh host omp read local://x.md")).toBe("ssh host omp read /host/x.md");
 	});
 
+	it("keeps omp's URLs when it is the command a split-string option runs, and resolves a file-backed omp", async () => {
+		const anyBacking: UrlBacking = async url => `/host/${url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "")}`;
+		const hostAny = (command: string) => hostCommandUrls(command, anyBacking);
+		expect(await hostAny("env -S omp read skill://tdd")).toBe("env -S omp read skill://tdd");
+		expect(await hostAny("env --split-string omp read skill://tdd")).toBe("env --split-string omp read skill://tdd");
+		expect(await hostAny("env -Somp read skill://tdd")).toBe("env -Somp read skill://tdd");
+		expect(await hostAny("env -S grep omp skill://tdd")).toBe("env -S grep omp /host/tdd");
+		expect(await hostAny("function f { omp read skill://tdd; }; f")).toBe("function f { omp read skill://tdd; }; f");
+		expect(await hostAny("function f { cat skill://tdd; }; f")).toBe("function f { cat /host/tdd; }; f");
+		expect(await hostAny("local://bin/omp --version")).toBe("/host/bin/omp --version");
+		expect(await hostAny("local://bin/omp read local://x.md")).toBe("/host/bin/omp read local://x.md");
+	});
+
 	it("treats a here-document body as input, not command text", async () => {
 		const command = [
 			"python3 - local://args.json <<'PY' && cat local://after.txt",

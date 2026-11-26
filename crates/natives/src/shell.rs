@@ -198,18 +198,28 @@ pub fn repair_heredoc_continuations(script: String) -> Option<String> {
 	String::from_utf8(fixed).ok()
 }
 
-/// Index of the local target command word in `words` after walking past known
-/// launchers.
+/// The local target command of `words` after walking past known launchers.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ShellLaunch {
+	/// Index of the word naming the program.
+	pub index:   u32,
+	/// The program's name, past an option carrying it (`env -S=omp`).
+	pub program: String,
+}
+
+/// The local target command of `words` after walking past known launchers.
 ///
 /// Returns `null` when the target runs remotely (`ssh`) or no command word
 /// remains.
 #[napi]
-pub fn shell_launch_index(words: Vec<String>, windows: Option<bool>) -> Option<u32> {
+pub fn shell_launch(words: Vec<String>, windows: Option<bool>) -> Option<ShellLaunch> {
 	let launch = omp_shell::bash::launch::launch_with(&words, windows.unwrap_or(cfg!(windows)));
 	if launch.remote || launch.at >= words.len() {
 		return None;
 	}
-	u32::try_from(launch.at).ok()
+	let program = launch.program(&words)?.to_string();
+	Some(ShellLaunch { index: u32::try_from(launch.at).ok()?, program })
 }
 
 /// N-API opt-in handle for the minimizer.

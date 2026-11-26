@@ -3,7 +3,7 @@
 //!
 //! Shared policy imported by:
 //! - spawn-time URL rewriting (`crate::host::urls`),
-//! - client-terminal URL rewriting (via `omp-natives`'s `shell_launch_index`),
+//! - client-terminal URL rewriting (via `omp-natives`'s `shell_launch`),
 //! - embedded-language preview highlighting
 //!   (`crate::bash::trace::viz::embedded`).
 //!
@@ -18,6 +18,24 @@ pub struct Launch {
 	pub at:     usize,
 	/// The program runs on an `ssh` host.
 	pub remote: bool,
+	/// Byte offset in the word at `at` where the program's name starts: past
+	/// an option carrying it (`env -S=omp`, `env --split-string=omp`).
+	pub offset: usize,
+}
+
+impl Launch {
+	/// The program the command line runs: the word at `at` past `offset`, or
+	/// its first word, for a command line split into words (`env -S "omp read
+	/// x"`).
+	pub fn program<'a, W: AsRef<[u8]>>(&self, words: &'a [W]) -> Option<&'a str> {
+		let word = words.get(self.at)?.as_ref();
+		let word = word.get(self.offset..).unwrap_or(word);
+		let end = word
+			.iter()
+			.position(|b| b.is_ascii_whitespace())
+			.unwrap_or(word.len());
+		std::str::from_utf8(&word[..end]).ok()
+	}
 }
 
 /// Walk past launchers at the start of `words` using host path conventions.
@@ -28,10 +46,11 @@ pub fn launch<W: AsRef<[u8]>>(words: &[W]) -> Launch {
 /// Walk past launchers at the start of `words`, stripping `\` path prefixes and
 /// `.exe` suffixes when `windows` is `true`.
 pub fn launch_with<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Launch {
-	let mut launch = Launch { at: 0, remote: false };
-	while let Some((skip, remote)) = launcher(&words[launch.at..], windows) {
+	let mut launch = Launch { at: 0, remote: false, offset: 0 };
+	while let Some((skip, remote, offset)) = launcher(&words[launch.at..], windows) {
 		launch.at = (launch.at + skip).min(words.len());
 		launch.remote |= remote;
+		launch.offset = offset;
 	}
 	launch
 }
@@ -116,10 +135,16 @@ fn skip_options<W: AsRef<[u8]>>(
 }
 
 /// Words a launcher at the start of `words` takes before the command it runs
-/// (`timeout 5 cmd` → 2), and whether that command runs on an `ssh` host.
-fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool)> {
+/// (`timeout 5 cmd` → 2), whether that command runs on an `ssh` host, and the
+/// byte offset in the word naming it where the program's name starts.
+fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, usize)> {
 	let skip = match command_name(words.first()?.as_ref(), windows)? {
 		"env" => {
+			// `-S`/`--split-string` takes the command line it splits into the
+			// words it runs: `env -S omp read x` runs `omp read x`.
+			if let Some((at, offset)) = env_split_value(words) {
+				return Some((at, false, offset));
+			}
 			let mut at = skip_options(
 				words,
 				1,
@@ -253,9 +278,57 @@ fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool)>
 		)?,
 		"ssh" => {
 			let host = skip_options(words, 1, b"BbcDEeFIiJLlmOopQRSWw", &[], b"", &[])?;
-			return (host < words.len()).then_some((host + 1, true));
+			return (host < words.len()).then_some((host + 1, true, 0));
 		},
 		_ => return None,
 	};
-	Some((skip, false))
+	Some((skip, false, 0))
+}
+
+/// The word `env -S`/`--split-string` takes, and the byte offset in it where
+/// the command line starts: `env -S omp read x` (word 2), `env -Somp` (word 1,
+/// offset 2), `env --split-string=omp read x` (word 1, offset 15).
+fn env_split_value<W: AsRef<[u8]>>(words: &[W]) -> Option<(usize, usize)> {
+	let mut i = 1;
+	while let Some(word) = words.get(i) {
+		let w = word.as_ref();
+		if w == b"--" || w == b"-" || !w.starts_with(b"-") {
+			return None;
+		}
+		if let Some(rest) = w.strip_prefix(b"--split-string") {
+			return if rest.is_empty() {
+				Some((i + 1, 0))
+			} else if rest.starts_with(b"=") {
+				Some((i, b"--split-string=".len()))
+			} else {
+				None
+			};
+		}
+		if w.starts_with(b"--") {
+			i += 1;
+			continue;
+		}
+		for (k, &c) in w.iter().enumerate().skip(1) {
+			match c {
+				// `-S` takes the command line: the next word, or attached.
+				b'S' => {
+					return Some(if k + 1 < w.len() {
+						(i, k + 1)
+					} else {
+						(i + 1, 0)
+					});
+				},
+				// Options taking a value: `-u NAME`, `-C DIR`, `-a NAME`.
+				b'u' | b'C' | b'a' => {
+					if k + 1 == w.len() {
+						i += 1;
+					}
+					break;
+				},
+				_ => {},
+			}
+		}
+		i += 1;
+	}
+	None
 }

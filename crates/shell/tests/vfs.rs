@@ -654,6 +654,44 @@ async fn non_omp_commands_naming_omp_receive_host_paths_for_url_arguments() {
 	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
+/// A command line `env -S`/`--split-string` splits is the command that runs:
+/// `omp` behind it receives its URLs as written, another command behind it
+/// receives host paths.
+#[cfg(unix)]
+#[tokio::test]
+async fn env_split_string_runs_the_command_it_splits() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	let bin = tempfile::tempdir().expect("program directory");
+	let omp = bin.path().join("omp");
+	fs::write(&omp, b"#!/bin/sh\nprintf 'omp:%s\\n' \"$*\"\n").expect("stand-in omp");
+	fs::set_permissions(&omp, fs::Permissions::from_mode(0o755)).expect("executable stand-in");
+	let probe_bin = bin.path().join("probe");
+	fs::write(&probe_bin, b"#!/bin/sh\nfor arg; do printf 'probe:%s\\n' \"$arg\"; done\n")
+		.expect("stand-in probe");
+	fs::set_permissions(&probe_bin, fs::Permissions::from_mode(0o755)).expect("executable probe");
+	let script = format!(
+		"PATH='{bin}':$PATH; env -S omp read virtual://docs/a.txt; env --split-string omp read \
+		 virtual://docs/a.txt; env -Somp read virtual://docs/a.txt; env -S probe \
+		 virtual://docs/a.txt",
+		bin = bin.path().display(),
+	);
+	let run = run_virtual(directory.path(), &script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let file = docs.join("a.txt").display().to_string();
+	let expected = [
+		"omp:read virtual://docs/a.txt".to_owned(),
+		"omp:read virtual://docs/a.txt".to_owned(),
+		"omp:read virtual://docs/a.txt".to_owned(),
+		format!("probe:{file}"),
+	];
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
+}
+
 /// Wrapper-owned option URLs and wrapper environment URLs ahead of `omp` still
 /// resolve to host paths while `omp`'s own operands remain literal.
 #[cfg(unix)]

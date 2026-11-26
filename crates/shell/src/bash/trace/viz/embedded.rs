@@ -45,9 +45,10 @@ pub fn argument_language(words: &[String], index: usize) -> Option<&'static str>
 	if shell_script(words).is_some_and(|(at, _)| at == index) {
 		return Some("bash");
 	}
-	let at = launch(words).at;
+	let launch = launch(words);
+	let at = launch.at;
 	let (args, index) = (&words[at..], index.checked_sub(at)?);
-	let command = basename(args.first()?);
+	let command = basename(launch.program(words)?);
 	let previous = index
 		.checked_sub(1)
 		.and_then(|i| args.get(i))
