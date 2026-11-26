@@ -18,7 +18,7 @@ import {
 } from "./protocol";
 import { OUTPUT_ACTIVE_LEVEL, OutputActivity } from "./output-activity";
 import { type LiveEndpoint, LiveTransport, resolveLiveEndpoint } from "./transport";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import type { LivePhase } from "../modes/view-model/apps/live-visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
 
 const MIN_BARGE_IN_LEVEL = 0.04;
@@ -390,8 +390,11 @@ export class LiveSessionController {
 			if (event.message.stopReason === "toolUse") this.#appendProgress(event.message);
 			return;
 		}
-		if (event.type !== "agent_end") return;
-		this.#appendFinalResponse(event.messages);
+		// A run held open by background work (a subagent, an async job) pauses once the model has
+		// answered; its `agent_end` may come much later, so the voice takes the answer at the pause.
+		if (event.type === "agent_end" || (event.type === "agent_pause" && event.yielded)) {
+			this.#appendFinalResponse(event.messages);
+		}
 	}
 
 	#appendProgress(message: AssistantMessage): void {

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { databaseOwner } from "./backend";
 import { parseFatSlices, selectSlice, type FatSelection } from "./store";
 
