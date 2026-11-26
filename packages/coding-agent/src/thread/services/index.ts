@@ -7,6 +7,7 @@ import type { ThreadService } from "../services";
 import { agentsThreadService } from "./agents";
 import { asyncJobsThreadService } from "./async-jobs";
 import { authService } from "./auth";
+import { awsAuthRefreshThreadService } from "./aws-auth-refresh";
 import { executorThreadService } from "./executor";
 import { identityThreadService } from "./identity";
 import { integrationsThreadService } from "./integrations";
@@ -25,6 +26,7 @@ export const THREAD_SERVICES: readonly ThreadService[] = [
 	runtimeIdentityThreadService,
 	settingsThreadService,
 	authService,
+	awsAuthRefreshThreadService,
 	agentsThreadService,
 	lspThreadService,
 	telemetryThreadService,

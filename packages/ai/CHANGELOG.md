@@ -4,6 +4,9 @@
 
 ### Added
 
+- `loginAwsSso` signs an expired or missing AWS SSO session in again (browser redirect with PKCE, or a device code) and writes the token where the AWS CLI reads it; hosts call it from `setAwsAuthRefreshHandler`, Bedrock requests then retry once, and SSO errors name the exact `aws sso login --sso-session <name>` command ([#20160](https://github.com/can1357/oh-my-pi/pull/20160) by [@lericson](https://github.com/lericson))
+- Added `AssistantMessage.errorFromAgentLoop`, set when the agent loop rather than the provider ended the turn with the error ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
+- Requests that ask for a fast service tier now prefer a credential that offers it: Codex accounts whose plan advertises the tier (Ultrafast), Claude accounts with fast mode available, or a stored or environment API key. Such an account keeps serving on paid overage and inside its reserve, and ordinary balancing across the rest takes over once it is blocked or refused the tier.
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price

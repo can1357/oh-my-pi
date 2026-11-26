@@ -8,6 +8,11 @@
 
 ### Added
 
+- Bedrock signs in to AWS SSO again on its own when the SSO session expires: the browser opens (or, over SSH, a device code shows) in the TUI, print mode or RPC, and the request retries; turn off with `providers.amazon-bedrock.ssoSignIn` ([#20160](https://github.com/can1357/oh-my-pi/pull/20160) by [@lericson](https://github.com/lericson))
+### Breaking Changes
+
+- Processes a bash call leaves running (`cmd &`, `(cmd &)`, `nohup cmd &`) no longer leak: the agent is reminded of them when it stops so it can register them as services or kill them, and the `&` ones are killed when the session ends (`nohup` ones never are). Turn off with `bash.reapBackground`; RPC mode never reaps.
+- New `o2ctl services` command in the bash tool's shell: `o2ctl services add <name> <pid|%job>` keeps an already-running process as a named service without restarting it (listed, supervised and stopped like any other; when its stdout or stderr goes to a file such as `nohup.out`, that file is the service's output), `o2ctl services ls` lists services and `o2ctl services stop <name>` stops one.
 - Added the `tui.showLinkUrl` setting to hide the URL drawn after named Markdown links where the label is a clickable terminal hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))

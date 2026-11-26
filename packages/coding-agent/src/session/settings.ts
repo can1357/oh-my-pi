@@ -1070,6 +1070,23 @@ export const cfgProvidersAnthropicSlowMode = register({
 	default: "off" as const,
 });
 
+/**
+ * When Bedrock credentials fail because the AWS SSO sign-in lapsed, sign in to
+ * IAM Identity Center again (`loginAwsSso`) and retry the request.
+ */
+export const cfgProvidersBedrockSsoSignIn = register({
+	id: "providers.amazon-bedrock.ssoSignIn",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Bedrock SSO Sign-in",
+		description:
+			"Sign in to AWS IAM Identity Center again when the SSO session behind Bedrock has expired, then retry the request",
+	},
+});
+
 // Provider selection
 export const cfgProvidersOllamaCloudMaxConcurrency = register({
 	id: "providers.ollama-cloud.maxConcurrency",

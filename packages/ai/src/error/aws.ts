@@ -19,14 +19,29 @@ export type AwsCredentialsErrorKind =
 	/** STS `AssumeRole` call failed or returned malformed credentials. */
 	| "assume-role";
 
+/** IAM Identity Center sign-in an SSO profile depends on. */
+export interface AwsSsoSession {
+	/** Profile carrying the `sso_*` keys (a role chain's base profile, not necessarily the requested one). */
+	profile: string;
+	startUrl: string;
+	region: string;
+	/** `[sso-session <name>]` block; absent for legacy `sso_start_url` profiles. */
+	sessionName?: string;
+	/** The session's `sso_registration_scopes`, when set. */
+	registrationScopes?: string[];
+}
+
 /** A failure resolving AWS credentials for the Bedrock provider. */
 export class AwsCredentialsError extends Error {
 	readonly kind: AwsCredentialsErrorKind;
+	/** Set when signing in again is the remedy (`sso-token-missing`, or `sso-token-expired` with a dead grant). */
+	readonly sso?: AwsSsoSession;
 
-	constructor(message: string, kind: AwsCredentialsErrorKind, options?: { cause?: unknown }) {
+	constructor(message: string, kind: AwsCredentialsErrorKind, options?: { cause?: unknown; sso?: AwsSsoSession }) {
 		super(message, options?.cause === undefined ? undefined : { cause: options.cause });
 		this.name = "AwsCredentialsError";
 		this.kind = kind;
+		if (options?.sso) this.sso = options.sso;
 	}
 }
 

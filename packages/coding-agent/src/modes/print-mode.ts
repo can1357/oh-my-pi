@@ -14,6 +14,7 @@ import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { MNEMOPI_NOTICE_SOURCE } from "../mnemopi/embedding-notice";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { setAwsAuthRefreshPresenter } from "../session/aws-auth-refresh";
 import { toWireEvent } from "../session/loop-end-wire";
 import { COST_GATE_NOTICE_SOURCE } from "../session/cost-gate";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
@@ -28,6 +29,7 @@ import {
 	formatPersistenceFailure,
 	formatPersistenceNotice,
 } from "./persistence-failure";
+import { openPath } from "../utils/open";
 import { initializeExtensions } from "./runtime-init";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
@@ -178,9 +180,27 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 		await stdout.drained();
 	});
+	// The AWS SSO sign-in's URL and progress go to stderr: stdout carries the
+	// answer or the JSON event stream.
+	setAwsAuthRefreshPresenter(sso => {
+		process.stderr.write(`Signing in to AWS SSO: ${sanitizeText(sso.sessionName ?? sso.startUrl)}\n`);
+		return {
+			onAuth: info => {
+				const instructions = info.instructions ? `${sanitizeText(info.instructions)}\n` : "";
+				process.stderr.write(`${instructions}${sanitizeText(info.url)}\n`);
+				openPath(info.url);
+			},
+			onProgress: message => process.stderr.write(`${sanitizeText(message)}\n`),
+			finish: error =>
+				process.stderr.write(
+					error ? `AWS SSO sign-in failed: ${sanitizeText(error)}\n` : "AWS SSO sign-in renewed\n",
+				),
+		};
+	});
 	try {
 		return await runPrintModeCore(session, options, stdout, () => signalReason !== undefined);
 	} finally {
+		setAwsAuthRefreshPresenter(undefined);
 		cancelSignalTeardown();
 	}
 }
