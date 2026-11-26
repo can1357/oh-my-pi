@@ -16,6 +16,7 @@ import type {
 	AutocompleteProviderFactory,
 	ExtensionCustomFactory,
 	ExtensionCustomOptions,
+	ExtensionStatusOptions,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -196,7 +197,7 @@ export interface StatusLineModel extends StatusLineView {
 	/** The turn ended (the active clock stops). */
 	markActivityEnd(): void;
 	/** An extension status by key (`undefined` removes it). */
-	setHookStatus(key: string, text: string | undefined): void;
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 	/** An ask is waiting for the user's answer. */
 	setAwaitingAnswer(awaiting: boolean): void;
 	/** The collab segment (hosting or joined, participant count); `null` hides it. */
@@ -1140,7 +1141,7 @@ export interface InteractiveModeContext {
 		previousSessionFile?: string,
 	): Promise<void>;
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
-	setHookStatus(key: string, text: string | undefined): void;
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],

@@ -27,6 +27,7 @@ import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
+import type { ExtensionStatusOptions } from "../../extensibility/extensions/render-types";
 import type { AgentViewSession } from "../../session/agent-session-handle";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
@@ -124,7 +125,7 @@ export class SessionStatusLine implements StatusLineModel {
 	readonly #clock = signal(Date.now());
 	readonly #saved: Signal<StatusLineSettings>;
 	readonly #preview = signal<Partial<StatusLineSettings> | undefined>(undefined);
-	readonly #hooks = signal<ReadonlyMap<string, string>>(new Map());
+	readonly #hooks = signal<ReadonlyMap<string, { text: string; style?: ExtensionStatusOptions }>>(new Map());
 	readonly #awaiting = signal(false);
 	readonly #collab = signal<CollabStatus | null>(null);
 	/** The running subagents the agents badge counts. */
@@ -387,10 +388,10 @@ export class SessionStatusLine implements StatusLineModel {
 		return meter;
 	}
 
-	setHookStatus(key: string, text: string | undefined): void {
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void {
 		const next = new Map(this.#hooks.peek());
 		if (text === undefined) next.delete(key);
-		else next.set(key, text);
+		else next.set(key, { text, ...(options ? { style: { ...options, spans: options.spans?.map(span => ({ ...span })) } } : {}) });
 		this.#hooks.set(next);
 	}
 
@@ -600,6 +601,7 @@ export class SessionStatusLine implements StatusLineModel {
 		const subagents = this.#subagents();
 		const turnStartedAt = this.#meter().since;
 		const activeMs = this.activeMs(now);
+		const hooks = [...this.#hooks()].sort(([a], [b]) => a.localeCompare(b)).map(([, hook]) => hook);
 		this.#syncPricingTimer(segments.includes("cost") ? model?.cost : undefined, now);
 
 		return {
@@ -689,7 +691,8 @@ export class SessionStatusLine implements StatusLineModel {
 			...(this.#awaiting() ? { awaitingAnswer: true } : {}),
 			...(this.#focusedAgentId === undefined ? { treePosition: this.#treePosition() } : {}),
 			...(this.#quota() ? { quota: this.#quota() } : {}),
-			hooks: [...this.#hooks()].sort(([a], [b]) => a.localeCompare(b)).map(([, text]) => text),
+			hooks: hooks.map(hook => hook.text),
+			hookStyles: hooks.map(hook => hook.style),
 		};
 	}
 

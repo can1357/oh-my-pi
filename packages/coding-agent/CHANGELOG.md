@@ -136,6 +136,14 @@
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
 - Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
 - omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
+### Added
+
+- Added `ExtensionUiHost.live` for interactive transcript widgets: native-only retained decorators, stable block handles, action and fold routing, focus-aware overlays, and explicit invalidation without changing session messages.
+- Extension statuses accept optional native roles and styled spans while retaining their plain text for terminal and RPC clients.
+
+### Fixed
+
+- The compiled extension module registry locates the current `packages/tui` workspace, retaining the canonical modern pi-tui root and shared reactive runtime for extension imports.
 
 ## [19.2.1] - 2026-11-25
 

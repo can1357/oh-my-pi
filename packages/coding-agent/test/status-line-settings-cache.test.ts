@@ -165,6 +165,21 @@ describe("status-line live state", () => {
 		expect(cleared).not.toContain("Tests passing");
 	});
 
+	it("preserves plain status text while native styling follows key order, replacement and removal", () => {
+		const line = makeLine({ preset: "custom", leftSegments: ["status"], rightSegments: [], sessionAccent: false });
+		const spans = [{ t: "NORMAL", s: "strong accent" }, { t: " 1/3", s: "mono" }];
+		line.setHookStatus("z-nav", "NORMAL 1/3", { role: "extension.navigation", spans });
+		line.setHookStatus("a-tests", "tests passing");
+		spans[0]!.t = "mutated by caller";
+		expect(line.facts().hooks).toEqual(["tests passing", "NORMAL 1/3"]);
+		expect(line.facts().hookStyles).toEqual([undefined, { role: "extension.navigation", spans: [{ t: "NORMAL", s: "strong accent" }, { t: " 1/3", s: "mono" }] }]);
+		expect(lineText(line, 120)).toContain("NORMAL 1/3");
+		line.setHookStatus("z-nav", "INSERT");
+		expect(line.facts().hookStyles).toEqual([undefined, undefined]);
+		line.setHookStatus("a-tests", undefined);
+		expect(line.facts().hooks).toEqual(["INSERT"]);
+	});
+
 	it("skips git probes when git integration is disabled", async () => {
 		const repoSpy = spyOn(vcs, "repo");
 		const displaySpy = spyOn(vcs, "repoForDisplay");

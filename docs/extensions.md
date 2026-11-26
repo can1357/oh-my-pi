@@ -1076,6 +1076,34 @@ alternate screen; `onHandle` receives `{ closed, close() }`. The factory's `ui`
 argument offers `requestRender()` (repaint rows objects), `size()` and
 `suspend(run)` (hand the terminal to an external editor while `run` settles).
 
+#### Retained transcript widgets
+
+Interactive main-transcript widget factories also receive `ui.live` (`ExtensionLiveUi`).
+It is absent from custom-dialog factories and non-interactive modes. Check `live.native`
+before installing native transcript decoration; plain terminal messages are unchanged.
+
+- `blocks()`: the currently shown blocks, including streamed content. A staged rebuild appears only after it commits. Each `ExtensionLiveBlock` is stable until that underlying block is replaced; `id` is an opaque per-instance string, not a TSP wire id.
+- `block.node`: the stable terminal wrapper. `block.native()` returns the actual native roots, which can differ from that wrapper. Return those roots unchanged for blocks you do not decorate: do not clone them or substitute `block.node`.
+- `block.render(width)`: rows from the existing terminal renderer with the current theme.
+- `decorate(transform)`: replace the native transcript roots with the transform's returned nodes. Signal, node-prop and child-list reads in the transform are reactive, so streamed changes repaint without a timer. The most recently registered transform takes precedence; its idempotent removal restores the previous transform or the original native transcript. Nodes built by a transform belong to its scope; original block nodes still belong to their transcript blocks. A failed transform is reported and falls back to the original roots.
+- `invalidate()`: recompute decoration and resend settled native descriptions, for state that is not held in signals.
+- `block.setExpanded(expanded)`: route all changed collapsible tool and thought folds through their existing toggle handlers; it does not edit session messages.
+- `block.dispatchAction(path, action)`: resolve a path below a single native root (the root is `""`), or below a synthetic column over multiple roots, then bubble the action as native input does. Escape `%`, `/`, `~` and `^` as `%25`, `%2F`, `%7E` and `%5E`; repeated sibling keys use `~1`, `~2` and so on. Missing paths return `false`; handler errors propagate.
+- `focused()`: the node currently holding keyboard focus.
+- `promptConsumesEscape()`: whether autocomplete or the built-in Vim layer currently handles Escape, so a transcript navigation mode should leave that key with the prompt.
+- `showOverlay(factory, { passive? })`: mount a supplied pi-tui node in the shell's overlay stack and return an idempotent `hide()`. A passive view neither steals keyboard focus nor becomes modal. Active views restore prior focus when closed.
+
+Registrations and overlays created inside a widget's owned scope are removed when it is
+disposed. Keep the returned removal and `hide` functions for early teardown; do not mutate
+host methods or session messages. Import nodes and signals from the canonical
+`@oh-my-pi/pi-tui` root to share the host's retained runtime.
+
+`ctx.ui.setStatus(key, text, options?)` accepts optional native styling:
+`{ role?: string, spans?: readonly { t: string, s?: string }[] }`. The text remains the
+plain-terminal and RPC status. Native composer extras preserve the role and styled spans
+without replacing other extensions' statuses. Passing `undefined` as the text clears both.
+
+
 #### Launching terminal commands
 
 `ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a

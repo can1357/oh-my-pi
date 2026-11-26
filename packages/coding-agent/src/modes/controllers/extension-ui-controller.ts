@@ -32,7 +32,7 @@ import type {
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { extensionLinkClicksAvailable } from "../../extensibility/extensions/link-clicks";
 import type { ExtensionHostUIContext } from "../../extensibility/extensions/runner";
-import type { ExtensionUiHost } from "../../extensibility/extensions/render-types";
+import type { ExtensionLiveUi, ExtensionStatusOptions, ExtensionUiHost } from "../../extensibility/extensions/render-types";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import type { ComposerOwner, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -50,6 +50,7 @@ import {
 } from "../../tools/html-form/data";
 import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "../../tools/html-form/parse";
 import { extensionOutput, extensionTheme, singleNode } from "../../ui/extensions/render-output";
+import { createExtensionLiveUi } from "../../ui/extensions/live-ui";
 import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
 import { htmlFormKeyHints } from "../../ui/styles/forms/html-form";
 import { formatKeyHint, formatKeyHints } from "../../ui/keys/hints";
@@ -201,6 +202,7 @@ export class ExtensionUiController {
 	 * call with the same picker/dialog primitives a live tool call would get.
 	 */
 	#toolUIContext: ExtensionUIContext | undefined;
+	#liveUi: ExtensionLiveUi | undefined;
 	constructor(private ctx: InteractiveModeContext) {}
 
 	/** Ctrl+G in a dialog editor: the editor gets the terminal, the TUI stops rendering and reading keys until it exits. */
@@ -262,7 +264,7 @@ export class ExtensionUiController {
 			rerenderMessage: timestamp => this.#rerenderAssistantMessage(timestamp),
 			refreshTranscript: ids => this.ctx.refreshTranscriptPresentation(new Set(ids)),
 			getLinkClicksAvailable: extensionLinkClicksAvailable,
-			setStatus: (key, text) => this.setHookStatus(key, text),
+			setStatus: (key, text, options) => this.setHookStatus(key, text, options),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
 			setOwnedWidget: (owner, key, content, options) => this.setHookWidget(key, content, options, owner),
@@ -501,7 +503,7 @@ export class ExtensionUiController {
 			key,
 			() => {
 				const revision = signal(0);
-				return extensionOutput(factory(this.#uiHost(revision), extensionTheme(currentTheme())), {
+				return extensionOutput(factory(this.#uiHost(revision, true), extensionTheme(currentTheme())), {
 					revision,
 					onError: error => this.#reportRenderError(`widget "${key}"`, error),
 				});
@@ -512,11 +514,18 @@ export class ExtensionUiController {
 	}
 
 	/** What extension UI factories receive: `requestRender` bumps `revision`, which rows views read. */
-	#uiHost(revision: Signal<number>): ExtensionUiHost {
+	#uiHost(revision: Signal<number>, transcript = false): ExtensionUiHost {
 		return {
 			requestRender: () => revision.set(revision.peek() + 1),
 			size: () => this.ctx.shell.size(),
 			suspend: run => this.ctx.suspend(run),
+			...(transcript
+				? {
+						live: (this.#liveUi ??= createExtensionLiveUi(this.ctx.shell, this.ctx.composer, error =>
+							this.#reportRenderError("transcript decorator", error),
+						)),
+					}
+				: {}),
 		};
 	}
 
@@ -572,8 +581,8 @@ export class ExtensionUiController {
 	/**
 	 * Set hook status text in the footer.
 	 */
-	setHookStatus(key: string, text: string | undefined): void {
-		this.ctx.statusLine.setHookStatus(key, text);
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void {
+		this.ctx.statusLine.setHookStatus(key, text, options);
 	}
 
 	async showCollabAwareSelector(

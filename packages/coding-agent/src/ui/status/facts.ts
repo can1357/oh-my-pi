@@ -8,6 +8,7 @@ import type { StatusLineSettings } from "../../modes/view-model/status-line/type
 import type { JobWidgetView } from "../../tools/details/job-widget";
 import type { LoopConditionConfig, LoopLimitRuntime } from "../../modes/view-model/status-line/loop";
 import type { PromptCacheStatus, SessionTreePosition } from "../../modes/view-model/status-line/host";
+import type { ExtensionStatusOptions } from "../../extensibility/extensions/render-types";
 
 export type { StatusLineSettings };
 
@@ -170,6 +171,8 @@ export interface StatusFacts {
 	readonly promptCache?: PromptCacheStatus;
 	/** Extension statuses, ordered by key. */
 	readonly hooks: readonly string[];
+	/** Native styling at each hook's index; omitted hooks remain plain statuses. */
+	readonly hookStyles?: readonly (ExtensionStatusOptions | undefined)[];
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import type { JSXNode } from "@oh-my-pi/pi-tui";
+import type { JSXNode, UiNode } from "@oh-my-pi/pi-tui";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import type { TodoItem } from "../../tools/details/todo";
@@ -44,6 +44,34 @@ export interface ExtensionTheme extends Theme {
 	inverse(text: string): string;
 }
 
+/** One owned block of the interactive transcript; identity lasts until the block is replaced. */
+export interface ExtensionLiveBlock {
+	readonly id: string;
+	readonly node: UiNode;
+	native(): readonly UiNode[];
+	render(width: number): readonly string[];
+	setExpanded(expanded: boolean): void;
+	/** Escaped sibling keypath below one native root, or below a column over multiple roots. */
+	dispatchAction(path: string, act: string): boolean;
+}
+
+/** Retained UI access for interactive transcript widgets, not session-message transforms. */
+export interface ExtensionLiveUi {
+	readonly native: boolean;
+	blocks(): readonly ExtensionLiveBlock[];
+	decorate(transform: (blocks: readonly ExtensionLiveBlock[]) => readonly UiNode[]): () => void;
+	invalidate(): void;
+	focused(): UiNode | null;
+	promptConsumesEscape(): boolean;
+	showOverlay(factory: () => UiNode, options?: { passive?: boolean }): { hide(): void };
+}
+
+/** Optional native styling of a status; plain terminals and RPC keep the supplied text. */
+export interface ExtensionStatusOptions {
+	readonly role?: string;
+	readonly spans?: readonly { readonly t: string; readonly s?: string }[];
+}
+
 /** What UI factories receive in place of the old pi-tui `TUI`. */
 export interface ExtensionUiHost {
 	/**
@@ -58,6 +86,8 @@ export interface ExtensionUiHost {
 	 * resolves with what `run` resolves.
 	 */
 	suspend<R>(run: () => Promise<R>): Promise<R>;
+	/** Available to widgets on the interactive main transcript; decoration is native-only. */
+	readonly live?: ExtensionLiveUi;
 }
 
 /** Builds a widget, header or footer view. */

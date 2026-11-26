@@ -19,6 +19,8 @@
  */
 import {
 	type Accessor,
+	computed,
+	createRoot,
 	createContext,
 	effect,
 	getOwner,
@@ -135,6 +137,8 @@ export class Transcript {
 	#wrappers = new Map<UiNode, CompactRun>();
 	#host: TranscriptHost | undefined;
 	#insertionPoint: TranscriptBlock | undefined;
+	readonly #decorators = signal<readonly Accessor<readonly UiNode[]>[]>([]);
+	readonly #decorationRevision = signal(0);
 
 	/** A `select` no handler inside its block took: an extension link label clicked in Markdown (its href). */
 	onSelect: ((item: string) => void) | undefined;
@@ -146,6 +150,40 @@ export class Transcript {
 
 	/** The blocks' nodes, as the terminal draws them (reactive). */
 	readonly nodes: Accessor<readonly UiNode[]> = this.#shown.nodes;
+
+	/** Blocks currently on screen; staged rebuilds are not visible until committed. */
+	readonly shownBlocks: Accessor<readonly TranscriptBlock[]> = this.#shown.entries;
+
+	/** Replace the native main region. The most recently registered transform takes precedence. */
+	decorateNative(transform: (blocks: readonly TranscriptBlock[]) => readonly UiNode[]): () => void {
+		const view = untrack(() =>
+			createRoot(dispose => ({
+				dispose,
+				nodes: computed(() => {
+					this.#decorationRevision();
+					return transform(this.#shown.entries());
+				}),
+			})),
+		);
+		this.#decorators.update(list => [...list, view.nodes]);
+		this.invalidateNative();
+		let removed = false;
+		const remove = (): void => {
+			if (removed) return;
+			removed = true;
+			this.#decorators.update(list => list.filter(other => other !== view.nodes));
+			view.dispose();
+			this.invalidateNative();
+		};
+		if (getOwner()) onCleanup(remove);
+		return remove;
+	}
+
+	/** Recompute decorations and resend settled native roots whose descriptions were dropped. */
+	invalidateNative(): void {
+		this.#decorationRevision.update(value => value + 1);
+		if (this.#host) for (const node of untrack(this.nativeNodes)) this.#host.redescribe(node);
+	}
 
 	get #blocks(): ViewList<TranscriptBlock> {
 		return this.#target.peek();
@@ -325,6 +363,8 @@ export class Transcript {
 	 * last member.
 	 */
 	readonly nativeNodes: Accessor<readonly UiNode[]> = () => {
+		const decorator = this.#decorators().at(-1);
+		if (decorator) return decorator();
 		const out: UiNode[] = [];
 		const runs = new Map<UiNode, CompactRun>();
 		let run: TranscriptBlock[] = [];

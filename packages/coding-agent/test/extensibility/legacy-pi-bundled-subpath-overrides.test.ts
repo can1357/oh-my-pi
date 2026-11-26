@@ -317,12 +317,17 @@ export const observed = buildModel({
 			`const ui = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui"]();
 const runtime = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/jsx-runtime"]();
 const theme = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/theme/runtime"]();
+// Intentionally compare the lazy registry with a direct load at the module-loading boundary.
+const direct = await import("@oh-my-pi/pi-tui");
 export const observed = {
 	node: ui.isUiNode(runtime.jsx("text", { text: "x" })),
 	theme: typeof theme.currentTheme,
+	sharedRuntime: ui.UiNode === direct.UiNode && ui.signal === direct.signal,
+	decodeKey: typeof ui.decodeKey,
+	backspaceContext: typeof ui.rawBackspaceIsCtrl,
 };`,
 		);
-		expect(observed).toEqual({ node: true, theme: "function" });
+		expect(observed).toEqual({ node: true, theme: "function", sharedRuntime: true, decodeKey: "function", backspaceContext: "function" });
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});

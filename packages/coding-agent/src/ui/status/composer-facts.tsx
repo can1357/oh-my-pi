@@ -140,7 +140,13 @@ export function composerFacts(props: {
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]) => {
 			ids.forEach((id, index) => {
 				if (HOMED[id]) return;
-				const view = segmentView(id, state, settings);
+				const view = segmentView(
+					id,
+					id === "status" && state.hookStyles
+						? { ...state, hooks: state.hooks.filter((_, i) => !state.hookStyles?.[i]) }
+						: state,
+					settings,
+				);
 				if (!view) return;
 				const order = side === "left" ? ids.length - index : index + 1;
 				const action = FACT_ACTIONS[id];
@@ -160,11 +166,18 @@ export function composerFacts(props: {
 		collect("left", settings.leftSegments);
 		collect("right", settings.rightSegments);
 		const ids = [...settings.leftSegments, ...settings.rightSegments];
-		if ((settings.showHookStatus ?? true) && !ids.includes("status")) {
+		if ((settings.showHookStatus ?? true) || ids.includes("status")) {
 			state.hooks.forEach((status, index) => {
+				const style = state.hookStyles?.[index];
+				if (!style && ids.includes("status")) return;
 				const text = sanitizeStatusText(status);
 				if (text)
-					out.push({ key: `hook-${index}`, role: "omp.composer.fact", priority: 0, spans: dim([{ t: text }]) });
+					out.push({
+						key: `hook-${index}`,
+						role: style?.role ?? "omp.composer.fact",
+						priority: 0,
+						spans: dim(style?.spans?.map(span => ({ ...span, t: sanitizeStatusText(span.t) })) ?? [{ t: text }]),
+					});
 			});
 		}
 		return out;
@@ -361,7 +374,13 @@ export function StatusBarPreview(props: {
 			<col role="omp.status.panel">
 				{bar}
 				{state.hooks.map((status, index) => (
-					<text key={`hook-${index}`} role="omp.status.hook" text={sanitizeStatusText(status)} wrap="none" />
+					<text
+						key={`hook-${index}`}
+						role={state.hookStyles?.[index]?.role ?? "omp.status.hook"}
+						text={state.hookStyles?.[index]?.spans ? undefined : sanitizeStatusText(status)}
+						spans={state.hookStyles?.[index]?.spans?.map(span => ({ ...span, t: sanitizeStatusText(span.t) }))}
+						wrap="none"
+					/>
 				))}
 			</col>
 		);
