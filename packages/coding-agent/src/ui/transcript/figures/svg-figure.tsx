@@ -61,16 +61,37 @@ export class SvgRaster {
 	readonly #awaiting: Signal<boolean> = signal(false);
 	#final = false;
 	#generation = 0;
+	/** What the last landed raster was drawn from, and whether its room cut its height. */
+	#drawn: { source: string; cell: FigureCell; theme: Theme; rows: number; cut: boolean } | undefined;
 
 	constructor(options: FigureOptions = {}) {
 		this.#options = options;
 		holdSettle(this.#awaiting);
 		effect(() => {
 			read(options.cell);
-			read(options.maxRows);
+			const maxRows = read(options.maxRows);
 			options.theme?.();
-			untrack(() => this.#draw());
+			untrack(() => {
+				if (!this.#stands(maxRows)) this.#draw();
+			});
 		});
+	}
+
+	/**
+	 * Whether the ready raster is what a draw in room `maxRows` would give: drawn from the current
+	 * source, cell and theme, its height not cut by its own room and within this one. A resize then
+	 * redraws only the figures its room cuts. A draw in flight for an earlier room is dropped.
+	 */
+	#stands(maxRows: number | undefined): boolean {
+		const drawn = this.#drawn;
+		if (!drawn || drawn.cut || this.#awaiting.peek() || this.#state.peek().status !== "ready") return false;
+		const cell = read(this.#options.cell) ?? DEFAULT_FIGURE_CELL;
+		const theme = this.#options.theme?.() ?? currentTheme();
+		if (drawn.source !== this.#source.peek() || drawn.theme !== theme) return false;
+		if (drawn.cell.w !== cell.w || drawn.cell.h !== cell.h) return false;
+		if (maxRows !== undefined && drawn.rows > maxRows) return false;
+		this.#generation++;
+		return true;
 	}
 
 	/** The raster state. */
@@ -95,7 +116,8 @@ export class SvgRaster {
 	#draw(): void {
 		const generation = ++this.#generation;
 		const final = this.#final;
-		const svg = closePartialSvg(this.#source.peek());
+		const source = this.#source.peek();
+		const svg = closePartialSvg(source);
 		if (svg === null) {
 			if (final) this.#fail();
 			return;
@@ -109,6 +131,8 @@ export class SvgRaster {
 					if (maxRows !== undefined && maxRows < 1) throw new Error("no room for the figure");
 					const raster = await rasterizeFigure(prepareSvg(svg, figurePalette(theme)), cell, maxRows);
 					if (generation !== this.#generation) return;
+					const rows = Math.ceil(raster.h / cell.h);
+					this.#drawn = { source, cell, theme, rows, cut: maxRows !== undefined && rows >= maxRows };
 					this.#state.set({ status: "ready", raster });
 					this.#awaiting.set(false);
 				} catch {
