@@ -1,31 +1,40 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as Zlib from "node:zlib";
-import { $which, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { Shell } from "@oh-my-pi/pi-natives";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { cfgBashDirenvLoadTimeoutMs } from "./settings";
 
 let zlibCache: typeof Zlib | undefined;
-function inflateSync(buf: Zlib.InputType): Buffer {
-	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
-	return zlibCache.inflateSync(buf);
-}
 
-/** Default cap on a single `direnv` invocation. The first export for a devenv
- *  `.envrc` can build a shell; callers may raise this via `bash.direnvLoadTimeoutMs`. */
-export const DEFAULT_DIRENV_TIMEOUT_MS = 30_000;
+const CACHE_MAX = 512;
+const MISS_TTL_MS = 5_000;
+const STATE_VARS = [
+	"DIRENV_DIFF",
+	"DIRENV_DIR",
+	"DIRENV_FILE",
+	"DIRENV_WATCHES",
+	"DIRENV_DUMP_FILE_PATH",
+	"DIRENV_REQUIRED",
+	"DIRENV_EXE_PATH",
+];
+const UTILITY_GATE = "PI_DISABLE_UUTILS_BUILTINS";
+const TRUST_ROOT_VARS = ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "DIRENV_CONFIG"];
 
-/** Walk up from `startDir` to the nearest directory containing an `.envrc`. */
-export async function findEnvrc(startDir: string): Promise<string | null> {
-	let dir = path.resolve(startDir);
-	for (;;) {
-		const candidate = path.join(dir, ".envrc");
-		try {
-			if ((await fs.stat(candidate)).isFile()) return candidate;
-		} catch {
-			// no .envrc here — keep walking up
+/** Walk up to the nearest `.envrc`, optionally treating `.env` as a candidate. */
+export async function findEnvrc(startDir: string, includeDotenv = false): Promise<string | null> {
+	const names = includeDotenv ? [".envrc", ".env"] : [".envrc"];
+	for (let dir = path.resolve(startDir); ; dir = path.dirname(dir)) {
+		for (const filename of names) {
+			const candidate = path.join(dir, filename);
+			try {
+				if ((await fs.stat(candidate)).isFile()) return candidate;
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+			}
 		}
-		const parent = path.dirname(dir);
-		if (parent === dir) return null;
-		dir = parent;
+		if (dir === path.dirname(dir)) return null;
 	}
 }
 
@@ -36,362 +45,261 @@ export interface DirenvExportDiff {
 	readonly unset: readonly string[];
 }
 
-/** Parse `direnv export json` output (`{VAR: value|null}`) into set/unset halves. */
-export function parseDirenvExport(jsonText: string): DirenvExportDiff {
-	const trimmed = jsonText.trim();
-	if (trimmed.length === 0) return { set: {}, unset: [] };
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(trimmed);
-	} catch {
-		return { set: {}, unset: [] };
-	}
-	const set: Record<string, string> = {};
+/** Parse the Rust builtin's `direnv export json` output into set/unset halves. */
+function parseDirenvExport(jsonText: string): DirenvExportDiff {
+	const data: unknown = JSON.parse(jsonText);
+	if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid direnv export");
+	const set: Record<string, string> = Object.create(null);
 	const unset: string[] = [];
-	if (parsed && typeof parsed === "object") {
-		for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-			if (value === null) unset.push(key);
-			else if (typeof value === "string") set[key] = value;
-		}
+	const record = data as Record<string, unknown>;
+	for (const name in record) {
+		if (!Object.hasOwn(record, name)) continue;
+		const value = record[name];
+		if (typeof value === "string") set[name] = value;
+		else if (value === null) unset.push(name);
+		else throw new Error("Invalid direnv export value");
 	}
 	return { set, unset };
 }
 
-let direnvLookup: { bin: string | null } | undefined;
-function direnvBinary(): string | null {
-	if (!direnvLookup) direnvLookup = { bin: $which("direnv") };
-	return direnvLookup.bin;
-}
-
-// Per-directory `.envrc` walk-up cache (positive and negative): a repo
-// without `.envrc` pays the throwing-stat walk once per TTL window instead
-// of once per bash call. Entries are keyed on the resolved start dir with a
-// short TTL, so a created/deleted/moved `.envrc` is discovered within
-// seconds without re-walking to the filesystem root on every call.
-const envrcCache = new Map<string, { found: string | null; atMs: number }>();
-const ENVRC_CACHE_MAX = 512;
-const ENVRC_CACHE_TTL_MS = 5_000;
-// A stat-guard hit within this window of the last direnv export/verification
-// reuses the cached diff without forking `direnv export json` again.
-const DIRENV_WARM_TTL_MS = 5_000;
-
 interface DirenvWatch {
 	path: string;
-	/** Newest of the link and target ns mtimes, mirroring direnv's `getLatestStat`; null when missing. */
+	stamp: string;
 	mtimeNs: bigint | null;
-	size: bigint | null;
+	ctimeNs: bigint | null;
 }
 
-// Retain direnv's state so subsequent exports check its watch list instead of
-// rebuilding devenv. The diff is relative to the clean process env.
+const misses = new Map<string, number>();
 const exportCache = new Map<
 	string,
 	{
 		base: Record<string, string>;
-		loaded: Record<string, string>;
+		envrc: string;
 		diff: DirenvExportDiff;
-		mtimeNs: bigint;
-		size: bigint;
 		watches: DirenvWatch[];
-		/** `Date.now()` of the last export or warm verification that confirmed this entry. */
-		verifiedAtMs: number;
 	}
 >();
 
-async function statDirenvWatch(watchedPath: string): Promise<DirenvWatch> {
+export function clearDirenvCachesForTests(): void {
+	misses.clear();
+	exportCache.clear();
+}
+
+async function statWatch(watchedPath: string): Promise<DirenvWatch> {
 	try {
-		// direnv takes the newer of lstat/stat so a re-pointed symlink counts as a change.
-		const [link, target] = await Promise.all([
-			fs.lstat(watchedPath, { bigint: true }),
-			fs.stat(watchedPath, { bigint: true }),
-		]);
+		const link = await fs.lstat(watchedPath, { bigint: true });
+		const target = link.isSymbolicLink() ? await fs.stat(watchedPath, { bigint: true }) : link;
 		const mtimeNs = link.mtimeNs > target.mtimeNs ? link.mtimeNs : target.mtimeNs;
-		return { path: watchedPath, mtimeNs, size: target.size };
+		const stamp = `${link.dev}:${link.ino}:${link.ctimeNs}:${link.mtimeNs}:${target.dev}:${target.ino}:${target.ctimeNs}:${target.mtimeNs}:${target.size}`;
+		const ctimeNs = link.ctimeNs > target.ctimeNs ? link.ctimeNs : target.ctimeNs;
+		return { path: watchedPath, stamp, mtimeNs, ctimeNs };
 	} catch (err) {
 		if (!isEnoent(err)) throw err;
-		return { path: watchedPath, mtimeNs: null, size: null };
+		return { path: watchedPath, stamp: "missing", mtimeNs: null, ctimeNs: null };
 	}
 }
 
-async function snapshotDirenvWatches(encoded: string, envrcPath: string): Promise<DirenvWatch[] | null> {
+async function snapshotNativeWatches(
+	encoded: string,
+	envrc: string,
+	loadStartedNs: bigint,
+	signal: AbortSignal,
+): Promise<DirenvWatch[] | null> {
 	try {
-		// direnv's gzenv format is base64url-encoded zlib JSON.
-		const decoded: unknown = JSON.parse(inflateSync(Buffer.from(encoded, "base64url")).toString("utf8"));
+		zlibCache ??= require("node:zlib") as typeof Zlib;
+		const decoded: unknown = JSON.parse(zlibCache.inflateSync(Buffer.from(encoded, "base64url")).toString("utf8"));
 		if (!Array.isArray(decoded) || decoded.length === 0) return null;
-		const recorded: { path: string; modtime: number; exists: boolean }[] = [];
+		const watches: DirenvWatch[] = [];
+		let rootPinned = false;
 		for (const watch of decoded) {
+			signal.throwIfAborted();
 			if (
 				!watch ||
-				typeof watch !== "object" ||
 				typeof watch.path !== "string" ||
 				!path.isAbsolute(watch.path) ||
 				typeof watch.modtime !== "number" ||
 				typeof watch.exists !== "boolean"
-			) {
+			)
+				return null;
+			const snapshot = await statWatch(watch.path);
+			if ((snapshot.mtimeNs !== null) !== watch.exists) return null;
+			if (snapshot.mtimeNs !== null && snapshot.mtimeNs / 1_000_000_000n !== BigInt(watch.modtime)) return null;
+			// A pinned input (the root or a require_allowed file) was approved by
+			// content, not timestamp. Bind our finer stat to those same bytes.
+			if (watch.hash !== undefined) {
+				if (typeof watch.hash !== "string" || !watch.exists) return null;
+				const bytes = await fs.readFile(watch.path, { signal });
+				if (createHash("sha256").update(`${watch.path}\n`).update(bytes).digest("hex") !== watch.hash) return null;
+				if (watch.path === envrc) rootPinned = true;
+			} else if (snapshot.ctimeNs !== null && snapshot.ctimeNs >= loadStartedNs) {
+				// Only a whole-second observation came from the builtin. If this
+				// input was touched during evaluation, its new high-resolution
+				// stamp can't vouch for the bytes that produced the diff.
 				return null;
 			}
-			// The caller captures .envrc before the export.
-			if (watch.path !== envrcPath) recorded.push(watch);
+			if (watch.path !== envrc) watches.push(snapshot);
 		}
-		const watches = await Promise.all(recorded.map(watch => statDirenvWatch(watch.path)));
-		// A watched file edited while the export ran no longer matches the second
-		// direnv recorded; caching would pin the new mtime to the old environment.
-		for (let i = 0; i < watches.length; i++) {
-			const { mtimeNs } = watches[i];
-			const { modtime, exists } = recorded[i];
-			if ((mtimeNs !== null) !== exists) return null;
-			if (mtimeNs !== null && mtimeNs / 1_000_000_000n !== BigInt(modtime)) return null;
-		}
-		return watches;
+		return rootPinned ? watches : null;
 	} catch {
-		// Without a readable watch list, the next export must start cold.
 		return null;
 	}
 }
 
-async function direnvWatchesUnchanged(watches: DirenvWatch[]): Promise<boolean> {
-	try {
-		const current = await Promise.all(watches.map(watch => statDirenvWatch(watch.path)));
-		return current.every((now, i) => now.mtimeNs === watches[i].mtimeNs && now.size === watches[i].size);
-	} catch {
-		return false;
+async function watchesUnchanged(watches: DirenvWatch[], signal: AbortSignal): Promise<boolean> {
+	for (const watch of watches) {
+		signal.throwIfAborted();
+		if ((await statWatch(watch.path)).stamp !== watch.stamp) return false;
 	}
+	signal.throwIfAborted();
+	return true;
 }
 
-/** Test-only: filtered parent-env baseline (versioned against live Bun.env). */
-export function cleanSpawnEnvForTests(): Record<string, string> {
-	return cleanSpawnEnv();
-}
-
-export function clearDirenvCachesForTests(): void {
-	envrcCache.clear();
-	exportCache.clear();
-	cleanSpawnEnvCache = undefined;
-}
-
-async function findEnvrcCached(startDir: string): Promise<string | null> {
-	const key = path.resolve(startDir);
-	const now = Date.now();
-	const cached = envrcCache.get(key);
-	if (cached !== undefined && now - cached.atMs < ENVRC_CACHE_TTL_MS) return cached.found;
-	const found = await findEnvrc(key);
-	if (envrcCache.size >= ENVRC_CACHE_MAX) envrcCache.clear();
-	envrcCache.set(key, { found, atMs: now });
-	return found;
-}
-
-/** direnv computes its diff relative to the spawning env; strip any inherited
- *  direnv state so it loads the target `.envrc` from a clean baseline. */
-// Filtered parent-env baseline, versioned against live Bun.env: production
-// code DOES mutate Bun.env mid-process (deferred MCP discovery sets
-// EXA_API_KEY in sdk.ts after the session is usable), so a permanently
-// cached baseline would spawn direnv with stale values. Key cheaply on size
-// + a rolling checksum; a mismatch rebuilds. DIRENV_* values are stripped
-// (direnv diffs relative to the spawning env), so they are excluded from
-// both the checksum and the output.
-let cleanSpawnEnvCache: { size: number; checksum: number; env: Record<string, string> } | undefined;
-
-function envChecksum(): { size: number; checksum: number } {
-	let size = 0;
-	let checksum = 0;
-	for (const key in Bun.env) {
-		if (key.startsWith("DIRENV_")) continue;
-		size++;
-		for (let i = 0; i < key.length; i++) checksum = (checksum * 31 + key.charCodeAt(i)) | 0;
-		const value = Bun.env[key];
-		if (typeof value === "string") {
-			checksum = (checksum * 31 + value.length) | 0;
-			for (let i = 0; i < value.length; i++) checksum = (checksum * 31 + value.charCodeAt(i)) | 0;
-		}
+function cleanEnv(): Record<string, string> {
+	const env: Record<string, string> = Object.create(null);
+	for (const name in Bun.env) {
+		const value = Bun.env[name];
+		if (value !== undefined && !STATE_VARS.includes(name)) env[name] = value;
 	}
-	return { size, checksum };
+	return env;
 }
 
-function cleanSpawnEnv(): Record<string, string> {
-	const { size, checksum } = envChecksum();
-	const cached = cleanSpawnEnvCache;
-	if (cached !== undefined && cached.size === size && cached.checksum === checksum) return cached.env;
-	const out: Record<string, string> = {};
-	for (const [key, value] of Object.entries(Bun.env)) {
-		if (value !== undefined && !key.startsWith("DIRENV_")) out[key] = value;
-	}
-	cleanSpawnEnvCache = { size, checksum, env: out };
-	return out;
+function sameEnv(previous: Record<string, string>, current: Record<string, string>): boolean {
+	for (const name in previous) if (previous[name] !== current[name]) return false;
+	for (const name in current) if (!Object.hasOwn(previous, name)) return false;
+	return true;
 }
 
-async function runDirenv(
-	bin: string,
-	args: string[],
-	cwd: string,
-	timeoutMs: number,
-	env: Record<string, string>,
-	signal?: AbortSignal,
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-	// Bail on the caller's cancellation as well as the per-invocation cap so a
-	// cold `.envrc` load can't outlive an aborted / short-timeout bash call.
-	const abortSignal = signal
-		? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
-		: AbortSignal.timeout(timeoutMs);
-	const proc = Bun.spawn([bin, ...args], {
-		cwd,
-		env,
-		stdout: "pipe",
-		stderr: "pipe",
-		signal: abortSignal,
+async function configWatches(env: Record<string, string>): Promise<DirenvWatch[]> {
+	const conf = env.DIRENV_CONFIG || path.join(env.XDG_CONFIG_HOME || path.join(env.HOME, ".config"), "direnv");
+	const libDir = path.join(conf, "lib");
+	const watchedPaths = [
+		path.join(conf, "direnv.toml"),
+		path.join(conf, "config.toml"),
+		path.join(conf, "direnvrc"),
+		path.join(env.HOME || path.sep, ".direnvrc"),
+	];
+	// Pin the directory before listing it so concurrent additions cannot get
+	// a fresh directory stamp while being omitted from its member watches.
+	const libWatch = await statWatch(libDir);
+	const libs = await fs.readdir(libDir).catch(err => {
+		if (isEnoent(err) || (err as NodeJS.ErrnoException).code === "ENOTDIR") return [];
+		throw err;
 	});
-	// Drain stdout AND stderr concurrently: a cold `use devenv`/Nix load emits
-	// enough diagnostics to fill the stderr pipe and block the child forever if
-	// only stdout is read (it would then wait out `timeoutMs`).
-	const [stdout, stderr] = await Promise.all([
-		new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
-		new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
-	]);
-	const exitCode = await proc.exited;
-	return { exitCode, stdout, stderr };
+	for (const lib of libs) if (lib.endsWith(".sh")) watchedPaths.push(path.join(libDir, lib));
+	return [libWatch, ...(await Promise.all(watchedPaths.map(statWatch)))];
 }
 
-function applyExportDiff(env: Record<string, string>, diff: DirenvExportDiff): Record<string, string> {
-	const loaded = { ...env, ...diff.set };
-	for (const name of diff.unset) delete loaded[name];
-	return loaded;
-}
-
-/** Run `direnv export json` from `env`; null when the `.envrc` is blocked or the export fails. */
-async function exportDirenv(
-	bin: string,
-	dir: string,
-	timeoutMs: number,
-	env: Record<string, string>,
-	signal?: AbortSignal,
-): Promise<DirenvExportDiff | null> {
-	const { exitCode, stdout, stderr } = await runDirenv(bin, ["export", "json"], dir, timeoutMs, env, signal);
-	const blocked = stderr.includes("is blocked");
-	if (exitCode === 0 && !blocked) return parseDirenvExport(stdout);
-	// A not-yet-allowed .envrc is an expected steady state (the user opted
-	// out by never running `direnv allow`), not an error worth warning on.
-	if (blocked) {
-		logger.debug("direnv .envrc not allowed; skipping", { dir });
-	} else {
-		logger.warn("direnv export failed", { dir, exitCode });
+async function runBuiltin(
+	shell: Shell,
+	command: "export json" | "status --json",
+	cwd: string,
+	signal: AbortSignal,
+	base: Record<string, string>,
+): Promise<{ exitCode?: number; stdout: string }> {
+	// The native session inherits the host env *under* its Bun-provided
+	// overlay. Clear absent trust roots as well as hook state so an unset
+	// DIRENV_CONFIG, for example, can't select a different approval policy.
+	const unset = [...STATE_VARS];
+	for (const name of [...TRUST_ROOT_VARS, "DIRENV_DISABLE", UTILITY_GATE]) {
+		if (!(name in base)) unset.push(name);
 	}
-	return null;
+	let output = "";
+	const result = await shell.run(
+		{
+			command: `unset -v ${unset.join(" ")}\n[[ $(type -t direnv) == builtin ]] || exit 127\ncommand direnv ${command} 2>/dev/null`,
+			cwd,
+			env: UTILITY_GATE in base ? { [UTILITY_GATE]: base[UTILITY_GATE] } : undefined,
+			signal,
+		},
+		(_error, chunk) => {
+			output += chunk;
+		},
+	);
+	return { exitCode: result.exitCode, stdout: output };
 }
 
-/**
- * direnv >= 2.33 exports an explicitly denied `.envrc` with exit 0 and only its
- * own `DIRENV_*` bookkeeping. Older releases fail that export as blocked and
- * print plain-text `status` (no `--json`), which reads as not denied.
- */
-async function direnvDenied(
-	bin: string,
+async function allowedFile(
+	shell: Shell,
 	dir: string,
-	timeoutMs: number,
-	env: Record<string, string>,
-	signal?: AbortSignal,
-): Promise<boolean> {
-	const { exitCode, stdout } = await runDirenv(bin, ["status", "--json"], dir, timeoutMs, env, signal);
-	if (exitCode !== 0) return false;
-	let status: { state?: { foundRC?: { allowed?: unknown } | null } };
-	try {
-		status = JSON.parse(stdout);
-	} catch {
-		return false;
-	}
-	// direnv's AllowStatus: 0 allowed, 1 not allowed, 2 denied.
-	return status.state?.foundRC?.allowed === 2;
+	signal: AbortSignal,
+	base: Record<string, string>,
+): Promise<string | null> {
+	const status = await runBuiltin(shell, "status --json", dir, signal, base);
+	if (status.exitCode !== 0 || signal.aborted) return null;
+	const found = JSON.parse(status.stdout).state?.foundRC;
+	return found?.allowed === 0 && typeof found.path === "string" && path.isAbsolute(found.path) ? found.path : null;
 }
 
-/**
- * Resolve the nearest `.envrc` from `cwd` and return its `direnv export` diff
- * (variables to set, and variables direnv removes). Returns `null` when there
- * is no `.envrc`, `direnv` is not installed, the `.envrc` is not on direnv's
- * allow list, or the export fails/times out.
- *
- * direnv's own allow list is honored — an `.envrc` the user has not
- * `direnv allow`ed is NEVER executed or auto-allowed. This keeps OMP's trust
- * boundary identical to the user's own shell: cloning a repo with a poisoned
- * `.envrc` grants it nothing until the user explicitly allows it.
- *
- * Re-invokes `direnv export json` with its previous DIRENV_* state, so direnv
- * reuses the loaded environment until a watched input changes. High-resolution
- * stats of `.envrc` and every watched path (including direnv's allow/deny
- * files) catch same-second edits that direnv's whole-second timestamps miss.
- * While those stats are unchanged, an entry verified by direnv within the last
- * {@link DIRENV_WARM_TTL_MS} is reused without spawning direnv at all.
- * A warm export that reports any change is discarded and re-run cold, so a
- * revoked allow or an input the stat guard missed never leaves the result
- * relative to stale direnv state. The returned diff is always relative to the
- * clean process environment.
- */
+/** Load a project environment with omp-shell's native direnv builtin. */
 export async function loadDirenvEnv(
 	cwd: string,
 	opts?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<DirenvExportDiff | null> {
-	const envrcPath = await findEnvrcCached(cwd);
-	if (!envrcPath) return null;
-	const bin = direnvBinary();
-	if (!bin) return null;
-
-	const dir = path.dirname(envrcPath);
-	const timeoutMs = opts?.timeoutMs ?? DEFAULT_DIRENV_TIMEOUT_MS;
-	const base = cleanSpawnEnv();
-	// Captured before the export so an edit made while it runs invalidates the entry.
-	const envrcStat = await fs.stat(envrcPath, { bigint: true }).catch(() => null);
-	const cached = exportCache.get(dir);
-	const previous =
-		cached?.base === base &&
-		envrcStat &&
-		cached.mtimeNs === envrcStat.mtimeNs &&
-		cached.size === envrcStat.size &&
-		(await direnvWatchesUnchanged(cached.watches))
-			? cached
-			: undefined;
-	exportCache.delete(dir);
+	let signal = opts?.signal;
 	try {
-		if (previous) {
-			if (Date.now() - previous.verifiedAtMs < DIRENV_WARM_TTL_MS) {
-				exportCache.set(dir, previous);
-				return previous.diff;
-			}
-			const warm = await exportDirenv(bin, dir, timeoutMs, previous.loaded, opts?.signal);
-			if (!warm) return null;
-			if (Object.keys(warm.set).length === 0 && warm.unset.length === 0) {
-				previous.verifiedAtMs = Date.now();
-				exportCache.set(dir, previous);
-				return previous.diff;
-			}
-		}
-		const diff = await exportDirenv(bin, dir, timeoutMs, base, opts?.signal);
-		if (!diff) return null;
-		if (
-			diff.unset.length === 0 &&
-			Object.keys(diff.set).every(name => name.startsWith("DIRENV_")) &&
-			(await direnvDenied(bin, dir, timeoutMs, base, opts?.signal))
-		) {
-			logger.debug("direnv .envrc denied; skipping", { dir });
+		const budget = AbortSignal.timeout(opts?.timeoutMs ?? cfgBashDirenvLoadTimeoutMs.default);
+		signal = signal ? AbortSignal.any([signal, budget]) : budget;
+		signal.throwIfAborted();
+		const key = path.resolve(cwd);
+		const miss = misses.get(key);
+		if (miss !== undefined && Date.now() - miss < MISS_TTL_MS) return null;
+		const candidate = await findEnvrc(await fs.realpath(key), true);
+		if (!candidate) {
+			if (misses.size >= CACHE_MAX) misses.clear();
+			misses.set(key, Date.now());
 			return null;
 		}
-		const loaded = applyExportDiff(base, diff);
-		const watches =
-			envrcStat && Object.hasOwn(loaded, "DIRENV_DIFF") && Object.hasOwn(loaded, "DIRENV_WATCHES")
-				? await snapshotDirenvWatches(loaded.DIRENV_WATCHES, envrcPath)
-				: null;
-		// Retain state only when every watched path can be tracked.
-		if (envrcStat && watches) {
-			if (exportCache.size >= ENVRC_CACHE_MAX) exportCache.clear();
-			exportCache.set(dir, {
-				base,
-				loaded,
-				diff,
-				mtimeNs: envrcStat.mtimeNs,
-				size: envrcStat.size,
-				watches,
-				verifiedAtMs: Date.now(),
-			});
+		const candidateDir = path.dirname(candidate);
+		const base = cleanEnv();
+		// XDG bases should be absolute. A relative base would allow a repository
+		// to supply files where the embedded builtin expects the user's trust store.
+		if (!base.HOME && (!base.XDG_DATA_HOME || !base.XDG_CACHE_HOME || !(base.XDG_CONFIG_HOME || base.DIRENV_CONFIG)))
+			return null;
+		for (const name of TRUST_ROOT_VARS) {
+			if (base[name] && !path.isAbsolute(base[name])) return null;
 		}
-		return diff;
+		const cached = exportCache.get(candidate);
+		if (
+			cached &&
+			sameEnv(cached.base, base) &&
+			(cached.envrc === candidate || (await findEnvrc(candidateDir)) === cached.envrc) &&
+			(await watchesUnchanged(cached.watches, signal))
+		)
+			return cached.diff;
+		exportCache.delete(candidate);
+		const config = await configWatches(base);
+		signal.throwIfAborted();
+		const shell = new Shell({ sessionEnv: { ...base, [UTILITY_GATE]: "0" } });
+		// Only the builtin knows whether load_dotenv is enabled. A nearer .env
+		// must not mask a parent's .envrc or change its startup directory.
+		const envrc =
+			path.basename(candidate) === ".env" ? await allowedFile(shell, candidateDir, signal, base) : candidate;
+		if (!envrc) return null;
+		const dir = path.dirname(envrc);
+		const rc = await statWatch(envrc);
+		const loadStartedNs = BigInt(Math.trunc((performance.timeOrigin + performance.now()) * 1e6));
+		const { exitCode, stdout } = await runBuiltin(shell, "export json", dir, signal, base);
+		if (signal.aborted || exitCode !== 0 || !stdout.trim()) return null;
+		const diff = parseDirenvExport(stdout);
+		if (diff.set.DIRENV_REQUIRED || diff.set.DIRENV_FILE !== envrc) return null;
+		if (diff.unset.length === 0 && Object.keys(diff.set).every(name => name.startsWith("DIRENV_"))) {
+			// The builtin's public export protocol returns only its bookkeeping
+			// and exits successfully on denial. Don't merge that state into Bash.
+			if ((await allowedFile(shell, dir, signal, base)) !== envrc) return null;
+		}
+		// High-resolution stats supplement direnv's whole-second watch protocol.
+		// Pin the pre-run envrc and config stats, never ones taken after execution.
+		if (diff.set.DIRENV_WATCHES) {
+			const watches = await snapshotNativeWatches(diff.set.DIRENV_WATCHES, envrc, loadStartedNs, signal);
+			if (watches && (await watchesUnchanged([rc, ...config], signal))) {
+				if (exportCache.size >= CACHE_MAX) exportCache.clear();
+				exportCache.set(candidate, { base, envrc, diff, watches: [rc, ...config, ...watches] });
+			}
+		}
+		return signal.aborted ? null : diff;
 	} catch (err) {
-		logger.warn("direnv load failed", { dir, error: err instanceof Error ? err.message : String(err) });
+		if (!signal?.aborted)
+			logger.warn("embedded direnv load failed", { cwd, error: err instanceof Error ? err.message : String(err) });
 		return null;
 	}
 }
