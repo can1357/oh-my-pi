@@ -299,9 +299,11 @@ export class OAuthRefresher {
 	 * a blocked event loop can outlive its TTL, and an expired lease no peer
 	 * took is still ours) instead of dropping the only valid token. A refused
 	 * save is retried too, within the same 60 s window, while the row still
-	 * holds the spent token: a peer that took over the lapsed lease hands it
-	 * back once the provider rejects that token, but the next peer can hold it
-	 * at the moment this save lands.
+	 * holds the spent token and a peer holds (or lapsed) the lease: a peer that
+	 * took over the lapsed lease hands it back once the provider rejects that
+	 * token, but the next peer can hold it at the moment this save lands. A
+	 * refusal when no lease exists or when our own lease is still live right
+	 * now is terminal, since waiting on a peer lease cannot make it succeed.
 	 */
 	async #persistExchangedCredential(
 		provider: string,
@@ -352,6 +354,24 @@ export class OAuthRefresher {
 				const stored = this.#deps.store.listAuthCredentials(provider).find(entry => entry.id === credentialId);
 				if (!stored || serializeCredential(provider, stored.credential)?.data !== expectedData) {
 					logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: renewed });
+					return false;
+				}
+				if (!lease) {
+					logger.warn("OAuth exchanged token save refused without a refresh lease", {
+						...fingerprints,
+						leaseHeld: false,
+					});
+					return false;
+				}
+				const holder = lease.store.getCredentialRefreshLeaseHolder?.(credentialId);
+				if (holder?.owner === lease.owner && holder.expiresAtMs > Date.now()) {
+					// Our own lease is still live right now and the row still matches
+					// what we read, so lease contention did not cause the refusal;
+					// retrying while holding our own lease cannot succeed.
+					logger.warn("OAuth exchanged token save refused under our own live lease", {
+						...fingerprints,
+						leaseHeld: true,
+					});
 					return false;
 				}
 				if (!refused) {
@@ -580,7 +600,7 @@ export class OAuthRefresher {
 			if (this.#shuttingDown || options.signal?.aborted) {
 				throw new AIError.AbortError("OAuth refresh stopped before token exchange");
 			}
-			const serialized = serializeCredential(provider, current);
+			const serialized = serializeCredential(provider, row.credential);
 			if (!serialized) return { credential: current, refreshed: false, removed: false };
 			// Acquiring the lease can block on SQLite past the deadline; do not start an exchange nobody waits for.
 			if (Date.now() >= waitDeadline) return this.#budgetExceeded(provider, options, current);

@@ -1644,6 +1644,43 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
+	/**
+	 * Resolve the exact persisted `data` string to match in CAS predicates.
+	 *
+	 * Fast path: returns `expectedData` unchanged when it already matches the row
+	 * byte-for-byte (or the row is missing/disabled). When an external writer
+	 * stored semantically equivalent JSON with different formatting (e.g. spaces
+	 * from Python `json.dumps()`, pretty-printing, or different key order),
+	 * returns the row's verbatim `data` so `WHERE id = ? AND data = ?` stays
+	 * atomic against concurrent writers instead of permanently missing CAS.
+	 */
+	#resolveMatchingRowData(id: number, expectedData: string, row?: CredentialStateRow | null): string {
+		const current = row === undefined ? (this.#getCredentialStateStmt.get(id) as CredentialStateRow | null) : row;
+		if (!current || current.disabled_cause !== null || current.data === expectedData) {
+			return expectedData;
+		}
+		const deserialized = deserializeCredential({
+			id,
+			provider: current.provider,
+			credential_type: current.credential_type,
+			data: current.data,
+			disabled_cause: current.disabled_cause,
+			identity_key: current.identity_key,
+		});
+		if (!deserialized) return expectedData;
+		const canonical = serializeCredential(current.provider, deserialized);
+		if (!canonical) return expectedData;
+		if (canonical.data === expectedData) return current.data;
+		try {
+			if (Bun.deepEquals(JSON.parse(canonical.data), JSON.parse(expectedData))) {
+				return current.data;
+			}
+		} catch {
+			// Invalid expectedData JSON cannot semantically match a valid row.
+		}
+		return expectedData;
+	}
+
 	tryUpdateAuthCredentialIfMatches(
 		id: number,
 		expectedData: string,
@@ -1664,13 +1701,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			// matches, but rewriting identical bytes would only churn the revision.
 			return !lease || Boolean(this.#holdsCredentialRefreshLeaseStmt.get(id, lease.owner, lease.nowMs));
 		}
+		const matchedData = this.#resolveMatchingRowData(id, expectedData, row);
 		const result = lease
 			? (this.#updateIfMatchesWithLeaseStmt.run(
 					serialized.credentialType,
 					serialized.data,
 					serialized.identityKey,
 					id,
-					expectedData,
+					matchedData,
 					id,
 					lease.owner,
 					lease.nowMs,
@@ -1680,7 +1718,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					serialized.data,
 					serialized.identityKey,
 					id,
-					expectedData,
+					matchedData,
 				) as { changes: number });
 		if (result.changes === 0) return false;
 		if (provider) {
@@ -1711,16 +1749,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		disabledCause: string,
 		lease?: CredentialRefreshLeaseFence,
 	): boolean {
+		const normalizedCause = normalizeDisabledCause(disabledCause);
+		const matchedData = this.#resolveMatchingRowData(id, expectedData);
 		const result = lease
-			? (this.#deleteIfMatchesWithLeaseStmt.run(
-					normalizeDisabledCause(disabledCause),
-					id,
-					expectedData,
-					id,
-					lease.owner,
-					lease.nowMs,
-				) as { changes: number })
-			: (this.#deleteIfMatchesStmt.run(normalizeDisabledCause(disabledCause), id, expectedData) as {
+			? (this.#deleteIfMatchesWithLeaseStmt.run(normalizedCause, id, matchedData, id, lease.owner, lease.nowMs) as {
+					changes: number;
+				})
+			: (this.#deleteIfMatchesStmt.run(normalizedCause, id, matchedData) as {
 					changes: number;
 				});
 		return result.changes > 0;
