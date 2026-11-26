@@ -343,24 +343,44 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			}
 			return;
 		}
-		this.lastRetainedTurn = turns;
+		// A copy (`/fork`, `/branch`, `/btw`) holds its source's cursors under the source's id: continue
+		// after the source's last retained turn, so the source's unsent open window is not lost. Windows
+		// already sent belong to the source's documents, so nothing before that turn is re-sent here.
+		const copied = this.#pathCursor(path, start, true);
+		const copiedStop = copied?.stoppedAt;
+		const copiedOff =
+			copiedStop !== undefined &&
+			(turns > copiedStop ||
+				(copied?.stoppedMessages !== undefined && extractMessages(path, start).length > copied.stoppedMessages));
+		if (copied && copied.scope === this.#scope() && !copiedOff && this.automatic && this.#config.autoRetain) {
+			const from = Math.min(copied.turn, turns);
+			this.lastRetainedTurn = from;
+			this.#windowStart = from;
+			this.#retainedMessages = 0;
+			return;
+		}
+		// Otherwise a branch without a cursor was never retained by automatic retention: start at its
+		// current turn. `/memory enqueue` without automatic retention keeps sending the open tail.
+		const base = this.automatic && this.#config.autoRetain ? turns : turns - (turns % this.#config.retainEveryNTurns);
+		this.lastRetainedTurn = base;
 		this.#retainedMessages = 0;
-		this.#windowStart = turns;
+		this.#windowStart = base;
 	}
 
 	/**
-	 * Latest cursor of this transcript whose retained turns all lie on `path`: one appended at an
-	 * entry of `path` past its retention start. A cursor appended at a deeper entry wins; a `/tree`
-	 * move back to an earlier answer leaves later cursors off the path. A stop applies only to the
-	 * branch it was written on (the entry itself is on `path`); from a sibling branch it is a plain cursor.
+	 * Latest cursor of this transcript (or, with `copied`, of the transcript this one was copied from)
+	 * whose retained turns all lie on `path`: one appended at an entry of `path` past its retention
+	 * start. A cursor appended at a deeper entry wins; a `/tree` move back to an earlier answer leaves
+	 * later cursors off the path. A stop applies only to the branch it was written on (the entry itself
+	 * is on `path`); from a sibling branch it is a plain cursor.
 	 */
-	#pathCursor(path: readonly SessionEntry[], start: number): RetentionCursorData | undefined {
+	#pathCursor(path: readonly SessionEntry[], start: number, copied = false): RetentionCursorData | undefined {
 		const depth = new Map(path.map((entry, index) => [entry.id, index]));
 		let best: RetentionCursorData | undefined;
 		let bestDepth = -Infinity;
 		for (const entry of this.session.sessionManager.getEntries()) {
 			if (entry.type !== "custom" || entry.customType !== RETENTION_CURSOR_ENTRY_TYPE) continue;
-			if (!isRetentionCursor(entry.data) || entry.data.transcriptId !== this.transcriptId) continue;
+			if (!isRetentionCursor(entry.data) || (entry.data.transcriptId === this.transcriptId) === copied) continue;
 			const at = entry.parentId === null ? -1 : depth.get(entry.parentId);
 			if (at === undefined || at < start - 1 || at < bestDepth) continue;
 			best = depth.has(entry.id) ? entry.data : { ...entry.data, stoppedAt: undefined, stoppedMessages: undefined };

@@ -8,12 +8,13 @@
  * arbitrary namespace of the user's account (`supermemory.scoping` only picks `omp-global` or the
  * per-repository namespace). For the same reason they ignore the project's dotenv files, which
  * Bun and OMP merge into the environment: only the launch environment and the user's own `.env`
- * files (home, agent dir) count. Both the current project and the one OMP was launched in are
- * filtered: the launch project's values stay in the environment after `--cwd` or `/move`.
+ * files (home, agent dir) count. Values the startup environment took from the launch project's
+ * files are refused from a snapshot taken at startup: they stay in the environment after `--cwd`,
+ * `/move` or an edit of those files.
  * Tuning fields read the `supermemory.*` setting handles.
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { clamp, filterChildShellEnv, getLaunchProjectDir } from "@oh-my-pi/pi-utils";
+import { clamp, launchTrustedEnv } from "@oh-my-pi/pi-utils";
 import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 import type { Settings } from "../config/settings";
 import {
@@ -79,15 +80,12 @@ function validateBaseUrl(raw: string | undefined): string | null {
 }
 
 export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
-	// The environment without values from the project's dotenv files (see the module comment): a
-	// value counts only if neither the launch project's nor the current project's dotenv files supplied it.
-	const launch = filterChildShellEnv(Bun.env, getLaunchProjectDir());
-	const current = filterChildShellEnv(Bun.env);
-	const trusted = (name: string) => (launch[name] === current[name] ? current[name] : undefined);
+	// Without values the startup environment took from project dotenv files (see the module comment);
+	// no project's dotenv files enter the environment after startup.
 	const env = {
-		SUPERMEMORY_BASE_URL: trusted("SUPERMEMORY_BASE_URL"),
-		SUPERMEMORY_API_KEY: trusted("SUPERMEMORY_API_KEY"),
-		SUPERMEMORY_NAMESPACE: trusted("SUPERMEMORY_NAMESPACE"),
+		SUPERMEMORY_BASE_URL: launchTrustedEnv("SUPERMEMORY_BASE_URL"),
+		SUPERMEMORY_API_KEY: launchTrustedEnv("SUPERMEMORY_API_KEY"),
+		SUPERMEMORY_NAMESPACE: launchTrustedEnv("SUPERMEMORY_NAMESPACE"),
 	};
 	return {
 		baseUrl: validateBaseUrl(env.SUPERMEMORY_BASE_URL?.trim() || DEFAULT_BASE_URL),

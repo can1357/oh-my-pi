@@ -293,15 +293,6 @@ const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
 const launchProjectDir = getProjectDir();
 const projectEnv = parseEnvFile(path.join(launchProjectDir, ".env"));
 
-/**
- * Project directory whose dotenv files this process loaded into `Bun.env` at startup. Its values stay
- * in `Bun.env` after the project directory changes (`--cwd`, `/move`), so filtering trusted settings
- * against the current directory alone misses them.
- */
-export function getLaunchProjectDir(): string {
-	return launchProjectDir;
-}
-
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];
 	if (!isSafeEnvName(key) || isMacosMallocStackLoggingEnvName(key) || value === undefined || !isSafeEnvValue(value)) {
@@ -399,6 +390,48 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 			if (file === projectEnv) projectEnvNamesLoadedByOmp.add(key);
 		}
 	}
+}
+
+// Startup values that came from a dotenv file of the launch project (OMP's merge above) or of the
+// process cwd (Bun's autoload), with what the launch environment held instead (absent, or a launcher
+// value such as `""` that dotenv overwrote). Captured now: those values stay in `Bun.env` after the
+// project directory changes or the files are edited, and a filter that re-reads the files misses them.
+const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string | undefined }> = (() => {
+	const values = new Map<string, { planted: string; trusted: string | undefined }>();
+	// Launched from the home, config root or agent dir: its `.env` is the user's own, not a project's.
+	const real = (dir: string) => {
+		try {
+			return fs.realpathSync(dir);
+		} catch {
+			return path.resolve(dir);
+		}
+	};
+	const userDirs = new Set([os.homedir(), getConfigRootDir(), getAgentDir()].map(real));
+	for (const dir of new Set([launchProjectDir, process.cwd()].map(real))) {
+		if (userDirs.has(dir)) continue;
+		const kept = filterChildShellEnvInternal(Bun.env, dir);
+		for (const key in Bun.env) {
+			const planted = Bun.env[key];
+			if (planted === undefined || kept[key] === planted) continue;
+			// Two directories disagreeing on what to keep: trust neither.
+			const trusted = values.has(key) && values.get(key)?.trusted !== kept[key] ? undefined : kept[key];
+			values.set(key, { planted, trusted });
+		}
+	}
+	return values;
+})();
+
+/**
+ * `Bun.env[name]`, except a value the startup environment took from a project dotenv file (the launch
+ * project's or the process cwd's): that reads as what the launch environment held instead. Unlike
+ * `filterChildShellEnv`, this still holds after the project directory changes (`--cwd`, `/move`) or
+ * the files are edited. For settings a cloned repository must not control. A value set after startup
+ * is returned as is: no dotenv file is loaded into the environment later.
+ */
+export function launchTrustedEnv(name: string): string | undefined {
+	const value = Bun.env[name];
+	const launch = launchDotenvValues.get(name);
+	return launch !== undefined && value === launch.planted ? launch.trusted : value;
 }
 
 // Directory-affecting keys (XDG_*_HOME, and in default mode PI_CODING_AGENT_DIR)

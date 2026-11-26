@@ -93,8 +93,16 @@ describe("loadSupermemoryConfig", () => {
 		using temp = TempDir.createSync("@sm-dotenv-");
 		const agentDir = path.join(temp.path(), "agent");
 		await fs.mkdir(agentDir, { recursive: true });
-		const probe = async (files: Record<string, string>, launchKey?: string, moveTo?: string) => {
-			const project = await fs.mkdtemp(path.join(temp.path(), "project-"));
+		const probe = async (
+			files: Record<string, string>,
+			launchKey?: string,
+			moveTo?: string,
+			afterStart?: "delete" | "rewrite",
+			launchEnv: Record<string, string> = {},
+			noEnvFile = false,
+			fromHome = false,
+		) => {
+			const project = fromHome ? temp.path() : await fs.mkdtemp(path.join(temp.path(), "project-"));
 			for (const [name, content] of Object.entries(files)) {
 				await Bun.write(
 					name.startsWith("agent:") ? path.join(agentDir, name.slice(6)) : path.join(project, name),
@@ -108,6 +116,12 @@ describe("loadSupermemoryConfig", () => {
 					`import { setProjectDir } from ${JSON.stringify(path.join(import.meta.dir, "../../../utils/src/dirs.ts"))};`,
 					`import { Settings } from ${JSON.stringify(path.join(import.meta.dir, "../../src/config/settings.ts"))};`,
 					`import { loadSupermemoryConfig } from ${JSON.stringify(path.join(import.meta.dir, "../../src/supermemory/config.ts"))};`,
+					// The repository edits its dotenv files after startup; their old values stay in the environment.
+					...(afterStart === "delete"
+						? [`await Bun.file(${JSON.stringify(path.join(project, ".env"))}).delete();`]
+						: afterStart === "rewrite"
+							? [`await Bun.write(${JSON.stringify(path.join(project, ".env"))}, "UNRELATED=1\\n");`]
+							: []),
 					// `/move` (or `--cwd`) after startup: the launch project's dotenv values stay in the environment.
 					...(moveTo ? [`setProjectDir(${JSON.stringify(moveTo)});`] : []),
 					"const { apiKey, baseUrl, namespace } = loadSupermemoryConfig(Settings.isolated({}));",
@@ -118,9 +132,11 @@ describe("loadSupermemoryConfig", () => {
 				PATH: Bun.env.PATH ?? "",
 				HOME: temp.path(),
 				PI_CODING_AGENT_DIR: agentDir,
+				...launchEnv,
 			};
 			if (launchKey) env.SUPERMEMORY_API_KEY = launchKey;
-			const result = JSON.parse(await $`bun ${script}`.cwd(project).env(env).text());
+			const bunArgs = noEnvFile ? ["--no-env-file"] : [];
+			const result = JSON.parse(await $`bun ${bunArgs} ${script}`.cwd(project).env(env).text());
 			await fs.rm(path.join(agentDir, ".env"), { force: true });
 			return result;
 		};
@@ -141,6 +157,31 @@ describe("loadSupermemoryConfig", () => {
 			apiKey: "launch-key",
 			baseUrl: "https://api.supermemory.ai",
 		});
+		for (const edit of ["delete", "rewrite"] as const) {
+			for (const moveTo of [undefined, clean]) {
+				expect(await probe(planted, "launch-key", moveTo, edit)).toEqual({
+					apiKey: "launch-key",
+					baseUrl: "https://api.supermemory.ai",
+				});
+			}
+		}
+		// The launcher set it empty; OMP's `.env` merge filled it in. After a move the planted value must not count.
+		expect(await probe(planted, "launch-key", clean, undefined, { SUPERMEMORY_BASE_URL: "" }, true)).toEqual({
+			apiKey: "launch-key",
+			baseUrl: "https://api.supermemory.ai",
+		});
+		// Launched from the home directory: `~/.env` is the user's own, and stays trusted after a move.
+		const home = await probe(
+			{ ".env": "SUPERMEMORY_API_KEY=home-key\n" },
+			undefined,
+			clean,
+			undefined,
+			{},
+			false,
+			true,
+		);
+		await fs.rm(path.join(temp.path(), ".env"), { force: true });
+		expect(home).toEqual({ apiKey: "home-key", baseUrl: "https://api.supermemory.ai" });
 		// The user's own agent-dir `.env` stays trusted.
 		expect(await probe({ "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, "launch-key")).toEqual({
 			apiKey: "launch-key",

@@ -1415,6 +1415,29 @@ describe("supermemoryBackend", () => {
 		expect(docs[0]?.content).toContain("three");
 	});
 
+	it("a copied transcript still retains the source's unsent open window", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		session.addTurn("two");
+		await session.endTurn();
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		// `/fork`: the same entries, cursors included, under a new transcript id.
+		session.transcriptId = "t2";
+		await start(session);
+		session.addTurn("three");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[1]);
+		expect(docs).toHaveLength(1);
+		expect(docs[0]?.metadata).toMatchObject({ sessionId: "t2", turnStart: 0, turnEnd: 3 });
+		expect(docs[0]?.content).toContain("reply to one");
+		expect(docs[0]?.content).toContain("reply to three");
+	});
+
 	it("a window that completes after the session moves to a new transcript records no cursor there", async () => {
 		const reply = Promise.withResolvers<{ id: string; status: string }>();
 		const sent = Promise.withResolvers<void>();

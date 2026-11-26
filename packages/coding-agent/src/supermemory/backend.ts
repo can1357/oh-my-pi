@@ -30,6 +30,11 @@ export const supermemoryBackend: MemoryBackend = {
 				?.dispose();
 			return;
 		}
+		// A worker thread re-reads the environment at its own start, against a project directory that a
+		// `/move` or `--cwd` may have changed: its dotenv provenance is not the process's, so values a
+		// cloned repository planted at launch could read as trusted there. Without a parent state to
+		// alias, such a subagent stays inert.
+		if (!Bun.isMainThread) return;
 		const config = loadSupermemoryConfig(settings);
 		if (!isSupermemoryConfigured(config)) {
 			if (options.taskDepth === 0) {
