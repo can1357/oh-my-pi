@@ -4,7 +4,9 @@
  *
  * Updates are synchronous and glitch-free. A write marks direct observers
  * dirty and their dependents "check"; queued effects then pull their sources
- * in creation order, so a computed reruns only when a source actually changed
+ * in the order they were marked (each source marks its observers in the order
+ * they subscribed; one that stopped reading it and came back is last), so a
+ * computed reruns only when a source actually changed
  * and every effect sees a consistent graph. Writes inside {@link batch} (or
  * inside a running effect) flush once, when the outermost batch ends.
  *
@@ -58,7 +60,10 @@ const MAX_FLUSH_RUNS = 100_000;
 const kAccessor = Symbol("jsx.accessor");
 
 interface Source {
-	observers: Computation<unknown>[] | null;
+	/** Insertion-ordered, so a write marks (and flushes) observers in the order they subscribed; O(1) to leave. */
+	observers: Set<Computation<unknown>> | null;
+	/** Scratch mark: the run that last tracked it, or the resubscribe pass that last visited it. */
+	stamp: number;
 	/** Bring the value up to date (computeds); no-op for signals. */
 	refresh(): void;
 }
@@ -101,14 +106,20 @@ export class Owner {
 
 let currentOwner: Owner | null = null;
 let currentObserver: Computation<unknown> | null = null;
-/** Sources the running computation read this run, in first-read order. */
+/** Sources the running computation read this run, in first-read order (a nested run can add repeats; `#resubscribe` drops them). */
 let currentSources: Source[] | null = null;
+/** Source of every stamp: run ids and resubscribe marks never repeat. */
+let stampClock = 0;
+/** Id of the running computation's run; a source stamped with it is already in `currentSources`. */
+let currentRun = 0;
 let batchDepth = 0;
 let pendingEffects: Computation<unknown>[] = [];
 
 function track(source: Source): void {
-	if (currentSources === null) return;
-	if (!currentSources.includes(source)) currentSources.push(source);
+	if (currentSources === null || source.stamp === currentRun) return;
+	// A nested run may restamp a source this run already read; the duplicate push is swept in `#resubscribe`.
+	source.stamp = currentRun;
+	currentSources.push(source);
 }
 
 function markStale(node: Computation<unknown>, state: State): void {
@@ -147,7 +158,8 @@ function flush(): void {
 }
 
 class SignalNode<T> implements Source {
-	observers: Computation<unknown>[] | null = null;
+	observers: Set<Computation<unknown>> | null = null;
+	stamp = 0;
 	value: T;
 	readonly equals: Equals<T> | false;
 
@@ -171,8 +183,9 @@ class SignalNode<T> implements Source {
 }
 
 class Computation<T> extends Owner implements Source {
-	observers: Computation<unknown>[] | null = null;
+	observers: Set<Computation<unknown>> | null = null;
 	sources: Source[] | null = null;
+	stamp = 0;
 	state: State = DIRTY;
 	value: T | undefined = undefined;
 	readonly isEffect: boolean;
@@ -199,7 +212,8 @@ class Computation<T> extends Owner implements Source {
 	}
 
 	refresh(): void {
-		if (this.state === CLEAN) return;
+		// Disposed while stale: an observer still holding it pulls the last value, never a new run.
+		if (this.state === CLEAN || this.disposed) return;
 		if (this.state === CHECK) {
 			for (const source of this.sources ?? []) {
 				source.refresh();
@@ -220,10 +234,12 @@ class Computation<T> extends Owner implements Source {
 		const prevOwner = currentOwner;
 		const prevObserver = currentObserver;
 		const prevSources = currentSources;
+		const prevRun = currentRun;
 		const sources: Source[] = [];
 		currentOwner = this;
 		currentObserver = this as Computation<unknown>;
 		currentSources = sources;
+		currentRun = ++stampClock;
 		let next: T;
 		try {
 			if (this.#tracksEpoch) this.epoch?.();
@@ -232,7 +248,11 @@ class Computation<T> extends Owner implements Source {
 			currentOwner = prevOwner;
 			currentObserver = prevObserver;
 			currentSources = prevSources;
-			this.#resubscribe(sources);
+			currentRun = prevRun;
+			// Disposed during its own run: `dispose` already left every source, so what the run read must not
+			// rejoin them, and what it created after the dispose is torn down now.
+			if (this.disposed) this.reset();
+			else this.#resubscribe(sources);
 		}
 		const changed = !this.#settled || this.#equals === false || !this.#equals(this.value as T, next);
 		this.#settled = true;
@@ -243,20 +263,30 @@ class Computation<T> extends Owner implements Source {
 		}
 	}
 
+	/**
+	 * Subscribe to the sources of the run that just ended and drop the ones it no longer read, in
+	 * one pass over each list: previous sources are marked, then `next` is walked (deduplicated in
+	 * place, first read kept, so the CHECK walk keeps read order), then unmarked previous ones leave.
+	 */
 	#resubscribe(next: Source[]): void {
+		const self = this as Computation<unknown>;
 		const previous = this.sources;
+		const kept = ++stampClock;
+		if (previous) for (const source of previous) source.stamp = kept;
+		const seen = ++stampClock;
+		let length = 0;
+		for (const source of next) {
+			const stamp = source.stamp;
+			if (stamp === seen) continue;
+			if (stamp !== kept) (source.observers ??= new Set()).add(self);
+			source.stamp = seen;
+			next[length++] = source;
+		}
+		next.length = length;
 		if (previous) {
 			for (const source of previous) {
-				if (next.includes(source)) continue;
-				const list = source.observers;
-				if (!list) continue;
-				const index = list.indexOf(this as Computation<unknown>);
-				if (index !== -1) list.splice(index, 1);
+				if (source.stamp !== seen) source.observers?.delete(self);
 			}
-		}
-		for (const source of next) {
-			if (previous?.includes(source)) continue;
-			(source.observers ??= []).push(this as Computation<unknown>);
 		}
 		this.sources = next;
 	}
@@ -264,12 +294,7 @@ class Computation<T> extends Owner implements Source {
 	override dispose(): void {
 		if (this.disposed) return;
 		super.dispose();
-		for (const source of this.sources ?? []) {
-			const list = source.observers;
-			if (!list) continue;
-			const index = list.indexOf(this as Computation<unknown>);
-			if (index !== -1) list.splice(index, 1);
-		}
+		for (const source of this.sources ?? []) source.observers?.delete(this as Computation<unknown>);
 		this.sources = null;
 	}
 }

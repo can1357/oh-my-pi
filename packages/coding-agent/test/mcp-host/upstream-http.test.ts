@@ -639,6 +639,29 @@ describe("era probe of a remote server", () => {
 		expect(closing?.headers.get("Mcp-Session-Id")).toBe("session-1");
 	});
 
+	it("falls back to initialize on a plain 415 and reports a legacy server", async () => {
+		// rmcp 0.2.1 cannot deserialize an unknown method and refuses the body as unsupported media.
+		const { url, seen } = serveLegacy(
+			() =>
+				new Response(
+					"fail to deserialize request body data did not match any variant of untagged enum JsonRpcMessage",
+					{
+						status: 415,
+						headers: { "Content-Type": "text/plain" },
+					},
+				),
+		);
+
+		const result = await mcpUpstreams.probe(httpSpec(url), realDeps());
+
+		expect(result.era).toBe("legacy");
+		expect(seen.filter(entry => entry.method === "POST").map(entry => entry.body.method)).toEqual([
+			"server/discover",
+			"initialize",
+			"notifications/initialized",
+		]);
+	});
+
 	it("passes an auth challenge through instead of guessing an era", async () => {
 		const { url, seen } = serve(
 			() => new Response("denied", { status: 401, headers: { "WWW-Authenticate": "Bearer" } }),

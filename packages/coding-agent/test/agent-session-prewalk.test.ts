@@ -1818,6 +1818,24 @@ describe("AgentSession prewalk", () => {
 		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Usage: /prewalk"));
 	});
 
+	it("/prewalk accepts ^ model references for into and from", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const { session, showStatus, runtime } = createSelectorFixture(primary, { default: primary, smol: primary });
+		const from = `^${primary.provider}/${primary.id}:medium`;
+		const into = `^${target.provider}/${target.id}:high`;
+
+		expect(await executeBuiltinSlashCommand(`/prewalk ${into}`, runtime)).toBe(true);
+		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Prewalk on"));
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.High);
+
+		expect(await executeBuiltinSlashCommand(`/prewalk restart ${from} ${into}`, runtime)).toBe(true);
+		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Prewalk restarted"));
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+	});
+
 	it("requires a fresh todo before a later explicit prewalk can hand off", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
