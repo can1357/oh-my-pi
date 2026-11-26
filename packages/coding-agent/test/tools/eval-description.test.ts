@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Tool as AiTool } from "@oh-my-pi/pi-ai";
@@ -15,6 +16,15 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
+
+/** Helper names the `<namespaces>` judge line tells a JS cell to call: its backticked names, minus those tagged `(Python)`. */
+function jsHelperNames(description: string): string[] {
+	const line = description.split("\n").find(text => text.startsWith("- `judge`,"));
+	if (line === undefined) throw new Error("no judge helper line in eval description");
+	return [...line.split(": ")[0].matchAll(/`([^`]+)`( \(Python\))?/g)]
+		.filter(match => match[2] === undefined)
+		.map(match => match[1]);
+}
 
 function makeSession(opts: {
 	spawns?: string | null;
@@ -150,6 +160,25 @@ describe("eval tool description", () => {
 		expect(pyOnly.helpers).not.toContain("%bun add");
 		expect(pyOnly.helpers).toContain("@tool / tool(fn");
 		expect(pyOnly.helpers).not.toContain("await budget.total()");
+	});
+
+	it("names only JS helpers the JS cell runtime defines in the namespace list", async () => {
+		// A JS cell written from the list must not throw `ReferenceError`; `judge_batch` exists only in Python.
+		const runtime = new JsRuntime({ initialCwd: os.tmpdir(), sessionId: "eval-description-helper-list-js" });
+		const hooks: RuntimeHooks = { onText: () => {}, onDisplay: () => {}, callTool: async () => undefined };
+		try {
+			for (const options of [
+				{ py: false, js: true },
+				{ py: true, js: true },
+			]) {
+				const names = jsHelperNames(getEvalToolDescription(options));
+				const probe = `JSON.stringify({ ${names.map(name => `${JSON.stringify(name)}: typeof ${name}`).join(", ")} })`;
+				const types = JSON.parse((await runtime.run(probe, undefined, hooks)) as string);
+				expect(types).toEqual(Object.fromEntries(names.map(name => [name, "function"])));
+			}
+		} finally {
+			runtime.dispose();
+		}
 	});
 
 	it("inlines every topic when the session cannot open help:// links", () => {
