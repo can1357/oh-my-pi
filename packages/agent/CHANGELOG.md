@@ -6,6 +6,7 @@
 
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
 - Corrected OpenTelemetry chat spans to report the model that actually served the response.
+- Fixed a failed split-turn compaction leaving its other summary request running after the failure was reported
 
 ## [19.2.1] - 2026-11-25
 
