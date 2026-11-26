@@ -98,13 +98,24 @@ export interface AgentsHubDeps {
 	saveAgent: (scope: "project" | "user", spec: GeneratedAgentSpec) => Promise<string>;
 }
 
+/** What the hub hands its host through {@link AgentsHubProps.ref}. */
+export interface AgentsHubHandle {
+	/** Rediscover agents (the host awaits the first load before showing the hub). */
+	reload(): Promise<void>;
+	/**
+	 * The hub's key handler, for the host to route keys from a node that
+	 * outlives the hub's root: the root swaps between a picker and a card
+	 * (pattern input, model browser, create flow), so focus on it goes stale.
+	 */
+	onKey(key: KeyEvent): boolean;
+}
+
 export interface AgentsHubProps {
 	readonly deps: AgentsHubDeps;
 	/** Terminal rows (the hub fills them). */
 	readonly rows: () => number;
 	readonly onCancel: () => void;
-	/** Receives the hub's reload (the host awaits the first load before showing the hub). */
-	readonly ref?: (hub: { reload(): Promise<void> }) => void;
+	readonly ref?: (hub: AgentsHubHandle) => void;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = { project: "Project", user: "User", bundled: "Bundled" };
@@ -361,7 +372,6 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 		modelPreview = undefined;
 		touch();
 	};
-	props.ref?.({ reload });
 
 	// ─── Settings ───────────────────────────────────────────────────────────
 
@@ -1409,6 +1419,7 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 			}
 		},
 	};
+	props.ref?.({ reload, onKey });
 
 	return () =>
 		sheetMode() ? (
