@@ -329,7 +329,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// `permission_denied: no API providers are available`.
 			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
 			// 200K window on every model.
-			return "devin:models-v3";
+			// v4: rows cached before discovery dropped Fusion pairings and folded
+			// `-fast` lanes into `priorityLane` list 1000+ duplicate rows.
+			return "devin:models-v4";
 		default:
 			return providerId;
 	}
