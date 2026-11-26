@@ -109,6 +109,8 @@ export const NON_POSIX_CONTROL_RE = /[\n\r;&|<>`$()]/u;
 const ZSH_SHELL_RE = /(?:^|[\\/])zsh(?:\.exe)?$/i;
 const PYTHON_BIN_RE = /^python\d*(?:\.\d+)*$/u;
 const GENERIC_REINTERPRET_FLAG_RE = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=|$))/u;
+// A reinterpret flag inside a quoted payload (`make SHELL='sh -c "a;b"'`).
+const EMBEDDED_REINTERPRET_FLAG_RE = /\s(?:-[^-\s]*[ce]|--(?:command|eval))(?:[=\s]|$)/u;
 const PWSH_EXEC_FLAGS = ["command", "commandwithargs", "cmd", "cwa", "encodedcommand", "enc", "ec"];
 const CMD_EXEC_ARG_RE = /^\/[ckr]/i;
 const GO_TOOLEXEC_SUBCOMMANDS = new Set(["build", "run", "install", "test", "vet"]);
@@ -225,6 +227,7 @@ const EXEC_FLAG_SPECS: Record<string, ExecFlagSpec> = {
 			"--rsh-command",
 			"--info-script",
 			"--new-volume-script",
+			"--rmt-command",
 		],
 		execShort: "IF",
 		stopAtPositional: false,
@@ -282,6 +285,7 @@ const GIT_SUBCOMMAND_SPECS: Record<string, ExecFlagSpec> = {
 	difftool: { execLong: ["--extcmd", "--tool"], execShort: "xt", stopAtPositional: false },
 	mergetool: { execLong: ["--extcmd", "--tool"], execShort: "xt", stopAtPositional: false },
 	grep: { valueOpts: ["-e", "-f"], execLong: ["--open-files-in-pager"], execShort: "O", stopAtPositional: false },
+	instaweb: { execLong: ["--httpd"], execShort: "d", stopAtPositional: false },
 	"filter-branch": {
 		execLong: [
 			"--env-filter",
@@ -321,7 +325,7 @@ function matchesLongFlag(arg: string, flags: readonly string[] | undefined, allo
 	const name = eq >= 0 ? arg.slice(0, eq) : arg;
 	for (const flag of flags) {
 		if (name === flag) return true;
-		if (allowPrefix && name.startsWith("--") && name.length >= 4 && flag.startsWith(name)) return true;
+		if (allowPrefix && name.startsWith("--") && name.length >= 3 && flag.startsWith(name)) return true;
 	}
 	return false;
 }
@@ -352,12 +356,13 @@ function scanShortCluster(
 	return "ok";
 }
 
+// getopt_long-style parsers (GNU tar/sort/env, git) accept unambiguous long-option
+// prefixes (`--to-com`), so exec flags match by prefix.
 function scanOptionFlags(
 	argv: readonly string[],
 	startIndex: number,
 	spec: ExecFlagSpec,
 	globIndices?: ReadonlySet<number>,
-	allowLongPrefix = false,
 ): boolean {
 	for (let i = startIndex; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -370,7 +375,7 @@ function scanOptionFlags(
 			break;
 		}
 		if (!isOpt || arg === "-" || arg === "+") continue;
-		if (matchesLongFlag(arg, spec.execLong, allowLongPrefix)) return true;
+		if (matchesLongFlag(arg, spec.execLong, true)) return true;
 		if (arg.startsWith("--")) {
 			if (spec.valueOpts?.includes(arg)) i++;
 			continue;
@@ -402,7 +407,7 @@ function unwrapLauncherIndex(argv: readonly string[], globIndices?: ReadonlySet<
 			}
 			if (!arg.startsWith("-") || arg === "-") break;
 			if (globIndices?.has(i) && canGlobExpandToOption(arg)) return "reject";
-			if (matchesLongFlag(arg, spec.rejectLong)) return "reject";
+			if (matchesLongFlag(arg, spec.rejectLong, true)) return "reject";
 			if (arg.startsWith("--")) {
 				i += spec.valueOpts?.includes(arg) ? 2 : 1;
 				continue;
@@ -468,13 +473,12 @@ function hasGitReinterpretableArg(
 			subcommandIdx + 1,
 			{ execLong: ["--upload-pack", "--receive-pack"], stopAtPositional: false },
 			globIndices,
-			true,
 		)
 	) {
 		return true;
 	}
 	const subSpec = Object.hasOwn(GIT_SUBCOMMAND_SPECS, subcommand) ? GIT_SUBCOMMAND_SPECS[subcommand] : undefined;
-	if (subSpec && scanOptionFlags(argv, subcommandIdx + 1, subSpec, globIndices, true)) return true;
+	if (subSpec && scanOptionFlags(argv, subcommandIdx + 1, subSpec, globIndices)) return true;
 	if (subcommand === "submodule" || subcommand === "bisect") {
 		const target = subcommand === "submodule" ? "foreach" : "run";
 		for (let i = subcommandIdx + 1; i < argv.length; i++) {
@@ -562,10 +566,9 @@ export function hasReinterpretableExecutionArg(argv: readonly string[], globWord
 	const spec = Object.hasOwn(EXEC_FLAG_SPECS, specKey) ? EXEC_FLAG_SPECS[specKey] : undefined;
 	if (spec) return scanOptionFlags(argv, offset + 1, spec, globSet);
 	// Fail-closed floor for unlisted wrappers (e.g. `docker exec c sh -c`, `uv run bash -c`, `npx -c`, `su -c`).
+	// Their `--` separates the wrapper's options from the wrapped command (`uv run -- bash -c`), so keep scanning.
 	for (let i = offset + 1; i < argv.length; i++) {
-		const arg = argv[i]!;
-		if (arg === "--") break;
-		const innerName = commandBasename(arg).toLowerCase();
+		const innerName = commandBasename(argv[i]!).toLowerCase();
 		if (POSIX_SHELLS.has(innerName) && scanOptionFlags(argv, i + 1, POSIX_SHELL_SPEC, globSet)) {
 			return true;
 		}
@@ -574,8 +577,7 @@ export function hasReinterpretableExecutionArg(argv: readonly string[], globWord
 	let hasShellMeta = false;
 	for (let i = offset + 1; i < argv.length; i++) {
 		const arg = argv[i]!;
-		if (arg === "--") break;
-		if (GENERIC_REINTERPRET_FLAG_RE.test(arg)) hasGenericFlag = true;
+		if (GENERIC_REINTERPRET_FLAG_RE.test(arg) || EMBEDDED_REINTERPRET_FLAG_RE.test(arg)) hasGenericFlag = true;
 		if (NON_POSIX_CONTROL_RE.test(arg)) hasShellMeta = true;
 		if (hasGenericFlag && hasShellMeta) return true;
 	}

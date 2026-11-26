@@ -1541,6 +1541,18 @@ describe("tool-owned dynamic approval declarations", () => {
 			"env env env env env env env env env sh -c 'id'",
 			"tar -I/tmp/evil -cf /tmp/a.tar .",
 			"git status 'unterminated",
+			"uv run -- bash -c 'id; whoami'",
+			"docker exec c -- sh -c 'id'",
+			"flock /tmp/l -- sh -c 'id'",
+			`make SHELL='sh -c "id; whoami"'`,
+			"sort --compress-prog=/tmp/evil f",
+			"tar -xf a.tar --to-com=/tmp/evil",
+			"tar -xf a.tar --use-comp=/tmp/evil",
+			"tar -cf host:/x --rmt-command=/tmp/evil .",
+			"env --split='sh -c id'",
+			"env --s='sh -c id'",
+			"sudo --sh id",
+			"git instaweb --httpd=/tmp/evil",
 		]) {
 			expect(bashApproval(command, permissiveOverrides, "/bin/bash")).toBe("exec");
 		}
