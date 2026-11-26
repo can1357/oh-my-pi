@@ -13,7 +13,7 @@ import { enableConsoleVtInput, restoreConsoleInputMode } from "@oh-my-pi/pi-nati
 import { logger } from "@oh-my-pi/pi-utils";
 import { isDarkBackground } from "../caps/color";
 import { detectTerminal } from "../caps/detect";
-import { forcedCellSize, rawBackspaceIsCtrl, synchronizedOutputOverride } from "../caps/env";
+import { rawBackspaceIsCtrl, synchronizedOutputOverride } from "../caps/env";
 import type { InputEvent, TerminalCapabilities } from "../contract";
 import { type Clock, systemClock } from "../input/clock";
 import { GLYPH_CONFIRMATION_CODEPOINT, GLYPH_SUPPORT_QUERY, glyphRegistrations, parseGlyphReply } from "../glyphs";
@@ -280,7 +280,8 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#baseline = detected.capabilities;
 		this.#capabilities = this.#baseline;
 		this.#forcedImages = env.PI_FORCE_IMAGE_PROTOCOL !== undefined && env.PI_FORCE_IMAGE_PROTOCOL !== "";
-		this.#forcedCell = forcedCellSize(env) !== null;
+		// Only `PI_CELL_SIZE` gives the environment baseline a cell size.
+		this.#forcedCell = this.#baseline.cell !== null;
 		this.#size = this.#osSize();
 
 		this.#decoder = new InputDecoder(
@@ -762,8 +763,9 @@ export class ProcessTerminalInput implements TerminalInput {
 		// DECRQM: synchronized output, in-band resize, color-scheme reports, bracketed paste,
 		// xterm scroll-to-bottom on output/keypress.
 		let out = "\x1b[?2026$p\x1b[?2048$p\x1b[?2031$p\x1b[?2004$p\x1b[?1010$p\x1b[?1011$p";
-		// XTVERSION and the cell size in pixels.
-		out += "\x1b[>0q\x1b[16t";
+		// XTVERSION, and the cell size in pixels unless `PI_CELL_SIZE` pins it.
+		out += "\x1b[>0q";
+		if (!this.#forcedCell) out += "\x1b[16t";
 		// XTSMGRAPHICS (SIXEL geometry), when no protocol is known: the one image upgrade a probe makes.
 		if (this.#capabilities.images === null && !this.#forcedImages) out += "\x1b[?2;1;0S";
 		// Structured OSC 99 notifications only once the terminal lists `title` among its payload types.

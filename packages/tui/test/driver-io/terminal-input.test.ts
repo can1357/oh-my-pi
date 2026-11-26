@@ -408,6 +408,7 @@ describe("ProcessTerminalInput probe replies", () => {
 		h.bytes("\x1b[6;18;9t\x1b[48;40;120;800;1200t");
 		expect(h.resizes).toEqual([[120, 40]]);
 		expect(h.input.capabilities.cell).toEqual({ w: 12, h: 24 });
+		expect(h.out()).not.toContain("\x1b[16t");
 	});
 
 	it("enables SIXEL from DA1 plus a positive XTSMGRAPHICS geometry", () => {
