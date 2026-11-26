@@ -19,6 +19,7 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- Added `--session-id <uuid>` to resume the session with that id or start a new one under it, so a launcher can record the id before the first launch and run the same command every time; it is refused before any model call while another running omp has that session open, and beside `--resume`, `--restore`, `--continue`, `--fork`, `--no-session`, `--from-claude`, `--from-codex`, `--goal` or `--mode acp`
 
 ### Changed
 

@@ -263,6 +263,7 @@ describe("buildSpec", () => {
 							thinking: { kind: "string", options: ["low", "high"] },
 							"no-tools": { kind: "boolean" },
 							"session-dir": { kind: "string" },
+							"session-id": { kind: "string" },
 						},
 						args: {},
 					}),
@@ -275,6 +276,8 @@ describe("buildSpec", () => {
 		expect(byName.get("thinking")).toBe("enum");
 		expect(byName.get("no-tools")).toBe("flag");
 		expect(byName.get("session-dir")).toBe("dir");
+		// A session id is a UUID: nothing to complete, and not a file path.
+		expect(byName.get("session-id")).toBe("value");
 	});
 });
 

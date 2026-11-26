@@ -115,6 +115,11 @@ export interface NewSessionOptions {
 	additionalDirectories?: string[];
 	/** Directory for the new session file (and later `/new` sessions); defaults to the current session directory. */
 	sessionDir?: string;
+	/**
+	 * Id for the new session, in place of a minted one: for a launcher that records the id
+	 * before the session starts. The caller makes sure no stored session holds it.
+	 */
+	sessionId?: string;
 }
 
 export interface SessionEntryBase {

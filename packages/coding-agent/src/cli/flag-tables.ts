@@ -37,6 +37,7 @@ import { parseSpinnerInterval } from "../config/spinner-interval";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
+import { CANONICAL_SESSION_ID_RE } from "../session/session-id-format";
 
 /**
  * Runtime dependencies injected into setters that need to validate input.
@@ -236,6 +237,16 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--session-dir": (result, value) => {
 		result.sessionDir = value;
 	},
+	// Thrown at parse time, unlike the deferred enum errors: a deferred error would let `--fork`,
+	// `--resume` or an import act before the launch is refused.
+	"--session-id": (result, value) => {
+		// Lowercased: omp mints lowercase ids, and macOS `uuidgen` prints uppercase.
+		const id = value.toLowerCase();
+		if (!CANONICAL_SESSION_ID_RE.test(id)) {
+			throw new CliUsageError(`Invalid --session-id value: ${JSON.stringify(value)}. Expected a UUID.`);
+		}
+		result.sessionId = id;
+	},
 	"--models": (result, value) => {
 		result.models = value.split(",").map(s => s.trim());
 	},
@@ -431,8 +442,8 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
  * One-shot launch selectors dropped when relaunching into an existing
  * session: the relaunch supplies its own session source, and replaying a
  * stale continue/fork/import selector would re-run its one-shot session
- * choice. `--goal` belongs here too: it seeds a fresh session only, and
- * `validateGoalLaunch` rejects it beside any resume/fork selector.
+ * choice. `--goal` and `--session-id` belong here too: each is refused
+ * beside any resume/fork selector, and the relaunch reopens the session itself.
  */
 const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--resume": true,
@@ -445,6 +456,7 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--from-claude": true,
 	"--from-codex": true,
 	"--goal": true,
+	"--session-id": true,
 };
 
 /**
