@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { type Accessor, computed, createRoot, type Signal, signal } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
-import { RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { anchoredRows, RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { itermImage } from "@oh-my-pi/pi-tui/driver/images/iterm";
 import { kittyDelete, kittyDeleteAll, kittyTransmit, kittyVirtualPlace } from "@oh-my-pi/pi-tui/driver/images/kitty";
 import {
 	type ImageRequest,
@@ -369,6 +370,15 @@ describe("TerminalImages: fallback and SIXEL", () => {
 			[120, 240],
 			[500, 1000],
 		]);
+	});
+
+	it("sends an iTerm2 image taller than the screen at the screen's height, at its natural size once it fits", () => {
+		const screenRows = signal(12);
+		const { images } = rig({ images: "iterm", cell: { w: 10, h: 20 } }, { screenRows });
+		const block = paint(images, { ...image("i"), widthPx: 500, heightPx: 1000 }, { fallback: "[i]" });
+		expect(block.block().rows).toEqual(anchoredRows(itermImage(PNG_1PX, 12, 12), 12));
+		screenRows.set(60);
+		expect(block.block().rows).toEqual(anchoredRows(itermImage(PNG_1PX, 50, 50), 50));
 	});
 
 	it("falls back in the image's rows when the encode fails", async () => {

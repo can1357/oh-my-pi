@@ -20,6 +20,7 @@
  * resolve through the last frame's hit regions.
  */
 import type { FramePlan, InputEvent, MouseEvent, TerminalCapabilities, TerminalDriver } from "../driver/contract";
+import { dropCutImages } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { KeyEvent } from "../events";
@@ -935,8 +936,12 @@ export class TermBackend {
 				from = Math.max(0, block.rows.length - rows);
 			} else from = block.rows.length - rows;
 			for (; lead > 0; lead--) viewport.push("");
-			const top = viewport.length - from;
+			const start = viewport.length;
+			const top = start - from;
+			// Block rows above `from` are on screen right above it only when they are in history and the block opens the viewport.
+			const joined = start === 0 && from === skipAt(i);
 			for (let row = from; row < block.rows.length; row++) viewport.push(block.rows[row]!);
+			if (!joined) dropCutImages(viewport, start);
 			if (block.cursor && block.cursor.row >= from && this.#surface.focused())
 				cursor = { row: top + block.cursor.row, col: block.cursor.col };
 			for (const hit of block.hits ?? []) if (hit.row >= from) hits.push({ hit, top, left: 0 });
@@ -944,6 +949,7 @@ export class TermBackend {
 		const clipped = Math.max(0, viewport.length - capacity);
 		if (clipped > 0) {
 			viewport.splice(0, clipped);
+			dropCutImages(viewport, 0);
 			if (cursor) cursor = cursor.row >= clipped ? { row: cursor.row - clipped, col: cursor.col } : null;
 			for (const entry of hits) (entry as { top: number }).top -= clipped;
 		}
@@ -982,6 +988,7 @@ export class TermBackend {
 		const hidden = covering > 0 ? Math.min(dockTop, viewport.length - height) : 0;
 		if (hidden > 0) {
 			viewport.splice(0, hidden);
+			dropCutImages(viewport, 0, dockTop - hidden);
 			if (cursor) cursor = cursor.row >= hidden ? { row: cursor.row - hidden, col: cursor.col } : null;
 			for (const entry of hits) (entry as { top: number }).top -= hidden;
 		}
