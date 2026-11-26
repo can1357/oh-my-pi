@@ -127,7 +127,7 @@ describe("native rewind page and session reset", () => {
 
 	it("opens a screen surface of the branch's blocks with the latest turn picked and the bar docked", async () => {
 		await using ui = await nativeShell(mode.shell);
-		mode.showUserMessageSelector();
+		await mode.showUserMessageSelector();
 
 		const page = ui.surface("screen");
 		expect(page?.role).toBe("omp.rewind");
@@ -147,7 +147,7 @@ describe("native rewind page and session reset", () => {
 
 	it("moves the outline with the keys: the turns a rewind drops are marked", async () => {
 		await using ui = await nativeShell(mode.shell);
-		mode.showUserMessageSelector();
+		await mode.showUserMessageSelector();
 		ui.type(UP);
 
 		const page = ui.surface("screen")!;
@@ -166,7 +166,7 @@ describe("native rewind page and session reset", () => {
 
 	it("outlines the turn Tern clicks", async () => {
 		await using ui = await nativeShell(mode.shell);
-		mode.showUserMessageSelector();
+		await mode.showUserMessageSelector();
 		const first = ui.surface("screen")!.main[0]!;
 		expect(first.p).toMatchObject({ actions: { click: "rewind-pick" } });
 		ui.send({ ev: "action", sf: ui.sf, id: first.id, act: "rewind-pick" });
@@ -184,7 +184,7 @@ describe("native rewind page and session reset", () => {
 
 	it("filters the page to the matching turns and Escape leaves the filter, then the page", async () => {
 		await using ui = await nativeShell(mode.shell);
-		mode.showUserMessageSelector();
+		await mode.showUserMessageSelector();
 		ui.type("f");
 		const field = find(ui, ui.surface("screen")!.dock, "input")!;
 		expect(field.p).toMatchObject({ text: "", prompt: "filter: ", sendable: false });
@@ -215,7 +215,7 @@ describe("native rewind page and session reset", () => {
 		const manager = session.sessionManager;
 		for (let index = 0; index < 640; index++) manager.appendMessage(user(`prompt ${index}`));
 		await using ui = await nativeShell(mode.shell);
-		mode.showUserMessageSelector();
+		await mode.showUserMessageSelector();
 
 		let page = ui.surface("screen")!;
 		expect(sig(page.main[0]!)).toBe("row:omp.rewind.earlier");

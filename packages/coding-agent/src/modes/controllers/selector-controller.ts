@@ -111,6 +111,7 @@ import {
 	AgentTranscriptViewerModel,
 	type ViewerTranscriptActions,
 } from "../../ui/overlays/panels/agent-transcript-viewer-model";
+import { BorderedLoader } from "../../ui/overlays/panels/bordered-loader";
 import { ExtensionDashboard } from "../../ui/overlays/panels/extensions-dashboard";
 import { ExtensionDashboardModel } from "../../ui/overlays/panels/extensions-dashboard-model";
 import { LoginDialog, LoginDialogState } from "../../ui/overlays/panels/login-dialog";
@@ -321,6 +322,23 @@ export class SelectorController {
 	#showInEditorArea(build: (done: () => void) => JSXNode, focus: OverlayOptions["focus"] = pickerFocus): void {
 		const done = (): void => handle.close();
 		const handle = this.ctx.showEditorAreaDialog(() => build(done), { focus });
+	}
+
+	/**
+	 * Put a loader on screen before a picker that draws the session's history: the terminal
+	 * paints such a picker in one frame that takes a while on a long session, and until then
+	 * the keypress showed nothing. Tern draws the history itself and needs none.
+	 */
+	async #presentHistoryLoader(): Promise<void> {
+		const host = this.ctx.shell.host;
+		if (!host || host.native) return;
+		// Holding focus keeps keys typed meanwhile off the hidden composer, and its caret from showing through.
+		const loader = this.ctx.shell.overlays.show(() =>
+			bottomSheetView("history-loader", BorderedLoader({ message: "Loading the session history…" })),
+		);
+		await this.ctx.shell.nextFrame();
+		// The caller opens its picker before the next frame: the loader stays up while that frame paints.
+		loader.close();
 	}
 
 	showSettingsSelector(): void {
@@ -1358,7 +1376,7 @@ export class SelectorController {
 	}
 
 	/** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
-	showUserMessageSelector(startAt?: string): void {
+	async showUserMessageSelector(startAt?: string): Promise<void> {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
@@ -1369,6 +1387,8 @@ export class SelectorController {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
+
+		await this.#presentHistoryLoader();
 		const done = () => {
 			overlay?.close();
 			this.focusActiveEditorArea();
@@ -1595,7 +1615,7 @@ export class SelectorController {
 			return;
 		}
 		if (turn === "rewind") {
-			this.showUserMessageSelector(entry.id);
+			await this.showUserMessageSelector(entry.id);
 			return;
 		}
 		if (turn === "fork") {
@@ -1633,7 +1653,7 @@ export class SelectorController {
 		);
 	}
 
-	showCopySelector(): void {
+	async showCopySelector(): Promise<void> {
 		// The session on screen: a focused subagent's transcript, else the main one.
 		const session = this.ctx.viewSession;
 		const entries = session.sessionManager.getBranch().filter(isTranscriptEntry);
@@ -1642,6 +1662,7 @@ export class SelectorController {
 			return;
 		}
 
+		await this.#presentHistoryLoader();
 		const done = () => {
 			overlay?.close();
 			this.focusActiveEditorArea();
@@ -1674,7 +1695,7 @@ export class SelectorController {
 		);
 	}
 
-	showTreeSelector(): void {
+	async showTreeSelector(): Promise<void> {
 		const tree = this.ctx.sessionManager.getTree();
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
@@ -1683,6 +1704,7 @@ export class SelectorController {
 			return;
 		}
 
+		await this.#presentHistoryLoader();
 		this.#showInEditorArea(done =>
 			TreeSelector({
 				roots: tree,
@@ -1732,7 +1754,7 @@ export class SelectorController {
 
 						if (summaryChoice === undefined) {
 							// User pressed escape - re-show tree selector
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 
@@ -1792,7 +1814,7 @@ export class SelectorController {
 						if (result.aborted) {
 							// Summarization aborted - re-show tree selector
 							this.ctx.showStatus("Branch summarization cancelled");
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 						if (result.cancelled) {

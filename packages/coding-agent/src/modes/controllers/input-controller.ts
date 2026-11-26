@@ -565,8 +565,8 @@ export class InputController {
 		const actions: [Keybinding, () => void][] = [
 			["app.plan.toggle", () => void this.ctx.handlePlanModeCommand()],
 			["app.session.new", () => void this.ctx.handleNewCommand()],
-			["app.session.tree", () => this.ctx.showTreeSelector()],
-			["app.session.fork", () => this.ctx.showUserMessageSelector()],
+			["app.session.tree", () => void this.ctx.showTreeSelector()],
+			["app.session.fork", () => void this.ctx.showUserMessageSelector()],
 			["app.session.resume", () => this.ctx.showSessionSelector()],
 			["app.message.followUp", () => void this.handleFollowUp()],
 			["app.stt.toggle", () => void this.ctx.handleSTTToggle()],
@@ -899,9 +899,9 @@ export class InputController {
 				const now = Date.now();
 				if (now - this.ctx.lastEscapeTime < 500) {
 					if (doubleEscapeAction === "tree") {
-						this.ctx.showTreeSelector();
+						void this.ctx.showTreeSelector();
 					} else {
-						this.ctx.showUserMessageSelector();
+						void this.ctx.showUserMessageSelector();
 					}
 					this.ctx.lastEscapeTime = 0;
 				} else {
