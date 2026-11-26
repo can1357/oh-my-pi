@@ -283,6 +283,6 @@ export function EmbedFigure(
 function picture(bytes: Uint8Array, mime: string | undefined): Loaded | undefined {
 	const size = readImageHeaderDimensions(bytes);
 	if (!size) return undefined;
-	const type = mime?.startsWith("image/") ? mime.split(";")[0]! : bytes[0] === 0xff ? "image/jpeg" : "image/png";
+	const type = mime?.startsWith("image/") ? mime.split(";")[0]! : size.mimeType;
 	return { status: "image", raster: { blob: registerBlob(bytes, type), w: size.width, h: size.height } };
 }

@@ -1403,7 +1403,7 @@ A `ComposerShape` contains:
 - `sideBorders`: content rows carry side chrome with padding, so an end-of-row caret may take a padding cell.
 - `gutter`: the prompt gutter before the first row (blanks before the others).
 - `paddingX`: default padding inside the side chrome; `sideWidth(paddingX)`: cells the chrome takes on each side of a content row.
-- `top(cx)` and `bottom(cx)`: one chrome row or `undefined`; `row(cx)`: a content row in its chrome (usually one row).
+- `top(cx)` and `bottom(cx)`: one chrome row or `undefined`; `row(cx)`: return an array when its first row holds the text, or `{ rows, textRow }` to identify the text row by its zero-based index when adding chrome above it. For example, return `{ rows: [blankRow, inputRow], textRow: 1 }` to put a blank row above the input without moving the caret off the text.
 
 Every chrome context has `width`, `paddingX`, `theme`, the rounded `box` glyphs, `border(text)` (the state-colored border), `accent(text)`, `surface(text)` (the composer surface, kept across the row's own resets) and, when the composer shows one, the pre-styled `status` content with its `width`. A row context adds the styled `text` (caret included), the `pad` blanks filling it to the content width, this row's `gutter`, `first`, `last` and `overflow` (cells an end-of-row caret took from the right chrome). Every row must occupy exactly `width` visible cells.
 

@@ -68,6 +68,8 @@ export interface AppFrameOptions {
 	readonly autocompleteMaxVisible?: number;
 	/** `showHardwareCursor`: the terminal's cursor marks the caret (else the composer draws one). */
 	readonly hardwareCursor?: boolean;
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	readonly imeSafeCursor?: boolean;
 	/**
 	 * The terminal the frame starts on, whoever starts it (headless hosts and tests hand the
 	 * interactive mode an unstarted frame on in-memory streams); {@link AppFrameStartOptions} add to it.
@@ -129,6 +131,7 @@ export class AppFrame {
 			shape: options.shape,
 			vim: options.vim === true,
 			caret: options.hardwareCursor === false ? "drawn" : "terminal",
+			imeSafeCursor: options.imeSafeCursor === true,
 			dictating: () => {
 				const state = this.dictation();
 				return state === "recording" || state === "transcribing";
@@ -194,6 +197,11 @@ export class AppFrame {
 	setShape(id: string): void {
 		this.#shape.set(id);
 		this.composer.setShape(id);
+	}
+
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	setImeSafeCursor(enabled: boolean): void {
+		this.composer.setImeSafeCursor(enabled);
 	}
 
 	/** Draw the bar. A startup prediction has no session routes, so it advertises no click actions. */
