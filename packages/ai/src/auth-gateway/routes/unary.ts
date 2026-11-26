@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ApiKey } from "../../auth-retry";
 import { classifyGatewayError } from "../../error/gateway";
+import { ValidationError } from "../../error/validation";
 import type { Api, FetchImpl, Model, Usage } from "../../types";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
@@ -95,6 +96,11 @@ export async function handleUnaryGatewayRoute<Parsed extends { modelId: string }
 		);
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		// Adapter validation is a client error: the wire schema admits values the
+		// adapter cannot serve, and the classifier would bill them as a 502.
+		if (error instanceof ValidationError) {
+			return codedErrorResponse(400, "invalid_request_error", error.message);
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn(`auth-gateway ${route.failure} failed`, {
 			format: route.format,

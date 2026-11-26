@@ -15,6 +15,7 @@ members = [
    "crates/vcs",
    "crates/vfs",
    "crates/voice",
+   "crates/web",
    "crates/xfs",
    "crates/vendor/cfg_aliases",
    "crates/vendor/grep-searcher",
@@ -275,6 +276,7 @@ omp-xfs = { path = "crates/xfs" }
 omp-vcs = { path = "crates/vcs" }
 omp-vfs = { path = "crates/vfs" }
 omp-builtins = { path = "crates/builtins" }
+omp-web = { path = "crates/web" }
 # Third-party crates of omp's shell engine (`crates/shell/src/bash`),
 # at the versions of the workspace it came from.
 blake3 = { version = "1.8.7", features = ["rayon"] }
@@ -302,6 +304,7 @@ flume = "0.12"
 # Serialization & Data Formats
 # ──────────────────────────────────────────────────────────────────────────────
 base64 = "0.23"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "1.1"
@@ -439,9 +442,8 @@ syntect = { version = "5.3", default-features = false, features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Markup Conversion
 # ──────────────────────────────────────────────────────────────────────────────
-# The version html-to-markdown-rs builds on; bump with it.
 html-escape = "0.3"
-html-to-markdown-rs = { version = "3.18.3", default-features = false }
+html5ever = "0.40.1"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization
