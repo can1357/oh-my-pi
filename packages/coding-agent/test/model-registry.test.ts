@@ -724,6 +724,27 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", pruned.id)).toBeUndefined();
 			expect(registry.find("openai-codex", otherProvider.id)).toBeUndefined();
 		});
+
+		test("provider base URL ignores a judge row's own endpoint after discovery (#20581)", async () => {
+			// OpenCode Go seeds its Jev judge on the Console System One endpoint and
+			// discovery lists that seed ahead of the chat rows. The usage probe reads
+			// the provider base URL; answering with the judge's URL sent it to
+			// `/inference/systemone/v1/usage`, which 404s.
+			authStorage.keys.setRuntime("opencode-go", "go-key");
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url === "https://opencode.ai/inference/go/v1/models") {
+					return Response.json({ object: "list", data: [{ id: "kimi-k2.7-code", object: "model" }] });
+				}
+				return new Response("Not Found", { status: 404 });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("opencode-go", "online");
+
+			expect(registry.find("opencode-go", "jev-1.13-free")?.baseUrl).toBe("https://opencode.ai/inference/systemone");
+			expect(registry.getProviderBaseUrl("opencode-go")).toBe("https://opencode.ai/inference/go/v1");
+		});
 	});
 
 	describe("provider compat overrides", () => {

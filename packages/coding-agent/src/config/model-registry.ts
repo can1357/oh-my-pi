@@ -4622,8 +4622,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Provider-level base URL: explicit runtime/config overrides first, then any
-	 * discovered model that defines one.
+	 * Provider-level base URL: explicit runtime/config overrides first, then the
+	 * first chat model that defines one, then any model that does.
 	 *
 	 * The overrides lead because a model-derived answer is only available once
 	 * discovery has populated the registry. `omp usage` builds a `ModelRegistry`
@@ -4631,13 +4631,23 @@ export class ModelRegistry {
 	 * discovery-only (no bundled rows) have no model to read a URL from at that
 	 * point — so deriving solely from models returned `undefined` cache-cold and
 	 * let a usage probe send a proxy-scoped key to the provider's canonical host.
+	 *
+	 * Chat rows lead the model fallback because non-chat rows may live on their
+	 * own endpoint: OpenCode Go seeds its Jev judge on `/inference/systemone`,
+	 * which serves no `/v1/usage` (#20581). Judge-only providers still resolve
+	 * through their judge rows.
 	 */
 	getProviderBaseUrl(provider: string): string | undefined {
-		return (
-			this.#runtimeProviderOverrides.get(provider)?.baseUrl ??
-			this.#providerOverrides.get(provider)?.baseUrl ??
-			this.#modelsForProviderLookup(provider).find(m => m.provider === provider && m.baseUrl)?.baseUrl
-		);
+		const override =
+			this.#runtimeProviderOverrides.get(provider)?.baseUrl ?? this.#providerOverrides.get(provider)?.baseUrl;
+		if (override !== undefined) return override;
+		let fallback: string | undefined;
+		for (const model of this.#modelsForProviderLookup(provider)) {
+			if (model.provider !== provider || !model.baseUrl) continue;
+			if (modelKind(model) === "chat") return model.baseUrl;
+			fallback ??= model.baseUrl;
+		}
+		return fallback;
 	}
 	/**
 	 * Materialize provider-level config headers for one outbound request.
