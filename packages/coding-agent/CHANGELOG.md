@@ -22,6 +22,7 @@
 ### Fixed
 
 - Codex saved-reset auto-redeem no longer spends one ChatGPT Team member's reset for another member's block when both credentials share the workspace account id ([#20619](https://github.com/can1357/oh-my-pi/issues/20619)).
+- The active usage marker no longer follows a shared email onto another workspace's quota.
 - Blob-broker tunnels no longer flash console windows on Windows, including when a tunnel fails to start and is retried ([#20599](https://github.com/can1357/oh-my-pi/issues/20599)).
 - `/restart` keeps the session open if its working directory was deleted and suggests using `/move` before retrying ([#20594](https://github.com/can1357/oh-my-pi/issues/20594)).
 - `http` MCP servers that answer `server/discover` with a plain HTTP 415 (rmcp 0.2, e.g. `elastic/mcp-server-elasticsearch`) now connect through the `initialize` handshake instead of failing ([#20588](https://github.com/can1357/oh-my-pi/issues/20588)).
