@@ -384,8 +384,8 @@ export class MCPManager implements MCPManagerApi {
 	#startupUpdates = new Map<string, Promise<void>>();
 	/** Servers still in the session's startup connect, each with the token of the connect that claimed it. */
 	#startupOwned = new Map<string, object>();
-	/** Each mounted tool's server by tool name, kept after the tool goes: a notice may name a tool already removed. */
-	#toolServers = new Map<string, string>();
+	/** Claimed servers' mounted tools by name, kept until the claim ends: a notice may name a tool removed since. */
+	#startupTools = new Map<string, string>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
 	/** Newest connect/reconnect failure per server, cleared when it connects; explains "not connected". */
@@ -1046,7 +1046,7 @@ export class MCPManager implements MCPManagerApi {
 			const owned = startup ? {} : undefined;
 			if (owned) this.#startupOwned.set(name, owned);
 			const release = (): void => {
-				if (owned && this.#startupOwned.get(name) === owned) this.#startupOwned.delete(name);
+				if (owned && this.#startupOwned.get(name) === owned) this.#endStartup(name);
 			};
 			let retrying = false;
 			const startupUpdate = toolsPromise
@@ -1157,7 +1157,7 @@ export class MCPManager implements MCPManagerApi {
 	#replaceServerTools(name: string, tools: CustomTool<TSchema, MCPToolDetails>[]): void {
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
 		this.#tools.push(...tools);
-		for (const tool of tools) this.#toolServers.set(tool.name, name);
+		if (this.#startupOwned.has(name)) for (const tool of tools) this.#startupTools.set(tool.name, name);
 		// Stable sort by name so reconnect order does not perturb the array.
 		// See `sortMCPToolsByName` for the cache-stability rationale.
 		sortMCPToolsByName(this.#tools);
@@ -1336,8 +1336,14 @@ export class MCPManager implements MCPManagerApi {
 	 * server that mounted the tool, never a name prefix; a tool removed since still names its server.
 	 */
 	isStartupMount(toolName: string): boolean {
-		const server = this.#toolServers.get(toolName);
+		const server = this.#startupTools.get(toolName);
 		return server !== undefined && this.#startupOwned.has(server);
+	}
+
+	/** End `name`'s startup claim and forget its tools. */
+	#endStartup(name: string): void {
+		this.#startupOwned.delete(name);
+		for (const [tool, server] of this.#startupTools) if (server === name) this.#startupTools.delete(tool);
 	}
 
 	/**
@@ -1578,7 +1584,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#startupServers.delete(name);
 		this.#startupFailures.delete(name);
 		this.#startupUpdates.delete(name);
-		this.#startupOwned.delete(name);
+		this.#endStartup(name);
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
@@ -1636,6 +1642,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#pendingToolLoads.clear();
 		this.#startupUpdates.clear();
 		this.#startupOwned.clear();
+		this.#startupTools.clear();
 		this.#startupServers.clear();
 		this.#startupFailures.clear();
 		this.#pendingReconnections.clear();
