@@ -23,7 +23,9 @@ describe("AgentOutputManager", () => {
 	it("reserves numeric names for PIDs only when cross-instance messaging is enabled", async () => {
 		using tmp = TempDir.createSync("@omp-output-manager-");
 		await Bun.write(path.join(tmp.path(), "Agent123.md"), "prior output");
-		const local = new AgentOutputManager(() => tmp.path(), { settings: Settings.isolated() });
+		const local = new AgentOutputManager(() => tmp.path(), {
+			settings: Settings.isolated({ "task.crossInstance": false }),
+		});
 		const sharing = new AgentOutputManager(() => tmp.path(), {
 			settings: Settings.isolated({ "task.crossInstance": true }),
 		});

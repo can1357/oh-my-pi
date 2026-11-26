@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "../utils/render-utils";
 import { memoryNoticeErrorText } from "../memory-backend/messages";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
@@ -22,7 +22,7 @@ import {
 	resolveSeedsForScope,
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
-import { countUserTurns, extractMessages } from "./transcript";
+import { countUserTurns, extractMessages, retentionStart } from "./transcript";
 import { type DrainResult, HindsightOutbox, type RetainInput } from "./outbox";
 
 /** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
@@ -482,9 +482,12 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	async #retainIfDue(): Promise<void> {
 		if (!this.config.autoRetain) return;
 		// Cheap gate first: most turn ends are not retain turns, so skip text extraction.
-		const userTurns = countUserTurns(this.session.sessionManager);
+		const manager = this.session.sessionManager;
+		const entries = manager.getEntries();
+		const start = retentionStart(entries, manager.getHeader?.());
+		const userTurns = countUserTurns(entries, start);
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
-		const messages = extractMessages(this.session.sessionManager);
+		const messages = extractMessages(entries, start);
 		if (messages.length === 0) return;
 
 		try {
@@ -507,13 +510,15 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		}
 	}
 
-	/** `/memory enqueue`: retain the whole transcript now, after any in-flight retain settles. */
+	/** `/memory enqueue`: rebuild retention for the current session, after any in-flight retain settles. */
 	forceRetainCurrentSession(): Promise<void> {
 		return this.#requestRetain(true);
 	}
 
 	async #forceRetain(): Promise<void> {
-		const messages = extractMessages(this.session.sessionManager);
+		const manager = this.session.sessionManager;
+		const entries = manager.getEntries();
+		const messages = extractMessages(entries, retentionStart(entries, manager.getHeader?.()));
 		if (messages.length === 0) return;
 		// Forced retains are user-initiated rebuilds (`/memory enqueue`): drop the
 		// incremental cache so the full transcript is reformatted and resent even
@@ -558,7 +563,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 			};
 		}
 
-		const history = extractMessages(this.session.sessionManager);
+		const history = extractMessages(this.session.sessionManager.getEntries());
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);

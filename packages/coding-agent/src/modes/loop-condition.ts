@@ -16,11 +16,12 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
-import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
+import type { LoopConditionConfig } from "./view-model/status-line/loop";
 import type { BashResult } from "../exec/bash-executor";
-import { executeBash } from "../exec/bash-executor";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
+import { executeBash, sessionShellEnv } from "../exec/bash-executor";
+import { TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { truncateToWidth } from "../utils/text-width";
+import { sanitizeStatusText } from "./view-model/chrome/shared";
 
 export type LoopConditionVerdict =
 	/** The condition says run another iteration. */
@@ -39,6 +40,8 @@ export interface LoopConditionOptions {
 	signal?: AbortSignal;
 	/** Owning session id, so the condition's shell session cannot leak state into (or from) another session's. */
 	sessionId: string;
+	/** Owning session's transcript, for the condition's `PI_SESSION_FILE`; absent when not persisted. */
+	sessionFile?: string;
 	/** Asked once the run settles; `false` drops the condition shell if the owning session was left mid-run. */
 	isSessionCurrent?: () => boolean;
 }
@@ -103,6 +106,7 @@ export async function evaluateLoopCondition(
 			signal: options.signal,
 			sessionKey: `${LOOP_CONDITION_SESSION_KEY}:${options.sessionId}`,
 			isSessionCurrent: options.isSessionCurrent,
+			env: sessionShellEnv({ id: options.sessionId, file: options.sessionFile }),
 		});
 	} catch (error) {
 		logger.error("loop condition failed to start", { command: condition.command, error: String(error) });

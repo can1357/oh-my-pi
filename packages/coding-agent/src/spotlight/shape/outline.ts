@@ -3,7 +3,7 @@
  * passages. Each passage carries its enclosing signature to the final window. The remaining folds name exact file
  * coordinates both for the agent's readback markers and for the session's fold recovery state.
  */
-import type { SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightReason } from "../../tools/details/spotlight";
 import { countNewlines } from "@oh-my-pi/pi-utils";
 import { fileLines, readTargets, resolveTarget, SOURCE_PATH } from "./command";
 import { bump, noteRank, noteWhy, type Origin, type Run, scoreLines, shifted, spanShares } from "./run";

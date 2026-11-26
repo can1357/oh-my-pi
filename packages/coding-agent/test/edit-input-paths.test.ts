@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import { getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+import { getEditInputPaths } from "@oh-my-pi/pi-coding-agent/tools/details/edit";
 
 it("keeps apply-patch targets when unchanged source contains a sloppy marker", () => {
 	const input = "*** Begin Patch\n*** Update File: target.txt\n@@\n <SM: example>\n-old\n+new\n*** End Patch";

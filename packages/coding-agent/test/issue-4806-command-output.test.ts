@@ -4,16 +4,37 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { Text } from "@oh-my-pi/pi-tui";
-import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { type JSXNode, jsx, type UiNode } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal, transcriptText } from "./helpers/mode-terminal";
+
+/** A plain transcript line. */
+function line(text: string): () => JSXNode {
+	return () => jsx("text", { text });
+}
+
+/** Whether `node` is `root` or inside it. */
+function within(root: UiNode, node: UiNode | null): boolean {
+	return node !== null && (root === node || root.children().some(child => within(child, node)));
+}
+
+/** A node as the native backend describes it. */
+interface Described {
+	readonly k: string;
+	readonly p?: Readonly<Record<string, unknown>>;
+	readonly scroll?: unknown;
+	readonly c?: readonly Described[];
+}
 
 describe("issue #4806 command output during streaming", () => {
 	let authStorage: AuthStorage;
@@ -21,20 +42,13 @@ describe("issue #4806 command output during streaming", () => {
 	let session: AgentSession;
 	let streaming = true;
 	let tempDir: TempDir;
+	let term: ModeTerminal;
 
 	beforeAll(() => {
 		initTheme();
 	});
 
 	beforeEach(async () => {
-		vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
-		if (typeof process.stdin.setRawMode === "function") {
-			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
-		}
-
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-issue-4806-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -50,13 +64,17 @@ describe("issue #4806 command output during streaming", () => {
 		});
 		streaming = true;
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
-		mode = new InteractiveMode(session, "test");
+		// Reports and sheets run on the shell: keys reach them through the terminal.
+		term = createModeTerminal({ columns: 100, rows: 40 });
+		await term.start();
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 		mode.isInitialized = true;
-		mode.ui.requestRender = vi.fn();
 	});
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		HistoryStorage.close();
 		vi.restoreAllMocks();
 		await session?.dispose();
@@ -65,106 +83,111 @@ describe("issue #4806 command output during streaming", () => {
 		resetSettingsForTest();
 	});
 
-	it("docks a short report above the editor without touching the streaming transcript; Esc removes it", () => {
-		const streamedReply = new Text("agent is streaming", 0, 0);
-		mode.chatContainer.addChild(streamedReply);
-		mode.ui.setFocus(mode.editor);
+	/** Natively, reports open as sheets (Tern). */
+	const goNative = () => vi.spyOn(mode.shell, "native").mockReturnValue(true);
+	const report = () => mode.shell.dock.slot("report");
+
+	it("docks a short report above the editor without touching the streaming transcript; Esc removes it", async () => {
+		const streamedReply = mode.present(line("agent is streaming"), { live: true });
+		mode.shell.focus(mode.composer.field);
 		new InputController(mode).setupKeyHandlers();
 		const abort = vi.spyOn(session, "abort");
 
 		mode.handleToolsCommand();
 
-		expect(mode.chatContainer.children).toEqual([streamedReply]);
-		expect(mode.reportContainer.render(80).join("\n")).toContain("Available Tools");
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
+		await term.waitFor(screen => screen.some(row => row.includes("Available Tools")));
 		// The editor keeps focus: typing still goes to the prompt.
-		expect(mode.ui.getFocused()).toBe(mode.editor);
+		expect(mode.shell.focused()).toBe(mode.composer.field);
 
 		// The editor's Esc closes the report before it would interrupt the streaming turn.
-		mode.editor.onEscape?.();
-		expect(mode.reportContainer.children).toHaveLength(0);
+		term.press("escape");
+		await term.waitFor(() => !report().occupied());
 		expect(abort).not.toHaveBeenCalled();
-		expect(mode.chatContainer.children).toEqual([streamedReply]);
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 	});
 
 	it("natively opens reports as focused sheets like /usage whose long bodies scroll; Esc closes them", async () => {
-		const wasNative = isNativeRendering();
-		setNativeRendering(true);
-		try {
-			streaming = false;
-			type Described = { scroll?: { by: string; n: number }; c?: Described[] };
-			const sheet = () => mode.ui.overlayStack.at(-1)?.component;
+		goNative();
+		streaming = false;
+		const sheet = () => mode.shell.overlays.top();
+		const describe = (): Described | undefined => {
+			const node = sheet()?.node;
+			return node ? (describeTree(node, staticEnvironment(currentTheme())) as Described) : undefined;
+		};
+		const find = (root: Described | undefined, test: (node: Described) => boolean): Described | undefined => {
+			if (!root) return undefined;
+			if (test(root)) return root;
+			for (const child of root.c ?? []) {
+				const found = find(child, test);
+				if (found) return found;
+			}
+			return undefined;
+		};
 
-			mode.handleToolsCommand();
-			expect(sheet()?.nativeOverlay).toMatchObject({ role: "omp.overlay.report", size: "lg" });
-			expect(mode.ui.getFocused()).toBe(sheet() ?? null);
-			expect(mode.chatContainer.children).toHaveLength(0);
-			expect(mode.reportContainer.children).toHaveLength(0);
+		mode.handleToolsCommand();
+		expect(describe()).toMatchObject({ k: "overlay", p: { size: "lg", modal: true } });
+		expect(within(sheet()!.node, mode.shell.focused())).toBe(true);
+		expect(mode.shell.transcript.blocks()).toHaveLength(0);
+		expect(report().occupied()).toBe(false);
 
-			// A second report replaces the first sheet instead of stacking.
-			await mode.handleChangelogCommand("full");
-			expect(mode.ui.overlayStack).toHaveLength(1);
-			// The sheet body is the terminal's scroller; Page Down reaches it as a scroll request.
-			const bodyScroll = () =>
-				(sheet()?.describe?.({ supports: () => true } as never) as Described | undefined)?.c?.[0]?.scroll;
-			expect(bodyScroll()).toBeUndefined();
-			sheet()?.handleInput?.("\x1b[6~");
-			expect(bodyScroll()).toEqual({ by: "page-down", n: 1 });
-			sheet()?.handleInput?.("\x1b[6~");
-			expect(bodyScroll()).toEqual({ by: "page-down", n: 2 });
+		// A second report replaces the first sheet instead of stacking.
+		const first = sheet();
+		await mode.handleChangelogCommand("full");
+		expect(first?.closed).toBe(true);
+		expect(mode.shell.overlays.nodes()).toHaveLength(1);
+		// The sheet body is the terminal's scroller; Page Down reaches it as a scroll request.
+		const bodyScroll = () => find(describe(), node => node.scroll !== undefined)?.scroll;
+		expect(bodyScroll()).toBeUndefined();
+		term.press("pagedown");
+		await term.settle();
+		expect(bodyScroll()).toEqual({ by: "page-down", n: 1 });
+		term.press("pagedown");
+		await term.settle();
+		expect(bodyScroll()).toEqual({ by: "page-down", n: 2 });
 
-			sheet()?.handleInput?.("\x1b");
-			expect(mode.ui.hasOverlay()).toBe(false);
-			expect(mode.ui.getFocused()).toBe(mode.editor);
-		} finally {
-			setNativeRendering(wasNative);
-		}
+		term.press("escape");
+		await term.waitFor(() => !mode.shell.overlays.open());
+		expect(mode.shell.focused()).toBe(mode.composer.field);
 	});
 
 	it("closes an open native report sheet when the transcript is reset for another session", () => {
-		const wasNative = isNativeRendering();
-		setNativeRendering(true);
-		try {
-			streaming = false;
-			mode.handleContextCommand();
-			expect(mode.ui.hasOverlay()).toBe(true);
+		goNative();
+		streaming = false;
+		mode.handleContextCommand();
+		expect(mode.shell.overlays.open()).toBe(true);
 
-			mode.resetTranscript();
+		mode.resetTranscript();
 
-			expect(mode.ui.hasOverlay()).toBe(false);
-			expect(mode.ui.getFocused()).toBe(mode.editor);
-		} finally {
-			setNativeRendering(wasNative);
-		}
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(mode.shell.focused()).toBe(mode.composer.field);
 	});
 
 	it("mounts deferred command output once after the active turn ends", async () => {
-		const streamedReply = new Text("agent is streaming", 0, 0);
-		mode.chatContainer.addChild(streamedReply);
+		const streamedReply = mode.present(line("agent is streaming"), { live: true });
 
-		mode.presentCommandOutput(new Text("Deferred Output", 0, 0));
+		mode.presentCommandOutput(line("Deferred Output"));
 
-		expect(mode.chatContainer.children).toEqual([streamedReply]);
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 
 		streaming = false;
 		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
 
-		expect(mode.chatContainer.children).toHaveLength(2);
-		const transcript = mode.chatContainer.render(80).join("\n");
-		expect(transcript.match(/Deferred Output/g)).toHaveLength(1);
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
+		expect(transcriptText(mode.shell, 80).match(/Deferred Output/g)).toHaveLength(1);
 	});
 
 	it("drops deferred command output when the session changes before agent_end", async () => {
-		const streamedReply = new Text("old session is streaming", 0, 0);
-		mode.chatContainer.addChild(streamedReply);
+		const streamedReply = mode.present(line("old session is streaming"), { live: true });
 		const previousSessionId = session.sessionManager.getSessionId();
 
-		mode.presentCommandOutput(new Text("Deferred Output", 0, 0));
+		mode.presentCommandOutput(line("Deferred Output"));
 		await session.newSession();
 
 		expect(session.sessionManager.getSessionId()).not.toBe(previousSessionId);
 		streaming = false;
 		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
 
-		expect(mode.chatContainer.children).toEqual([streamedReply]);
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 	});
 });

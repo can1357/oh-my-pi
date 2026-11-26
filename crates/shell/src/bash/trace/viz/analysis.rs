@@ -45,6 +45,9 @@ pub struct Analysis {
 	pub branch_conditions: HashMap<NodeKey, Vec<NodeKey>>,
 	/// Actual engine-announced child units keyed by their proven invoking word.
 	pub children:          HashMap<NodeKey, Vec<u32>>,
+	/// Units of scripts a command ran that are not literal in it (`eval
+	/// "$x"`, `.`, a nested shell's file), by that command, in announce order.
+	pub scripts:           HashMap<NodeKey, Vec<u32>>,
 	/// Announced outer-script units, in original source order.
 	pub roots:             Vec<u32>,
 	pub tainted:           HashSet<String>,
@@ -195,6 +198,16 @@ pub fn analyze(source: &impl VizSource) -> Analysis {
 				.result
 				.children
 				.entry(NodeKey::engine(parent.unit, NodeId(parent.node)))
+				.or_default()
+				.push(unit.index);
+		} else if unit.at.is_none()
+			&& !unit.callout
+			&& let Some(runner) = unit.runner
+		{
+			walker
+				.result
+				.scripts
+				.entry(runner)
 				.or_default()
 				.push(unit.index);
 		}

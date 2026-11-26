@@ -1,4 +1,4 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 
 /** `tab.press(key, {selector})`; a `press(selector, key)` call (a string second argument) means the same. */
 export function pressArgs<S>(
