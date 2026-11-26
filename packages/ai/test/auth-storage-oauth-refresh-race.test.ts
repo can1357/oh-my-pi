@@ -1721,7 +1721,7 @@ describe("AuthStorage OAuth refresh race", () => {
 			credential: { access: "access-1", refresh: "refresh-1" },
 		});
 
-		// Stored JSON should now be canonical compact JSON and CAS must still reject stale writes.
+		// Stored JSON should now be canonical compact JSON.
 		const verifyDb = new Database(dbPath, { readonly: true });
 		try {
 			const row = verifyDb.prepare("SELECT data FROM auth_credentials WHERE id = ?").get(credentialId) as {
@@ -1732,16 +1732,67 @@ describe("AuthStorage OAuth refresh race", () => {
 		} finally {
 			verifyDb.close();
 		}
+	});
 
-		// Stale CAS predicate against the old spaced/compact payload must not overwrite access-1.
+	test("matches non-compact row with different key order and rejects when peer rewrites it", () => {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-noncompact-key-order";
+		const dbPath = path.join(tempDir, "agent.db");
+		const expiredAt = Date.now() - 60_000;
+		const spacedReorderedJson = `{"expires": ${expiredAt}, "refresh": "refresh-0", "access": "access-0"}`;
+		const canonicalExpected = JSON.stringify({ access: "access-0", refresh: "refresh-0", expires: expiredAt });
+
+		const rawDb = new Database(dbPath);
+		let idMatch: number;
+		let idRewritten: number;
+		try {
+			idMatch = (
+				rawDb
+					.prepare(
+						"INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, 'oauth', ?) RETURNING id",
+					)
+					.get(provider, spacedReorderedJson) as { id: number }
+			).id;
+			idRewritten = (
+				rawDb
+					.prepare(
+						"INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, 'oauth', ?) RETURNING id",
+					)
+					.get(provider, spacedReorderedJson) as { id: number }
+			).id;
+			// Simulate a peer rewriting the non-compact row with a newer token before CAS runs.
+			rawDb
+				.prepare("UPDATE auth_credentials SET data = ? WHERE id = ?")
+				.run(
+					`{"expires": ${expiredAt + 600_000}, "refresh": "refresh-peer", "access": "access-peer"}`,
+					idRewritten,
+				);
+		} finally {
+			rawDb.close();
+		}
+
+		// Different key order + spacing still matches semantically via Bun.deepEquals.
 		expect(
-			store.tryUpdateAuthCredentialIfMatches?.(
-				credentialId,
-				JSON.stringify({ access: "access-0", refresh: "refresh-0", expires: expiredAt }),
-				{ type: "oauth", access: "stale-overwrite", refresh: "stale-refresh", expires: Date.now() + 1_000 },
-			),
+			store.tryUpdateAuthCredentialIfMatches?.(idMatch, canonicalExpected, {
+				type: "oauth",
+				access: "access-1",
+				refresh: "refresh-1",
+				expires: expiredAt + 3_600_000,
+			}),
+		).toBe(true);
+		// A peer rewrite with different content must still fail CAS and keep the peer's token.
+		expect(
+			store.tryUpdateAuthCredentialIfMatches?.(idRewritten, canonicalExpected, {
+				type: "oauth",
+				access: "stale-overwrite",
+				refresh: "stale-refresh",
+				expires: expiredAt + 1_000,
+			}),
 		).toBe(false);
-		expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({ access: "access-1" });
+
+		const rows = store.listAuthCredentials(provider);
+		expect(rows.find(row => row.id === idMatch)?.credential).toMatchObject({ access: "access-1" });
+		expect(rows.find(row => row.id === idRewritten)?.credential).toMatchObject({ access: "access-peer" });
 	});
 
 	test("disables a definitively dead credential when auth_credentials.data has non-compact JSON", async () => {
@@ -1848,5 +1899,59 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(casSpy).toHaveBeenCalledTimes(1);
 		// Lease must be released immediately after giving up rather than held for 60s.
 		expect(store.getCredentialRefreshLeaseExpiresAt?.(credentialId)).toBeUndefined();
+	});
+
+	test("retries and saves when a pause expires the lease and a peer hands it back before re-checking", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-pause-handback-retry";
+		const now = Date.parse("2026-07-10T12:30:00.000Z");
+		setSystemTime(new Date(now));
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: now - 60_000 },
+		]);
+		const credentialId = store.listAuthCredentials(provider)[0]!.id;
+		const originalSave = store.tryUpdateAuthCredentialIfMatches?.bind(store);
+		if (!originalSave) throw new Error("test store does not support compare-and-set updates");
+		let attempts = 0;
+		vi.spyOn(store, "tryUpdateAuthCredentialIfMatches").mockImplementation((id, expected, cred, lease) => {
+			attempts += 1;
+			if (attempts === 1) {
+				// Simulate a pause past the 15s lease TTL after `nowMs` was captured:
+				// a peer steals the lease (causing this write to fail) and hands back
+				// our original, now-expired lease before the post-miss check runs.
+				const originalHolder = store?.getCredentialRefreshLeaseHolder?.(credentialId);
+				if (!originalHolder) throw new Error("expected active lease");
+				setSystemTime(new Date(now + 16_000));
+				expect(store?.tryAcquireCredentialRefreshLease?.(credentialId, "peer", now + 31_000)).toBe(true);
+				const saved = originalSave(id, expected, cred, lease);
+				expect(saved).toBe(false);
+				expect(store?.handBackCredentialRefreshLease?.(credentialId, "peer", originalHolder)).toBe(true);
+				return false;
+			}
+			return originalSave(id, expected, cred, lease);
+		});
+
+		const result = await authStorage.oauth.refreshStored(provider, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refreshTimeoutMs: 2_000,
+			refresh: async current => ({
+				...current,
+				access: "access-1",
+				refresh: "refresh-1",
+				expires: now + 3_600_000,
+			}),
+		});
+
+		expect(attempts).toBe(2);
+		expect(result).toMatchObject({
+			refreshed: true,
+			credential: { access: "access-1", refresh: "refresh-1" },
+		});
+		expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({
+			access: "access-1",
+			refresh: "refresh-1",
+		});
 	});
 });

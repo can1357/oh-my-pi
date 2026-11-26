@@ -299,9 +299,11 @@ export class OAuthRefresher {
 	 * a blocked event loop can outlive its TTL, and an expired lease no peer
 	 * took is still ours) instead of dropping the only valid token. A refused
 	 * save is retried too, within the same 60 s window, while the row still
-	 * holds the spent token: a peer that took over the lapsed lease hands it
-	 * back once the provider rejects that token, but the next peer can hold it
-	 * at the moment this save lands.
+	 * holds the spent token and a peer holds (or lapsed) the lease: a peer that
+	 * took over the lapsed lease hands it back once the provider rejects that
+	 * token, but the next peer can hold it at the moment this save lands. A
+	 * refusal when no lease exists or when our own lease is still live right
+	 * now is terminal, since waiting on a peer lease cannot make it succeed.
 	 */
 	async #persistExchangedCredential(
 		provider: string,
@@ -322,24 +324,29 @@ export class OAuthRefresher {
 				throw new AIError.ConfigurationError("OAuth exchanged token could not be saved: store stayed busy");
 			}
 			let renewed = true;
-			let leaseExpiresAt = 0;
 			try {
 				if (lease) {
-					leaseExpiresAt = Date.now() + OAUTH_REFRESH_LEASE_TTL_MS;
-					renewed = lease.store.renewCredentialRefreshLease(credentialId, lease.owner, leaseExpiresAt);
+					renewed = lease.store.renewCredentialRefreshLease(
+						credentialId,
+						lease.owner,
+						Date.now() + OAUTH_REFRESH_LEASE_TTL_MS,
+					);
 					// An expired lease no peer took is still ours: re-acquire it rather
 					// than fail the fence and drop a token the provider already minted.
 					if (!renewed) {
-						renewed = lease.store.tryAcquireCredentialRefreshLease(credentialId, lease.owner, leaseExpiresAt);
+						renewed = lease.store.tryAcquireCredentialRefreshLease(
+							credentialId,
+							lease.owner,
+							Date.now() + OAUTH_REFRESH_LEASE_TTL_MS,
+						);
 					}
 				}
-				const writeNowMs = Date.now();
 				const saved =
 					this.#deps.store.tryUpdateAuthCredentialIfMatches?.(
 						credentialId,
 						expectedData,
 						credential,
-						lease ? { owner: lease.owner, nowMs: writeNowMs } : undefined,
+						lease ? { owner: lease.owner, nowMs: Date.now() } : undefined,
 					) ?? false;
 				if (saved) return true;
 				// A peer that saved first changed the row; otherwise no peer can hold a
@@ -350,18 +357,22 @@ export class OAuthRefresher {
 					return false;
 				}
 				if (!lease) {
-					logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: false });
+					logger.warn("OAuth exchanged token save refused without a refresh lease", {
+						...fingerprints,
+						leaseHeld: false,
+					});
 					return false;
 				}
-				if (renewed && writeNowMs < leaseExpiresAt) {
-					const holder = lease.store.getCredentialRefreshLeaseHolder?.(credentialId);
-					if (holder?.owner === lease.owner && holder.expiresAtMs > writeNowMs) {
-						// We held a valid lease during the write and the row still matches
-						// what we read, so lease contention did not cause the refusal;
-						// retrying while holding our own lease cannot succeed.
-						logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: true });
-						return false;
-					}
+				const holder = lease.store.getCredentialRefreshLeaseHolder?.(credentialId);
+				if (holder?.owner === lease.owner && holder.expiresAtMs > Date.now()) {
+					// Our own lease is still live right now and the row still matches
+					// what we read, so lease contention did not cause the refusal;
+					// retrying while holding our own lease cannot succeed.
+					logger.warn("OAuth exchanged token save refused under our own live lease", {
+						...fingerprints,
+						leaseHeld: true,
+					});
+					return false;
 				}
 				if (!refused) {
 					logger.warn("OAuth exchanged token save refused while a peer holds the lease; retrying", {

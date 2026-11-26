@@ -14,7 +14,7 @@
 
 ### Fixed
 
-- OAuth refresh compare-and-set now matches semantically equivalent non-compact JSON in `auth_credentials.data` (e.g. spaced/reordered JSON written externally) instead of discarding refreshed tokens in a 60s retry loop, and `#persistExchangedCredential` no longer retries as lease contention when the caller still holds a valid lease ([#20601](https://github.com/can1357/oh-my-pi/issues/20601), [#20602](https://github.com/can1357/oh-my-pi/pull/20602) by [@noahgaertner](https://github.com/noahgaertner))
+- Externally formatted OAuth credential rows no longer cause refresh timeouts or discarded tokens, and failed saves no longer retry for 60 s when no other process holds the refresh lease ([#20601](https://github.com/can1357/oh-my-pi/issues/20601), [#20602](https://github.com/can1357/oh-my-pi/pull/20602) by [@noahgaertner](https://github.com/noahgaertner))
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))

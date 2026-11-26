@@ -108,28 +108,6 @@ function storesSerializedCredential(row: CredentialStateRow, serialized: Seriali
 	);
 }
 
-function jsonValuesEqual(left: unknown, right: unknown): boolean {
-	if (Object.is(left, right)) return true;
-	if (typeof left !== typeof right || left === null || right === null) return false;
-	if (Array.isArray(left)) {
-		if (!Array.isArray(right) || left.length !== right.length) return false;
-		for (let i = 0; i < left.length; i += 1) {
-			if (!jsonValuesEqual(left[i], right[i])) return false;
-		}
-		return true;
-	}
-	if (Array.isArray(right) || typeof left !== "object") return false;
-	const leftObj = left as Record<string, unknown>;
-	const rightObj = right as Record<string, unknown>;
-	const leftKeys = Object.keys(leftObj);
-	if (leftKeys.length !== Object.keys(rightObj).length) return false;
-	for (const key of leftKeys) {
-		if (!Object.hasOwn(rightObj, key)) return false;
-		if (!jsonValuesEqual(leftObj[key], rightObj[key])) return false;
-	}
-	return true;
-}
-
 const AUTH_SCHEMA_VERSION = 8;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
@@ -1694,7 +1672,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (!canonical) return expectedData;
 		if (canonical.data === expectedData) return current.data;
 		try {
-			if (jsonValuesEqual(JSON.parse(canonical.data), JSON.parse(expectedData))) {
+			if (Bun.deepEquals(JSON.parse(canonical.data), JSON.parse(expectedData))) {
 				return current.data;
 			}
 		} catch {
