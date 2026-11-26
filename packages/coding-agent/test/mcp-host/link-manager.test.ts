@@ -160,6 +160,20 @@ describe("MCPManager on a scripted host", () => {
 		expect(manager.getTools()).toHaveLength(1);
 	});
 
+	it("settles waitForPendingConnects once connects are done, without waiting on a reconnect", async () => {
+		await connect();
+		// The reconnect's catalog load never answers, so the reconnect stays in flight.
+		answers["tools/list"] = () => undefined;
+		let reconnected = false;
+		void manager.reconnectServer(SERVER).then(() => {
+			reconnected = true;
+		}, noop);
+
+		// Waiting on the reconnect, as `waitForStartup(0)` does, would hang here until the test times out.
+		await manager.waitForPendingConnects();
+		expect(reconnected).toBe(false);
+	});
+
 	it("reports a reauth reconnect by its outcome, not by the link being attached", async () => {
 		const config: MCPHttpServerConfig = { type: "http", url: URL };
 		await connect(config);

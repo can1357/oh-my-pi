@@ -1297,6 +1297,16 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
+	 * Settles once the servers connecting now have published their tools (the owner's tool-change
+	 * callback awaited) or failed, each bounded by its connect timeout. Unlike {@link waitForStartup},
+	 * it waits neither on reconnects and reloads (a timed-out connect's retry, `/mcp reload`,
+	 * `tools/list_changed`) nor on connects started later.
+	 */
+	async waitForPendingConnects(): Promise<void> {
+		await Promise.allSettled([...this.#startupUpdates.values()]);
+	}
+
+	/**
 	 * Wait for configured servers' initial tools (including timeout-triggered reconnects).
 	 * Zero disables the barrier deadline; an unresponsive server can then wait indefinitely.
 	 * Tool-change callbacks are drained before returning; callers should still refresh their

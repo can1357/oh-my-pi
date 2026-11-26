@@ -1714,7 +1714,7 @@ Unavailable; invocations fail:
 	});
 
 	it("keeps the startup MCP connect's mounts model-visible without rendering them", async () => {
-		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+		const { session, contexts, toolRegistry } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			toolCommands: createTestToolCommandState(),
 			responses: [{ content: ["ok"] }],
 		});
@@ -1733,6 +1733,11 @@ Unavailable; invocations fail:
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		await session.refreshMCPTools([search]);
 		expect(notices).toEqual([]);
+		// A non-MCP tool command mounted meanwhile is still a change the user sees.
+		const catalog = { ...createBasicTool("catalog_lookup", "Catalog Lookup"), loadMode: "discoverable" as const };
+		toolRegistry.set(catalog.name, catalog);
+		await session.setActiveToolPresentation(["read", "bash", search.name, catalog.name], [search.name, catalog.name]);
+		expect(notices).toEqual(["Tool commands: added catalog_lookup"]);
 		await session.prompt("hello");
 		const delivered = mountNoticesIn(contexts[0]);
 		expect(delivered).toHaveLength(1);
@@ -1743,7 +1748,7 @@ Unavailable; invocations fail:
 		await discovery.promise;
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
 		await session.refreshMCPTools([search, fetch]);
-		expect(notices).toEqual(["Tool commands: added mcp__nucleus_fetch"]);
+		expect(notices).toEqual(["Tool commands: added catalog_lookup", "Tool commands: added mcp__nucleus_fetch"]);
 	});
 	it("restores the active-tool predicate when a rebuild fails mid-flight", async () => {
 		let blockRebuild = false;
