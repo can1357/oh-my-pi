@@ -7,6 +7,10 @@
  * has happened), so the row saves the cursor, moves up to the image's first
  * row, draws, and restores the cursor. The other rows are reserved: empty
  * but not blank (a reset), so nothing treats them as trimmable padding.
+ *
+ * The image must fit on the screen: the cursor stops at the top row, so a
+ * taller image would be drawn from there and scroll the terminal under the
+ * frame. `TerminalImages` fits SIXEL and iTerm2 images within the screen's rows.
  */
 import { hasGraphics } from "../output/ansi";
 
