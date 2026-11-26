@@ -69,6 +69,8 @@ export interface MessageFaceEnv {
 	onRenderError(customType: string, error: unknown): void;
 	/** Files of a prompt's attached images (chips and thumbnails open them). */
 	imageLinks(message: AgentMessage, images: readonly ImageContent[]): (string | undefined)[] | undefined;
+	/** Whether a prompt's attached images show as pictures (`terminal.showImages`); shown when absent. */
+	readonly showImages?: Accessor<boolean>;
 	/** SKILL.md of a skill chip. */
 	skillPath(name: string): string | undefined;
 	/** Whether a host handles transcript actions (the prompt's copy/edit controls). */
@@ -280,6 +282,7 @@ function promptFace(
 					text,
 					images,
 					...(imageLinks ? { imageLinks } : {}),
+					showImages: env.showImages,
 					synthetic,
 					liveSteered: message.role === "user" && message.liveSteered === true,
 					skillPath: env.skillPath,

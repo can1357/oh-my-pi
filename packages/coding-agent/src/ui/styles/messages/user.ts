@@ -7,13 +7,14 @@
  *   (`dim` for synthetic input). Attachment chips keep their composer color.
  * - The live-steering marker (`*`, accent) and the reaction emoji take the
  *   top fill row (left and right, inside the padding).
- * - Tools and thumbnails are native-only.
+ * - Tools are native-only. Attached images draw under the bubble, after the
+ *   prompt zone closes, where the terminal draws images.
  * - A one-row allocation shows the first content row (no zone marks).
  * - With prompt zones on, the bubble is an OSC 133 prompt zone.
  * - An empty prompt draws nothing.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
-import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext, roleOf } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
@@ -140,6 +141,10 @@ function paintUser(node: UiNode, cx: PaintContext): Block {
 		rows[0] = ZONE_START + rows[0]!;
 		rows[rows.length - 1] += ZONE_CLOSE;
 	}
+	// Images sit outside the OSC 133 zone: their rows keep the exact shape the image protocol needs.
+	// One under another: a `row` sizes children by visible width, and an image row's is all escapes.
+	const strip = cx.images && node.children().find(child => roleOf(child) === "omp.user.images");
+	for (const image of strip ? strip.children() : []) rows.push("", ...cx.paint(image, cx.width).rows);
 	return { rows };
 }
 

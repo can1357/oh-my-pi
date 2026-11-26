@@ -1,7 +1,8 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
  * The user's turn: a head-less user-toned card holding the prompt as
- * Markdown under its attached images.
+ * Markdown under its attached images (the terminal draws the images under
+ * the bubble, where it draws images at all; `terminal.showImages` hides them).
  *
  * - Composer tokens stay chips (`📷 #1`, `⬢ model`, `✦ skill`): `md` marks
  *   natively, composer colors in the terminal.
@@ -33,6 +34,8 @@ export interface UserMessageModel {
 	readonly imageLinks?: readonly (string | undefined)[];
 	/** Whether thumbnails link to their files (the host's link policy). */
 	readonly linkImages?: Reactive<boolean>;
+	/** Whether attached images show as pictures (`terminal.showImages`); shown when absent. */
+	readonly showImages?: Reactive<boolean>;
 	/** Agent-attributed input: muted, flat prose, no controls. */
 	readonly synthetic?: boolean;
 	/** Delivered into the response that was streaming. */
@@ -212,17 +215,19 @@ export function UserMessage(props: { model: UserMessageModel }): JSXNode {
 				<UserTools model={model} />
 			</Show>
 			{thumbs.length > 0 && (
-				<row gap="sm" wrap align="start" role="omp.user.images">
-					{thumbs.map(({ image, i }) => (
-						<ImageNode
-							image={image}
-							nodeKey={`#${i + 1}`}
-							alt={`#${i + 1}`}
-							title={`#${i + 1}`}
-							path={() => (read(model.linkImages) === true ? model.imageLinks?.[i] : undefined)}
-						/>
-					))}
-				</row>
+				<Show when={() => read(model.showImages) !== false}>
+					<row gap="sm" wrap align="start" role="omp.user.images">
+						{thumbs.map(({ image, i }) => (
+							<ImageNode
+								image={image}
+								nodeKey={`#${i + 1}`}
+								alt={`#${i + 1}`}
+								title={`#${i + 1}`}
+								path={() => (read(model.linkImages) === true ? model.imageLinks?.[i] : undefined)}
+							/>
+						))}
+					</row>
+				</Show>
 			)}
 			<md text={display.text} marks={marks} term={() => ({ chips, synthetic, keywords: keywords() })} />
 			<Show when={() => badges().length > 0}>
