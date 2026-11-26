@@ -14,7 +14,7 @@ import {
 } from "../approval";
 import type { ToolSession } from "../index";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import {
 	COMPUTER_WORKER_ARG,
 	type ComputerEscapeScope,

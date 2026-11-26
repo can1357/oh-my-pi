@@ -1,0 +1,62 @@
+name: Stale issues and PRs
+
+# Marks issues and PRs `stale` after 45 days without updates and closes them 14
+# days later; any update or comment clears the label. Keep this the only
+# actions/stale step in the repo: every step shares one `_state` resume cache,
+# so a second step would clobber the first's progress through the backlog.
+
+on:
+   schedule:
+      - cron: "17 * * * *"
+   workflow_dispatch:
+      inputs:
+         dry-run:
+            description: Log what would be marked or closed without changing anything
+            type: boolean
+            default: true
+
+permissions:
+   issues: write
+   pull-requests: write
+   actions: write # actions/stale deletes and re-saves its `_state` resume cache
+
+concurrency:
+   group: stale
+   cancel-in-progress: false
+
+jobs:
+   stale:
+      name: Mark and close stale issues and PRs
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+           with:
+              days-before-stale: 45
+              days-before-close: 14
+              stale-issue-label: stale
+              stale-pr-label: stale
+              exempt-issue-labels: prio:p0,prio:p1,backlog,proposal
+              close-issue-reason: not_planned
+              # Each stale mark or close costs 4 operations and every pass re-checks
+              # each stale item for 2, so a pass over a large stale set needs
+              # thousands of operations. Hourly runs of 400 keep closures within
+              # hours of their 14-day mark while capping each run at ~95 comments,
+              # well under GitHub's content-creation rate limits.
+              operations-per-run: 400
+              debug-only: ${{ inputs.dry-run == true }}
+              stale-issue-message: >-
+                 This issue has had no activity for 45 days and is now marked `stale`.
+                 It will be closed in 14 days unless there is a new comment or update.
+                 If it still reproduces on the latest release, comment with what
+                 you're seeing and it stays open.
+              close-issue-message: >-
+                 Closed: marked `stale` with no activity since. If this is still
+                 relevant, comment and a maintainer can reopen it.
+              stale-pr-message: >-
+                 This PR has had no activity for 45 days and is now marked `stale`.
+                 It will be closed in 14 days unless it is updated. Push a commit or
+                 comment to keep it open; if it has conflicts, rebasing on `main` is
+                 a good start.
+              close-pr-message: >-
+                 Closed: marked `stale` with no activity since. The branch is kept;
+                 reopen this PR or open a new one to continue.

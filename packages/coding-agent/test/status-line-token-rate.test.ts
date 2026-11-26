@@ -1,14 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
+import { describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
-
-beforeAll(async () => {
-	await initTheme();
-});
+import { segmentText, statusFacts } from "./helpers/session-status-line";
 
 function assistantMessage(overrides?: Partial<AssistantMessage>): AssistantMessage {
 	return {
@@ -31,30 +24,19 @@ function assistantMessage(overrides?: Partial<AssistantMessage>): AssistantMessa
 	};
 }
 
-function ctxWithTokenRate(tokensPerSecond: number | null): SegmentContext {
-	return {
-		usageStats: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			premiumRequests: 0,
-			cost: 0,
-			tokensPerSecond,
-		},
-	} as unknown as SegmentContext;
-}
-
 describe("token_rate status-line segment", () => {
 	it("renders per-second throughput without a numeric slash path", () => {
-		const rendered = renderSegment("token_rate", ctxWithTokenRate(35.5));
-		const content = stripVTControlCharacters(rendered.content);
+		const content = segmentText("token_rate", statusFacts({ tokensPerSecond: 35.5 }));
 
-		expect(rendered.visible).toBe(true);
+		expect(content).not.toBeNull();
 		expect(content).toContain("35.5");
 		expect(content).toMatch(/(?:\/s|\bs\b|\bsec(?:ond)?s?\b|\btps\b)/i);
 		expect(content).not.toContain("35.5/s");
 		expect(content).not.toMatch(/\b\d+(?:\.\d+)?\/s\b/);
+	});
+
+	it("hides while no rate is known", () => {
+		expect(segmentText("token_rate", statusFacts({ tokensPerSecond: null }))).toBeNull();
 	});
 });
 
@@ -62,7 +44,12 @@ describe("token rate calculation", () => {
 	it("computes from completed message duration metadata", () => {
 		const base = assistantMessage();
 		const rate = calculateTokensPerSecond(
-			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000 })],
+			[
+				assistantMessage({
+					usage: { ...base.usage, output: 120 },
+					duration: 2_000,
+				}),
+			],
 			false,
 		);
 		expect(rate).toBe(60);
@@ -71,7 +58,13 @@ describe("token rate calculation", () => {
 	it("computes from elapsed time while streaming when duration metadata is missing", () => {
 		const base = assistantMessage();
 		const rate = calculateTokensPerSecond(
-			[assistantMessage({ timestamp: 10_000, duration: undefined, usage: { ...base.usage, output: 45 } })],
+			[
+				assistantMessage({
+					timestamp: 10_000,
+					duration: undefined,
+					usage: { ...base.usage, output: 45 },
+				}),
+			],
 			true,
 			13_000,
 		);
@@ -95,7 +88,11 @@ describe("token rate calculation", () => {
 	it("returns null when usage metadata has no output tokens", () => {
 		const base = assistantMessage();
 		const rate = calculateTokensPerSecond(
-			[assistantMessage({ usage: { ...base.usage, output: 0, totalTokens: 10 } })],
+			[
+				assistantMessage({
+					usage: { ...base.usage, output: 0, totalTokens: 10 },
+				}),
+			],
 			false,
 		);
 		expect(rate).toBeNull();

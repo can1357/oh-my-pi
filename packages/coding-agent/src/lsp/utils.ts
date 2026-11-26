@@ -1,24 +1,25 @@
 export { truncate } from "@oh-my-pi/pi-utils";
 
 import * as fs from "node:fs/promises";
-import { isEnoent } from "@oh-my-pi/pi-utils";
-import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { isEnoent, pathExists } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
-import type {
-	CodeAction,
-	Command,
-	Diagnostic,
-	DiagnosticSeverity,
-	DocumentSymbol,
-	Location,
-	SymbolInformation,
-	SymbolKind,
-	TextEdit,
-	WorkspaceEdit,
+import {
+	type CodeAction,
+	type Command,
+	type Diagnostic,
+	type DiagnosticSeverity,
+	type DocumentSymbol,
+	type Location,
+	SYMBOL_KIND_NAMES,
+	type SymbolInformation,
+	type SymbolKind,
+	type TextEdit,
+	type WorkspaceEdit,
 } from "./types";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { uriToFile } from "./uri";
 
-export { detectLanguageId } from "@oh-my-pi/pi-tui/lang-from-path";
+export { detectLanguageId } from "../utils/lang-from-path";
 
 /** Read a file's text, refusing FIFOs, devices and sockets, whose reads can block forever or never end. */
 export async function readTextFromDisk(filePath: string): Promise<string> {
@@ -96,20 +97,16 @@ export function mergeDiagnosticLists(primary: Diagnostic[], secondary: Diagnosti
  * Get icon for diagnostic severity.
  */
 export function severityToIcon(severity?: DiagnosticSeverity): string {
-	const currentTheme = theme as Theme | undefined;
-	const fallback = currentTheme?.format?.bullet ?? "*";
-	const status = currentTheme?.status;
+	const symbols = currentTheme().symbols;
 	switch (severity ?? 1) {
-		case 1:
-			return status?.error ?? fallback;
 		case 2:
-			return status?.warning ?? fallback;
+			return symbols.symbol("status.warning");
 		case 3:
-			return status?.info ?? fallback;
+			return symbols.symbol("status.info");
 		case 4:
-			return currentTheme?.format?.bullet ?? fallback;
+			return symbols.symbol("format.bullet");
 		default:
-			return status?.error ?? fallback;
+			return symbols.symbol("status.error");
 	}
 }
 
@@ -271,16 +268,13 @@ export function formatTextEdit(edit: TextEdit, maxLength = 50): string {
 // =============================================================================
 
 function getSymbolKindIcons(): Record<SymbolKind, string> {
-	const currentTheme = theme as Theme | undefined;
-	const fallback = currentTheme?.format?.bullet ?? "*";
-	const dash = currentTheme?.format?.dash ?? fallback;
-	const icon = currentTheme?.icon;
-
-	const file = icon?.file ?? fallback;
-	const folder = icon?.folder ?? fallback;
-	const pkg = icon?.package ?? folder;
-	const model = icon?.model ?? fallback;
-	const func = icon?.auto ?? dash;
+	const symbols = currentTheme().symbols;
+	const fallback = symbols.symbol("format.bullet");
+	const file = symbols.symbol("icon.file");
+	const folder = symbols.symbol("icon.folder");
+	const pkg = symbols.symbol("icon.package");
+	const model = symbols.symbol("icon.model");
+	const func = symbols.symbol("icon.auto");
 
 	return {
 		1: file, // File
@@ -316,44 +310,14 @@ function getSymbolKindIcons(): Record<SymbolKind, string> {
  * Get icon for symbol kind.
  */
 export function symbolKindToIcon(kind: SymbolKind): string {
-	const currentTheme = theme as Theme | undefined;
-	const bullet = currentTheme?.format?.bullet ?? "*";
-	return getSymbolKindIcons()[kind] ?? bullet;
+	return getSymbolKindIcons()[kind] ?? currentTheme().symbols.symbol("format.bullet");
 }
 
 /**
  * Get name for symbol kind.
  */
 export function symbolKindToName(kind: SymbolKind): string {
-	const names: Record<number, string> = {
-		1: "File",
-		2: "Module",
-		3: "Namespace",
-		4: "Package",
-		5: "Class",
-		6: "Method",
-		7: "Property",
-		8: "Field",
-		9: "Constructor",
-		10: "Enum",
-		11: "Interface",
-		12: "Function",
-		13: "Variable",
-		14: "Constant",
-		15: "String",
-		16: "Number",
-		17: "Boolean",
-		18: "Array",
-		19: "Object",
-		20: "Key",
-		21: "Null",
-		22: "EnumMember",
-		23: "Struct",
-		24: "Event",
-		25: "Operator",
-		26: "TypeParameter",
-	};
-	return names[kind] ?? "Unknown";
+	return SYMBOL_KIND_NAMES[kind] ?? "Unknown";
 }
 
 /**
@@ -375,9 +339,9 @@ export function formatDocumentSymbol(symbol: DocumentSymbol, indent = 0): string
 	return results;
 }
 
-/** The theme's arrow glyph; `theme` is unset outside the TUI (eval, headless runs). */
+/** The theme's arrow glyph. */
 function navArrow(): string {
-	return (theme as Theme | undefined)?.nav.cursor ?? "→";
+	return currentTheme().symbols.symbol("nav.cursor");
 }
 
 /**
@@ -559,16 +523,6 @@ export async function resolveDiagnosticTargets(
 		return { matches: [...matches], truncated: false };
 	}
 	return resolveDiagnosticTarget(file, cwd, maxMatches);
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-	try {
-		await fs.stat(filePath);
-		return true;
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		throw error;
-	}
 }
 
 async function resolveDiagnosticTarget(

@@ -1,0 +1,10 @@
+{
+	"name": "keyhash",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"bench": "bun bench/run.ts",
+		"test": "bun test",
+		"check": "bun build src/*.ts src/hash/*.ts test/*.ts bench/*.ts --target=bun --outdir=node_modules/.check"
+	}
+}

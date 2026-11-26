@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../../tools/tool-errors";
 import type { JsStatusEvent } from "./types";
 
 export interface HelperOptions {

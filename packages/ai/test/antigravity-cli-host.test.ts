@@ -624,7 +624,7 @@ describe("AgyHost stateful steps", () => {
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await second.done;
 	});
-	it("cancels a parked turn before restarting for a rotated credential version", async () => {
+	it("reloads the parked conversation before delivering the result after a credential rotation", async () => {
 		const state = await parked();
 		state.fake.cancelMode = "hold";
 		const next = step(state.host, [...state.messages, result(state.first.writer.output)], {}, undefined, {
@@ -635,8 +635,11 @@ describe("AgyHost stateful steps", () => {
 		state.fake.acknowledgeCancel();
 		const restarted = await state.started.next();
 		const prompt = await restarted.prompts.next();
-		expect(textOf(prompt.request.prompt)).toContain("actual file body");
+		expect(restarted.loads).toEqual([state.fake.currentId]);
+		expect(restarted.created).toEqual([]);
 		expect(state.fake.closed).toBe(true);
+		expect(textOf(prompt.request.prompt)).toContain("actual file body");
+		expect(textOf(prompt.request.prompt)).not.toContain("Reading now.");
 		restarted.text("Done after credential rotation.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await next.done;

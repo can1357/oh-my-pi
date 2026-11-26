@@ -1,14 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { MCPAuthorizationLinkPrompt } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { describe, expect, it } from "bun:test";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { McpAuthorizationLink } from "../../../src/ui/transcript/messages/mcp-auth";
 
-import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+/** The block's terminal rows at `width` (with escapes), on a terminal that draws hyperlinks. */
+function renderLink(url: string, width: number, launchUrl?: string): string[] {
+	const term = createTestTerminal(() => ({ main: McpAuthorizationLink({ url, launchUrl }) }), {
+		columns: width,
+		rows: 200,
+		capabilities: { hyperlinks: true },
+	});
+	const rows = [...term.rows()];
+	while (rows.length > 0 && rows.at(-1)!.trim() === "") rows.pop();
+	return rows.map(row => row.trimEnd());
+}
 
 const OSC = "\x1b]";
-const BEL = "\x07";
 
 function extractLinkUri(text: string): string | undefined {
 	return text.match(/\x1b\]8;[^;]*;([^\x1b\x07]+)(?:\x1b\\|\x07)/)?.[1];
@@ -51,26 +58,14 @@ function reassembleUrl(plainLines: string[], label: string): string {
 	return joined;
 }
 
-describe("MCPAuthorizationLinkPrompt", () => {
-	beforeEach(async () => {
-		initTheme();
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true, cwd: process.cwd() });
-	});
-
-	afterEach(() => {
-		cfgTuiHyperlinks.clearOverride(settings);
-		resetSettingsForTest();
-	});
-
+describe("McpAuthorizationLink", () => {
 	it("renders a clickable hyperlink label and inline Copy URL row when the row fits the viewport", () => {
 		// Width large enough to keep ` Copy URL: <LONG_AUTH_URL>` on one row.
-		const lines = new MCPAuthorizationLinkPrompt(LONG_AUTH_URL).render(1000);
-		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const lines = renderLink(LONG_AUTH_URL, 1000);
+		const plainLines = lines.map(line => Bun.stripANSI(line));
 
 		expect(lines).toHaveLength(3);
 		expect(lines[1]).toContain(`${OSC}8;`);
-		expect(lines[1]).toContain(`${OSC}8;;${BEL}`);
 		expect(extractLinkUri(lines[1])).toBe(LONG_AUTH_URL);
 		expect(plainLines[1]).toContain("Click here to authorize");
 		expect(plainLines[2]).toBe(` ${COPY_URL_LABEL} ${LONG_AUTH_URL}`);
@@ -82,11 +77,10 @@ describe("MCPAuthorizationLinkPrompt", () => {
 		// `code_challenge_method=S256`. Post-fix, the render itself keeps
 		// every character.
 		const width = 80;
-		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL).render(width);
-		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const lines = renderLink(LINEAR_AUTH_URL, width);
+		const plainLines = lines.map(line => Bun.stripANSI(line));
 
-		// Every emitted row fits inside the viewport, so `TUI#prepareLine`'s
-		// truncation branch is unreachable.
+		// Every emitted row fits inside the viewport, so nothing is cut.
 		for (const line of plainLines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
@@ -108,8 +102,8 @@ describe("MCPAuthorizationLinkPrompt", () => {
 	it("links every wrapped chunk to the full URL under one OSC 8 id so a click never opens a fragment", () => {
 		// #20192: unlinked chunks let terminal URL auto-detection open only the
 		// clicked row — an authorize request missing its trailing parameters.
-		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL).render(80);
-		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const lines = renderLink(LINEAR_AUTH_URL, 80);
+		const plainLines = lines.map(line => Bun.stripANSI(line));
 		const labelRow = plainLines.indexOf(` ${COPY_URL_LABEL}`);
 		const chunks = lines.slice(labelRow + 1);
 		expect(chunks.length).toBeGreaterThan(1);
@@ -125,8 +119,8 @@ describe("MCPAuthorizationLinkPrompt", () => {
 
 	it("keeps the full URL as the primary copy target even when a launch shortcut is available", () => {
 		const launchUrl = "http://localhost:14570/launch";
-		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL, launchUrl).render(80);
-		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const lines = renderLink(LINEAR_AUTH_URL, 80, launchUrl);
+		const plainLines = lines.map(line => Bun.stripANSI(line));
 
 		// Full URL primacy: an SSH user copying the top URL after the label
 		// still gets the whole authorize URL, byte-for-byte, so their local
@@ -139,8 +133,8 @@ describe("MCPAuthorizationLinkPrompt", () => {
 	it("advertises launchUrl as an additional local shortcut, wrapped to width so it also can never truncate", () => {
 		const launchUrl = "http://localhost:14570/launch";
 		const width = 80;
-		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL, launchUrl).render(width);
-		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const lines = renderLink(LINEAR_AUTH_URL, width, launchUrl);
+		const plainLines = lines.map(line => Bun.stripANSI(line));
 
 		for (const line of plainLines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
@@ -153,10 +147,10 @@ describe("MCPAuthorizationLinkPrompt", () => {
 	});
 
 	it("omits the local-shortcut row when launchUrl is absent or identical to the full URL", () => {
-		const withoutLaunch = new MCPAuthorizationLinkPrompt(LONG_AUTH_URL).render(1000);
+		const withoutLaunch = renderLink(LONG_AUTH_URL, 1000);
 		expect(withoutLaunch.some(line => line.includes(SHORTCUT_LABEL))).toBe(false);
 
-		const withRedundantLaunch = new MCPAuthorizationLinkPrompt(LONG_AUTH_URL, LONG_AUTH_URL).render(1000);
+		const withRedundantLaunch = renderLink(LONG_AUTH_URL, 1000, LONG_AUTH_URL);
 		expect(withRedundantLaunch.some(line => line.includes(SHORTCUT_LABEL))).toBe(false);
 	});
 
@@ -164,8 +158,8 @@ describe("MCPAuthorizationLinkPrompt", () => {
 		// Below 16 cols the terminal is unusable, but the render still emits
 		// chunks (bounded at the 16-column floor). No character is silently
 		// dropped; the user can widen and reflow.
-		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL).render(4);
-		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const lines = renderLink(LINEAR_AUTH_URL, 4);
+		const plainLines = lines.map(line => Bun.stripANSI(line));
 		expect(reassembleUrl(plainLines, COPY_URL_LABEL)).toBe(LINEAR_AUTH_URL);
 	});
 });

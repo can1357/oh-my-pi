@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -21,7 +21,6 @@ import {
 	type ExecutedWorkspaceChange,
 	sortAndValidateTextEdits,
 } from "@oh-my-pi/pi-coding-agent/lsp/edits";
-import { renderCall, renderResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import {
 	type CodeAction,
 	type CreateFile,
@@ -36,7 +35,7 @@ import {
 	type TextDocumentEdit,
 	type WorkspaceEdit,
 } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type LspToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
 import {
 	applyCodeAction,
 	collectGlobMatches,
@@ -49,7 +48,7 @@ import {
 	resolveSymbolColumn,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { fileToUri, uriToFile } from "@oh-my-pi/pi-coding-agent/lsp/uri";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
@@ -57,8 +56,13 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
-import { renderResult as renderLocalResult } from "@oh-my-pi/pi-tui/tools/lsp";
-import { getLanguageFromPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import { ToolCall } from "../../src/ui/transcript/tool-block";
+import { toolCallText, toolText } from "../helpers/tool-text";
+import { getLanguageFromPath } from "@oh-my-pi/pi-coding-agent/utils/lang-from-path";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const lspTestSettings = Settings.isolated();
 
@@ -1405,6 +1409,66 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("does not count forwarded workspace file changes as activity for the idle timeout", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-watched-idle-");
+		try {
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "initialized") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: 9003,
+						method: "client/registerCapability",
+						params: {
+							registrations: [
+								{
+									id: "py-files",
+									method: "workspace/didChangeWatchedFiles",
+									registerOptions: {
+										watchers: [{ globPattern: { baseUri: fileToUri(tempDir.path()), pattern: "**/*.py" } }],
+									},
+								},
+							],
+						},
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["py"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await server.waitFor(message => message.id === 9003 && message.method === undefined);
+
+			// Another process keeps writing in the workspace long after omp last used the server.
+			const lastUse = Date.now() - 10 * 60_000;
+			const deadline = Date.now() + 5_000;
+			for (let attempt = 0; ; attempt++) {
+				client.lastActivity = lastUse;
+				const probe = path.join(tempDir.path(), `probe-${attempt}.py`);
+				await Bun.write(probe, "x = 1\n");
+				const seen = await server
+					.waitFor(
+						message =>
+							message.method === "workspace/didChangeWatchedFiles" &&
+							JSON.stringify(message.params).includes(fileToUri(probe)),
+						300,
+					)
+					.catch(() => undefined);
+				if (seen) break;
+				if (Date.now() > deadline) throw new Error("the watch never reported a probe file");
+			}
+
+			expect(client.lastActivity).toBe(lastUse);
+			expect(lspClient.isIdleClient(client, Date.now(), 60_000)).toBe(true);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("drains every workspace/configuration pull during lazy cold start when a pull id collides with an in-flight request", async () => {
 		// #3001: basedpyright/pyright pull `workspace/configuration` repeatedly
 		// during cold start and gate document analysis on every pull being
@@ -1901,79 +1965,71 @@ describe("lsp regressions", () => {
 	});
 
 	it("sanitizes symbol metadata in renderer output", async () => {
-		const theme = await getThemeByName("dark");
-		const uiTheme = theme!;
-		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
-
-		const call = renderCall(
-			{ action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
-			renderOptions,
-			uiTheme,
+		const callText = sanitizeText(
+			toolCallText(
+				new ToolCall({
+					id: "call-1",
+					name: "lsp",
+					args: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
+				}),
+			),
 		);
-		const callText = sanitizeText(call.render(120).join("\n"));
 		const normalizedCallText = callText.replace(/\s+/g, " ");
 		expect(normalizedCallText).toContain("foo bar baz");
 		expect(callText).not.toContain("\t");
-		const result = renderResult(
-			{
-				content: [{ type: "text", text: "No definition found" }],
-				details: {
-					action: "definition",
-					success: true,
-					request: {
+		const resultText = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
+				result: {
+					content: [{ type: "text", text: "No definition found" }],
+					details: {
 						action: "definition",
-						file: "src/example.ts",
-						line: 10,
-						symbol: "foo\tbar\nbaz",
+						success: true,
+						request: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
 					},
 				},
-			},
-			renderOptions,
-			uiTheme,
+			}),
 		);
-		const resultText = sanitizeText(result.render(120).join("\n"));
 		const normalizedResultText = resultText.replace(/\s+/g, " ");
 		expect(normalizedResultText).toContain("src/example.ts:10 (foo bar baz)");
 		expect(resultText).not.toContain("\t");
 	});
 
 	it("sanitizes tabs in rendered diagnostic output", async () => {
-		const theme = await getThemeByName("dark");
-		const uiTheme = theme!;
-		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
-
-		const result = renderResult(
-			{
-				content: [
-					{
-						type: "text",
-						text: "Diagnostics: 1 error(s)\nsrc/example.go:183:41 [error] [compiler] too many\targuments in call (WrongArgCount)",
-					},
-				],
-			},
-			renderOptions,
-			uiTheme,
+		const resultText = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "diagnostics", file: "src/example.go" },
+				result: {
+					content: [
+						{
+							type: "text",
+							text: "Diagnostics: 1 error(s)\nsrc/example.go:183:41 [error] [compiler] too many\targuments in call (WrongArgCount)",
+						},
+					],
+				},
+			}),
 		);
-
-		const resultText = sanitizeText(result.render(120).join("\n"));
 		expect(resultText).not.toContain("\t");
 		expect(resultText.replace(/\s+/g, " ")).toContain("too many arguments in call");
 	});
 
 	it("hang-wraps expanded generic output without tabs or lost text (#7041, #15824)", async () => {
-		const theme = await getThemeByName("dark");
 		const note =
 			"note: 'configured, not started' means the binary resolves on PATH but no request has spawned it yet";
-		const result = renderLocalResult(
-			{
-				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }],
-			},
-			{ expanded: true, isPartial: false },
-			theme!,
-		);
-
 		const width = 80;
-		const lines = sanitizeText(result.render(width).join("\n")).split("\n");
+		const lines = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "status" },
+				result: { content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }] },
+				expanded: true,
+				width,
+			}),
+		)
+			.split("\n")
+			.filter(line => line.trim() !== "");
 		const text = lines.join("\n");
 		expect(text).not.toContain("\t");
 		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
@@ -4624,12 +4680,11 @@ describe("lsp regressions", () => {
 				});
 				await server.waitFor(message => message.id === 9101 && message.method === undefined);
 
-				// The watch is armed shortly after the registration is acknowledged; wait until a
-				// probe file is reported, then check the exact notification for a fresh file.
+				// Registration can be acknowledged before the OS watcher is live.
+				const probe = path.join(sessionRoot, "src", "probe.py");
 				const deadline = Date.now() + 5_000;
 				for (let attempt = 0; ; attempt++) {
-					const probe = path.join(sessionRoot, "src", `probe-${attempt}.py`);
-					await Bun.write(probe, "");
+					await Bun.write(probe, `value = ${attempt}\n`);
 					const seen = await server
 						.waitFor(
 							message =>
@@ -4651,7 +4706,10 @@ describe("lsp regressions", () => {
 						JSON.stringify(message.params).includes(fileToUri(created)),
 					5_000,
 				);
-				expect(watched.params).toEqual({ changes: [{ uri: fileToUri(created), type: FileChangeType.Created }] });
+				// A late probe event may share the batch with the new file.
+				expect(watched.params).toEqual({
+					changes: expect.arrayContaining([{ uri: fileToUri(created), type: FileChangeType.Created }]),
+				});
 			} finally {
 				configCache.delete(sessionRoot);
 				await lspClient.shutdownAll();

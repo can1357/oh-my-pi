@@ -7,15 +7,17 @@
  * handler itself stops short-circuiting on `entryId === realLeafId` for
  * ask toolResults).
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { createRoot } from "@oh-my-pi/pi-tui";
+import * as treeSelectorModule from "../../../src/ui/overlays/pickers/tree-selector";
+import { initTheme } from "../../../src/ui/theme/service";
 
 beforeAll(async () => {
-	await initTheme();
+	initTheme();
 });
 
 beforeEach(async () => {
@@ -24,6 +26,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	resetSettingsForTest();
 });
 
@@ -55,31 +58,16 @@ function plainUserEntry(id: string): SessionEntry {
 	} as unknown as SessionEntry;
 }
 
-interface EditorSlot {
-	children: unknown[];
-	clear: () => void;
-	addChild: Mock<(child: unknown) => void>;
-}
-
-function createEditorSlot(): EditorSlot {
-	const children: unknown[] = [];
-	return {
-		children,
-		clear: vi.fn(() => {
-			children.length = 0;
-		}),
-		addChild: vi.fn((child: unknown) => {
-			children.push(child);
-		}),
-	};
-}
-
 function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { cancelled: false }) {
 	const tree: SessionTreeNode[] = [{ entry: leafEntry, children: [] }];
 	const navigateTree = vi.fn(async () => navigateTreeResult as never);
 	const showStatus = vi.fn();
 	const showError = vi.fn();
-	const editorContainer = createEditorSlot();
+	let picker: treeSelectorModule.TreeSelectorProps | undefined;
+	vi.spyOn(treeSelectorModule, "TreeSelector").mockImplementation(props => {
+		picker = props;
+		return [];
+	});
 	// Records the order of UI-rebuild vs agent-resume so a test can prove the
 	// re-answer continuation is deferred until after the transcript rebuild
 	// (issue #6483).
@@ -94,8 +82,11 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		order.push("resume");
 	});
 	const ctx = {
-		editor: { id: "editor", getText: () => "", setText: vi.fn() },
-		editorContainer,
+		composer: { text: () => "", setText: vi.fn() },
+		showEditorAreaDialog: vi.fn((factory: () => unknown) => {
+			createRoot(factory);
+			return { node: {}, closed: false, close: vi.fn() };
+		}),
 		sessionManager: {
 			getTree: () => tree,
 			getLeafId: () => leafEntry.id,
@@ -103,12 +94,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 			getSessionName: () => undefined,
 		},
 		session: { navigateTree, resumeAfterAskReanswer },
-		ui: {
-			setFocus: vi.fn(),
-			getFocused: () => undefined,
-			requestRender: vi.fn(),
-			terminal: { rows: 24 },
-		},
+		shell: { size: () => ({ columns: 80, rows: 24 }) },
 		renderInitialMessages,
 		reloadTodos,
 		showStatus,
@@ -121,25 +107,23 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		// itself (already covered at the session level).
 		getToolUIContext: () => undefined,
 	} as unknown as InteractiveModeContext;
-	return { ctx, editorContainer, navigateTree, showStatus, showError, resumeAfterAskReanswer, order };
+	return { ctx, getPicker: () => picker, navigateTree, showStatus, showError, resumeAfterAskReanswer, order };
 }
 
-/** Grabs the `TreeSelectorComponent` mounted by the most recent `showTreeSelector()` call and fires its onSelect as if the user pressed Enter on `entryId`. */
-async function pickEntry(editorContainer: EditorSlot, entryId: string): Promise<void> {
-	const mounted = editorContainer.addChild.mock.calls.at(-1)?.[0] as {
-		getTreeList: () => { onSelect?: (id: string, options: { summarize: boolean }) => unknown };
-	};
-	await mounted.getTreeList().onSelect?.(entryId, { summarize: false });
+/** Fires the tree picker's onSelect as if the user pressed Enter on `entryId`, and waits for the navigation. */
+async function pickEntry(picker: treeSelectorModule.TreeSelectorProps | undefined, entryId: string): Promise<void> {
+	if (!picker) throw new Error("Expected the tree picker");
+	await (picker.onSelect(entryId, { summarize: false }) as unknown as Promise<void>);
 }
 
 describe("SelectorController.showTreeSelector re-answering the active ask leaf", () => {
 	it("keeps the plain no-op for a non-ask current leaf", async () => {
 		const entry = plainUserEntry("leaf-user");
-		const { ctx, editorContainer, navigateTree, showStatus } = createCtx(entry);
+		const { ctx, getPicker, navigateTree, showStatus } = createCtx(entry);
 		const controller = new SelectorController(ctx);
 
 		controller.showTreeSelector();
-		await pickEntry(editorContainer, "leaf-user");
+		await pickEntry(getPicker(), "leaf-user");
 
 		expect(showStatus).toHaveBeenCalledWith("Already at this point");
 		expect(navigateTree).not.toHaveBeenCalled();
@@ -149,13 +133,13 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		const entry = askResultEntry("leaf-ask");
 		const reopenHtml =
 			'<form><label><input type="radio" name="deploy_target" value="staging" checked> staging</label></form>';
-		const { ctx, editorContainer, navigateTree, showStatus, showError } = createCtx(entry, {
+		const { ctx, getPicker, navigateTree, showStatus, showError } = createCtx(entry, {
 			reopenAsk: { toolCallId: "call-1", html: reopenHtml },
 		});
 		const controller = new SelectorController(ctx);
 
 		controller.showTreeSelector();
-		await pickEntry(editorContainer, "leaf-ask");
+		await pickEntry(getPicker(), "leaf-ask");
 
 		// The no-op short-circuit must not fire for the current-leaf ask result:
 		// navigateTree gets called with `allowAskReopen: true`, and the result's
@@ -170,7 +154,7 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 
 	it("resumes the agent only after rebuilding the transcript when navigateTree reports a committed re-answer", async () => {
 		const entry = plainUserEntry("leaf-user");
-		const { ctx, editorContainer, showStatus, resumeAfterAskReanswer, order } = createCtx(entry, {
+		const { ctx, getPicker, showStatus, resumeAfterAskReanswer, order } = createCtx(entry, {
 			cancelled: false,
 			askReanswerCommitted: true,
 		});
@@ -179,7 +163,7 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		controller.showTreeSelector();
 		// A non-current target skips the no-op short-circuit and lands straight on
 		// the success path (navigateTree here returns a committed re-answer).
-		await pickEntry(editorContainer, "some-other-entry");
+		await pickEntry(getPicker(), "some-other-entry");
 
 		expect(showStatus).toHaveBeenCalledWith("Navigated to selected point");
 		expect(resumeAfterAskReanswer).toHaveBeenCalledTimes(1);
@@ -191,11 +175,11 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 
 	it("does not resume the agent for a plain navigation without a committed re-answer", async () => {
 		const entry = plainUserEntry("leaf-user");
-		const { ctx, editorContainer, resumeAfterAskReanswer } = createCtx(entry, { cancelled: false });
+		const { ctx, getPicker, resumeAfterAskReanswer } = createCtx(entry, { cancelled: false });
 		const controller = new SelectorController(ctx);
 
 		controller.showTreeSelector();
-		await pickEntry(editorContainer, "some-other-entry");
+		await pickEntry(getPicker(), "some-other-entry");
 
 		expect(resumeAfterAskReanswer).not.toHaveBeenCalled();
 	});

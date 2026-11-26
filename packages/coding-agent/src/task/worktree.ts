@@ -1,4 +1,4 @@
-import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
+import { type NestedRepoPatch } from "./task-details";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { errorMessage, formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
@@ -609,10 +609,6 @@ export interface IsolationHandle {
  * caller learns about that through `IsolationHandle.fellBack` +
  * `fallbackReason`.
  */
-
-function errorMessage(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
 
 /**
  * Deterministic task-isolation dir of one run (`repoRoot` + agent id) under the

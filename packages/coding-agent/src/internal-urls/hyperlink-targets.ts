@@ -1,10 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
 import { expandPath } from "../tools/path-utils";
+import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
+import { fileUriForTerminal } from "../utils/file-links";
 
 /**
  * Resolve Markdown link destinations (as extracted by `getMarkdownLinkUrls`)
@@ -47,7 +47,7 @@ export async function resolveMarkdownLinkHrefs(
 				}
 				const stat = await fs.stat(sourcePath);
 				if (!stat.isFile() && !stat.isDirectory()) return;
-				const target = fileUriForTerminal(sourcePath, undefined, TERMINAL.id);
+				const target = fileUriForTerminal(sourcePath, undefined, terminalIdentity().id);
 				if (!target) return;
 				targets.set(href, target + suffix);
 			} catch {

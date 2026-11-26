@@ -7,7 +7,7 @@ import type {
 	OAuthPrompt,
 	OAuthProviderId,
 } from "../registry/oauth/types";
-import type { Provider } from "../types";
+import type { Provider, ServiceTier } from "../types";
 import type {
 	ClientUsageIdentity,
 	ClientUsageReport,
@@ -501,6 +501,22 @@ export type AuthApiKeyOptions = {
 	 */
 	accountIds?: readonly string[];
 	/**
+	 * Service tier the request will ask for (`/fast`, `/fast ultra`). Selection
+	 * prefers a credential that offers it — an entitled OAuth account, kept even
+	 * on paid overage, else a stored or environment API key — and falls back to
+	 * ordinary balancing across the rest once those are blocked or refused the
+	 * tier. A resolution that could not honor it reports
+	 * {@link ResolvedApiKey.serviceTierUnavailable}.
+	 */
+	serviceTier?: ServiceTier;
+	/**
+	 * Discovery verdicts for `serviceTier` on `modelId`: {@link oauthAccountKey}
+	 * → whether that account's own catalog offers the tier (see
+	 * `serviceTierOffersByAccount`). Accounts discovery did not judge are
+	 * absent and fall back to the provider's usage-report gate.
+	 */
+	serviceTierAccounts?: Readonly<Record<string, boolean>>;
+	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of
 	 * stranding the caller for `timeoutMs * (maxRetries + 1)`.
@@ -800,6 +816,28 @@ export type MarkUsageLimitOptions = {
 	signal?: AbortSignal;
 };
 
+/** Identify the credential that was refused a service tier, and for how long to stop preferring it. */
+export type MarkServiceTierUnavailableOptions = {
+	/**
+	 * Stored row that served the refused request
+	 * ({@link ResolvedApiKey.credentialId}). Omit when the bearer had no row
+	 * (environment variable, `--api-key`, `models.yml`): the refusal is then
+	 * held in this process against the provider's unstored key.
+	 */
+	credentialId?: number;
+	serviceTier: ServiceTier;
+	modelId: string;
+	/** Provider-stated cooldown; defaults to {@link SERVICE_TIER_BLOCK_MS}. */
+	retryAfterMs?: number;
+};
+
+/**
+ * How long a credential refused a service tier stays out of tier-preferring
+ * selection when the provider states no cooldown. Matches the pause Claude
+ * Code applies after a refused fast-mode request before probing again.
+ */
+export const SERVICE_TIER_BLOCK_MS = 30 * 60_000;
+
 /** Resolve a failed request to its credential and rotate if possible. */
 export type RotateCredentialOptions = {
 	error?: unknown;
@@ -826,6 +864,8 @@ export type RotateCredentialOptions = {
 export interface CredentialRotation {
 	switched: boolean;
 	afterSiblingWait?: boolean;
+	/** Explanation when a restricted pool is blocked and includes an OAuth organization rejection. */
+	poolUnavailableReason?: string;
 }
 
 /** Filter saved reset credits by provider and session. */
@@ -1435,6 +1475,24 @@ export interface LimitsApi {
 		sessionId: string | undefined,
 		options?: RotateCredentialOptions,
 	): Promise<CredentialRotation>;
+	/**
+	 * Record that the provider refused `serviceTier` on `modelId` for one
+	 * credential (fast mode not enabled, out of usage credits, fast-mode rate
+	 * limit). Until the block expires, tier-preferring selection treats that
+	 * credential as not offering the tier, so requests move to one that does or
+	 * run at standard speed; ordinary selection is unaffected. Resolves `false`
+	 * when the named stored row is gone or the refusal was already on record —
+	 * selection could not keep the tier away from this credential, so the
+	 * caller drops the tier itself.
+	 */
+	markServiceTierUnavailable(provider: string, options: MarkServiceTierUnavailableOptions): Promise<boolean>;
+	/**
+	 * Forget every recorded refusal of `serviceTier` on `modelId` for a provider
+	 * and drop its cached usage reports, so the next request probes each
+	 * credential for the tier again. For re-arming the tier (`/fast on`) once
+	 * the user has fixed what the provider refused.
+	 */
+	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void>;
 	/** Invalidate a credential matching an API key after authentication failure. */
 	invalidateMatching(
 		provider: string,

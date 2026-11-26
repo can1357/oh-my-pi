@@ -4,12 +4,15 @@ import {
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
+	type AuthStorageOptions,
+	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { logger } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
 
 interface CacheEntry {
 	value: string;
@@ -186,6 +189,58 @@ describe("AuthStorage model usage health", () => {
 		await storage.keys.prefetchUsage("anthropic", "session", { modelId: "plan-gated" });
 		expect(fetchUsage).toHaveBeenCalledTimes(1);
 		expect(storage.oauth.accounts("anthropic", "session").some(account => account.active)).toBe(false);
+	});
+
+	it.each([
+		{ rejected: false, state: "healthy" },
+		{ rejected: true, state: "depleted" },
+	])("restores model health across processes after OAuth refresh ($state)", async ({ rejected, state }) => {
+		await using dir = await TempDir.create();
+		const dbPath = dir.join("agent.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		let offline = true;
+		const reports = { "account-1": report("account-1", [limit("short", 0.2)]) };
+		const options: AuthStorageOptions = {
+			async refreshOAuthCredential() {
+				if (offline) throw new Error("getaddrinfo ENOTFOUND api.anthropic.com");
+				return { access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 3_600_000 };
+			},
+			usageProviderResolver: () => makeUsageProvider(reports),
+			rankingStrategyResolver: () => strategy,
+		};
+		const auth = new AuthStorage(store, options);
+		const model = { modelId: "claude", reserveFraction: 0.1 };
+		try {
+			const { credential } = oauthRow(1);
+			if (credential.type !== "oauth") throw new Error("expected OAuth credential");
+			await auth.credentials.set("anthropic", [{ ...credential, expires: Date.now() - 60_000 }]);
+			expect(await auth.keys.get("anthropic", "offline", model)).toBeUndefined();
+			expect((await auth.health.model("anthropic", model)).state).toBe("depleted");
+
+			if (rejected) {
+				const [row] = store.listAuthCredentials("anthropic");
+				if (!row) throw new Error("expected stored OAuth credential");
+				auth.blocks.upsert({
+					credentialId: row.id,
+					providerKey: "anthropic:oauth",
+					blockScope: "auth",
+					blockedUntilMs: Date.now() + 60_000,
+				});
+			}
+			offline = false;
+			expect(await auth.keys.get("anthropic", "online", model)).toBe("fresh-access");
+
+			const peer = new AuthStorage(await SqliteAuthCredentialStore.open(dbPath), options);
+			try {
+				await peer.credentials.reload();
+				expect((await peer.health.model("anthropic", model)).state).toBe(state);
+				expect((await auth.health.model("anthropic", model)).state).toBe(state);
+			} finally {
+				peer.close();
+			}
+		} finally {
+			auth.close();
+		}
 	});
 
 	it("honours every request scope when checking persisted health blocks", async () => {
