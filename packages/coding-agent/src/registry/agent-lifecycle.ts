@@ -62,13 +62,24 @@ async function removeAgentTombstone(id: string, sessionFile: string): Promise<vo
 }
 
 /**
+ * A persisted factory's decline to rebuild a ref. `reason` completes
+ * "cannot be resumed: <reason>" in the errors {@link AgentLifecycleManager.ensureLive}
+ * throws, so a refusal (such as an isolated run) never reads like a missing
+ * registration.
+ */
+export interface ReviveRefusal {
+	reason: string;
+}
+
+/**
  * Builds a reviver for a `parked` ref restored from disk (Agent Hub scan,
  * collab mirror, resumed process) that carries a sessionFile but no in-memory
- * adoption. Returns undefined when the ref cannot be faithfully rebuilt (no
- * persisted session contract, or its workspace is gone). Injected from the
- * top-level session so this manager stays free of sdk/SessionManager imports.
+ * adoption. Returns a {@link ReviveRefusal} when the ref cannot be faithfully
+ * rebuilt (isolated run, no persisted session contract, or its workspace is
+ * gone). Injected from the top-level session so this manager stays free of
+ * sdk/SessionManager imports.
  */
-export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentReviver | undefined>;
+export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentReviver | ReviveRefusal>;
 
 export interface AdoptOptions {
 	/** TTL before an idle agent is parked. <= 0 disables parking. */
@@ -334,7 +345,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const persistedFactory = ref.sessionFile ? this.#persistedReviverFactory : undefined;
 		if (persistedFactory) {
 			try {
-				if (await persistedFactory(ref)) return false;
+				if (typeof (await persistedFactory(ref)) === "function") return false;
 			} catch (error) {
 				logger.warn("AgentLifecycleManager.reclaimDeadCorpse: persisted reviver probe failed", {
 					id,
@@ -473,7 +484,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	 * - the ref is being killed (retry once it has stopped) or removed;
 	 * - the ref was replaced, released, or killed while its park was in flight;
 	 * - the ref was replaced while its killed transcript was being reopened;
-	 * - its transcript cannot be revived (no reviver, no session contract, workspace gone).
+	 * - its transcript cannot be revived (no reviver, or the persisted factory refused it).
 	 */
 	async ensureLive(id: string): Promise<AgentSessionHandle> {
 		let ref = this.#registry.get(id);
@@ -568,9 +579,9 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				`Agent "${id}" revival aborted: its lifecycle was disposed while its transcript was being checked.`,
 			);
 		}
-		if (!reviver) {
+		if (typeof reviver !== "function") {
 			throw new Error(
-				`Agent "${id}" was killed and its transcript cannot be resumed (no session contract, isolated run, or its workspace is gone). Read history://${id} for what it did.`,
+				`Agent "${id}" was killed and its transcript cannot be resumed: ${reviver.reason}. Read history://${id} for what it did.`,
 			);
 		}
 		const reopened = this.#registry.reopen(id, killed);
@@ -593,8 +604,9 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const prior = adoption?.ref === ref ? adoption : undefined;
 		let revive = prior?.revive;
 		let coldAdopted = false;
+		let refusal: ReviveRefusal | undefined;
 		if (!revive && ref.status === "parked" && ref.sessionFile && this.#persistedReviverFactory) {
-			revive = await this.#persistedReviverFactory(ref);
+			const built = await this.#persistedReviverFactory(ref);
 			// Teardown can complete during the factory await. A late cold revive must
 			// not cold-adopt (and later attach a live session + TTL) into a disposed
 			// manager — reject deterministically before creating any session.
@@ -608,7 +620,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			if (this.#registry.get(id) !== ref) {
 				throw new Error(`Agent "${id}" changed while its persisted session was being prepared.`);
 			}
-			if (revive) {
+			if (typeof built === "function") {
+				revive = built;
 				adoption = {
 					ref,
 					idleTtlMs: prior?.idleTtlMs ?? this.#persistedReviveTtlMs(),
@@ -617,10 +630,17 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				};
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
+			} else {
+				refusal = built;
 			}
 		}
 		if (this.#registry.get(id) !== ref) {
 			throw new Error(`Agent "${id}" changed while its persisted session was being prepared.`);
+		}
+		if (refusal) {
+			throw new Error(
+				`Agent "${id}" is ${ref.status} and cannot be resumed: ${refusal.reason}. Its transcript remains readable at history://${id}.`,
+			);
 		}
 		if (ref.status !== "parked" || !revive || !adoption) {
 			throw new Error(
