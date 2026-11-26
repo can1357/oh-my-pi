@@ -2,7 +2,6 @@ import { type Model, resolveModelServiceTier, type ServiceTier, shouldSendServic
 import { findActiveModelPreset, getModelPresetNames } from "../config/model-presets";
 import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
-import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { describeModelCompactionPoint } from "../session/model-compaction-threshold";
 import {
@@ -11,13 +10,7 @@ import {
 	cfgModelProviderOrder,
 	cfgModelRoleStorage,
 } from "../config/model-settings";
-import {
-	cfgDefaultThinkingLevel,
-	cfgRetryFallbackChains,
-	cfgTierAnthropic,
-	cfgTierGoogle,
-	cfgTierOpenai,
-} from "../session/settings";
+import { cfgDefaultThinkingLevel, cfgRetryFallbackChains, cfgTiers } from "../session/settings";
 import type { ModelHubSource } from "./view-model/overlays/model-hub";
 
 /**
@@ -54,14 +47,7 @@ export function createModelBrowserSource(
 		serviceTierFor: model => {
 			const tier = sessionServiceTier
 				? sessionServiceTier(model)
-				: resolveModelServiceTier(
-						buildServiceTierByFamily(
-							cfgTierOpenai.get(settings),
-							cfgTierAnthropic.get(settings),
-							cfgTierGoogle.get(settings),
-						),
-						model,
-					);
+				: resolveModelServiceTier(cfgTiers.get(settings), model);
 			// Label only a tier the request carries as `service_tier`: that is what the
 			// provider echoes back as the served tier, which keys the perf row.
 			return shouldSendServiceTier(tier, model) ? tier : undefined;
