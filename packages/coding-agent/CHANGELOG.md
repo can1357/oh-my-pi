@@ -26,6 +26,7 @@
 - `http` MCP servers that answer `server/discover` with a plain HTTP 415 (rmcp 0.2, e.g. `elastic/mcp-server-elasticsearch`) now connect through the `initialize` handshake instead of failing ([#20588](https://github.com/can1357/oh-my-pi/issues/20588)).
 - `/usage` shows OpenCode Go quota windows again instead of `API key — usage unavailable` after the model catalog refreshes ([#20581](https://github.com/can1357/oh-my-pi/issues/20581)).
 - Terminal images at the edges of assistant replies no longer disappear or draw above their allotted rows ([#20569](https://github.com/can1357/oh-my-pi/issues/20569)).
+- A session kept in a `SqlSessionStorage` or `RedisSessionStorage` now journals its idle recaps in history.db as a file-backed session does. Before, none was journaled, so the `archive` prelude's `recaps()` listed none for it and a resumed session did not show its last recap again. Only an in-memory session journals none.
 - `/prewalk`, `/prewalk restart`, and `/switch` now accept `^provider/id[:level]` model references inserted by `^` completion ([#20564](https://github.com/can1357/oh-my-pi/issues/20564)).
 - Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
 - Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).

@@ -738,6 +738,6 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project
 - Normalizes line endings and surrounding/trailing whitespace, then deduplicates prompts across the database
 - Resubmission updates the latest timestamp/cwd/session provenance and increments `use_count`
 - `add()` writes synchronously before returning its resolved promise; failures are logged rather than thrown
-- The same DB also contains independent `session_titles` and append-only `session_recaps` tables. Idle recaps do not enter the session JSONL or model context.
+- The same DB also contains independent `session_titles` and append-only `session_recaps` tables. A session journals its idle recaps in `session_recaps` whichever session storage keeps it (`FileSessionStorage`, `SqlSessionStorage` or `RedisSessionStorage`); only an in-memory session journals none. `session_titles` indexes file-backed sessions only. Idle recaps do not enter the session JSONL or model context.
 
 Use session files for conversation graph/state replay; use `HistoryStorage` for prompt history UX.
