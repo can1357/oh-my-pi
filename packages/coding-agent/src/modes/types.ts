@@ -751,9 +751,10 @@ export interface InteractiveModeContext {
 	presentAssistant(message?: AssistantMessage, options?: PresentAssistantOptions): AssistantView;
 	/**
 	 * Replay `entries` into a transcript of their own, drawn by the session's block presenters (the
-	 * rewind page's turns). Dispose it when the page closes.
+	 * rewind page's turns). `clipped`: the entries are a later part of the session, so the run they
+	 * open in may have started above them. Dispose it when the page closes.
 	 */
-	createTranscriptReplica(entries: readonly TranscriptEntryLike[]): TranscriptReplica;
+	createTranscriptReplica(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica;
 	/**
 	 * Mount a tool call's block: a tool card, or a reply block for a built-in `write` to a reply
 	 * URL (`out://`). Wired to the display flags; registers nothing in {@link pendingTools}.

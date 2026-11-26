@@ -6,13 +6,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal } from "./helpers/mode-terminal";
@@ -42,6 +43,26 @@ function assistant(text: string): AssistantMessage {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		timestamp: 2,
+	};
+}
+
+/** A reply that only calls `bash`: the run goes on. */
+function bashCall(callId: string): AssistantMessage {
+	return {
+		...assistant(""),
+		content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command: "ls" } }],
+		stopReason: "toolUse",
+	};
+}
+
+function bashResult(callId: string): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: callId,
+		toolName: "bash",
+		content: [{ type: "text", text: "file.txt" }],
+		isError: false,
+		timestamp: 3,
 	};
 }
 
@@ -75,6 +96,11 @@ function find(ui: Ui, nodes: readonly NativeNode[], kind: string): NativeNode | 
 		if (inner) return inner;
 	}
 	return undefined;
+}
+
+/** Whether `node` or a node under it has role `role`. */
+function hasRole(ui: Ui, node: NativeNode, role: string): boolean {
+	return node.p.role === role || node.c.some(id => hasRole(ui, ui.get(id), role));
 }
 
 describe("native rewind page and session reset", () => {
@@ -230,6 +256,50 @@ describe("native rewind page and session reset", () => {
 		// The outline stays on the turn it was on.
 		expect(textOf(ui, page.dock[0]!)).toContain("644/644");
 		expect(sig(page.main.at(-1)!)).toBe("card:omp.user [pick]");
+	});
+
+	it("shows the totals of the branch's first run, however that run started", async () => {
+		// A run an extension starts (`sendCustomMessage(…, { triggerTurn: true })`) opens with no prompt.
+		const manager = session.sessionManager;
+		manager.resetLeaf();
+		const trigger: CustomMessage = {
+			role: "custom",
+			customType: "test-trigger",
+			content: "check the build",
+			display: true,
+			attribution: "agent",
+			timestamp: 1,
+		};
+		manager.appendMessage(trigger);
+		manager.appendMessage(assistant("the build passes"));
+		await using ui = await nativeShell(mode.shell);
+		mode.showUserMessageSelector();
+
+		const reply = ui.surface("screen")!.main.at(-1)!;
+		expect(sig(reply)).toBe("col:omp.assistant [pick]");
+		expect(hasRole(ui, reply, "omp.turn.usage")).toBe(true);
+	});
+
+	it("leaves out the totals of a run the tail opens partway through, until `a` loads its start", async () => {
+		const manager = session.sessionManager;
+		manager.appendMessage(user("run the sweep"));
+		for (let index = 0; index < 330; index++) {
+			manager.appendMessage(bashCall(`call-${index}`));
+			manager.appendMessage(bashResult(`call-${index}`));
+		}
+		manager.appendMessage(assistant("swept"));
+		await using ui = await nativeShell(mode.shell);
+		mode.showUserMessageSelector();
+
+		// The tail's totals would count only its part of the run.
+		let reply = ui.surface("screen")!.main.at(-1)!;
+		expect(sig(reply)).toBe("col:omp.assistant [pick]");
+		expect(hasRole(ui, reply, "omp.turn.usage")).toBe(false);
+
+		ui.type("a");
+		reply = ui.surface("screen")!.main.at(-1)!;
+		expect(sig(reply)).toBe("col:omp.assistant [pick]");
+		expect(hasRole(ui, reply, "omp.turn.usage")).toBe(true);
 	});
 
 	it("shows the welcome card again over the first line of a new session", async () => {

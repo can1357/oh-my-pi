@@ -126,7 +126,7 @@ import type { ModelHubState } from "../../ui/overlays/pickers/model-hub-state";
 import { ModelPicker, type ModelPickerProps, prewarmModelPicker } from "../../ui/overlays/pickers/model-picker";
 import { type OAuthAuthState, OAuthSelector } from "../../ui/overlays/pickers/oauth-selector";
 import { ResetUsageSelector } from "../../ui/overlays/pickers/reset-usage-selector";
-import { RewindSelector, rewindTargets } from "../../ui/overlays/pickers/rewind-selector";
+import { hasRewindPoint, RewindSelector } from "../../ui/overlays/pickers/rewind-selector";
 import { SessionAccountSelector } from "../../ui/overlays/pickers/session-account-selector";
 import {
 	SessionSelector,
@@ -1365,7 +1365,7 @@ export class SelectorController {
 			return;
 		}
 
-		if (rewindTargets(entries).length === 0) {
+		if (!hasRewindPoint(entries)) {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
@@ -1386,7 +1386,7 @@ export class SelectorController {
 						siblingPaths: entryId => this.#siblingBranchPaths(entryId),
 						startAt,
 						terminalRows: () => this.ctx.shell.size().rows,
-						...(native ? { replica: turns => this.ctx.createTranscriptReplica(turns) } : {}),
+						...(native ? { replica: (turns, clipped) => this.ctx.createTranscriptReplica(turns, clipped) } : {}),
 						onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
 						onCancel: done,
 					}),
