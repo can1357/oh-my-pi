@@ -172,6 +172,30 @@ describe("OpenRouter native generation failures", () => {
 		expect(result.usage.output).toBe(outputTokens);
 	});
 
+	it("surfaces a native failure when only an unbilled encrypted reasoning item is present", async () => {
+		const zeroUsage = { input_tokens: 77_000, output_tokens: 0, total_tokens: 77_000 };
+		const { fetchImpl, requests } = createFetch(
+			{
+				output: [{ type: "reasoning", status: "completed", summary: [], encrypted_content: "opaque" }],
+				usage: zeroUsage,
+			},
+			generation("MALFORMED_RESPONSE"),
+			[
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque" },
+				},
+			],
+		);
+		const result = await streamOpenAIResponses(model, context, { apiKey: "test-key", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("MALFORMED_RESPONSE");
+		expect(result.responseId).toBe(responseId);
+		expect(result.usage.output).toBe(0);
+		expect(requests).toEqual([`POST ${model.baseUrl}/responses`, `GET ${model.baseUrl}/generation?id=${responseId}`]);
+	});
+
 	it("does not look up metadata for signed reasoning-only progress", async () => {
 		const { fetchImpl, requests } = createFetch({}, generation("MALFORMED_RESPONSE"), [
 			{

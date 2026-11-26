@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import { SessionObserverRegistry } from "../src/task/session-observer-registry";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { sumSubagentTreeCost } from "../src/modes/agent-hub-runtime";

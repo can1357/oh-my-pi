@@ -6,10 +6,11 @@
  * thinking slider. Every ordering, ranking and slider rule comes from the TUI picker's own helpers.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { fuzzyRank } from "@oh-my-pi/pi-tui/fuzzy";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { fuzzyRank } from "../../utils/fuzzy";
 import {
 	buildSearchAffinity,
+	buildSessionModelScope,
 	heldRoles,
 	type ModelBrowserItem,
 	type ModelBrowserSource,
@@ -18,10 +19,9 @@ import {
 	recentBlockLength,
 	roleChipLabel,
 	type SessionModelScope,
-	SessionModelScopeCache,
-} from "@oh-my-pi/pi-tui/overlays/model-browser";
-import { thinkingSlider } from "@oh-my-pi/pi-tui/overlays/model-picker";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+} from "../view-model/overlays/model-browser";
+import { thinkingSlider } from "../view-model/overlays/model-picker";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
 import { cfgCycleOrder } from "../../config/model-settings";
 import type { AgentSession } from "../../session/agent-session";
 import { createModelBrowserSource } from "../model-browser-source";
@@ -70,7 +70,6 @@ export interface RpcModelPickerResult {
 export class RpcModelPicker {
 	readonly #session: AgentSession;
 	readonly #source: ModelBrowserSource;
-	readonly #scopes: SessionModelScopeCache;
 	#ranker:
 		| { items: readonly ModelBrowserItem[]; providerOrder: readonly string[]; ranker: ModelItemRanker }
 		| undefined;
@@ -78,7 +77,6 @@ export class RpcModelPicker {
 	constructor(session: AgentSession) {
 		this.#session = session;
 		this.#source = createModelBrowserSource(session.settings, model => session.effectiveServiceTier(model));
-		this.#scopes = new SessionModelScopeCache(this.#source, session.modelRegistry);
 	}
 
 	/**
@@ -91,7 +89,11 @@ export class RpcModelPicker {
 
 	#models(query: string, limit: number): RpcModelPickerResult {
 		const session = this.#session;
-		const scope = this.#scopes.get(session.scopedModels.map(entry => entry.model));
+		const scope = buildSessionModelScope(
+			this.#source,
+			session.modelRegistry,
+			session.scopedModels.map(entry => entry.model),
+		);
 		if (scope.error !== undefined && scope.items.length === 0) throw new Error(scope.error);
 		const ranked = query.trim() ? this.#rank(scope, query) : scope.items;
 		const shown = ranked.slice(0, limit);
@@ -112,7 +114,7 @@ export class RpcModelPicker {
 				...(roles.length > 0 ? { roles } : {}),
 				...(slider.disabled ? {} : { thinking: [...slider.steps], thinkingLevel: slider.value }),
 				...(tokens > 0 && window > 0 && tokens > window ? { overContext: true } : {}),
-				...(modelsAreEqual(current, model) ? { current: true } : {}),
+				...(routedModelsAreEqual(current, model) ? { current: true } : {}),
 			};
 		});
 		return {

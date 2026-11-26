@@ -344,6 +344,34 @@ mod tests {
 		Record::Var(Var::scalar(v, Attrs::NONE))
 	}
 
+	#[test]
+	fn forked_images_share_existing_array_elements_after_append() {
+		let mut root = Image::default();
+		root.put_var(
+			b"pids",
+			Record::Var(Var {
+				attrs: Attrs::INDEXED,
+				value: VarValue::Indexed(vec![(0, BString::from("first"))].into()),
+			}),
+		);
+		let first = root.var(b"pids").unwrap().index(0).unwrap().as_ptr();
+		let mut jobs = Vec::new();
+		for i in 1..=512 {
+			jobs.push(root.clone());
+			let Record::Var(var) = root.var_mut(b"pids").unwrap() else {
+				panic!("array variable");
+			};
+			let VarValue::Indexed(items) = &mut var.value else {
+				panic!("indexed array");
+			};
+			items.push((i, BString::from("next")));
+			assert_eq!(root.var(b"pids").unwrap().index(0).unwrap().as_ptr(), first);
+		}
+		assert_eq!(jobs[0].var(b"pids").unwrap().values().len(), 1);
+		assert_eq!(jobs[511].var(b"pids").unwrap().next_index(), 512);
+		assert_eq!(root.var(b"pids").unwrap().next_index(), 513);
+	}
+
 	/// A child's image survives a save against the root's changed image:
 	/// its own writes, removals and the fork-time values the root has since
 	/// overwritten all come back; kernel records are not the child's.

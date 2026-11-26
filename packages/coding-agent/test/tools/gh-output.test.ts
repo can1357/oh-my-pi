@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,13 +7,34 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GithubTool } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import type { ForgeCliResult } from "@oh-my-pi/pi-coding-agent/utils/forge-cli";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
-import { bashToolRenderer, type BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
-import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
+import { type BashToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/bash";
+import { createRoot, isUiNode } from "@oh-my-pi/pi-tui";
+import { corpusEnvironment, describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { printRows } from "../../src/ui/print-rows";
+import { ToolBlock } from "../../src/ui/transcript/tool-block";
+import { type ToolTextInput, toolCall } from "../helpers/tool-text";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const tempDirs: string[] = [];
+
+/** A tool call's transcript card: its terminal rows (escapes kept) and its native tree as JSON. */
+function card(input: ToolTextInput): { rows: string[]; native: string } {
+	const call = toolCall({ expanded: true, ...input });
+	const rows = printRows(() => ToolBlock({ call }), input.width ?? 120);
+	const native = createRoot(dispose => {
+		const node = ToolBlock({ call });
+		if (!isUiNode(node)) throw new Error("expected one tool node");
+		const tree = JSON.stringify(describeTree(node, corpusEnvironment("dark"), input.width ?? 120));
+		dispose();
+		return tree;
+	});
+	return { rows, native };
+}
 
 afterEach(async () => {
 	vi.restoreAllMocks();
@@ -248,13 +269,9 @@ for (const mode of ["run", "commit"] as const) {
 					expect(output).not.toContain("\u0007");
 				}
 				if (fixture.logs[0] === unavailableLog) {
-					await themeModule.initTheme();
-					const theme = await themeModule.getThemeByName("dark");
-					if (!theme) throw new Error("expected an initialized theme");
-					const options = { expanded: true, isPartial: false };
-					const component = githubToolRenderer.renderResult(result, options, theme);
-					expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("exit code 7");
-					expect(JSON.stringify(githubToolRenderer.describeResult(result, options))).toContain("exit code 7");
+					const rendered = card({ name: "github", args: { op: "run_watch" }, result });
+					expect(Bun.stripANSI(rendered.rows.join("\n"))).toContain("exit code 7");
+					expect(rendered.native).toContain("exit code 7");
 				}
 				for (const job of jobs) {
 					const calls = runSpy.mock.calls.filter(([, args]) =>
@@ -292,17 +309,17 @@ it("keeps multiline gh stderr on one terminal diagnostic row", async () => {
 		repo: "owner/repo",
 		run: "77",
 	});
-	await themeModule.initTheme();
-	const theme = await themeModule.getThemeByName("dark");
-	if (!theme) throw new Error("expected an initialized theme");
-	const options = { expanded: true, isPartial: false };
-	const rows = githubToolRenderer.renderResult(result, options, theme).render(200);
+	const { rows, native } = card({
+		name: "github",
+		args: { op: "run_watch", repo: "owner/repo", run: "77" },
+		result,
+		width: 200,
+	});
 	expect(rows.every(row => !/[\r\n\u0007]/.test(row))).toBe(true);
 	const diagnosticRow = rows.map(row => Bun.stripANSI(row)).find(row => row.includes("log tail unavailable"));
 	expect(diagnosticRow).toContain("first line second line third");
 	expect(diagnosticRow).toContain("exit code 7");
-	const described = JSON.stringify(githubToolRenderer.describeResult(result, options));
-	expect(described).toContain("first line second line third");
+	expect(native).toContain("first line second line third");
 });
 
 describe("pr_create concise output", () => {
@@ -348,7 +365,7 @@ describe("pr_create concise output", () => {
 					}),
 				};
 			});
-			const tool = Object.assign(new GithubTool(session), githubToolRenderer);
+			const tool = new GithubTool(session);
 			const result = await tool.execute("create-output", input);
 			expect(submittedBody).toBe(body);
 			expect(input.body).toBe(body);
@@ -367,34 +384,22 @@ describe("pr_create concise output", () => {
 			for (const field of ["body", "files", "comments", "reviews", "reviewComments"]) {
 				expect(requestedFields).not.toContain(field);
 			}
-			await themeModule.initTheme();
-			const theme = await themeModule.getThemeByName("dark");
-			if (!theme) throw new Error("expected an initialized theme");
 			const rebuilt: typeof result = JSON.parse(JSON.stringify(result));
 			// The nested card rebuilds from the projected dispatch, without the
 			// original body-bearing command line.
-			const bashResult: { content: Array<{ type: string; text?: string }>; details: BashToolDetails } = {
-				content: rebuilt.content,
+			const bashResult: { content: Array<{ type: "text"; text?: string }>; details: BashToolDetails } = {
+				content: rebuilt.content as Array<{ type: "text"; text?: string }>,
 				details: {
 					toolCommands: [{ tool: "github", mode: "execute", exitCode: 0, args: input, inner: rebuilt.details }],
 				},
 			};
-			const bashArgs = { command: "github pr_create" };
-			const options = {
-				expanded: true,
-				isPartial: false,
-				renderContext: {
-					resolveToolCommandMounted: (name: string) => (name === "github" ? tool : undefined),
-				},
-			};
-			const rendered = bashToolRenderer.renderResult(bashResult, options, theme, bashArgs);
-			if (!rendered) throw new Error("expected a rendered nested card");
-			const output = Bun.stripANSI(rendered.render(120).join("\n"));
+			const rendered = card({ name: "bash", args: { command: "github pr_create" }, result: bashResult });
+			const output = Bun.stripANSI(rendered.rows.join("\n"));
 			expect(output).toContain("owner/repo");
 			expect(output).toContain("Created Pull Request #77: Add gizmo");
 			expect(output).toContain("https://github.com/owner/repo/pull/77");
 			expect(output).not.toContain("SENTINEL");
-			const described = JSON.stringify(bashToolRenderer.describeResult?.(bashResult, options, bashArgs));
+			const described = rendered.native;
 			expect(described).toContain("owner/repo");
 			expect(described).toContain("Created Pull Request #77: Add gizmo");
 			expect(described).not.toContain("SENTINEL");

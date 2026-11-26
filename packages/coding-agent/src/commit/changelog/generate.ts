@@ -6,7 +6,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import changelogSystemPrompt from "../../commit/prompts/changelog-system.md" with { type: "text" };
 import changelogUserPrompt from "../../commit/prompts/changelog-user.md" with { type: "text" };
 import type { ChangelogGenerationResult } from "../../commit/types";
-import { toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { toReasoningEffort } from "../../thinking/levels";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../utils";
 
 // Build the changelog entry schema with arktype

@@ -21,6 +21,7 @@ mod platform {
 		collections::HashSet,
 		fs,
 		os::fd::{AsFd, AsRawFd, OwnedFd},
+		path::PathBuf,
 		sync::Arc,
 	};
 
@@ -146,6 +147,16 @@ mod platform {
 			args
 		}
 
+		pub fn executable_name(&self) -> Option<String> {
+			if !self.live_identity() {
+				return None;
+			}
+			let path = executable_path(self.pid)?;
+			// The procfs lookup is by numeric PID, so check again after reading.
+			self.live_identity().then_some(())?;
+			Some(path.file_name()?.to_str()?.to_owned())
+		}
+
 		pub fn kill(&self, signal: i32) -> bool {
 			sys::pidfd_send_signal(self.pidfd.as_fd(), signal)
 		}
@@ -228,14 +239,15 @@ mod platform {
 		}
 	}
 
+	fn executable_path(pid: i32) -> Option<PathBuf> {
+		fs::read_link(format!("/proc/{pid}/exe")).ok()
+	}
+
 	/// Find processes whose `/proc/{pid}/exe` symlink resolves to exactly
 	/// `target`.
 	pub fn find_by_path(target: &str) -> Vec<Process> {
 		sys::pids()
-			.filter(|pid| {
-				fs::read_link(format!("/proc/{pid}/exe"))
-					.is_ok_and(|resolved| resolved.as_os_str() == target)
-			})
+			.filter(|&pid| executable_path(pid).is_some_and(|resolved| resolved.as_os_str() == target))
 			.filter_map(Process::from_pid)
 			.collect()
 	}
@@ -306,6 +318,16 @@ mod platform {
 				return Vec::new();
 			}
 			sys::args(self.pid)
+		}
+
+		pub fn executable_name(&self) -> Option<String> {
+			self.live_bsdinfo()?;
+			let mut path = [0u8; sys::PATH_CAPACITY];
+			let path = sys::executable_path(self.pid, &mut path)?;
+			// proc_pidpath takes a numeric PID, not a stable process reference.
+			self.live_bsdinfo()?;
+			let name = path.rsplit(|&byte| byte == b'/').next()?;
+			Some(std::str::from_utf8(name).ok()?.to_owned())
 		}
 
 		pub fn kill(&self, signal: i32) -> bool {
@@ -526,6 +548,28 @@ mod platform {
 				.map_or_default(|command_line| sys::split_command_line(&command_line))
 		}
 
+		pub fn executable_name(&self) -> Option<String> {
+			if self.status() != ProcessStatus::Running {
+				return None;
+			}
+			let mut path = [0u16; 260];
+			let mut long_path;
+			let image = if let Some(image) = sys::image_path(&self.handle, &mut path) {
+				image
+			} else {
+				long_path = vec![0u16; 32_768];
+				sys::image_path(&self.handle, &mut long_path)?
+			};
+			// The pinned handle cannot see a process that reused this PID.
+			if self.status() != ProcessStatus::Running {
+				return None;
+			}
+			let name = image
+				.rsplit(|&unit| unit == u16::from(b'\\') || unit == u16::from(b'/'))
+				.next()?;
+			String::from_utf16(name).ok()
+		}
+
 		pub fn children(&self) -> Vec<Self> {
 			let tree = build_process_tree();
 			self.children_from_tree(&tree)
@@ -681,6 +725,13 @@ impl Process {
 	#[must_use]
 	pub fn args(&self) -> Vec<String> {
 		self.inner.args()
+	}
+
+	/// Basename of the running process's OS executable image, not `argv[0]`.
+	/// Returns `None` when the image is unreadable or the process has exited.
+	#[must_use]
+	pub fn executable_name(&self) -> Option<String> {
+		self.inner.executable_name()
 	}
 
 	/// Send `signal` to this process only, through its pinned identity, so it
@@ -1066,6 +1117,12 @@ pub struct TerminationTargets {
 	pgids:     Vec<i32>,
 	processes: Vec<Process>,
 	seen_pids: HashSet<i32>,
+	/// Unix: the targets and every process descended from them, in any group
+	/// or session, as of the last wave ([`crate::sys::proc::family`]). The
+	/// next wave starts from it, so a member a TERM orphaned (a debugger's
+	/// stopped inferior, a `setsid` daemon) still gets the KILL.
+	#[cfg(unix)]
+	family:    Vec<crate::sys::proc::ProcInfo>,
 }
 
 impl TerminationTargets {
@@ -1118,13 +1175,52 @@ impl TerminationTargets {
 	/// Send `signal` to every recorded target. Failures are swallowed:
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
-	pub fn signal(&self, signal: i32) {
+	///
+	/// On Unix each wave first takes the targets' whole family from one scan
+	/// of the process table (starting from the previous wave's), then signals
+	/// the groups and every member outside them, and continues the stopped
+	/// ones; elsewhere it signals each process tree.
+	pub fn signal(&mut self, signal: i32) {
+		#[cfg(unix)]
+		self.refresh_family();
 		for &pgid in &self.pgids {
 			let _ = kill_process_group(pgid, signal);
 		}
+		#[cfg(unix)]
+		crate::sys::proc::signal_each(
+			self.family.iter().filter(|p| !self.pgids.contains(&p.pgid)),
+			signal,
+		);
+		#[cfg(not(unix))]
 		for process in &self.processes {
 			let _ = process.signal_tree(signal);
 		}
+	}
+
+	/// Re-take [`TerminationTargets::family`] from the recorded processes
+	/// still running, the members of the recorded groups, and the previous
+	/// family.
+	#[cfg(unix)]
+	fn refresh_family(&mut self) {
+		use crate::sys::proc;
+		let Ok(table) = proc::list() else {
+			return;
+		};
+		let mut roots: Vec<proc::ProcInfo> = table
+			.iter()
+			.filter(|p| self.pgids.contains(&p.pgid) && !is_self_process_group(p.pgid))
+			.cloned()
+			.collect();
+		for process in &self.processes {
+			// Still running after the scan: its pid named it during the scan.
+			if process.status() == ProcessStatus::Running
+				&& let Some(p) = table.iter().find(|p| p.pid == process.pid())
+			{
+				roots.push(p.clone());
+			}
+		}
+		roots.append(&mut self.family);
+		self.family = proc::family(&table, &roots);
 	}
 }
 
@@ -1263,6 +1359,17 @@ mod tests {
 		let _ = newer.kill();
 		let _ = older.wait();
 		let _ = newer.wait();
+	}
+
+	#[test]
+	fn executable_name_matches_current_image() {
+		let pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let process = Process::from_pid(pid).expect("pin self");
+		let image = std::env::current_exe().expect("current executable");
+		assert_eq!(
+			process.executable_name().as_deref(),
+			image.file_name().and_then(std::ffi::OsStr::to_str)
+		);
 	}
 
 	/// `kill_process_group` is the last line of defense: even if a future

@@ -529,7 +529,7 @@ describe("Codex model discovery", () => {
 		}
 	});
 
-	it("keeps bundled display names over Codex's slug-style display_name", async () => {
+	it("names discovered rows with the bundled spelling over Codex's slug-style display_name", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-names-"));
 		// Codex reports `GPT-6.1-Sol` where every other surface (and the bundled
 		// row) says `GPT-6.1 Sol`; the composer chip flipped between the two once
@@ -552,6 +552,8 @@ describe("Codex model discovery", () => {
 					JSON.stringify({
 						models: [
 							{ slug: "gpt-6.1-sol", display_name: "GPT-6.1-Sol", supported_in_api: true },
+							// Not in the Codex static catalog; OpenAI ships the same id (#20167).
+							{ slug: "gpt-6.2-sol", display_name: "GPT-6.2-Sol", supported_in_api: true },
 							{ slug: "gpt-6.2-nova", display_name: "GPT-6.2-Nova", supported_in_api: true },
 						],
 					}),
@@ -573,7 +575,8 @@ describe("Codex model discovery", () => {
 
 			const names = Object.fromEntries(result.models.map(model => [model.id, model.name]));
 			expect(names["gpt-6.1-sol"]).toBe("GPT-6.1 Sol");
-			// Without a bundled row there is no other name to keep consistent with.
+			expect(names["gpt-6.2-sol"]).toBe("GPT-6.2 Sol");
+			// Without a bundled row anywhere there is no other name to keep consistent with.
 			expect(names["gpt-6.2-nova"]).toBe("GPT-6.2-Nova");
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
@@ -678,6 +681,51 @@ describe("Codex model discovery", () => {
 			});
 			expect(result.models.find(model => model.id === "gpt-daybreak-blue-latest")?.accountAccess).toEqual({
 				"account-a": { cyberPrograms: ["daybreak_blue"] },
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("unions service tiers across accounts and keeps each account's own list", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-tiers-"));
+		const tiers = (...ids: string[]) => ids.map(id => ({ id, name: id, description: id }));
+		const fetchFn: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const pro = new Headers(init?.headers).get("chatgpt-account-id") === "account-pro";
+				return Response.json({
+					models: [
+						{
+							slug: "gpt-6-sol",
+							display_name: "GPT-6 Sol",
+							service_tiers: pro ? tiers("priority", "ultrafast") : tiers("priority"),
+						},
+					],
+				});
+			},
+			{ preconnect() {} },
+		);
+		try {
+			// The Plus account is listed first: its tier list must not shadow the Pro account's.
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [
+							{ accessToken: "token-plus", accountId: "account-plus" },
+							{ accessToken: "token-pro", accountId: "account-pro" },
+						],
+						fetch: fetchFn,
+					}),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+
+			const sol = result.models.find(model => model.id === "gpt-6-sol");
+			expect(sol?.serviceTiers).toEqual(["priority", "ultrafast"]);
+			expect(sol?.accountAccess).toEqual({
+				"account-plus": { serviceTiers: ["priority"] },
+				"account-pro": { serviceTiers: ["priority", "ultrafast"] },
 			});
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });

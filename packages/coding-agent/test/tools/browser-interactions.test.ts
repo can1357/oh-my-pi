@@ -192,10 +192,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser input cut off mid-gesture", () => {
 	// `blockNow(ms)` blocks the page's main thread in its own script right after the current call answers; with
 	// `blockMs` set, the next mousedown or keydown handler blocks instead. Either way omp's input waits on the page
-	// for BLOCK_MS, past the 2 s per-op ceiling of a BLOCKED_CELL_S cell (`resolveOpTimeouts`: the budget less 1 s),
+	// for BLOCK_MS, past the 1 s per-op ceiling of a BLOCKED_CELL_S cell (`resolveOpTimeouts`: the budget less 1 s),
 	// and the cell's cleanup returns once the page answers, inside that budget.
-	const BLOCKED_CELL_S = 3;
-	const BLOCK_MS = 2_500;
+	const BLOCKED_CELL_S = 2;
+	const BLOCK_MS = 1_500;
 	const gestureHtml = `<!doctype html>
 <button id="target" style="position:absolute;left:20px;top:20px;width:120px;height:40px">Target</button>
 <div id="from" style="position:absolute;left:20px;top:100px;width:60px;height:60px"></div>
@@ -2601,7 +2601,7 @@ return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(c
 					name: tabName,
 					code: `await tab.evaluate(() => window.render(true));
 try { await tab.click("#vol"); return "clicked"; } catch (caught) { return String(caught?.message ?? caught); }`,
-					timeout: 4,
+					timeout: 2,
 				},
 				context,
 			);

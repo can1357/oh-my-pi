@@ -4,8 +4,6 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
@@ -15,6 +13,8 @@ import { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
 import { convertToLlm } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 test("a dismissed review cannot inject an approved plan after /plan pauses", async () => {
 	resetSettingsForTest();
@@ -65,7 +65,10 @@ test("a dismissed review cannot inject an approved plan after /plan pauses", asy
 		settings: Settings.isolated({ "compaction.enabled": false }),
 		modelRegistry: registry,
 	});
-	const mode = new InteractiveMode(session, "test");
+	// The review runs on the shell: keys reach it through the terminal.
+	const term = createModeTerminal();
+	await term.start();
+	const mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 	try {
 		await mode.handlePlanModeCommand();
 		const planFilePath = mode.planModePlanFilePath;
@@ -77,20 +80,14 @@ test("a dismissed review cannot inject an approved plan after /plan pauses", asy
 			}),
 			"# Plan\n\nEdit files to answer a question.",
 		);
-		let overlay: PlanReviewOverlay | undefined;
-		const show = mode.ui.showOverlay.bind(mode.ui);
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation((component, options) => {
-			if (component instanceof PlanReviewOverlay) overlay = component;
-			return show(component, options);
-		});
 		const opened = Promise.withResolvers<void>();
 		const review = mode.handlePlanApproval(
 			{ planFilePath, planExists: true, title: "Plan" },
 			{ abortTurn: false, onOpened: () => opened.resolve() },
 		);
 		await opened.promise;
-		if (!overlay) throw new Error("Plan review did not open");
-		overlay.handleInput("\x03");
+		if (!mode.shell.overlays.open()) throw new Error("Plan review did not open");
+		term.press("ctrl+c");
 		await review;
 		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
 		await mode.handlePlanModeCommand();
@@ -99,6 +96,8 @@ test("a dismissed review cannot inject an approved plan after /plan pauses", asy
 		expect(messageCounts).toEqual([1]);
 	} finally {
 		mode.stop();
+		await mode.shell.stop();
+		term.dispose();
 		await session.dispose();
 		auth.close();
 		dir.removeSync();
@@ -123,7 +122,10 @@ test("pausing plan mode closes an open review so it cannot approve the paused pl
 		settings: Settings.isolated({ "compaction.enabled": false }),
 		modelRegistry: new ModelRegistry(auth),
 	});
-	const mode = new InteractiveMode(session, "test");
+	// The review runs on the shell: keys reach it through the terminal.
+	const term = createModeTerminal();
+	await term.start();
+	const mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 	try {
 		await mode.handlePlanModeCommand();
 		const planFilePath = mode.planModePlanFilePath;
@@ -135,12 +137,6 @@ test("pausing plan mode closes an open review so it cannot approve the paused pl
 			}),
 			"# Plan\n\nEdit files.",
 		);
-		let overlay: PlanReviewOverlay | undefined;
-		const show = mode.ui.showOverlay.bind(mode.ui);
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation((component, options) => {
-			if (component instanceof PlanReviewOverlay) overlay = component;
-			return show(component, options);
-		});
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
 		const opened = Promise.withResolvers<void>();
@@ -149,18 +145,20 @@ test("pausing plan mode closes an open review so it cannot approve the paused pl
 			{ abortTurn: false, onOpened: () => opened.resolve() },
 		);
 		await opened.promise;
-		if (!overlay) throw new Error("Plan review did not open");
+		if (!mode.shell.overlays.open()) throw new Error("Plan review did not open");
 
 		await mode.handlePlanModeCommand();
 		// A late Enter on the stale review would otherwise pick "Approve and execute".
-		overlay.handleInput("\r");
+		term.press("enter");
 		await review;
 
 		expect(mode.planModePaused).toBe(true);
-		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(mode.shell.overlays.open()).toBe(false);
 		expect(prompt).not.toHaveBeenCalled();
 	} finally {
 		mode.stop();
+		await mode.shell.stop();
+		term.dispose();
 		await session.dispose();
 		auth.close();
 		dir.removeSync();

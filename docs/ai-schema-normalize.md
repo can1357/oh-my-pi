@@ -68,6 +68,7 @@ Removed in the unified-flow refactor:
 | `azure-openai-responses`                                                    | `sanitizeSchemaForOpenAIResponses`; emits `strict: false` without adaptation |
 | Moonshot/Kimi native hosts using MFJS (`toolSchemaFlavor: "moonshot-mfjs"`) | `normalizeSchemaForMoonshot`                                                 |
 | Grammar-flavored OpenAI-compatible hosts (`toolSchemaFlavor: "grammar"`)    | `sanitizeSchemaForGrammar`                                                   |
+| Gemini behind an OpenAI-compatible host (`toolSchemaFlavor: "google"`, GitHub Copilot) | `normalizeSchemaForGoogle`                                     |
 | `ollama-chat` (`ollama` / `ollama-cloud`) tool parameters                   | `toolWireSchema` → `sanitizeSchemaForOllama`                                 |
 | `cursor-agent` with `requiresCursorToolSchemaProjection: true`              | `toolWireSchema` → `sanitizeSchemaForCursor`                                 |
 | `google-generative-ai`, `google-vertex`                         | `normalizeSchemaForGoogle`                                                   |

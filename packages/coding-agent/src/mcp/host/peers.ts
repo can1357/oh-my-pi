@@ -9,6 +9,7 @@ import type { ManagedChild, ManagedChildState } from "../../daemon/module";
 import { type MCPTransportKind, MCPTransportError, normalizeMCPTransportError } from "../errors";
 import {
 	isModernErrorCode,
+	MCP_LEGACY_PROTOCOL_VERSION,
 	MCP_PROTOCOL_VERSION,
 	MCP_SUBSCRIPTION_ACKNOWLEDGED,
 	type MCPDiscoverResult,
@@ -21,7 +22,7 @@ import {
 import { type MCPInitializeResult, MCPNotificationMethods, type MCPRequestOptions } from "../types";
 import type { McpEra, McpServerSpec, McpUpstreamExit } from "./contract";
 import { encodeMcpHeaderValue, HttpUpstream } from "./http-upstream";
-import { MCP_LEGACY_INITIALIZE_PARAMS, openLegacySession, parseInitializeResult } from "./legacy-session";
+import { openLegacySession, parseInitializeResult } from "./legacy-session";
 import type {
 	McpPeer,
 	McpPeerDeps,
@@ -40,9 +41,10 @@ type Upstream = StdioUpstream | HttpUpstream | SseUpstream;
 /** Bound of the era probe when the spec disables its own. */
 const PROBE_TIMEOUT_MS = 30_000;
 /**
- * How long a server that answered `initialize` first may still answer the
- * `server/discover` written before it. A server of both eras answers both; the
- * modern answer wins.
+ * How long a server that answered `initialize` may still answer the
+ * `server/discover` written after it. A server of both eras answers both; the
+ * modern answer wins. A handshake-era server that refuses the method or
+ * ignores it is classified from the `initialize` session instead.
  */
 const PROBE_DISCOVER_GRACE_MS = 250;
 
@@ -125,11 +127,12 @@ function legacyDiscover(session: MCPInitializeResult): MCPDiscoverResult {
 
 function discoverResultOf(value: unknown): MCPDiscoverResult | undefined {
 	if (!isRecord(value) || !Array.isArray(value.supportedVersions) || !isRecord(value.capabilities)) return undefined;
-	return {
-		...value,
-		supportedVersions: value.supportedVersions.filter((version): version is string => typeof version === "string"),
-		capabilities: value.capabilities,
-	};
+	const supportedVersions = value.supportedVersions.filter(
+		(version): version is string => typeof version === "string",
+	);
+	// A server that does not speak this revision is handshake-era, whatever else its discover answer says.
+	if (!supportedVersions.includes(MCP_PROTOCOL_VERSION)) return undefined;
+	return { ...value, supportedVersions, capabilities: value.capabilities };
 }
 
 /** The server requests a handshake-era upstream may send: liveness and the session's roots. */
@@ -857,50 +860,68 @@ class LegacyPeer implements McpPeer {
 
 // ── probe ──────────────────────────────────────────────────────────────────
 
-type Outcome = { value: unknown } | { error: unknown };
+type Outcome<T = unknown> = { value: T } | { error: unknown };
 
-function outcomeOf(request: Promise<unknown>): Promise<Outcome> {
+function outcomeOf<T>(request: Promise<T>): Promise<Outcome<T>> {
 	return request.then(
 		value => ({ value }),
 		error => ({ error }),
 	);
 }
 
-/** Whether a failed `server/discover` proves a modern server: only one answers with a 2026-07-28 error. */
-function isModernError(error: unknown): boolean {
-	return error instanceof MCPTransportError && error.rpc !== undefined && isModernErrorCode(error.rpc.code);
+const LEGACY_PROTOCOL_VERSIONS = new Set([MCP_LEGACY_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"]);
+
+/**
+ * The era a failed `server/discover` names by itself: `modern` for an error
+ * only a 2026-07-28 server emits, `legacy` when the server rejects this
+ * revision while listing a handshake-era one it does speak. Undefined when the
+ * failure says nothing either way.
+ */
+function eraOfDiscoverError(error: unknown): McpEra | undefined {
+	if (!(error instanceof MCPTransportError) || error.rpc === undefined) return undefined;
+	if (error.rpc.code !== MCPErrorCode.UnsupportedProtocolVersion) {
+		return isModernErrorCode(error.rpc.code) ? "modern" : undefined;
+	}
+	// Only an explicit compatible revision warrants trying the legacy handshake.
+	const supported = isRecord(error.rpc.data) ? error.rpc.data.supported : undefined;
+	const handshake =
+		Array.isArray(supported) &&
+		supported.every(version => typeof version === "string") &&
+		supported.some(version => LEGACY_PROTOCOL_VERSIONS.has(version));
+	return handshake ? "legacy" : "modern";
 }
 
 /**
- * Probe a subprocess: `server/discover`, and right behind it `initialize`, so
- * a handshake-era server that ignores the unknown method still shows itself
- * without waiting out the bound.
+ * Probe a subprocess with `initialize` first: the handshake era requires it as
+ * the very first request — strict servers such as rmcp exit on anything else —
+ * and `server/discover`, asked only once the handshake is done, names the
+ * modern ones.
  */
 async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
 	upstream.onRequest = legacyRequestHandler(deps);
 	await upstream.connect(deps.spawn, signal);
-	const discover = outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal }));
-	const initialize = outcomeOf(upstream.request("initialize", { ...MCP_LEGACY_INITIALIZE_PARAMS }, { signal }));
-
-	const discovered = await Promise.race([
-		discover,
-		initialize.then(outcome =>
-			"value" in outcome
-				? Promise.race([discover, Bun.sleep(PROBE_DISCOVER_GRACE_MS).then(() => undefined)])
-				: discover,
-		),
-	]);
-	if (discovered) {
+	const initialized = await outcomeOf(openLegacySession(upstream, signal));
+	if ("error" in initialized) {
+		// The server refused the legacy handshake: it may be of the 2026-07-28
+		// era alone, so ask its own question before giving up.
+		const discovered = await outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal }));
 		if ("error" in discovered) {
-			if (isModernError(discovered.error)) return { era: "modern" };
+			if (eraOfDiscoverError(discovered.error) === "modern") return { era: "modern" };
 		} else {
 			const result = discoverResultOf(discovered.value);
 			if (result) return { era: "modern", discover: result };
 		}
+		throw initialized.error;
 	}
-	const initialized = await initialize;
-	if ("error" in initialized) throw initialized.error;
-	return { era: "legacy", discover: legacyDiscover(parseInitializeResult(initialized.value)) };
+	const discovered = await Promise.race([
+		outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal })),
+		Bun.sleep(PROBE_DISCOVER_GRACE_MS).then(() => undefined),
+	]);
+	if (discovered && !("error" in discovered)) {
+		const result = discoverResultOf(discovered.value);
+		if (result) return { era: "modern", discover: result };
+	}
+	return { era: "legacy", discover: legacyDiscover(initialized.value) };
 }
 
 /** The HTTP status behind a failed modern POST, whether or not its body was a JSON-RPC error. */
@@ -911,7 +932,12 @@ function httpStatusOf(error: MCPTransportError): number | undefined {
 		: undefined;
 }
 
-const LEGACY_HTTP_STATUS: Record<number, true> = { 400: true, 404: true, 405: true };
+/**
+ * Statuses a handshake-era endpoint gives a POST it cannot read as one of its
+ * own requests; 415 is rmcp 0.2, which fails to deserialize an unknown
+ * method. Auth challenges (401/403) are never among them.
+ */
+const LEGACY_HTTP_STATUS: Record<number, true> = { 400: true, 404: true, 405: true, 415: true };
 
 async function probeHttp(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
 	const modern = upstreamFor(spec, "modern");
@@ -920,14 +946,19 @@ async function probeHttp(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSi
 		const result = discoverResultOf(await modern.request("server/discover", { _meta: requestMeta() }, { signal }));
 		if (result) return { era: "modern", discover: result };
 	} catch (error) {
-		if (isModernError(error)) return { era: "modern" };
+		const era = eraOfDiscoverError(error);
+		if (era === "modern") return { era };
 		// Anything but a server's own answer or one of the statuses a
 		// handshake-era endpoint gives an unknown POST is the caller's to see:
 		// an auth challenge, an outage.
 		if (!(error instanceof MCPTransportError)) throw error;
-		const status = httpStatusOf(error);
-		const refused = status === undefined ? error.failure === "json_rpc" : Object.hasOwn(LEGACY_HTTP_STATUS, status);
-		if (!refused) throw error;
+		// A server that lists a handshake-era revision asked for the handshake, whatever status carried that.
+		if (era !== "legacy") {
+			const status = httpStatusOf(error);
+			const refused =
+				status === undefined ? error.failure === "json_rpc" : Object.hasOwn(LEGACY_HTTP_STATUS, status);
+			if (!refused) throw error;
+		}
 	} finally {
 		await modern.close();
 	}

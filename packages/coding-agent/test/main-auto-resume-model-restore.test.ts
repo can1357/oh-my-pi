@@ -79,7 +79,7 @@ async function runScenario(scenario: Scenario): Promise<Observation> {
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } }
 		];
 		await Bun.write(file, rows.map(row => JSON.stringify(row)).join("\\n") + "\\n");
-		const args = ["--no-title", "--no-tools", "--no-skills", "--no-rules", "--no-lsp",
+		const args = ["--no-title", "--no-skills", "--no-rules", "--no-lsp",
 			"--no-prewalk", "--trusted-extension", ${JSON.stringify(extension)}];
 		if (scenario === "continue") args.push("-c");
 		if (scenario === "resume") args.push("--resume", file);

@@ -16,5 +16,6 @@ export const API_KEY_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"cloudflare-ai-gateway": () => import("../oauth/cloudflare-ai-gateway").then(m => m.loginCloudflareAiGateway),
 	"cloudflare-workers-ai": () => import("../oauth/cloudflare-workers-ai").then(m => m.loginCloudflareWorkersAi),
 	kilo: () => import("../oauth/kilo").then(m => m.loginKilo),
+	otari: () => import("../oauth/otari").then(m => m.loginOtari),
 	xiaomi: () => import("../oauth/xiaomi").then(m => m.loginXiaomi),
 };
