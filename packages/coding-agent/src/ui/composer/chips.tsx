@@ -49,6 +49,8 @@ function card(atom: Atom & { kind: "paste" | "image" | "video" }, attachment?: C
 			key={`${atom.kind}:${atom.n}`}
 			role="omp.composer.chip"
 			tone="accent"
+			kind={atom.kind}
+			expansion={atom.kind === "paste" ? (atom.expansion ?? content) : undefined}
 			head={() => {
 				// An image's title links to its file (the terminal draws it as an OSC 8 link).
 				const href = link?.();

@@ -1,0 +1,113 @@
+// Refuseless (refuseless.com): abliterated and standard open-weight models
+// behind an OpenAI-compatible API at api.refuseless.com/v1.
+
+provider "refuseless" {
+	default-model "glm-5.3-abliterated"
+	env "REFUSELESS_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Refuseless"
+
+	// Lineup from keyed `GET /v1/models` (2026-11-25), bundled so the provider is
+	// usable before discovery runs. Keyed `/v1/models` also lists models private
+	// to the key's account and bills account rates, so the live response is
+	// authoritative once discovery runs. Every model accepts `low|high|max`;
+	// rows without `off` in `reasoning_efforts` 400 on thinking off.
+	seed api="openai-completions" base-url="https://api.refuseless.com/v1" bundle="fallback" {
+		model "glm-5.3-abliterated" name="GLM 5.3 Abliterated" {
+			reasoning #true
+			input "text"
+			cost input=1 output=2 cache-read=0.15 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+			thinking-requires-effort #true
+		}
+		model "glm-5.3-flash-abliterated" name="GLM 5.3 Flash Abliterated" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.12 output=0.5 cache-read=0.025 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+			thinking-requires-effort #true
+		}
+		model "deepseek-v4.1-flash-abliterated" name="DeepSeek V4.1 Flash Abliterated" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.12 output=0.45 cache-read=0.019 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+		}
+		model "deepseek-v4.1-flash-abliterated-fast" name="DeepSeek V4.1 Flash Abliterated Fast" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.12 output=0.45 cache-read=0.025 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+		}
+		model "kimi-k3.1-pro-abliterated" name="Kimi K3.1 Pro Abliterated" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.5 output=3 cache-read=0.15 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+			thinking-requires-effort #true
+		}
+		model "deepseek-v4.1-flash-fast" name="DeepSeek V4.1 Flash Fast" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.01 output=0.08 cache-read=0.002 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+		}
+		model "kimi-k3.1-pro" name="Kimi K3.1 Pro" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.25 output=2.5 cache-read=0.15 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+			thinking-requires-effort #true
+		}
+		model "minimax-m3.1-flash" name="MiniMax M3.1 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.02 output=0.08 cache-read=0.002 cache-write=0
+			limits context=1048576
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+			thinking-requires-effort #true
+		}
+		model "gemma-4-26b-storyteller" name="Gemma 4 26B Storyteller" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.08 output=0.2 cache-read=0.002 cache-write=0
+			limits context=262144
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "max"
+		}
+	}
+
+	// `reasoning_effort` takes only `off` (alias `none`), `low`, `high`, `max`;
+	// anything else 400s. Unserved `medium`/`xhigh` step up to the next tier.
+	thinking-effort-map {
+		medium "high"
+		xhigh "max"
+	}
+	reasoning-disable-mode "none-effort"
+	// No per-model output cap is published: an unset `max_tokens` defaults to the
+	// model's max output and the server rejects values over 1,000,000.
+	max-tokens-fallback 131072
+
+	// residue: abliterated weights classify as the lineage they derive from, but
+	// their reasoning is not carried to or from it. The row's `abliterated` flag
+	// is not visible to the cascade; every abliterated id so far carries the
+	// marker.
+	models "*abliterated*" {
+		portable-reasoning #false
+	}
+}
