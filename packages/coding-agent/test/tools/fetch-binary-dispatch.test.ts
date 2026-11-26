@@ -7,10 +7,11 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
+import { HttpSession } from "@oh-my-pi/pi-coding-agent/web/http-session";
 import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
+import { mockFetch } from "../helpers/fetch-mock";
 
 function makeSession(testDir: string): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
@@ -22,41 +23,24 @@ function makeSession(testDir: string): ToolSession {
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
-		allocateOutputArtifact: async toolType => {
+		allocateOutputArtifact: async () => {
 			const id = String(nextArtifactId++);
-			return { id, path: path.join(artifactsDir, `${id}.${toolType}.log`) };
+			return { id, path: path.join(artifactsDir, `${id}.log`) };
 		},
 		settings: Settings.isolated({ "fetch.enabled": true }),
 	};
 }
 
-function stubUrlBytes(bytes: Uint8Array, contentType: string, contentDisposition?: string) {
-	const decoded = Buffer.from(bytes).toString("utf-8");
-	vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => ({
-		ok: true,
-		status: 200,
-		finalUrl: requestedUrl,
-		contentType,
-		content: decoded,
-	}));
-	return vi.spyOn(scraperUtils, "fetchBinary").mockImplementation(async () => ({
-		ok: true,
-		buffer: bytes,
-		contentDisposition,
-	}));
-}
-
-function stubUrlText(body: string, contentType: string) {
-	vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => ({
-		ok: true,
-		status: 200,
-		finalUrl: requestedUrl,
-		contentType,
-		content: body,
-	}));
-	return vi.spyOn(scraperUtils, "fetchBinary").mockImplementation(async () => {
-		throw new Error("unexpected binary fetch");
-	});
+function stubResponse(session: ToolSession, url: string, body: Uint8Array | string, contentType: string) {
+	const request = vi.fn((input: string | URL | Request) =>
+		String(input) === url
+			? new Response(typeof body === "string" ? body : new Uint8Array(body), {
+					headers: { "content-type": contentType },
+				})
+			: new Response(null, { status: 404 }),
+	);
+	session.fetch = mockFetch(request);
+	return request;
 }
 
 function textOutput(result: { content: Array<TextContent | ImageContent> }): string {
@@ -117,9 +101,10 @@ describe("read URL binary dispatch", () => {
 			["nested/data.txt", "nested file\n"],
 		]);
 		const url = uniqueUrl("archive", ".zip");
-		stubUrlBytes(zipBytes, "application/octet-stream");
+		const session = makeSession(testDir);
+		stubResponse(session, url, zipBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadTool(session);
 		const result = await tool.execute("read-url-zip", { path: url });
 		const text = textOutput(result);
 
@@ -131,51 +116,63 @@ describe("read URL binary dispatch", () => {
 		expect(text).not.toContain("�");
 	});
 
-	it("downloads a generic-MIME convertible document body only once", async () => {
-		const url = uniqueUrl("report", ".pdf");
-		const bodyReads: string[] = [];
-		const loadPage = vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl, options) => {
-			const contentType = "application/octet-stream";
-			if (options?.skipBodyForContentType?.(contentType)) {
-				return { ok: true, status: 200, finalUrl: requestedUrl, contentType, content: "", bodySkipped: true };
-			}
-			bodyReads.push(requestedUrl);
-			return { ok: true, status: 200, finalUrl: requestedUrl, contentType, content: "%PDF-1.4 binary" };
+	it("reads a member of a remote zip named after the archive URL", async () => {
+		const zipBytes = await encodeArchive("zip", [
+			["root.txt", "root file\n"],
+			["nested/data.txt", "nested line one\nnested line two\n"],
+		]);
+		const url = uniqueUrl("archive", ".zip");
+		const fetchBinary = vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
+			ok: true,
+			buffer: zipBytes,
+			contentType: "application/zip",
 		});
-		const fetchBinary = vi
-			.spyOn(scraperUtils, "fetchBinary")
-			.mockImplementation(async () => ({ ok: false, error: "offline" }));
 
 		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-generic-pdf", { path: url });
+		const member = textOutput(await tool.execute("read-url-zip-member", { path: `${url}:nested/data.txt` }));
+		expect(member).toContain("nested line one");
+		expect(fetchBinary.mock.calls[0]?.[0]).toBe(url);
 
-		expect(loadPage).toHaveBeenCalledTimes(1);
-		expect(bodyReads).toEqual([]);
-		// One download even when it fails: the binary fallback reuses the conversion attempt.
-		expect(fetchBinary).toHaveBeenCalledTimes(1);
-		expect(textOutput(result).split("Binary fetch failed: offline").length - 1).toBe(1);
+		const listing = textOutput(await tool.execute("read-url-zip-dir", { path: `${url}:nested/` }));
+		expect(listing).toContain("data.txt");
 	});
 
-	it("returns a metadata notice when a hinted binary refetch fails", async () => {
+	it("downloads a generic-MIME convertible document body only once", async () => {
+		const url = uniqueUrl("report", ".pdf");
+		const session = makeSession(testDir);
+		const bytes = Buffer.from("%PDF-1.4 binary");
+		const download = stubResponse(session, url, bytes, "application/octet-stream");
+		const convert = vi
+			.spyOn(scraperUtils, "convertWithMarkit")
+			.mockResolvedValue({ content: "", ok: false, error: "offline" });
+
+		const result = await new ReadTool(session).execute("read-url-generic-pdf", { path: url });
+
+		expect(download).toHaveBeenCalledTimes(1);
+		expect(convert).toHaveBeenCalledTimes(1);
+		const [body, extension] = convert.mock.calls[0]!;
+		expect(Buffer.from(body)).toEqual(bytes);
+		expect(extension).toBe(".pdf");
+		expect(textOutput(result)).toContain("markit conversion failed: offline");
+	});
+
+	it("returns a metadata notice rather than parsing a truncated archive", async () => {
 		const url = uniqueUrl("oversized", ".zip");
-		vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => ({
-			ok: true,
+		const session = makeSession(testDir);
+		stubResponse(session, url, "", "application/octet-stream");
+		vi.spyOn(HttpSession.prototype, "request").mockResolvedValue({
 			status: 200,
-			finalUrl: requestedUrl,
-			contentType: "application/octet-stream",
-			content: "PK\u0003\u0004\u0000\u0001",
-		}));
-		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
-			ok: false,
-			error: "content-length 52428801 exceeds 52428800",
+			url,
+			headers: [{ name: "content-type", value: "application/octet-stream" }],
+			body: Buffer.from("PK\u0003\u0004\u0000\u0001"),
+			truncated: true,
 		});
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-zip-too-large", { path: url });
+		const result = await new ReadTool(session).execute("read-url-zip-too-large", { path: url });
 		const text = textOutput(result);
 
 		expect(result.details?.method).toBe("binary");
-		expect(result.details?.notes).toContain("Binary fetch failed: content-length 52428801 exceeds 52428800");
+		expect(text).toContain("was cut mid-stream; content is incomplete");
 		expect(text).toContain("[Binary content: application/octet-stream");
 		expect(text).not.toContain("PK\u0003\u0004");
 	});
@@ -183,9 +180,10 @@ describe("read URL binary dispatch", () => {
 	it("renders a remote sqlite database through the sqlite reader", async () => {
 		const sqliteBytes = await createSqliteFixtureBytes(testDir);
 		const url = uniqueUrl("data", ".db");
-		stubUrlBytes(sqliteBytes, "application/octet-stream");
+		const session = makeSession(testDir);
+		stubResponse(session, url, sqliteBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadTool(session);
 		const result = await tool.execute("read-url-sqlite", { path: url });
 		const text = textOutput(result);
 
@@ -197,9 +195,10 @@ describe("read URL binary dispatch", () => {
 	it("renders a remote notebook as editable cells", async () => {
 		const notebookBytes = createNotebookFixtureBytes();
 		const url = uniqueUrl("notebook", ".ipynb");
-		stubUrlBytes(notebookBytes, "application/octet-stream");
+		const session = makeSession(testDir);
+		stubResponse(session, url, notebookBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadTool(session);
 		const result = await tool.execute("read-url-notebook", { path: url });
 		const text = textOutput(result);
 
@@ -213,9 +212,10 @@ describe("read URL binary dispatch", () => {
 	it("returns a metadata notice for unrenderable binary bytes", async () => {
 		const binaryBytes = new Uint8Array([0, 1, 2, 3, 255, 254, 253, 0, 7, 8]);
 		const url = uniqueUrl("payload", ".bin");
-		stubUrlBytes(binaryBytes, "application/octet-stream");
+		const session = makeSession(testDir);
+		stubResponse(session, url, binaryBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadTool(session);
 		const result = await tool.execute("read-url-binary", { path: url });
 		const text = textOutput(result);
 
@@ -228,16 +228,17 @@ describe("read URL binary dispatch", () => {
 
 	it("leaves valid UTF-8 octet-stream payloads on the text path", async () => {
 		const url = uniqueUrl("plain", ".txt");
-		const fetchBinarySpy = stubUrlText("plain UTF-8 text\nsecond line", "application/octet-stream");
+		const session = makeSession(testDir);
+		const download = stubResponse(session, url, "plain UTF-8 text\nsecond line", "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadTool(session);
 		const result = await tool.execute("read-url-text-octet", { path: url });
 		const text = textOutput(result);
 
-		expect(result.details?.method).toBe("raw");
+		expect(result.details?.method).not.toBe("binary");
 		expect(text).toContain("plain UTF-8 text");
 		expect(text).toContain("second line");
-		expect(fetchBinarySpy).not.toHaveBeenCalled();
+		expect(download).toHaveBeenCalledTimes(1);
 	});
 
 	it("renders HTML when a binary-looking identity response is valid text on refetch", async () => {

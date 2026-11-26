@@ -8,17 +8,24 @@ import { getBundledAgent } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
 import {
 	MODEL_MENTION_RE,
+	MODEL_MENTION_TAG_RE,
 	type ModelMention,
 	modelMentionDisplayName,
 	modelMentionName,
 	modelMentionTag,
-} from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { AUTO_THINKING, parseEffort } from "@oh-my-pi/pi-tui/thinking";
+	resolveModelMentionToken,
+} from "./model-mention-syntax";
+import { AUTO_THINKING, parseEffort } from "../thinking/levels";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 /** Journal entry identifying a model the user authorized for delegation. */
 export const MODEL_MENTION_ENTRY_TYPE = "model_mention";
+
+/** The `m<N>` agents whose expanded mention tags appear in `text`. */
+export function referencedModelAgents(text: string): Set<string> {
+	return new Set(Array.from(text.matchAll(MODEL_MENTION_TAG_RE), match => match[1]!));
+}
 
 /** Replay valid branch entries, keeping the first occurrence of each agent and selector. */
 export function readModelMentions(entries: readonly SessionEntry[]): ModelMention[] {
@@ -127,22 +134,22 @@ export class ModelMentionRegistry {
 	expandMentions(text: string): string {
 		if (!text.includes("^")) return text;
 		return text.replace(MODEL_MENTION_RE, (token, delimiter: string, selector: string) => {
-			let mention = this.#bySelector.get(selector);
+			const match = resolveModelMentionToken(
+				selector,
+				candidate => this.#bySelector.get(candidate) ?? this.resolve(candidate),
+			);
+			if (!match) return token;
+			let mention = this.#bySelector.get(match.value.selector);
 			if (!mention) {
-				const resolved = this.resolve(selector);
-				if (!resolved) return token;
-				mention = this.#bySelector.get(resolved.selector);
-				if (!mention) {
-					let next = 1;
-					while (this.#agents.has(`m${next}`)) next++;
-					mention = { agent: `m${next}`, ...resolved };
-					this.#host.sessionManager.appendCustomEntry(MODEL_MENTION_ENTRY_TYPE, mention);
-					this.#mentions.push(mention);
-					this.#bySelector.set(mention.selector, mention);
-					this.#agents.add(mention.agent);
-				}
+				let next = 1;
+				while (this.#agents.has(`m${next}`)) next++;
+				mention = { agent: `m${next}`, ...match.value };
+				this.#host.sessionManager.appendCustomEntry(MODEL_MENTION_ENTRY_TYPE, mention);
+				this.#mentions.push(mention);
+				this.#bySelector.set(mention.selector, mention);
+				this.#agents.add(mention.agent);
 			}
-			return `${delimiter}${modelMentionTag(mention)}`;
+			return `${delimiter}${modelMentionTag(mention)}${match.suffix}`;
 		});
 	}
 

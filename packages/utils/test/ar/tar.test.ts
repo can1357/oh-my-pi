@@ -7,7 +7,7 @@ import { openArchive } from "../../src/ar/open";
 import { type ByteSource, memoryByteSource } from "../../src/ar/source";
 import { encodeTar, readTar, readTarEntriesFromBuffer, sniffTar } from "../../src/ar/tar";
 import type { ArchiveIndexEntry, FormatReadOptions } from "../../src/ar/types";
-import { arFixture as fixture } from "./fixtures";
+import { arFixture as fixture, extractLargestMember } from "./fixtures";
 
 const options: FormatReadOptions = { limits: DEFAULT_ARCHIVE_LIMITS };
 
@@ -168,7 +168,8 @@ describe("tar reader", () => {
 		await expect(index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxInMemorySize: bytes.byteLength - 1 })).rejects.toThrow(
 			"too large to read in memory",
 		);
-		await expect(index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 3 })).rejects.toThrow(
+		const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 3 };
+		await expect(extractLargestMember("tar", await index(bytes, memberLimits), memberLimits)).rejects.toThrow(
 			"too large to extract",
 		);
 		await expect(index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 5 })).rejects.toThrow("exceeds 5 bytes");

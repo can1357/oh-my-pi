@@ -332,6 +332,8 @@ export interface CompiledPricingPeer {
 /** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
 export interface CompiledRetryResetTimezone {
 	provider: string;
+	/** Exact upstream endpoint whose custom provider IDs inherit this offset. */
+	baseUrl?: string;
 	offset: string;
 }
 
@@ -400,6 +402,8 @@ export type CompiledAuthValidation =
 			url: string;
 			/** Env var holding an alternate base URL; `baseUrlPath` is appended to it. */
 			baseUrlEnv?: string;
+			/** Path segment ensured on the `baseUrlEnv` value (appended when absent) before `baseUrlPath` is applied — e.g. `/v1` for bases that may be bare origins. */
+			baseUrlAppend?: string;
 			/** Path appended to the `baseUrlEnv` value (default `/models`), for bases that exclude the API version. */
 			baseUrlPath?: string;
 			/** Hook returning extra request headers (may throw a configuration error). */
@@ -448,6 +452,10 @@ export interface CompiledCredentialMap {
 	projectId?: CompiledCredentialField;
 	apiEndpoint?: CompiledCredentialField;
 	enterpriseUrl?: CompiledCredentialField;
+	/** Dot path to the refresh token's remaining lifetime in seconds (`OAuthCredentials.refreshExpires`). */
+	refreshExpiresIn?: string;
+	/** Granted scopes (`OAuthCredentials.scope`), usually the response's `scope`. */
+	scope?: CompiledCredentialField;
 }
 
 /** Bearer GET that enriches credentials with identity fields. */
@@ -458,16 +466,17 @@ export interface CompiledUserinfo {
 }
 
 /**
- * One token-endpoint style request. `params` values may use `{placeholders}`
- * (`code`, `state`, `redirect_uri`, `code_verifier`, `client_id`,
- * `client_secret`, `refresh_token`, `device_code`, `scope`, `base`).
+ * One token-endpoint style request. String `params` values may use
+ * `{placeholders}` (`code`, `state`, `redirect_uri`, `code_verifier`,
+ * `client_id`, `client_secret`, `refresh_token`, `device_code`, `scope`,
+ * `base`); numeric values go out as JSON numbers.
  */
 export interface CompiledOAuthRequest {
 	url: CompiledAuthValue;
 	body: "form" | "json";
 	/** Include the grant's standard parameter set before `params`. */
 	standard: boolean;
-	params: Record<string, string>;
+	params: Record<string, string | number>;
 	headers: Record<string, string>;
 	timeoutMs?: number;
 }
@@ -551,6 +560,16 @@ export type CompiledLogin =
 	| CompiledDeviceCodeLogin
 	| CompiledCustomLogin;
 
+/**
+ * Token-endpoint refusals that prove a refresh grant dead: a 400/401 whose
+ * RFC 6749 `error` code is in `codes`, unless its `error_description` equals
+ * `exceptDescription`.
+ */
+export interface CompiledDeadGrant {
+	codes: string[];
+	exceptDescription?: string;
+}
+
 /** Refresh-token grant declared for a provider. */
 export type CompiledRefresh =
 	| { kind: "none" }
@@ -560,6 +579,12 @@ export type CompiledRefresh =
 			token: CompiledOAuthRequest;
 			/** Stored credential fields that must be present before refreshing. */
 			require: string[];
+			/** Sent space-joined as `scope`; a 400 `invalid_scope` retries once without it. */
+			scopes?: string[];
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+			/** When set, only these refusals disable the login; every other refresh failure keeps it. */
+			deadGrant?: CompiledDeadGrant;
 			credential: CompiledCredentialMap;
 			userinfo?: CompiledUserinfo;
 			afterRefresh?: string;

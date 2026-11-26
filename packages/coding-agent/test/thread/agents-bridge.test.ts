@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "../../src/config/model-registry";
@@ -12,11 +12,15 @@ import type { AgentSessionHandle } from "../../src/session/agent-session-handle"
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { collectIrcPeerRoster } from "../../src/task/executor";
+import { cfgTaskAgentModelOverrides } from "../../src/task/settings";
+import type { AgentDefinition } from "../../src/task/types";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
 import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
+import { WriteTool } from "../../src/tools/write";
 import type { AgentsProbe, AgentsProbeGlobals } from "../fixtures/agents-bridge-worker";
 
 const cleanups: Array<() => unknown> = [];
@@ -74,7 +78,7 @@ function mirrorOf(session: AgentSessionHandle | null | undefined): RemoteAgentSe
 	return session;
 }
 
-async function mainSession(id: string): Promise<AgentSession> {
+async function mainSession(id: string, sessionAgents?: AgentDefinition[]): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("bundled model missing");
 	const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
@@ -91,6 +95,7 @@ async function mainSession(id: string): Promise<AgentSession> {
 		sessionManager: SessionManager.inMemory(),
 		settings: Settings.isolated(),
 		modelRegistry: new ModelRegistry(authStorage),
+		inheritedSessionAgents: sessionAgents,
 		agentId: id,
 	});
 	cleanups.push(async () => {
@@ -168,6 +173,39 @@ describe("agent bridging across subagent workers", () => {
 		expect(await probe.manages()).toBe(true);
 	});
 
+	it("keeps late worker activity out of a same-id replacement's peer roster entry", async () => {
+		const { probe } = await startWorker();
+		const registry = AgentRegistry.global();
+		const runs: Promise<boolean>[] = [];
+		const openRun = async () => {
+			const key = await probe.open("W1", { gated: true, monitored: true });
+			const ref = liveRef("W1");
+			const remote = mirrorOf(ref.session);
+			runs.push(remote.prompt("Inspect the task"));
+			await waitFor(() => ref.status === "running" && remote.isStreaming);
+			return key;
+		};
+		const activity = () => collectIrcPeerRoster(registry, "Main").peers.find(peer => peer.id === "W1")?.activity;
+		try {
+			const old = await openRun();
+			await probe.toolCall(old, "grep");
+			expect(activity()).toBe("running grep");
+			const current = await openRun();
+			await probe.toolCall(current, "read");
+			expect(activity()).toBe("running read");
+			const lastActivity = liveRef("W1").lastActivity;
+
+			// Tool start flushes progress at once (no 150ms coalescing), so the worker sends
+			// the tool's heartbeat and then the probe reply on the same port.
+			await probe.toolCall(old, "bash");
+			expect(activity()).toBe("running read");
+			expect(liveRef("W1").lastActivity).toBe(lastActivity);
+		} finally {
+			await probe.openGate();
+			await Promise.all(runs);
+		}
+	});
+
 	it("lets a worker read a main-homed session through one canonical peer handle", async () => {
 		const { probe } = await startWorker();
 		const main = await mainSession("Main");
@@ -200,6 +238,70 @@ describe("agent bridging across subagent workers", () => {
 		});
 		expect((await probe.peerSeen()).runStates).toEqual(["running", "idle"]);
 	});
+
+	it("switches a worker-homed child to a granted model and applies viable effort on its next request", async () => {
+		const [{ probe }, parent] = await Promise.all([
+			startWorker(),
+			mainSession("Parent", [
+				{
+					name: "m1",
+					model: ["anthropic/claude-sonnet-4-6"],
+					thinkingLevel: ThinkingLevel.Medium,
+					description: "User-tagged model",
+					systemPrompt: "",
+					source: "bundled",
+				},
+			]),
+		]);
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Parent", displayName: "Parent", kind: "main", session: parent });
+		await probe.open("Parent.Child", { parentId: "Parent", parentSessionKey: parent.instanceKey });
+		const remote = mirrorOf(liveRef("Parent.Child").session);
+		registry.register({
+			id: "Foreign",
+			displayName: "Foreign",
+			kind: "sub",
+			parentId: "Parent",
+			parentSessionKey: "old-parent",
+			session: remote,
+		});
+
+		let spawns = "task";
+		cfgTaskAgentModelOverrides.override(parent.settings, { task: "anthropic/claude-sonnet-4-5" });
+		const write = new WriteTool({
+			cwd: parent.sessionManager.getCwd(),
+			hasUI: false,
+			settings: parent.settings,
+			getSessionFile: () => parent.sessionFile ?? null,
+			getSessionSpawns: () => spawns,
+			getSessionAgents: () => parent.getSessionAgents(),
+			getAgentId: () => "Parent",
+			getAgentSession: () => parent,
+			agentRegistry: registry,
+		});
+		const set = (path: string, content: string) => write.execute("control", { path: `agent://${path}`, content });
+
+		await expect(set("Parent.Child/model", "m1:max")).rejects.toThrow("Allowed: task");
+		await expect(set("Foreign/effort", "high")).rejects.toThrow("only yourself or a direct child");
+		expect(remote.model?.id).toBe("claude-sonnet-4-5");
+
+		spawns = "task,m1";
+		const model = await set("Parent.Child/model", "m1:max");
+		expect(model.content[0]).toMatchObject({
+			text: expect.stringContaining("anthropic/claude-sonnet-4-6 (effort: high)"),
+		});
+		const effort = await set("Parent.Child/effort", "minimal");
+		expect(effort.content[0]).toMatchObject({
+			text: expect.stringContaining("anthropic/claude-sonnet-4-6 (effort: low)"),
+		});
+		expect(await probe.prompt("Parent.Child", "Check the settings for this turn")).toEqual({
+			model: "claude-sonnet-4-6",
+			effort: ThinkingLevel.Low,
+		});
+		await set("Parent.Child/model", "task:off");
+		expect(remote.model?.id).toBe("claude-sonnet-4-5");
+		expect(remote.thinkingLevel).toBe(ThinkingLevel.Off);
+	}, 20_000);
 
 	it("delivers an IRC message from main into a worker-homed session", async () => {
 		const { probe } = await startWorker();

@@ -19,7 +19,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../src/ui/theme/service";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -27,9 +27,11 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
+import { MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { aggregateVibeWorkerUsage, VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { createModeTerminal } from "../helpers/mode-terminal";
 
 function stubTool(name: string): AgentTool {
 	return {
@@ -88,7 +90,7 @@ describe("goal + vibe composition", () => {
 	let modelRegistry: ModelRegistry;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 		tempDir = TempDir.createSync("@pi-goal-vibe-");
 		authStorage = createInMemoryAuthStorage();
 		modelRegistry = new ModelRegistry(authStorage);
@@ -142,7 +144,15 @@ describe("goal + vibe composition", () => {
 				getGoalRuntime: () => session.goalRuntime,
 			}) as unknown as AgentTool,
 		);
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, new EventBus());
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			new EventBus(),
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {
@@ -252,10 +262,82 @@ describe("goal + vibe composition", () => {
 		vi.useRealTimers();
 		const input = waiter.getResolvedInput();
 		expect(input?.customType).toBe("goal-continuation");
+		expect(input?.text).toContain("Ship the refactor");
+		expect(input?.text).toContain("read/todo/vibe tools only");
+		expect(input?.text).toContain("vibe_send");
+		expect(input?.text).not.toContain("run commands/tests");
 		const drain = input ?? mode.startPendingSubmission({ text: "cleanup" });
 		mode.onInputCallback?.(drain);
 		await waiter.inputPromise;
 		mode.finishPendingSubmission(drain);
+	});
+
+	it("entering vibe while a goal is paused keeps the objective on the vibe journal entry", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleGoalModeCommand("Ship the refactor");
+		await session.goalRuntime.pauseGoal();
+		expect(mode.goalModePaused).toBe(true);
+
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(mode.goalModeEnabled).toBe(false);
+
+		const tail = lastModeChange(session.sessionManager);
+		expect(tail?.mode).toBe("vibe");
+		expect(tail?.data?.goalEnabled).toBe(false);
+		const goal = tail?.data?.goal as { objective?: string; status?: string } | undefined;
+		expect(goal?.objective).toBe("Ship the refactor");
+		expect(goal?.status).toBe("paused");
+	});
+
+	it("does not re-charge worker spend when a paused goal resumes and vibe starts again", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		await mode.handleGoalModeCommand("Ship the refactor");
+
+		const registry = VibeSessionRegistry.global();
+		registry.registerRecordForTests({
+			id: "w-spent",
+			ownerId: MAIN_AGENT_ID,
+			state: "dead",
+			usage: { input: 80, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		const spent = registry.listWorkerRecordsByOwner(MAIN_AGENT_ID).find(record => record.id === "w-spent");
+		if (spent) {
+			spent.killed = true;
+			spent.terminalPersisted = true;
+		}
+
+		const before = session.getGoalModeState()?.goal.tokensUsed ?? 0;
+		await session.goalRuntime.flushUsage("suppressed");
+		expect((session.getGoalModeState()?.goal.tokensUsed ?? 0) - before).toBe(80);
+
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(mode.goalModePaused).toBe(true);
+		expect(aggregateVibeWorkerUsage(MAIN_AGENT_ID)).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		const pausedUsed = session.getGoalModeState()?.goal.tokensUsed ?? 0;
+		await mode.handleGoalModeCommand("resume");
+		expect(mode.goalModeEnabled).toBe(true);
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+		await session.goalRuntime.flushUsage("suppressed");
+		expect(session.getGoalModeState()?.goal.tokensUsed).toBe(pausedUsed);
+
+		registry.registerRecordForTests({
+			id: "w-new",
+			ownerId: MAIN_AGENT_ID,
+			state: "idle",
+			usage: { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		await session.goalRuntime.flushUsage("suppressed");
+		expect(session.getGoalModeState()?.goal.tokensUsed).toBe(pausedUsed + 5);
 	});
 
 	it("preserves an already-paused goal when exiting vibe", async () => {

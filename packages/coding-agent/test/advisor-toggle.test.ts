@@ -16,6 +16,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { __resetDirsFromEnvForTests, getProjectAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function restoreEnv(key: string, value: string | undefined): void {
@@ -184,6 +185,63 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.isAdvisorActive()).toBe(true);
 		expect(session.isAdvisorEnabled()).toBe(true);
 		expect(session.formatAdvisorStatus()).toContain("Advisor is enabled (anthropic/claude-sonnet-4-5)");
+	});
+
+	it("uses current WATCHDOG.yml imports after /advisor off and on", async () => {
+		const cwd = tempDir.path();
+		const agentDir = tempDir.join("watchdog-agent");
+		const config = path.join(agentDir, "WATCHDOG.yml");
+		const rule = path.join(agentDir, "rule.md");
+		const settings = Settings.isolated({ "advisor.enabled": true, "async.enabled": false });
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		await Bun.write(config, "instructions: '@./rule.md'\nadvisors:\n  - name: Reviewer\n");
+		await Bun.write(rule, "Original shared watchdog rule.");
+
+		const { session: watchdogSession } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: SessionManager.inMemory(cwd),
+			authStorage,
+			modelRegistry,
+			settings,
+			model,
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			skills: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		try {
+			let output = "";
+			const runtime = {
+				session: watchdogSession,
+				sessionManager: watchdogSession.sessionManager,
+				settings,
+				cwd,
+				output: (text: string) => {
+					output = text;
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			};
+			await executeAcpBuiltinSlashCommand("/advisor dump raw", runtime);
+			expect(output).toContain("Original shared watchdog rule.");
+
+			await executeAcpBuiltinSlashCommand("/advisor off", runtime);
+			await Bun.write(rule, "Updated shared watchdog rule.");
+			await Bun.write(path.join(agentDir, "specialization.md"), "New advisor-specific rule.");
+			await Bun.write(
+				config,
+				"instructions: '@./rule.md'\nadvisors:\n  - name: Reviewer\n    instructions: '@./specialization.md'\n",
+			);
+			await executeAcpBuiltinSlashCommand("/advisor on", runtime);
+			await executeAcpBuiltinSlashCommand("/advisor dump raw", runtime);
+			expect(output).toContain("Updated shared watchdog rule.");
+			expect(output).toContain("New advisor-specific rule.");
+			expect(output).not.toContain("Original shared watchdog rule.");
+		} finally {
+			await watchdogSession.dispose();
+		}
 	});
 
 	it("explicit enable rebuilds the runtime when the advisor role changes", () => {
@@ -937,21 +995,23 @@ describe("AgentSession advisor toggle", () => {
 		await session.dispose();
 		expect((await loadAdvisorTranscriptCosts(previousSessionFile)).get("")).toBeCloseTo(0.75, 8);
 	});
-	it("resets advisor runtimes after an in-place handoff compaction", async () => {
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
-		const advisor = enableAdvisor();
-		prepareHandoffConversation(advisor);
-		cfgCompactionKeepRecentTokens.set(session.settings, 1);
-		const sessionFile = session.sessionFile;
+	it("commits a handoff on the same branch while an advisor is attached", async () => {
+		const generate = vi.spyOn(compactionModule, "generateHandoffFromContext");
+		generate.mockResolvedValue("## Goal\nContinue from here");
+		try {
+			const advisor = enableAdvisor();
+			prepareHandoffConversation(advisor);
+			cfgCompactionKeepRecentTokens.set(session.settings, 1);
+			const sessionFile = session.sessionFile;
 
-		const result = await session.handoff();
-
-		expect(result?.document).toContain("Continue from here");
-		expect(session.sessionFile).toBe(sessionFile);
-		const compaction = sessionManager.getBranch().at(-1);
-		expect(compaction).toMatchObject({ type: "compaction" });
-		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
-		expect(compaction.summary).toContain("Continue from here");
+			await session.compact(undefined, { mode: "handoff" });
+			expect(session.sessionFile).toBe(sessionFile);
+			const compaction = sessionManager.getBranch().at(-1);
+			if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
+			expect(compaction.summary).toContain("Continue from here");
+		} finally {
+			generate.mockRestore();
+		}
 	});
 	it("clears advisor cost when a branch skips conversation restore", async () => {
 		const extensionRunner = {

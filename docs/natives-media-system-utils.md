@@ -4,22 +4,23 @@ This document covers the media/system/conversion exports in `@oh-my-pi/pi-native
 
 ## Implementation files
 
-- `crates/pi-natives/src/audio.rs`
-- `crates/pi-natives/src/live.rs`
-- `crates/pi-voice/src/audio.rs` and `crates/pi-voice/src/live.rs` (media engines behind the N-API adapters)
-- `crates/pi-natives/src/snapcompact.rs`
-- `crates/pi-natives/src/sixel.rs`
-- `crates/pi-natives/src/svg.rs`
-- `crates/pi-natives/src/pdf.rs`
-- `crates/pi-natives/src/html.rs`
-- `crates/pi-natives/src/clipboard.rs`
-- `crates/pi-natives/src/tokens.rs`
-- `crates/pi-natives/src/utok/` (embedded tokenizer implementation and vocabularies)
-- `crates/pi-natives/src/devicecheck.rs`
-- `crates/pi-natives/src/appearance.rs`
-- `crates/pi-natives/src/power.rs`
-- `crates/pi-natives/src/prof.rs`
-- `crates/pi-natives/src/task.rs`
+- `crates/natives/src/audio.rs`
+- `crates/natives/src/live.rs`
+- `crates/voice/src/audio.rs` and `crates/voice/src/live.rs` (media engines behind the N-API adapters)
+- `crates/natives/src/snapcompact.rs`
+- `crates/natives/src/sixel.rs`
+- `crates/natives/src/svg.rs`
+- `crates/natives/src/pdf.rs`
+- `crates/natives/src/web.rs`
+- `crates/web/` (the `omp-web` reader engine)
+- `crates/natives/src/clipboard.rs`
+- `crates/natives/src/tokens.rs`
+- `crates/natives/src/utok/` (embedded tokenizer implementation and vocabularies)
+- `crates/natives/src/devicecheck.rs`
+- `crates/natives/src/appearance.rs`
+- `crates/natives/src/power.rs`
+- `crates/natives/src/prof.rs`
+- `crates/natives/src/task.rs`
 - `packages/natives/native/index.d.ts`
 
 There is no native `PhotonImage` class or `image.rs` in the addon. General-purpose image processing stays in `Bun.Image`; the native image surface supplies SIXEL encoding/decoding, bounded SVG rasterization, and snapcompact frame rendering. Filesystem isolation is a separate subsystem.
@@ -38,7 +39,8 @@ There is no native `PhotonImage` class or `image.rs` in the addon. General-purpo
 | `pdfToMarkdown(bytes)`                                  | `pdf_to_markdown`              | `pdf.rs`         |
 | `renderSnapcompactPng(text, options)`                   | `render_snapcompact_png`       | `snapcompact.rs` |
 | `snapcompactSupportedChars(font, chars)`                | `snapcompact_supported_chars`  | `snapcompact.rs` |
-| `htmlToMarkdown(html, options?)`                        | `html_to_markdown`             | `html.rs`        |
+| `renderHtml(html, options?)`                            | `render_html`                  | `web.rs`         |
+| `new Reader(options?)`                                  | `Reader`                       | `web.rs`         |
 | `copyToClipboard(text)`                                 | `copy_to_clipboard`            | `clipboard.rs`   |
 | `readImageFromClipboard()`                              | `read_image_from_clipboard`    | `clipboard.rs`   |
 | `countTokens(input, encoding?)`                         | `count_tokens`                 | `tokens.rs`      |
@@ -55,7 +57,7 @@ There is no native `PhotonImage` class or `image.rs` in the addon. General-purpo
 - `AudioCapture(sampleRate, callback)` opens the default microphone and delivers low-latency mono `Float32Array` PCM chunks at the requested logical rate. `stop()` immediately releases capture.
 - `AudioPlayback(sampleRate)` opens the default speaker. `write(samples)` queues mono `Float32Array` PCM in order; `setGain(gain)` changes render-time gain even for queued samples; `end()` drains and closes, while `stop()` discards queued audio immediately.
 - `LiveWebRtcPeer(onEvent, onLevel, onFailure)` owns a WebRTC peer for Codex live media. `createOffer()` returns SDP, `acceptAnswer(sdp)` applies the remote answer, and `waitForOpen(timeoutMs?)` waits for the `oai-events` data channel (default 20 seconds). `pushAudio(samples)` accepts 16 kHz mono PCM with a bounded queue; muted input and input that would overflow the queue are dropped. `setMuted()` controls transmission and discards partial muted frames; `close()` asynchronously tears down media, data channel, peer, and playback.
-- The N-API modules adapt callbacks/buffers; device discovery, conversion, playback, WebRTC, and Opus media live in `pi-voice`. The TypeScript host owns authenticated signaling and sideband protocol handling.
+- The N-API modules adapt callbacks/buffers; device discovery, conversion, playback, WebRTC, and Opus media live in `omp-voice`. The TypeScript host owns authenticated signaling and sideband protocol handling.
 
 ### SIXEL image encoding (`sixel`)
 
@@ -82,18 +84,47 @@ The configured `image` features enable PNG, JPEG, WebP, GIF, and BMP decoding. I
 
 `renderSnapcompactPng(text, options)` renders pre-normalized text on a bounded bitmap and asynchronously returns a **base64-encoded PNG string**. The N-API transport type is `Latin1String`, but the string contains base64 text rather than raw one-byte PNG data; base64-decode it before treating the result as PNG bytes. `options.size` is required and must be `1..16384`; optional controls include `font`, `cellWidth`, `cellHeight`, `variant`, `lineRepeat`, `stretch`, and `columns`. Fonts are `"5x8"` (default), `"6x12"`, `"8x13"`, `"8x8"`, and `"silver"`; variants are `"sent"` (default) and `"bw"`; columns are `1` (default) or `2`. Output height hugs used rows and overflowing input is ignored. `U+000E`/`U+000F` toggle dim-gray ink without consuming cells. `snapcompactSupportedChars(font, chars)` preserves supported glyphs and renderer control characters.
 
-### HTML conversion (`html`)
+### HTML conversion (`renderHtml`, `Reader`)
 
-- **JS input boundary**: HTML `string` + optional `{ cleanContent?: boolean; skipImages?: boolean }`.
-- **Rust conversion boundary**: conversion is scheduled through `task::blocking("html_to_markdown", (), ...)`; there is no timeout/abort option on this export.
-- **Output boundary**: Markdown `string` promise.
+The reader engine lives in the pure `omp-web` crate (`crates/web`) and is bound
+through `crates/natives/src/web.rs`; it performs no network access.
+
+- **JS input boundary**: `renderHtml(html, options?)` accepts an HTML `string`
+  plus optional `{ format?: "markdown" | "text"; mode?: "auto" | "full"; hidden?: "drop" | "reachable" | "all"; images?: boolean; width?: number; baseUrl?: string }`.
+- **Rust conversion boundary**: rendering is scheduled on the native blocking
+  pool through `omp-web`; there is no timeout/abort option on this export.
+- **Output boundary**: Markdown or plain text `string` promise.
 
 Conversion behavior:
 
-- `cleanContent` defaults to `false`.
-- When `cleanContent=true`, preprocessing is enabled with `PreprocessingPreset::Aggressive`, `remove_navigation=true`, and `remove_forms=true`.
-- `skipImages` defaults to `false` and is passed to `html_to_markdown_rs::ConversionOptions`.
-- Conversion explicitly selects `TierStrategy::Tier2`. A `DepthLimitExceeded` warning is promoted to a rejection instead of returning partial Markdown.
+- `format` defaults to `markdown`; `mode` defaults to `auto`, the reader that
+  selects the main content and removes boilerplate. `full` renders the whole
+  document instead.
+- `hidden` defaults to `drop`: hidden content is dropped unless `reachable` or
+  `all` are requested.
+- `images` defaults to `true`; `width` defaults to `250` for the plain-text
+  writer and is ignored by the Markdown writer.
+- `baseUrl` resolves relative links and image sources.
+
+The Markdown writer emits ATX headings, paragraphs with collapsed whitespace,
+strong/emphasis/code/del/sub/sup, links resolved against `baseUrl` (dropping
+`javascript:`), nested and ordered lists, blockquotes, `pre`/`code` with a
+class-derived language, `hr`, `br`, definition lists, and GFM tables for
+rectangular inline-cell tables; layout tables are flattened to blocks. The
+plain-text writer reproduces `lynx -dump -nolist -width <width>` layout (UTF-8,
+default styles) without embedding Lynx source or implementing its interactive
+browser, network access, alternate charsets, or style sheets.
+
+`new Reader(options?)` drives the same engine over a URL as a sans-I/O state
+machine. `open(url)` and `resolve(response)` return `fetch`, `browse`, or `done`
+steps carrying `{ url, method, headers, body, maxBytes, purpose }` requests or a
+page/blob/failed output; the TypeScript host performs the HTTP request or the
+headless-browser load and resolves each step. The engine owns user-agent
+retries, bot-wall and JavaScript-shell verdicts, charset decoding, payload
+classification, `Refresh` and meta refresh, Markdown alternates,
+`Accept: text/markdown` negotiation, llms.txt and feed candidates,
+linked-document fallback, embedded data for shells, selection, writing, and
+judging.
 
 ### Clipboard (`clipboard`)
 
@@ -157,10 +188,11 @@ Failure transitions (the synchronous form throws; the asynchronous form rejects)
 
 ### HTML lifecycle
 
-1. `htmlToMarkdown(html, options)` schedules a blocking conversion task.
-2. Conversion runs with defaulted options (`cleanContent=false`, `skipImages=false`) unless specified.
-3. The upstream converter owns normalization and preprocessing. Native code rejects conversion errors and `DepthLimitExceeded` warnings rather than accepting partial Markdown.
-4. Returns markdown string or rejects with `Conversion error: ...`.
+1. `renderHtml(html, options)` schedules a render on the native blocking pool.
+2. Rendering runs with defaulted options (`format=markdown`, `mode=auto`, `hidden=drop`, `images=true`, `width=250`) unless specified.
+3. `mode=auto` runs one reader behaviour: it selects the main content and removes boilerplate. `mode=full` renders everything visible.
+4. The Markdown writer owns rendering and normalization; the plain-text writer owns Lynx-style layout.
+5. Returns a Markdown or plain-text string (empty when the selected mode finds no content).
 
 ### Clipboard lifecycle
 
@@ -190,8 +222,9 @@ Failure transitions:
 
 ### HTML
 
-- Conversion errors are strict failures.
+- `renderHtml` returns the best-effort rendering for the selected mode; an empty string means the mode found no content.
 - Option omission is defaulting, not failure.
+- `Reader` reports transport failures, walls, and JavaScript shells as output steps rather than throwing.
 
 ### Clipboard
 

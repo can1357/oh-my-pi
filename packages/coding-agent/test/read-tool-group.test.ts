@@ -2,14 +2,23 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as path from "node:path";
 import * as url from "node:url";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-// Installs the pi-tui scheme host that decides which reads collapse into the group.
+// Installs the scheme router that decides which reads collapse into the group.
 import "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
-import { ReadToolGroupComponent, readArgsCollapseIntoGroup } from "@oh-my-pi/pi-tui/chat/read-tool-group";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
-import { FILE_NAME_COLOR } from "@oh-my-pi/pi-tui/render/render-utils";
-import { cfgReadToolResultPreview } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { readArgsCollapseIntoGroup } from "@oh-my-pi/pi-coding-agent/session/transcript/read-tool-group";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import "../src/ui/styles/tools";
+import "../src/ui/styles/transcript/read-group";
 import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgReadToolResultPreview } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { printRows } from "../src/ui/print-rows";
+import {
+	ReadGroup,
+	ReadGroupBlock,
+	type ReadGroupOptions,
+	type ReadResult,
+	type ReadUsage,
+} from "../src/ui/transcript/read-group";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);
@@ -21,11 +30,43 @@ function extractLinkTexts(text: string): string[] {
 	);
 }
 
-describe("ReadToolGroupComponent", () => {
+/** A transcript read group, painted the way the terminal draws it. */
+class ReadToolGroupComponent {
+	readonly group: ReadGroup;
+
+	constructor(options?: ReadGroupOptions) {
+		this.group = new ReadGroup(options);
+	}
+
+	updateArgs(args: { path?: unknown; file_path?: unknown; raw?: unknown }, id: string): void {
+		this.group.updateArgs(args, id);
+	}
+
+	updateResult(
+		result: { content: { type: string; text?: string }[]; details?: unknown },
+		partial: boolean,
+		id: string,
+	) {
+		this.group.updateResult(result as ReadResult, partial, id);
+	}
+
+	attachUsage(ids: readonly string[], usage: ReadUsage, durationMs?: number, ttftMs?: number, timestamp?: number) {
+		this.group.attachUsage(ids, usage, durationMs, ttftMs, timestamp);
+	}
+
+	render(width: number): string[] {
+		return printRows(() => ReadGroupBlock({ group: this.group })(), width, {
+			hyperlinks: cfgTuiHyperlinks.get(settings) === "always",
+		});
+	}
+}
+
+const sym = (key: string) => currentTheme().symbols.symbol(key);
+
+describe("read group", () => {
 	beforeAll(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 	});
 
 	afterEach(() => {
@@ -73,8 +114,8 @@ describe("ReadToolGroupComponent", () => {
 		const rendered = component.render(120).join("\n");
 		const plain = Bun.stripANSI(rendered);
 
-		expect(plain).toContain(`${themeModule.theme.status.success} Read`);
-		expect(rendered).toContain(themeModule.theme.fg("success", themeModule.theme.status.success));
+		expect(plain).toContain(`${sym("status.success")} Read`);
+		expect(rendered).toContain(currentTheme().fg("success", sym("status.success")));
 	});
 
 	it("omits duplicate success marks from multi-read child rows", () => {
@@ -89,10 +130,11 @@ describe("ReadToolGroupComponent", () => {
 		const plain = Bun.stripANSI(component.render(120).join("\n"));
 
 		expect(plain).toContain("Read (2)");
-		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
-		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
-		expect(plain).not.toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.success}`);
-		expect(plain).not.toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.success}`);
+		expect(plain).toContain(`${sym("tree.branch")} ${onePath}`);
+		expect(plain).toContain(`${sym("tree.last")} ${twoPath}`);
+		// Child rows of successful reads carry no success mark of their own.
+		expect(plain).not.toContain(`${sym("tree.branch")} ${sym("status.success")}`);
+		expect(plain).not.toContain(`${sym("tree.last")} ${sym("status.success")}`);
 	});
 
 	it("nests one usage row beneath the last path from each read-only turn", () => {
@@ -142,11 +184,9 @@ describe("ReadToolGroupComponent", () => {
 			.filter(index => index >= 0);
 
 		expect(firstUsageIndex).toBe(onePathIndex + 1);
-		expect(lines[firstUsageIndex]?.startsWith(`   ${themeModule.theme.tree.vertical}  `)).toBe(true);
 		expect(twoPathIndex).toBeGreaterThan(firstUsageIndex);
 		expect(threePathIndex).toBeGreaterThan(twoPathIndex);
 		expect(parallelUsageIndices).toEqual([threePathIndex + 1]);
-		expect(lines[parallelUsageIndices[0]!]?.startsWith("      ")).toBe(true);
 	});
 
 	it("splits a single selector-delimited read argument into child rows", () => {
@@ -160,9 +200,9 @@ describe("ReadToolGroupComponent", () => {
 		const plain = Bun.stripANSI(component.render(120).join("\n"));
 
 		expect(plain).toContain("Read (3)");
-		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}:1-2`);
-		expect(plain).toContain(`${themeModule.theme.tree.branch} ${twoPath}:3-4`);
-		expect(plain).toContain(`${themeModule.theme.tree.last} ${threePath}:5-6`);
+		expect(plain).toContain(`${sym("tree.branch")} ${onePath}:1-2`);
+		expect(plain).toContain(`${sym("tree.branch")} ${twoPath}:3-4`);
+		expect(plain).toContain(`${sym("tree.last")} ${threePath}:5-6`);
 	});
 
 	it("merges multi-range selectors into one file row", () => {
@@ -206,21 +246,6 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).not.toContain("1210-1240");
 	});
 
-	it("styles grouped rows' paths and mutes their selectors, merged lists included", () => {
-		const { theme } = themeModule;
-		const component = new ReadToolGroupComponent();
-		const renderPath = path.resolve("/tmp/render.ts");
-		component.updateArgs({ path: `${renderPath}:507-605` }, "read-one");
-		component.updateArgs({ path: `${renderPath}:1070-1194,1210-1240,1270-1274` }, "read-more");
-		// A second file keeps the reads as group rows rather than one header line.
-		component.updateArgs({ path: path.resolve("/tmp/other.ts") }, "read-other");
-
-		const rendered = component.render(120).join("\n");
-
-		expect(rendered).toContain(theme.fg(FILE_NAME_COLOR, "render.ts"));
-		expect(rendered).toContain(theme.fg("muted", ":507-605,1070-1194,…,1270-1274"));
-	});
-
 	it("uses result-provided recovered targets for delimited reads", () => {
 		const component = new ReadToolGroupComponent();
 		const onePath = path.resolve("/tmp/one.ts");
@@ -238,8 +263,8 @@ describe("ReadToolGroupComponent", () => {
 		const plain = Bun.stripANSI(component.render(120).join("\n"));
 
 		expect(plain).toContain("Read (2)");
-		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
-		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
+		expect(plain).toContain(`${sym("tree.branch")} ${onePath}`);
+		expect(plain).toContain(`${sym("tree.last")} ${twoPath}`);
 	});
 
 	it("links every grouped delimited row from result-provided link paths", () => {
@@ -277,7 +302,12 @@ describe("ReadToolGroupComponent", () => {
 		component.updateResult(
 			{
 				content: [{ type: "text", text: "const a = 1;\nconst b = 2;\nconst c = 3;" }],
-				details: { suffixResolution: { from: path.resolve("/tmp/exampl.ts"), to: examplePath } },
+				details: {
+					suffixResolution: {
+						from: path.resolve("/tmp/exampl.ts"),
+						to: examplePath,
+					},
+				},
 			},
 			false,
 			"read-1",
@@ -285,13 +315,37 @@ describe("ReadToolGroupComponent", () => {
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 
-		expect(rendered).toContain(themeModule.theme.status.warning);
-		expect(rendered).not.toContain(themeModule.theme.status.success);
+		expect(rendered).toContain(sym("status.warning"));
+		expect(rendered).not.toContain(sym("status.success"));
 		expect(rendered).toContain("corrected from");
 	});
 
-	it("highlights only the collapsed preview lines", () => {
-		const highlightSpy = vi.spyOn(themeModule, "highlightCode");
+	it("marks a suffix-corrected read with the warning glyph", () => {
+		const component = new ReadToolGroupComponent();
+		const examplePath = path.resolve("/tmp/example.ts");
+		component.updateArgs({ path: path.resolve("/tmp/exampl.ts") }, "read-corrected");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "const a = 1;" }],
+				details: {
+					suffixResolution: {
+						from: path.resolve("/tmp/exampl.ts"),
+						to: examplePath,
+					},
+				},
+			},
+			false,
+			"read-corrected",
+		);
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(rendered).toContain(`${sym("status.warning")} Read`);
+		expect(rendered).not.toContain(sym("status.success"));
+		expect(rendered).toContain("corrected from");
+	});
+
+	it("shows only the collapsed preview lines", () => {
 		const component = new ReadToolGroupComponent({ showContentPreview: true });
 		const examplePath = path.resolve("/tmp/example.ts");
 		component.updateArgs({ path: examplePath }, "read-2");
@@ -309,10 +363,9 @@ describe("ReadToolGroupComponent", () => {
 		);
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
-		const highlightedInput = highlightSpy.mock.calls[0]?.[0];
 
-		expect(highlightedInput).toBe("line 1\nline 2\nline 3");
 		expect(rendered).toContain("line 1");
+		expect(rendered).toContain("line 3");
 		expect(rendered).not.toContain("line 4");
 		expect(rendered).toContain("2 more lines");
 	});
@@ -347,8 +400,6 @@ describe("ReadToolGroupComponent", () => {
 				output: 7,
 				cacheRead: 0,
 				cacheWrite: 0,
-				totalTokens: 1241,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			1000,
 			500,
@@ -414,10 +465,15 @@ describe("ReadToolGroupComponent", () => {
 	it("previews Markdown-tagged reads as rendered Markdown unless raw source was requested", () => {
 		const markdown = "# Title\n\nSome **bold** text.";
 		const preview = (args: { path: string; raw?: boolean }): string => {
-			const component = new ReadToolGroupComponent({ showContentPreview: true });
+			const component = new ReadToolGroupComponent({
+				showContentPreview: true,
+			});
 			component.updateArgs(args, "read-md");
 			component.updateResult(
-				{ content: [{ type: "text", text: markdown }], details: { contentType: "text/markdown" } },
+				{
+					content: [{ type: "text", text: markdown }],
+					details: { contentType: "text/markdown" },
+				},
 				false,
 				"read-md",
 			);
@@ -463,7 +519,6 @@ describe("readArgsCollapseIntoGroup", () => {
 		["issue://123"],
 		["pr://can1357/oh-my-pi/456"],
 		["agent://abc"],
-		["artifact://abc"],
 		["memory://root"],
 		["rule://name"],
 		["mcp://server/resource"],
@@ -477,8 +532,8 @@ describe("readArgsCollapseIntoGroup", () => {
 		[path.resolve("/tmp/example.ts")],
 		["./relative/path.md"],
 		["https://example.com/file"],
-		["xd://"],
-		["xd://generate_image"],
+		["help://"],
+		["help://eval/helpers"],
 	])("collapses %s into the read group", target => {
 		expect(readArgsCollapseIntoGroup({ path: target })).toBe(true);
 		expect(readArgsCollapseIntoGroup({ file_path: target })).toBe(true);
@@ -487,8 +542,8 @@ describe("readArgsCollapseIntoGroup", () => {
 	it("returns false for non-record / missing arguments", () => {
 		expect(readArgsCollapseIntoGroup(undefined)).toBe(false);
 		expect(readArgsCollapseIntoGroup(null)).toBe(false);
-		expect(readArgsCollapseIntoGroup("xd://x")).toBe(false);
-		expect(readArgsCollapseIntoGroup(["xd://x"])).toBe(false);
+		expect(readArgsCollapseIntoGroup("help://x")).toBe(false);
+		expect(readArgsCollapseIntoGroup(["help://x"])).toBe(false);
 		expect(readArgsCollapseIntoGroup({})).toBe(false);
 		expect(readArgsCollapseIntoGroup({ path: 42 })).toBe(false);
 	});

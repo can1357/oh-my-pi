@@ -21,11 +21,22 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
+import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../config/model-selector";
+import { fuzzyFilter } from "../utils/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
-import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
+import { agentMesh } from "../irc/mesh";
+import { formatPeerAddress, type PeerAddress } from "../irc/mesh-protocol";
+import type { AgentKindModelChange, AgentModelChange, AgentSessionHandle } from "../session/agent-session-handle";
+import { discoverAgents, getAgent } from "../task/discovery";
+import { cfgTaskAgentModelOverrides, cfgTaskCrossInstance, cfgTaskDisabledAgents } from "../task/settings";
+import { spawnDenial } from "../task/spawn-policy";
+import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import type { ToolSession } from "../tools";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
@@ -42,6 +53,59 @@ import type {
 	UrlCompletion,
 	WriteContext,
 } from "./types";
+
+/**
+ * A `agent://<pid>[/<id>[/<json-path>]]` URL: an agent of the omp instance
+ * with that pid. This process's own pid reads as a local address.
+ */
+interface PidTarget {
+	address: PeerAddress;
+	/** JSON-path segments after the agent id. */
+	segments: string[];
+	local: boolean;
+}
+
+function pidTarget(url: InternalUrl): PidTarget | undefined {
+	const host = url.rawHost || url.hostname;
+	if (!/^\d+$/.test(host)) return undefined;
+	const [id, ...segments] = url.pathname.split("/").filter(Boolean).map(decodeSegment);
+	if (id && /[/\\\0]/.test(id)) throw new Error("Invalid agent ID in PID-qualified URL.");
+	const pid = Number(host);
+	return { address: { pid, ...(id ? { id } : {}) }, segments, local: pid === process.pid };
+}
+
+function crossInstanceEnabled(context?: ResolveContext): boolean {
+	const settings = context?.session?.settings ?? context?.settings;
+	return settings !== undefined && cfgTaskCrossInstance.get(settings);
+}
+
+function decodeSegment(segment: string): string {
+	try {
+		return decodeURIComponent(segment);
+	} catch {
+		return segment;
+	}
+}
+
+/** What a progress view reads: a live session, else a transcript file. */
+interface ProgressSource {
+	id: string;
+	status: string;
+	session: AgentSessionHandle | null;
+	sessionFile: string | null;
+}
+
+/** Where {@link AgentProtocolHandler.resolve} looks up one output id. */
+interface OutputTarget {
+	outputId: string;
+	segments: string[];
+	dirs: string[];
+	registry?: AgentRegistryApi;
+	/** Last status published by the peer that owns this subagent. */
+	remoteStatus?: string;
+	/** Transcript-backed progress source for a peer, including retained agents. */
+	remoteProgress?: () => Promise<ProgressSource | undefined>;
+}
 
 /** Upper bound on the ids a `Not found` error suggests. */
 const MAX_ID_SUGGESTIONS = 5;
@@ -128,7 +192,88 @@ function lastAssistantText(messages: readonly AgentMessage[]): string | undefine
 	return undefined;
 }
 
-/** Whether `<id>`'s published output predates a turn the agent is streaming now. */
+/**
+ * The registered agent a message to `named` means: the id itself when
+ * registered (or `all`), the sender's parent for `parent`, else the one agent
+ * whose id matches ignoring case. Anything else stays as named, and delivery
+ * reports it unknown.
+ */
+function resolveRecipient(registry: AgentRegistryApi, senderId: string, named: string): string {
+	if (named === "all" || registry.get(named)) return named;
+	if (named.toLowerCase() === "parent") {
+		const parentId = registry.get(senderId)?.parentId;
+		if (parentId) return parentId;
+	}
+	const lower = named.toLowerCase();
+	const [match, ...others] = registry.list().filter(ref => ref.kind !== "advisor" && ref.id.toLowerCase() === lower);
+	return match && others.length === 0 ? match.id : named;
+}
+
+/** Find the live caller or one of its own direct children; a reused id never grants ownership. */
+function controlTarget(
+	session: ToolSession,
+	registry: AgentRegistryApi,
+	senderId: string,
+	targetId: string,
+): AgentSessionHandle {
+	const caller = session.getAgentSession?.();
+	const sender = registry.get(senderId);
+	if (!caller || sender?.session !== caller || session.isDisposed?.()) {
+		throw new Error("Agent model controls require a live, registered tool session.");
+	}
+	const ref = targetId === senderId ? sender : registry.get(targetId);
+	if (!ref || ref.kind === "advisor" || !ref.session) {
+		throw new Error(`Agent ${targetId} does not have a live session.`);
+	}
+	if (ref.session === caller) return caller;
+	const callerFile = session.getSessionFile();
+	const targetFile = ref.sessionFile;
+	// Restored refs have no runtime spawner identity; their transcript must belong to this parent.
+	const inParentTranscript = callerFile && targetFile && sessionFileBelongsToRoot(targetFile, callerFile);
+	const owned =
+		ref.parentId === senderId &&
+		(ref.parentSessionKey === undefined
+			? inParentTranscript
+			: ref.parentSessionKey === caller.instanceKey && (!callerFile || !targetFile || inParentTranscript));
+	if (!owned) throw new Error("Agent model controls can change only yourself or a direct child you spawned.");
+	return ref.session;
+}
+
+async function resolveModelChange(session: ToolSession, selector: string): Promise<AgentKindModelChange> {
+	const { base: kind, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+	await session.settings.reloadFromDisk();
+	const denial = spawnDenial(session, kind);
+	if (denial) throw new Error(denial);
+	if (cfgTaskDisabledAgents.get(session.settings).includes(kind)) {
+		throw new Error(`Agent kind "${kind}" is disabled in settings.`);
+	}
+	const { agents } = await discoverAgents(session.cwd, undefined, session.effectiveExtensionRoots?.());
+	const agent = getAgent(agents, kind) ?? session.getSessionAgents?.().find(candidate => candidate.name === kind);
+	if (!agent) {
+		throw new Error(`Unknown agent kind "${kind}". Use a permitted task agent kind, optionally with :effort.`);
+	}
+	const overrides = cfgTaskAgentModelOverrides.get(session.settings);
+	const patterns = resolveAgentModelPatterns({
+		settings: session.settings,
+		settingsOverride: Object.hasOwn(overrides, kind) ? overrides[kind] : undefined,
+		agentModel: agent.model,
+		activeModelPattern: session.getActiveModelString?.(),
+		fallbackModelPattern: session.getModelString?.(),
+	});
+	return { patterns, kind, thinkingLevel: level, defaultThinkingLevel: agent.thinkingLevel };
+}
+
+/** Largest output still read whole to tell a whitespace-only one from content. */
+const BLANK_PROBE_BYTES = 4096;
+
+/** Whether the published output at `file` has no content (empty or whitespace only). */
+async function isBlankFile(file: string): Promise<boolean> {
+	const blob = Bun.file(file);
+	if (blob.size > BLANK_PROBE_BYTES) return false;
+	return !(await blob.text()).trim();
+}
+
+/** Whether `<id>`'s published output predates the run the agent has open now. */
 function isSuperseded(registry: AgentRegistryApi, outputId: string): boolean {
 	const ref = registry.get(outputId);
 	return ref !== undefined && ref.kind !== "advisor" && registry.isRunning(ref);
@@ -151,23 +296,31 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	};
 
 	promptDoc(host: SchemeHost): string {
-		return prompt.render(agentPromptDoc, { subagent: host.subagent }).trim();
+		return prompt
+			.render(agentPromptDoc, {
+				subagent: host.subagent,
+				crossInstanceAgents: host.crossInstanceAgents,
+			})
+			.trim();
 	}
 
 	/**
 	 * The `<id>.md` output file. JSON-path URLs (`/<json-path>`) render a value
 	 * rather than the file, so they locate to null, as do missing ids. So does an
-	 * output superseded by a running turn: a located file is read directly by
-	 * `read`, which would skip the previous-run banner {@link resolve} adds.
+	 * output superseded by a running turn, or an empty one: a located file is
+	 * read directly by `read`, which would skip what {@link resolve} adds (the
+	 * previous-run banner, the status of a run that published nothing).
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
 		if (outputId === "all" || hasPathExtraction(url)) return null;
+		if (crossInstanceEnabled(context) && (outputId === "peers" || /^\d+$/.test(outputId))) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
-		return (await this.#findOutput(dirs, outputId)).foundPath ?? null;
+		const foundPath = (await this.#findOutput(dirs, outputId)).foundPath;
+		return foundPath && !(await isBlankFile(foundPath)) ? foundPath : null;
 	}
 
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
@@ -175,26 +328,75 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!session) throw new Error("agent:// messaging requires a tool session");
 		const registry = session.agentRegistry;
 		const senderId = session.getAgentId?.();
-		if (
-			!registry ||
-			!senderId ||
-			session.enableIrc === false ||
-			!isIrcEnabled(session.settings, session.taskDepth ?? 0)
-		) {
+		if (!registry || !senderId || session.enableIrc === false) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
-		const to = url.rawHost || url.hostname;
-		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
-		if (hasPathExtraction(url)) {
+		const pid = cfgTaskCrossInstance.get(session.settings) ? pidTarget(url) : undefined;
+		const named = pid
+			? pid.local
+				? (pid.address.id ?? MAIN_AGENT_ID)
+				: formatPeerAddress(pid.address)
+			: url.rawHost || url.hostname;
+		if (!named) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		const segments = pid?.segments ?? url.pathname.split("/").filter(Boolean).map(decodeSegment);
+		const [field] = segments;
+		const remote = pid !== undefined && !pid.local;
+		if (segments.length === 1 && (field === "model" || field === "effort")) {
+			if (remote || named === "all" || named === "peers" || url.search) {
+				throw new Error("Agent model controls require a local agent id and no query parameters.");
+			}
+			if (session.getPlanModeState?.()?.enabled) {
+				throw new Error("Agent model controls are unavailable in plan mode.");
+			}
+			const to = resolveRecipient(registry, senderId, named);
+			const target = controlTarget(session, registry, senderId, to);
+			const value = content.trim();
+			if (!value) throw new Error(`agent:// writes to /${field} require a non-empty value.`);
+			let change: AgentModelChange;
+			if (field === "model") {
+				change = await resolveModelChange(session, value);
+				if (controlTarget(session, registry, senderId, to) !== target) {
+					throw new Error(`Agent ${to} changed sessions before the write could be applied.`);
+				}
+			} else {
+				const effort = parseCliThinkingLevel(value);
+				if (!effort) throw new Error(`Unknown effort "${value}". Use ${CLI_THINKING_LEVELS.join(", ")}.`);
+				change = { effort };
+			}
+			context?.signal?.throwIfAborted();
+			const { model, effort } = await target.applyAgentModelChange(change);
+			return { content: [{ type: "text", text: `${to}: ${model} (effort: ${effort ?? "default"}).` }] };
+		}
+		if (!isIrcEnabled(session.settings, session.taskDepth ?? 0)) {
+			throw new Error("Peer messaging is unavailable in this session.");
+		}
+		if (pid ? segments.length > 0 : hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
+		const to = remote ? named : resolveRecipient(registry, senderId, named);
 		const progress = url.searchParams.has("progress");
 		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
+		// A spawn waiting for a slot (or still opening its session) has a job but
+		// no live session yet: hold the message for its run to take on start.
+		const recipient = registry.get(to);
+		const startingJob =
+			recipient?.session || (recipient && recipient.status !== "running")
+				? undefined
+				: session.asyncJobManager?.getJob(to);
+		if (startingJob?.agentId === to && startingJob.status === "running") {
+			IrcBus.global().park({ from: senderId, to, body: content, ...(progress ? { progress: true } : {}) });
+			return {
+				content: [{ type: "text", text: `Queued for ${to} (not started yet; delivered when it starts).` }],
+				details: { message: { op: "send", from: senderId, to } },
+			};
+		}
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content, progress },
+			{ to, message: content, progress, remote },
 		);
+		const toLabel = remote ? agentMesh()?.label(pid.address) : undefined;
+		const message = result.details;
 		return {
 			content: [
 				{
@@ -202,7 +404,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 					text: result.content.find(item => item.type === "text")?.text ?? "Message delivery failed.",
 				},
 			],
-			details: { message: result.details },
+			details: { message: message && toLabel ? { ...message, toLabel } : message },
 			isError: result.isError,
 		};
 	}
@@ -213,43 +415,110 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
-
-		const extraction = hasPathExtraction(url);
-
-		const dirs = await this.#outputDirs(context);
-		const scan = dirs.length > 0 ? await this.#findOutput(dirs, outputId) : undefined;
+		const crossInstance = crossInstanceEnabled(context);
+		if (crossInstance && outputId === "peers") return this.#resolvePeers(url);
 		const registry = context?.agentRegistry ?? AgentRegistry.global();
+		const pid = crossInstance ? pidTarget(url) : undefined;
+		if (pid && !pid.local) return this.#resolvePeer(url, pid);
+		return this.#resolveOutput(url, {
+			outputId: pid ? (pid.address.id ?? MAIN_AGENT_ID) : outputId,
+			segments: pid ? pid.segments : url.pathname.split("/").filter(Boolean).map(decodeSegment),
+			dirs: await this.#outputDirs(context),
+			registry,
+		});
+	}
+
+	/** Roster of the other omp instances in this project. */
+	#resolvePeers(url: InternalUrl): InternalResource {
+		const peers = agentMesh()?.peers() ?? [];
+		const content =
+			peers.length === 0
+				? "No other omp instances in this project.\n"
+				: `${peers.map(peer => `- agent://${peer.pid} (${peer.status})${peer.title ? `: ${peer.title}` : ""}`).join("\n")}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.\n`;
+		return {
+			url: url.href,
+			content,
+			contentType: "text/markdown",
+			size: Buffer.byteLength(content, "utf-8"),
+			notes: [`This instance: ${process.pid}`],
+			shape: "document",
+		};
+	}
+
+	/** An agent of another omp instance, read from that instance's session files. */
+	async #resolvePeer(url: InternalUrl, target: PidTarget): Promise<InternalResource> {
+		const { pid, id } = target.address;
+		const peer = agentMesh()?.peer(pid);
+		if (!peer) throw new Error(`No omp instance with pid ${pid} in this project. List them with agent://peers`);
+		const sessionFile = peer.sessionFile;
+		if (!sessionFile) throw new Error(`Instance ${pid} has no session file; its agents cannot be read.`);
+		if (!id) {
+			if (target.segments.length > 0) throw new Error(`agent://${pid} is a main agent; it has no JSON output.`);
+			return this.#resolveProgress(url, { id: String(pid), status: peer.status, session: null, sessionFile }, false);
+		}
+		const dir = sessionFile.slice(0, -".jsonl".length);
+		const agent = peer.agents.find(agent => agent.id === id);
+		const transcript =
+			agent && sessionFileBelongsToRoot(agent.sessionFile, sessionFile)
+				? agent.sessionFile
+				: path.join(dir, `${id}.jsonl`);
+		return this.#resolveOutput(url, {
+			outputId: id,
+			segments: target.segments,
+			dirs: [dir],
+			remoteStatus: agent?.status,
+			remoteProgress: async () => {
+				const exists = await Bun.file(transcript).exists();
+				if (!exists && !agent) return undefined;
+				return {
+					id: formatPeerAddress(target.address),
+					status: agent?.status ?? "not registered",
+					session: null,
+					sessionFile: exists ? transcript : null,
+				};
+			},
+		});
+	}
+
+	async #resolveOutput(url: InternalUrl, target: OutputTarget): Promise<InternalResource> {
+		const { outputId, dirs, registry } = target;
+		const extraction = target.segments.length > 0;
+		const scan = dirs.length > 0 ? await this.#findOutput(dirs, outputId) : undefined;
 		if (!scan?.foundPath) {
 			// No published output yet. A registered agent (running, idle after a
 			// non-terminal yield, or parked before publishing) is the same
 			// registry `write agent://<id>` delivers to: answer with its progress.
-			const ref = registry.get(outputId);
-			if (ref && ref.kind !== "advisor") return this.#resolveProgress(url, ref, extraction);
+			const ref = registry?.get(outputId);
+			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
+			if (progress) return this.#resolveProgress(url, progress, extraction);
 			if (!scan) throw new Error("No session - agent outputs unavailable");
 			if (!scan.anyDirExists) throw new Error("No artifacts directory found");
-			const registered = registry
-				.list()
-				.filter(candidate => candidate.kind !== "advisor")
-				.map(candidate => candidate.id);
+			const registered =
+				registry
+					?.list()
+					.filter(candidate => candidate.kind !== "advisor")
+					.map(candidate => candidate.id) ?? [];
 			throw notFoundError(outputId, [...scan.availableIds, ...registered]);
 		}
 
-		const pathSegments = extraction ? url.pathname.split("/").filter(Boolean) : [];
-		const decodedSegments = pathSegments.map(segment => {
-			try {
-				return decodeURIComponent(segment);
-			} catch {
-				return segment;
-			}
-		});
+		const decodedSegments = target.segments;
 
 		const rawContent = await Bun.file(scan.foundPath).text();
-		const notes: string[] = [];
-		let content = rawContent;
+		// A run that failed or was cancelled can publish an empty output; a blank
+		// read would pass for success, so show what the agent did instead.
+		if (!extraction && !rawContent.trim()) {
+			const ref = registry?.get(outputId);
+			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
+			if (progress) return this.#resolveProgress(url, progress, false, true);
+		}
+		const notes: string[] = target.remoteStatus === undefined ? [] : [`Status: ${target.remoteStatus}`];
+		let content = rawContent.trim()
+			? rawContent
+			: `${outputId} published an empty output. Transcript: history://${outputId}\n`;
 		// A published file belongs to a finished run. If the agent is streaming
 		// again (follow-up or IRC wake), the file is the previous run's result;
 		// unmarked, a reader takes it as the current state.
-		if (!extraction && isSuperseded(registry, outputId)) {
+		if (!extraction && (registry ? isSuperseded(registry, outputId) : target.remoteStatus === "running")) {
 			const publishedAt = (await fs.stat(scan.foundPath)).mtimeMs;
 			content = `${prompt.render(agentSupersededTemplate, {
 				id: outputId,
@@ -320,7 +589,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * its latest assistant text. Reads the live session's messages, else the
 	 * retained session file. JSON-path extraction needs the published output.
 	 */
-	async #resolveProgress(url: InternalUrl, ref: AgentRef, extraction: boolean): Promise<InternalResource> {
+	async #resolveProgress(
+		url: InternalUrl,
+		ref: ProgressSource,
+		extraction: boolean,
+		publishedEmpty = false,
+	): Promise<InternalResource> {
 		if (extraction) {
 			throw new Error(
 				`Output ${ref.id} is not published yet (status: ${ref.status}); read agent://${ref.id} for its progress.`,
@@ -343,13 +617,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			sections,
 			lastText,
 			empty: sections.length === 0 && !lastText,
+			publishedEmpty,
 		})}\n`;
 		return {
 			url: url.href,
 			content,
 			contentType: "text/markdown",
 			size: Buffer.byteLength(content, "utf-8"),
-			notes: [`No published output; progress from ${source} (${ref.status})`],
+			notes: [`${publishedEmpty ? "Empty" : "No"} published output; progress from ${source} (${ref.status})`],
 			shape: "document",
 		};
 	}

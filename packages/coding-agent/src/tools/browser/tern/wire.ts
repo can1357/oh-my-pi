@@ -10,15 +10,17 @@
  * `{"id":N,KIND:ANSWER}` correlated by `id`, where ANSWER is `{"ok": result}`
  * or `{"error": {"kind", "message"}}`:
  * - `browser`: Tern's browser op protocol, REQUEST `{"op": …}`.
- * - `fork`: REQUEST `{"block":P,"dir":"right"|"down"}` opens `omp --fork` of
- *   pane P's session in a new pane beside it; result `{"block":M}`.
+ * - `fork`: REQUEST `{"block":P,"dir":"right"|"down","tab":true}` opens
+ *   `omp --fork` of pane P's session in a new pane beside it, or with
+ *   `"tab":true` in a tab of its own after P's (a Tern from before `tab`
+ *   splits instead); result `{"block":M}`, plus `"tab":T` when it opened tab T.
  *
  * Members and message kinds either side does not know are skipped, so the
  * protocol does not tie omp to a Tern build. A Tern from before it cannot read
  * the hello and hangs up.
  */
 import * as net from "node:net";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 
 /** Frames larger than this are a protocol error (the daemon's own cap). */
 const MAX_FRAME_BYTES = 256 << 20;
@@ -220,12 +222,22 @@ export interface TernRequestOptions {
 	onLateAnswer?: (value: unknown) => void;
 }
 
-/** A `fork` request: open `omp --fork` of pane `block`'s session in a new pane beside it. */
+/** A `fork` request: open `omp --fork` of pane `block`'s session in a new pane beside it, or in a tab of its own. */
 export interface TernForkRequest {
 	/** The pane whose omp session to fork (`TERN_PANE`). */
 	block: number;
-	/** Where the new pane goes (Tern's default: `right`). */
+	/** Where the new pane goes beside `block`, unless `tab` (Tern's default: `right`). */
 	dir?: "right" | "down";
+	/** Open the fork in a new tab right after `block`'s instead; a Tern from before it splits `block`. */
+	tab?: boolean;
+}
+
+/** Where Tern opened a fork ({@link TernSocketClient.fork}). */
+export interface TernForked {
+	/** The fork's block. */
+	block: number;
+	/** The tab Tern opened for it; absent when the fork went beside the forked pane. */
+	tab?: number;
 }
 
 interface PendingOp {
@@ -270,6 +282,8 @@ export interface TernTransport {
 	readonly waitsForEvents: boolean;
 	/** Why a peer may hang up before greeting, appended to that error. */
 	readonly greetingHint?: string;
+	/** How long the peer may take to answer the greeting; {@link CONNECT_TIMEOUT_MS} when unset. */
+	readonly greetingTimeoutMs?: number;
 	/** Open the stream. Called once; a throw is a failed connection. */
 	start(events: TernTransportEvents): void;
 	/** Send one frame. A throw is a dropped connection. */
@@ -409,14 +423,14 @@ export class TernSocketClient {
 		return await this.#send("browser", op, `browser ${typeof op.op === "string" ? op.op : "op"}`, opts);
 	}
 
-	/** Send a fork request and resolve the new pane's block. Only a Tern that {@link supports} `fork` answers it. */
-	async fork(request: TernForkRequest, opts: TernRequestOptions = {}): Promise<number> {
+	/** Send a fork request and resolve where the fork opened. Only a Tern that {@link supports} `fork` answers it. */
+	async fork(request: TernForkRequest, opts: TernRequestOptions = {}): Promise<TernForked> {
 		const result = await this.#send("fork", request, "fork", opts);
-		const block = result && typeof result === "object" && "block" in result ? result.block : undefined;
-		if (typeof block !== "number") {
+		if (!result || typeof result !== "object" || !("block" in result) || typeof result.block !== "number") {
 			throw new TernError("protocol", `${this.product} answered fork without a "block"`);
 		}
-		return block;
+		const tab = "tab" in result && typeof result.tab === "number" ? result.tab : undefined;
+		return tab === undefined ? { block: result.block } : { block: result.block, tab };
 	}
 
 	async #send(channel: TernChannel, body: object, label: string, opts: TernRequestOptions): Promise<unknown> {
@@ -478,7 +492,7 @@ export class TernSocketClient {
 		this.#greeting = greeting;
 		const timer = setTimeout(() => {
 			this.#fail(new TernError("connect", `The ${transport.peer} did not answer the greeting in time`));
-		}, CONNECT_TIMEOUT_MS);
+		}, transport.greetingTimeoutMs ?? CONNECT_TIMEOUT_MS);
 		timer.unref();
 		// A stream that drops before the welcome never connected (`connect`); after it, the connection dropped (`closed`).
 		const dropped = (reason: string | undefined): TernError => {

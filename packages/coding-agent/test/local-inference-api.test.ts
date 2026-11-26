@@ -10,23 +10,12 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { type DownloadActivity, onDownloadActivity } from "@oh-my-pi/pi-coding-agent/downloads/activity";
-import { WORKER_CONNECTION_CLOSED } from "@oh-my-pi/pi-coding-agent/subprocess/shared-worker";
 import {
 	buildLocalInferenceMessages,
 	registerLocalInferenceApi,
 } from "@oh-my-pi/pi-coding-agent/tiny/local-inference-api";
-import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import {
-	type TinyModelChatOptions,
-	TinyTitleClient,
-	tinyModelClient,
-} from "@oh-my-pi/pi-coding-agent/tiny/title-client";
-import type {
-	TinyChatMessage,
-	TinyWorkerRequest,
-	TinyWorkerResponse,
-} from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
+import { type TinyModelChatOptions, tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import type { TinyChatMessage } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
 
 const SOURCE_ID = "omp/local-inference";
 const model = getBundledModel("local", "lfm2.5-230m")!;
@@ -63,53 +52,6 @@ async function collectEvents(stream: AsyncIterable<AssistantMessageEvent>): Prom
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
 	return events;
-}
-
-class FakeTinyWorker {
-	terminated = false;
-	refCalls = 0;
-	unrefCalls = 0;
-	#messageHandlers = new Set<(message: TinyWorkerResponse) => void>();
-	#errorHandlers = new Set<(error: Error) => void>();
-	#onSend: (message: TinyWorkerRequest, worker: FakeTinyWorker) => void;
-
-	constructor(onSend: (message: TinyWorkerRequest, worker: FakeTinyWorker) => void) {
-		this.#onSend = onSend;
-	}
-
-	send(message: TinyWorkerRequest): void {
-		this.#onSend(message, this);
-	}
-
-	onMessage(handler: (message: TinyWorkerResponse) => void): () => void {
-		this.#messageHandlers.add(handler);
-		return () => this.#messageHandlers.delete(handler);
-	}
-
-	onError(handler: (error: Error) => void): () => void {
-		this.#errorHandlers.add(handler);
-		return () => this.#errorHandlers.delete(handler);
-	}
-
-	async terminate(): Promise<void> {
-		this.terminated = true;
-	}
-
-	ref(): void {
-		this.refCalls += 1;
-	}
-
-	unref(): void {
-		this.unrefCalls += 1;
-	}
-
-	emit(message: TinyWorkerResponse): void {
-		for (const handler of this.#messageHandlers) handler(message);
-	}
-
-	emitError(error: Error): void {
-		for (const handler of this.#errorHandlers) handler(error);
-	}
 }
 
 describe("local inference API", () => {
@@ -214,7 +156,7 @@ describe("local inference API", () => {
 
 	it("rejects non-tiny local models before invoking the worker client", async () => {
 		const chat = vi.spyOn(tinyModelClient, "chat").mockResolvedValue("should not run");
-		const nonTinyModel = getBundledModel("local", "kokoro")!;
+		const nonTinyModel = getBundledModel("local", "phonon-31m")!;
 		const stream = streamSimple(nonTinyModel, { messages: [userMessage("question")] });
 		const result = await stream.result();
 
@@ -234,146 +176,5 @@ describe("local inference API", () => {
 			{ role: "system", content: "developer instruction" },
 			{ role: "user", content: "structured user" },
 		]);
-	});
-});
-
-describe("tiny model chat client", () => {
-	it("accepts every local tiny model key and clamps requested output tokens", async () => {
-		const connected: string[] = [];
-		const requests: TinyWorkerRequest[] = [];
-		const client = new TinyTitleClient(async modelKey => {
-			connected.push(modelKey);
-			return new FakeTinyWorker((request, worker) => {
-				requests.push(request);
-				if (request.type === "chat") worker.emit({ type: "text", id: request.id, text: modelKey });
-			});
-		});
-
-		try {
-			for (const [index, spec] of TINY_LOCAL_MODELS.entries()) {
-				const maxTokens = index === 0 ? 0 : 100_000;
-				expect(await client.chat(spec.key, [{ role: "user", content: "hello" }], { maxTokens })).toBe(spec.key);
-			}
-			expect(connected).toEqual(TINY_LOCAL_MODELS.map(spec => spec.key));
-			expect(requests.map(request => (request.type === "chat" ? request.maxNewTokens : undefined))).toEqual([
-				1,
-				...TINY_LOCAL_MODELS.slice(1).map(() => 1024),
-			]);
-		} finally {
-			await client.terminate();
-		}
-	});
-
-	it("resolves an in-flight chat as null when its signal aborts", async () => {
-		const worker = new FakeTinyWorker(() => {});
-		const client = new TinyTitleClient(async () => worker);
-		const controller = new AbortController();
-
-		try {
-			const completion = client.chat("lfm2.5-230m", [{ role: "user", content: "hello" }], {
-				signal: controller.signal,
-			});
-			controller.abort();
-
-			expect(await completion).toBeNull();
-		} finally {
-			await client.terminate();
-		}
-	});
-
-	it("prewarms and generates titles with memory-group tiny models", async () => {
-		const firstRequest = Promise.withResolvers<TinyWorkerRequest>();
-		const worker = new FakeTinyWorker((request, current) => {
-			firstRequest.resolve(request);
-			if (request.type === "chat")
-				current.emit({ type: "text", id: request.id, text: "Memory Model Title</title>" });
-		});
-		const client = new TinyTitleClient(async () => worker);
-
-		try {
-			client.prewarm("qwen3-1.7b");
-			expect(await firstRequest.promise).toMatchObject({ type: "ping" });
-			expect(await client.generate("qwen3-1.7b", "title this session")).toBe("Memory Model Title");
-		} finally {
-			await client.terminate();
-		}
-	});
-
-	it("keeps an idle worker's exit after a prewarm out of the download HUD", async () => {
-		const activities: DownloadActivity[] = [];
-		const stop = onDownloadActivity(activity => activities.push(activity));
-		const pinged = Promise.withResolvers<void>();
-		const worker = new FakeTinyWorker((request, current) => {
-			if (request.type !== "ping") return;
-			current.emit({ type: "pong", id: request.id, tag: "test" });
-			pinged.resolve();
-		});
-		const client = new TinyTitleClient(async () => worker);
-
-		try {
-			client.prewarm("lfm2.5-230m");
-			await pinged.promise;
-			worker.emitError(new Error(WORKER_CONNECTION_CLOSED));
-
-			expect(activities).toEqual([]);
-		} finally {
-			stop();
-			await client.terminate();
-		}
-	});
-
-	it("closes an aborted load's HUD row when its worker goes away", async () => {
-		const activities: DownloadActivity[] = [];
-		const stop = onDownloadActivity(activity => activities.push(activity));
-		const loading = Promise.withResolvers<void>();
-		const worker = new FakeTinyWorker((request, current) => {
-			if (request.type !== "load") return;
-			current.emit({
-				type: "progress",
-				id: request.id,
-				event: { modelKey: "lfm2.5-230m", status: "initiate", name: "onnxruntime-node@1.0.0" },
-			});
-			loading.resolve();
-		});
-		const client = new TinyTitleClient(async () => worker);
-		const controller = new AbortController();
-
-		try {
-			const download = client.downloadModel("lfm2.5-230m", { signal: controller.signal });
-			await loading.promise;
-			controller.abort();
-			expect(await download).toEqual({ ok: false });
-			worker.emitError(new Error(WORKER_CONNECTION_CLOSED));
-
-			expect(activities.map(activity => [activity.id, activity.state])).toEqual([
-				[activities[0]!.id, "running"],
-				[activities[0]!.id, "failed"],
-			]);
-		} finally {
-			stop();
-			await client.terminate();
-		}
-	});
-
-	it("surfaces a worker that cannot be reached in the download HUD", async () => {
-		const failed = Promise.withResolvers<DownloadActivity>();
-		const stop = onDownloadActivity(activity => {
-			if (activity.state !== "running") failed.resolve(activity);
-		});
-		const client = new TinyTitleClient(async () => {
-			throw new Error("tiny onnx worker for lfm2.5-230m exited with code 3");
-		});
-
-		try {
-			client.prewarm("lfm2.5-230m");
-
-			expect(await failed.promise).toMatchObject({
-				state: "failed",
-				error: "tiny onnx worker for lfm2.5-230m exited with code 3",
-			});
-		} finally {
-			stop();
-			await client.terminate();
-		}
 	});
 });

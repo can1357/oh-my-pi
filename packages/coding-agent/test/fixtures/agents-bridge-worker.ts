@@ -6,6 +6,7 @@
  */
 import { MessagePort, parentPort } from "node:worker_threads";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "../../src/config/model-registry";
@@ -16,6 +17,7 @@ import { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { attachIrcWakeTurnMonitor } from "../../src/task/executor";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
 import { PeerAgentSession } from "../../src/thread/peer-agent-session";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "../../src/thread/protocol";
@@ -35,13 +37,24 @@ export interface PeerReport {
 	casBySession: boolean;
 }
 
+/** Identity and run options of a test worker session. */
+export interface AgentsProbeOpenOptions {
+	sessionFile?: string;
+	gated?: boolean;
+	monitored?: boolean;
+	parentId?: string;
+	parentSessionKey?: string;
+}
+
 /** Operations the test drives on the worker. */
 export interface AgentsProbe {
 	threadId(): Promise<string>;
 	/** Build a real session (mock model) and register it as `id` in the (remote) registry. */
-	open(id: string, options: { sessionFile?: string; gated?: boolean }): Promise<string>;
-	/** Run a prompt on the local session to completion. */
-	prompt(id: string, text: string): Promise<void>;
+	open(id: string, options: AgentsProbeOpenOptions): Promise<string>;
+	/** Run a prompt and report the actual model and effort passed to its provider. */
+	prompt(id: string, text: string): Promise<ProviderSelection | undefined>;
+	/** Emit a tool call on a specific session, even after another session takes its id. */
+	toolCall(key: string, toolName: string): Promise<void>;
 	/** Let gated model calls answer. */
 	openGate(): Promise<void>;
 	/** Rewrite the second message's text through `replaceMessages`, keeping the first and last objects (as pruning does). */
@@ -76,6 +89,12 @@ export interface AgentsProbeGlobals {
 const port = parentPort;
 if (!port) throw new Error("fixture must run in a worker");
 
+interface ProviderSelection {
+	model: string;
+	effort: Effort | undefined;
+}
+
+const selections = new Map<string, ProviderSelection>();
 const sessions = new Map<string, AgentSession>();
 const byKey = new Map<string, AgentSession>();
 const grabbed = new Map<string, AgentRef>();
@@ -97,7 +116,10 @@ async function makeSession(id: string, gated: boolean): Promise<AgentSession> {
 		getApiKey: () => "test-key",
 		initialState: { model, systemPrompt: ["Test"], tools: [] },
 		convertToLlm,
-		streamFn: mock.stream,
+		streamFn: (model, context, options) => {
+			selections.set(id, { model: model.id, effort: options?.reasoning });
+			return mock.stream(model, context, options);
+		},
 	});
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("anthropic", "test-key");
@@ -128,15 +150,32 @@ const probe: AgentsProbe = {
 			id,
 			displayName: id,
 			kind: "sub",
+			parentId: options.parentId,
+			parentSessionKey: options.parentSessionKey,
 			session,
 			sessionFile: options.sessionFile ?? null,
 			status: "idle",
 		});
 		registry.syncSessionStatus(id, session);
+		if (options.monitored) {
+			attachIrcWakeTurnMonitor(session, {
+				id,
+				agent: { name: id, description: "test", systemPrompt: "test", source: "bundled" },
+			});
+		}
 		return session.instanceKey;
 	},
 	prompt: async (id, text) => {
+		selections.delete(id);
 		await local(id).prompt(text);
+		return selections.get(id);
+	},
+	toolCall: async (key, toolName) => {
+		const session = byKey.get(key);
+		if (!session) throw new Error(`no session ${key}`);
+		const call = { toolCallId: `${key}-${toolName}`, toolName };
+		session.agent.emitExternalEvent({ type: "tool_execution_start", ...call, args: {} });
+		session.agent.emitExternalEvent({ type: "tool_execution_end", ...call, result: { content: [] } });
 	},
 	rewriteInterior: async (id, text) => {
 		const session = local(id);

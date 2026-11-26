@@ -219,6 +219,32 @@ describe("Python runner request dispatch", () => {
 		}
 	});
 
+	it("drops a stray await on a sync prelude helper only while its name binds the helper", async () => {
+		const runner = spawnRunner();
+		const run = async (id: string, code: string): Promise<RunnerFrame> => {
+			runner.send({ id, code });
+			const [done] = await collectDoneOrder(runner, new Set([id]));
+			return done;
+		};
+		try {
+			expect(
+				(await run("setup", "def sh(command):\n    return command.upper()\n__omp_register_sync_helpers(sh)"))
+					.status,
+			).toBe("ok");
+			// JS-style `await sh(...)` used to raise "'str' object can't be awaited".
+			expect((await run("awaited", 'assert await sh("ok") == "OK"')).status).toBe("ok");
+			// Rebinding in the same cell keeps the `await`: the run-time binding is async.
+			expect(
+				(await run("same-cell", 'async def sh(command):\n    return command\nassert await sh("ok") == "ok"'))
+					.status,
+			).toBe("ok");
+			// The retained async rebinding is no longer the registered helper.
+			expect((await run("later-cell", 'assert await sh("ok") == "ok"')).status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
 	it.skipIf(process.platform !== "win32")("handles shadow controls and stale shadow admission", async () => {
 		const runner = spawnRunner();
 		try {
@@ -622,7 +648,8 @@ describe("Python runner request dispatch", () => {
 			// thread processes their `interrupt` requests and then `release`.
 			runner.send({ id: "aborted", code: "seed = 0" });
 			runner.send({ id: "aborted", type: "interrupt" });
-			runner.send({ id: "setup-err", code: "seed = 0", cwd: "/nonexistent/omp-setup-err" });
+			// A NUL byte makes `os.chdir` raise ValueError: a setup error (a missing cwd only warns).
+			runner.send({ id: "setup-err", code: "seed = 0", cwd: "/tmp/omp\u0000setup-err" });
 			runner.send({ id: "setup-err", type: "interrupt" });
 			runner.send({ id: "release", type: "tool", op: "call", name: "release", args: {} });
 
@@ -676,6 +703,27 @@ describe("Python runner request dispatch", () => {
 			runner.send({ id: "verify", code: "assert seed == 44" });
 			const [verify] = await collectDoneOrder(runner, new Set(["verify"]));
 			expect(verify.status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("runs a cell whose session cwd no longer exists, with a warning", async () => {
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "gone", code: "print('ran')", cwd: "/nonexistent/omp-missing-cwd" });
+			const frames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.id !== "gone") continue;
+				frames.push(frame);
+				if (frame.type === "done") break;
+			}
+			expect(frames.find(frame => frame.type === "stderr")?.data).toContain(
+				"session cwd /nonexistent/omp-missing-cwd is unavailable",
+			);
+			expect(frames.find(frame => frame.type === "stdout")?.data).toContain("ran");
+			expect(frames.at(-1)).toMatchObject({ type: "done", status: "ok" });
 		} finally {
 			await runner.dispose();
 		}

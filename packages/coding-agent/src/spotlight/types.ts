@@ -1,4 +1,4 @@
-import type { SpotlightRank, SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightRank, SpotlightReason } from "../tools/details/spotlight";
 import type { SpotlightClient } from "./client";
 
 /**
@@ -86,7 +86,7 @@ export interface Scorer {
 
 /** Saves the full text a shaped result hides, so markers can point at it. */
 export interface ShapeSink {
-	/** Stores `text` and returns the internal URL the agent reads it back with, e.g. `artifact://12`. */
+	/** Stores `text` and returns the internal URL the agent reads it back with, e.g. `local://12.log`. */
 	save(text: string, label: ShapedTool): Promise<string>;
 }
 
@@ -101,8 +101,8 @@ export interface ShapeInput {
 	command?: string;
 	/**
 	 * `read`: the path or URL as the agent wrote it, selectors included; any other tool: its `path` argument (a search
-	 * of `artifact://` output pages it back and is left whole, as are `agent://`, `local://`, `skill://`, `rule://`, and
-	 * a `read` of Markdown or of line ranges that all end).
+	 * of a spill, `local://N.log`, pages it back and is left whole, as are other `local://`, `agent://`, `skill://`,
+	 * `rule://`, and a `read` of Markdown or of line ranges that all end).
 	 */
 	path?: string;
 	/** `read` with `:raw`: the text is the selected bytes, which paste back into tools, and is left whole. */
@@ -120,7 +120,7 @@ export interface ShapeInput {
 		selected: boolean;
 	};
 	/**
-	 * `bash` shaped from its whole artifact: that artifact's URL. It numbers the text's lines as cuts name them, so a
+	 * `bash` shaped from its whole spill: that spill's URL. It numbers the text's lines as cuts name them, so a
 	 * cut points there instead of saving a copy.
 	 */
 	artifact?: string;

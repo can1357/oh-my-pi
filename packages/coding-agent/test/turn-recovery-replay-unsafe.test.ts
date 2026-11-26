@@ -176,7 +176,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -227,7 +227,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key" },
+			{ pinFallback: true, apiKey: "test-key", cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -273,7 +273,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await eventStarted.promise;
@@ -472,6 +472,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				providerTimed: true,
 				baseUrl: model.baseUrl,
 				modelId: model.id,
+				signal: expect.any(AbortSignal),
 			});
 		} finally {
 			mark.mockRestore();

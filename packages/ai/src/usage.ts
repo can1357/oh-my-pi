@@ -5,7 +5,7 @@
  * and shared quotas across providers.
  */
 import { type } from "@oh-my-pi/omptype";
-import type { FetchImpl, Provider } from "./types";
+import type { FetchImpl, Provider, ServiceTier } from "./types";
 export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
 
 export type UsageStatus = "ok" | "warning" | "exhausted" | "unknown";
@@ -149,8 +149,18 @@ export interface UsageReport {
 	 * requests: N") stay on {@link UsageLimit.notes}.
 	 */
 	notes?: string[];
+	/**
+	 * Provider-specific attributes. `subscriptionPlan` names the account's paid
+	 * plan (e.g. "Max 20x"); read it with {@link usageSubscriptionPlan}.
+	 */
 	metadata?: Record<string, unknown>;
 	raw?: unknown;
+}
+
+/** Subscription plan label a report carries in `metadata.subscriptionPlan`, when the provider resolved one. */
+export function usageSubscriptionPlan(report: Pick<UsageReport, "metadata"> | null | undefined): string | undefined {
+	const plan = report?.metadata?.subscriptionPlan;
+	return typeof plan === "string" && plan.trim() ? plan.trim() : undefined;
 }
 
 /**
@@ -391,6 +401,8 @@ export interface UsageCredential {
 	activeOrganizationId?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
+	/** Kiro profile ARN the login routes by (see OAuthCredentials.kiroProfileArn). */
+	kiroProfileArn?: string;
 }
 
 /** Parameters provided to a usage fetcher. */
@@ -446,6 +458,8 @@ export interface UsageProvider {
 export interface CredentialRankingContext {
 	/** Provider model id, when the caller is selecting a credential for one model. */
 	modelId?: string;
+	/** Service tier the request will ask for, when selection should prefer accounts that offer it. */
+	serviceTier?: ServiceTier;
 }
 
 /** Classify an account report as eligible, ineligible, or unknown for a model's plan gate. */
@@ -459,6 +473,14 @@ export interface CredentialRankingStrategy {
 	 * `undefined` when every plan may serve the model.
 	 */
 	planGate?(context: CredentialRankingContext): PlanGate | undefined;
+	/**
+	 * Account gate for `context.serviceTier`: a classifier for whether the account behind a usage
+	 * report offers that tier — yes (`true`), no (`false`), or unknown (`undefined`, not reported) —
+	 * or `undefined` when the provider cannot tell accounts apart for it. Unlike {@link planGate}
+	 * this only biases selection: an account without the tier still serves once those with it are
+	 * blocked or spent.
+	 */
+	tierGate?(context: CredentialRankingContext): PlanGate | undefined;
 	/** Idle window after which a session pin stops suppressing usage re-ranking because the provider's prompt cache cannot still be warm; omit for indefinite stickiness. */
 	stickyWarmMs?: number;
 	/** Extract the primary (short) and secondary (long) window limits from a usage report. */

@@ -1,72 +1,92 @@
 /**
- * Cross-process contract for the broker-owned LSP mux daemon.
+ * Contract of the daemon's `lsp` module (`daemon/modules/lsp.ts`) and its
+ * client connector in `lsp/client.ts`.
  *
- * One mux daemon runs per project scope (launched through the same daemon
- * broker that owns the shared Chromium and `bash` services). It assigns
- * each concurrent OMP link its own language-server process, then retains idle
- * processes briefly for reuse by later links. The link speaks plain
- * Content-Length-framed LSP JSON-RPC after a one-request handshake
- * ({@link MUX_CONNECT_METHOD}); everything below is shared by the worker
- * entry (`server.ts`), the client connector (`daemon.ts`), and tests.
+ * One `lsp` unit is one language-server process. A client calls
+ * {@link LSP_ACQUIRE_METHOD} to pick an instance key (the first instance of
+ * its server identity with no attached session), `open`s that unit, and
+ * `attach`es with the returned token as channel. The tunnel then carries
+ * plain Content-Length-framed LSP JSON-RPC plus the private `omp/mux*`
+ * methods below.
  */
+import type { UnitScope } from "../../daemon/daemon-types";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { TOOL_TIMEOUTS } from "../../tools/tool-timeouts";
 
-export { LSP_MUX_WORKER_ARG } from "../../cli/worker-selectors";
+/** Daemon unit kind and `call` module name. */
+export const LSP_MODULE_KIND = "lsp";
+/** `lsp` module protocol version advertised in the daemon's caps. */
+export const LSP_MODULE_VERSION = 1;
 
-/** Environment key carrying the socket endpoint the mux must listen on. */
-export const LSP_MUX_SOCKET_ENV = "OMP_LSP_MUX_SOCKET";
-
-/** Environment key carrying the canonical project directory the mux serves. */
-export const LSP_MUX_PROJECT_DIR_ENV = "OMP_LSP_MUX_PROJECT_DIR";
-
-/** Stable broker daemon name for the shared LSP mux. */
-export const LSP_MUX_DAEMON_NAME = "omp.lsp.mux";
-
-/** Broker readiness regex matched against the banner printed by the worker. */
-export const LSP_MUX_READY_PATTERN = String.raw`omp lsp mux listening on \S+`;
-
-/** Banner printed on stdout once the mux socket accepts connections. */
-export function lspMuxReadyBanner(endpoint: string): string {
-	return `omp lsp mux listening on ${endpoint}`;
-}
-
-// =============================================================================
-// Mux-private JSON-RPC methods
-// =============================================================================
+/** Hard ceiling for a cold LSP handshake, including callers with no deadline. */
+export const LSP_STARTUP_MAX_MS = TOOL_TIMEOUTS.lsp.max * 1_000;
 
 /**
- * First (and only pre-LSP) request on a fresh connection: binds the link to
- * an idle server instance or spawns one. Params: {@link MuxConnectParams},
- * result: {@link MuxConnectResult}. After the response the link carries
- * ordinary LSP traffic for that server.
+ * `call("lsp", LSP_ACQUIRE_METHOD, LspServerParams)`: reserve the first free
+ * instance of the server identity. Result: {@link LspAcquireResult}.
  */
-export const MUX_CONNECT_METHOD = "omp/muxConnect";
+export const LSP_ACQUIRE_METHOD = "acquire";
 
 /**
- * Liveness probe answered with {@link MUX_PING_RESULT} without binding the
- * link to a server. Used by the smoke probe and the ensure loop.
+ * `call("lsp", LSP_UNRESERVE_METHOD, LspAcquireResult)`: drop a reservation
+ * whose `open` or `attach` failed, so the next acquire reuses the instance
+ * instead of starting another server. Result: null.
  */
-export const MUX_PING_METHOD = "omp/muxPing";
-export const MUX_PING_RESULT = "pong";
+export const LSP_UNRESERVE_METHOD = "unreserve";
 
 /**
- * Notification on a bound link: kill that link's server process. Sent by
- * `lsp reload` when the generic reload path decides the server is wedged, or
- * when the link's configuration was superseded — a plain per-session
- * `shutdown`/`exit` is intercepted by the mux so the process can linger for
- * reuse.
+ * Notification on an attached tunnel: kill that tunnel's server process. Sent
+ * by `lsp reload` when the generic reload path decides the server is wedged,
+ * or when the link's configuration was superseded — a plain per-session
+ * `shutdown`/`exit` is intercepted by the module so the process can linger
+ * for reuse.
  */
 export const MUX_RESTART_METHOD = "omp/muxRestartServer";
 
-/** Handshake parameters identifying a reusable server process. */
-export interface MuxConnectParams {
+/**
+ * Last frame the module writes on each tunnel bound to a server that just
+ * exited, before closing it: carries the real exit code and stderr tail,
+ * which a bare close cannot. Sent as `{ jsonrpc, method, params }` (in that
+ * key order) so the client finds it by prefix in the tunnel's final bytes.
+ */
+export const MUX_SERVER_EXITED_METHOD = "omp/muxServerExited";
+
+/** Bytes of server stderr forwarded in {@link MUX_SERVER_EXITED_METHOD}. */
+export const MUX_SERVER_EXIT_STDERR_BYTES = 4_096;
+
+/** Payload of {@link MUX_SERVER_EXITED_METHOD}. */
+export interface MuxServerExit {
+	/** Process exit code; -1 when the process died from a signal. */
+	code: number;
+	/** Tail of the server's stderr. */
+	stderr: string;
+}
+
+const MUX_SERVER_EXIT_PREFIX = `{"jsonrpc":"2.0","method":"${MUX_SERVER_EXITED_METHOD}"`;
+
+/** Find the server-exit notification at the end of a tunnel's final bytes. */
+export function parseMuxServerExit(tail: string): MuxServerExit | undefined {
+	const start = tail.lastIndexOf(MUX_SERVER_EXIT_PREFIX);
+	if (start < 0) return undefined;
+	try {
+		const message = JSON.parse(tail.slice(start)) as { params?: Partial<MuxServerExit> };
+		const params = message.params;
+		if (typeof params?.code !== "number") return undefined;
+		return { code: params.code, stderr: typeof params.stderr === "string" ? params.stderr : "" };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Parameters identifying a reusable server process. */
+export interface LspServerParams {
 	/** Executable to spawn (the client's `resolvedCommand ?? command`). */
 	command: string;
 	/** Arguments passed verbatim to the executable. */
 	args: string[];
 	/** Workspace root the server runs in; part of the server identity key. */
 	cwd: string;
-	/** Extra environment overlaid on the mux daemon's own env for the spawn. */
+	/** Environment overlay the client applies on top of its own env for the spawn. */
 	env?: Record<string, string>;
 	/**
 	 * `initializationOptions` the client sends in its `initialize` request. A
@@ -76,42 +96,52 @@ export interface MuxConnectParams {
 	initializationOptions?: unknown;
 }
 
-/** Handshake result. */
-export interface MuxConnectResult {
-	/** Server identity key inside the mux; covers command, args, cwd, env, and initialization options. */
+/** `open` params of an `lsp` unit. */
+export interface LspUnitParams extends LspServerParams {
+	/** Complete spawn environment: the client's base env merged with {@link LspServerParams.env}. */
+	spawnEnv: Record<string, string>;
+}
+
+/** Result of {@link LSP_ACQUIRE_METHOD}. */
+export interface LspAcquireResult {
+	/** Project scope of the server's canonical cwd. */
+	scope: UnitScope;
+	/** Instance key to `open`. */
 	key: string;
-	/** True when this handshake spawned the server process. */
-	spawned: boolean;
-	/** Pid of the server process assigned to this link. */
-	pid?: number;
+	/** Reservation token; pass as the `attach` channel. */
+	token: string;
+}
+
+/** Unit key of instance `index` of a server identity. */
+export function lspInstanceKey(identity: string, index: number): string {
+	return index === 0 ? identity : `${identity}#${index}`;
 }
 
 /**
- * Server identity key used by the mux registry.
+ * Server identity key.
  *
  * Every input that changes what the spawned process actually *is* belongs in
- * this key: the registry spawns `[command, ...args]` in `cwd` with
- * `{ ...Bun.env, ...env }`, so two links that agree on command and cwd but
- * differ in args or env are not interchangeable. Keying on command and cwd
- * alone let an idle server started with one argument set be handed to a link
- * that asked for another, silently serving the wrong configuration from a
- * process the client believed it had configured.
+ * this key: the module spawns `[command, ...args]` in `cwd` with the client's
+ * env plus `env`, so two clients that agree on command and cwd but differ in
+ * args or env are not interchangeable. Keying on command and cwd alone let
+ * an idle server started with one argument set be handed to a client that
+ * asked for another, silently serving the wrong configuration from a process
+ * the client believed it had configured.
  *
  * Initialization options belong in the key for the same reason. A reused
- * server answers `initialize` from the cached result of the link that started
- * it, so the options a later link sends never reach the process. Absent
- * options key like `{}`, which is what the client sends when its config has
- * none.
+ * server answers `initialize` from the cached result of the client that
+ * started it, so the options a later client sends never reach the process.
+ * Absent options key like `{}`, which is what the client sends when its
+ * config has none.
  *
  * Object keys are sorted at every depth so insertion order never splits one
  * identity in two, and the parts are JSON-encoded so no separator can be
  * forged from a value (`["--log-level", "4"]` stays distinct from
  * `["--log-level 4"]`). The canonical identity is SHA-256 hashed because the
- * key is returned over the handshake and included in mux logs; raw
- * environment values and initialization options can contain credentials and
- * must not leak through either surface.
+ * key is the unit key shown on the board and in logs; raw environment values
+ * and initialization options can contain credentials and must not leak.
  */
-export function muxServerKey(params: MuxConnectParams): string {
+export function muxServerKey(params: LspServerParams): string {
 	const identity = stableStringifyJson([
 		params.command,
 		params.args,

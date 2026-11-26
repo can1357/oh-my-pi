@@ -1,0 +1,281 @@
+//! `sloppy` mode: tolerant-match edits inside `*** Edit File:` sections.
+//!
+//! Supports `*** Find` anchors with `*** Replace` replacements,
+//! `*** Insert Before`/`*** Insert After` insertions, and `*** Cut` with
+//! `*** Paste Before`/`*** Paste After` moves.
+
+pub mod apply;
+pub mod parse;
+pub mod types;
+mod update_patch;
+
+pub use types::{InlineSloppyRegion, SloppySection};
+
+use self::{
+	apply::{Applied, ApplyContext, apply_sloppy, join_failures, remessage},
+	parse::split_sloppy_sections,
+	types::PARTIAL_NOTICE,
+};
+use crate::{
+	diff_string::{BlockContextSource, DiffOutput, generate_diff_string},
+	engine::{EditMode, FileOp, Inspection, ModeEngine, PreviewFile, StagedFile},
+	error::EditError,
+	files::{FileRead, FileSource},
+	store::EditStore,
+	stream_json::ArgSnapshot,
+};
+
+fn update_diff(read: &FileRead, after: &str, streaming: bool) -> DiffOutput {
+	generate_diff_string(&read.text, after, None, &BlockContextSource {
+		path: Some(&read.resolved.display),
+		lang: None,
+		streaming,
+	})
+}
+
+fn preview_update(read: &FileRead, after: &str, streaming: bool) -> PreviewFile {
+	let output = update_diff(read, after, streaming);
+	PreviewFile {
+		display: read.resolved.display.clone(),
+		diff: Some(output.diff),
+		first_changed_line: output.first_changed_line,
+		op: Some(FileOp::Update),
+		..PreviewFile::default()
+	}
+}
+
+fn staged_file(read: &FileRead, op: FileOp) -> StagedFile {
+	let mut file =
+		StagedFile::new(read.resolved.display.clone(), read.resolved.location.clone(), op);
+	file.before_raw = Some(read.raw.clone());
+	file.before.clone_from(&read.text);
+	file
+}
+
+fn stage_update(read: &FileRead, text: String) -> Result<StagedFile, EditError> {
+	let output = update_diff(read, &text, false);
+	let mut file = staged_file(read, FileOp::Update);
+	file.persisted = Some(read.persist(&text)?);
+	file.after = text;
+	file.diff = output.diff;
+	file.first_changed_line = output.first_changed_line;
+	Ok(file)
+}
+
+pub struct SloppyEngine {
+	/// Retained for the mode-neutral constructor; sloppy owns its matching
+	/// ladder.
+	pub allow_fuzzy:     bool,
+	/// Retained for the mode-neutral constructor; sloppy owns its matching
+	/// thresholds.
+	pub fuzzy_threshold: f64,
+}
+
+impl SloppyEngine {
+	fn sections(args: &ArgSnapshot, streaming: bool) -> Result<Vec<SloppySection>, EditError> {
+		let Some(input) = args.input.as_deref() else {
+			return Ok(Vec::new());
+		};
+		let input = if streaming {
+			input.rfind('\n').map_or("", |end| &input[..=end])
+		} else {
+			input
+		};
+		parse::split_sloppy_sections_for_preview(input, streaming)
+	}
+
+	fn missing_target(args: &ArgSnapshot) -> bool {
+		args.input.as_deref().is_some_and(|input| {
+			!input.trim().is_empty()
+				&& split_sloppy_sections(input).is_ok_and(|sections| sections.is_empty())
+		})
+	}
+}
+
+impl ModeEngine for SloppyEngine {
+	fn mode(&self) -> EditMode {
+		EditMode::Sloppy
+	}
+
+	fn preview(
+		&self,
+		args: &ArgSnapshot,
+		streaming: bool,
+		files: &mut dyn FileSource,
+		store: &EditStore,
+	) -> Vec<PreviewFile> {
+		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
+		if let Some(result) = args.input.as_deref().and_then(update_patch::parse) {
+			return match result.and_then(|updates| {
+				update_patch::map_files(&updates, files, |read, after| {
+					Ok(preview_update(read, &after, streaming))
+				})
+			}) {
+				Ok(previews) => previews,
+				Err(_) if streaming => Vec::new(),
+				Err(error) => {
+					vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }]
+				},
+			};
+		}
+		let sections = match Self::sections(args, streaming) {
+			Ok(sections) => sections,
+			Err(error) => {
+				return vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }];
+			},
+		};
+		if sections.is_empty() {
+			if !streaming && Self::missing_target(args) {
+				return vec![PreviewFile {
+					error: Some(
+						"Missing file target: start the payload with *** Edit File: relative/path.ts."
+							.to_owned(),
+					),
+					..PreviewFile::default()
+				}];
+			}
+			return Vec::new();
+		}
+		let last = sections.len().saturating_sub(1);
+		sections
+			.into_iter()
+			.enumerate()
+			.filter_map(|(index, section)| {
+				// Only the last section can still be streaming; the next
+				// `*** Edit File:` header closes every earlier one.
+				let streaming = streaming && index == last;
+				let read = match files.read(&section.path) {
+					Ok(read) => read,
+					Err(_error) if streaming => return None,
+					Err(error) => {
+						return Some(PreviewFile {
+							display: section.path,
+							error: Some(error.to_string()),
+							..PreviewFile::default()
+						});
+					},
+				};
+				let mut notes = Vec::new();
+				match apply_sloppy(&read.text, &section.body, ApplyContext {
+					path: &read.resolved.display,
+					notes: &mut notes,
+					store,
+					canonical: &read.canonical,
+					streaming,
+				}) {
+					Ok(Applied::Changed { text: after, .. }) => {
+						Some(preview_update(&read, &after, streaming))
+					},
+					Ok(Applied::Unchanged(_)) | Err(_) if streaming => None,
+					Ok(Applied::Unchanged(error)) | Err(error) => Some(PreviewFile {
+						display: read.resolved.display.clone(),
+						error: Some(error.to_string()),
+						op: Some(FileOp::Update),
+						..PreviewFile::default()
+					}),
+				}
+			})
+			.collect()
+	}
+
+	fn stage(
+		&self,
+		args: &ArgSnapshot,
+		files: &mut dyn FileSource,
+		store: &EditStore,
+	) -> Result<Vec<StagedFile>, EditError> {
+		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
+		let input = args.input.as_deref().unwrap_or_default();
+		if let Some(result) = update_patch::parse(input) {
+			return update_patch::map_files(&result?, files, stage_update);
+		}
+		let sections = split_sloppy_sections(input)?;
+		if sections.is_empty() {
+			return Err(EditError::parse(
+				"Missing file target: start the payload with *** Edit File: relative/path.ts.",
+			));
+		}
+		let multi_file = sections.len() > 1;
+		let mut staged = Vec::with_capacity(sections.len());
+		let mut unchanged = Vec::new();
+		for section in sections {
+			let read = files.read(&section.path).map_err(|error| {
+				// An unresolved internal URL stays typed so the host can
+				// resolve it and retry.
+				if multi_file && !matches!(error, EditError::UnresolvedUrl(_)) {
+					EditError::InFile { path: section.path.clone(), source: Box::new(error) }
+				} else {
+					error
+				}
+			})?;
+			let mut notes = Vec::new();
+			// A section that does not parse fails the whole payload.
+			let applied = apply_sloppy(&read.text, &section.body, ApplyContext {
+				path: &read.resolved.display,
+				notes: &mut notes,
+				store,
+				canonical: &read.canonical,
+				streaming: false,
+			})
+			.map_err(|error| {
+				if multi_file {
+					EditError::InFile { path: read.resolved.display.clone(), source: Box::new(error) }
+				} else {
+					error
+				}
+			})?;
+			let file = match applied {
+				Applied::Changed { text, rejected } => {
+					let mut file = stage_update(&read, text)?;
+					file.after_preview = notes;
+					file
+						.after_preview
+						.extend(rejected.map(|error| format!("{PARTIAL_NOTICE}\n{error}")));
+					file
+				},
+				Applied::Unchanged(error) => {
+					let mut file = staged_file(&read, FileOp::Noop);
+					file.after.clone_from(&read.text);
+					file
+						.after_preview
+						.push(format!("{PARTIAL_NOTICE}\n{error}"));
+					unchanged.push(if multi_file {
+						remessage(error, |message| format!("[{}]: {message}", read.resolved.display))
+					} else {
+						error
+					});
+					file
+				},
+			};
+			staged.push(file);
+		}
+		let changed = staged.iter().any(|file| file.op != FileOp::Noop);
+		match join_failures(unchanged) {
+			// No file changed: the call fails with every file's rejections.
+			Some(error) if !changed => Err(error),
+			_ => Ok(staged),
+		}
+	}
+
+	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
+		let input = args.input.as_deref().unwrap_or_default();
+		if let Some(result) = update_patch::parse(input) {
+			return update_patch::inspect(input, result);
+		}
+		let Ok(sections) = parse::all_sections(input, false) else {
+			return Inspection { paths: parse::declared_paths(input), ..Inspection::default() };
+		};
+		Inspection {
+			paths:    sections
+				.iter()
+				.map(|section| section.path.clone())
+				.collect(),
+			entries:  sections
+				.into_iter()
+				.filter(|section| !section.body.is_empty())
+				.map(|section| (section.path, section.body))
+				.collect(),
+			file_ops: Vec::new(),
+		}
+	}
+}

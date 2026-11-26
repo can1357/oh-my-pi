@@ -1,7 +1,7 @@
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
+import { type ArtifactAllocator, type OutputArtifactError, OutputSink } from "../tools/streaming-output";
+import { statusEventKey } from "../tools/details/eval";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
 import {
@@ -83,9 +83,9 @@ export interface KernelExecutorBaseOptions {
 	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
 	onReply?: (text: string) => void;
 	toolSession?: ToolSession;
+	parentToolCallId?: string;
 	bridgeSessionId?: string;
-	artifactId?: string;
-	artifactPath?: string;
+	allocateArtifact?: ArtifactAllocator;
 	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
 	claimKernelRestartNotice?: () => boolean;
 }
@@ -488,8 +488,7 @@ export async function executeWithKernelBase<
 	const settings = await Settings.init();
 	const sink = new OutputSink({
 		onChunk: options?.onChunk,
-		artifactPath: options?.artifactPath,
-		artifactId: options?.artifactId,
+		allocateArtifact: options?.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
@@ -542,6 +541,7 @@ export async function executeWithKernelBase<
 		options?.toolSession && options?.bridgeSessionId
 			? registerPyToolBridge(options.bridgeSessionId, runId, {
 					toolSession: options.toolSession,
+					parentToolCallId: options.parentToolCallId,
 					signal: options.signal,
 					cellTimeoutMs: executionTimeoutMs ?? options.idleTimeoutMs ?? 0,
 					shieldedSignal: abortShield.signal,

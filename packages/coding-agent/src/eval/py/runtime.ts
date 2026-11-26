@@ -99,7 +99,8 @@ function normalizeEnvKey(key: string): string {
 	return CASE_INSENSITIVE_ENV ? key.toUpperCase() : key;
 }
 
-function resolvePathKey(env: Record<string, string | undefined>): string {
+/** The key `env` stores PATH under: `PATH`, or on Windows whatever casing it already uses. */
+export function resolvePathKey(env: Record<string, string | undefined>): string {
 	if (!CASE_INSENSITIVE_ENV) return "PATH";
 	const match = Object.keys(env).find(candidate => candidate.toLowerCase() === "path");
 	return match ?? "PATH";
@@ -262,7 +263,7 @@ export function enumeratePythonRuntimes(cwd: string, baseEnv: Record<string, str
 		});
 	}
 
-	for (const systemPath of [...$whichAll("python"), ...$whichAll("python3")]) {
+	for (const systemPath of [...$whichAll("python3"), ...$whichAll("python")]) {
 		push({ pythonPath: systemPath, env: { ...baseEnv } });
 	}
 

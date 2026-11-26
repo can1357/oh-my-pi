@@ -1,6 +1,7 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
-import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { ToolError } from "./tool-errors";
 
 const SQLITE_MAGIC = new Uint8Array([
 	0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00,
@@ -567,6 +568,26 @@ export function parseSqlitePathCandidates(filePath: string): SqlitePathCandidate
 	}
 
 	return candidates.sort((left, right) => right.sqlitePath.length - left.sqlitePath.length);
+}
+
+/**
+ * Splits of `filePath` at each `:`/`?` selector boundary, for SQLite files without a database extension
+ * (`state.vscdb?q=…`, Chrome's `History:urls`). Only the file header can confirm one, so callers sniff it.
+ */
+export function parseSqliteSelectorBoundaryCandidates(filePath: string): SqlitePathCandidate[] {
+	const normalized = filePath.replace(/\\/g, "/");
+	const queryStart = normalized.indexOf("?");
+	const end = queryStart === -1 ? normalized.length : queryStart + 1;
+	const candidates: SqlitePathCandidate[] = [];
+	for (let i = 1; i < end; i++) {
+		const ch = normalized[i];
+		if (ch !== ":" && ch !== "?") continue;
+		// `C:/…` is a drive, `scheme://` a URL: neither ends a file path.
+		if (ch === ":" && (i === 1 || normalized.startsWith("//", i + 1))) continue;
+		const { subPath, queryString } = splitSqliteRemainder(normalized.slice(i));
+		candidates.push({ sqlitePath: filePath.slice(0, i), subPath, queryString });
+	}
+	return candidates.reverse();
 }
 
 export async function isSqliteFile(absolutePath: string): Promise<boolean> {

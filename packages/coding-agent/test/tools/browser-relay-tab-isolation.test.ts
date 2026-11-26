@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import type { BrowserDownload } from "@oh-my-pi/pi-coding-agent/tools/browser/downloads";
 import {
 	closeLaunchedBrowser,
@@ -29,11 +28,11 @@ import {
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import puppeteer, { type Browser, type Page, type Protocol } from "puppeteer-core";
+import { type FixtureRelayExtension, prepareRelayExtension } from "./browser-relay-fixture";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-const ASSETS = path.resolve(import.meta.dir, "../../src/tools/browser/relay/extension-assets");
 
 interface TestWorker {
 	outcome: Promise<Extract<WorkerOutbound, { type: "ready" | "init-failed" }>>;
@@ -97,12 +96,16 @@ async function launchRelayFixture(
 	log?: (message: string, data?: Record<string, unknown>) => void,
 	extensions: string[] = [],
 ): Promise<RelayFixture> {
-	const port = await findFreeCdpPort();
-	const server = startRelayServer({ port, group: false, log });
-	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-isolation-"));
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-isolation-"));
+	const server = startRelayServer({
+		port: 0,
+		group: false,
+		log,
+		installRegistryFile: path.join(root, "omp", "installs.json"),
+	});
+	let install: FixtureRelayExtension;
 	// Every fixture browser saves downloads here, as the user's Chrome would its own folder (real names, " (1)" on a clash).
-	const downloads = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-downloads-")));
-	const profiles: string[] = [];
+	const downloads = await fs.realpath(await fs.mkdtemp(path.join(root, "downloads-")));
 	const held: Array<PromiseWithResolvers<void>> = [];
 	let heldArrived = Promise.withResolvers<void>();
 	const pages = Bun.serve({
@@ -114,7 +117,10 @@ async function launchRelayFixture(
 				"Content-Type": "text/csv",
 				"Content-Disposition": `attachment; filename="${name}"`,
 			});
-			if (route === "/report.csv") return new Response("a,b\n1,2\n", { headers: attachment("report.csv") });
+			if (route === "/report.csv")
+				return new Response("a,b\n1,2\n", {
+					headers: attachment("report.csv"),
+				});
 			if (route === "/held.csv") {
 				const release = Promise.withResolvers<void>();
 				held.push(release);
@@ -136,7 +142,7 @@ async function launchRelayFixture(
 					: route === "/second"
 						? "<title>Second</title><button>Second</button>"
 						: route === "/login"
-							? `<title>Login ${url.searchParams.get("who")}</title><input id="pw" type="password">`
+							? `<title>Login ${url.searchParams.get("who")}</title><form onsubmit="event.preventDefault(); document.title = 'Signed in'"><input id="pw" type="password"><button id="go">Log in</button></form>`
 							: route === "/download"
 								? `<title>Download</title><a id="report" href="/report.csv">Report</a><a id="held" href="/held.csv">Held</a>`
 								: route === "/framed"
@@ -151,33 +157,36 @@ async function launchRelayFixture(
 		// A failed test may leave a held download open; end it so the browser and server can stop.
 		for (const release of held) release.resolve();
 		try {
-			await Promise.all(browsers.map(browser => closeLaunchedBrowser(browser)));
+			await Promise.all(browsers.map(browser => closeLaunchedBrowser({ browser })));
 		} finally {
 			server.stop();
 			pages.stop(true);
-			await fs.rm(extensionDir, { recursive: true, force: true });
-			await fs.rm(downloads, { recursive: true, force: true });
-			for (const profile of profiles) await fs.rm(profile, { recursive: true, force: true });
+			await install?.dispose();
+			await fs.rm(root, { recursive: true, force: true });
 		}
 	}
 	async function launchBrowser(): Promise<RelayBrowser> {
-		const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-profile-"));
-		profiles.push(userDataDir);
+		const userDataDir = await fs.mkdtemp(path.join(root, "profile-"));
+		await install.configureProfile(userDataDir);
 		await Bun.write(
 			path.join(userDataDir, "Default", "Preferences"),
-			JSON.stringify({ download: { default_directory: downloads, prompt_for_download: false } }),
+			JSON.stringify({
+				download: { default_directory: downloads, prompt_for_download: false },
+			}),
 		);
 		const browser = await puppeteer.launch({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			pipe: true,
 			userDataDir,
-			enableExtensions: [extensionDir, ...extensions],
+			enableExtensions: true,
+			env: { ...process.env, PI_CODING_AGENT_DIR: path.join(root, "omp") },
 			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain", ...RENDERER_PRIORITY_ARGS],
 		});
 		browsers.push(browser);
-		const extensionId = await unpackedExtensionId(extensionDir);
-		if (!extensionId) throw new Error("Missing relay extension directory");
+		// Puppeteer's `enableExtensions` list does not wait for its installs, so a page could load before a stand-in
+		// vault's content script is registered.
+		for (const extension of [install.dir, ...extensions]) await browser.installExtension(extension);
 		// A service worker is transient: it may start and stop before Puppeteer observes its target.
 		// An extension page can wake it via runtime messaging and remains available for tab queries.
 		const page = await browser.newPage();
@@ -187,7 +196,8 @@ async function launchRelayFixture(
 		const deadline = Date.now() + 10_000;
 		for (;;) {
 			try {
-				await page.goto(`chrome-extension://${extensionId}/options.html`);
+				// This shipped document listens for GIF requests but doesn't open a panel or start a chat.
+				await page.goto(`chrome-extension://${install.id}/offscreen.html`);
 				break;
 			} catch (error) {
 				if (!String(error).includes("ERR_BLOCKED_BY_CLIENT") || Date.now() > deadline) throw error;
@@ -209,15 +219,11 @@ async function launchRelayFixture(
 		return { browser, inExtension };
 	}
 	try {
-		for (const file of ["manifest.json", "options.html", "options.js"]) {
-			await fs.copyFile(path.join(ASSETS, `${file}.txt`), path.join(extensionDir, file));
-		}
-		const background = await fs.readFile(path.join(ASSETS, "background.js.txt"), "utf8");
-		const defaultPort = "var DEFAULT_PORT = 9224;";
-		if (!background.includes(defaultPort)) throw new Error("Relay extension default port not found");
-		// Point the disposable extension at this relay without deferring listener registration.
-		await fs.writeFile(
-			path.join(extensionDir, "background.js"),
+		install = await prepareRelayExtension(root, server.port);
+		const backgroundPath = path.join(install.dir, "background.js");
+		const background = await Bun.file(backgroundPath).text();
+		await Bun.write(
+			backgroundPath,
 			`const testRegisterDetach = chrome.debugger.onDetach.addListener.bind(chrome.debugger.onDetach);
 chrome.debugger.onDetach.addListener = listener => {
 	globalThis.testDebuggerDetach = listener;
@@ -243,10 +249,10 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 		return true;
 	}
 });
-${background.replace(defaultPort, `var DEFAULT_PORT = ${port};`)}`,
+${background}`,
 		);
 		const { browser, inExtension } = await launchBrowser();
-		const cdpUrl = `http://127.0.0.1:${port}`;
+		const cdpUrl = `http://127.0.0.1:${server.port}`;
 		// Finish the extension hello before the native CDP client attaches to the sentinel.
 		const outcome = await waitForRelayExtension(cdpUrl);
 		if (outcome !== "ready") throw new Error(`Relay fixture handshake failed: ${outcome}`);
@@ -294,6 +300,83 @@ const session = {
 	getSessionFile: () => null,
 } as unknown as ToolSession;
 
+/**
+ * A stand-in password manager running `contentScript` on the fixture site, which may draw its `menu.html` and
+ * `notification.html` into the page as chrome-extension:// frames.
+ */
+async function writeStandInVault(contentScript: string): Promise<string> {
+	const vaultDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-vault-"));
+	await fs.writeFile(
+		path.join(vaultDir, "manifest.json"),
+		JSON.stringify({
+			manifest_version: 3,
+			name: "Stand-in vault",
+			version: "1.0",
+			content_scripts: [{ matches: ["http://127.0.0.1/*"], js: ["content.js"] }],
+			web_accessible_resources: [
+				{
+					resources: ["menu.html", "notification.html"],
+					matches: ["http://127.0.0.1/*"],
+				},
+			],
+		}),
+	);
+	await fs.writeFile(path.join(vaultDir, "menu.html"), "<button>Fill</button>");
+	await fs.writeFile(
+		path.join(vaultDir, "notification.html"),
+		"<title>Vault: save login</title><h3>Save login?</h3><button>Save</button>",
+	);
+	// A page the vault does not expose to sites, so no site can frame it.
+	await fs.writeFile(path.join(vaultDir, "private.html"), "<title>Vault private</title>");
+	await fs.writeFile(path.join(vaultDir, "content.js"), contentScript);
+	return vaultDir;
+}
+
+/** The text a call showed the agent, or the error it failed with. */
+const shown = (result: { displays: Array<{ type: string; text?: string }> }) =>
+	result.displays.map(display => display.text ?? "").join("\n");
+
+/** How often `text` holds `part`. */
+const occurrences = (text: string, part: string) => text.split(part).length - 1;
+
+/**
+ * What the calls on tab `name` showed, starting with what `told` holds so far, until one names `extensionId` and then
+ * one more: the relay reports what it hid while the calls go on, so a later call may carry it. At most 20 more calls.
+ */
+async function untilNamed(name: string, extensionId: string, ...told: string[]): Promise<string[]> {
+	const titleCall = {
+		code: "return await tab.title();",
+		timeoutMs: 10_000,
+		session,
+	};
+	for (let call = 0; call < 20 && !told.some(text => text.includes(extensionId)); call++) {
+		told.push(shown(await runInTab(name, titleCall)));
+	}
+	told.push(shown(await runInTab(name, titleCall)));
+	return told;
+}
+
+/** The iframes in `page`, closed shadow roots included, that the relay emptied: they carry its blank `srcdoc`. */
+async function emptiedFrames(page: Page): Promise<number> {
+	const cdp = await page.createCDPSession();
+	try {
+		const { root } = await cdp.send("DOM.getDocument", {
+			depth: -1,
+			pierce: true,
+		});
+		let count = 0;
+		const visit = (node: Protocol.DOM.Node) => {
+			if (node.nodeName === "IFRAME" && node.attributes?.some((name, i) => i % 2 === 0 && name === "srcdoc"))
+				count++;
+			for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child);
+		};
+		visit(root);
+		return count;
+	} finally {
+		await cdp.detach();
+	}
+}
+
 describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 	it("keeps another connection's cross-site frame alive when a page disables auto-attach", async () => {
 		const fixture = await launchRelayFixture();
@@ -308,7 +391,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			const secondPage = (await second.pages()).find(page => page.url() === source.url())!;
 			const frame = secondPage.frames().find(frame => frame.parentFrame())!;
 			expect(
-				await frame.client.send("Runtime.evaluate", { expression: "document.title", returnByValue: true }),
+				await frame.client.send("Runtime.evaluate", {
+					expression: "document.title",
+					returnByValue: true,
+				}),
 			).toMatchObject({
 				result: { value: "Download" },
 			});
@@ -322,7 +408,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			});
 			// A command on the surviving child proves Chrome did not tear down its shared session.
 			expect(
-				await frame.client.send("Runtime.evaluate", { expression: "document.title", returnByValue: true }),
+				await frame.client.send("Runtime.evaluate", {
+					expression: "document.title",
+					returnByValue: true,
+				}),
 			).toMatchObject({
 				result: { value: "Download" },
 			});
@@ -343,10 +432,16 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const names = [`relay-first-${process.pid}`, `relay-second-${process.pid}`, `relay-borrowed-${process.pid}`];
 		try {
-			const first = await acquireTab(names[0]!, relay, { url: `${fixture.origin}/first`, timeoutMs: 15_000 });
+			const first = await acquireTab(names[0]!, relay, {
+				url: `${fixture.origin}/first`,
+				timeoutMs: 15_000,
+			});
 			// An open that adopted the selected tab would have navigated it to the `url`.
 			expect(human.url()).toBe(humanUrl);
-			const second = await acquireTab(names[1]!, relay, { url: `${fixture.origin}/second`, timeoutMs: 15_000 });
+			const second = await acquireTab(names[1]!, relay, {
+				url: `${fixture.origin}/second`,
+				timeoutMs: 15_000,
+			});
 			expect(first.tab.targetId).not.toBe(second.tab.targetId);
 			expect(human.url()).toBe(humanUrl);
 			expect(await human.title()).toBe("Human sentinel");
@@ -381,11 +476,18 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			await releaseTab(names[0]!);
 			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toBeNull();
 			expect(await human.title()).toBe("Human sentinel");
-			const surviving = await runInTab(names[1]!, { code: "return await tab.title();", timeoutMs: 10_000, session });
+			const surviving = await runInTab(names[1]!, {
+				code: "return await tab.title();",
+				timeoutMs: 10_000,
+				session,
+			});
 			expect(surviving.returnValue).toBe("Second");
 
 			// `target` borrows the user's page; closing releases it without closing it.
-			const borrowed = await acquireTab(names[2]!, relay, { target: "Human sentinel", timeoutMs: 15_000 });
+			const borrowed = await acquireTab(names[2]!, relay, {
+				target: "Human sentinel",
+				timeoutMs: 15_000,
+			});
 			expect(borrowed.tab.targetId).not.toBe(first.tab.targetId);
 			await releaseTab(names[2]!);
 			expect(human.isClosed()).toBeFalse();
@@ -417,14 +519,23 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const browserOf = (targetId: string) => targetId.slice(4, targetId.lastIndexOf("."));
 		try {
 			// Borrowing waits until the relay lists the tab, so the first browser's selected tab is listed first.
-			const inFirst = await acquireTab(names[0]!, relay, { target: "Human sentinel", timeoutMs: 15_000 });
+			const inFirst = await acquireTab(names[0]!, relay, {
+				target: "Human sentinel",
+				timeoutMs: 15_000,
+			});
 			const other = await fixture.launchBrowser();
 			// The relay announces a browser's tabs to connected clients only as they change after its hello.
 			await secondHello.promise;
 			await (await other.browser.newPage()).goto(`${fixture.origin}/first`);
-			const inSecond = await acquireTab(names[1]!, relay, { target: "First", timeoutMs: 15_000 });
+			const inSecond = await acquireTab(names[1]!, relay, {
+				target: "First",
+				timeoutMs: 15_000,
+			});
 			expect(browserOf(inSecond.tab.targetId)).not.toBe(browserOf(inFirst.tab.targetId));
-			const owned = await acquireTab(names[2]!, relay, { url: `${fixture.origin}/second`, timeoutMs: 15_000 });
+			const owned = await acquireTab(names[2]!, relay, {
+				url: `${fixture.origin}/second`,
+				timeoutMs: 15_000,
+			});
 			expect(browserOf(owned.tab.targetId)).toBe(browserOf(inSecond.tab.targetId));
 		} finally {
 			for (const name of names) await releaseTab(name).catch(() => undefined);
@@ -438,7 +549,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-refused-close-${process.pid}`;
 		try {
-			const { tab } = await acquireTab(name, relay, { url: `${fixture.origin}/first`, timeoutMs: 15_000 });
+			const { tab } = await acquireTab(name, relay, {
+				url: `${fixture.origin}/first`,
+				timeoutMs: 15_000,
+			});
 			// A release sends two closes (the worker's, then the supervisor's by id); Chrome refuses the first two tries.
 			await fixture.inExtension('chrome.runtime.sendMessage({ op: "refuseRemoves", count: 2 })');
 			await releaseTab(name);
@@ -542,20 +656,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 	it("empties a password manager's menu only in the tab omp drives", async () => {
 		// A stand-in password manager: a focused password field opens its inline menu, a chrome-extension:// frame in
 		// a closed shadow root, the way 1Password draws it.
-		const vaultDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-vault-"));
-		await fs.writeFile(
-			path.join(vaultDir, "manifest.json"),
-			JSON.stringify({
-				manifest_version: 3,
-				name: "Stand-in vault",
-				version: "1.0",
-				content_scripts: [{ matches: ["http://127.0.0.1/*"], js: ["content.js"] }],
-				web_accessible_resources: [{ resources: ["menu.html"], matches: ["http://127.0.0.1/*"] }],
-			}),
-		);
-		await fs.writeFile(path.join(vaultDir, "menu.html"), "<button>Fill</button>");
-		await fs.writeFile(
-			path.join(vaultDir, "content.js"),
+		const vaultDir = await writeStandInVault(
 			`document.addEventListener("focusin", event => {
 	if (event.target.type !== "password" || document.querySelector("vault-menu")) return;
 	const host = document.createElement("vault-menu");
@@ -582,15 +683,96 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			session,
 		};
 		try {
-			await acquireTab(name, relay, { target: "Login driven", timeoutMs: 20_000 });
+			await acquireTab(name, relay, {
+				target: "Login driven",
+				timeoutMs: 20_000,
+			});
 			// Focusing the field opens the menu, and Chrome detaches omp from the tab during the call.
-			await runInTab(name, fill).catch(() => undefined);
-			expect((await runInTab(name, fill)).returnValue).toBe("secret");
+			const failed = await runInTab(name, fill).then(shown, (error: unknown) => String(error));
+			const filled = await runInTab(name, fill);
+			expect(filled.returnValue).toBe("secret");
+			// A call names what omp hid, once: that call, the next or a later one, as the relay reports it. Chrome can
+			// also drop omp as the menu starts loading and that load then never commit: omp hid nothing, and says nothing.
+			const vaultId = await unpackedExtensionId(vaultDir);
+			if (!vaultId) throw new Error("Missing stand-in vault directory");
+			if ((await emptiedFrames(driven)) > 0) {
+				const told = await untilNamed(name, vaultId, failed, shown(filled));
+				expect(occurrences(told.join("\n"), vaultId)).toBe(1);
+				expect(told.join("\n")).toContain(`"menu.html"`);
+				expect(told.at(-1)).not.toContain(vaultId);
+			} else {
+				expect(`${failed}\n${shown(filled)}\n${shown(await runInTab(name, fill))}`).not.toContain(vaultId);
+			}
 			// The menu opened, and its frame was emptied.
 			expect(await driven.$("vault-menu")).not.toBeNull();
 			expect(menuOpen(driven)).toBeFalse();
 			// Chrome refused the relay the user's tab too, yet its menu there is left alone.
 			expect(menuOpen(user)).toBeTrue();
+		} finally {
+			await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+			await fs.rm(vaultDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("says once what it hid when a submit opens a password manager's save card", async () => {
+		const vaultDir = await writeStandInVault(
+			`document.addEventListener("submit", () => {
+	const card = document.createElement("vault-notification");
+	const frame = document.createElement("iframe");
+	card.attachShadow({ mode: "closed" }).append(frame);
+	document.documentElement.append(card);
+	frame.src = chrome.runtime.getURL("notification.html");
+}, true);`,
+		);
+		const fixture = await launchRelayFixture(undefined, [vaultDir]);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const name = `relay-vault-submit-${process.pid}`;
+		const title = {
+			code: "return await tab.title();",
+			timeoutMs: 10_000,
+			session,
+		};
+		try {
+			await acquireTab(name, relay, {
+				url: `${fixture.origin}/login?who=submit`,
+				timeoutMs: 20_000,
+			});
+			const page = (await fixture.browser.pages()).find(page => page.url().includes("who=submit"));
+			if (!page) throw new Error("omp's tab is gone");
+			const vaultId = await unpackedExtensionId(vaultDir);
+			if (!vaultId) throw new Error("Missing stand-in vault directory");
+			// The page adds frames of its own as the card opens, so one sweep empties them with it: one to an extension
+			// that is not installed, one to a vault page no site may load, and one whose `src` carries page text.
+			await page.evaluate(`document.addEventListener("submit", () => {
+	for (const src of ["chrome-extension://${"p".repeat(32)}/decoy.html", "chrome-extension://${vaultId}/private.html", "chrome-extension://${vaultId}/Page text/../notification.html"]) {
+		const frame = document.createElement("iframe");
+		frame.src = src;
+		document.body.append(frame);
+	}
+});`);
+			// The card starts loading as the click submits, so Chrome may drop omp during this call.
+			const submitted = await runInTab(name, {
+				code: "await tab.click('#go');",
+				timeoutMs: 10_000,
+				session,
+			}).then(shown, (error: unknown) => String(error));
+			const after = await runInTab(name, title);
+			expect(after.returnValue).toBe("Signed in");
+			const told = await untilNamed(name, vaultId, submitted, shown(after));
+			// The card's page, once, by the title the vault gave it.
+			expect(occurrences(told.join("\n"), vaultId)).toBe(1);
+			expect(told.join("\n")).toContain(`"notification.html"`);
+			expect(told.join("\n")).toContain(`"Vault: save login"`);
+			expect(told.at(-1)).not.toContain(vaultId);
+			// The page's frames to an extension that is not installed, or to a page the vault does not expose, are emptied
+			// but never reported: they could not have shown that extension's page. A `/../` in a planted `src` still
+			// loads the vault's page; only the URL that loaded is reported.
+			expect(told.join("\n")).not.toContain("decoy.html");
+			expect(told.join("\n")).not.toContain("private.html");
+			expect(told.join("\n")).not.toContain("Page text");
+			expect(page.frames().filter(frame => frame.url().startsWith("chrome-extension://"))).toEqual([]);
 		} finally {
 			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
@@ -615,7 +797,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				url: `${fixture.origin}/second`,
 				timeoutMs: 20_000,
 			});
-			const { tab } = await acquireTab(name, relay, { url: `${fixture.origin}/first`, timeoutMs: 20_000 });
+			const { tab } = await acquireTab(name, relay, {
+				url: `${fixture.origin}/first`,
+				timeoutMs: 20_000,
+			});
 			ownedTabId = chromeTabId(tab.targetId);
 			expect(fixture.server.bridge.listTargets().some(target => target.id === tab.targetId)).toBeTrue();
 			// Replay the infobar dismissal through the extension's real listener.
@@ -652,9 +837,16 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-download-${process.pid}`;
 		try {
-			await acquireTab(name, relay, { url: `${fixture.origin}/download`, timeoutMs: 15_000 });
+			await acquireTab(name, relay, {
+				url: `${fixture.origin}/download`,
+				timeoutMs: 15_000,
+			});
 			// Clicked before any wait: the tab tracks downloads from the moment it opens.
-			await runInTab(name, { code: "await tab.click('#report');", timeoutMs: 20_000, session });
+			await runInTab(name, {
+				code: "await tab.click('#report');",
+				timeoutMs: 20_000,
+				session,
+			});
 			const download = await waitForDownload(name);
 			expect(download).toEqual({
 				path: path.join(fixture.downloads, "report.csv"),
@@ -672,7 +864,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			const framed = await waitForDownload(name);
 			expect(framed.url).toBe(`http://localhost:${new URL(fixture.origin).port}/report.csv`);
 			expect(framed.path).toBe(path.join(fixture.downloads, "report (1).csv"));
-			const listed = await runInTab(name, { code: "return await tab.downloads();", timeoutMs: 10_000, session });
+			const listed = await runInTab(name, {
+				code: "return await tab.downloads();",
+				timeoutMs: 10_000,
+				session,
+			});
 			expect(listed.returnValue).toEqual([download, framed]);
 		} finally {
 			await releaseTab(name).catch(() => undefined);
@@ -686,10 +882,21 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-download-held-${process.pid}`;
 		try {
-			await acquireTab(name, relay, { url: `${fixture.origin}/download`, timeoutMs: 15_000 });
-			await runInTab(name, { code: "await tab.click('#held');", timeoutMs: 20_000, session });
+			await acquireTab(name, relay, {
+				url: `${fixture.origin}/download`,
+				timeoutMs: 15_000,
+			});
+			await runInTab(name, {
+				code: "await tab.click('#held');",
+				timeoutMs: 20_000,
+				session,
+			});
 			const first = await fixture.heldDownload(0);
-			await runInTab(name, { code: "await tab.click('#held');", timeoutMs: 20_000, session });
+			await runInTab(name, {
+				code: "await tab.click('#held');",
+				timeoutMs: 20_000,
+				session,
+			});
 			const second = await fixture.heldDownload(1);
 			// Chrome names the first `held.csv` and the second `held (1).csv`; the second finishes first.
 			second.resolve();
@@ -726,7 +933,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {
 		const downloadDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recovery-download-"));
 		const blockedDownloadPath = path.join(downloadDir, "not-a-directory");
 		await fs.writeFile(blockedDownloadPath, "existing file");
-		const failed = startWorker({ ...payload, downloadsPath: blockedDownloadPath });
+		const failed = startWorker({
+			...payload,
+			downloadsPath: blockedDownloadPath,
+		});
 		let retried: TestWorker | undefined;
 		try {
 			expect((await failed.outcome).type).toBe("init-failed");

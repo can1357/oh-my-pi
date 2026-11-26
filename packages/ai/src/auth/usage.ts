@@ -35,7 +35,7 @@ import {
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
 import type { CredentialPool } from "./pool";
 import type { RankingStrategyResolver } from "../usage/registry";
-import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refresh";
+import { mergeRefreshedOrganizationScope, oauthRefreshSkewMs } from "./refresh";
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
@@ -65,6 +65,7 @@ export function buildRefreshableOauthCredential(credential: UsageCredential): OA
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		kiroProfileArn: credential.kiroProfileArn,
 		region: credential.region,
 		inferenceRegion: credential.inferenceRegion,
 		activeOrganizationId: credential.activeOrganizationId,
@@ -86,6 +87,7 @@ export function mergeRefreshedUsageCredential(
 		email: refreshed.email ?? credential.email,
 		enterpriseUrl: refreshed.enterpriseUrl ?? credential.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? credential.apiEndpoint,
+		kiroProfileArn: refreshed.kiroProfileArn ?? credential.kiroProfileArn,
 		...mergeRefreshedOrganizationScope(credential, refreshed),
 	};
 }
@@ -113,6 +115,20 @@ type UsageReportsOptions = {
 	baseUrlResolver?: (provider: Provider) => string | undefined;
 	signal?: AbortSignal;
 };
+
+/**
+ * Copy of `report` carrying the durable row id of the stored credential the
+ * probe ran as (`metadata.credentialId`). API-key accounts have no OAuth
+ * identity, so the row id is the only attribute that ties a report to the
+ * account the session router actually serves from; consumers that don't read
+ * it are unaffected. Returns cached objects untouched for unattributed
+ * requests (env/runtime keys, broker aggregates).
+ */
+function tagReportCredentialId(report: UsageReport | null, request: UsageRequestDescriptor): UsageReport | null {
+	if (!report || request.credentialId === undefined) return report;
+	if (report.metadata?.credentialId === request.credentialId) return report;
+	return { ...report, metadata: { ...report.metadata, credentialId: request.credentialId } };
+}
 
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
@@ -164,13 +180,23 @@ export class UsageService implements UsageApi {
 	 *
 	 * Runtime overrides are checked before the configured resolver, including its
 	 * built-in fallback. Removing the override restores that resolver unchanged.
+	 *
+	 * Cached reports are invalidated when the override replaces another adapter,
+	 * like {@link replaceConfiguredProviders}. A provider gaining its first
+	 * adapter keeps them: an extension registers on every startup, and the
+	 * persisted reports were written by another process with that same
+	 * registration, under the same cache version.
 	 */
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void {
+		const before =
+			this.#runtimeUsageProviderOverrides.get(provider)?.provider ??
+			this.#configuredUsageProviders.get(provider) ??
+			this.#deps.usageProviders(provider);
 		this.#runtimeUsageProviderOverrides.set(provider, {
 			provider: usageProvider,
 			apiKey,
 		});
-		this.#deps.cache.invalidateForProvider(provider);
+		if (before !== undefined && before !== usageProvider) this.#deps.cache.invalidateForProvider(provider);
 	}
 	/** Carry runtime and configured registrations over from the service this one replaces (store swap). */
 	adoptRegistrations(previous: UsageService): void {
@@ -223,6 +249,7 @@ export class UsageService implements UsageApi {
 			email: next.email ?? entry.credential.email,
 			enterpriseUrl: next.enterpriseUrl ?? entry.credential.enterpriseUrl,
 			apiEndpoint: next.apiEndpoint ?? entry.credential.apiEndpoint,
+			kiroProfileArn: next.kiroProfileArn ?? entry.credential.kiroProfileArn,
 			orgId: next.orgId,
 			orgName: next.orgName,
 			region: next.region,
@@ -249,7 +276,7 @@ export class UsageService implements UsageApi {
 		if (
 			request.credential.type === "oauth" &&
 			request.credential.expiresAt !== undefined &&
-			Date.now() + OAUTH_REFRESH_SKEW_MS >= request.credential.expiresAt
+			Date.now() + oauthRefreshSkewMs(request.provider) >= request.credential.expiresAt
 		) {
 			const refreshableCredential = buildRefreshableOauthCredential(request.credential);
 			if (refreshableCredential) {
@@ -280,7 +307,7 @@ export class UsageService implements UsageApi {
 					};
 				} catch (error) {
 					const errorMsg = String(error);
-					if (request.credential.expiresAt <= Date.now() && AIError.isDefinitiveOAuthFailure(errorMsg)) {
+					if (request.credential.expiresAt <= Date.now() && AIError.isDefinitiveOAuthFailure(error)) {
 						// The current access token is unusable, so don't replay an
 						// old usage report after its rotating refresh token is revoked.
 						// This changes cache state only; usage polling remains
@@ -639,6 +666,19 @@ export class UsageService implements UsageApi {
 				}
 				if (!apiKey) continue;
 				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+				// Attribute the probe to the stored row the resolved key belongs
+				// to (literal material or a resolved reference), so a session
+				// pinned to that row can match its report. Runtime, config, and
+				// env keys match no row and stay untagged — the sticky gate
+				// already treats those as unknown attribution.
+				for (const entry of this.#deps.pool.entries(providerId)) {
+					if (entry.credential.type !== "api_key") continue;
+					const storedMaterial = await this.#deps.overrides.resolve(entry.credential.key);
+					if (entry.credential.key === apiKey || storedMaterial === apiKey) {
+						request.credentialId = entry.id;
+						break;
+					}
+				}
 				if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
 				continue;
 			}
@@ -661,6 +701,9 @@ export class UsageService implements UsageApi {
 					if (entry.credential.type !== "oauth") continue;
 					const request = oauthUsageRequest(provider, entry.credential, baseUrl);
 					if (providerImpl.supports && !providerImpl.supports(request)) continue;
+					// Same stored-row attribution contract as the generic loop
+					// below (e.g. xai-oauth probes take this path).
+					request.credentialId = entry.id;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
 				}
@@ -703,6 +746,7 @@ export class UsageService implements UsageApi {
 					request = oauthUsageRequest(provider, credential, baseUrl);
 				}
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
+				request.credentialId = entry.id;
 				requests.push(request);
 			}
 		}
@@ -821,7 +865,7 @@ export class UsageService implements UsageApi {
 				);
 				return current;
 			}),
-		);
+		).then(reports => reports.map((report, index) => tagReportCredentialId(report, requests[index])));
 	}
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */

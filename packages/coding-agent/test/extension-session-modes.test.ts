@@ -15,9 +15,10 @@ import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-in
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 function refusal(result: SessionModeResult): string {
 	if (result.ok) throw new Error("Expected the transition to be refused");
@@ -83,7 +84,7 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 			rules: [],
 			enableMCP: false,
 			enableLsp: false,
-			cacheWarming: false,
+			cacheWarming: "off",
 			workspaceTree: { rootPath: dir.path(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 		});
 		cleanups.push(() => session.dispose());
@@ -106,8 +107,15 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 				events.push(event);
 			});
 		}, settings);
-		const mode = new InteractiveMode(session, "test");
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		const mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		cleanups.push(() => mode.stop());
 		await mode.init();
 		const modes = ctx?.sessionModes;

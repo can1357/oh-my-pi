@@ -1,10 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { procmgr } from "@oh-my-pi/pi-utils";
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "@oh-my-pi/pi-coding-agent/tools/details/job-widget";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { snapshotJobs } from "../../src/async/job-control";
 import { Settings } from "../../src/config/settings";
 import { type JobWidgetAuthorRequest, JobWidgets } from "../../src/job-widgets";
+import type { AsyncJobInspection } from "../../src/session/agent-session-types";
+import { inspectAsyncJob } from "../../src/session/async-job-views";
 import type { ToolSession } from "../../src/tools";
 import { BashTool } from "../../src/tools/bash";
 
@@ -83,6 +88,50 @@ describe("bash job widgets", () => {
 			expect(requests[0]?.sources[0]?.label).toMatch(/printf.* → tail -n 1$/);
 		} finally {
 			await manager.dispose({ timeoutMs: 2_000 });
+		}
+	}, 20_000);
+
+	// A command that redirects everything prints nothing of its own: without the file as a stream, a job
+	// inspector shows "no output" for as long as it runs, and its widget has no line to read.
+	it("offers the file a command redirects its output into as a stream, beside the running command's trace", async () => {
+		const manager = new AsyncJobManager({});
+		const session = toolSession(manager);
+		// The shell's own spelling of the directory: the temp dir is a symlink on macOS.
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-redirect-")));
+		try {
+			await new BashTool(session).execute("bench", {
+				command: `cd '${dir}' && { printf 'round 1/3\\nround 2/3\\n'; sleep 30; } > bench.log 2>&1`,
+				async: true,
+				pty: false,
+			});
+			const [job] = manager.getAllJobs({ ownerId: "Main" });
+			if (!job) throw new Error("no bash job started");
+
+			// Real-time poll: a real child writes the file, and the trace arrives on its own timer.
+			let inspection: AsyncJobInspection | undefined;
+			for (let waited = 0; waited < 10_000; waited += 20) {
+				await Bun.sleep(20);
+				inspection = inspectAsyncJob(manager, "Main", job.id);
+				if (inspection?.streams?.[0]?.bytes && inspection.trace) break;
+			}
+			expect(job.status).toBe("running");
+			expect(inspection?.output ?? "").toBe("");
+			expect(inspection?.streams).toHaveLength(1);
+			const stream = inspection?.streams?.[0];
+			expect(stream).toMatchObject({
+				id: "file:1",
+				kind: "file",
+				consumer: path.join(dir, "bench.log"),
+				bytes: 20,
+				open: true,
+			});
+			expect(stream?.tail()).toBe("round 1/3\nround 2/3\n");
+			expect(job.widgetInputs?.sources().map(source => source.id)).toEqual(["out", "file:1"]);
+			const states = inspection?.trace?.units.flatMap(unit => unit.nodes.map(node => node.state));
+			expect(states).toContain("running");
+		} finally {
+			await manager.dispose({ timeoutMs: 2_000 });
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	}, 20_000);
 });

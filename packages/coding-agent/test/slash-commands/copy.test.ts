@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
@@ -30,7 +33,7 @@ function createRuntimeHarness(messages: AgentMessage[], viewMessages: AgentMessa
 			ctx: {
 				session: { messages },
 				viewSession: { messages: viewMessages },
-				editor: { setText },
+				composer: { setText },
 				showStatus,
 				showWarning,
 				showCopySelector,
@@ -108,6 +111,21 @@ describe("/copy slash command", () => {
 
 		expect(copySpy).not.toHaveBeenCalled();
 		expect(harness.showStatus).toHaveBeenCalledWith("No link to copy.");
+	});
+
+	it("creates and copies the session's local:// directory with /copy local", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		using tempDir = TempDir.createSync("@pi-copy-local-");
+		const localRoot = path.join(tempDir.path(), "session", "local");
+		const harness = createRuntimeHarness([assistantText("answer")]);
+		Object.assign(harness.runtime.ctx.session, { localRoot });
+
+		expect(await executeBuiltinSlashCommand("/copy local", harness.runtime)).toBe(true);
+
+		expect(copySpy).toHaveBeenCalledWith(localRoot);
+		expect(fs.statSync(localRoot).isDirectory()).toBe(true);
+		expect(harness.showCopySelector).not.toHaveBeenCalled();
+		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 
 	it("keeps bare /copy on the picker", async () => {

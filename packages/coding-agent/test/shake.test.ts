@@ -19,6 +19,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	convertToLlm,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	USER_INTERRUPT_LABEL,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-stats";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
@@ -148,7 +153,7 @@ describe("AgentSession shake", () => {
 			const [tr] = branchToolResults();
 			expect(tr.prunedAt).toBeGreaterThan(0);
 			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
-			expect(text).toContain(`artifact://${result.artifactId}`);
+			expect(text).toContain(`local://${result.artifactId}.log`);
 			expect(text).toContain("shaken");
 		});
 
@@ -166,7 +171,7 @@ describe("AgentSession shake", () => {
 			expect(result.artifactId).toBeUndefined();
 			const [toolResult] = branchToolResults();
 			expect(toolResult.content).toEqual([{ type: "text", text: expect.stringContaining("[shaken ~") }]);
-			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("artifact://") }]);
+			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("local://") }]);
 			saveArtifact.mockRestore();
 			allocateArtifactPath.mockRestore();
 		});
@@ -197,7 +202,7 @@ describe("AgentSession shake", () => {
 			expect(placeholder?.type).toBe("text");
 			if (placeholder?.type !== "text") throw new Error("Expected shake placeholder text");
 			expect(placeholder.text).toContain("shaken");
-			expect(placeholder.text).toContain(`artifact://${result.artifactId}`);
+			expect(placeholder.text).toContain(`local://${result.artifactId}.log`);
 			expect(mixedResult.content[1]).toBe(image);
 			expect(mixedResult.content[1]).toEqual(imageSnapshot);
 
@@ -589,6 +594,87 @@ describe("AgentSession shake", () => {
 				await persisted.close();
 			}
 		});
+
+		it("durably clears a surviving continuity note after its typed thinking was already shaken", async () => {
+			const model = bundled("openai", "gpt-5.2");
+			session.agent.setModel(model);
+			const quote = "interrupted reasoning ".repeat(80);
+			const noteId = sessionManager.appendCustomMessageEntry(INTERRUPTED_THINKING_MESSAGE_TYPE, quote, false);
+			const siblingId = sessionManager.appendMessageToBranch(
+				{ role: "user", content: "other branch", timestamp: Date.now() },
+				noteId,
+			);
+			const keepId = sessionManager.appendCustomMessageEntry("project-fact", "keep this fact", false);
+			const anchorId = sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(JSON.stringify(convertToLlm(session.agent.state.messages, model))).toContain(quote);
+			const rewrite = vi.spyOn(sessionManager, "rewriteEntries");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.interruptedThinkingNotesDropped).toBe(1);
+			expect(result.tokensFreed).toBe(session.agent.tokenizer.countTokens(quote));
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+			expect(formatShakeSummary(result)).toContain("Dropped 1 interrupted-thinking note");
+			expect(JSON.stringify(session.agent.state.messages)).not.toContain(quote);
+			expect((await session.shake("thinking")).interruptedThinkingNotesDropped).toBe(0);
+			expect(rewrite).toHaveBeenCalledTimes(1);
+
+			const file = sessionManager.getSessionFile();
+			if (!file) throw new Error("Expected persisted shake session");
+			expect(await Bun.file(file).text()).not.toContain(quote);
+			const persisted = await SessionManager.open(file, tempDir.path());
+			try {
+				expect(persisted.getLeafId()).toBe(anchorId);
+				expect(persisted.getEntry(keepId)?.parentId).toBe(noteId);
+				expect(persisted.getBranch(siblingId).map(entry => entry.id)).toContain(noteId);
+				const wire = convertToLlm(persisted.buildSessionContext().messages, model);
+				expect(wire.map(message => message.content)).toEqual([
+					[{ type: "text", text: "keep this fact" }],
+					[{ type: "text", text: "latest answer" }],
+				]);
+			} finally {
+				await persisted.close();
+			}
+		});
+
+		it.each([true, false])(
+			"credits the quote only if replayed, not the demoted copy (eligible: %s)",
+			async eligible => {
+				const model = eligible ? bundled("openai", "gpt-5.2") : bundled("anthropic", "claude-sonnet-4-5");
+				session.agent.setModel(model);
+				const reasoning = "my unfinished thought ".repeat(40);
+				sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "thinking", thinking: reasoning }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					stopReason: "aborted",
+					errorMessage: USER_INTERRUPT_LABEL,
+					usage,
+					timestamp: Date.now(),
+				});
+				const quote = `Interrupted: ${reasoning}`;
+				sessionManager.appendCustomMessageEntry(INTERRUPTED_THINKING_MESSAGE_TYPE, quote, false);
+
+				const result = await session.shake("thinking");
+
+				expect(result.interruptedThinkingNotesDropped).toBe(1);
+				expect(result.thinkingBlocksDropped).toBe(1);
+				expect(result.tokensFreed).toBe(eligible ? session.agent.tokenizer.countTokens(quote) : 0);
+			},
+		);
 
 		it("does not inflate reported savings with opaque signature bytes", async () => {
 			const signed: AssistantMessage = {
@@ -1042,12 +1128,12 @@ describe("AgentSession shake", () => {
 		}
 
 		it("rescue config never re-elides artifact recovery reads, by path or by source meta", async () => {
-			seedArtifactRecoveryResult("R".repeat(4000), { path: "artifact://0" });
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "local://0.log" });
 			seedArtifactRecoveryResult(
 				"F".repeat(4000),
 				{ path: "/tmp/artifacts/3.shake.log" },
 				{
-					meta: { source: { type: "internal", value: "artifact://3" } },
+					meta: { source: { type: "internal", value: "local://3.log" } },
 				},
 			);
 			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
@@ -1059,7 +1145,7 @@ describe("AgentSession shake", () => {
 
 		it("rescue config still elides ordinary oversized results", async () => {
 			seedHeavyToolResult("B".repeat(4000));
-			seedArtifactRecoveryResult("R".repeat(4000), { path: "artifact://0" });
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "local://0.log" });
 			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
 			expect(result.toolResultsDropped).toBe(1);
 			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);

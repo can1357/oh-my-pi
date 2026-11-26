@@ -1,5 +1,5 @@
 /**
- * `omp zsh|bash|sh [args...]`: the pi-shell engine as a process shell, run
+ * `omp zsh|bash|sh [args...]`: the shell engine as a process shell, run
  * in this process through the native `runShellMain`.
  *
  * The argv after `omp` reaches the shell untouched (`omp zsh --help`, `-c`,

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { customMessageEntryMessage, isUserRequestEntry } from "./transcript/transcript-entry";
 import {
 	canReplayRemoteCompaction,
 	getAnthropicCompactionPayload,
@@ -19,6 +19,7 @@ import {
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isEmptyErrorTurn,
+	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 	PREWALK_PLAN_MESSAGE_TYPE,
 	REWIND_REPORT_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
@@ -133,6 +134,11 @@ export interface SessionContext {
 	 * Only populated in transcript mode.
 	 */
 	cacheMissExplainedAt?: boolean[];
+	/**
+	 * A model/compaction/plan-mode reset follows the last assistant turn, so the
+	 * next live turn's prompt-cache miss is explained. Only set in transcript mode.
+	 */
+	nextCacheMissExplained?: boolean;
 }
 
 /** Lists session model strings to try when restoring, in fallback order. */
@@ -484,7 +490,9 @@ export function buildSessionContext(
 		} else if (entry.type === "custom_message") {
 			if (
 				!options?.transcript &&
-				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE || entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE)
+				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE ||
+					entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE ||
+					entry.customType === PLAN_MODE_CONTEXT_MESSAGE_TYPE)
 			) {
 				return;
 			}
@@ -842,6 +850,7 @@ export function buildSessionContext(
 	return {
 		messages,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
+		nextCacheMissExplained: options?.transcript ? pendingReset : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,
 		serviceTier,

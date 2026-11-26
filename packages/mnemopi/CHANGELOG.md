@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed unused `@oh-my-pi/pi-mnemopi/config` exports: `FASTEMBED_CACHE_DIR`, `MODEL_CACHE_DIR`, `DEFAULT_LLM_MODEL_REPO`, `DEFAULT_LLM_MODEL_FILE`, `HOST_LLM_TIMEOUT_SECONDS`, `beamOptimizationsEnabled`, `embeddingsViaApi`, `isApiEmbeddingModel`, `apiEmbeddingsAvailable`, `workingMemoryMaxItems`, `episodicRecallLimit`, `sleepBatchSize`, `scratchpadMaxItems`, `tier2Days`, `tier3Days`, `degradeBatchSize`, `smartCompressEnabled`, `tier3MaxChars`, `veracityWeightOverrides`, `autoMigrateEnabled`, `llmThreads`, `llmRepo`, `llmFile`, `llmModelFiles`, `hostLlmProvider`, `hostLlmModel`, `hostLlmContext` ([#20530](https://github.com/can1357/oh-my-pi/pull/20530))
+
+## [19.1.0] - 2026-11-21
+
+### Fixed
+
+- Improved diagnostics when a configured embedding provider fails, making provider errors visible in logs while preserving the existing fallback behavior.
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.
+
+## [18.21.0] - 2026-11-16
+
+### Changed
+
+- Improved file memory bank performance by reducing unnecessary disk synchronization during checkpointing, lowering per-turn I/O overhead for banks shared across multiple processes.
+
 ## [18.20.3] - 2026-11-16
 
 ### Added

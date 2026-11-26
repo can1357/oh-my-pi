@@ -188,6 +188,7 @@ Slash command state is refreshed:
 - when the editor component is swapped
 - by explicit plugin reload flows such as `/reload-plugins`
 - when session command-metadata notifications arrive, including live settings changes, skill management, and MCP prompt updates (autocomplete rebuilds from current session state)
+- after `/wt` ran a new worktree's `post-checkout` hook (linked git worktree or ovnfs checkout): once the move and `worktree.cleanSource` are done and reported, `/wt` runs the hook with the arguments `git worktree add` gives it (`vcs.runPostCheckoutHook`, the helper behind `omp worktree add`) and then refreshes session skills/commands, so they include what the hook added. A failing hook keeps the worktree and shows a warning; the hook cannot be cancelled. An ovnfs checkout has its own git dir without `hooks/`: only a hook found through `core.hooksPath` runs there, not one in the source repo's `.git/hooks`
 
 There is no continuous file watcher for command directories.
 
@@ -320,6 +321,11 @@ viewed: the focused subagent's session when one is focused, otherwise the main
 session. It uses that session's active model and context, including partial
 streaming assistant text. Bare `/btw` opens that view's history, with the newest
 question selected.
+
+In the interactive composer, one leading `?` followed by question text is a
+shortcut for `/btw <question>`. A bare `?` or a draft starting with consecutive
+question marks (`??`) submits as a normal prompt.
+
 Saved side questions are not appended to the main transcript or sent as history
 to unrelated turns. Each new `/btw <question>` remains independent; explicit
 follow-ups include only the selected side conversation alongside the current
@@ -394,6 +400,16 @@ than a byte-for-byte native provider transcript.
   details. `Right` focuses details, `Left` returns to history.
 - Focused details support scrolling, `Page Up`/`Page Down`, and `Home`/`End`.
   Narrow terminals show one pane at a time.
+- In Tern, the answer is a note in the transcript, after what was on screen when it was
+  asked, instead of the inline panel; it is display-only, never a session message. Clicking
+  the note points the composer at it (role `omp.editor.btw`, a `btw` chip, the note ringed):
+  plain drafts go to its topic as follow-ups, which answer in the same note, while `/`
+  commands and `!`/`$` shell drafts run as usual. `Esc`, the chip, or another click on the
+  note points the composer back at the chat without cancelling a running answer. Its `×`
+  folds it to one line, which a click opens again with the composer on it. Right-click (a
+  long press on a phone) offers copy, inject, branch, stop, opening it in history, and
+  fold. After a transcript rebuild or resume, the notes asked on the shown branch come back
+  folded, each before the first message newer than it.
 - New questions and follow-ups are refused while any BTW request is running.
   There is no implicit cancellation or queue.
 - A refused follow-up submission keeps the draft for retry; repeated Enter while
@@ -504,11 +520,15 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 
 `/plan-review` reopens the Plan Review overlay for the latest plan (plan mode only). In the Contents sidebar `a` annotates the selected section; in the plan body `a` annotates the top visible line. `e` edits the annotation(s) at that section or line (with a chooser when several apply) and `u` undoes the latest section deletion or annotation change. The note editor behaves like `/annotate`'s: Enter saves, Shift+Enter inserts a newline, Escape discards the draft, the external-editor key replaces the draft without saving, and saving an empty edit deletes the annotation.
 
+The decision options are the approval choices and **Save**, which writes the plan to a chosen path, reports the destination, and leaves the review open (plan mode and the session stay as they are). **Refine plan** appears only while the plan has feedback (annotations or deleted sections); it is then the first, preselected option and re-prompts the model with that feedback.
+
+Under Tern the plan is one editable document: double-click edits it in place (edits are mirrored to the plan file and annotations follow their text), and selecting text offers a Comment bubble whose comments become Refine feedback (`> "quote"` then the note, under the section heading). Below it a dock holds the Approve split button (Refine while the plan has comments; its menu lists every approval choice), the execution model chip, Save and Cancel; Enter runs the main button, ←/→ change the model, ↑/↓ walk the Contents (hidden while the plan has comments). Older Tern builds keep one Markdown block per section and the option bar.
+
 ## 14) Built-in command note: `/context`
 
 `/context` opens a read-only Context Viewer over a snapshot of the active system prompt, loaded instruction files and skill listings, tool definitions, and messages, with estimated tokens per entry and per category. The snapshot is taken on open and does not refresh; close and reopen to update. It does not run extension hooks (`context`, `before_provider_request`), so inspecting context cannot trigger their side effects. Messages go through the same per-message conversion as `convertToLlm`, with steering wrapped by `wrapSteeringForModel` and provider refusals dropped as live replay drops them, but not image blocking, obfuscation, request normalization, provider encoding, or provider transforms, so content and token counts can differ from the provider request.
 
-Instruction files and skill listings stay in the provider-facing system prompt but are shown in their own categories, also under a literal custom prompt or a custom template. `buildSystemPrompt` renders its blocks with `prompt.renderTracked`, passing the context file and skill objects as tracked items: the template engine records the output range of every `{{#each}}` iteration over one of them, and each iteration that covers whole lines is formatted on its own and joined into the formatted template as one block, so its block index and range are known by construction. The session commits these sources together with the base prompt (rebuilds, prepared commits, and session-switch rollback). When the viewer opens, it attributes the sources of every block that is unchanged at the same index in the effective prompt. System Prompt entries show an attributed source as a `[Shown in <category>: <source>]` marker at its original position, colored with that category's theme color; markers carry no tokens. Sources in a block that changed or moved after the build stay in System Prompt, and the Overview says how many instruction files and skills stayed there because the prompt changed after it was built; an extension `before_agent_start` hook or SDK `systemPrompt` callback that appends to block 0 leaves every skill there. An iteration inside a helper block such as `{{#list}}`, sharing a line with other text, or inside a code fence the template opened is formatted in place and not attributed, so that source stays in System Prompt without a note. The status line's context breakdown counts Instruction files and Skills through the same attribution (`claimPromptSources` in `pi-tui`), so its figures match `/context`. A file that leaves a code fence open has it closed at its end, so the rest of the prompt is formatted as usual.
+Instruction files and skill listings stay in the provider-facing system prompt but are shown in their own categories, also under a literal custom prompt or a custom template. `buildSystemPrompt` renders its blocks with `prompt.renderTracked`, passing the context file and skill objects as tracked items: the template engine records the output range of every `{{#each}}` iteration over one of them, and each iteration that covers whole lines is formatted on its own and joined into the formatted template as one block, so its block index and range are known by construction. The session commits these sources together with the base prompt (rebuilds, prepared commits, and session-switch rollback). When the viewer opens, it attributes the sources of every block that is unchanged at the same index in the effective prompt. System Prompt entries show an attributed source as a `[Shown in <category>: <source>]` marker at its original position, colored with that category's theme color; markers carry no tokens. Sources in a block that changed or moved after the build stay in System Prompt, and the Overview says how many instruction files and skills stayed there because the prompt changed after it was built; an extension `before_agent_start` hook or SDK `systemPrompt` callback that appends to block 0 leaves every skill there. An iteration inside a helper block such as `{{#list}}`, sharing a line with other text, or inside a code fence the template opened is formatted in place and not attributed, so that source stays in System Prompt without a note. The status line's context breakdown counts Instruction files and Skills through the same attribution (`claimPromptSources` in `packages/coding-agent/src/session/context-usage.ts`), so its figures match `/context`. A file that leaves a code fence open has it closed at its end, so the rest of the prompt is formatted as usual.
 
 Estimate rules: Overview category and per-tool rows split the reported Used total by each row's estimated share, while entry headers show their own unscaled estimates, so the entries in a category need not add up to its Overview row; the Overview notes this under its legend. Multiple thinking blocks in one message share a total shown on a group heading, and grouped entries show `—`; empty interrupted thinking without usage shows `N/A · Interrupted`, not zero. Retained Anthropic web-search and tool-search calls and results appear in Tool Calls and Tool Output as JSON; opaque provider data (thinking signatures, `encrypted_content`, `encrypted_index`) is shown only as its size, such as `signature · 1,024 chars`, while still counted.
 

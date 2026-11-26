@@ -6,9 +6,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { formatRawOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { Shell } from "@oh-my-pi/pi-natives";
-import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
-import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { toolText } from "./helpers/tool-text";
 
 afterEach(() => {
 	mock.restore();
@@ -57,25 +58,17 @@ describe("BashTool execution results", () => {
 			return result;
 		});
 		const tool = new BashTool(makeSession());
-		const args = { command: `printf 'Wall time: %.2f seconds\\n' ${wallTimeMs / 1000}` };
+		const args = {
+			command: `printf 'Wall time: %.2f seconds\\n' ${wallTimeMs / 1000}`,
+		};
 		const result = await tool.execute("call-timing-output", args);
 		const timingOutput = `Wall time: ${(wallTimeMs / 1000).toFixed(2)} seconds`;
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(result.details?.wallTimeMs).toBe(wallTimeMs);
 		expect(text.match(/Wall time: \d+\.\d{2} seconds/gu)).toHaveLength(noticeCount);
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-
 		for (const expanded of [false, true]) {
-			const options = { expanded, isPartial: false };
-			const component = bashToolRenderer.renderResult(result, options, theme, args);
-			const rendered = Bun.stripANSI(component.render(120).join("\n"));
+			const rendered = toolText({ name: "bash", args, result, expanded });
 			expect(rendered.match(/Wall time: \d+\.\d{2} seconds/gu)).toEqual([timingOutput]);
-			const view = bashToolRenderer.describeResult(result, options, args);
-			const output = (view.body ?? [])
-				.flatMap(node => ("k" in node ? (node.c ?? []) : []))
-				.find(node => "k" in node && node.k === "ansi");
-			expect(output).toMatchObject({ p: { role: "omp.tool.bash.output", text: timingOutput } });
 		}
 	});
 
@@ -112,7 +105,10 @@ describe("BashTool execution results", () => {
 			return realRun.call(this, { ...options, timeoutMs: 20 }, onChunk);
 		});
 		const tool = new BashTool(makeSession());
-		const result = await tool.execute("call-timeout", { command: "sleep 3", timeout: 1 });
+		const result = await tool.execute("call-timeout", {
+			command: "sleep 3",
+			timeout: 1,
+		});
 
 		expect(result.isError).toBe(true);
 		expect(result.details?.timedOut).toBe(true);
@@ -158,12 +154,16 @@ describe("BashTool execution results", () => {
 			sessionManager: { getSessionId: () => "session-fg" },
 		} as unknown as ToolSession);
 		// The session's persistent shell carries a value an earlier command (or a parent omp) left behind.
-		await tool.execute("call-stale", { command: "export PI_SESSION_FILE=/stale/parent.jsonl" });
-		const result = await tool.execute("call-env", {
-			command: `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`,
+		await tool.execute("call-stale", {
+			command: "export PI_SESSION_FILE=/stale/parent.jsonl",
 		});
-		const [id, file] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
+		const result = await tool.execute("call-env", {
+			command: `printf '%s|%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$OMP_BASH_SESSION"`,
+		});
+		const [id, file, tag] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
 		expect(id).toBe("session-fg");
+		// The leftover-process membership tag (exec/session-processes.ts).
+		expect(tag).toBe("session-fg");
 		// Empty, not the stale path: the session is not persisted.
 		expect(file).toBe("");
 	});
@@ -171,38 +171,33 @@ describe("BashTool execution results", () => {
 	it("gives each command the id of the tool call running it", async () => {
 		const tool = new BashTool(makeSession());
 		// An earlier command in the session's persistent shell (or a parent omp) left a value behind.
-		await tool.execute("call-stale", { command: "export PI_TOOL_CALL_ID=toolu_stale" });
+		await tool.execute("call-stale", {
+			command: "export PI_TOOL_CALL_ID=toolu_stale",
+		});
 		for (const id of ["toolu_first", "toolu_second"]) {
-			const result = await tool.execute(id, { command: `printf '%s|' "$PI_TOOL_CALL_ID"` });
+			const result = await tool.execute(id, {
+				command: `printf '%s|' "$PI_TOOL_CALL_ID"`,
+			});
 			expect((result.content.find(c => c.type === "text")?.text ?? "").split("|")[0]).toBe(id);
 		}
 	});
 
 	it("gives a call the identity of the session it started in, even if the session changes before it runs", async () => {
 		let sessionId = "session-a";
-		const gate = Promise.withResolvers<void>();
-		let allocating = Promise.withResolvers<void>();
 		const tool = new BashTool({
 			...makeSession(),
 			getSessionId: () => sessionId,
 			getSessionFile: () => path.resolve(`/sessions/${sessionId}.jsonl`),
-			allocateOutputArtifact: async () => {
-				allocating.resolve();
-				await gate.promise;
-				return {};
-			},
 		} as unknown as ToolSession);
 		const probe = `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`;
 		const fields = (result: { content: readonly { type: string; text?: string }[] }) =>
 			(result.content.find(c => c.type === "text")?.text ?? "").split("|").slice(0, 2);
 
 		const pending = tool.execute("call-a", { command: probe });
-		await allocating.promise;
-		sessionId = "session-b"; // e.g. `/fork` while the call waits on its artifact
-		gate.resolve();
+		// e.g. `/fork` landing after the call started but before its shell runs.
+		sessionId = "session-b";
 		expect(fields(await pending)).toEqual(["session-a", path.resolve("/sessions/session-a.jsonl")]);
 
-		allocating = Promise.withResolvers<void>();
 		expect(fields(await tool.execute("call-b", { command: probe }))).toEqual([
 			"session-b",
 			path.resolve("/sessions/session-b.jsonl"),
@@ -224,6 +219,8 @@ describe("BashTool execution results", () => {
 				cancelled: false,
 				timedOut: false,
 				workingDir: process.cwd(),
+				movedCwd: false,
+				errexit: false,
 				minimized: {
 					filter: "lint",
 					text: "test/event-cache.e2e-spec.ts:281-405 multiple ... errors\n",
@@ -235,7 +232,9 @@ describe("BashTool execution results", () => {
 		});
 
 		const tool = new BashTool(makeSession());
-		const result = await tool.execute("call-minimized-unpersisted", { command: "pnpm lint" });
+		const result = await tool.execute("call-minimized-unpersisted", {
+			command: "pnpm lint",
+		});
 
 		expect(result.isError).toBe(true);
 		expect(result.details?.exitCode).toBe(1);
@@ -254,6 +253,8 @@ describe("BashTool execution results", () => {
 				cancelled: false,
 				timedOut: false,
 				workingDir: process.cwd(),
+				movedCwd: false,
+				errexit: false,
 				minimized: {
 					filter: "lint",
 					text: minimizedText,
@@ -264,13 +265,15 @@ describe("BashTool execution results", () => {
 			});
 		});
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-meta-"));
-		const ids: Record<string, string> = { bash: "1", "bash-original": "2" };
+		// Sequential ids like the session's spill manager. Output that fits inline claims
+		// no spill, so the raw original gets the first id.
+		let nextId = 1;
 		const session = {
 			...makeSession(),
-			allocateOutputArtifact: async (kind: string) => ({
-				id: ids[kind],
-				path: path.join(artifactsDir, `${kind}.log`),
-			}),
+			allocateOutputArtifact: async () => {
+				const id = String(nextId++);
+				return { id, path: path.join(artifactsDir, `${id}.log`) };
+			},
 		} as unknown as ToolSession;
 
 		try {
@@ -281,26 +284,15 @@ describe("BashTool execution results", () => {
 				filter: "lint",
 				inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
 				outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
-				artifactId: "2",
+				artifactId: "1",
 			});
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
-			expect(text).toContain("[raw output: artifact://2]");
+			expect(text).toContain(formatRawOutputNotice("1"));
 			expect(text).not.toContain("Minimized");
-			expect(await Bun.file(path.join(artifactsDir, "bash-original.log")).text()).toBe(rawOutput);
+			expect(await Bun.file(path.join(artifactsDir, "1.log")).text()).toBe(rawOutput);
 
-			const theme = await getThemeByName("dark");
-			if (!theme) throw new Error("Expected dark theme");
-			const rendered = Bun.stripANSI(
-				bashToolRenderer
-					.renderResult(result, { expanded: false, isPartial: false }, theme, args)
-					.render(160)
-					.join("\n"),
-			);
-			expect(rendered).toContain("Minimized: lint 1.9KB → 27B");
-			const view = JSON.stringify(
-				bashToolRenderer.describeResult(result, { expanded: false, isPartial: false }, args),
-			);
-			expect(view).toContain("Minimized lint 1.9KB → 27B");
+			const rendered = toolText({ name: "bash", args, result, width: 160 });
+			expect(rendered).toContain(`${currentTheme().symbols.symbol("icon.minimize")} lint 1.9KB → 27B`);
 		} finally {
 			await fs.rm(artifactsDir, { recursive: true, force: true });
 		}
@@ -324,7 +316,11 @@ describe("BashTool execution results", () => {
 });
 
 describe("BashTool skill:// working directory", () => {
-	async function skillFixture(): Promise<{ dir: string; skillDir: string; skill: Skill }> {
+	async function skillFixture(): Promise<{
+		dir: string;
+		skillDir: string;
+		skill: Skill;
+	}> {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-cwd-")));
 		const skillDir = path.join(dir, "skill");
 		await fs.mkdir(skillDir, { recursive: true });
@@ -346,7 +342,10 @@ describe("BashTool skill:// working directory", () => {
 		const { dir, skill } = await skillFixture();
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cwd", { command: "pwd; cat SKILL.md", cwd: "skill://docs" });
+			const result = await tool.execute("call-skill-cwd", {
+				command: "pwd; cat SKILL.md",
+				cwd: "skill://docs",
+			});
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.isError).toBeUndefined();
@@ -361,7 +360,9 @@ describe("BashTool skill:// working directory", () => {
 		const { dir, skill } = await skillFixture();
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && cat SKILL.md" });
+			const result = await tool.execute("call-skill-cd", {
+				command: "cd skill://docs && cat SKILL.md",
+			});
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.isError).toBeUndefined();
@@ -373,7 +374,11 @@ describe("BashTool skill:// working directory", () => {
 });
 
 describe("BashTool skill:// containment failures", () => {
-	async function containedFixture(): Promise<{ dir: string; outsideFile: string; skill: Skill }> {
+	async function containedFixture(): Promise<{
+		dir: string;
+		outsideFile: string;
+		skill: Skill;
+	}> {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
 		const pluginRoot = path.join(dir, "plugin");
 		const skillDir = path.join(pluginRoot, "skills", "docs");
@@ -400,7 +405,9 @@ describe("BashTool skill:// containment failures", () => {
 		await fs.symlink(outsideFile, path.join(skill.baseDir, "leak.md"));
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-leak", { command: "cat skill://docs/leak.md" });
+			const result = await tool.execute("call-skill-leak", {
+				command: "cat skill://docs/leak.md",
+			});
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.isError).toBe(true);
@@ -425,9 +432,12 @@ describe("BashTool skill:// containment failures", () => {
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
 
-			await expect(tool.execute("call-skill-leak-cwd", { command: "pwd", cwd: "skill://docs" })).rejects.toThrow(
-				"resolves outside the plugin root",
-			);
+			await expect(
+				tool.execute("call-skill-leak-cwd", {
+					command: "pwd",
+					cwd: "skill://docs",
+				}),
+			).rejects.toThrow("resolves outside the plugin root");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}

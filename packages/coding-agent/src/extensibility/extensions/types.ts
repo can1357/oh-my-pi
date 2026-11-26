@@ -8,29 +8,36 @@
  * - Interact with the user via UI primitives
  */
 
-import {
-	type ExtensionUiComponent,
-	type ExtensionUiComponentFactory,
-	type ExtensionWidgetContent,
-	type MessageRenderer,
-	type AssistantThinkingRenderer,
-	type AssistantTextRenderer,
-	type TranscriptPresenter,
-} from "@oh-my-pi/pi-tui/chat/extension-types";
+import type {
+	AssistantTextRenderer,
+	AssistantThinkingRenderer,
+	ExtensionRender,
+	ExtensionTheme,
+	ExtensionUiFactory,
+	ExtensionUiHost,
+	ExtensionWidgetContent,
+	MessageRenderer,
+	TranscriptPresenter,
+} from "./render-types";
+export type {
+	AssistantThinkingRenderer,
+	ExtensionRender,
+	ExtensionRows,
+	ExtensionTheme,
+	ExtensionUiFactory,
+	ExtensionUiHost,
+	ExtensionWidgetContent,
+	MessageRenderer,
+} from "./render-types";
 export {
-	type ExtensionUiComponent,
-	type ExtensionUiComponentFactory,
-	type ExtensionWidgetContent,
 	type MessageRenderOptions,
-	type MessageRenderer,
 	type AssistantThinkingRenderContext,
-	type AssistantThinkingRenderer,
 	type AssistantTextRenderContext,
 	type AssistantTextRenderer,
 	type TranscriptBlock,
 	type TranscriptPresentation,
 	type TranscriptPresenter,
-} from "@oh-my-pi/pi-tui/chat/extension-types";
+} from "./render-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
@@ -43,10 +50,10 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
-import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ContextUsage } from "../../modes/view-model/status-line/types";
+import type { LoopConditionConfig } from "../../modes/view-model/status-line/loop";
+import type { LivePhase } from "../../modes/view-model/apps/live-visualizer";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
 import type {
 	Api,
 	AssistantMessage,
@@ -67,24 +74,25 @@ import type {
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
-import type {
-	AutocompleteItem,
-	AutocompleteProvider,
-	Component,
-	EditorTheme,
-	Keybinding,
-	KeyId,
-	OverlayHandle,
-	OverlayOptions,
-	TUI,
-} from "@oh-my-pi/pi-tui";
+import type { KeyEvent } from "@oh-my-pi/pi-tui";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import type { Keybinding } from "../../config/keybindings/app-keybindings";
+import type { AutocompleteItem, AutocompleteProvider } from "../../autocomplete/autocomplete";
+import type { KeyId } from "../../config/keybindings/key-id";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
-export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import type { ModelRegistry } from "../../config/model-registry";
-import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
+import type { KeybindingsManager } from "../../config/keybindings/keybindings";
+import type { ComposerDecorator, SubmitTransform } from "../../ui/composer/composer";
+import type { ComposerShape } from "../../ui/styles/composer/shapes";
+import type { CodeReviewAnnotation, TextReviewAnnotation } from "../custom-commands/bundled/annotate/annotation-types";
+export type { ComposerDecoration, ComposerDecorator, SubmitTransform } from "../../ui/composer/composer";
+export type {
+	ComposerChromeContext,
+	ComposerRowContext,
+	ComposerRowRender,
+	ComposerShape,
+} from "../../ui/styles/composer/shapes";
+import type { ModelRegistry, ProviderConfigInput } from "../../config/model-registry";
+import type { EditToolDetails } from "../../tools/details/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { LiveTranscript } from "../../live/controller";
@@ -93,20 +101,18 @@ import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
-import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
 import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
-import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
-import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { GlobToolDetails } from "../../tools/details/glob";
+import type { GrepToolDetails } from "../../tools/details/grep";
+import type { ReadToolDetails } from "../../tools/details/read";
+import type { TodoPhase } from "../../tools/details/todo";
 import type { ApprovalMode } from "../../tools/approval";
-import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
+import type { BashToolDetails } from "../../tools/details/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
@@ -154,8 +160,9 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
 
-export type { Keybinding, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
-export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+export type { Theme };
+export type { KeybindingsManager } from "../../config/keybindings/keybindings";
+export type { AppKeybinding, Keybinding } from "../../config/keybindings/app-keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
 
@@ -174,7 +181,7 @@ import type {
 	ExtensionAskDialogQuestion,
 	ExtensionAskDialogResult,
 	ExtensionAskDialogSubmitResult,
-} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+} from "../../modes/view-model/overlays/ask-dialog";
 export type {
 	ExtensionAskDialogOption,
 	ExtensionAskDialogQuestion,
@@ -182,10 +189,10 @@ export type {
 	ExtensionAskDialogSubmitResult,
 	ExtensionAskDialogChatResult,
 	ExtensionAskDialogResult,
-} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+} from "../../modes/view-model/overlays/ask-dialog";
 
-import type { HtmlFormData, OptionNote } from "@oh-my-pi/pi-tui/html-form/data";
-export type { HtmlFormData, HtmlFormValue, OptionNote } from "@oh-my-pi/pi-tui/html-form/data";
+import type { HtmlFormData, OptionNote } from "../../tools/html-form/data";
+export type { HtmlFormData, HtmlFormValue, OptionNote } from "../../tools/html-form/data";
 
 /** A submitted {@link ExtensionUIContext.formDialog}: form values and optional notes on selected options. */
 export interface ExtensionFormDialogResult {
@@ -236,6 +243,11 @@ export interface ExtensionUIDialogOptions {
 	/** Invoked when user input resets a UI-managed timeout countdown */
 	onTimeoutReset?: () => void;
 	/**
+	 * Form dialogs: invoked when `signal` closes the form before a submit (a message the user sent
+	 * instead), with the answers the user changed from the form's defaults and their option notes.
+	 */
+	onAbandon?: (given: ExtensionFormDialogResult) => void;
+	/**
 	 * Host hint to mask entered characters in `input` dialogs.
 	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
 	 * requests for hosts that honor it, and rejected (`undefined`) in ACP mode where
@@ -265,7 +277,7 @@ export interface ExtensionUIDialogOptions {
 	 *  trailing options (e.g. "Other"/"Done" actions) keep the plain cursor.
 	 *  Defaults to all options when `selectionMarker` is set. */
 	markableCount?: number;
-	/** Allow image pastes in rich ask-dialog custom-answer and note prompts. */
+	/** Allow image pastes in rich ask-dialog custom-answer and note prompts, and in `formDialog` option notes. */
 	acceptImages?: boolean;
 }
 
@@ -278,16 +290,52 @@ export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
 }
 
-/** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
+/** An open `ExtensionUIContext.custom()` overlay. */
+export interface ExtensionOverlayHandle {
+	readonly closed: boolean;
+	/** Close the overlay (idempotent); the `custom()` promise stays pending until `done` is called. */
+	close(): void;
+}
+
+/** Options for `ExtensionUIContext.custom()`. */
 export interface ExtensionCustomOptions {
-	/** Render the component as an overlay over the transcript instead of replacing the editor area. */
+	/** Show the view as an overlay over the transcript instead of in place of the editor. */
 	overlay?: boolean;
-	/** Static or lazily resolved overlay positioning/sizing options forwarded to `showOverlay`. */
-	overlayOptions?: OverlayOptions | (() => OverlayOptions);
-	/** Invoked with the overlay handle once the overlay is created (overlay mode only). */
-	onHandle?: (handle: OverlayHandle) => void;
+	/** Take the whole screen (the terminal's alternate screen) while the overlay is open. */
+	fullscreen?: boolean;
+	/** Invoked with the overlay handle once the overlay is open (overlay mode only). */
+	onHandle?: (handle: ExtensionOverlayHandle) => void;
 	/** Abort the custom UI and reject its promise. */
 	signal?: AbortSignal;
+}
+
+/** Builds a `ExtensionUIContext.custom()` view; call `done` to close it and resolve `custom()`. */
+export type ExtensionCustomFactory<T> = (
+	ui: ExtensionUiHost,
+	theme: ExtensionTheme,
+	keybindings: KeybindingsManager,
+	done: (result: T) => void,
+) => ExtensionRender | Promise<ExtensionRender>;
+
+/** A key handler on the built-in composer: true takes the key before the composer's own bindings. */
+export type ExtensionComposerKeyHandler = (key: KeyEvent) => boolean;
+
+/**
+ * Hooks on the built-in composer (the prompt editor). They replace the old custom editor
+ * components: extensions shape, decorate and intercept the one composer instead of replacing it.
+ */
+export interface ExtensionComposerHooks {
+	/** Consult `handler` for every key before the composer's own bindings; returns its removal. */
+	addKeyHandler(handler: ExtensionComposerKeyHandler): () => void;
+	/** Style ranges of the draft (re-run on every edit); returns its removal. */
+	addDecorator(decorator: ComposerDecorator): () => void;
+	/** Rewrite what a submission sends, or cancel it (return `undefined`; the draft stays); `undefined` removes it. */
+	setSubmitTransform(transform: SubmitTransform | undefined): void;
+	/**
+	 * Draw the composer with the shape registered as `id` (`registerComposerShape` or a built-in);
+	 * `undefined` restores the user's configured shape.
+	 */
+	setShape(id: string | undefined, paddingX?: number): void;
 }
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
@@ -332,7 +380,7 @@ export type ExtensionApprovalAnswer =
  */
 // fallow-ignore-next-line code-duplication
 // Parallel to HookUIContext: extensions expose a strictly larger UI surface
-// (custom editor component, header/footer, widgets, theming, terminal input)
+// (composer hooks, header/footer, widgets, theming, terminal input)
 // and may be invoked from event handlers that have already taken the agent
 // loop's lock — hooks intentionally cannot.
 export interface ExtensionUIContext {
@@ -362,7 +410,7 @@ export interface ExtensionUIContext {
 	): Promise<ExtensionAskDialogResult | undefined>;
 
 	/**
-	 * Show an HTML `<form>` (see `@oh-my-pi/pi-tui/html-form/parse`) as an interactive form and
+	 * Show an HTML `<form>` (see `src/tools/html-form/parse.ts`) as an interactive form and
 	 * resolve its data on submit, `undefined` on cancel. With `timeout`, the form's current values
 	 * submit when it elapses (`timedOut: true`); input resets the countdown. Absent on hosts that
 	 * cannot draw a form; callers then fall back to field-by-field `select`/`input`/`editor`.
@@ -418,28 +466,27 @@ export interface ExtensionUIContext {
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 
-	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
+	/**
+	 * Set a widget above or below the editor: lines of text, or a factory returning pi-tui nodes or
+	 * a rows object. Setting a key again replaces that widget; `undefined` removes it.
+	 */
 	setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
 
-	/** Set a custom footer component, or undefined to restore the built-in footer. */
-	setFooter(factory: ExtensionUiComponentFactory | undefined): void;
+	/** Set a custom footer (pi-tui nodes or rows), or undefined to restore the built-in footer. */
+	setFooter(factory: ExtensionUiFactory | undefined): void;
 
-	/** Set a custom header component, or undefined to restore the built-in header. */
-	setHeader(factory: ExtensionUiComponentFactory | undefined): void;
+	/** Set a custom header (pi-tui nodes or rows), or undefined to restore the built-in header. */
+	setHeader(factory: ExtensionUiFactory | undefined): void;
 
 	/** Set the terminal window/tab title. */
 	setTitle(title: string): void;
 
-	/** Show a custom component with keyboard focus. */
-	custom<T>(
-		factory: (
-			tui: TUI,
-			theme: Theme,
-			keybindings: KeybindingsManager,
-			done: (result: T) => void,
-		) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
-		options?: ExtensionCustomOptions,
-	): Promise<T>;
+	/**
+	 * Show a custom view with keyboard focus until `done` is called: pi-tui nodes (one root node,
+	 * which takes focus: handle keys with its `onKey`) or a rows object (keys arrive at its
+	 * `handleInput` as raw input).
+	 */
+	custom<T>(factory: ExtensionCustomFactory<T>, options?: ExtensionCustomOptions): Promise<T>;
 
 	/** Set the text in the core input editor. */
 	setEditorText(text: string): void;
@@ -447,7 +494,7 @@ export interface ExtensionUIContext {
 	/**
 	 * Paste text into the core input editor.
 	 *
-	 * Interactive mode should route through the editor's paste handling (e.g. large paste markers).
+	 * Interactive mode should route through the editor's paste handling (e.g. large pastes collapse into a chip).
 	 * Non-interactive modes may fall back to replacing the editor text.
 	 */
 	pasteToEditor(text: string): void;
@@ -471,28 +518,17 @@ export interface ExtensionUIContext {
 	 */
 	addAutocompleteProvider(factory: AutocompleteProviderFactory): void;
 
-	/**
-	 * Set a custom editor component via factory function, or `undefined` to restore the default editor.
-	 *
-	 * The factory must return a {@link CustomEditor} subclass. Plain `EditorComponent`/`Editor`
-	 * instances do not implement the action-keys, escape callbacks, and custom-key-handler surface
-	 * required by interactive mode.
-	 */
-	setEditorComponent(
-		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
-	): void;
-
-	/** Get the current custom editor factory, if one has been installed. */
-	getEditorComponent(): ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined;
+	/** Hooks on the built-in composer; absent where there is none (RPC, ACP, print mode). */
+	readonly composer?: ExtensionComposerHooks;
 
 	/** Get the current theme for styling. */
-	readonly theme: Theme;
+	readonly theme: ExtensionTheme;
 
 	/** Get all available themes with names and paths. */
 	getAllThemes(): Promise<{ name: string; path: string | undefined }[]>;
 
 	/** Load a theme by name without switching to it. */
-	getTheme(name: string): Promise<Theme | undefined>;
+	getTheme(name: string): Promise<ExtensionTheme | undefined>;
 
 	/** Set the current theme by name or Theme object. */
 	setTheme(theme: string | Theme): Promise<{ success: boolean; error?: string }>;
@@ -510,15 +546,17 @@ export interface ExtensionUIContext {
 
 export type { ContextUsage };
 
+/** One invocation's history-rewrite options and lifecycle callbacks. */
 export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
 	/**
 	 * Force a one-off compaction mode for this invocation, replacing the
-	 * configured `compaction.methodOrder` (`/compact soft`, `remote`, or
-	 * `snapcompact`). Omitted = configured preference order.
+	 * configured `compaction.methodOrder`. Omitted = configured preference order.
 	 */
 	mode?: CompactMode;
+	/** Cancel the compaction without interrupting any live turn. */
+	signal?: AbortSignal;
 	/**
 	 * Internal summarizer guidance — piped only to native summarization, never
 	 * exposed as `customInstructions` on the `session_before_compact` extension
@@ -532,7 +570,7 @@ export interface CompactOptions {
 	 */
 	internalGuidance?: string;
 	/**
-	 * A manual compaction aborts any turn in flight and, once the summary is
+	 * A foreground compaction aborts any turn in flight and, once the summary is
 	 * committed (or at once when there was nothing to compact), resumes it with
 	 * the auto-continue nudge. Set this when the caller dispatches its own
 	 * follow-up turn after compaction — plan-mode "Approve and compact context" —
@@ -825,20 +863,22 @@ export interface ExtensionContext {
 	/**
 	 * Answer the open interactive plan review as if the operator picked `choice` in it.
 	 * `refine` needs non-empty `input.feedback`, which is sent as the next planning prompt.
-	 * `save` writes the plan under its default file name without the path prompt.
+	 * `save` writes the plan under its default file name without the path prompt; the review
+	 * stays open and still takes an answer (no `plan_review_resolved`).
 	 * Approvals execute the plan as it is when picked (in-overlay edits, else the plan
 	 * file), which may differ from the `planContent` that `plan_review_requested` reported.
 	 * `input.role` selects an approval's execution tier, matched against `plan_review_requested`'s
 	 * `tiers` by role name; without it the approval runs on the tier selected in the
 	 * overlay's model slider. `role` applies only to approvals (`execute`, `compact`, `keep`).
-	 * False when that review is not open, the choice is disabled or missing its feedback,
-	 * `input.role` names no selectable tier or accompanies a non-approval choice, or the
-	 * mode has no plan review.
+	 * False when that review is not open, the choice is disabled (with `input.role`, on that tier) or
+	 * missing its feedback, `input.role` names no selectable tier or accompanies a non-approval choice,
+	 * or the mode has no plan review.
 	 */
 	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
 	/**
-	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it,
-	 * or `undefined`. Lets an extension that loaded or reconnected after the event answer the review.
+	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it
+	 * with `options` re-measured for the currently selected tier, or `undefined`. Lets an extension that
+	 * loaded or reconnected after the event answer the review.
 	 */
 	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
 	/**
@@ -1069,31 +1109,27 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
 
 	/**
-	 * Custom rendering for tool call display.
+	 * Custom rendering for tool call display: pi-tui nodes (drawn in the terminal and in Tern) or a
+	 * rows object (drawn in the terminal; Tern shows the generic tool card). `undefined` draws
+	 * nothing for the call; a throw is reported and the generic card shows.
 	 *
 	 * At runtime `options` also answers the {@link Theme} API, so renderers
 	 * ported from upstream pi — declared `renderCall(args, theme, context)` —
 	 * keep styling correctly.
 	 */
-	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
+	renderCall?: (
+		args: Static<TParams>,
+		options: ToolRenderResultOptions,
+		theme: ExtensionTheme,
+	) => ExtensionRender | undefined;
 
-	/** Custom rendering for tool result display */
+	/** Custom rendering for tool result display; same contract as {@link renderCall}. */
 	renderResult?: (
 		result: AgentToolResult<TDetails>,
 		options: ToolRenderResultOptions,
-		theme: Theme,
+		theme: ExtensionTheme,
 		args?: Static<TParams>,
-	) => Component;
-
-	/** Semantic call view for TSP terminals (the native counterpart of {@link renderCall}). */
-	describeCall?: (args: Static<TParams>, options: ToolRenderResultOptions) => NativeToolView | undefined;
-
-	/** Semantic result view for TSP terminals (the native counterpart of {@link renderResult}). */
-	describeResult?: (
-		result: AgentToolResult<TDetails>,
-		options: ToolRenderResultOptions,
-		args?: Static<TParams>,
-	) => NativeToolView | undefined;
+	) => ExtensionRender | undefined;
 }
 
 /** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */
@@ -1190,7 +1226,9 @@ export type {
 	CacheWarmingAction,
 	CacheWarmingDecision,
 	CacheWarmingMode,
+	CacheWarmingRentMethod,
 	CacheWarmingStatus,
+	CacheWarmingStrategy,
 } from "../../session/cache-warmer";
 
 /** Fired before a provider request is sent. Can replace the payload. */
@@ -1451,7 +1489,10 @@ export interface ToolApprovalResolvedEvent {
 
 /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
-/** A choice as displayed in the interactive plan review, delivered in display order by `plan_review_requested`. */
+/**
+ * A choice of the interactive plan review, delivered in order by `plan_review_requested`. The overlay
+ * shows `refine` only while the plan has comments; it is always answerable with feedback.
+ */
 export interface PlanReviewOption {
 	id: PlanReviewChoice;
 	label: string;
@@ -1478,6 +1519,7 @@ export interface PlanReviewRequestedEvent {
 	title: string;
 	planFilePath: string;
 	planContent: string;
+	/** Availability for the tier selected when the review opened: `keep` is measured against that tier's context window. */
 	options: PlanReviewOption[];
 	/** Execution tiers in slider order (not selection order); omitted when fewer than two resolve. */
 	tiers?: PlanReviewTier[];
@@ -1545,9 +1587,14 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
-interface ToolCallEventBase {
-	type: "tool_call";
+interface ToolEventIdentity {
 	toolCallId: string;
+	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
+	parentToolCallId?: string;
+}
+
+interface ToolCallEventBase extends ToolEventIdentity {
+	type: "tool_call";
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -1595,9 +1642,8 @@ export type ToolCallEvent =
 	| GlobToolCallEvent
 	| CustomToolCallEvent;
 
-interface ToolResultEventBase {
+interface ToolResultEventBase extends ToolEventIdentity {
 	type: "tool_result";
-	toolCallId: string;
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
@@ -1820,6 +1866,33 @@ export interface RegisteredCommand {
 	description?: string;
 	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+}
+
+/**
+ * A todo backend registered with `pi.registerTodoBackend()`. omp keeps the todo list; the backend
+ * the `todo.backend` setting selects is told about every change to it.
+ */
+export interface TodoBackendDefinition {
+	/** `todo.backend` value that selects this backend: letters, digits, `.`, `_` and `-`. `native` is reserved. */
+	id: string;
+	/** Name shown for the backend in Settings; the id when omitted. */
+	label?: string;
+	/** One line shown beside the label in Settings. */
+	description?: string;
+	/**
+	 * Called in the main session with the whole todo list after omp committed a change to it:
+	 * a `todo` call, a `/todo` edit, RPC `set_todos`, `/new`, or a resume, rewind, branch, fork or
+	 * move to another session file that left another list or session id. An empty list is sent
+	 * only once omp has called a todo backend for this session; `/new`, a resume, a branch and a
+	 * fork carry that over. Tasks carry `content` and `status` only.
+	 * A backend the user picks in Settings is sent the current list then, without a change.
+	 * One call runs at a time, and lists that change meanwhile collapse into the newest. A throw,
+	 * or no answer within the extension handler timeout, is reported as an extension error and
+	 * leaves omp's list as it is; the next change sends the whole list again, even while a call
+	 * omp gave up on is still running. A call still running when the session is disposed is given
+	 * up after the `session_shutdown` handler timeout, without an error.
+	 */
+	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
 }
 
 // ============================================================================
@@ -2123,12 +2196,22 @@ export interface ExtensionAPI {
 	registerLinkScheme(scheme: string): void;
 
 	/**
-	 * Register a composer shape for the interactive editor.
+	 * Register a composer shape for the interactive editor: the chrome drawn around the
+	 * composer's text rows (see {@link ComposerShape}). It joins the shape picker under its
+	 * `label` and can be selected with `ctx.ui.composer.setShape(id)`.
 	 *
 	 * Registration happens during extension load. Built-in ids cannot be
 	 * replaced; when extensions reuse an id, the later extension wins.
 	 */
-	registerComposerShape(definition: ComposerShapeDefinition): void;
+	registerComposerShape(shape: ComposerShape & { readonly label: string }): void;
+
+	/**
+	 * Register a todo backend the user can select with the `todo.backend` setting. Throws for a
+	 * malformed id, for `native` and for a missing `replace`; an id this extension registered
+	 * before gets the new definition. When several extensions register an id, the first one loaded
+	 * keeps it; once that id is selected, the others are reported as extension errors.
+	 */
+	registerTodoBackend(definition: TodoBackendDefinition): void;
 
 	// =========================================================================
 	// Actions
@@ -2216,6 +2299,14 @@ export interface ExtensionAPI {
 	 * If `models` is provided: replaces all existing models for this provider.
 	 * If only `baseUrl` is provided: overrides the URL for existing models.
 	 * If `streamSimple` is provided: registers a custom API stream handler.
+	 * If `stream`/`generateImage`/`webSearch`/`rules` are provided: takes over those parts of the provider.
+	 *
+	 * @example
+	 * // Own an existing provider's wire requests and flip a KDL rule for its models
+	 * pi.registerProvider("google-generative-ai", {
+	 *   stream: myGeminiStream,
+	 *   rules: { "prompt-perturbation": true },
+	 * });
 	 *
 	 * @example
 	 * // Register a new provider with custom models and streaming
@@ -2261,8 +2352,18 @@ export interface ExtensionAPI {
 // Provider Registration Types
 // ============================================================================
 
-/** Configuration for registering a provider via pi.registerProvider(). */
-export interface ProviderConfig {
+/**
+ * Configuration for registering a provider via pi.registerProvider().
+ *
+ * `stream`, `generateImage`, `webSearch`, `discoverModels`, and `rules` take
+ * over a built-in provider without redefining its models: they replace its
+ * request adapter, image generation, grounded web search request, and roster
+ * fetch, and set KDL rule directives for its models. Removed again when the extension unloads.
+ */
+export interface ProviderConfig extends Pick<
+	ProviderConfigInput,
+	"stream" | "generateImage" | "webSearch" | "discoverModels" | "rules"
+> {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/**
@@ -2321,18 +2422,22 @@ export interface ProviderModelConfig {
 	 * Must be a kind the api serves, as in `models.yml`.
 	 */
 	kind?: Model["kind"];
-	/** Whether the model supports extended thinking at all. */
-	reasoning: boolean;
+	/** Reviewed thinking capability; omitted when request-time discovery should determine support. */
+	reasoning?: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */
 	thinking?: Model["thinking"];
 	/** Supported input types. */
 	input: ("text" | "image")[];
+	/** Snapcompact frame shape for this model, replacing the model line's default (see `Model.snapcompactShape`). */
+	snapcompactShape?: Model["snapcompactShape"];
 	/** Cost per million tokens. */
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** Premium Copilot requests charged per user-initiated request. */
 	premiumMultiplier?: number;
 	/** Maximum context window size in tokens. */
 	contextWindow: number;
+	/** Optional larger window selected by the extended-context policy. */
+	maxContextWindow?: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
 	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
@@ -2515,7 +2620,9 @@ export interface Extension {
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
-	composerShapes: Map<string, ComposerShapeDefinition>;
+	composerShapes: Map<string, ComposerShape>;
+	/** Backends registered with `registerTodoBackend`, by id; absent until the first one. */
+	todoBackends?: Map<string, TodoBackendDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

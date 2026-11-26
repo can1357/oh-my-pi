@@ -1,20 +1,19 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
 	ExtensionActions,
 	ExtensionCommandContextActions,
 	ExtensionContextActions,
+	ExtensionRunner,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import type { CustomMessageEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { Container } from "@oh-my-pi/pi-tui";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 
 /**
  * Issue #1955: `sendMessage` with `display: true` renders twice during
@@ -23,19 +22,17 @@ import { Container } from "@oh-my-pi/pi-tui";
  * Repro:
  * - Extension calls `pi.sendMessage({ display: true, ... })` from a
  *   `session_start` handler while the session is idle.
- * - `ExtensionUiController.#applyCustomMessageDisplay` rebuilds the chat from
- *   the freshly-persisted session entry, so the chat container ends up holding
- *   one custom-message component.
+ * - `ExtensionUiController.#applyCustomMessageDisplay` rebuilds the transcript
+ *   from the freshly-persisted session entry, so it ends up holding one
+ *   custom-message block.
  * - `main.ts` then calls `mode.renderInitialMessages({ preserveExistingChat: true })`,
- *   which snapshots the chat children, clears, re-renders from session entries
- *   (adding the same custom message again), and re-appends the snapshot —
- *   leaving two identical custom-message components in the chat.
+ *   which re-renders from session entries (adding the same custom message
+ *   again) while preserving the existing blocks — leaving two identical
+ *   custom-message blocks.
  */
 beforeAll(async () => {
 	// renderInitialMessages reads the global Settings (display.collapseCompacted).
 	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
-	await initTheme();
 	await Settings.init({ inMemory: true });
 });
 
@@ -47,29 +44,15 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function makeCustomEntry(id: number, text: string, parentId: string | null): CustomMessageEntry {
-	return {
-		type: "custom_message",
-		customType: "issue-1955-probe",
-		content: [{ type: "text", text }],
-		display: true,
-		attribution: "agent",
-		id: `entry-${id}`,
-		parentId,
-		timestamp: new Date(2026, 5, 5, 0, 0, id).toISOString(),
-	};
-}
-
 interface Harness {
 	ctx: InteractiveModeContext;
 	helpers: UiHelpers;
-	entries: SessionEntry[];
 	controller: ExtensionUiController;
+	sessionManager: SessionManager;
 	getActions: () => ExtensionActions | undefined;
 }
 
 function createHarness(): Harness {
-	const entries: SessionEntry[] = [];
 	let capturedActions: ExtensionActions | undefined;
 	const fakeRunner = {
 		initialize: (
@@ -88,109 +71,71 @@ function createHarness(): Harness {
 		getComposerShapes: () => [],
 	};
 
+	const sessionManager = SessionManager.inMemory();
 	const messages: AgentMessage[] = [];
-	const sessionMock = {
-		isStreaming: false,
-		messages,
-		extensionRunner: fakeRunner,
-		/**
-		 * Mirror `AgentSession.sendCustomMessage` non-streaming
-		 * `deliverAs: "nextTurn"` / no-trigger path: persist the message as a
-		 * `custom_message` session entry and append it to the session messages
-		 * (silently — no event, no render).
-		 */
-		sendCustomMessage: async (msg: {
-			customType: string;
-			content: string | (TextContent | ImageContent)[];
-			display?: boolean;
-			details?: unknown;
-			attribution?: string;
-		}) => {
-			const parent = entries.length === 0 ? null : entries[entries.length - 1].id;
-			entries.push(makeCustomEntry(entries.length + 1, extractText(msg.content), parent));
-			messages.push({
-				role: "custom",
-				customType: msg.customType,
-				content: msg.content,
-				display: msg.display ?? false,
-				attribution: "agent",
-				timestamp: Date.now(),
-			});
-		},
-	};
-
-	const ctx = {
-		chatContainer: new Container(),
-		pendingShellContainer: new Container(),
-		pendingMessagesContainer: new Container(),
-		updatePendingMessagesDisplay: vi.fn(),
-		pendingBashComponents: [],
-		pendingPythonComponents: [],
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		ui: { requestRender: vi.fn() },
-		resetTranscript: () => ctx.chatContainer.clear(),
-		isBackgrounded: false,
+	const ctx = createInteractiveModeContext({
+		sessionManager,
 		initialChatRendered: false,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorBorderColor: vi.fn(),
-		settings: { get: () => false },
-		session: sessionMock,
-		viewSession: {
-			buildTranscriptSessionContext: () => buildSessionContext(entries),
-			sessionManager: { getEntries: () => entries, getConversationTip: () => undefined },
-		},
-		focusedAgentId: undefined,
-		sessionManager: {
-			buildSessionContext: () => buildSessionContext(entries),
-			getEntries: () => entries,
-		},
 		setToolUIContext: vi.fn(),
-		setEditorComponent: vi.fn(),
-		setWorkingMessage: vi.fn(),
-		setToolsExpanded: vi.fn(),
-		toolOutputExpanded: false,
-		syncComposerShape: vi.fn(),
-		syncExtensionLinks: vi.fn(),
-		hideThinkingBlock: false,
-		showError: vi.fn(),
-		editor: {
-			setText: vi.fn(),
-			handleInput: vi.fn(),
-			getText: () => "",
+		session: {
+			messages,
+			extensionRunner: fakeRunner as unknown as ExtensionRunner,
+			buildTranscriptSessionContext: () => sessionManager.buildSessionContext(),
+			/**
+			 * Mirror `AgentSession.sendCustomMessage` non-streaming
+			 * `deliverAs: "nextTurn"` / no-trigger path: persist the message as a
+			 * `custom_message` session entry and append it to the session messages
+			 * (silently — no event, no render), reporting it delivered.
+			 */
+			sendCustomMessage: async payload => {
+				const msg = normalizeCustomMessagePayload(payload);
+				sessionManager.appendCustomMessageEntry(msg.customType, msg.content, msg.display, undefined, "agent");
+				messages.push({
+					role: "custom",
+					customType: msg.customType,
+					content: msg.content,
+					display: msg.display,
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
+				return true;
+			},
 		},
-		renderSessionContext: (context: SessionContext, options?: RenderSessionContextOptions) =>
-			helpers.renderSessionContext(context, options),
-		renderSessionContextIncrementally: (
-			context: SessionContext,
-			options: RenderSessionContextOptions,
-			renderChunk?: () => void,
-		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
-		addMessageToChat: (m: AgentMessage) => helpers.addMessageToChat(m),
-		rebuildChatFromMessages: () => {
-			ctx.chatContainer.clear();
-			helpers.renderSessionContext(buildSessionContext(entries));
-		},
-	} as unknown as InteractiveModeContext;
+	});
 	const helpers = new UiHelpers(ctx);
-
-	const controller = new ExtensionUiController(ctx);
+	ctx.renderSessionContext = (context, options) => helpers.renderSessionContext(context, options);
+	ctx.renderSessionContextIncrementally = (context, options, renderChunk) =>
+		helpers.renderSessionContextIncrementally(context, options, renderChunk);
+	ctx.addMessageToChat = message => helpers.addMessageToChat(message);
+	ctx.rebuildChatFromMessages = () => {
+		ctx.shell.transcript.clear();
+		helpers.renderSessionContext(sessionManager.buildSessionContext());
+	};
 
 	return {
 		ctx,
 		helpers,
-		entries,
-		controller,
+		controller: new ExtensionUiController(ctx),
+		sessionManager,
 		getActions: () => capturedActions,
 	};
 }
 
-function extractText(content: string | (TextContent | ImageContent)[]): string {
-	if (typeof content === "string") return content;
-	for (const part of content) {
-		if (part.type === "text") return part.text;
+function seed(harness: Harness, prefix: string, count: number): void {
+	for (let index = 0; index < count; index++) {
+		harness.sessionManager.appendCustomMessageEntry(
+			"issue-1955-probe",
+			[{ type: "text", text: `${prefix}_${index}_END` }],
+			true,
+			undefined,
+			"agent",
+		);
 	}
-	return "";
+}
+
+/** Let the `.then(applyCustomMessageDisplay)` chain queued by `actions.sendMessage` run. */
+async function drainMicrotasks(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -228,13 +173,13 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 
 		// Drain the `.then(applyCustomMessageDisplay)` microtask chain queued by
 		// `actions.sendMessage` before the host's renderInitialMessages fires.
-		await Bun.sleep(0);
+		await drainMicrotasks();
 
 		// Mirror main.ts: after `mode.init()` returns, the host renders the
 		// initial transcript while preserving anything previously added to chat.
 		await harness.helpers.renderInitialMessages({ preserveExistingChat: true });
 
-		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
+		const rendered = renderTranscript(harness.ctx).join("\n");
 		const occurrences = countOccurrences(rendered, marker);
 		expect(occurrences).toBe(1);
 	});
@@ -258,9 +203,9 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 			},
 			{ deliverAs: "nextTurn" },
 		);
-		await Bun.sleep(0);
+		await drainMicrotasks();
 
-		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
+		const rendered = renderTranscript(harness.ctx).join("\n");
 		expect(countOccurrences(rendered, marker)).toBe(1);
 	});
 
@@ -268,11 +213,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 		const initialMarker = "INITIAL_ENTRY_127_END";
 		const lateMarker = "LATE_EXTENSION_MESSAGE_END";
 		const harness = createHarness();
-		for (let index = 0; index < 128; index++) {
-			harness.entries.push(
-				makeCustomEntry(index + 1, `INITIAL_ENTRY_${index}_END`, index === 0 ? null : `entry-${index}`),
-			);
-		}
+		seed(harness, "INITIAL_ENTRY", 128);
 		await harness.controller.initHooksAndCustomTools();
 		const actions = harness.getActions();
 		expect(actions).toBeDefined();
@@ -293,7 +234,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 		);
 		await initialReplay;
 
-		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
+		const rendered = renderTranscript(harness.ctx).join("\n");
 		expect(countOccurrences(rendered, initialMarker)).toBe(1);
 		expect(countOccurrences(rendered, lateMarker)).toBe(1);
 		expect(rendered.indexOf(initialMarker)).toBeLessThan(rendered.indexOf(lateMarker));
@@ -303,17 +244,15 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 		const existingMarker = "EXISTING_ENTRY_127_END";
 		const lateMarker = "LATE_DURING_REPLAY_END";
 		const harness = createHarness();
-		for (let index = 0; index < 128; index++) {
-			harness.entries.push(
-				makeCustomEntry(index + 1, `EXISTING_ENTRY_${index}_END`, index === 0 ? null : `entry-${index}`),
-			);
-		}
+		seed(harness, "EXISTING_ENTRY", 128);
 		await harness.controller.initHooksAndCustomTools();
 		await harness.helpers.renderInitialMessages({ clearTerminalHistory: true });
 		const actions = harness.getActions();
 		expect(actions).toBeDefined();
 
-		const replay = harness.helpers.renderInitialMessages({ clearTerminalHistory: true });
+		const replay = harness.helpers.renderInitialMessages({
+			clearTerminalHistory: true,
+		});
 		expect(harness.ctx.initialChatRendered).toBe(false);
 		actions!.sendMessage(
 			{
@@ -326,7 +265,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 		);
 		await replay;
 
-		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
+		const rendered = renderTranscript(harness.ctx).join("\n");
 		expect(countOccurrences(rendered, existingMarker)).toBe(1);
 		expect(countOccurrences(rendered, lateMarker)).toBe(1);
 		expect(rendered.indexOf(existingMarker)).toBeLessThan(rendered.indexOf(lateMarker));

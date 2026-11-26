@@ -4,12 +4,13 @@
  * worth describing (and for a caption of a command that needs explaining),
  * and pushes refreshed views to subscribers while jobs run.
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../tools/details/job-widget";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async/job-manager";
 import type { JobWidgetAuthor, JobWidgetAuthorRequest } from "./author";
 import { type JobCaptionWriter, needsJobCaption, normalizeJobCaption } from "./caption";
 import { JobWidgetRuntime, sampleLines } from "./runtime";
+import { jobDisplayLabel } from "../async/job-label";
 import { type JobWidgetSpec, jobWidgetSkip, validateJobWidgetSpec } from "./spec";
 import type { JobWidgetBrief, JobWidgetRegistry } from "./types";
 
@@ -146,7 +147,7 @@ export class JobWidgets implements JobWidgetRegistry {
 		const entry: WidgetEntry = {
 			job,
 			runtime,
-			view: runtime.view({ label: job.intent ?? job.label, authoring: false }),
+			view: runtime.view({ label: jobDisplayLabel(job), authoring: false }),
 			viewKey: "",
 			lastIngestAt: Number.NEGATIVE_INFINITY,
 			shown: false,
@@ -223,7 +224,7 @@ export class JobWidgets implements JobWidgetRegistry {
 
 	#recompute(entry: WidgetEntry, brief: JobWidgetBrief): boolean {
 		const view = entry.runtime.view({
-			label: entry.job.intent ?? entry.job.label,
+			label: jobDisplayLabel(entry.job),
 			stage: brief.stage,
 			// A subagent's tool results are file contents and search hits; only a command's newest line says what it does.
 			lineStage: brief.kind === "bash",

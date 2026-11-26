@@ -5,7 +5,10 @@
 	"private": true,
 	"description": "Chrome extension that lets the omp browser tool drive your existing tabs (relay server lives in the omp CLI: `omp browser-relay`)",
 	"homepage": "https://omp.sh",
-	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
 	"license": "MIT",
 	"repository": {
 		"type": "git",
@@ -14,14 +17,28 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build-extension.ts",
+		"gen:embedded": "bun scripts/build-extension.ts --embedded",
+		"test": "bun test",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
 		"check:types": "bun check --no-script -p tsconfig.json",
 		"lint": "oxlint .",
 		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",
 		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
 	},
+	"dependencies": {
+		"@oh-my-pi/collab-web": "workspace:*",
+		"@oh-my-pi/pi-utils": "catalog:",
+		"@oh-my-pi/pi-wire": "catalog:",
+		"gifenc": "1.0.3",
+		"lucide-react": "catalog:",
+		"react": "catalog:",
+		"react-dom": "catalog:"
+	},
 	"devDependencies": {
 		"@types/bun": "catalog:",
+		"@types/chrome": "0.3.7",
+		"@types/react": "catalog:",
+		"@types/react-dom": "catalog:",
 		"puppeteer-core": "catalog:"
 	},
 	"engines": {

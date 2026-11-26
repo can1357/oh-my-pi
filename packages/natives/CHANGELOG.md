@@ -2,6 +2,202 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline rendering or `Reader` for URL reads; interactive terminal browsing is no longer provided.
+
+### Added
+
+- Added `renderHtml` for Markdown and plain-text rendering. Both `renderHtml` and `Reader` default to reader content selection (`mode: "auto"`), support `mode: "full"` to keep all visible content, and share hidden-content options.
+- Added `Reader` for step-by-step URL reading with host-provided HTTP and browser I/O.
+
+### Fixed
+
+- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
+- Preserved source-code indentation and linked content cards in URL reads.
+
+- The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Shell.heldProcesses()` to inspect all live external processes held by a shell session, including background and `nohup` jobs, with their `nohup` status.
+- Added process utilities for finding processes by inherited environment variables, inspecting process details and output files, and terminating process families while preserving `nohup` processes when requested.
+- Added an in-process Perl 5.34 shell builtin with core language and regex support, common command-line options and modules, and shell-integrated file and command I/O, including support for `scheme://` paths and other shell builtins.
+
+### Fixed
+
+- Fixed timed-out, cancelled, or terminated shell and PTY commands leaving descendant processes running, including descendants in separate process groups or sessions.
+- Fixed cancelled filesystem searches continuing in the background and consuming CPU or blocking subsequent filesystem operations when multiple searches ran concurrently.
+
+## [19.2.0] - 2026-11-25
+
+### Breaking Changes
+
+- Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.
+
+### Added
+
+- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)` for detecting file metadata changes, including atomic saves and symlink retargets.
+- Added `truncateToTokens(input, maxTokens)` for safely truncating text to a token budget without splitting UTF-16 surrogate pairs.
+- Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
+- Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
+- Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
+
+### Changed
+
+- OAuth callback handling now polls for callbacks at regular intervals instead of relying on directory watching.
+- Improved `tail -f` reliability for moved files, symlinks, network drives, and file-watcher failures by combining event-driven updates with polling fallback.
+- Persistent shell sessions no longer carry `set -e` into subsequent commands; other shell options continue to persist.
+- `ShellRunResult` now reports whether a command changed the working directory (`movedCwd`) or left errexit enabled (`errexit`).
+
+### Fixed
+
+- Fixed PTY sessions and child-process cleanup consuming native blocking-pool threads, which could prevent new terminals and other blocking operations from starting after enough terminals were open.
+- Fixed the Linux shell `open` command creating an excessive D-Bus thread pool on first use.
+- Fixed Windows Chromium and Electron captures and accessibility trees incorrectly reporting fully covered windows as current when covered by popup, tool, or click-through windows.
+- Fixed standalone binaries failing to start when the natives directory was read-only or owned by another user despite already containing the extracted addon.
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Fixed `grep()`, `glob()`, `fuzzyFind()`, `astGrep()`, `astEdit()`, and recursive shell search commands occasionally hanging on machines with many CPUs.
+- Fixed cancellation and timeout races in native search, file-matching, fuzzy-search, AST, and editing operations that could cause crashes or use-after-free errors.
+- Fixed `grep()` with a match limit reporting incomplete results instead of rejecting when its directory walk failed.
+- Fixed `@oh-my-pi/pi-natives` failing to load when installed from Bun's cache or when standalone binaries had extracted native addons from another build.
+- Fixed Linux Wayland accessibility and automation support for GTK dialogs, control values, and selected rows, list items, and tabs.
+- Fixed Linux PTY output occasionally including an extra blank line after a command exits.
+- Fixed keypad navigation keys being dropped when NumLock is off under the kitty keyboard protocol.
+- Fixed Wayland screenshots incorrectly timing out while waiting for the screen-share picker.
+- Improved Windows accessibility action reliability by reporting uncertain dispatches accurately and preventing actions from being sent after their reply wait has expired.
+- Fixed Windows automation of classic Win32 and WinForms buttons and checkboxes incorrectly activating the application or reporting success without performing the click.
+- Fixed macOS computer-control takeover restoration so the previously active window is restored correctly after automation ends, with failures reported when restoration cannot be confirmed.
+- Fixed macOS background keyboard and scroll events, including events sent through iPhone Mirroring, being lost or unexpectedly activating another window.
+- Fixed X11 typing of non-Latin and other characters outside the active keyboard layout.
+- Binary patches now refuse to apply when the target file does not match the version the patch was created from, preventing accidental replacement of changed files.
+- On Windows, aborting or timing out an in-process utility blocked on an open empty stdin pipe now terminates it without waiting for the pipe writer.
+
+### Removed
+
+- Removed the startup warning shown when a source checkout loads a native addon from another release; incompatible addons still produce an actionable error when a required symbol is unavailable.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
+
+### Fixed
+
+- Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
+- Fixed the native addon failing to load when `HOME`, `PI_NATIVES_DIR`, or the installation path contains `?`.
+- `commitCreate()` now reports a `HeadMoved` error when `HEAD` changes after the expected-HEAD check, including changes made by a `commit-msg` hook.
+- Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
+- Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
+- Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
+
+## [19.0.1] - 2026-11-19
+
+### Fixed
+
+- Fixed omp freezing for seconds to minutes on WSL2 while saving sessions: Linux `FileLock` now locks a sidecar file instead of binding a socket, which takes about 10 ms per call there. Older omp versions still running do not see these locks, so restart them after updating ([#19704](https://github.com/can1357/oh-my-pi/pull/19704) by [@turgaybulut](https://github.com/turgaybulut))
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added `VcsGitRepo.worktreeToGit()` to convert worktree content into the blob representation produced by `git add`.
+- Added support for using a `Shell` as a process's shell, routing commands through the process's standard streams while preserving the process session and terminal for external commands.
+- Added `ShellRunOptions.speech` to connect the host speech handler to the shell's `say` command.
+- Added an in-process `file` shell builtin with broad file-type detection, MIME and encoding output, archive/image/document support, and compatibility with the commonly used `file` command options.
+
+### Changed
+
+- Improved typing and key-press responsiveness in iPhone Mirroring, reducing per-character latency by approximately half.
+
+### Fixed
+
+- Fixed screenshots of partially off-screen Linux windows on Wayland and X11 so the visible region is captured and coordinate-based zoom targets correctly.
+- Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
+- Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
+- Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write
+- Added `isolateThreadStartsFromConsole()`, which keeps a Windows console whose terminal stopped reading from blocking new threads in the process
+
+## [18.22.1] - 2026-11-17
+
+### Added
+
+- Added `DesktopFocusReturn.keyboard`, which reports what happened to the user's keyboard after a macOS takeover: handed back, left as chosen, kept, brought to the front only, or not sent.
+- Added `desktopWindowRoster()` to enumerate all on-screen macOS windows, including popups, pickers, and system prompts, with their owners, layers, and visibility to `listWindows`.
+- Added sparse-checkout-aware Git tree operations so selective commits preserve files outside the sparse cone and collapsed sparse-directory entries.
+
+### Changed
+
+- macOS scrolling now matches Windows and Linux: positive `dy` scrolls down and positive `dx` scrolls right.
+- `InputBusy` now identifies the agent and omp process holding input or focus control when that information is available.
+- Wayland text input now supports characters unavailable through the active keyboard layout, including accented characters, CJK text, and emoji, on compositors providing libei text support.
+- Improved Linux accessibility performance and scalability for large GTK, Qt, and other applications, including faster element lookups and bounded tree reads for very large tables and lists.
+- Tree listings now expose gitlink modes so selective commits can distinguish submodule pointers from ordinary files.
+
+### Fixed
+
+- Fixed macOS and Windows focus restoration after computer takeovers and background input, including cases where the target application brought itself forward; the originating app now becomes active again and focus results are reported accurately.
+- Fixed keyboard input on Windows and X11 when the target uses a different keyboard layout or when Caps Lock, StickyKeys, or another layout is active.
+- Fixed X11 input being delivered to another application's menu, screen lock, or other keyboard grab; input now waits for transient grabs to end or fails without sending keys.
+- Fixed Linux text entry from affecting the user's active field during agent input. Supported GTK and Qt text fields now use safe accessibility-based entry where possible, while unsupported fields continue to use the existing keyboard path.
+- Fixed Linux interactions with combo boxes so unsupported popup-opening actions are refused safely, while supported GTK 3 and Chromium selections can be made without taking over the keyboard.
+- Fixed macOS accessibility labels for SwiftUI toggles, including matching their adjacent labels with `find({ title })`.
+- Fixed macOS element references in refreshed tables, including Activity Monitor, so row actions follow an unchanged row, reject a changed row safely, and provide useful before-and-after details when the row cannot be matched.
+- Fixed macOS clicks and presses being reported as successful when the target was hidden, unavailable, covered by a sheet, or otherwise not clickable.
+- Fixed macOS Chromium `<select>` interactions, including option matching, menu cleanup, and safe handling when the available options are incomplete.
+- Fixed macOS `setValue` for numeric controls such as sliders and steppers, including reporting values that the control clamps or rounds; unsupported but step-able controls now explain how to use their increment and decrement actions.
+- Fixed macOS takeover and background input from sending keys while the user is actively typing or holding input controls; such operations now wait for a safe idle point or fail without sending input.
+- Fixed macOS menu and popup-button interactions from leaving menus open or sending keys into the user's application after background input completes.
+- Fixed macOS background actions from incorrectly stopping when the user's app briefly took the keyboard, and improved target selection after drag-and-drop or remote-control interaction.
+- Fixed Wayland screenshots and screenshot-dependent clicks, drags, and scrolls in released Linux builds. `capabilities()` now reports when capture is unavailable, with an explanatory error when PipeWire is missing.
+- Fixed a Windows native IPC crash that could leave daemon-served tools hanging after another session closed its connection.
+- Fixed `commitCreate()` errors from omitting rejecting `pre-commit` or `commit-msg` hook output; hook output is now included consistently with `git commit`.
+- Fixed Rust block edits anchored on the first attribute or documentation comment so they cover the complete item instead of being treated as single-line edits.
+
+### Removed
+
+- Removed the obsolete `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES` configuration variable.
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- `TtyWriter` now requires a drain threshold and callback and only supports independently reopenable TTYs. Its pending UTF-8 byte bounds are reported conservatively.
+
+### Changed
+
+- Large terminal repaints are handled more efficiently, reducing JavaScript-thread work and releasing oversized buffers after output drains.
+
+### Fixed
+
+- Fixed stalled terminal writers continuing to emit output or leaking file descriptors after shutdown.
+- Fixed terminal output preserving Unicode across chunk boundaries and safely replacing malformed surrogate sequences.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added the `PhononTts` binding for on-device Phonon text-to-speech.
+- Added `Shell.adopt(fork)` to apply variables, functions, aliases, options, and traps from a completed fork back to its parent shell. When both shells set a name, the value from the command that finished last is retained.
+
+### Fixed
+
+- Fixed concurrent `commitCreate()` calls incorrectly overwriting each other’s commit subject and body.
+
 ## [18.20.3] - 2026-11-16
 
 ### Fixed

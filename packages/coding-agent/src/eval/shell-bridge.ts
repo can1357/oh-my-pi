@@ -8,14 +8,22 @@
  * one persistent shell per agent session (separate from the `bash` tool's):
  * variables and functions carry over, but each command starts in the session
  * cwd or its own `cwd`.
+ * The session's tool commands run in it too, each reported as a status event
+ * under its tool name.
  */
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { executeBash } from "../exec/bash-executor";
+import { shellChangeSnapshots } from "../commit/selective/journal";
+import { executeBash, sessionShellEnv } from "../exec/bash-executor";
+import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { cfgBashGitGuard } from "../exec/settings";
+import { sessionResolveContext } from "../internal-urls/context";
+import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
+import { owningSessionId } from "../tools/session-id";
 import { resolveToCwd } from "../tools/path-utils";
+import { sessionShellSpeech } from "../tts/shell-speech";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `sh` helper across both runtimes. */
@@ -27,6 +35,8 @@ const MAX_OUTPUT_CHARS = 16 * 1024 * 1024;
 export interface EvalShellBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
+	/** Enclosing eval call, for the tool commands the command runs. */
+	parentToolCallId?: string;
 	emitStatus?: (event: JsStatusEvent) => void;
 }
 
@@ -57,8 +67,35 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 	const chunks: string[] = [];
 	let length = 0;
 	let truncated = false;
+	const names = toolCommandNames(session);
+	const toolContext = session.getToolContext?.();
+	const commands =
+		names.length === 0
+			? undefined
+			: {
+					names,
+					handler: createToolCommandHandler({
+						session,
+						toolCallId: `sh-${crypto.randomUUID()}`,
+						signal,
+						context: toolContext && {
+							...toolContext,
+							programmatic: true,
+							parentToolCallId: options.parentToolCallId,
+						},
+						onDispatch: dispatch => {
+							options.emitStatus?.({
+								op: dispatch.tool,
+								mode: dispatch.mode,
+								code: dispatch.exitCode,
+								...(dispatch.exitCode === 0 ? {} : { hasError: true }),
+							});
+						},
+					}),
+				};
 	const result = await executeBash(command, {
 		cwd: cwd ? resolveToCwd(cwd, session.cwd) : session.cwd,
+		env: sessionShellEnv({ id: owningSessionId(session), file: session.getSessionFile() }),
 		// 0 disables the executor deadline: the cell's own deadline governs.
 		timeout: timeout === undefined ? 0 : timeout * 1000,
 		signal,
@@ -67,6 +104,17 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 		minimize: false,
 		gitGuard: cfgBashGitGuard.get(session.settings),
 		ovnfs: ovnfsCommand(session.settings),
+		// Builtins read internal URLs (`cat local://x`, `local://3.log`) like the bash tool's; read tier,
+		// and without reply/write sinks handler-written URLs refuse writes.
+		filesystem: new InternalUrlFilesystem({
+			context: sessionResolveContext(session, { signal }),
+			tier: "read",
+			onFileChange:
+				session.recordFileChange &&
+				(change => session.recordFileChange?.({ tool: "eval", ...shellChangeSnapshots(change) })),
+		}).shellFilesystem(),
+		speech: sessionShellSpeech(session),
+		commands,
 		// The sink's inline window is a bounded preview; collect the whole stream instead.
 		chunkThrottleMs: 0,
 		onChunk: chunk => {

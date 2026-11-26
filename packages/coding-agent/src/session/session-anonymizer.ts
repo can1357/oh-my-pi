@@ -41,6 +41,10 @@ export const ANONYMIZED_REVIEW_NOTE =
  * - `args`/`details`/`data`: tool-call args, tool-result details, custom-entry data — walked only
  *   for built-in tools / omp's own entries, otherwise opaque.
  * - `runtime`: the build stamp; version and commit kept, branch/diff/label tokenized.
+ * - `judgment`: a journaled judge query; probabilities and counts kept, the state hash,
+ *   question ids, and choice labels tokenized.
+ * - `fallback`: a retry fallback's cause; `from` keeps its identity like `model`, `trigger` is an
+ *   enum, and `reason` is redacted like an error.
  * - `opaque`: replaced whole by a marker.
  */
 type Rule =
@@ -67,7 +71,11 @@ type Rule =
 	| "opaque"
 	| "transforms"
 	| "sessionPath"
-	| "runtime";
+	| "runtime"
+	| "judgment"
+	| "fallback";
+
+const FALLBACK_CAUSE_RULES: Record<string, Rule> = { from: "identity", trigger: "enum", reason: "error" };
 
 function fields(rule: Rule, keys: readonly string[]): Record<string, Rule> {
 	return Object.fromEntries(keys.map(key => [key, rule]));
@@ -103,6 +111,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"errorStatus",
 		"errorId",
 		"requestBodyReadTimeoutFullReplay",
+		"errorFromAgentLoop",
 		"duration",
 		"ttft",
 		"dt",
@@ -114,6 +123,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"nonMessageTokens",
 		"historyRewriteTokensRemoved",
 		"elidedOutputTokens",
+		"demotedReasoningBlocks",
 		"compactionEpoch",
 		"lastMessageTimestamp",
 		"historyRewriteAt",
@@ -333,6 +343,8 @@ const FIELD_RULES: Record<string, Rule> = {
 		"log",
 		"messages",
 		"body",
+		"prompt",
+		"reply",
 	]),
 	...fields("label", ["title", "previousTitle", "label", "injectedRules", "intent", "emoji", "nf"]),
 	...fields("error", ["errorMessage", "explanation", "errorClassificationMessage", "upstreamError"]),
@@ -343,9 +355,12 @@ const FIELD_RULES: Record<string, Rule> = {
 	parentSession: "sessionPath",
 	previousSessionFiles: "sessionPath",
 	runtime: "runtime",
+	judgment: "judgment",
+	fallback: "fallback",
 	content: "content",
 	...fields("struct", [
 		"message",
+		"completion",
 		"parentIrc",
 		"usage",
 		"cost",
@@ -414,7 +429,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		// Eval cell pretty views: printed tables/JSON/Markdown of user data.
 		"views",
 		"structured",
-		"xdev",
+		"toolCommands",
 		"response",
 		"results",
 		"projectAgentsDir",
@@ -1114,7 +1129,6 @@ const KNOWN_SCHEMES = new Set([
 	"ws",
 	"wss",
 	"agent",
-	"artifact",
 	"attachment",
 	"cfg",
 	"conflict",
@@ -1131,7 +1145,6 @@ const KNOWN_SCHEMES = new Set([
 	"security",
 	"skill",
 	"vault",
-	"xd",
 ]);
 
 /** File extensions kept on mock names; `.test`/`.spec`/`.d` qualify a known final extension. */
@@ -1472,6 +1485,50 @@ export class SessionAnonymizer {
 		return out;
 	}
 
+	/**
+	 * A journaled judge query. Probabilities, scores, and counts are measurements; the state hash,
+	 * question ids, and choice labels derive from user content, so only their equality survives.
+	 */
+	#judgmentRecord(record: JsonObject): JsonObject {
+		const out: JsonObject = {};
+		for (const key in record) {
+			const value = record[key];
+			if (key === "state" && typeof value === "string") out[key] = this.placeholder(value);
+			else if (key === "cached" && typeof value === "number") out[key] = value;
+			else if (key === "answers" && isObject(value)) {
+				const answers: JsonObject = {};
+				for (const id in value) {
+					const answer = value[id];
+					answers[this.placeholder(id)] =
+						typeof answer === "number"
+							? answer
+							: Array.isArray(answer)
+								? answer.map(part =>
+										typeof part === "number"
+											? part
+											: typeof part === "string"
+												? this.#literal(part, false)
+												: this.#opaque(part),
+									)
+								: this.#opaque(answer);
+				}
+				out[key] = answers;
+			} else out[this.placeholder(key)] = this.#opaque(value);
+		}
+		return out;
+	}
+
+	/** A retry fallback's cause: the model it left is named like `model`, and its reason can echo a provider error. */
+	#fallbackCause(cause: JsonObject, fromTool: boolean): JsonObject {
+		const out: JsonObject = {};
+		for (const key in cause) {
+			const rule = Object.hasOwn(FALLBACK_CAUSE_RULES, key) ? FALLBACK_CAUSE_RULES[key] : undefined;
+			if (rule === undefined) out[this.placeholder(key)] = this.#opaque(cause[key]);
+			else out[key] = this.#field(rule, cause[key], cause, key, fromTool);
+		}
+		return out;
+	}
+
 	#field(rule: Rule, value: unknown, parent: JsonObject, key: string, fromTool: boolean): unknown {
 		// Payload scopes come first: a primitive inside an untrusted payload is still untrusted.
 		switch (rule) {
@@ -1495,6 +1552,10 @@ export class SessionAnonymizer {
 					: this.#opaque(value);
 			case "runtime":
 				return isObject(value) ? this.#runtimeStamp(value) : this.#opaque(value);
+			case "judgment":
+				return isObject(value) ? this.#judgmentRecord(value) : this.#opaque(value);
+			case "fallback":
+				return isObject(value) ? this.#fallbackCause(value, fromTool) : this.#opaque(value);
 			case "name":
 				return this.#field(
 					TOOL_CALL_TYPES[String(parent.type)] === true ? "tool" : "label",

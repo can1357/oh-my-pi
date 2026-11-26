@@ -4,11 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
+import type { HostEvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
 import { type ApprovalOutcome, createRatchetPrelude } from "@oh-my-pi/pi-coding-agent/ratchet/prelude-definition";
 import type { ApprovalStatus, GateResult, RatchetState } from "@oh-my-pi/pi-coding-agent/ratchet/ratchet";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import type {
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/ask-dialog";
 
 const FLOW = "router";
 const CASES = Array.from({ length: 10 }, (_, index) => `case_${index}`);
@@ -18,7 +21,7 @@ type Status = RatchetState & { approval_status: ApprovalStatus };
 type Row = Record<string, unknown>;
 
 interface Harness {
-	prelude: EvalPreludeDefinition;
+	prelude: HostEvalPreludeDefinition;
 	call<T>(params: Record<string, unknown>, answer?: Answer): Promise<T>;
 	approve(stage: string, answer?: Answer): Promise<ApprovalOutcome>;
 	gate(variant: string, change?: string): Promise<GateResult>;

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { createFileReader } from "../capability/fs";
 import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
@@ -14,18 +15,10 @@ import {
 	type AdvisorConfigScope,
 	type AdvisorSyncBacklog,
 	type WatchdogConfigDoc,
-} from "@oh-my-pi/pi-tui/overlays/advisor-config";
+} from "./advisor-config-types";
 
-export {
-	ADVISOR_REVIEW_MODES,
-	ADVISOR_SESSION_SCOPES,
-	ADVISOR_SYNC_BACKLOG_MODES,
-} from "@oh-my-pi/pi-tui/overlays/advisor-config";
-export type {
-	AdvisorReviewMode,
-	AdvisorSessionScope,
-	AdvisorSyncBacklog,
-} from "@oh-my-pi/pi-tui/overlays/advisor-config";
+export { ADVISOR_REVIEW_MODES, ADVISOR_SESSION_SCOPES, ADVISOR_SYNC_BACKLOG_MODES } from "./advisor-config-types";
+export type { AdvisorReviewMode, AdvisorSessionScope, AdvisorSyncBacklog } from "./advisor-config-types";
 /**
  * Runtime health of a single advisor, surfaced in stats and the status line.
  * - `running` — actively processing primary turns
@@ -145,7 +138,7 @@ const ADVISOR_PROVIDER_SESSION_KEY_SEPARATOR = "\u0000";
 /**
  * Returns a stable provider-facing UUIDv7 for one advisor within one primary session.
  *
- * Codex treats `session_id`/`conversation_id` as a UUID-shaped routing identity,
+ * Codex treats `session-id` as a UUID-shaped routing identity,
  * so advisor labels such as `-advisor` stay local-only.
  */
 export function getOrCreateAdvisorProviderSessionId(
@@ -199,6 +192,7 @@ function filterAdvisorTools(tools: string[] | undefined, sourcePath: string): st
  */
 export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Promise<DiscoveredAdvisors> {
 	const items = await collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
+	const imports = { readFile: createFileReader() };
 	const advisors = new Map<string, AdvisorConfig>();
 	const sharedParts: string[] = [];
 	let sharedMaxNotesPerUpdate: number | undefined;
@@ -229,7 +223,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 		for (const message of docWarnings) warn(message, { path: item.path });
 
 		if (instructions?.trim()) {
-			const expanded = (await expandAtImports(instructions, item.path)).trim();
+			const expanded = (await expandAtImports(instructions, item.path, imports)).trim();
 			if (expanded) sharedParts.push(expanded);
 		}
 
@@ -238,7 +232,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 		for (const entry of entries) {
 			const slug = slugifyAdvisorName(entry.name);
 			const entryInstructions = entry.instructions?.trim()
-				? (await expandAtImports(entry.instructions, item.path)).trim() || undefined
+				? (await expandAtImports(entry.instructions, item.path, imports)).trim() || undefined
 				: undefined;
 			advisors.set(slug, {
 				name: entry.name,

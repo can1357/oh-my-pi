@@ -6,7 +6,7 @@ import {
 	type VibeSendOutcome,
 	type VibeKillOutcome,
 	type VibeWaitOutcome,
-} from "@oh-my-pi/pi-tui/tools/vibe";
+} from "../tools/details/vibe";
 /**
  * Vibe mode worker-session runtime.
  *
@@ -41,10 +41,10 @@ import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "..
 import { generateTaskName, sanitizeAgentId } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition } from "../task/types";
-import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { type AgentProgress, oneLineLabel, type SingleResult } from "../task/task-details";
 import type { ToolSession } from "../tools";
-import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatDuration } from "@oh-my-pi/pi-utils";
+import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
@@ -56,9 +56,9 @@ import {
 	type VibeSpawnLifecycleEvent,
 	type VibeTombstoneReason,
 } from "./lifecycle";
-import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
+import { type VibeCli } from "../tools/details/vibe";
 
-import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
+import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -557,18 +557,26 @@ export class VibeSessionRegistry {
 	}
 
 	/**
-	 * Whether any live worker in this parent's scope has a turn in flight.
-	 * Goal continuation consults this so it never fires while worker results
-	 * are still coming — delivery itself wakes the director.
+	 * Whether any live worker in this parent's scope still has work the director
+	 * handed off. Goal continuation consults this so it never fires while worker
+	 * results are still coming — delivery itself wakes the director.
+	 *
+	 * A turn job with status `running` is in flight, including jobs parked behind
+	 * `queued` before they execute. So is a spawn that has not registered its
+	 * turn yet (`starting`), a turn whose body has not yet marked the record
+	 * idle (`running`), and follow-up text parked on `record.queue` after the
+	 * current turn was cleared but before the next job starts. Terminal job
+	 * statuses are not in flight.
 	 */
 	hasInFlightTurns(session: VibeParentSession): boolean {
 		const scope = this.ownerScope(session);
 		const manager = session.asyncJobManager;
 		for (const record of this.#records.values()) {
 			if (!matchesScope(record, scope) || record.state === "dead") continue;
+			if (record.state === "starting" || record.state === "running" || record.queue.length > 0) return true;
 			if (!record.turn) continue;
 			const job = manager?.getJob(record.turn.jobId);
-			if (!manager || !job || job.status === "running") return true;
+			if (!manager || !job || job.queued === true || job.status === "running") return true;
 		}
 		return false;
 	}
@@ -860,7 +868,9 @@ export class VibeSessionRegistry {
 		const manager = this.#manager(session);
 		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
-			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
+			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null), {
+				settings: session.settings,
+			});
 		}
 		const reservedIds = this.#persistedIds(session, scope);
 		for (const ref of AgentRegistry.global().list()) reservedIds.add(ref.id);
@@ -1344,7 +1354,7 @@ export class VibeSessionRegistry {
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
-			enableLsp: (session.enableLsp ?? true) && cfgTaskEnableLsp.get(session.settings),
+			enableLsp: session.enableLsp ?? true,
 			signal,
 			eventBus: session.eventBus,
 			subagentEventBus: session.subagentEventBus,
@@ -1643,6 +1653,10 @@ export type { VibeWorkerUsageTotals } from "./lifecycle";
  * kept so their spend stays part of the owner's total — dropping a dead or
  * parked worker from the sum would let that dip mask a live worker's new delta
  * under GoalRuntime's per-field clamped deltas.
+ *
+ * The map is process-lifetime until {@link releaseVibeWorkerUsage}. Vibe exit
+ * and goal completion/drop call that after the goal has flushed, so a later
+ * resume cannot treat the same spend as new.
  */
 const workerUsageHighWater = new Map<string, VibeWorkerUsageTotals>();
 
@@ -1670,6 +1684,21 @@ function mergeUsageHighWater(key: string, usage: VibeWorkerUsageTotals): void {
  */
 export function seedPersistedWorkerUsage(ownerId: string, id: string, usage: VibeWorkerUsageTotals): void {
 	mergeUsageHighWater(`${ownerId}\0${id}`, usage);
+}
+
+/**
+ * Drop one owner's worker-usage total. Zeros record usage too: the next
+ * aggregate would otherwise re-seed the map from surviving dead records and
+ * present already-flushed spend as a new goal delta.
+ */
+export function releaseVibeWorkerUsage(ownerId: string): void {
+	const prefix = `${ownerId}\0`;
+	for (const key of workerUsageHighWater.keys()) {
+		if (key.startsWith(prefix)) workerUsageHighWater.delete(key);
+	}
+	for (const record of VibeSessionRegistry.global().listWorkerRecordsByOwner(ownerId)) {
+		record.usage = undefined;
+	}
 }
 
 /**

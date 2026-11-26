@@ -139,12 +139,30 @@ describe("resolveImageTokenization", () => {
 		}
 	});
 
-	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity and xAI as verified", () => {
+	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity, xAI and Devin as verified", () => {
 		// Cloud Code Assist bills every Gemini image 1,089 tokens; Google's own API keeps the documented 1,120.
 		for (const id of ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]) {
 			expect(ruleFor("google-antigravity", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
 		}
 		expect(ruleFor("google", "gemini-3.8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
+		// Devin bills the Gemini models measured across sizes 1,089 (raw effort uids included); 3.6 Flash keeps the
+		// unverified lineage rule.
+		for (const id of [
+			"gemini-3-5-flash",
+			"gemini-3-7-flash",
+			"gemini-3-8-flash",
+			"gemini-4-carbon",
+			"gemini-4-carbon-high",
+			"gemini-4-neon",
+			"gemini-4-neon-xhigh",
+			"gemini-4-hydrogen",
+			"gemini-4-hydrogen-xhigh",
+			"gemini-4-argon",
+			"gemini-4-argon-low",
+		]) {
+			expect(ruleFor("devin", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
+		}
+		expect(ruleFor("devin", "gemini-3-6-flash")).toEqual({ regime: "fixed", tokens: 1120 });
 		// Sonnet's standard tier is verified on every host; Opus 4.6 is not measured.
 		expect(ruleFor("google-antigravity", "claude-sonnet-4-6")).toEqual({ ...STANDARD, verified: true });
 		expect(ruleFor("anthropic", "claude-sonnet-4-6").verified).toBe(true);

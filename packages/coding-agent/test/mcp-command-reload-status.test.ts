@@ -1,18 +1,24 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { callTool } from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { disposeLocalMcpHost } from "@oh-my-pi/pi-coding-agent/mcp/host/local";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 import { TOOL_NAME, TOOL_RESULT } from "./fixtures/delayed-tool-mcp";
+import { initTheme } from "../src/ui/theme/service";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts");
 
 beforeAll(() => {
 	initTheme();
 });
+
+// The server must be one the host has never seen: a known one answers from the
+// host's store inside the reload window, however slowly it starts.
+beforeEach(disposeLocalMcpHost);
+afterEach(disposeLocalMcpHost);
 
 describe("/mcp reload status", () => {
 	it("reports servers still connecting after the bounded reload window", async () => {
@@ -21,7 +27,7 @@ describe("/mcp reload status", () => {
 			command: process.execPath,
 			args: [FIXTURE_PATH],
 		};
-		const manager = new MCPManager(process.cwd(), null, async () => ({
+		const manager = new MCPManager(process.cwd(), async () => ({
 			configs: { delayed: config },
 			sources: {},
 			exaApiKeys: [],
@@ -32,7 +38,7 @@ describe("/mcp reload status", () => {
 		try {
 			await controller.handle("/mcp reload");
 
-			const output = ctx.chatContainer.render(120).join("\n");
+			const output = renderTranscript(ctx).join("\n");
 			expect(output).toContain("Connected servers: 0");
 			expect(output).toContain("Connecting servers: 1");
 

@@ -17,7 +17,6 @@ import {
 	grep,
 	HighlightStream,
 	highlightCode,
-	htmlToMarkdown,
 	listWorkspace,
 	macOSCheckSpelling,
 	macOSSpellCheckerAvailable,
@@ -26,6 +25,8 @@ import {
 	PtySession,
 	parseKey,
 	pdfToMarkdown,
+	renderHtml,
+	type RenderHtmlOptions,
 	summarizeCode,
 	supportsLanguage,
 	truncateToWidth,
@@ -151,7 +152,7 @@ function textPdf(text: string): Uint8Array {
 	return Buffer.from(document);
 }
 
-describe("pi-natives", () => {
+describe("omp-natives", () => {
 	beforeAll(async () => {
 		await setupFixtures();
 		return async () => {
@@ -1072,56 +1073,105 @@ try {
 			expect(result.markdown).toContain("Copied PDF bytes");
 		});
 	});
-	describe("htmlToMarkdown", () => {
-		it("should convert basic HTML to markdown", async () => {
-			const html = "<h1>Hello World</h1><p>This is a paragraph.</p>";
-			const markdown = await htmlToMarkdown(html);
+	describe("renderHtml", () => {
+		// Golden stdout from stock Lynx 2.9.3: -stdin -dump -nolist -width 250
+		// -assume_charset=utf-8 -display_charset=utf-8. No binary needed in CI.
+		// `hidden: "all"` mirrors Lynx, which renders content CSS would hide.
+		it("matches Lynx heading alignment, list indentation, links and literal text", async () => {
+			const html = `<head><title>Head only</title></head><body><nav><a href="/home">Site home</a></nav><h1>Release notes</h1><p>Visit <a href="https://example.test/">the <em>guide</em></a> for details &amp; examples.</p><ul><li>Linux</li><li>macOS<ul><li>Apple Silicon</li></ul></li></ul><pre>one
+    two</pre><script>never visible</script></body>`;
+			expect(await renderHtml(html, { format: "text", mode: "full", hidden: "all" })).toBe(
+				`   Site home\n\n${" ".repeat(118)}Release notes\n\n   Visit the guide for details & examples.\n     * Linux\n     * macOS\n          + Apple Silicon\n\none\n    two\n`,
+			);
+		});
+
+		it("matches browser controls, image labels and table column alignment", async () => {
+			const html = `<h2>Controls</h2><p><q>Hello</q> x<sub>2</sub> x<sup>3</sup>. See <img src="/images/icon.png"> and <img alt="diagram" src="/d">.</p><form>Name<input size="8" value="Jane"><input type="checkbox" checked><select><option>Red</option><option selected>Blue</option></select></form><table><tr><th>Key</th><th>Value</th></tr><tr><td>Longer</td><td>One</td></tr></table>`;
+			expect(await renderHtml(html, { format: "text", mode: "full", hidden: "all" })).toBe(
+				'Controls\n\n   "Hello" x₂ x³. See [icon.png] and diagram .\n   Name ________ [X] [Blue]\n\n    Key   Value\n   Longer One\n',
+			);
+		});
+
+		it.each(["lynx-dump", "lynx-layout"])("renders the %s fixture", async fixture => {
+			const [html, dump] = await Promise.all(
+				["html", "txt"].map(ext => Bun.file(new URL(`./fixtures/${fixture}.${ext}`, import.meta.url)).text()),
+			);
+			expect(await renderHtml(html, { format: "text", mode: "full", hidden: "all" })).toBe(dump);
+		});
+
+		it("preserves spanned table columns and omits discretionary hyphens", async () => {
+			const html =
+				'<table><tr><td rowspan="2">AB</td><td>One</td></tr><tr><td>Two</td></tr><tr><td>B</td><td>Three</td></tr></table><p>soft&shy;hyphen &shy; text.</p>';
+			expect(await renderHtml(html, { format: "text", mode: "full", hidden: "all" })).toBe(
+				"    AB One\n       Two\n    B  Three\n\n   softhyphen  text.\n",
+			);
+		});
+
+		it("matches the 250-column dump's paragraph margins and UTF-8 wrapping", async () => {
+			// Lynx reserves three leading and six trailing columns in a paragraph.
+			const prefix = "界".repeat(239);
+			expect(
+				await renderHtml(`<p>${prefix} x</p><p>${prefix} xx</p>`, { format: "text", mode: "full", hidden: "all" }),
+			).toBe(`   ${prefix} x\n\n   ${prefix}\n   xx\n`);
+		});
+
+		it("supports width, reader selection, and hidden-content options", async () => {
+			const html = `<nav><a href="/home">Site nav</a></nav><article><h1>Title</h1><p>one two three four five</p><p>Second body paragraph.</p><div class="post-comments"><p>Reader comment</p></div><p style="display:none">Hidden note</p></article>`;
+			const extracted = await renderHtml(html, { format: "text", mode: "auto", width: 20, hidden: "drop" });
+			expect(extracted.startsWith("       Title\n")).toBe(true);
+			expect(extracted).toContain("Second body");
+			expect(extracted).not.toContain("Site nav");
+			expect(extracted).not.toContain("Hidden note");
+			expect(await renderHtml(html, { format: "text", mode: "full", hidden: "drop" })).not.toContain("Hidden note");
+			expect(await renderHtml(html, { format: "text", mode: "full", hidden: "reachable" })).toContain("Hidden note");
+		});
+
+		it("converts headings, paragraphs, links, lists and code to Markdown", async () => {
+			const html =
+				'<h1>Hello World</h1><p>This is a paragraph with <a href="https://example.com">a link</a>.</p><ul><li>Item 1</li><li>Item 2</li></ul><pre><code>const x = 42;</code></pre>';
+			const markdown = await renderHtml(html, { format: "markdown", mode: "full" });
 
 			expect(markdown).toContain("# Hello World");
-			expect(markdown).toContain("This is a paragraph.");
-		});
-
-		it("should handle links", async () => {
-			const html = '<p>Visit <a href="https://example.com">Example</a> for more info.</p>';
-			const markdown = await htmlToMarkdown(html);
-
-			expect(markdown).toContain("[Example](https://example.com)");
-		});
-
-		it("should handle lists", async () => {
-			const html = "<ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul>";
-			const markdown = await htmlToMarkdown(html);
-
+			expect(markdown).toContain("This is a paragraph");
+			expect(markdown).toContain("[a link](https://example.com)");
 			expect(markdown).toContain("- Item 1");
 			expect(markdown).toContain("- Item 2");
-			expect(markdown).toContain("- Item 3");
-		});
-
-		it("should handle code blocks", async () => {
-			const html = "<pre><code>const x = 42;</code></pre>";
-			const markdown = await htmlToMarkdown(html);
-
 			expect(markdown).toContain("const x = 42;");
 		});
 
-		it("should skip images when option is set", async () => {
+		it("converts a rectangular table to GFM", async () => {
+			const html = "<table><tr><th>Key</th><th>Value</th></tr><tr><td>Longer</td><td>One</td></tr></table>";
+			const markdown = await renderHtml(html, { format: "markdown", mode: "full" });
+
+			expect(markdown).toContain("| Key | Value |");
+			expect(markdown).toContain("| Longer | One |");
+		});
+
+		it("omits images only when asked", async () => {
 			const html = '<p>Text with <img src="image.jpg" alt="pic"> image</p>';
-			const withImages = await htmlToMarkdown(html);
-			const withoutImages = await htmlToMarkdown(html, { skipImages: true });
+			const withImages = await renderHtml(html, { format: "markdown", mode: "full" });
+			const withoutImages = await renderHtml(html, { format: "markdown", mode: "full", images: false });
 
 			expect(withImages).toContain("pic");
 			expect(withoutImages).not.toContain("pic");
 		});
 
-		it("should clean content when option is set", async () => {
-			const html = "<nav>Navigation</nav><main><p>Main content</p></main><footer>Footer</footer>";
-			const cleaned = await htmlToMarkdown(html, { cleanContent: true });
+		it("selects the marked article body and preserves formatted Markdown with reader mode", async () => {
+			const html = `<article><h1>Teaser heading</h1><p>Different story</p></article>
+<div itemprop="articleBody"><h1>Actual article</h1>
+<p>A <strong>bold phrase</strong> and a <a href="https://example.com/notes">link</a> are preserved.</p>
+<p>The next paragraph proves the selected body keeps its structure.</p>
+<div class="post-comments"><p>Article comment text</p></div></div>`;
 
-			expect(cleaned).toContain("Main content");
-			// Navigation/footer may or may not be removed depending on preprocessing
+			const markdown = await renderHtml(html, { format: "markdown", mode: "auto" });
+
+			expect(markdown).toContain("# Actual article");
+			expect(markdown).toContain("**bold phrase**");
+			expect(markdown).toContain("[link](https://example.com/notes)");
+			expect(markdown).not.toContain("Different story");
 		});
 
-		it("keeps collapsed sections only with hiddenContent reachable, never template content", async () => {
+		it("keeps collapsed sections only with hidden reachable, never template content", async () => {
 			const html = `<main>
 <h2>Product information</h2>
 <button aria-expanded="false">Item details</button>
@@ -1129,8 +1179,8 @@ try {
 <template><p>Template-only claim</p></template>
 </main>`;
 
-			const dropped = await htmlToMarkdown(html);
-			const reachable = await htmlToMarkdown(html, { hiddenContent: "reachable" });
+			const dropped = await renderHtml(html, { format: "markdown", mode: "full" });
+			const reachable = await renderHtml(html, { format: "markdown", mode: "full", hidden: "reachable" });
 
 			expect(dropped).toContain("Product information");
 			expect(dropped).not.toContain("Country of Origin: India");
@@ -1138,21 +1188,14 @@ try {
 			expect(reachable).not.toContain("Template-only claim");
 		});
 
-		it("rejects an unknown hiddenContent value", async () => {
-			expect(() => htmlToMarkdown("<p>text</p>", { hiddenContent: "visible" })).toThrow(/hiddenContent/);
-		});
-
-		it("should reject depth-truncated HTML", async () => {
-			const html = `${"<div>".repeat(90)}<p>deep-content</p>${"</div>".repeat(90)}`;
-
-			await expect(htmlToMarkdown(html, { cleanContent: true })).rejects.toThrow(
-				/Conversion error: .*effective depth limit of 64/,
-			);
+		it("rejects an unknown hidden value", () => {
+			const invalid = { hidden: "visible" } as unknown as RenderHtmlOptions;
+			expect(() => renderHtml("<p>text</p>", invalid)).toThrow(/hidden/);
 		});
 
 		it("should survive pathologically deep HTML", async () => {
 			const script = `
-import { htmlToMarkdown } from ${JSON.stringify(addonUrl)};
+import { renderHtml } from ${JSON.stringify(addonUrl)};
 
 const cases = [
 	{
@@ -1167,9 +1210,9 @@ const cases = [
 
 for (const { label, input } of cases) {
 	console.error("case=" + label + ":start");
-	const pending = htmlToMarkdown(input, { cleanContent: true });
+	const pending = renderHtml(input, { format: "markdown", mode: "full" });
 	if (pending === null || typeof pending.then !== "function") {
-		throw new TypeError("htmlToMarkdown did not return a Promise for " + label);
+		throw new TypeError("renderHtml did not return a Promise for " + label);
 	}
 
 	let rejected = false;
@@ -1180,7 +1223,7 @@ for (const { label, input } of cases) {
 		rejected = true;
 	}
 	if (!rejected && typeof value !== "string") {
-		throw new TypeError("htmlToMarkdown fulfilled with a non-string for " + label);
+		throw new TypeError("renderHtml fulfilled with a non-string for " + label);
 	}
 	console.error("case=" + label + ":done");
 }
@@ -1227,7 +1270,7 @@ console.log("ok");
 		it("should create a stoppable power assertion handle, or surface a descriptive bus/service failure where the host cannot provide one", () => {
 			let assertion: PowerAssertion | undefined;
 			try {
-				assertion = PowerAssertion.start({ reason: "pi-natives test" });
+				assertion = PowerAssertion.start({ reason: "omp-natives test" });
 			} catch (error) {
 				// A host with no bus must fail in the documented bus/service vocabulary,
 				// so a wrong export or a no-op stub fails on any other message.
@@ -1242,7 +1285,7 @@ console.log("ok");
 		it.skipIf(process.platform !== "linux" || !Bun.which("systemd-inhibit"))(
 			"registers a login1 inhibitor for the handle's lifetime",
 			() => {
-				const reason = `pi-natives ${crypto.randomUUID()}`;
+				const reason = `omp-natives ${crypto.randomUUID()}`;
 				const held = (): boolean =>
 					Bun.spawnSync(["systemd-inhibit", "--list", "--no-pager"]).stdout.toString().includes(reason);
 				let assertion: PowerAssertion;

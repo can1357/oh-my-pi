@@ -304,6 +304,10 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"limits.markReached": (storage, provider, sessionId, options) =>
 			storage.limits.markReached(provider, sessionId, options),
 		"limits.rotate": (storage, provider, sessionId, options) => storage.limits.rotate(provider, sessionId, options),
+		"limits.markServiceTierUnavailable": (storage, provider, options) =>
+			storage.limits.markServiceTierUnavailable(provider, options),
+		"limits.rearmServiceTier": (storage, provider, serviceTier, modelId) =>
+			storage.limits.rearmServiceTier(provider, serviceTier, modelId),
 		"limits.invalidateMatching": (storage, provider, apiKey, options) =>
 			storage.limits.invalidateMatching(provider, apiKey, options),
 
@@ -356,13 +360,13 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 	return {
 		mirror: (registry, listener) => {
 			const { snapshot, unsubscribe } = registry.subscribeMirror(batch =>
-				settleQuietly(listener(toWireMirrorBatch(batch))),
+				settleQuietly(listener(toWireMirrorBatch(batch, registry))),
 			);
 			trackWorkerSubscription(state.subscriptions, unsubscribe);
 			return {
 				...registry.mirrorInputs(),
 				authStorage: registry.authStorage,
-				snapshot: toWireMirrorBatch(snapshot),
+				snapshot: toWireMirrorBatch(snapshot, registry),
 			};
 		},
 		invalidateCommandConfigs: (registry, provider) => registry.invalidateCommandConfigs(provider),

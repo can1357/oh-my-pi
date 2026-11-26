@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { mockFetch } from "../helpers/fetch-mock";
 
 const PROSE = "This guide explains how the renderer handles every input it receives in one pass. ".repeat(3);
 
@@ -41,30 +42,9 @@ const RULED_PAGE = `<!doctype html><html><body>
 <p>${PROSE}</p>
 </body></html>`;
 
-describe("read URL: native rendering keeps only the head metadata a reader uses", () => {
-	const servers: Bun.Server<undefined>[] = [];
-	afterEach(() => {
-		for (const server of servers) server.stop(true);
-		servers.length = 0;
-	});
-
-	async function readPage(
-		html: string,
-		{
-			selector = "",
-			method = "native",
-			provider = "auto",
-			reader = () => new Response("offline", { status: 503 }),
-		}: { selector?: string; method?: string; provider?: string; reader?: () => Response } = {},
-	): Promise<{ text: string; notes: string[]; readerCalls: string[] }> {
-		const server = Bun.serve({
-			port: 0,
-			fetch: request =>
-				new URL(request.url).pathname === "/page"
-					? new Response(html, { headers: { "content-type": "text/html" } })
-					: new Response("not found", { status: 404 }),
-		});
-		servers.push(server);
+describe("read URL: local rendering keeps only the head metadata a reader uses", () => {
+	async function readPage(html: string, jinaResponse?: () => Response) {
+		const url = "https://example.com/page";
 		const readerCalls: string[] = [];
 		const cwd = process.cwd();
 		const artifactsDir = path.join(cwd, ".fetch-markup-tokens-artifacts");
@@ -74,23 +54,27 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 			getSessionFile: () => path.join(cwd, "session.jsonl"),
 			getArtifactsDir: () => artifactsDir,
 			getSessionSpawns: () => null,
-			allocateOutputArtifact: async toolType => ({
+			allocateOutputArtifact: async () => ({
 				id: "test",
-				path: path.join(artifactsDir, `test.${toolType}.log`),
+				path: path.join(artifactsDir, `test.log`),
 			}),
-			settings: Settings.isolated({ "fetch.enabled": true, "providers.fetch": provider }),
-			// Remote readers (Jina and the like) answer through here.
-			fetch: async input => {
-				readerCalls.push(String(input instanceof Request ? input.url : input));
-				return reader();
-			},
+			settings: Settings.isolated({
+				"fetch.enabled": true,
+				"providers.fetch": jinaResponse ? "jina" : "local",
+				"providers.webKeyless": true,
+			}),
+			fetch: mockFetch(input => {
+				const target = String(input);
+				if (target === url) return new Response(html, { headers: { "content-type": "text/html" } });
+				if (new URL(target).origin !== new URL(url).origin) readerCalls.push(target);
+				if (target.startsWith("https://r.jina.ai/") && jinaResponse) return jinaResponse();
+				return new Response(null, { status: 404 });
+			}),
 		};
-		const result = await new ReadTool(session).execute("call", {
-			path: `http://127.0.0.1:${server.port}/page${selector}`,
-		});
-		expect(result.details?.method).toBe(method);
+		const result = await new ReadTool(session).execute("call", { path: url });
 		return {
 			text: result.content.find(block => block.type === "text")?.text ?? "",
+			method: result.details?.method,
 			notes: result.details?.notes ?? [],
 			readerCalls,
 		};
@@ -100,62 +84,51 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 		const { text } = await readPage(DOCS_PAGE);
 
 		expect(text).toContain('title: "Renderer guide: when to write <meta name=\\"viewport\\">"');
-		expect(text).toContain("canonical: https://example.com/guide");
-		// A quoted value keeps its escapes, and the name matches in any letter case.
+		expect(text).toMatch(/canonical: "?https:\/\/example.com\/guide"?\n/);
 		expect(text).toContain(
-			'meta-Description: "\\"Setup notes\\": pass name=viewport, or write <meta name=\\"viewport\\">, to the renderer"',
+			'description: "\\"Setup notes\\": pass name=viewport, or write <meta name=\\"viewport\\">, to the renderer"',
 		);
-		expect(text).toContain('meta-article:published_time: "2026-10-01"');
-		expect(text).toContain("meta-author: Jane Doe");
+		expect(text).toMatch(/published: "?2026-10-01"?\n/);
+		expect(text).toMatch(/author: "?Jane Doe"?\n/);
 		const frontMatter = text.slice(0, text.indexOf("# Renderer guide"));
-		expect(frontMatter).not.toContain("meta-og");
-		expect(frontMatter).not.toContain("meta-twitter");
-		expect(frontMatter).not.toContain("meta-viewport");
-		expect(frontMatter).not.toContain("meta-tracking");
-		expect(frontMatter).not.toContain("meta-google-site-verification");
-		// A name is matched as written: an escaped character in it is no letter of a kept name.
+		expect(frontMatter).not.toContain("social-card-renderer-guide.png");
+		expect(frontMatter).not.toContain("summary_large_image");
+		expect(frontMatter).not.toContain("width=device-width");
+		expect(frontMatter).not.toContain("abcdefghijklmnopqrstuvwxyz0123456789");
 		expect(frontMatter).not.toContain("ENCODED_NAME");
 		expect(frontMatter).not.toContain("TAB_IN_NAME");
-		// The dropped tags are named, with the way to read their values.
-		expect(text).toContain(
-			'meta_omitted: "auth&#111;r, descrip\\tion, google-site-verification, og:image, og:title, tracking: id, twitter:card, viewport; read the URL with :raw for their values"',
-		);
-		// The body is left as the converter wrote it, a front-matter lookalike and same-page links included.
+		// Metadata-like body text and same-page links are still content.
 		expect(text).toContain("meta-og:title: BODY_FRONT_MATTER_LOOKALIKE");
-		expect(text).toContain("[Setup](#setup)");
+		expect(text).toMatch(/\[Setup\]\((?:https:\/\/example.com\/page)?#setup\)/);
 		expect(text).toContain("LAST_NEEDLE");
 	});
 
-	it("names the first 25 dropped tags and counts the rest", async () => {
-		const tags = Array.from({ length: 30 }, (_, i) => `<meta name="x-${String(i).padStart(2, "0")}" content="v">`);
+	it("does not dump arbitrary metadata into rendered content", async () => {
+		const tags = Array.from({ length: 30 }, (_, i) => `<meta name="x-${i}" content="PRIVATE_META_${i}">`);
 		const { text } = await readPage(
 			`<!doctype html><html><head><title>Guide</title>${tags.join("")}</head><body><p>${PROSE}</p></body></html>`,
 		);
-		const listed = Array.from({ length: 25 }, (_, i) => `x-${String(i).padStart(2, "0")}`).join(", ");
 
-		expect(text).toContain(`meta_omitted: "${listed} (+5 more); read the URL with :raw for their values"`);
-		expect(text).not.toContain("meta-x-");
+		expect(text).toContain("This guide explains");
+		expect(text).not.toContain("PRIVATE_META_");
 	});
 
-	it("adds no omitted-tags line when the page has only tags a reader uses", async () => {
+	it("keeps a description on a page with no unrelated metadata", async () => {
 		const { text } = await readPage(
 			`<!doctype html><html><head><title>Guide</title><meta name="description" content="How it works"></head><body><p>${PROSE}</p></body></html>`,
 		);
 
-		expect(text).toContain("meta-description: How it works");
-		expect(text).not.toContain("meta_omitted");
+		expect(text).toMatch(/description: "?How it works"?\n/);
 	});
 
-	it("chooses the reader on the whole rendering, before its metadata is pruned", async () => {
-		// Whole, the rendering is too long to be a JavaScript wall; pruned, it would not be.
+	it("does not mistake an article mentioning JavaScript for a wall", async () => {
 		const card = "A city guide to every route, stop and timetable, with live arrivals. ".repeat(18);
 		const { text, notes, readerCalls } = await readPage(
-			`<!doctype html><html><head><title>Transit</title><meta property="og:description" content="${card}"></head><body><p>Please enable JavaScript to use the live map; the timetable below works without it.</p><p>${PROSE}</p></body></html>`,
+			`<!doctype html><html><head><title>Transit</title><meta property="og:description" content="${card}"></head><body><p>Please enable JavaScript to use the live map; the timetable below works without it.</p><p>${PROSE.repeat(5)}</p></body></html>`,
 		);
 
 		expect(readerCalls).toEqual([]);
 		expect(notes.join("; ")).not.toContain("JavaScript");
-		expect(text).toContain('meta_omitted: "og:description; read the URL with :raw for their values"');
 		expect(text).toContain("the timetable below works without it");
 	});
 
@@ -163,26 +136,21 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 		const { text } = await readPage(HEAD_ONLY_PAGE);
 
 		expect(text).toContain("Manage members, billing and security");
-		expect(text).not.toContain("meta_omitted");
 	});
 
 	it("leaves a page without front matter as it came", async () => {
 		const { text } = await readPage(RULED_PAGE);
 
 		expect(text).toContain("meta-viewport: KEPT_AS_BODY_TEXT");
-		expect(text).not.toContain("meta_omitted");
+		expect(text).not.toMatch(/\n---\n(?:title|description|author|published|canonical):/);
 	});
 
 	it("leaves another reader's output as it came", async () => {
 		const markdown = `---\nlicense: Do not redistribute\nmeta-og:title: Example\n---\n\n# Example\n\n${PROSE}`;
-		const { text } = await readPage(DOCS_PAGE, {
-			method: "jina",
-			provider: "jina",
-			reader: () => new Response(`Markdown Content:\n${markdown}`),
-		});
+		const { text, method } = await readPage(DOCS_PAGE, () => new Response(`Markdown Content:\n${markdown}`));
 
-		expect(text).toContain("license: Do not redistribute");
-		expect(text).toContain("meta-og:title: Example");
-		expect(text).not.toContain("meta_omitted");
+		expect(method).toBe("jina");
+		// Every read is finalized, which trims the trailing space PROSE ends with.
+		expect(text).toContain(markdown.trimEnd());
 	});
 });

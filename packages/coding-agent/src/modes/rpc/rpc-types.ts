@@ -19,17 +19,20 @@ import type {
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { WireSessionEvent } from "../../session/loop-end-wire";
 import type { SessionLeaseReport } from "../../session/session-storage";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { UsageLimitState } from "../../session/usage-limit";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
+import type { AgentProgress } from "../../task/task-details";
+import type { RpcModelPickerResult } from "./rpc-model-picker";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import type { TodoPhase } from "../../tools/details/todo";
+import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
+import type { LivePhase } from "../view-model/apps/live-visualizer";
 import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
@@ -58,6 +61,8 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort_and_restore_queue" }
+	| { id?: string; type: "abort_and_deliver_queue" }
+	| { id?: string; type: "resume" }
 	| { id?: string; type: "new_session"; parentSession?: string }
 	| { id?: string; type: "open_session"; sessionDir: string; provider?: string; modelId?: string }
 
@@ -96,12 +101,20 @@ export type RpcCommand =
 	| { id?: string; type: "dictation_stop" }
 
 	// Model
-	| { id?: string; type: "set_model"; provider: string; modelId: string }
+	| {
+			id?: string;
+			type: "set_model";
+			provider: string;
+			modelId: string;
+			thinkingLevel?: ConfiguredThinkingLevel;
+			role?: string;
+	  }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
+	| { id?: string; type: "get_model_picker"; query?: string; limit?: number }
 
 	// Thinking
-	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
+	| { id?: string; type: "set_thinking_level"; level: ConfiguredThinkingLevel }
 	| { id?: string; type: "cycle_thinking_level" }
 	| { id?: string; type: "get_available_thinking_levels" }
 
@@ -173,6 +186,10 @@ export type RpcCommand =
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
+	/** The user's thinking selector: `auto` while auto mode picks the effort. */
+	configuredThinkingLevel?: ConfiguredThinkingLevel;
+	/** Selectors the active model accepts: `off`, `auto`, then its efforts. */
+	thinkingLevels?: ConfiguredThinkingLevel[];
 	isStreaming: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
@@ -198,15 +215,17 @@ export interface RpcSessionState {
 	tokensPerSecond: number | null;
 	messageCount: number;
 	queuedMessageCount: number;
-	/** Background jobs or deliveries can still inject a follow-up and wake the session. */
+	/** Background jobs, their deliveries, child agents or queued peer messages can still wake the session. */
 	hasPendingAsyncWork: boolean;
 	/** Same predicate as `session_settled`: idle with nothing queued or pending. */
 	isSettled: boolean;
 	/** Displayable queue-chip text for pending user-authored messages, mirroring
 	 *  `AgentSession.getQueuedMessages()`. Render the queue from this snapshot
 	 *  (and the `queue_update` event) instead of tracking chips independently.
-	 *  `liveSteered` counts the leading `steering` entries already sent into the
-	 *  streaming response; `remove_queued_message` cannot reach them. */
+	 *  Input the agent already took leads its list until the transcript records
+	 *  it; `liveSteered` counts the leading `steering` entries among it (live
+	 *  steering inside the streaming response, or steering on its way into the
+	 *  next request), which `remove_queued_message` cannot reach. */
 	queuedMessages: { steering: string[]; followUp: string[]; liveSteered: number };
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
@@ -458,6 +477,8 @@ export type RpcResponse =
 			success: true;
 			data: RpcAbortAndRestoreQueueResult;
 	  }
+	| { id?: string; type: "response"; command: "abort_and_deliver_queue"; success: true; data: { aborted: boolean } }
+	| { id?: string; type: "response"; command: "resume"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "open_session"; success: true; data: RpcOpenSessionResult }
 
@@ -555,6 +576,13 @@ export type RpcResponse =
 			command: "get_available_models";
 			success: true;
 			data: { models: Model[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_model_picker";
+			success: true;
+			data: RpcModelPickerResult;
 	  }
 
 	// Thinking
@@ -760,9 +788,7 @@ export type RpcDeltaMessageUpdateFrame = Omit<
 };
 
 /** Session event as written to stdout by default: message lifecycle events carry a `messageId`. */
-export type RpcAgentSessionEventFrame =
-	| Exclude<AgentSessionEvent, { type: RpcMessageEventType }>
-	| RpcMessageEventFrame;
+export type RpcAgentSessionEventFrame = Exclude<WireSessionEvent, { type: RpcMessageEventType }> | RpcMessageEventFrame;
 
 /** Every session event shape RPC mode can write, including the opt-in `messageUpdates: "delta"` projection. */
 export type RpcProjectedSessionEventFrame = RpcAgentSessionEventFrame | RpcDeltaMessageUpdateFrame;
@@ -833,6 +859,8 @@ export type RpcExtensionUIRequest =
 			questions: RpcAskDialogQuestion[];
 			timeout?: number;
 	  }
+	/** The whole HTML form of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required. */
+	| { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
 			type: "extension_ui_request";
@@ -988,7 +1016,9 @@ export type RpcExtensionUIResponse =
 			type: "extension_ui_response";
 			id: string;
 			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
-	  };
+	  }
+	/** Submitted data of a `form` request, by control `name`; validated against the form. */
+	| { type: "extension_ui_response"; id: string; data: Record<string, unknown> };
 
 // ============================================================================
 // Helper type for extracting command types

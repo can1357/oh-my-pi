@@ -11,6 +11,7 @@ import {
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
 } from "../config/service-tier";
+import { DaemonProviderSlots } from "../daemon/modules/provider-slots";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -26,10 +27,10 @@ import { compileModelPatterns } from "../utils/model-patterns";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
-import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
+import { configureProviderMaxInFlightRequests, configureProviderSlotBroker } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { formatKeyHint } from "../ui/keys/hints";
+import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking/levels";
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
@@ -114,7 +115,8 @@ export const cfgPrewalkFrom = register({
 		tab: "model",
 		group: "Prewalk",
 		label: "Prewalk planning model",
-		description: "Model or role (default '@default') that /prewalk restart returns to for planning.",
+		description:
+			"Model or role (default '@default') to plan on: /prewalk restart returns to it, and Auto Prewalk's Escalate mode moves a front-loaded task to it before planning.",
 	},
 });
 
@@ -134,7 +136,7 @@ export const cfgPrewalkInto = register({
 export const cfgPrewalkAuto = register({
 	id: "prewalk.auto",
 	type: "enum",
-	values: ["off", "suggest", "on"] as const,
+	values: ["off", "suggest", "on", "escalate"] as const,
 	default: "off",
 	ui: {
 		tab: "model",
@@ -147,13 +149,20 @@ export const cfgPrewalkAuto = register({
 			{
 				value: "suggest",
 				label: "Suggest",
-				description: "Classify each task and report the decision without arming prewalk",
+				description:
+					"Classify each task and report the decision, and whether Escalate would plan on another model, without arming prewalk",
 			},
 			{
 				value: "on",
 				label: "On",
 				description:
 					"For confidently front-loaded tasks, arm a handoff from the active model to the auto target; the next task starts back on the planning model",
+			},
+			{
+				value: "escalate",
+				label: "Escalate",
+				description:
+					"Like On, but plan on the Prewalk planning model (prewalk.from) first: a confidently front-loaded task moves there before setup and hands off from it; the next task starts back where this one started. When the planning model is already active, this is On, except that '@initial' then has nothing to hand back to",
 			},
 		],
 	},
@@ -167,9 +176,13 @@ export const cfgPrewalkAutoTarget = register({
 		tab: "model",
 		group: "Prewalk",
 		label: "Auto-prewalk target",
-		description: "Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.",
+		description:
+			"Model or role (default '@smol') auto-prewalk hands off to at the first edit/write. '@initial' (Escalate only) hands back to the model and thinking level the task started on.",
 	},
 });
+
+/** `prewalk.autoTarget` value that hands an `escalate` task back to the model and effort it started on. */
+export const PREWALK_INITIAL_TARGET = "@initial";
 
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
@@ -219,6 +232,8 @@ export const cfgProvidersMaxInFlightRequests = register({
 effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
+// The limits bind every omp process of this config root, through the daemon.
+configureProviderSlotBroker(new DaemonProviderSlots());
 
 export const cfgImagesDescribeForTextModels = register({
 	id: "images.describeForTextModels",
@@ -386,7 +401,7 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 		group: "Thinking",
 		label: "Tool-Call Loop Exempt Tools",
 		description:
-			"Tool names, or xd:// device names of write dispatches (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
+			"Tool names, including tools run as commands through bash (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard",
 	},
 });
 
@@ -817,7 +832,7 @@ export const cfgRetryMaxDelayMs = register({
 		group: "Retry & Fallback",
 		label: "Max Retry Delay",
 		description:
-			"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling — to let the session auto-resume through provider-stated quota resets.",
+			"Maximum wait between retries, in ms. When the retry would wait longer and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling.",
 	},
 });
 
@@ -830,7 +845,7 @@ export const cfgRetryWaitForUsageReset = register({
 		group: "Retry & Fallback",
 		label: "Wait For Usage Reset",
 		get description() {
-			return `When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (${formatKeyHint("escape")}) but also hold subagents, so leave off for unattended runs.`;
+			return `Usage-limit waits within retry.maxDelayMs are already allowed. Enable this to also wait past that cap when the provider reports a reset time, such as a 5-hour or weekly quota window. Waits are abortable (${formatKeyHint("escape")}) but also hold subagents, so leave off for unattended runs.`;
 		},
 	},
 });
@@ -1337,7 +1352,7 @@ export const cfgProvidersCacheWarming = register({
 		group: "Protocol",
 		label: "Cache Warming",
 		description:
-			"Re-send the last request with a one-token output budget shortly before its prompt-cache entry expires",
+			"Refresh the last request's prompt-cache entry shortly before it expires (Anthropic max_tokens 0 pre-warm, else a one-token replay)",
 		options: [
 			{ value: "off", label: "Off", description: "Disable cache warming" },
 			{
@@ -1351,6 +1366,74 @@ export const cfgProvidersCacheWarming = register({
 				description:
 					"Also refresh 5-minute entries between runs while the expected savings stay above the cost floor",
 			},
+		],
+	},
+});
+
+export const cfgProvidersCacheWarmingStrategy = register({
+	id: "providers.cacheWarmingStrategy",
+	type: "enum",
+	values: ["auto", "keepalive", "compact"] as const,
+	default: "auto",
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cache Warming Strategy",
+		description:
+			"How a long tool call is bridged once refreshing stops paying: compact the history before the cache expires, or let it expire",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Refresh while the refresh spend stays within the cheaper buy-out, then compact large prompts or let the entry expire",
+			},
+			{ value: "keepalive", label: "Keep Alive", description: "Never compact; refresh until it stops paying" },
+			{
+				value: "compact",
+				label: "Compact",
+				description: "Compact at the first decision once the prompt reaches the bridge-compaction threshold",
+			},
+		],
+	},
+});
+
+export const cfgProvidersCacheWarmingCompactPercent = register({
+	id: "providers.cacheWarmingCompactPercent",
+	type: "number",
+	default: 60,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cache Bridge Compaction Percent",
+		description:
+			"Share of the context window a prompt must reach before a long tool call may be bridged with compaction; the lower of this and the token limit applies",
+		options: [
+			{ value: "40", label: "40%" },
+			{ value: "50", label: "50%" },
+			{ value: "60", label: "60%" },
+			{ value: "70", label: "70%" },
+			{ value: "80", label: "80%" },
+		],
+	},
+});
+
+export const cfgProvidersCacheWarmingCompactTokens = register({
+	id: "providers.cacheWarmingCompactTokens",
+	type: "number",
+	default: 150_000,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cache Bridge Compaction Tokens",
+		description:
+			"Prompt tokens from which a long tool call may be bridged with compaction; the lower of this and the window percent applies",
+		options: [
+			{ value: "50000", label: "50K tokens" },
+			{ value: "100000", label: "100K tokens" },
+			{ value: "150000", label: "150K tokens" },
+			{ value: "200000", label: "200K tokens" },
+			{ value: "300000", label: "300K tokens" },
 		],
 	},
 });
@@ -1423,7 +1506,7 @@ export const cfgProvidersOpenrouterVariant = register({
 export const cfgProvidersFetch = register({
 	id: "providers.fetch",
 	type: "enum",
-	values: ["auto", "native", "trafilatura", "lynx", "parallel", "firecrawl", "jina"] as const,
+	values: ["auto", "local", "parallel", "firecrawl", "jina"] as const,
 	default: "auto",
 	ui: {
 		tab: "providers",
@@ -1434,15 +1517,31 @@ export const cfgProvidersFetch = register({
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Priority: native > trafilatura > lynx > parallel > firecrawl > jina",
+				description: "Priority: local > parallel > firecrawl > jina",
 			},
-			{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
-			{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
-			{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
+			{ value: "local", label: "Local", description: "In-process reader engine (always available)" },
 			{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 			{ value: "firecrawl", label: "Firecrawl", description: "Requires FIRECRAWL_API_KEY" },
 			{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
 		],
+	},
+});
+
+/**
+ * Whether `web_search` and the URL reader may use third-party services the user
+ * holds no credential for. Off, they stick to configured services; a per-request
+ * `omp q --model` selector still runs.
+ */
+export const cfgProvidersWebKeyless = register({
+	id: "providers.webKeyless",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Keyless Web Services",
+		description:
+			"Let web search and URL reading use third-party services without your credential: keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines (Startpage, DuckDuckGo, Ecosia, Google, Mojeek, Hacker News). Off, only services you configured run.",
 	},
 });
 

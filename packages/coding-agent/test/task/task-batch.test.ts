@@ -25,7 +25,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
@@ -307,6 +307,30 @@ describe("task.batch validation", () => {
 
 		const missing = await executeText({ tasks: [{ task: "Work." }, { name: "Beta" }] }, { "task.batch": true });
 		expect(missing).toContain("Task 2 (`Beta`) is missing `task`");
+	});
+
+	it("explains a JSON-string tasks payload instead of reporting it as missing", async () => {
+		const text = await executeText({ context: "Shared.", tasks: "not a JSON array" }, { "task.batch": true });
+		expect(text).toContain("must be an array of task items, not a JSON string");
+	});
+
+	it("accepts a JSON-string tasks payload and repairs double-encoded prose", async () => {
+		mockDiscovery();
+		const spawned: Array<string | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			spawned.push(options.assignment);
+			return makeResult(options.id ?? "?");
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		const result = await tool.execute("string-tasks", {
+			context: "Shared.",
+			tasks: JSON.stringify([
+				{ name: "Alpha", task: "line one\\nline two\\nline three", solutionSpace: "Open-ended" },
+			]) as unknown as TaskParams["tasks"],
+		});
+		expect(getFirstText(result)).not.toContain("Missing `tasks`");
+		expect(spawned).toHaveLength(1);
+		expect(spawned[0]).toContain("line one\nline two\nline three");
 	});
 
 	it("requires a shared context for batch calls", async () => {
@@ -796,10 +820,9 @@ describe("task.batch spawning", () => {
 
 	it("spawns schema-less, yield-less children by default even with caller and agent schemas", async () => {
 		mockDiscovery({ ...taskAgent, output: { type: "object", properties: { agent: { type: "string" } } } });
-		let captured: { structured?: boolean; outputSchema?: unknown; outputSchemaSource?: string } | undefined;
+		let captured: { outputSchema?: unknown; outputSchemaSource?: string } | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			captured = {
-				structured: options.structured,
 				outputSchema: options.outputSchema,
 				outputSchemaSource: options.outputSchemaSource,
 			};
@@ -819,7 +842,7 @@ describe("task.batch spawning", () => {
 		} as TaskParams);
 
 		await manager.getJob(result.details!.async!.jobId)!.promise;
-		expect(captured).toEqual({ structured: false, outputSchema: undefined, outputSchemaSource: undefined });
+		expect(captured).toEqual({ outputSchema: undefined, outputSchemaSource: undefined });
 	});
 
 	it("blocks batch execution when async.enabled is false even with a job manager", async () => {

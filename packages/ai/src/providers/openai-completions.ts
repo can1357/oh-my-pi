@@ -6,6 +6,7 @@ import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
 	$env,
+	isRecord,
 	logger,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
@@ -14,7 +15,16 @@ import {
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { isReasoningSourceSignature, MISTRAL_CONTENT_PARTS_SIGNATURE } from "../utils/reasoning-source";
+import {
+	isReasoningField,
+	isReasoningSourceSignature,
+	MISTRAL_CONTENT_PARTS_SIGNATURE,
+	parseReasoningDetailsSignature,
+	type ReasoningDetailsSignature,
+	type ReasoningField,
+	reasoningDetailsWithoutThinkingText,
+	signatureReasoningField,
+} from "../utils/reasoning-source";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -38,7 +48,11 @@ import type {
 import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
-import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import {
+	hasVisibleAssistantContent,
+	transportExhaustedMessages,
+	withReplaySafeStreamRetry,
+} from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -55,6 +69,7 @@ import {
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
+	normalizeSchemaForGoogle,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForGrammar,
 	toolWireSchema,
@@ -168,7 +183,8 @@ type GeminiThoughtSignatureExtraContent = Partial<
 	Record<GeminiThoughtSignatureNamespace, { thought_signature: string }>
 >;
 
-type OpenAICompletionsFunctionToolCall = ChatCompletionMessageFunctionToolCall & {
+type OpenAICompletionsFunctionToolCall = Omit<ChatCompletionMessageFunctionToolCall, "function"> & {
+	function: ChatCompletionMessageFunctionToolCall["function"] & { thought_signature?: string };
 	extra_content?: GeminiThoughtSignatureExtraContent;
 };
 
@@ -194,6 +210,16 @@ function getGeminiThoughtSignatureExtraContent(value: unknown): GeminiThoughtSig
 	return undefined;
 }
 
+// When strict OpenAI compliance is off, Portkey sends the per-call Gemini signature
+// on the `function` object of the tool call instead of in `extra_content`.
+function getGeminiFunctionThoughtSignature(toolCall: unknown): string | undefined {
+	if (typeof toolCall !== "object" || toolCall === null) return undefined;
+	const toolCallFunction = Reflect.get(toolCall, "function");
+	if (typeof toolCallFunction !== "object" || toolCallFunction === null) return undefined;
+	const thoughtSignature = Reflect.get(toolCallFunction, "thought_signature");
+	return typeof thoughtSignature === "string" && thoughtSignature.length > 0 ? thoughtSignature : undefined;
+}
+
 function getGeminiMessageThoughtSignature(value: unknown): GeminiMessageThoughtSignature | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	for (const field of GEMINI_MESSAGE_THOUGHT_SIGNATURE_FIELDS) {
@@ -212,16 +238,57 @@ function parseStoredThoughtSignature(thoughtSignature: string | undefined): unkn
 	}
 }
 
-// A single tool-call turn on an OpenAI-compatible Gemini wire can carry two
+// `reasoning_details` entries arrive in two shapes on chat completions:
+// - OpenRouter (https://openrouter.ai/docs/guides/best-practices/reasoning-tokens):
+//   `reasoning.text` {text, signature?}, `reasoning.encrypted` {data},
+//   `reasoning.summary` {summary}, alongside a plain `reasoning` string.
+// - Bifrost (Gemini): `reasoning.text` {text} with no `reasoning` string, and
+//   `reasoning.encrypted` carrying the blob in `signature` instead of `data`.
+// Entries are kept as received (streamed fragments of one entry concatenated,
+// as OpenRouter documents) and replayed verbatim, whatever field names they use.
+type ReasoningDetail = Record<string, unknown>;
+
+// The streamed field that carries each entry type's text fragments.
+const REASONING_DETAIL_FRAGMENT_FIELDS: Readonly<Record<string, string>> = {
+	"reasoning.text": "text",
+	"reasoning.summary": "summary",
+};
+
+function accumulateReasoningDetail(details: ReasoningDetail[], detail: ReasoningDetail): void {
+	const fragmentField = typeof detail.type === "string" ? REASONING_DETAIL_FRAGMENT_FIELDS[detail.type] : undefined;
+	const last = details.at(-1);
+	if (
+		!fragmentField ||
+		!last ||
+		last.type !== detail.type ||
+		last.index !== detail.index ||
+		(detail.id != null && last.id != null && detail.id !== last.id)
+	) {
+		details.push({ ...detail });
+		return;
+	}
+	for (const [key, value] of Object.entries(detail)) {
+		if (key === fragmentField && typeof value === "string") {
+			last[key] = (typeof last[key] === "string" ? last[key] : "") + value;
+		} else if (value != null || !(key in last)) {
+			last[key] = value;
+		}
+	}
+}
+
+// A single tool-call turn on an OpenAI-compatible Gemini wire can carry
 // independent signatures: a per-call one (`extra_content.google|vertex` or an
-// encrypted `reasoning_details` entry) and a message-level signature
-// (`thinking_signature`, `thought_signature`, or `reasoning_signature`).
-// Both are stashed together on the originating tool call's `thoughtSignature`
+// encrypted `reasoning_details` entry), a `function.thought_signature` on the
+// call, and a message-level signature (`thinking_signature`, `thought_signature`,
+// or `reasoning_signature`).
+// All are stashed together on the originating tool call's `thoughtSignature`
 // so persistence and replay preserve each field.
-// `perCall` holds the raw extra_content object or reasoning detail; `message`
-// holds the message-level signature in its wire shape.
+// `perCall` holds the raw extra_content object or reasoning detail; `function`
+// holds the `function.thought_signature` string; `message` holds the
+// message-level signature in its wire shape.
 type StoredGeminiSignature = {
 	perCall?: unknown;
+	function?: string;
 	message?: Partial<Record<GeminiMessageThoughtSignatureField, string>>;
 };
 
@@ -231,10 +298,14 @@ type StoredGeminiSignature = {
 function normalizeStoredGeminiSignature(value: unknown): StoredGeminiSignature | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const perCall = Reflect.get(value, "perCall");
+	const functionSignature = Reflect.get(value, "function");
+	const envelopeFunction =
+		typeof functionSignature === "string" && functionSignature.length > 0 ? functionSignature : undefined;
 	const envelopeMessage = getGeminiMessageThoughtSignature(Reflect.get(value, "message"));
-	if (perCall !== undefined || envelopeMessage) {
+	if (perCall !== undefined || envelopeFunction || envelopeMessage) {
 		const normalized: StoredGeminiSignature = {};
 		if (perCall !== undefined) normalized.perCall = perCall;
+		if (envelopeFunction) normalized.function = envelopeFunction;
 		if (envelopeMessage) normalized.message = { [envelopeMessage.field]: envelopeMessage.signature };
 		return normalized;
 	}
@@ -243,20 +314,43 @@ function normalizeStoredGeminiSignature(value: unknown): StoredGeminiSignature |
 	return { perCall: value };
 }
 
-// Merges a new per-call or message-level signature into whatever is already
-// stored, so a later message-level signature never clobbers an earlier per-call
-// one (and vice versa).
+// Merges a new per-call, function, or message-level signature into whatever is
+// already stored, so a later signature of one kind never clobbers an earlier one
+// of another kind.
 function mergeStoredGeminiSignature(existing: string | undefined, update: StoredGeminiSignature): string {
 	const merged = normalizeStoredGeminiSignature(parseStoredThoughtSignature(existing)) ?? {};
 	if (update.perCall !== undefined) merged.perCall = update.perCall;
+	if (update.function) merged.function = update.function;
 	if (update.message) merged.message = update.message;
 	return JSON.stringify(merged);
 }
 
-/** The stored signature envelope for a client-replayed `extra_content` (`google` or `vertex`), as this provider writes it. */
-export function storeGeminiToolCallSignature(extraContent: unknown): string | undefined {
+/**
+ * The stored signature envelope for a client-replayed tool call's `extra_content` (`google` or `vertex`) and
+ * `function.thought_signature`, as this provider writes it.
+ */
+export function storeGeminiToolCallSignature(toolCall: unknown): string | undefined {
+	const extraContent =
+		typeof toolCall === "object" && toolCall !== null ? Reflect.get(toolCall, "extra_content") : undefined;
 	const perCall = getGeminiThoughtSignatureExtraContent(extraContent);
-	return perCall ? JSON.stringify({ perCall } satisfies StoredGeminiSignature) : undefined;
+	const functionSignature = getGeminiFunctionThoughtSignature(toolCall);
+	if (!perCall && !functionSignature) return undefined;
+	const stored: StoredGeminiSignature = {};
+	if (perCall) stored.perCall = perCall;
+	if (functionSignature) stored.function = functionSignature;
+	return JSON.stringify(stored);
+}
+
+/** A tool call's `thoughtSignature` without the encrypted `reasoning_details` entry this provider may store on it. */
+export function dropToolCallReasoningDetail(thoughtSignature: string | undefined): string | undefined {
+	const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(thoughtSignature));
+	const perCall = stored?.perCall;
+	if (!isRecord(perCall) || perCall.type !== "reasoning.encrypted") return thoughtSignature;
+	if (!stored?.function && !stored?.message) return undefined;
+	const kept: StoredGeminiSignature = {};
+	if (stored.function) kept.function = stored.function;
+	if (stored.message) kept.message = stored.message;
+	return JSON.stringify(kept);
 }
 
 /**
@@ -272,10 +366,19 @@ export function geminiToolCallExtraContent(
 	return getGeminiThoughtSignatureExtraContent(normalizeStoredGeminiSignature(stored)?.perCall);
 }
 
+/** The `function.thought_signature` that replays a tool call's Gemini signature, read from the stored envelope. */
+export function geminiToolCallFunctionSignature(thoughtSignature: string | undefined): string | undefined {
+	return normalizeStoredGeminiSignature(parseStoredThoughtSignature(thoughtSignature))?.function;
+}
+
 /** The raw Gemini signature behind a tool call's `thoughtSignature`, as native Gemini parts carry it. */
 export function rawGeminiToolCallSignature(thoughtSignature: string | undefined): string | undefined {
 	const extraContent = geminiToolCallExtraContent(thoughtSignature);
-	return extraContent?.google?.thought_signature ?? extraContent?.vertex?.thought_signature;
+	return (
+		extraContent?.google?.thought_signature ??
+		extraContent?.vertex?.thought_signature ??
+		geminiToolCallFunctionSignature(thoughtSignature)
+	);
 }
 
 /**
@@ -301,10 +404,11 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 
 /**
  * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
- * reasoning field name or the Mistral content-parts marker.
+ * reasoning field name, the Mistral content-parts marker, or a
+ * `reasoning_details` envelope.
  */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
-	return !!signature && !isReasoningSourceSignature(signature);
+	return !!signature && !isReasoningSourceSignature(signature) && !parseReasoningDetailsSignature(signature);
 }
 
 /**
@@ -649,6 +753,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 				reasoning?: unknown;
 				reasoning_content?: unknown;
 				reasoning_text?: unknown;
+				reasoning_details?: unknown;
 				refusal?: unknown;
 			};
 		}>;
@@ -666,6 +771,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 	if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) return true;
 	if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) return true;
 	if (typeof delta.reasoning_text === "string" && delta.reasoning_text.length > 0) return true;
+	if (Array.isArray(delta.reasoning_details) && delta.reasoning_details.length > 0) return true;
 	if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
 	return false;
 }
@@ -911,6 +1017,7 @@ const streamOpenAICompletionsOnce = (
 				// The family affinity key rides only an explicit prompt-cache
 				// identity; the sessionId-derived cache-id fallback never does.
 				options?.promptCacheKey ? promptCacheSessionId : undefined,
+				options?.parentSessionId,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			let appliedStrictTools = false;
@@ -1320,6 +1427,12 @@ const streamOpenAICompletionsOnce = (
 				: undefined;
 			const explicitReasoningDeltasMayBeCumulative = policy.stream.reasoningDeltasMayBeCumulative;
 			let suppressHealedThinking = false;
+			// OpenRouter mirrors a plain reasoning field into `reasoning.text` entries;
+			// whichever streams first in the turn is its thinking, the other is skipped.
+			let reasoningSource: "field" | "details" | undefined;
+			// The plain field that streamed after `reasoning.text` won, kept as the replay marker.
+			let mirroredReasoningField: ReasoningField | undefined;
+			const receivedReasoningDetails: ReasoningDetail[] = [];
 			let healedToolCallEmitted = false;
 			const emitHealedToolCall = (call: HealedToolCall): void => {
 				finishCurrentBlock(currentBlock);
@@ -1502,6 +1615,19 @@ const streamOpenAICompletionsOnce = (
 							break;
 						}
 					}
+					const rawReasoningDetails = (choice.delta as OpenAICompletionsDeltaWithReasoningDetails)
+						.reasoning_details;
+					const reasoningDetails = Array.isArray(rawReasoningDetails)
+						? rawReasoningDetails.filter(
+								(detail): detail is ReasoningDetail => typeof detail === "object" && detail !== null,
+							)
+						: [];
+					let reasoningDetailsText = "";
+					for (const detail of reasoningDetails) {
+						if (detail.type === "reasoning.text" && typeof detail.text === "string") {
+							reasoningDetailsText += detail.text;
+						}
+					}
 
 					// LiteLLM mirrors Anthropic thinking into both `reasoning_content`
 					// and `thinking_blocks`; only the latter carries the signature, so
@@ -1527,13 +1653,26 @@ const streamOpenAICompletionsOnce = (
 					if (liteLLMThinkingBlocks) {
 						for (const entry of liteLLMThinkingBlocks) appendLiteLLMThinkingBlock(entry);
 						suppressHealedThinking = true;
-					} else if (foundReasoningField && !hasTypedThinking) {
-						appendThinkingDelta(
-							foundReasoningDelta,
-							foundReasoningField,
-							explicitReasoningDeltasMayBeCumulative ? "cumulative" : "delta",
-						);
-						suppressHealedThinking = true;
+					} else if (!hasTypedThinking) {
+						if (foundReasoningField && reasoningSource !== "details") {
+							reasoningSource = "field";
+							appendThinkingDelta(
+								foundReasoningDelta,
+								foundReasoningField,
+								explicitReasoningDeltasMayBeCumulative ? "cumulative" : "delta",
+							);
+							suppressHealedThinking = true;
+						} else if (reasoningSource !== "field") {
+							// Bifrost streams Gemini thinking only as `reasoning.text` entries. Once they
+							// won the turn, a plain field beside them is OpenRouter's mirror: kept as
+							// the replay marker, never rendered.
+							if (isReasoningField(foundReasoningField)) mirroredReasoningField ??= foundReasoningField;
+							if (reasoningDetailsText) {
+								reasoningSource = "details";
+								appendThinkingDelta(reasoningDetailsText);
+								suppressHealedThinking = true;
+							}
+						}
 					}
 					if (mistralParts) {
 						for (const part of mistralParts) {
@@ -1663,6 +1802,12 @@ const streamOpenAICompletionsOnce = (
 									perCall: extraContent,
 								});
 							}
+							const functionSignature = getGeminiFunctionThoughtSignature(toolCall);
+							if (functionSignature) {
+								block.thoughtSignature = mergeStoredGeminiSignature(block.thoughtSignature, {
+									function: functionSignature,
+								});
+							}
 							let delta = "";
 							// The OpenAI SDK types `function.arguments` as a JSON string, but MiniMax-compatible
 							// hosts stream a fully-formed object instead. Model both shapes so the branches below
@@ -1715,23 +1860,23 @@ const streamOpenAICompletionsOnce = (
 						}
 					}
 
-					const reasoningDetails = (choice.delta as OpenAICompletionsDeltaWithReasoningDetails).reasoning_details;
-					if (Array.isArray(reasoningDetails)) {
-						for (const detail of reasoningDetails) {
-							if (!detail || typeof detail !== "object") continue;
-							if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(detail);
-							const detailObject = detail as { type?: unknown; id?: unknown; data?: unknown };
-							if (detailObject.type === "reasoning.encrypted" && detailObject.id && detailObject.data) {
-								const matchingToolCall = output.content.find(
-									b => b.type === "toolCall" && b.id === detailObject.id,
-								) as ToolCall | undefined;
-								if (matchingToolCall) {
-									matchingToolCall.thoughtSignature = mergeStoredGeminiSignature(
-										matchingToolCall.thoughtSignature,
-										{ perCall: detailObject },
-									);
-								}
-							}
+					for (const detail of reasoningDetails) {
+						if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(detail);
+						accumulateReasoningDetail(receivedReasoningDetails, detail);
+						// An encrypted entry also stays on the tool call it names (blob in
+						// OpenRouter's `data` or Bifrost's `signature`): a pass that rewrites the
+						// turn's thinking or arguments drops the envelope, and an unchanged call
+						// must keep its signature.
+						if (detail.type !== "reasoning.encrypted" || !detail.id || !(detail.data ?? detail.signature)) {
+							continue;
+						}
+						const matchingToolCall = output.content.find(
+							(block): block is ToolCall => block.type === "toolCall" && block.id === detail.id,
+						);
+						if (matchingToolCall) {
+							matchingToolCall.thoughtSignature = mergeStoredGeminiSignature(matchingToolCall.thoughtSignature, {
+								perCall: detail,
+							});
 						}
 					}
 
@@ -1791,6 +1936,25 @@ const streamOpenAICompletionsOnce = (
 					"OpenAI completions stream closed before a finish_reason was received",
 					{ provider: model.provider, kind: "incomplete-stream" },
 				);
+			}
+
+			// Keep the received `reasoning_details` on the first thinking block whose
+			// signature only names its text's source field, so replay sends them back
+			// verbatim. With no such block, an empty thinking block holds them only when
+			// the turn has other content (text or tool calls, already pushed by now): an
+			// encrypted-only turn stays empty so the empty-stop retry still runs.
+			if (receivedReasoningDetails.length > 0) {
+				const holder = output.content.find(
+					(block): block is ThinkingContent =>
+						block.type === "thinking" &&
+						(block.thinkingSignature === undefined || isReasoningField(block.thinkingSignature)),
+				);
+				const stored: ReasoningDetailsSignature = { reasoningDetails: receivedReasoningDetails };
+				const holderField = holder?.thinkingSignature;
+				const field = isReasoningField(holderField) ? holderField : mirroredReasoningField;
+				if (field) stored.field = field;
+				if (holder) holder.thinkingSignature = JSON.stringify(stored);
+				else if (output.content.length > 0) openThinkingBlock(JSON.stringify(stored));
 			}
 
 			if (currentBlock?.type === "toolCall") {
@@ -1881,6 +2045,9 @@ const streamOpenAICompletionsOnce = (
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
+			if (error instanceof OpenAIHttpError && AIError.isTransientStatus(result.status)) {
+				transportExhaustedMessages.add(output);
+			}
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			// Some providers via OpenRouter include extra details here.
@@ -1933,6 +2100,7 @@ function createRequestSetup(
 	promptCacheSessionId?: string,
 	sessionId?: string,
 	promptCacheAffinityKey?: string,
+	parentSessionId?: string,
 ): OpenAIRequestSetup & { baseUrl: string } {
 	const apiVersion = $env.AZURE_OPENAI_API_VERSION || "2024-10-21";
 	const deploymentName = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(model.id) ?? model.id;
@@ -1943,6 +2111,7 @@ function createRequestSetup(
 		promptCacheSessionId,
 		sessionId,
 		promptCacheAffinityKey,
+		parentSessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
 		// Provider auth/header overlay: Kimi-code hosts require shared client
@@ -2637,14 +2806,11 @@ export function convertMessages(
 					// like opencode-kimi-with-thinking and DeepSeek demand the exact
 					// configured `reasoningContentField` instead, so honor that here
 					// rather than echoing the upstream field name.
-					const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
+					const signatureField = signatureReasoningField(nonEmptyThinkingBlocks[0].thinkingSignature);
 					const wireField =
-						compat.allowsSyntheticReasoningContentForToolCalls &&
-						(signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text")
-							? signature
-							: signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text"
-								? (compat.reasoningContentField ?? "reasoning_content")
-								: undefined;
+						signatureField && !compat.allowsSyntheticReasoningContentForToolCalls
+							? (compat.reasoningContentField ?? "reasoning_content")
+							: signatureField;
 					if (wireField) {
 						assistantMsg[wireField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 					}
@@ -2676,22 +2842,18 @@ export function convertMessages(
 					// than the existing `requires*` flags because local servers
 					// accept but don't validate the field — they just need it to
 					// preserve cache locality.
-					const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
 					const reasoningField: OpenAICompletionsReasoningField =
-						signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text"
-							? signature
-							: (compat.reasoningContentField ?? "reasoning_content");
+						signatureReasoningField(nonEmptyThinkingBlocks[0].thinkingSignature) ??
+						compat.reasoningContentField ??
+						"reasoning_content";
 					assistantMsg[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 				}
 			}
 
 			if (compat.requiresReasoningContentForToolCalls) {
-				const streamedReasoningField = nonEmptyThinkingBlocks[0]?.thinkingSignature;
+				const streamedReasoningField = signatureReasoningField(nonEmptyThinkingBlocks[0]?.thinkingSignature);
 				const reasoningField =
-					compat.allowsSyntheticReasoningContentForToolCalls &&
-					(streamedReasoningField === "reasoning_content" ||
-						streamedReasoningField === "reasoning" ||
-						streamedReasoningField === "reasoning_text")
+					compat.allowsSyntheticReasoningContentForToolCalls && streamedReasoningField
 						? streamedReasoningField
 						: (compat.reasoningContentField ?? "reasoning_content");
 				const reasoningContent = assistantMsg[reasoningField];
@@ -2754,8 +2916,7 @@ export function convertMessages(
 			) {
 				const allThinkingBlocks = msg.content.filter(b => b.type === "thinking") as ThinkingContent[];
 				if (allThinkingBlocks.length > 0) {
-					const signature = allThinkingBlocks[0].thinkingSignature;
-					if (signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text") {
+					if (signatureReasoningField(allThinkingBlocks[0].thinkingSignature)) {
 						const reasoningField = compat.reasoningContentField ?? "reasoning_content";
 						assistantMsg[reasoningField] = allThinkingBlocks.map(b => b.thinking).join("\n");
 						hasReasoningField = true;
@@ -2799,6 +2960,7 @@ export function convertMessages(
 					const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature));
 					const extraContent = getGeminiThoughtSignatureExtraContent(stored?.perCall);
 					if (extraContent) replayedToolCall.extra_content = extraContent;
+					if (stored?.function) replayedToolCall.function.thought_signature = stored.function;
 					return replayedToolCall;
 				});
 				for (const toolCall of toolCalls) {
@@ -2808,15 +2970,30 @@ export function convertMessages(
 					assistantMsg[messageSignature.field] = messageSignature.signature;
 					break;
 				}
-				const reasoningDetails = toolCalls.flatMap(tc => {
-					const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature));
-					const perCall = stored?.perCall;
-					if (perCall === undefined || getGeminiThoughtSignatureExtraContent(perCall)) return [];
-					return [perCall];
-				});
-				if (reasoningDetails.length > 0) {
-					assistantMsg.reasoning_details = reasoningDetails;
-				}
+			}
+			// Replay `reasoning_details` exactly as received. Once the envelope is gone
+			// (a pass rewrote the turn's thinking or arguments, or the turn predates
+			// it), the encrypted entries kept on unchanged tool calls still replay.
+			// A request that drops the model's own thinking also drops its unsigned text.
+			const receivedReasoningDetails = msg.content.flatMap(block =>
+				block.type === "thinking"
+					? (parseReasoningDetailsSignature(block.thinkingSignature)?.reasoningDetails ?? [])
+					: [],
+			);
+			const reasoningDetails =
+				receivedReasoningDetails.length > 0
+					? receivedReasoningDetails
+					: toolCalls.flatMap(tc => {
+							const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature));
+							const perCall = stored?.perCall;
+							if (perCall === undefined || getGeminiThoughtSignatureExtraContent(perCall)) return [];
+							return [perCall];
+						});
+			if (reasoningDetails.length > 0) {
+				const replayed = completionsSendsOwnThinking(model, compat)
+					? reasoningDetails
+					: reasoningDetailsWithoutThinkingText(reasoningDetails);
+				if (replayed.length > 0) assistantMsg.reasoning_details = replayed;
 			}
 			// Some OpenAI-compatible backends concatenate assistant content as a
 			// string even for tool-call replay. OpenAI accepts an empty string here;
@@ -2931,6 +3108,39 @@ export function convertMessages(
 	return params;
 }
 
+/**
+ * Rewrites tool parameters into the schema dialect `flavor` names; see
+ * {@link ResolvedOpenAICompat.toolSchemaFlavor}. Called once per tool by
+ * {@link convertTools} after strict adaptation.
+ */
+function applyToolSchemaFlavor(
+	flavor: ResolvedOpenAICompat["toolSchemaFlavor"],
+	parameters: Record<string, unknown>,
+): Record<string, unknown> {
+	switch (flavor) {
+		// Moonshot/Kimi native hosts validate against the stricter MFJS subset
+		// (const→enum, typed enums, no validators) and 400 otherwise.
+		case "moonshot-mfjs": {
+			const normalized = normalizeSchemaForMoonshot(parameters);
+			return isRecord(normalized) ? normalized : parameters;
+		}
+		// Gemini behind an OpenAI-compatible host (GitHub Copilot) takes Google's
+		// dialect: a JSON Schema `type` array 400s the whole request.
+		case "google": {
+			const normalized = normalizeSchemaForGoogle(parameters);
+			return isRecord(normalized) ? normalized : parameters;
+		}
+		// Grammar-constrained local backends (llama.cpp, LM Studio, vLLM)
+		// build a GBNF grammar from the schema and 400 with
+		// `Unrecognized schema: true` on the bare boolean subschema
+		// `toolWireSchema` emits for open fields (issue #5914).
+		case "grammar":
+			return sanitizeSchemaForGrammar(parameters);
+		default:
+			return parameters;
+	}
+}
+
 function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompat,
@@ -2974,18 +3184,7 @@ function convertTools(
 		const includeExplicitFalse =
 			!includeStrict && tool.strict === false && toolStrictMode === "mixed" && compat.supportsStrictMode !== false;
 		const wireParameters = includeStrict ? parameters : baseParameters;
-		// Moonshot/Kimi native hosts validate against the stricter MFJS subset
-		// (const→enum, typed enums, no validators) and 400 otherwise.
-		// Grammar-constrained local backends (llama.cpp, LM Studio, vLLM)
-		// build a GBNF grammar from the schema and 400 with
-		// `Unrecognized schema: true` on the bare boolean subschema
-		// `toolWireSchema` emits for open fields (issue #5914).
-		const emittedParameters =
-			compat.toolSchemaFlavor === "moonshot-mfjs"
-				? (normalizeSchemaForMoonshot(wireParameters) as Record<string, unknown>)
-				: compat.toolSchemaFlavor === "grammar"
-					? sanitizeSchemaForGrammar(wireParameters)
-					: wireParameters;
+		const emittedParameters = applyToolSchemaFlavor(compat.toolSchemaFlavor, wireParameters);
 		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			logger.warn(

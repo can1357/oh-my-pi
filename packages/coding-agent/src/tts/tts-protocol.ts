@@ -48,21 +48,18 @@ export type TtsWorkerOutbound =
 	| { type: "stream-done"; id: string };
 
 /**
- * Wire transport between the parent (`TtsClient`) and the local TTS subprocess.
- * The parent owns the subprocess lifecycle (graceful work, hard SIGKILL on
- * shutdown); the protocol carries no explicit close handshake — once the parent
- * decides to terminate, it signals the OS to reap the child so
- * `onnxruntime-node`'s NAPI finalizer never runs in the main agent address
- * space (it segfaults Bun on shutdown — issue #1606). See `tts-client.ts` for
- * the spawn/kill glue.
+ * Worker-side transport. Messages cross both hops (client tunnel <-> daemon
+ * `speech` module <-> worker stdio) as the binary frames of
+ * `daemon/modules/speech-frames.ts`; `pcm` travels as a raw f32le payload.
+ * The daemon owns the worker process (native inference stays out of every
+ * agent process) and SIGKILLs it on stop; there is no close handshake.
  */
 export interface TtsTransport {
 	send(message: TtsWorkerOutbound): void;
 	/**
-	 * Send and resolve once the message has drained into the IPC channel.
-	 * Streaming synthesis awaits this per audio chunk: ONNX inference blocks
-	 * the worker's event loop for seconds at a time, so fire-and-forget sends
-	 * queue unflushed until the session ends and arrive as one burst.
+	 * Send and resolve once the frame left the worker's stdout buffer.
+	 * Streaming synthesis awaits this per audio chunk, so each segment reaches
+	 * the client before the next one synthesizes and the pipe never backs up.
 	 */
 	sendAndFlush(message: TtsWorkerOutbound): Promise<void>;
 	onMessage(handler: (message: TtsWorkerInbound) => void): () => void;

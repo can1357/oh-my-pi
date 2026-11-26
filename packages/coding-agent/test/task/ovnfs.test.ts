@@ -9,11 +9,12 @@ import * as path from "node:path";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 import * as client from "../../src/ovnfs/client";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import * as daemon from "../../src/ovnfs/daemon";
 import { ISOLATION_OWNER_FILE } from "../../src/task/isolation-ownership";
 import * as isolationRunner from "../../src/task/isolation-runner";
-import { OVNFS_CHECKOUT_FILE, ovnfsWorkspace, releaseOvnfsCheckout } from "../../src/task/ovnfs";
+import { OVNFS_CHECKOUT_FILE, releaseOvnfsCheckout } from "../../src/ovnfs/task-record";
+import { ovnfsWorkspace } from "../../src/task/ovnfs";
 import * as executorModule from "../../src/task/executor";
 import * as worktreeModule from "../../src/task/worktree";
 import { taskIsolationBaseDir } from "../../src/task/worktree";
@@ -32,6 +33,7 @@ interface DaemonOp {
 	checkout?: string;
 	name?: string;
 	base?: string;
+	session?: string;
 }
 
 describe("ovnfs checkout recovery", () => {
@@ -57,12 +59,13 @@ describe("ovnfs checkout recovery", () => {
 		vi.spyOn(daemon, "startDaemon").mockResolvedValue({ socket: "/tmp/ovnfs-test.sock" });
 		vi.spyOn(client, "callSocket").mockImplementation(
 			async <T>(_socket: string, op: string, args: object): Promise<T> => {
-				const record = args as { checkout?: unknown; name?: unknown; base?: unknown };
+				const record = args as { checkout?: unknown; name?: unknown; base?: unknown; session?: unknown };
 				return handle({
 					op,
 					checkout: typeof record.checkout === "string" ? record.checkout : undefined,
 					name: typeof record.name === "string" ? record.name : undefined,
 					base: typeof record.base === "string" ? record.base : undefined,
+					session: typeof record.session === "string" ? record.session : undefined,
 				}) as T;
 			},
 		);
@@ -296,6 +299,27 @@ describe("ovnfs checkout recovery", () => {
 		failRemoval = false;
 		await workspace.cleanup();
 		await expect(fs.stat(baseDir)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("records the spawning session on the checkout only for a daemon that takes it", async () => {
+		const repo = path.join(root, "session");
+		await fs.mkdir(repo);
+		// A daemon without `new.session` refuses the unknown field, so it must not be sent.
+		for (const [agentId, features, recorded] of [
+			["New", ["new.session"], "parent-1"],
+			["Old", [], undefined],
+		] as const) {
+			vi.restoreAllMocks();
+			const opened: DaemonOp[] = [];
+			vi.spyOn(client, "socketFeatures").mockResolvedValue(new Set<string>(features));
+			mockDaemon(op => {
+				if (op.op !== "new" || !op.name) throw new Error(op.op);
+				opened.push(op);
+				return { checkout: { name: op.name, path: `/mnt/ovnfs/${op.name}` } };
+			});
+			await ovnfsWorkspace(COMMAND, "parent-1")(repo, agentId);
+			expect(opened.map(op => op.session)).toEqual([recorded]);
+		}
 	});
 
 	/** A daemon that captured `repo` as one repository on capture `b_1`, serving `features`. */

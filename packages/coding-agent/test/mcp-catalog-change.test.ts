@@ -1,23 +1,19 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { snapshotMcpRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/inventory/mcp-runtime";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
-import { snapshotMcpRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/mcp-runtime";
 import { createExtensionDashboardRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/dashboard-runtime";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { ExtensionDashboardModel } from "../src/ui/overlays/panels/extensions-dashboard-model";
 import { PROMPT_NAME, RESOURCE_NAME, RESOURCE_URI, TOOL_NAME } from "./fixtures/delayed-catalog-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-catalog-mcp.ts");
 const SERVER = "catalog";
-
-beforeAll(async () => {
-	await initTheme(false);
-});
 
 function waitUntil(predicate: () => boolean, label: string, timeoutMs = 8_000): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -102,7 +98,12 @@ describe("MCP catalog-change after connect", () => {
 			{
 				name: SERVER,
 				command: process.execPath,
-				_source: { provider: "native", providerName: "OMP", level: "user", path: workDir },
+				_source: {
+					provider: "native",
+					providerName: "OMP",
+					level: "user",
+					path: workDir,
+				},
 			},
 			manager,
 		);
@@ -113,13 +114,20 @@ describe("MCP catalog-change after connect", () => {
 
 	it("repaints after reconnect catalogs finish, then stops after dashboard dispose", async () => {
 		const settings = await Settings.init({ inMemory: true, cwd: workDir });
-		const dashboard = await ExtensionDashboard.create({
-			runtime: createExtensionDashboardRuntime({ cwd: workDir, settings, mcpManager: manager }),
+		const dashboard = await ExtensionDashboardModel.create({
+			runtime: createExtensionDashboardRuntime({
+				cwd: workDir,
+				settings,
+				mcpManager: manager,
+			}),
+			terminal: {
+				theme: currentTheme,
+				size: () => ({ columns: 120, rows: 40 }),
+			},
 		});
-		let paints = 0;
-		dashboard.onRequestRender = () => {
-			paints += 1;
-		};
+		// Every repaint the dashboard asks for bumps its revision.
+		const start = dashboard.rev.peek();
+		const paints = () => dashboard.rev.peek() - start;
 
 		const lifecycle: string[] = [];
 		const catalogs: Array<{ kind: string }> = [];
@@ -132,19 +140,21 @@ describe("MCP catalog-change after connect", () => {
 
 		await manager.connectServers({ [SERVER]: fixtureConfig() }, {});
 		await waitUntil(() => lifecycle.includes("connected"), "initial connected");
-		const paintsAtConnected = paints;
+		const paintsAtConnected = paints();
 		expect(paintsAtConnected).toBeGreaterThan(0);
 		expect(manager.getConnection(SERVER)?.resources).toBeUndefined();
 
 		fs.writeFileSync(gate, "go");
 		await waitUntil(() => catalogs.length >= 2, "initial catalogs");
-		expect(paints).toBeGreaterThan(paintsAtConnected);
+		expect(paints()).toBeGreaterThan(paintsAtConnected);
 		expect(manager.getServerResources(SERVER)?.resources[0]?.uri).toBe(RESOURCE_URI);
 
 		fs.unlinkSync(gate);
-		const paintsBeforeReconnect = paints;
+		const paintsBeforeReconnect = paints();
 		const connectedBefore = lifecycle.filter(type => type === "connected").length;
-		manager.getConnection(SERVER)?.transport.onClose?.();
+		// A manual reconnect restarts the server, so its catalogs are listed anew
+		// rather than served from what the host remembers.
+		void manager.reconnectServer(SERVER, { manual: true });
 		await waitUntil(
 			() => lifecycle.filter(type => type === "connected").length > connectedBefore,
 			"reconnect connected",
@@ -153,18 +163,17 @@ describe("MCP catalog-change after connect", () => {
 		expect(manager.getConnection(SERVER)?.resources).toBeUndefined();
 		expect(manager.getConnection(SERVER)?.prompts).toBeUndefined();
 		const catalogsBeforeRelease = catalogs.length;
-		expect(paints).toBeGreaterThan(paintsBeforeReconnect);
+		expect(paints()).toBeGreaterThan(paintsBeforeReconnect);
 
 		fs.writeFileSync(gate, "go");
 		await waitUntil(() => catalogs.length >= catalogsBeforeRelease + 2, "reconnect catalogs");
 		expect(manager.getServerPrompts(SERVER)?.[0]?.name).toBe(PROMPT_NAME);
-		const paintsAfterReconnectCatalogs = paints;
+		const paintsAfterReconnectCatalogs = paints();
 		expect(paintsAfterReconnectCatalogs).toBeGreaterThan(paintsBeforeReconnect);
 
 		dashboard.dispose();
-		const paintsAtDispose = paints;
+		const paintsAtDispose = paints();
 		await manager.refreshServerResources(SERVER);
-		await Bun.sleep(50);
-		expect(paints).toBe(paintsAtDispose);
+		expect(paints()).toBe(paintsAtDispose);
 	}, 20_000);
 });

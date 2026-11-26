@@ -27,9 +27,10 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { resourceText } from "../helpers/resource-text";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
@@ -55,9 +56,9 @@ function makeToolSession(
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "artifacts"),
-		allocateOutputArtifact: async toolType => ({
+		allocateOutputArtifact: async () => ({
 			id: "history-read",
-			path: path.join(cwd, "artifacts", `history-read.${toolType}.log`),
+			path: path.join(cwd, "artifacts", `history-read.log`),
 		}),
 		settings: Settings.isolated(),
 		...overrides,
@@ -192,9 +193,34 @@ describe("history:// protocol", () => {
 		const resource = await InternalUrlRouter.instance().resolve("history://HubAgent");
 
 		expect(resource.content).toContain("# HubAgent (idle)");
-		expect(resource.content).toContain("## user");
-		expect(resource.content).toContain("hello from live");
+		expect(resource.content).toMatch(/^#1 · .* · user: hello from live$/m);
 		expect(resource.notes).toContain("Source: live session");
+	});
+
+	it("history://<id> narrows and compacts by query like archive.transcript", async () => {
+		AgentRegistry.global().register({
+			id: "HubAgent",
+			displayName: "task",
+			kind: "sub",
+			session: fakeLiveSession([
+				{ role: "user", content: "first ask", timestamp: 1 },
+				{ role: "user", content: "second ask", timestamp: 2 },
+				{ role: "assistant", content: [{ type: "thinking", thinking: "pondering" }], timestamp: 3 },
+			]),
+			status: "idle",
+		});
+
+		const bare = await InternalUrlRouter.instance().resolve("history://HubAgent");
+		expect(bare.content).not.toContain("pondering");
+
+		const last = await InternalUrlRouter.instance().resolve("history://HubAgent?turns=-1&detail=thinking:full");
+		expect(last.content).toContain("turn 2 of 2");
+		expect(last.content).not.toContain("first ask");
+		expect(last.content).toContain("thinking: pondering");
+
+		await expect(InternalUrlRouter.instance().resolve("history://HubAgent?detail=loud")).rejects.toThrow(
+			"history:// detail takes",
+		);
 	});
 
 	it("preserves the existing bare history://current named-agent route", async () => {
@@ -339,6 +365,17 @@ describe("history:// protocol", () => {
 		expect(resource.sourcePath).toBeUndefined();
 	});
 
+	it("reads bare history://current as the caller's own branch when no agent is named current", async () => {
+		const resource = await InternalUrlRouter.instance().resolve("history://current", {
+			experimentalContextManagement: true,
+			getSessionBranch: currentBranchFixture,
+		});
+		expect(resource.content).toContain("latest raw request survives");
+		await expect(InternalUrlRouter.instance().resolve("history://current")).rejects.toThrow(
+			"experimentalContextManagement",
+		);
+	});
+
 	it("rejects current/full when disabled or without a caller-bound branch", async () => {
 		await expect(
 			InternalUrlRouter.instance().resolve("history://current/full", {
@@ -394,11 +431,13 @@ describe("history:// protocol", () => {
 	});
 
 	it("read applies line selectors to history transcripts", async () => {
+		// The read tool shows three lines after a range, so the checked turn sits past them.
+		const earlier = ["one", "two", "three"].map(content => ({ role: "user", content, timestamp: 1 }));
 		AgentRegistry.global().register({
 			id: "HubAgent",
 			displayName: "task",
 			kind: "sub",
-			session: fakeLiveSession([{ role: "user", content: "hello from live", timestamp: 1 }]),
+			session: fakeLiveSession([...earlier, { role: "user", content: "hello from live", timestamp: 1 }]),
 			status: "idle",
 		});
 		const tool = new ReadTool(makeToolSession(os.tmpdir()));
@@ -428,7 +467,8 @@ describe("history:// protocol", () => {
 
 		expect(output?.type).toBe("text");
 		if (output?.type !== "text") throw new Error("Expected text output");
-		expect(output.text).toBe(resource.content.split("\n").slice(0, 2).join("\n"));
+		// A raw range keeps each line's terminator, so consecutive ranges concatenate to the source.
+		expect(output.text).toBe(`${resourceText(resource).split("\n").slice(0, 2).join("\n")}\n`);
 	});
 
 	it("resolves agent ids case-insensitively", async () => {

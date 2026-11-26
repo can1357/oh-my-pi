@@ -11,11 +11,11 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentOutput } from "../task/task-details";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { OutputMeta } from "../tools/output-meta-format";
+import { truncateMiddle } from "../tools/streaming-output";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -113,8 +113,11 @@ export function taskAgentHandles(
 /** Longest command a completion header quotes before eliding its middle. */
 const COMMAND_IDENTITY_MAX_CHARS = 400;
 
-/** A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct. */
-function commandIdentity(command: string): string {
+/**
+ * A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct.
+ * Names the job in the notices that report on it: its completion and its `notify` matches.
+ */
+export function commandIdentity(command: string): string {
 	const oneLine = command.trim().replace(/\r\n|\r|\n/g, "\\n");
 	if (oneLine.length <= COMMAND_IDENTITY_MAX_CHARS) return oneLine;
 	const keep = COMMAND_IDENTITY_MAX_CHARS / 2;

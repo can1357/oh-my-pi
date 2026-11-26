@@ -17,7 +17,6 @@
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { hostMatchesUrl, modelMatchesHost } from "../hosts";
-import { withoutUnverifiedThinking } from "../model-thinking";
 import type {
 	Api,
 	CatalogPolicyInputs,
@@ -272,7 +271,7 @@ const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
 	vllm: true,
 	ollama: true,
 };
-const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true };
+const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true, bifrost: true };
 function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return false;
 	let hostname: string;
@@ -537,6 +536,8 @@ function detectOpenAICompat(
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
 		requiresAssistantAfterToolResult: isMistral,
+		foldUserAfterToolResult: false,
+		splitToolCalls: false,
 		requiresThinkingAsText: isMistral,
 		requiresMistralToolIds: isMistral,
 		thinkingFormat,
@@ -544,7 +545,7 @@ function detectOpenAICompat(
 		reasoningDisableMode: d.isVenice ? "venice-disable-thinking" : resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: d.isOpenRouter && isAnthropicModel,
+		filterReasoningHistory: false,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
 		reasoningContentField: "reasoning_content",
 		mistralReasoningContentParts: undefined,
@@ -768,6 +769,7 @@ function resolveOpenAIResponsesPolicy(
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
 		supportsSteering: false,
+		uncachedInstructions: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
 		reasoningEffortMap: {},
@@ -778,7 +780,7 @@ function resolveOpenAIResponsesPolicy(
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: isOpenRouter && isAnthropicModel,
+		filterReasoningHistory: false,
 		disableReasoningOnForcedToolChoice: facts.is("kimi"),
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		disableReasoningWithTools: false,
@@ -799,6 +801,8 @@ function resolveOpenAIResponsesPolicy(
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
+		foldUserAfterToolResult: false,
+		splitToolCalls: false,
 		requiresAssistantContentForToolCalls: facts.is("kimi"),
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
@@ -884,6 +888,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,
+		uncachedInstructions: compat.uncachedInstructions,
 		officialEndpoint: compat.officialEndpoint,
 		harmonyLeakMitigation: compat.harmonyLeakMitigation,
 		cacheControlFormat: compat.cacheControlFormat,
@@ -1158,12 +1163,11 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 /**
  * Compat-time reasoning capability. `axes.reasoning` also promotes targets on
  * reviewed effort corrections (the cascade's thinking-axis gate), but compat
- * may only be repaired where the matching contract opted in with
- * `thinking-upgrade-neutral`; everywhere else a spec that reports no reasoning
- * stays the authoritative capability surface.
+ * repairs missing or stale capability evidence only where the matching contract
+ * opted in with `thinking-upgrade-neutral`. Otherwise explicit false is authoritative.
  */
 function compatReasoning<TApi extends Api>(spec: ModelSpec<TApi>, axes: ResolvedAxes): boolean {
-	if (spec.reasoning) return true;
+	if (spec.reasoning === true) return true;
 	return axes.reasoning && readRuleThinking(axes).upgradeNeutral === true;
 }
 
@@ -1194,20 +1198,33 @@ function resolveThinkingPolicy<TApi extends Api>(
 		spec.thinking !== undefined && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0
 			? spec.thinking
 			: undefined;
-	// An explicit wire vocabulary is authoritative when discovery reports no
-	// reasoning (e.g. Synthetic's `none`-only off-switch): reviewed KDL must
-	// not re-expand it into an unadvertised ladder. Absent metadata is
-	// repaired only where KDL opts in with `thinking-upgrade-neutral`
-	// alongside a reviewed `thinking-efforts` ladder (the cascade upgrade for
-	// stale source capability data). On deployments whose discovery reports no
-	// capabilities (`thinking-unverified`), an unclassified neutral spec — nothing
-	// says whether it reasons — gets an unverified ladder the user may opt into.
-	const unverified = !compatReasoning(spec, axes);
+	// Reviewed neutral-upgrade rules may repair stale false capability data;
+	// reviewed unverified rules also preserve their existing provisional opt-in
+	// for capability-less seeds. An explicit vocabulary remains authoritative.
 	if (
-		unverified &&
-		(explicitThinking !== undefined || facts.identity.class !== "unknown" || rule.unverified !== true)
+		spec.reasoning === false &&
+		!compatReasoning(spec, axes) &&
+		(rule.unverified !== true || explicitThinking !== undefined)
 	) {
 		return undefined;
+	}
+	const unverified = !compatReasoning(spec, axes) && explicitThinking === undefined;
+	if (unverified) {
+		const supportedApi =
+			spec.api === "openai-completions" ||
+			spec.api === "openrouter" ||
+			spec.api === "openai-responses" ||
+			spec.api === "azure-openai-responses" ||
+			spec.api === "anthropic-messages" ||
+			spec.api === "google-generative-ai" ||
+			spec.api === "google-vertex" ||
+			spec.api === "google-gemini-cli";
+		if ((spec.kind ?? "chat") !== "chat" || (!supportedApi && rule.unverified !== true)) return undefined;
+		return {
+			mode: rule.mode ?? defaultThinkingMode(spec, facts),
+			efforts: THINKING_EFFORTS,
+			unverified: true,
+		};
 	}
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
 	if (explicitThinking !== undefined) {
@@ -1226,11 +1243,6 @@ function resolveThinkingPolicy<TApi extends Api>(
 	}
 	const effortMap = mergeEffortMap(spec, rule.effortMap, compat, config.efforts);
 	if (effortMap !== undefined) config.effortMap = effortMap;
-	if (unverified) {
-		// Off-by-default opt-in: no default level, mandatory effort, or wire off-switch.
-		config.unverified = true;
-		return config;
-	}
 	if (rule.defaultLevel !== undefined) config.defaultLevel = rule.defaultLevel;
 	if (rule.effortBudgets !== undefined) config.effortBudgets = rule.effortBudgets;
 	const supportsDisplay = rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts);
@@ -1268,7 +1280,28 @@ function mergeEffortMap(
 			: undefined;
 	const configured = readCompatEffortMap(compat);
 	if (detected === undefined && ruleMap === undefined && configured === undefined) return undefined;
-	return filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const served = filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const aliases = ruleMap === undefined ? undefined : effortAliases(ruleMap, efforts);
+	return aliases === undefined ? served : { ...served, ...aliases };
+}
+
+/**
+ * `thinking-effort-map` entries that send an unserved effort to a served tier
+ * (`medium "high"` on a low/high/max ladder); `clampThinkingLevelForModel`
+ * follows them instead of stepping down. Wire-value maps never alias.
+ */
+function effortAliases(
+	map: Partial<Record<Effort, string>>,
+	efforts: readonly Effort[],
+): Partial<Record<Effort, string>> | undefined {
+	let aliases: Partial<Record<Effort, string>> | undefined;
+	for (const effort of THINKING_EFFORTS) {
+		const target = effortValue(map[effort]);
+		if (efforts.includes(effort) || target === undefined || !efforts.includes(target)) continue;
+		aliases ??= {};
+		aliases[effort] = target;
+	}
+	return aliases;
 }
 
 /**
@@ -1367,7 +1400,7 @@ export function resolveModelPolicy<TApi extends Api>(
 	route?: ResolveRoute,
 ): ResolvedModelPolicy<TApi>;
 export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute): ResolvedModelPolicy<Api> {
-	const spec = withoutUnverifiedThinking(input);
+	const spec = input.thinking?.unverified ? { ...input, reasoning: undefined, thinking: undefined } : input;
 	const identity = resolveIdentity(spec);
 	const facts = new IdentityFacts(identity);
 	const target = buildResolveTarget(spec, identity);

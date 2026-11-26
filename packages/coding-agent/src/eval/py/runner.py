@@ -620,7 +620,7 @@ def _emit_shadow_plan(req: dict) -> None:
     # cell binds `__omp_with_call_site__` anywhere, authoritative execution
     # runs zero instrumented calls, so the planner must admit zero operations
     # (per-call scoping is undecidable across call order; fail closed).
-    if _cell_binds_call_site_helper(module):
+    if _CALL_SITE_HELPER_NAME in _cell_bound_names(module):
         _emit(
             {
                 "type": "shadow_plan",
@@ -1015,6 +1015,28 @@ def _magic_line_indices(lines: list[str]) -> set[int]:
     return indices
 
 
+# Blank lines plus `//`, `/* */`, and `#` comments, matched from the start of a cell.
+_COMMENT_PREAMBLE_RE = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/|#[^\n]*)*", re.DOTALL)
+
+
+def _strip_c_comment_preamble(source: str) -> str:
+    """Blank the C-style comment preamble some models put atop Python cells.
+
+    Only text before the first statement is touched, and only when it contains a
+    ``//`` or ``/* */`` comment (neither can open valid Python). Stripped spans
+    become newlines so traceback line numbers still match the submitted source.
+    """
+    end = _COMMENT_PREAMBLE_RE.match(source).end()
+    # Keep the first statement's own indentation; Python reports it as before.
+    line_start = source.rfind("\n", 0, end) + 1
+    if not source[line_start:end].strip():
+        end = line_start
+    preamble = source[:end]
+    if "//" not in preamble and "/*" not in preamble:
+        return source
+    return "\n" * preamble.count("\n") + source[end:]
+
+
 def transform_cell(source: str) -> str:
     """Translate IPython-style magics + shell escapes into plain Python.
 
@@ -1032,8 +1054,12 @@ def transform_cell(source: str) -> str:
     Python tokenization identifies command lines outside strings and comments.
     Real command payloads are skipped before resuming lexical scanning so shell
     quoting cannot change how subsequent Python source is interpreted.
+
+    A leading ``//`` / ``/* */`` comment preamble is blanked first; see
+    :func:`_strip_c_comment_preamble`.
     """
 
+    source = _strip_c_comment_preamble(source)
     if "%" not in source and "!" not in source:
         return source
 
@@ -1520,6 +1546,11 @@ def _run_pip(argv: list[str], args: str) -> None:
     if not _has_pip():
         code = _bootstrap_pip()
         if code != 0:
+            sys.stderr.write(
+                f"%pip: {sys.executable} has no pip and it could not be bootstrapped"
+                " (ensurepip failed and `uv` is not on PATH). Install `uv`, or your distribution's"
+                " python3-pip/python3-venv package, then retry.\n"
+            )
             _emit_status("pip", args=args, installed=[], exit_code=code)
             return
     installed_packages: list[str] = []
@@ -2397,14 +2428,30 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 # ---------------------------------------------------------------------------
 
 
+# Genuine prelude helpers that are synchronous in Python but awaited in JS,
+# keyed by name. Models carry `await sh(...)` across languages; awaiting the
+# plain return value raises TypeError after the cell's earlier statements ran,
+# so `_compile_source` drops that `await` while the name binds the helper.
+_SYNC_HELPERS: dict[str, Callable[..., Any]] = {}
+
+
+def _register_sync_helpers(*helpers: Callable[..., Any]) -> None:
+    """Prelude hook: record the helpers `_compile_source` may un-await."""
+    for helper in helpers:
+        _SYNC_HELPERS[helper.__name__] = helper
+
+
 def _install_builtins(ns: dict) -> None:
     ns["__omp_emit_status"] = _emit_status
+    ns["__omp_register_sync_helpers"] = _register_sync_helpers
     ns["__omp_emit_image"] = _emit_image_dict
     ns["__omp_magic"] = __omp_magic
     ns["__omp_magic_async"] = __omp_magic_async
     ns["__omp_magic_cell"] = __omp_magic_cell
     ns["__omp_shell"] = __omp_shell
-    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get()
+    # Plain threads (ThreadPoolExecutor) do not inherit the ContextVar: fall back
+    # to the request currently executing, the same target fd-1 capture uses.
+    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get() or _STATE.capture_rid
 
 
 _install_builtins(_STATE.user_ns)
@@ -2485,25 +2532,24 @@ def _restore_call_site_helper(ns: dict) -> None:
         ns[_CALL_SITE_HELPER_NAME] = trusted
 
 
-def _cell_binds_call_site_helper(module: ast.Module) -> bool:
-    """Whether the cell binds the reserved helper name in any scope."""
+def _cell_bound_names(module: ast.Module) -> set[str]:
+    """Names the cell may bind in any scope; `*` when it star-imports."""
+    names: set[str] = set()
     for node in ast.walk(module):
         if isinstance(node, ast.Name):
-            if node.id == _CALL_SITE_HELPER_NAME and isinstance(node.ctx, (ast.Store, ast.Del)):
-                return True
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == _CALL_SITE_HELPER_NAME:
-                return True
-        elif isinstance(node, ast.arg):
-            if node.arg == _CALL_SITE_HELPER_NAME:
-                return True
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
         elif isinstance(node, ast.alias):
-            if node.asname == _CALL_SITE_HELPER_NAME:
-                return True
-        elif isinstance(node, ast.ExceptHandler):
-            if node.name == _CALL_SITE_HELPER_NAME:
-                return True
-    return False
+            names.add(node.asname or node.name.partition(".")[0])
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        else:
+            # defs, classes, `except ... as`, match captures and `**rest`
+            for attr in ("name", "rest"):
+                value = getattr(node, attr, None)
+                if isinstance(value, str):
+                    names.add(value)
+    return names
 
 class _ShadowCallSiteTransformer(ast.NodeTransformer):
     def __init__(self, line_offsets: list[int]) -> None:
@@ -2538,15 +2584,41 @@ class _ShadowCallSiteTransformer(ast.NodeTransformer):
         return ast.copy_location(wrapped, node)
 
 
+class _SyncHelperAwaitStripper(ast.NodeTransformer):
+    """Rewrite `await helper(...)` to `helper(...)` for the given helper names."""
+
+    def __init__(self, names: frozenset[str]) -> None:
+        self._names = names
+
+    def visit_Await(self, node: ast.Await) -> ast.AST:
+        self.generic_visit(node)
+        call = node.value
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in self._names:
+            return call
+        return node
+
+
 def _compile_source(
-    source: str, filename: str = "<cell>"
+    source: str, ns: dict, filename: str = "<cell>"
 ) -> tuple[Any, Any | None, bool]:
     module = ast.parse(source, filename, "exec")
     line_offsets = [0]
     for line in source.splitlines(keepends=True):
         line_offsets.append(line_offsets[-1] + len(line))
-    if _CALL_SITE_HELPER_NAME not in source or not _cell_binds_call_site_helper(module):
+    bound = _cell_bound_names(module)
+    if _CALL_SITE_HELPER_NAME not in bound:
         module = _ShadowCallSiteTransformer(line_offsets).visit(module)
+    # After call-site instrumentation, which skips calls with awaited arguments
+    # exactly as the shadow planner does. A name the cell may rebind keeps its
+    # `await`: the binding at run time could be async.
+    if "*" not in bound:
+        sync = frozenset(
+            name
+            for name, helper in _SYNC_HELPERS.items()
+            if name not in bound and ns.get(name) is helper
+        )
+        if sync:
+            module = _SyncHelperAwaitStripper(sync).visit(module)
     ast.fix_missing_locations(module)
     if not module.body:
         return None, None, False
@@ -2585,7 +2657,7 @@ def _prepare_file_source(
 def _exec_source(source: str, ns: dict) -> None:
     """Synchronous source execution for legacy magic helpers."""
     _restore_call_site_helper(ns)
-    body_code, expr_code, has_expr = _compile_source(source)
+    body_code, expr_code, has_expr = _compile_source(source, ns)
     if body_code is None:
         return
     _run_compiled_sync(body_code, ns, want_value=False)
@@ -2607,7 +2679,7 @@ async def _exec_source_async(
     Top-level ``await`` / ``async for`` / ``async with`` is permitted; awaited
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
-    body_code, expr_code, has_expr = _compile_source(source, filename)
+    body_code, expr_code, has_expr = _compile_source(source, ns, filename)
     _prepare_file_source(source, ns, filename, linecache_source)
     if body_code is None:
         return
@@ -2708,10 +2780,29 @@ _MANAGED_ENV_KEYS = (
 )
 
 
-def _apply_request_runtime(req: dict) -> None:
+def _apply_request_runtime(req: dict, rid: str) -> None:
     cwd = req.get("cwd")
     if isinstance(cwd, str) and cwd:
-        os.chdir(cwd)
+        try:
+            os.chdir(cwd)
+        except OSError as exc:
+            # The session cwd was moved or removed (e.g. a deleted worktree): keep running
+            # in the last valid directory instead of failing every cell.
+            try:
+                fallback = os.getcwd()
+            except OSError:
+                # The process cwd is gone too (usually the same deleted directory).
+                fallback = os.path.expanduser("~")
+                os.chdir(fallback)
+            _emit(
+                {
+                    "type": "stderr",
+                    "id": rid,
+                    "data": f"Warning: session cwd {cwd} is unavailable ({exc.strerror or exc}); this cell runs in {fallback}\n",
+                }
+            )
+            cwd = None
+    if isinstance(cwd, str) and cwd:
         try:
             sys.path.remove(cwd)
         except ValueError:
@@ -2914,7 +3005,7 @@ async def _handle_request_async(req: dict) -> None:
 
     try:
         try:
-            _apply_request_runtime(req)
+            _apply_request_runtime(req, rid)
             source = req.get("code", "")
             requested_filename = req.get("filename")
             filename = (

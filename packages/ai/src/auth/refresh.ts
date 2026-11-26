@@ -1,11 +1,13 @@
 import { scheduler } from "node:timers/promises";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { isSqliteBusyError, logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
-import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
+import { normalizeOAuthCredentialExpiry, refreshProviderOAuthToken } from "../registry/oauth";
+import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
-import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
+import type { CredentialBlocks } from "./blocks";
+import { authCredentialEquals, type CredentialPool, credentialDisabledEvent, redactCredentialForWire } from "./pool";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
 	type AuthCredentialStore,
@@ -14,7 +16,6 @@ import {
 	hasRefreshLeases,
 } from "./store";
 import {
-	REMOTE_REFRESH_SENTINEL,
 	type AuthCredentialSnapshotEntry,
 	type AuthStorageOptions,
 	type OAuthCredential,
@@ -26,8 +27,9 @@ import {
 } from "./types";
 
 /**
- * Refresh OAuth access tokens this many ms before their stated expiry. The
- * skew exists so callers downstream of {@link OAuthRefresher} (stream providers,
+ * Refresh OAuth access tokens this many ms before their stated expiry unless the
+ * provider's KDL `refresh window-ms` says otherwise ({@link oauthRefreshSkewMs}).
+ * The skew exists so callers downstream of {@link OAuthRefresher} (stream providers,
  * usage probes, web_search) never observe a credential that is expired or
  * about to expire mid-request — there's a single rotation point and everyone
  * downstream trusts the token they receive.
@@ -37,7 +39,20 @@ import {
  * mint access tokens with 30-60min lifetimes, so refreshing 60s early changes
  * the rotation cadence by <4%.
  */
-export const OAUTH_REFRESH_SKEW_MS = 60_000;
+const OAUTH_REFRESH_SKEW_MS = 60_000;
+
+/** How long before expiry `provider`'s OAuth access tokens are refreshed. */
+export function oauthRefreshSkewMs(provider: string): number {
+	const refresh = authPolicyFor(provider)?.refresh;
+	return (refresh?.kind === "request" ? refresh.windowMs : undefined) ?? OAUTH_REFRESH_SKEW_MS;
+}
+
+/**
+ * After a proactive refresh fails without proving the grant dead, the caller's
+ * unexpired token stays in service and the exchange waits this long before it
+ * is tried again, as Claude Code holds back a failed renewal.
+ */
+const OAUTH_RENEWAL_RETRY_MS = 10_000;
 /**
  * How long auth recovery may reuse a token minted moments ago — by this
  * refresher or, through the shared store, by another process.
@@ -128,8 +143,15 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 		projectId: refreshed.projectId ?? current.projectId,
 		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
+		kiroProfileArn: refreshed.kiroProfileArn ?? current.kiroProfileArn,
 		...mergeRefreshedOrganizationScope(current, refreshed),
 		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
+		// Login states when the grant ends. A refresh may report a per-rotation
+		// lifetime, so like Claude Code it can only bring a known end forward.
+		refreshExpires:
+			current.refreshExpires === undefined
+				? undefined
+				: Math.min(current.refreshExpires, refreshed.refreshExpires ?? current.refreshExpires),
 	};
 }
 
@@ -137,6 +159,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 export interface OAuthRefresherDeps {
 	store: AuthCredentialStore;
 	pool: CredentialPool;
+	blocks: CredentialBlocks;
 	override?: AuthStorageOptions["refreshOAuthCredential"];
 	overrideMints?: AuthStorageOptions["refreshOAuthCredentialMints"];
 }
@@ -153,6 +176,8 @@ export class OAuthRefresher {
 	 * credential id: that refresher may still save their successor until `until`.
 	 */
 	#stalledRefreshes = new Map<number, { refresh: string; until: number }>();
+	/** Access token kept in service per credential id after its proactive refresh failed, until `retryAt`. */
+	#heldBackRenewals = new Map<number, { access: string; retryAt: number }>();
 	#pendingRefreshes = new Set<Promise<unknown>>();
 	#cancelRefreshCleanup?: () => void;
 	#shuttingDown = false;
@@ -177,7 +202,7 @@ export class OAuthRefresher {
 		if (
 			credential?.type !== "oauth" ||
 			credential.access !== mint.access ||
-			credential.expires <= now + OAUTH_REFRESH_SKEW_MS
+			credential.expires <= now + oauthRefreshSkewMs(mint.provider)
 		) {
 			this.#recentMints.delete(id);
 			return undefined;
@@ -425,7 +450,7 @@ export class OAuthRefresher {
 		provider: string,
 		options: StoredOAuthRefreshOptions<T>,
 	): Promise<StoredOAuthRefreshResult<T>> {
-		const refreshSkewMs = options.refreshSkewMs ?? OAUTH_REFRESH_SKEW_MS;
+		const refreshSkewMs = options.refreshSkewMs ?? oauthRefreshSkewMs(provider);
 		const leaseStore = hasRefreshLeases(this.#deps.store) ? this.#deps.store : undefined;
 		const owner = crypto.randomUUID();
 		let leasedCredentialId: number | undefined;
@@ -829,6 +854,7 @@ export class OAuthRefresher {
 				this.#deps.store.updateAuthCredential(row.id, merged);
 			}
 			saved = true;
+			this.#deps.blocks.clearOAuthRefreshFailure(provider, row.id);
 			if (this.#mintsLocally()) {
 				this.#rememberMint(provider, row.id, merged);
 			}
@@ -913,7 +939,8 @@ export class OAuthRefresher {
 	/**
 	 * Refresh `credential` unless it is still fresh. Shutdown waits for the
 	 * refresh, and for the caller's synchronous save of its result, before the
-	 * store closes.
+	 * store closes. A proactive refresh (no `reason`) that fails without proving
+	 * the grant dead returns the caller's token while it is unexpired.
 	 */
 	refresh(
 		provider: Provider,
@@ -923,14 +950,67 @@ export class OAuthRefresher {
 		reason?: OAuthRefreshReason,
 		rejectedAccess?: string,
 	): Promise<OAuthCredentials> {
-		if (this.#shuttingDown) return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		if (this.#shuttingDown) {
+			// Shutdown refuses new token exchanges, not tokens that need none: join one
+			// already under way (the drain waits for it) or serve a still-fresh token.
+			const inFlight =
+				credentialId === undefined ? undefined : this.#oauthCredentialRefreshInFlight.get(credentialId);
+			if (inFlight) return raceSignal(inFlight, signal, "credential refresh aborted");
+			const current = normalizeOAuthCredentialExpiry(provider, credential);
+			if (Date.now() + oauthRefreshSkewMs(provider) < current.expires) return Promise.resolve(current);
+			return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		}
 		const authRecovery = reason === "auth-recovery";
 		if (authRecovery && credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)) {
 			const recent = this.#recentMint(credentialId);
 			// A token the provider has just rejected is not a usable recent mint.
 			if (recent && recent.credential.access !== rejectedAccess) return Promise.resolve(recent.credential);
 		}
-		return this.#track(this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess));
+		// Forced callers pass an `expires: 0` copy, so only a proactive renewal can keep its token.
+		const current = normalizeOAuthCredentialExpiry(provider, credential);
+		const held =
+			reason === undefined && credentialId !== undefined ? this.#heldBackRenewals.get(credentialId) : undefined;
+		if (held?.access === current.access && Date.now() < Math.min(held.retryAt, current.expires)) {
+			return Promise.resolve(current);
+		}
+		const refreshed = this.#track(
+			this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess),
+		);
+		if (reason !== undefined || credentialId === undefined) return refreshed;
+		return refreshed.catch(error => {
+			if (signal?.aborted) throw error;
+			return this.#keepUnexpired(provider, current, credentialId, error);
+		});
+	}
+
+	/**
+	 * Keep `current` in service after its proactive refresh failed, as Claude Code
+	 * sends its request with the token it holds; rethrows when the failure was an
+	 * abort or a dead grant, the token has expired, or the stored row no longer
+	 * holds it.
+	 */
+	#keepUnexpired(provider: Provider, current: OAuthCredential, credentialId: number, error: unknown): OAuthCredential {
+		const stored = this.#deps.pool.entries(provider).find(entry => entry.id === credentialId)?.credential;
+		if (
+			(error instanceof Error && error.name === "AbortError") ||
+			AIError.isDefinitiveOAuthFailure(error) ||
+			Date.now() >= current.expires ||
+			stored?.type !== "oauth" ||
+			stored.access !== current.access
+		) {
+			throw error;
+		}
+		this.#heldBackRenewals.set(credentialId, {
+			access: current.access,
+			retryAt: Date.now() + OAUTH_RENEWAL_RETRY_MS,
+		});
+		logger.warn("OAuth refresh failed; serving the unexpired access token", {
+			provider,
+			credentialId,
+			expires: current.expires,
+			error: String(error),
+		});
+		return current;
 	}
 
 	/** Refresh without recent-mint reuse; still shares the per-credential in-flight request. */
@@ -953,7 +1033,7 @@ export class OAuthRefresher {
 				return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
 			}
 		}
-		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
+		if (Date.now() + oauthRefreshSkewMs(provider) < credential.expires) return credential;
 		// A caller that already left must not own a refresh that later callers join:
 		// they would inherit its cancellation instead of a credential.
 		if (signal?.aborted) throw new AIError.AbortError("credential refresh aborted");
@@ -1008,7 +1088,7 @@ export class OAuthRefresher {
 					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason, undefined),
 				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
 				isDefinitiveFailure:
-					reason === "usage-probe" ? undefined : error => AIError.isDefinitiveOAuthFailure(String(error)),
+					reason === "usage-probe" ? undefined : error => AIError.isDefinitiveOAuthFailure(error),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
 			if (result.credential) {
@@ -1018,7 +1098,7 @@ export class OAuthRefresher {
 					// are legitimately short-lived); the next resolve simply treats it as
 					// due for refresh again instead of rejecting a token we just minted.
 					if (Date.now() < result.credential.expires) return result.credential;
-				} else if (Date.now() + OAUTH_REFRESH_SKEW_MS < result.credential.expires) {
+				} else if (Date.now() + oauthRefreshSkewMs(provider) < result.credential.expires) {
 					// Reloaded (not refreshed by us) credential — match refresh's
 					// freshness contract: a reload within the refresh skew still counts as
 					// needing refresh, so returning it here would make the final candidate pass
@@ -1038,7 +1118,7 @@ export class OAuthRefresher {
 				provider,
 			});
 		}
-		return this.#requestOAuthCredentialRefresh(
+		const refreshed = await this.#requestOAuthCredentialRefresh(
 			provider,
 			credential,
 			credentialId,
@@ -1046,6 +1126,8 @@ export class OAuthRefresher {
 			reason,
 			DEFAULT_OAUTH_REFRESH_TIMEOUT_MS,
 		);
+		if (credentialId !== undefined) this.#deps.blocks.clearOAuthRefreshFailure(provider, credentialId);
+		return refreshed;
 	}
 
 	async #requestOAuthCredentialRefresh(
@@ -1065,18 +1147,7 @@ export class OAuthRefresher {
 		if (overrideRefresh && credentialId !== undefined) {
 			refreshPromise = overrideRefresh(provider, credentialId, credential, signal, reason);
 		} else {
-			const customProvider = getOAuthProvider(provider);
-			if (customProvider) {
-				if (!customProvider.refreshToken) {
-					throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
-						kind: "configuration",
-						provider,
-					});
-				}
-				refreshPromise = customProvider.refreshToken(credential, signal);
-			} else {
-				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
-			}
+			refreshPromise = refreshProviderOAuthToken(provider, credential, signal, reason);
 		}
 		// Stop awaiting after `timeoutMs` or on `signal`. Leased exchanges pass no
 		// timeout: `refreshStored` stops its caller waiting without dropping the
@@ -1202,7 +1273,7 @@ export class OAuthRefresher {
 				// attempted credential is known. CAS on the persisted credential so a
 				// peer/login rotation in flight leaves the freshly-rotated row intact.
 				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
-				if (reason !== "usage-probe" && AIError.isDefinitiveOAuthFailure(String(error))) {
+				if (reason !== "usage-probe" && AIError.isDefinitiveOAuthFailure(error)) {
 					// CAS-loss (false) means a peer/login rotated the row mid-refresh, so
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.
@@ -1230,12 +1301,12 @@ export class OAuthRefresher {
 	}
 }
 
-/** Broker-facing snapshot entry for a refreshed row; the real refresh token never leaves the store. */
+/** Broker-facing snapshot entry for a refreshed row; refresh secrets never leave the store. */
 function snapshotEntry(id: number, provider: string, credential: OAuthCredential): AuthCredentialSnapshotEntry {
 	return {
 		id,
 		provider,
-		credential: { ...credential, refresh: REMOTE_REFRESH_SENTINEL },
+		credential: redactCredentialForWire(credential),
 		identityKey: resolveCredentialIdentityKey(provider, credential),
 	};
 }

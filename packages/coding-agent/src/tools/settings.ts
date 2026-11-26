@@ -4,7 +4,6 @@ import { cfgBashEnabled } from "../exec/settings";
 import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
-import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
@@ -466,6 +465,22 @@ export const cfgTodoEager = register({
 	},
 });
 
+/** `todo.backend` value for omp's own todo list, with no extension backend. */
+export const NATIVE_TODO_BACKEND = "native";
+
+export const cfgTodoBackend = register({
+	id: "todo.backend",
+	type: "string",
+	default: NATIVE_TODO_BACKEND,
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Todo Backend",
+		description: "Extension that the todo list is mirrored to; Native keeps it in the session only",
+		options: "runtime",
+	},
+});
+
 export const cfgTasksTodoClearDelay = register({
 	id: "tasks.todoClearDelay",
 	type: "number",
@@ -598,12 +613,12 @@ export const cfgFindEnabled = register({
 		group: "Available Tools",
 		label: "Find (semantic grep)",
 		description:
-			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it only when the judge role resolves to a native TypeSafe jev model",
+			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it when the first usable judge is native",
 		options: [
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Enable when the judge role resolves to a native TypeSafe jev model",
+				description: "Enable when the first usable judge is native",
 			},
 			{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
 			{ value: "off", label: "Off", description: "Disable the find tool" },
@@ -673,7 +688,7 @@ export const cfgSpeechgenEnabled = register({
 		tab: "tools",
 		group: "Available Tools",
 		label: "Speech Generation",
-		description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
+		description: "Enable the tts tool for on-device (Phonon) or xAI Grok Voice speech-file synthesis",
 	},
 });
 
@@ -686,7 +701,7 @@ export const cfgGenerateImageEnabled = register({
 		group: "Available Tools",
 		label: "Generate Image",
 		description:
-			"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
+			"Enable the generate_image tool (text-to-image generation and editing). Mounted as a tool command when tools.commands is on.",
 	},
 });
 
@@ -776,29 +791,41 @@ export const cfgComputerMaxHeight = register({
 	},
 });
 
-export const cfgComputerBackgroundFallback = register({
-	id: "computer.backgroundFallback",
+export const cfgComputerTakeover = register({
+	id: "computer.takeover",
 	type: "enum",
-	values: ["takeover", "refuse"] as const,
-	default: "takeover",
+	values: ["fallback", "foreground", "always", "refuse"] as const,
+	default: "fallback",
 	ui: {
 		tab: "tools",
 		group: "Computer",
-		label: "Computer Background Fallback",
+		label: "Computer Takeover",
 		description:
-			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS menus itself",
+			"When window input takes over (the real pointer and keyboard; your Escape stops it) instead of running in the background",
 		options: [
 			{
-				value: "takeover",
-				label: "Takeover",
+				value: "fallback",
+				label: "Fallback",
 				description:
-					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
+					"Background first; a call whose background route is unavailable briefly brings the target forward, then returns focus to your app (on macOS even if you kept typing). The agent may also ask for takeover on a call",
+			},
+			{
+				value: "foreground",
+				label: "Foreground",
+				description:
+					"omp, never the agent, decides: take over input to a window already in front of you, and a call whose background route is unavailable; stay in the background otherwise",
+			},
+			{
+				value: "always",
+				label: "Always",
+				description:
+					"omp, never the agent, decides: take over every window and element input call, bringing the target forward for that call and then returning focus to your app",
 			},
 			{
 				value: "refuse",
 				label: "Refuse",
 				description:
-					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
+					"Never take over: a call whose background route is unavailable fails, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
 			},
 		],
 	},
@@ -972,7 +999,8 @@ export const cfgToolsIntentTracing = register({
 		tab: "tools",
 		group: "Execution",
 		label: "Intent Tracing",
-		description: "Ask the agent to describe the intent of each tool call before executing it",
+		description:
+			"Ask the agent to describe the intent of each tool call before executing it. Unset: on in the interactive TUI, off in print, RPC, ACP, and SDK sessions",
 	},
 });
 
@@ -1091,65 +1119,65 @@ export const cfgAsyncWidgets = register({
 	},
 });
 
-export const cfgToolsXdev = register({
-	id: "tools.xdev",
+export const cfgToolsCommands = register({
+	id: "tools.commands",
 	type: "boolean",
 	default: true,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Tools",
+		label: "Tool Commands",
 		description:
-			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (only local:// scratch stays writable besides devices). Disable to expose every enabled tool top-level.",
+			"Mount rarely-used (discoverable) tools as bash commands with schema-derived `--help` instead of shipping their schemas on every request. Needs the bash tool: sessions without it keep every enabled tool top-level. Disable to expose every enabled tool top-level.",
 	},
 });
 
-export const cfgToolsXdevDocs = register({
-	id: "tools.xdevDocs",
+export const cfgToolsCommandDocs = register({
+	id: "tools.commandDocs",
 	type: "enum",
 	values: ["inline", "builtins", "catalog"] as const,
 	default: "catalog",
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Prompt Docs",
+		label: "Tool Command Prompt Docs",
 		description:
-			"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
+			"Choose which mounted commands get their `--help` text inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on demand.",
 		options: [
-			{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
+			{ value: "inline", label: "All Commands", description: "Inline help for every mounted command." },
 			{
 				value: "builtins",
 				label: "Built-ins Only",
-				description: "Inline built-in docs; fetch MCP and extension docs on demand.",
+				description: "Inline built-in help; MCP and extension help on demand.",
 			},
-			{ value: "catalog", label: "Catalog Only", description: "List every device; fetch all docs on demand." },
+			{ value: "catalog", label: "Catalog Only", description: "List every command; run `--help` on demand." },
 		],
 	},
 });
 
-export const cfgToolsXdevInlineDevices = register({
-	id: "tools.xdevInlineDevices",
+export const cfgToolsCommandInline = register({
+	id: "tools.commandInline",
 	type: "array",
 	default: EMPTY_STRING_ARRAY,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Inline Devices",
+		label: "Tool Command Inline Help",
 		description:
-			"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+			"When Tool Command Prompt Docs is Built-ins Only, also inline dynamic commands whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
 	},
 });
 
-export const cfgToolsXdevNotices = register({
-	id: "tools.xdevNotices",
+export const cfgToolsCommandNotices = register({
+	id: "tools.commandNotices",
 	type: "boolean",
 	default: true,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Mount Notices",
+		label: "Tool Command Mount Notices",
 		description:
-			"Show an `xd://: mounted …` notice when MCP or extension tools are mounted or unmounted. The model still learns of the change with its next prompt.",
+			"Show a notice when MCP or extension tools are mounted or unmounted as commands; the model still learns of the change with its next prompt.",
 	},
 });
 
@@ -1163,7 +1191,7 @@ export const cfgDevAutoqa = register({
 		group: "Developer",
 		label: "Auto QA",
 		description:
-			"Automated tool issue reporting (xd://report_issue). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
+			"Automated tool issue reporting (`report_issue`). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
 	},
 });
 
@@ -1224,7 +1252,6 @@ export const cfgBuiltinToolGates = combine({
 	github: cfgGithubEnabled,
 	glob: cfgGlobEnabled,
 	grep: cfgGrepEnabled,
-	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
 	security: cfgSecurityEnabled,
@@ -1238,5 +1265,5 @@ export const cfgSessionToolGates = combine({
 	builtins: cfgBuiltinToolGates,
 	generateImage: cfgGenerateImageEnabled,
 	speechgen: cfgSpeechgenEnabled,
-	xdev: cfgToolsXdev,
+	toolCommands: cfgToolsCommands,
 });

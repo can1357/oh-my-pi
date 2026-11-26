@@ -35,6 +35,19 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// (otariModelManagerOptions discovers it live per key), so no rows are
 	// frozen into the bundled catalog.
 	"otari",
+	"arkanecloud",
+	// Self-hosted Bifrost gateway (bifrostModelManagerOptions discovers its
+	// /v1/models roster live against BIFROST_BASE_URL), so no rows are
+	// frozen into the bundled catalog.
+	"bifrost",
+	// Modal's roster is deployment- and credential-scoped
+	// (modalModelManagerOptions discovers it live per token plus endpoint),
+	// so no rows are frozen into the bundled catalog.
+	"modal",
+	// Refuseless rows are a KDL seed that refuselessModelManagerOptions serves
+	// until keyed discovery replaces it; the bundled catalog gains the seed
+	// rows at the next regeneration.
+	"refuseless",
 	// Clef judges are a `bundle="always"` KDL seed that
 	// cloudflareWorkersAiModelManagerOptions serves at runtime; the bundled
 	// catalog gains the rows at the next regeneration.

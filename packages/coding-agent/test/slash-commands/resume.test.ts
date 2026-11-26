@@ -75,7 +75,7 @@ function createRuntime(cwd = tempDir, sessionDir = tempDir) {
 		setText,
 		runtime: {
 			ctx: {
-				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				composer: { setText } as unknown as InteractiveModeContext["composer"],
 				showSessionSelector,
 				handleResumeSession,
 				showError,

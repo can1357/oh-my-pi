@@ -7,9 +7,10 @@ import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { defaultSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels, getBundledModelSlice } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	deepinfraModelManagerOptions,
@@ -245,7 +246,7 @@ describe("buildModel", () => {
 	});
 
 	it("loads bundled OpenRouter models with resolved compat", () => {
-		const model = getBundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4");
+		const model = getBundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4.6");
 
 		expect(model.compat).toBeDefined();
 		expect(model.compat?.isOpenRouterHost).toBe(true);
@@ -836,6 +837,42 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(false);
 	});
 
+	it("folds user text into the preceding tool result for Gemini 4 models only", () => {
+		// Gemini 4 ends requests closing on user text after a function response with
+		// an empty MALFORMED_RESPONSE; Gemini 3.x does not.
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.foldUserAfterToolResult).toBe(
+			true,
+		);
+		expect(
+			resolveModelPolicy(
+				responsesSpec({ provider: "custom", id: "gemini-4-neon", baseUrl: "https://proxy.example/v1" }),
+			).compat.foldUserAfterToolResult,
+		).toBe(true);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-argon" })).compat.foldUserAfterToolResult).toBe(
+			true,
+		);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-3.1-pro" })).compat.foldUserAfterToolResult).toBe(
+			false,
+		);
+	});
+
+	it("splits multi-call assistant turns only for Llama 3 models", () => {
+		// vLLM's Llama 3 chat templates reject an assistant message with several tool
+		// calls; Llama 4's template takes parallel calls.
+		expect(resolveModelPolicy(openrouterSpec({ id: "meta-llama/llama-3.1-8b-instruct" })).compat.splitToolCalls).toBe(
+			true,
+		);
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "custom", id: "llama3.3:70b", baseUrl: "http://localhost:8000/v1" }),
+			).compat.splitToolCalls,
+		).toBe(true);
+		expect(resolveModelPolicy(openrouterSpec({ id: "meta-llama/llama-4-maverick" })).compat.splitToolCalls).toBe(
+			false,
+		);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemma-3-12b-it" })).compat.splitToolCalls).toBe(false);
+	});
+
 	it("flags cumulative reasoning deltas for MiniMax provider or id", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "minimax" })).compat.reasoningDeltasMayBeCumulative).toBe(
 			true,
@@ -1320,6 +1357,32 @@ describe("OpenRouter model discovery", () => {
 		});
 	});
 
+	it("clamps thinking-off on mandatory OpenRouter rows that publish no effort ladder", async () => {
+		// Live shape of liquid/lfm-3-1.7b: `reasoning: { mandatory: true }` only.
+		// Without `requiresEffort`, disabled reasoning goes out as
+		// `enabled: false` and OpenRouter answers 400 "Reasoning is mandatory".
+		const row = (id: string) => ({
+			id,
+			name: id,
+			supported_parameters: ["tools", "reasoning", "include_reasoning"],
+			reasoning: { mandatory: true },
+		});
+		const options = openrouterModelManagerOptions({
+			fetch: async url =>
+				String(url) !== "https://openrouter.ai/api/v1/models"
+					? Response.json({ data: [] })
+					: Response.json({ data: [row("liquid/lfm-3-1.7b"), row("acme/unbundled-reasoner")] }),
+		});
+		const specs = (await options.fetchDynamicModels?.()) ?? [];
+		for (const id of ["liquid/lfm-3-1.7b", "acme/unbundled-reasoner"]) {
+			const spec = specs.find(model => model.id === id);
+			if (!spec) throw new Error(`Expected discovered ${id}`);
+			const model = buildModel(spec);
+			expect(model.thinking?.requiresEffort).toBe(true);
+			expect(defaultSupportedEffort(model)).toBe(Effort.Minimal);
+		}
+	});
+
 	it("bills discovered Haiku 5.5 rows at 5x their own rates above 100K input", async () => {
 		const haiku = {
 			name: "Anthropic: Claude Haiku 5.5",
@@ -1439,7 +1502,19 @@ describe("model cache materialized round trip", () => {
 		expect(fingerprintStaticModels(staticModels)).not.toBe(initial);
 
 		const frozen = Object.freeze([completionsSpec({ id: "frozen-fingerprint-model" })]);
-		expect(() => fingerprintStaticModels(frozen)).not.toThrow();
+		const initialFrozen = fingerprintStaticModels(frozen);
+		frozen[0]!.name = "Changed inside frozen array";
+		expect(fingerprintStaticModels(frozen)).not.toBe(initialFrozen);
+	});
+
+	it("preserves bundled content and policy identities across shared slice lookups", () => {
+		const shared = getBundledModelSlice("anthropic");
+		const copy = getBundledModels("anthropic");
+		expect(getBundledModelSlice("anthropic")).toBe(shared);
+		expect(Object.isFrozen(shared)).toBe(true);
+		for (const policy of [{}, { additive: true }, { authoritative: true }, { authoritative: true, additive: true }]) {
+			expect(fingerprintStaticModels(shared, policy)).toBe(fingerprintStaticModels(copy, policy));
+		}
 	});
 
 	it("uses generator-materialized bundled rows without rebuilding them", async () => {

@@ -1,5 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
-import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
+import { type VibeCli } from "../tools/details/vibe";
 /**
  * Vibe session lifecycle vocabulary: the persisted `vibe-session-lifecycle`
  * custom-entry schema and its parser.

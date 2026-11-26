@@ -192,6 +192,7 @@ export class MainSessionBridge {
 	/** The worker died: see the module doc for the ordering. */
 	exit(reason: string): void {
 		this.exited.abort(new Error(`Subagent worker ${this.#peer.threadId} exited: ${reason}`));
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove subscriptions
 		for (const stop of [...this.#subscriptions]) {
 			try {
 				stop();
@@ -210,6 +211,7 @@ export class MainSessionBridge {
 			if (ref.status !== "aborted") registry.setStatus(ref.id, ref.sessionFile ? "parked" : "aborted", ref);
 		}
 		const why = `worker ${this.#peer.threadId} exited: ${reason}`;
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove open channels
 		for (const key of [...this.#open.keys()]) this.closed(key, why);
 	}
 }
@@ -240,6 +242,7 @@ function serveBridge(): RpcServe<MainSessionBridge, SessionBridgeProtocol> {
 		dispose: (_bridge, session, options) => session.dispose(options),
 		deliverIrcMessage: (_bridge, session, msg) => session.deliverIrcMessage(msg),
 		waitForIrcReplies: (_bridge, session) => session.waitForIrcReplies(),
+		applyAgentModelChange: (_bridge, session, change) => session.applyAgentModelChange(change),
 		setWorkPoolYieldItems: (_bridge, session, items) => session.setWorkPoolYieldItems(items),
 		emitIrcRelayObservation: (_bridge, session, record) => session.emitIrcRelayObservation(record),
 	};
@@ -254,7 +257,7 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 		setStatus: (registry, id, status, expected) => registry.setStatus(id, status, expected),
 		markResultAccepted: (registry, id, expected, responseAt) => registry.markResultAccepted(id, expected, responseAt),
 		staleAcceptedRuns: registry => registry.staleAcceptedRuns(),
-		setActivity: (registry, id, activity) => registry.setActivity(id, activity),
+		setActivity: (registry, id, activity, expected) => registry.setActivity(id, activity, expected),
 		attachSession: (registry, id, session, sessionFile, expected) =>
 			registry.attachSession(id, session, sessionFile, expected),
 		detachSession: (registry, id, expected) => registry.detachSession(id, expected),
@@ -267,6 +270,8 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 			bridge.forward(listener, forward => registry.onChange(forward)),
 		awaitsHold: (registry, waiter, awaited, options) => bridge.track(registry.awaits.hold(waiter, awaited, options)),
 		awaitsBlocksOn: (registry, agent, target, sentAt) => registry.awaits.blocksOn(agent, target, sentAt),
+		awaitsBlockedVia: (registry, agent, target, sentAt) => registry.awaits.blockedVia(agent, target, sentAt),
+		awaitsWaitersOn: (registry, target) => registry.awaits.waitersOn(target),
 		awaitsSubscribe: (registry, listener) => bridge.forward(listener, forward => registry.awaits.onChange(forward)),
 	};
 }
@@ -289,6 +294,7 @@ function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 		send: (bus, msg) => bus.send(msg),
 		sentSince: (bus, from, to, sinceTs) => bus.sentSince(from, to, sinceTs),
 		unansweredSends: (bus, from, sinceTs) => bus.unansweredSends(from, sinceTs),
+		lastMessageAt: (bus, from, to) => bus.lastMessageAt(from, to),
 		// A wait parked by a dead worker must not swallow the next message for its agent.
 		wait: (bus, agentId, filter, timeoutMs, signal, options) =>
 			bus.wait(
@@ -299,6 +305,7 @@ function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 				options,
 			),
 		take: (bus, agentId, from) => bus.take(agentId, from),
+		park: (bus, msg) => bus.park(msg),
 		unreadCount: (bus, agentId) => bus.unreadCount(agentId),
 		recordReply: (bus, from, to) => bus.recordReply(from, to),
 	};

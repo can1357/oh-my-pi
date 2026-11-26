@@ -62,7 +62,7 @@ describe("cross-project session bucket isolation", () => {
 		expect(await findSessionFiles(SESSION_ID, sessionsRoot)).toEqual([sessionFile]);
 		expect((await listAllSessions(undefined, sessionsRoot)).map(session => session.id)).toEqual([SESSION_ID]);
 		expect((await listRecentSessions({ limit: 10, sessionsRoot })).map(session => session.id)).toEqual([SESSION_ID]);
-		expect((await listRecentProjects(10, sessionsRoot)).map(project => project.latest.id)).toEqual([SESSION_ID]);
+		expect((await listRecentProjects(10, { sessionsRoot })).map(project => project.latest.id)).toEqual([SESSION_ID]);
 	});
 
 	it.each(["EACCES", "EPERM", "ENOENT", "ENOTDIR"])("discards a bucket's partial matches on %s", async code => {

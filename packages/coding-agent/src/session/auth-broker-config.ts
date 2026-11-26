@@ -27,15 +27,17 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import {
 	type AuthBrokerClientConfig,
+	type AuthBrokerStartupRetry,
 	type DiscoverAuthStorageOptions,
 	discoverAuthStorage as discoverAuthStorageShared,
 	getAuthBrokerTokenFilePath,
 	openAuthCredentialStore,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
-import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { combine, effectsSettings, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
@@ -129,6 +131,22 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
 		}
 	});
 	return promise;
+}
+
+/**
+ * Where `provider`'s (credential-store id) logins are stored, for the "Credentials saved to …" /
+ * "Credential removed from …" lines after login and logout: the auth broker, or this machine's
+ * agent.db without a broker or for a provider the broker would not serve (see `HybridAuthCredentialStore`).
+ */
+export async function credentialStoreLabel(provider: string): Promise<string> {
+	const broker = await resolveAuthBrokerConfig();
+	if (!broker) return getAgentDbPath();
+	const local = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	try {
+		return local.listBrokerLocalProviders().includes(provider) ? getAgentDbPath() : `auth broker ${broker.url}`;
+	} finally {
+		local.close();
+	}
 }
 
 /** Settings a long-lived auth storage follows (see {@link createAuthStorageSettingsSync}). */
@@ -251,17 +269,68 @@ export function createAuthStorageSettingsSync(
  * pi-ai so the CLI, subagents, and the catalog generator all see the same
  * credentials.
  *
- * Default `agentDir` is the current configured agent directory.
+ * Default `agentDir` is the current configured agent directory. Interactive omp
+ * fails at once when the broker is unreachable rather than hold the user for the
+ * startup retry window; every other host retries and says so once on stderr.
  */
 export function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
 	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">,
 ): Promise<AuthStorage> {
+	const interactive = isInteractiveHost();
 	return discoverAuthStorageShared({
+		retryUnreachableBroker: !interactive,
+		onBrokerRetry: interactive ? undefined : authBrokerWaitNotice(),
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
 	});
+}
+
+/**
+ * Create an AuthStorage instance.
+ *
+ * Default: local SQLite store at `<agentDir>/agent.db`.
+ *
+ * Broker mode: when `OMP_AUTH_BROKER_URL` is set, credentials are pulled from
+ * a remote auth-broker over the wire. Refresh tokens never leave the broker;
+ * the client receives access tokens with `refresh = "__remote__"` and calls
+ * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
+ * override to re-mint access tokens when needed.
+ *
+ * Account routing (`auth.accountPolicies`, `retry.usageReservePct`) comes from
+ * effective settings: `options.settings` when given, else the matching global
+ * instance, else a read-only load for `options.cwd`; explicit option values win.
+ */
+export async function discoverSessionAuthStorage(
+	agentDir: string = getAgentDir(),
+	options: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver"> &
+		Omit<EffectiveSettingsScope, "agentDir"> = {},
+): Promise<AuthStorage> {
+	const { settings, cwd, ...discoveryOptions } = options;
+	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
+	applyUnpausedProviders(effective);
+	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
+	return discoverAuthStorage(agentDir, {
+		...discoveryOptions,
+		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
+		authStorageOptions: {
+			...discoveryOptions.authStorageOptions,
+			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+		},
+	});
+}
+
+/** Print the first retry of one startup to stderr; the retry is otherwise only in the log file. */
+function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
+	let shown = false;
+	return ({ url, error, budgetMs }) => {
+		if (shown) return;
+		shown = true;
+		process.stderr.write(
+			`Waiting for auth broker at ${url} (${error.message}); retrying for up to ${budgetMs / 1000}s...\n`,
+		);
+	};
 }
 
 /**

@@ -6,18 +6,21 @@ This document describes how theming works in the coding-agent today: schema, loa
 
 The theme system drives:
 
-- foreground/background color tokens used across the TUI
-- markdown styling adapters (`getMarkdownTheme()`)
-- selector/editor/settings list adapters (`getSelectListTheme()`, `getEditorTheme()`, `getSettingsListTheme()`)
-- symbol preset + symbol overrides (`unicode`, `nerd`, `ascii`)
+- foreground/background color tokens used across the UI (`theme.fg(key, text)`, `theme.bg(key, text)`, `theme.style(tokens, text)`)
+- markdown styling (`@oh-my-pi/pi-tui/text/markdown`, styled from the active theme)
+- symbol preset + symbol overrides (`unicode`, `nerd`, `ascii`) via `theme.symbols`
 - syntax highlighting colors used by native highlighter (`@oh-my-pi/pi-natives`)
 - status line segment colors
+- agent name colors in the agent hub, agent tree and Task tool rows
 
-Primary implementation: `packages/tui/src/theme/theme.ts`.
+Implementation:
+
+- `packages/tui/src/theme/` (`@oh-my-pi/pi-tui/theme/*`): the theme file format (`schema.ts`), loading (`loader.ts`), resolution at a color depth (`theme.ts`, `ResolvedTheme`), symbols (`symbols.ts`), the active-theme signal and `ThemeController` (`runtime.ts`).
+- `packages/coding-agent/src/ui/theme/service.ts`: the app's theme service. It owns the one `ThemeController` and wires it to settings, the terminal and the theme picker.
 
 ## Theme JSON shape
 
-Custom theme files are JSON objects validated by `validateThemeJson()` in `packages/tui/src/theme/schema-validation.ts` (using `@oh-my-pi/omptype`). Types live in `schema.ts`; the editor-facing JSON schema is `packages/tui/src/theme/theme-schema.json`. Embedded built-in themes bypass runtime validation.
+Custom theme files are JSON objects validated by `validateThemeJson()` in `packages/tui/src/theme/schema.ts`, next to the `ThemeJson` type and the token lists (`FOREGROUND_KEYS`, `BACKGROUND_KEYS`, `isForegroundKey()`). Embedded built-in themes bypass runtime validation.
 
 Top-level fields:
 
@@ -38,7 +41,7 @@ Color values accept:
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset/empty keeps the terminal default foreground) and `mdExtensionLink` (unset derives a muted `mdLink`).
+All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset/empty keeps the terminal default foreground), `mdExtensionLink` (unset derives a muted `mdLink`) and `subagent1`–`subagent6` (unset lets omp pick agent colors from the theme).
 
 ### Core text and borders (11)
 
@@ -67,13 +70,19 @@ With the `tui.colorfulMarkdown` setting on (the default), headings, `**strong**`
 `toolDiffAdded`, `toolDiffRemoved`, `toolDiffContext`,
 `syntaxComment`, `syntaxKeyword`, `syntaxFunction`, `syntaxVariable`, `syntaxString`, `syntaxNumber`, `syntaxType`, `syntaxOperator`, `syntaxPunctuation`
 
-### Mode/thinking borders (8 required, 1 optional)
+### Mode/thinking borders (9 required, 1 optional)
 
-`thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, optional `thinkingMax`, `bashMode`, `pythonMode`
+`thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, optional `thinkingMax`, `bashMode`, `pythonMode`, `btwMode`
 
 ### Status line segment colors (13)
 
 `statusLineSep`, `statusLineModel`, `statusLinePath`, `statusLineGitClean`, `statusLineGitDirty`, `statusLineContext`, `statusLineSpend`, `statusLineStaged`, `statusLineDirty`, `statusLineUntracked`, `statusLineOutput`, `statusLineCost`, `statusLineSubagents`
+
+### Agent name colors (6 optional)
+
+`subagent1`, `subagent2`, `subagent3`, `subagent4`, `subagent5`, `subagent6`
+
+The main agent's name takes `accent`. Subagents take a color in the order they arrive in the session: the first gets the first subagent color, the seventh reuses it, and an agent keeps its color for the rest of the session. A declared `subagentN` is used as written. Slots the theme leaves unset are filled, in order, with colors that are at least 3:1 against every surface names are drawn on (`terminal.background`, else `statusLineBg`, and the Task card tints `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`) and at least 0.10 apart in OKLab from `accent`, `error` and each other: first the theme's own `terminal.ansi` hues (blue, green, yellow, magenta, cyan, then their bright slots; red is left to errors), then hues derived from `accent` the way the session color is (each also offered one and two lightness steps further from the background), then a fixed fallback set.
 
 ## Optional tokens
 
@@ -89,7 +98,7 @@ If omitted, export code derives defaults from resolved theme colors.
 
 ### `terminal` section (optional)
 
-Describes the terminal the theme was made for, for hosts that paint the terminal themselves (Tern); omp never sets the terminal's colors. `terminal.ansi` (exactly 16 entries, ANSI 0–15) is also the palette colorful Markdown paints from; a theme without it falls back to the terminal's own ANSI colors.
+Describes the terminal the theme was made for, for hosts that paint the terminal themselves (Tern); omp never sets the terminal's colors. `terminal.ansi` (exactly 16 entries, ANSI 0–15) is also the palette colorful Markdown paints from; a theme without it falls back to the terminal's own ANSI colors. Agent name colors draw on `terminal.ansi` first and check contrast against `terminal.background`.
 
 ### `symbols` section (optional)
 
@@ -130,7 +139,7 @@ Custom themes directory comes from `getCustomThemesDir()`:
 - default-profile override: `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
 - named profile: `~/.omp/profiles/<name>/agent/themes` (under the configured root); named profiles derive their own agent directory
 
-`getAvailableThemes()` returns merged built-in + custom names, sorted, with built-ins taking precedence on name collision.
+`listThemes()` (`@oh-my-pi/pi-tui/theme/loader`) returns merged built-in + custom names, sorted, with built-ins taking precedence on name collision. `getAvailableThemesWithPaths()` in the theme service adds each custom theme's file path.
 
 ## Loading, validation, and resolution
 
@@ -139,8 +148,8 @@ For custom theme files:
 1. read JSON
 2. parse JSON
 3. validate with `validateThemeJson()` (required fields and string/number types; spinner frame arrays must be non-empty)
-4. resolve `vars` references recursively
-5. convert resolved values to ANSI by terminal capability mode
+4. resolve `vars` references recursively (`resolveColorValue()`)
+5. convert resolved values to SGR escapes at the terminal's color depth
 
 Validation behavior:
 
@@ -156,42 +165,59 @@ Var reference behavior:
 
 ## Terminal color mode behavior
 
-Color mode detection (`detectColorMode` in `theme/color.ts`):
-
-- `WT_SESSION` => truecolor
-- otherwise uses `detectTerminalId()` and `getTerminalInfo()` from the shared terminal capability model, selecting truecolor only when `TerminalInfo.trueColor` is true
+The color depth (`ColorDepth`: `truecolor`, `256` or `16`) comes from the terminal's capabilities (`depthOf()` in `packages/tui/src/theme/color.ts`). The theme service follows the terminal driver's capabilities (probed, refined as replies arrive). Before a driver runs, and in CLI commands, it uses the capabilities the environment implies (`capabilitiesFromEnv()`: terminal identity, `COLORTERM`, `WT_SESSION`, `TERM`).
 
 Conversion behavior:
 
-- hex -> `Bun.color(..., "ansi-16m" | "ansi-256")`
-- numeric -> `38;5` / `48;5` ANSI
+- hex at truecolor/256 -> `Bun.color(..., "ansi-16m" | "ansi-256")`
+- hex at 16 colors -> the nearest ANSI color by hue family and lightness
+- numeric -> `38;5` / `48;5` SGR (nearest ANSI color at 16 colors)
 - `""` -> default fg/bg reset
 
 ## Runtime switching behavior
 
-The `theme` export is a live binding, including in bundled extensions. Read it inside rendering callbacks rather than retaining a theme instance across switches. Extension renderer callbacks may also use their supplied theme argument.
+The active theme is a reactive signal: `currentTheme()` from `@oh-my-pi/pi-tui/theme/runtime`. It always holds a theme (the built-in `dark` until the service starts). Code that runs once, such as CLI output and command reports, reads `currentTheme()` when it formats. Components and painters read it while they render, so they repaint on every switch. Don't keep a theme instance across switches. Extension renderer callbacks may also use the theme argument they receive.
 
 ```ts
-import { theme } from "@oh-my-pi/pi-coding-agent";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { bold } from "@oh-my-pi/pi-tui/theme/theme";
 
-const renderStatus = () => theme.fg("accent", "Ready");
+const renderStatus = () => {
+	const theme = currentTheme();
+	return `${theme.symbols.symbol("status.success")} ${bold(theme.fg("accent", "Ready"))}`;
+};
 ```
 
-### Initial theme (`initThemeSync` / `initTheme`)
+Theme API at a glance (`Theme` in `@oh-my-pi/pi-tui/theme/contract`, implemented by `ResolvedTheme`):
 
-The startup composer initializes its cached theme synchronously before the first paint. `main.ts` later initializes the authoritative theme with settings:
+| Need | Call |
+|---|---|
+| color text | `theme.fg("accent", text)`, `theme.bg("selectedBg", text)` |
+| span tokens (colors, tones, attributes, semantics) | `theme.style("accent strong", text)` |
+| bold/italic/underline/strikethrough/inverse/faint | `bold(text)` … from `@oh-my-pi/pi-tui/theme/theme` |
+| a glyph | `theme.symbols.symbol("status.success")`, `"tree.branch"`, `"sep.dot"`, `"icon.pin"`, … |
+| a named or slash-command icon | `theme.symbols.icon("model")` |
+| box glyphs | `theme.symbols.box` (rounded), `theme.symbols.sharp` |
+| spinners | `theme.symbols.spinnerFrames`, `theme.symbols.activityFrames` |
+| symbol preset | `theme.symbols.preset` |
+| light or dark | `theme.dark` |
+| a color as hex / raw SGR | `theme.hex(key)`, `theme.fgSgr(key)` |
+| thinking-level color | `theme.fg(thinkingColor(level), text)` (`thinkingColor` from `@oh-my-pi/pi-tui/theme/schema`) |
+
+### Starting the service (`initTheme`)
+
+The startup composer starts the theme service synchronously before the first paint, using the theme preferences cached from the last run. `main.ts` then starts it for real with the settings:
 
 - `symbolPreset`
 - `colorBlindMode`
 - `theme.dark`
 - `theme.light`
 
-Auto theme slot selection uses terminal appearance in this order:
+`initTheme()` loads synchronously, in auto mode. CLI commands call `initTheme()` without arguments and get the preferences the settings already pushed into the service.
 
-1. terminal-reported OSC 11 background luminance, unless the macOS/Zellij fallback path is active
-2. `COLORFGBG` background index (`< 8` => dark, `>= 8` => light)
-3. macOS appearance fallback only for the known-broken macOS/Zellij OSC 11 path
-4. dark slot fallback
+Settings drive the service through `effect(...)` registrations in `packages/coding-agent/src/modes/settings.ts`: `setThemeSlot("dark" | "light", name)`, `setSymbolPreset(preset)`, `setColorBlindMode(enabled)`. Values that arrive before `initTheme()` are kept and applied when it runs.
+
+In auto mode the terminal's appearance picks the slot. The service follows the terminal driver (`followTerminal(driver)`): its `dark` capability comes from the OSC 11 background reply, or from `COLORFGBG` before that reply arrives or when it never does. Without either, the terminal is assumed dark. When the background is reported outside a driver, `setTerminalAppearance("dark" | "light")` applies it.
 
 Current defaults (definitions in `packages/coding-agent/src/modes/settings.ts`):
 
@@ -202,10 +228,9 @@ Current defaults (definitions in `packages/coding-agent/src/modes/settings.ts`):
 
 ### Explicit switching (`setTheme`)
 
-- loads selected theme
-- updates the live `theme` export
-- optionally starts watcher
-- triggers `onThemeChange` callback
+- loads selected theme and leaves auto mode (`enableAutoTheme()` returns to it)
+- publishes it as `currentTheme()`
+- notifies `onThemeChange` listeners
 
 On failure:
 
@@ -214,22 +239,28 @@ On failure:
 
 ### Preview switching (`previewTheme`)
 
-- applies the preview to the live `theme` export
-- does **not** change persisted settings by itself
+- publishes the previewed theme as `currentTheme()`
+- does **not** change the remembered theme, the mode or persisted settings
 - returns success/error without fallback replacement
 
-Settings UI uses this for live preview and restores prior theme on cancel.
+`endThemePreview()` re-applies the remembered theme. The settings theme picker uses both for its live preview.
+
+### Change notifications (`onThemeChange`)
+
+Listeners get `{ cause, ephemeral }` for every published theme. `cause` is one of `switch`, `preview`, `settings`, `terminal` or `file`. Previews and terminal appearance or depth changes are `ephemeral`: the live UI repaints and history already written stays. Every other switch also redraws history, so scrolled-back output uses the same palette.
 
 ## Watchers and live reload
 
-When watcher is enabled (`setTheme(..., true)` / interactive init):
+When the watcher is enabled (`initTheme({ watch: true })`, interactive startup):
 
 - watches `<customThemesDir>/<currentTheme>.json` only when that file exists
 - built-ins are effectively not watched; built-in theme lookup also takes precedence over same-name custom files
 - matching file changes schedule a debounced reload; reload errors or temporary file absence keep the last successfully loaded theme
 - the watcher does not perform a delete/rename fallback; it waits for a future successful reload or explicit theme switch
 
-Auto mode also reevaluates dark/light slot mapping from terminal appearance changes, `SIGWINCH`, and the macOS fallback observer when active.
+`stopThemeWatcher()` stops watching at shutdown.
+
+Auto mode also reevaluates the dark/light slot whenever the terminal's appearance changes.
 
 ## Color-blind mode behavior
 
@@ -238,7 +269,7 @@ Auto mode also reevaluates dark/light slot mapping from terminal appearance chan
 - `toolDiffAdded` is HSV-adjusted (green shifted toward blue)
 - adjustment is applied only when resolved value is a hex string
 
-Other tokens are unchanged.
+Other tokens are unchanged. Agent name colors derived from `accent` steer clear of the theme's hues, `toolDiffAdded` among them, so the shifted token can move one of those derived colors.
 
 ## Where theme settings are persisted
 
@@ -333,6 +364,7 @@ Minimal skeleton:
 
 		"bashMode": "#2ac3de",
 		"pythonMode": "#bb9af7",
+		"btwMode": "#7aa2f7",
 
 		"statusLineBg": "#16161e",
 		"statusLineSep": 240,
@@ -370,8 +402,8 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset keeps the terminal default foreground) and `mdExtensionLink` (unset blends `mdLink` with `text`).
+- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset keeps the terminal default foreground), `mdExtensionLink` (unset blends `mdLink` with `text`) and `subagent1`–`subagent6` (unset lets omp pick agent colors from the theme).
 - `export` and `symbols` are optional.
-- `$schema` in theme JSON is informational; custom-theme runtime validation is enforced by `@oh-my-pi/omptype` in `packages/tui/src/theme/schema-validation.ts`.
+- `$schema` in theme JSON is informational; custom-theme runtime validation is `validateThemeJson()` in `packages/tui/src/theme/schema.ts`.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.
 - File watcher reload errors or temporary missing files keep the current loaded theme until a successful reload or explicit theme switch.

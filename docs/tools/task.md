@@ -8,7 +8,7 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/task.md`
 - Key collaborators:
    - `packages/coding-agent/src/task/types.ts` — dynamic schema, agent definitions, output caps.
-   - `packages/tui/src/tools/task.ts` — progress/result and tool-details types.
+   - `packages/coding-agent/src/ui/tools/task.tsx` / `packages/coding-agent/src/task/task-details.ts` — progress/result rendering and tool-details types.
    - `packages/coding-agent/src/task/structured-subagent.ts` — shared task/eval preflight, model/schema policy, artifact retention, execution.
    - `packages/coding-agent/src/task/isolation-runner.ts` — isolation capture, merge, recovery, and lifecycle ownership.
    - `packages/coding-agent/src/task/eval-tools.ts` — expose parent-kernel tools to a child.
@@ -20,7 +20,7 @@
    - `packages/coding-agent/src/registry/agent-registry.ts` — process-global agent directory (`running | idle | parked | aborted`).
    - `packages/coding-agent/src/async/job-manager.ts` — background job registration, progress, and result delivery.
    - `packages/coding-agent/src/task/parallel.ts` — `Semaphore` used for the session-scoped concurrency bound.
-   - `@oh-my-pi/pi-natives` (`crates/pi-iso`) — isolation PAL: `isoResolve` / `isoStart` / `isoStop` backend resolution and fallback.
+   - `@oh-my-pi/pi-natives` (`crates/iso`) — isolation PAL: `isoResolve` / `isoStart` / `isoStop` backend resolution and fallback.
    - `packages/coding-agent/src/task/worktree.ts` — isolation backend mapping (`parseIsolationBackend`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
    - `packages/coding-agent/src/task/output-manager.ts` — session-scoped `agent://` id allocation.
    - `packages/coding-agent/src/task/name-generator.ts` — default AdjectiveNoun agent ids.
@@ -32,7 +32,7 @@
 
 ## Inputs
 
-The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, model?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default on).
+The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, model?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default off).
 
 `task.steps` (default off) swaps `task` for `steps: string[]` in the wire schema and tool description, in either shape: the model sees only one of the two. Runtime accepts either (internal callers, stale transcripts) but rejects an item carrying both.
 
@@ -157,11 +157,12 @@ Artifacts and side channels:
    - off — single spawn per call; `tasks`/`context` are rejected and removed from the schema, with the same conditional `effort`/`isolated` fields.
 - Speculative launch (`task.speculativeLaunch`, default on; batch mode only) — while a `{ context, tasks[] }` call streams, the tool's stream session (`src/task/speculative-launch.ts`) starts each item's `SpawnRun` as soon as that item's JSON object closes (`context` must already have closed), and starts the remainder when the call finishes streaming. Dispatch adopts runs whose normalized spawn params still match; an invalid finished call, launched items that differ from the finished call, a blocking hook, or an aborted turn aborts every launched run. Launches need host authorization (`authorizeLaunch`): auto-allowed `task` approval and no extension `tool_call`/`tool_result`/approval lifecycle handlers.
 - Isolation is available when `task.isolation.enabled` is true: each task must set `isolated: true` to use a separate checkout; omitted or `false` tasks share the parent checkout. `isolation.backend` selects `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone`, or `rcopy`, and the PAL resolves the actual backend with fallback; `auto` uses ovnfs for isolated subagents when it is found (below).
-- ovnfs (active whenever the binary is found — `ovnfs.path`, default `ovnfs` on PATH): the system prompt gains a "Separate checkouts" section telling agents to open ovnfs checkouts (`ovnfs new`, `diff`, `apply`, `rm`) instead of `git worktree add`, `git clone` or `cp -r`. When `task.isolation.enabled` also allows isolated tasks and `isolation.backend` is `auto`, each isolated subagent works in an ovnfs checkout — a copy-on-write view of the repo with a private git dir, served by the ovnfs daemon — instead of a native clone. omp runs `ovnfs --json start` to make sure the daemon runs and learn its admin socket, then opens (`new`) and removes (`rm`) one checkout per run over that Unix socket. Capture, merge and apply are the same as for native workspaces. The run's task-isolation dir records the checkout (`.omp-ovnfs-checkout.json`) so `omp worktree clear` removes checkouts of crashed runs; a checkout whose changes could not be captured is kept like a native workspace. Without the binary, isolation stays native; once ovnfs is found there is no fallback: if it fails, the isolated task fails and says so.
+- ovnfs (active whenever the binary is found — `ovnfs.path`, default `ovnfs` on PATH): the system prompt gains a "Separate checkouts" section telling agents to open ovnfs checkouts (`ovnfs new`, `diff`, `apply`, `land`, `pull`, `rm`) instead of `git worktree add`, `git clone` or `cp -r`. When `task.isolation.enabled` also allows isolated tasks and `isolation.backend` is `auto`, each isolated subagent works in an ovnfs checkout — a copy-on-write view of the repo with a private git dir, served by the ovnfs daemon — instead of a native clone. omp runs `ovnfs --json start` to make sure the daemon runs and learn its admin socket, then opens (`new`) and removes (`rm`) one checkout per run over that Unix socket. Capture, merge and apply are the same as for native workspaces. The run's task-isolation dir records the checkout (`.omp-ovnfs-checkout.json`) so `omp worktree clear` removes checkouts of crashed runs; a checkout whose changes could not be captured is kept like a native workspace. Without the binary, isolation stays native; once ovnfs is found there is no fallback: if it fails, the isolated task fails and says so.
 - Isolation merge strategy: `task.isolation.merge` selects patch mode (capture/apply root patches) or branch mode (commit to `omp/task/<id>`, cherry-pick into parent). `task.isolation.apply=false` retains captured changes without applying them; nested repositories get separate patch artifacts.
 - Eval-defined tools: `tools` resolves names across the parent's retained Python/JS kernels. Unknown names, disabled sharing, or the same name defined in both kernels fail preflight; these tools are not available in plan mode.
 - Agent source precedence is first-wins by exact name: project `.omp/agents`; user `.omp/agent/agents`; OMP extension-package `agents/` roots in CLI → project settings → user settings → installed npm/link plugin order; Claude marketplace plugin agents (project before user); then bundled (`scout`, `reviewer`, `security-reviewer`, `task`, `sonic`).
 - Prewalk: agent frontmatter `prewalk` or `task.agentPrewalk[agentName]` can start on the normal model and hand off to a cheaper resolved model at the first edit/write. `task.prewalk` (default off) arms this behavior for the bundled generic `task` agent. Missing/unconfigured targets and exact model+effort no-ops skip the handoff rather than failing the spawn.
+- Auto-prewalk: `task.agentPrewalkAuto[agentName]` (`"on"` / `"off"` / model pattern) lets the native judge decide per assignment whether an agent with no unconditional prewalk hands off; `"on"` uses `prewalk.autoTarget`, any other value the given target. An unconditional prewalk from frontmatter, `task.prewalk` or `task.agentPrewalk` wins and is never judged, and skipped spawns, unavailable targets or a judge failure leave the spawn without prewalk.
 - Advisor: agent frontmatter `advisor` or `task.agentAdvisor[agentName]` (`"on"` / `"off"` / model pattern) pairs the child session with an advisor; an explicit pattern lands on the child's `modelRoles.advisor`. Subagents default to no advisor.
 
 ## Side Effects
@@ -173,7 +174,7 @@ Artifacts and side channels:
    - Child sessions may use whichever networked tools/models their active tool set permits.
    - MCP proxy tools reuse parent connections and their configured transport deadlines, including `OMP_MCP_TIMEOUT_MS` overrides and `timeout: 0`; no separate subagent deadline caps a tool call.
 - Subprocesses / native bindings
-   - Isolation backends run through the `pi-natives` PAL (`crates/pi-iso`): kernel `overlay` with `fuse-overlayfs`/`fusermount[3]` fallback on Linux, APFS/Btrfs/ZFS/reflink clones, ProjFS on Windows, recursive copy as last resort.
+   - Isolation backends run through the `omp-natives` PAL (`crates/iso`): kernel `overlay` with `fuse-overlayfs`/`fusermount[3]` fallback on Linux, APFS/Btrfs/ZFS/reflink clones, ProjFS on Windows, recursive copy as last resort.
    - Git operations for baseline capture, patch apply, worktrees, branches, stash, cherry-pick, commits.
 - Session state (transcript, memory, jobs, checkpoints, registries)
    - Creates child `AgentSession` instances with isolated settings snapshots; finished sessions stay registered in the process-global `AgentRegistry` as `idle`/`parked` until process teardown or explicit release.

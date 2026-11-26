@@ -10,28 +10,28 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import type { UiNode } from "@oh-my-pi/pi-tui";
+import { initTheme } from "../../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal } from "../helpers/mode-terminal";
+
+/** Whether `node` is `root` or inside it. */
+function within(root: UiNode, node: UiNode | null): boolean {
+	return node !== null && (root === node || root.children().some(child => within(child, node)));
+}
 
 describe("context command viewer", () => {
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode;
 	let session: AgentSession;
 	let tempDir: TempDir;
+	let term: ModeTerminal | undefined;
 
 	beforeAll(() => {
 		initTheme();
 	});
 
 	beforeEach(async () => {
-		vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
-		if (typeof process.stdin.setRawMode === "function") {
-			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
-		}
-
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-context-command-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -40,6 +40,8 @@ describe("context command viewer", () => {
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		HistoryStorage.close();
 		vi.restoreAllMocks();
 		await session?.dispose();
@@ -77,25 +79,33 @@ describe("context command viewer", () => {
 			modelRegistry,
 			autoTitle: false,
 		});
-		mode = new InteractiveMode(session, "test");
+		// The viewer runs on the shell: keys reach it through the terminal.
+		term = createModeTerminal({ columns: 100, rows: 30 });
+		await term.start();
+		const screen = term;
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 		mode.isInitialized = true;
-		mode.ui.requestRender = vi.fn();
 		new InputController(mode).setupKeyHandlers();
-		mode.editor.setText("draft must survive");
-		mode.ui.setFocus(mode.editor);
+		mode.composer.setText("draft must survive");
+		mode.shell.focus(mode.composer.field);
 		const abort = vi.spyOn(session, "abort");
 		const pending = session.prompt("run background fixture");
 		await withTimeout(entered.promise, 2000, "fixture never entered model call");
 		try {
-			const messages = JSON.stringify(session.messages);
 			mode.handleContextCommand();
-			const overlay = mode.ui.overlayStack.at(-1)!;
-			expect(overlay.options?.fullscreen).toBe(true);
-			expect(mode.ui.getFocused()).toBe(overlay.component);
-			const snapshot = overlay.component.render(100);
-			overlay.component.handleInput?.("\r");
-			overlay.component.handleInput?.("\x1b");
-			expect(mode.ui.getFocused()).toBe(overlay.component);
+			const overlay = mode.shell.overlays.top()!;
+			expect(overlay).toBeDefined();
+			expect(within(overlay.node, mode.shell.focused())).toBe(true);
+			// Fullscreen: the viewer takes the alternate screen.
+			await screen.waitFor(() => !screen.engine.isMainScreen);
+			await screen.settle();
+			const snapshot = screen.screen();
+			const messages = JSON.stringify(session.messages);
+			screen.press("enter");
+			screen.press("escape");
+			await screen.settle();
+			expect(mode.shell.overlays.top()).toBe(overlay);
+			expect(within(overlay.node, mode.shell.focused())).toBe(true);
 			expect(abort).not.toHaveBeenCalled();
 			expect(JSON.stringify(session.messages)).toBe(messages);
 			expect(requests).toBe(1);
@@ -110,17 +120,18 @@ describe("context command viewer", () => {
 						),
 				),
 			).toBe(true);
-			expect(overlay.component.render(100)).toEqual(snapshot);
-			overlay.component.handleInput?.("\x1b");
-			expect(mode.ui.hasOverlay()).toBe(false);
-			expect(mode.ui.getFocused()).toBe(mode.editor);
-			expect(mode.editor.getText()).toBe("draft must survive");
+			await screen.settle();
+			expect(screen.screen()).toEqual(snapshot);
+			screen.press("escape");
+			await screen.waitFor(() => !mode.shell.overlays.open());
+			expect(mode.shell.focused()).toBe(mode.composer.field);
+			expect(mode.composer.text()).toBe("draft must survive");
 			expect(abort).not.toHaveBeenCalled();
 			expect(requests).toBe(1);
 			mode.handleContextCommand();
 			mode.handleToolsCommand();
-			expect(mode.ui.overlayStack).toHaveLength(0);
-			expect(mode.reportContainer.children).toHaveLength(1);
+			expect(mode.shell.overlays.open()).toBe(false);
+			expect(mode.shell.dock.slot("report").occupied()).toBe(true);
 		} finally {
 			release.resolve();
 			await pending;

@@ -63,9 +63,7 @@ import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { AgentRegistry } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
-import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-import { theme } from "@oh-my-pi/pi-tui/theme";
+import type { AgentCostSnapshot } from "../view-model/overlays/agent-hub-projection";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
@@ -79,7 +77,7 @@ import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { sumSubagentTreeCost } from "../agent-hub-runtime";
-import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking/levels";
 import {
 	choiceValue,
 	defaultFormData,
@@ -90,10 +88,10 @@ import {
 	isArrayChoice,
 	OTHER_LABEL,
 	textValue,
-} from "@oh-my-pi/pi-tui/html-form/data";
-import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
+} from "../../tools/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText } from "../../tools/html-form/parse";
 import { resolvePlanFilePath } from "../../plan-mode/plan-files";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import {
 	DEFAULT_TTS_SPEED,
 	DEFAULT_TTS_VOICE,
@@ -103,7 +101,7 @@ import {
 	TTS_SPEED_MIN,
 	TTS_SPEED_OPTIONS,
 } from "../../tts/models";
-import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import { canonicalizeMessage } from "../../session/transcript/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
 	extractAssistantMessageText,
@@ -111,10 +109,12 @@ import {
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
-
 import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
 import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { SessionObserverRegistry } from "../../task/session-observer-registry";
+import { extensionTheme } from "../../ui/extensions/render-output";
 
 const ACP_DEFAULT_MODE_ID = "default";
 const ACP_PLAN_MODE_ID = "plan";
@@ -994,10 +994,8 @@ export function createAcpExtensionUiContext(
 			return typeof value === "string" ? value : undefined;
 		},
 		addAutocompleteProvider: () => {},
-		setEditorComponent: () => {},
-		getEditorComponent: () => undefined,
 		get theme() {
-			return theme;
+			return extensionTheme(currentTheme());
 		},
 		getAllThemes: async () => [],
 		getTheme: async () => undefined,
@@ -1408,7 +1406,7 @@ export class AcpAgent implements Agent {
 
 	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
 		const promptTurn = record.promptTurn;
-		const skillResult = await this.#tryRunSkillCommand(record, text);
+		const skillResult = await this.#tryRunSkillCommand(record, text, images);
 		if (skillResult || promptTurn?.cancelRequested) {
 			return;
 		}
@@ -1513,7 +1511,11 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
+	async #tryRunSkillCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		images: AgentImageContent[],
+	): Promise<boolean> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
@@ -1529,7 +1531,7 @@ export class AcpAgent implements Agent {
 		await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
-				content: built.message,
+				content: images.length > 0 ? [{ type: "text", text: built.message }, ...images] : built.message,
 				display: true,
 				details: built.details,
 				attribution: "user",
@@ -2533,14 +2535,14 @@ export class AcpAgent implements Agent {
 
 	#getAvailableModes(session: AgentSession): Array<{ id: string; name: string; description: string }> {
 		const modes = [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
-		if (cfgPlanEnabled.get(session.settings)) {
+		// Plan mode ends by `propose`, which a --no-tools session does not register.
+		if (cfgPlanEnabled.get(session.settings) && !session.restrictToolNames) {
 			modes.push({
 				id: ACP_PLAN_MODE_ID,
 				name: "Plan",
 				description: "Read-only planning mode that drafts a plan to a markdown file before any code changes",
 			});
 		}
-		void session;
 		return modes;
 	}
 
@@ -2563,7 +2565,7 @@ export class AcpAgent implements Agent {
 				reentry: previous !== undefined,
 			});
 			// Mirror `InteractiveMode.#enterPlanMode`: register the plan-proposal
-			// handler that consumes `xd://propose` writes from plan mode. Without
+			// handler that consumes `propose` submissions from plan mode. Without
 			// this, proposal dispatch falls through and plan mode has no approval
 			// path (issue #1869).
 			session.setPlanProposalHandler?.(title => this.#handleAcpPlanProposal(record, title));
@@ -2575,11 +2577,11 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Plan-proposal handler installed while ACP plan mode is active. The agent
-	 * submits the finalized plan by writing its `<slug>`/title to
-	 * `xd://propose`; this handler validates the plan file, normalizes the
-	 * title, asks the ACP client to confirm (via `unstable_createElicitation`
-	 * when supported), and on approval keeps the chosen plan path, exits plan
-	 * mode, and notifies the client so the agent regains full tools.
+	 * submits the finalized plan by passing its `<slug>`/title to `propose`;
+	 * this handler validates the plan file, normalizes the title, asks the ACP
+	 * client to confirm (via `unstable_createElicitation` when supported), and
+	 * on approval keeps the chosen plan path, exits plan mode, and notifies the
+	 * client so the agent regains full tools.
 	 *
 	 * Mirrors `InteractiveMode.#handlePlanProposal` for the parts the agent sees
 	 * (same `PlanApprovalDetails` shape). Clients without form-mode elicitation
@@ -2620,7 +2622,7 @@ export class AcpAgent implements Agent {
 				content: [
 					{
 						type: "text" as const,
-						text: `Plan refinement requested. Update the plan file, then write ${normalizedTitle} to xd://propose again when ready.`,
+						text: `Plan refinement requested. Update the plan file, then submit ${normalizedTitle} with \`propose\` again when ready.`,
 					},
 				],
 				details,
@@ -2865,7 +2867,7 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Reload plugin/registry state for an ACP session. Mirrors the interactive
-	 * `/reload-plugins` and `/move` flows: invalidates the plugin-roots cache,
+	 * `/reload-plugins` flow: invalidates the plugin-roots cache,
 	 * refreshes task agents, resets the capability cache, refreshes the
 	 * session's slash-command state, then re-advertises commands so the client
 	 * sees newly installed/disabled plugins.

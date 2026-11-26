@@ -5,8 +5,8 @@
 # Doctests are NOT run by nextest (upstream limitation: they have no stable
 # libtest-json interface). `scripts/run-rs-task.ts` pairs the nextest run with
 # `cargo test --doc`, which runs every runnable doctest in the workspace's lib
-# crates. Today that is tree-sitter-go's one example: pi-natives is a `cdylib`
-# (rustdoc collects no doctests from it) and pi-builtins' examples are
+# crates. Today that is tree-sitter-go's one example: omp-natives is a `cdylib`
+# (rustdoc collects no doctests from it) and omp-builtins' examples are
 # `ignore`d vendored uutils docs.
 
 [profile.default]
@@ -26,7 +26,7 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 # The deep-chain walk tests build and delete a directory chain as deep as the
 # host's path syscalls reach. That saturates the filesystem for as long as they
 # run, which pushes tests elsewhere in the workspace past their own latency
-# assertions (pi-natives' OAuth callback wake, pi-shell's TERM-trap cleanup).
+# assertions (omp-natives' OAuth callback wake, omp-shell's TERM-trap cleanup).
 # Each takes every test thread, so it runs alone.
 [[profile.default.overrides]]
 filter = 'test(deeper_than_the_stack) + test(stopping_at_the_leaf_of_a_deep_ignore_chain_returns)'

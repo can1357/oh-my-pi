@@ -16,7 +16,6 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -28,6 +27,8 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 function stubTool(name: string): AgentTool {
 	return {
@@ -147,7 +148,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	let storage: ExitFaultStorage;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 		tempDir = TempDir.createSync("@pi-vibe-toggle-");
 		authStorage = createInMemoryAuthStorage();
 		modelRegistry = new ModelRegistry(authStorage);
@@ -186,7 +187,15 @@ describe("InteractiveMode vibe mode toggle", () => {
 			builtInToolNames: registryTools.map(tool => tool.name),
 			createVibeTools: () => VIBE_TOOL_NAMES.map(stubTool),
 		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, new EventBus());
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			new EventBus(),
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {
@@ -466,6 +475,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 			undefined,
 			undefined,
 			new EventBus(),
+			createModeTerminal().frame,
 		);
 
 		try {
@@ -531,7 +541,15 @@ describe("InteractiveMode vibe mode toggle", () => {
 			});
 			return {
 				session: opened,
-				mode: new InteractiveMode(opened, "test", undefined, undefined, undefined, new EventBus()),
+				mode: new InteractiveMode(
+					opened,
+					"test",
+					undefined,
+					undefined,
+					undefined,
+					new EventBus(),
+					createModeTerminal().frame,
+				),
 			};
 		};
 
@@ -605,7 +623,15 @@ describe("InteractiveMode vibe mode toggle", () => {
 			});
 			return {
 				session: opened,
-				mode: new InteractiveMode(opened, "test", undefined, undefined, undefined, new EventBus()),
+				mode: new InteractiveMode(
+					opened,
+					"test",
+					undefined,
+					undefined,
+					undefined,
+					new EventBus(),
+					createModeTerminal().frame,
+				),
 			};
 		};
 

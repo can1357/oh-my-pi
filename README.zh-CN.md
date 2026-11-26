@@ -245,7 +245,7 @@ _[观看录屏 ↗](https://omp.sh/clips/conflict.mp4)_
 
 ### 19 · 先预览，再接受。
 
-`ast_edit` 会返回一张带替换数量的 _（proposed）_ 卡片，修改处于暂存状态。智能体向 `xd://resolve` 写入一行理由；TUI 将其变为 **Accept** 卡片，随后才真正写入磁盘——原子操作，要么全部成功，要么全部不做。
+`ast_edit` 会返回一张带替换数量的 _（proposed）_ 卡片，修改处于暂存状态。智能体运行 `resolve "<reason>"`；TUI 将其变为 **Accept** 卡片，随后才真正写入磁盘——原子操作，要么全部成功，要么全部不做。
 
 ![omp TUI：✓ AST Edit: console.log($X)（proposed）3 处替换 · 1 个文件，然后 ✓ Accept: 1 个文件中 3 处替换（AST Edit），接着是 “Applied 3 replacements in src/auth.ts.”](https://omp.sh/clips/codemod-poster.webp)
 
@@ -261,7 +261,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 ## 任务需要什么，_早已内置_。
 
-核心工具与 `read` 和 `bash` 位于同一命名空间。用 `--tools read,edit,bash,…` 固定启用的工具集；不常用的工具则通过 `xd://` 设备按需发现。`read xd://` 会列出它们，启用 `tools.xdev` 后可用 `write xd://<tool>` 运行。
+核心工具与 `read` 和 `bash` 位于同一命名空间。用 `--tools read,edit,bash,…` 固定启用的工具集；启用 `tools.commands` 后，不常用的可发现工具会挂载为 bash 命令——用 bash 工具运行 `<tool> <args>`，用 `<tool> --help` 获取由 schema 派生的用法，而无需在每次请求中附带 schema。
 
 **文件与搜索**
 
@@ -343,19 +343,19 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 直连 API 和网关。可按角色混用不同提供商。
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari · Refuseless
 
 ### 编程套餐
 
 走订阅额度。用 `/login` 登录后即可在会话中使用。
 
-Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
+Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kiro `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
 ### 本地部署
 
 兼容 OpenAI 的 `/v1/models`。本地实例无需密钥。
 
-Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM
+Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM · Bifrost
 
 ### 自定义 OpenAI 兼容提供商
 
@@ -457,21 +457,21 @@ Exa 也可以通过 `/login exa` 存储 API 密钥；显式选择无密钥模式
 
 六个 crate，一个按平台打包的 N-API 插件。搜索、shell、AST、语法高亮、PTY、桌面控制、图像解码、BPE 计数——全部在 libuv 线程池中进程内完成。热路径上没有 fork/exec。shell 是我们自己的 bash 5.3 引擎，58 个命令行工具——coreutils、findutils、sed、jq、基于 ripgrep 的 grep、fd、diff、moreutils——被移植进 builtins crate，直接编译进 shell。
 
-- Crate：`pi-natives`、`pi-shell`、`pi-ast`、`pi-iso`、`pi-voice`、`pi-walker`
+- Crate：`omp-natives`、`omp-shell`、`omp-ast`、`omp-iso`、`omp-voice`、`omp-xfs`
 - 平台：`linux-x64`、`linux-arm64`、`darwin-x64`、`darwin-arm64`、`win32-x64`、`win32-arm64`——x64 同时提供 AVX2 和基线两种二进制
 
 按 crate 统计（仅代码行）：
 
 | Crate      | 功能                                                                         | ~代码行 |
 | ---------- | ---------------------------------------------------------------------------- | ------: |
-| pi-shell   | 内嵌 bash 引擎 · 持久会话 · 进程内 coreutils 调度 · 输出精简器               |  38,000 |
-| pi-natives | N-API 接口层——下表中的所有模块                                               |  25,000 |
-| pi-walker  | 并行遍历器 · 目录列表缓存 · glob · 为 natives 和 shell 的 rg/grep/fd 提供正则搜索 | 11,400 |
-| pi-iso     | 工作区隔离 · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |   3,300 |
-| pi-ast     | tree-sitter + ast-grep 匹配、代码块解析、结构化摘要                          |   2,900 |
-| pi-voice   | 音频采集/播放 · Opus · 实时 WebRTC                                           |   1,000 |
+| omp-shell   | 内嵌 bash 引擎 · 持久会话 · 进程内 coreutils 调度 · 输出精简器               |  38,000 |
+| omp-natives | N-API 接口层——下表中的所有模块                                               |  25,000 |
+| omp-xfs  | 并行遍历器 · 目录列表缓存 · glob · 为 natives 和 shell 的 rg/grep/fd 提供正则搜索 | 11,400 |
+| omp-iso     | 工作区隔离 · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |   3,300 |
+| omp-ast     | tree-sitter + ast-grep 匹配、代码块解析、结构化摘要                          |   2,900 |
+| omp-voice   | 音频采集/播放 · Opus · 实时 WebRTC                                           |   1,000 |
 
-`pi-natives` 内部的模块明细（省略胶水代码和测试）：
+`omp-natives` 内部的模块明细（省略胶水代码和测试）：
 
 | 模块          | 功能                                                                  | 基于                                      | ~代码行 |
 | ------------- | --------------------------------------------------------------------- | ----------------------------------------- | ------: |
@@ -623,7 +623,7 @@ bun setup
 bun dev
 ```
 
-使用 `nix build .#omp` 构建并冒烟测试可分发的 Nix 包。Wayland 屏幕录制支持默认关闭（链接 libpipewire 会增加约 750 MB 的运行时闭包）；可通过 `omp.override { withWaylandScreencast = true; }` 开启。发布构建使用 fat LTO 链接 `pi-natives`；`omp.override { withFatLto = false; }` 改用 thin LTO，本地重新构建会快得多。Rust 依赖和原生插件在不同的 derivation 中构建，因此修改 Rust 代码会复用已编译的依赖，修改 TypeScript 会复用已构建的插件。`nix/bun.nix` 只在 `bun.lock` 变化时生成；发布时会自动重新生成。依赖变更后，请运行：
+使用 `nix build .#omp` 构建并冒烟测试可分发的 Nix 包。Wayland 屏幕录制支持默认关闭（将 libpipewire 加入插件的库搜索路径会增加约 750 MB 的运行时闭包）；可通过 `omp.override { withWaylandScreencast = true; }` 开启。发布构建使用 fat LTO 链接 `omp-natives`；`omp.override { withFatLto = false; }` 改用 thin LTO，本地重新构建会快得多。Rust 依赖和原生插件在不同的 derivation 中构建，因此修改 Rust 代码会复用已编译的依赖，修改 TypeScript 会复用已构建的插件。`nix/bun.nix` 只在 `bun.lock` 变化时生成；发布时会自动重新生成。依赖变更后，请运行：
 
 ```sh
 bun run gen:nix
@@ -658,7 +658,7 @@ bun dev -- --version
 | **[@oh-my-pi/pi-catalog](packages/catalog)**                                  | 模型目录：内置模型数据库、提供商描述符和模型身份识别       |
 | **[@oh-my-pi/pi-agent-core](packages/agent)**                                 | 支持工具调用和状态管理的智能体运行时                       |
 | **[@oh-my-pi/pi-coding-agent](packages/coding-agent)**                        | 交互式编程智能体 CLI 和 SDK                                |
-| **[@oh-my-pi/pi-tui](packages/tui)**                                          | 支持差分渲染的终端 UI 库                                   |
+| **[@oh-my-pi/pi-tui](packages/tui)**                                            | 终端 UI 库：同一组件树，渲染为终端行或原生 TSP             |
 | **[@oh-my-pi/pi-natives](packages/natives)**                                  | 用于 grep、shell、图像、文本、语法高亮等功能的 N-API 绑定  |
 | **[@oh-my-pi/omp-stats](packages/stats)**                                     | AI 使用统计的本地可观测性面板                              |
 | **[@oh-my-pi/omptype](packages/omptype)**                                     | 兼容 ArkType、带惰性 JIT 编译的 schema 校验库              |
@@ -674,14 +674,14 @@ bun dev -- --version
 
 | Crate                                      | 说明                                                                                     |
 | ------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| **[pi-natives](crates/pi-natives)**        | `@oh-my-pi/pi-natives` 使用的核心 Rust 原生插件（N-API `cdylib`）；聚合下列各 crate      |
-| **[pi-shell](crates/pi-shell)**            | 内嵌的 bash 5.3 引擎（解析器、虚拟机、进程创建、会话）、PTY 和进程管理                   |
-| **[pi-ast](crates/pi-ast)**                | 基于 tree-sitter 的代码摘要器和 AST 工具（50+ 种语言语法）                               |
-| **[pi-iso](crates/pi-iso)**                | 任务隔离后端解析器：APFS 克隆、btrfs/zfs reflink、overlayfs、projfs、rcopy               |
-| **[pi-voice](crates/pi-voice)**            | 音频采集/播放、Opus 编解码和实时 WebRTC 流式传输基础组件                                 |
-| **[pi-walker](crates/pi-walker)**          | 为 natives 和 shell 提供并行的 ignore 感知遍历器、目录列表缓存、glob 和内容搜索          |
-| **[pi-edit](crates/pi-edit)**              | `edit` 工具背后的编辑引擎：基于行锚点的 patch/hashline 模式、流式预览、原子化应用        |
-| **[pi-builtins](crates/pi-builtins)**      | 67 个进程内命令行工具以及进程内建命令（ps、top、pgrep、pkill 等）                        |
+| **[omp-natives](crates/natives)**        | `@oh-my-pi/pi-natives` 使用的核心 Rust 原生插件（N-API `cdylib`）；聚合下列各 crate      |
+| **[omp-shell](crates/shell)**            | 内嵌的 bash 5.3 引擎（解析器、虚拟机、进程创建、会话）、PTY 和进程管理                   |
+| **[omp-ast](crates/ast)**                | 基于 tree-sitter 的代码摘要器和 AST 工具（50+ 种语言语法）                               |
+| **[omp-iso](crates/iso)**                | 任务隔离后端解析器：APFS 克隆、btrfs/zfs reflink、overlayfs、projfs、rcopy               |
+| **[omp-voice](crates/voice)**            | 音频采集/播放、Opus 编解码和实时 WebRTC 流式传输基础组件                                 |
+| **[omp-xfs](crates/xfs)**          | 为 natives 和 shell 提供并行的 ignore 感知遍历器、目录列表缓存、glob 和内容搜索          |
+| **[omp-edit](crates/edit)**              | `edit` 工具背后的编辑引擎：基于行锚点的 patch/hashline 模式、流式预览、原子化应用        |
+| **[omp-builtins](crates/builtins)**      | 67 个进程内命令行工具以及进程内建命令（ps、top、pgrep、pkill 等）                        |
 
 ## 参与贡献
 
@@ -693,7 +693,7 @@ Issue 和 Pull Request 向所有人开放。开放 PR 目前处于**试行**阶�
 
 OMP 基于 [MIT 许可证](LICENSE) 发布。
 
-第三方代码和内置（vendored）的上游代码，包括 `crates/pi-builtins/LICENSE` 中标明的第三方部分，仍遵循各自上游的许可证。每个发布的组件都附带自己的 `THIRD-PARTY-NOTICES.txt`：CLI（`packages/coding-agent`）、原生插件（`packages/natives`）和 robomp（`python/robomp`）。`omp --license` 会打印 CLI 和原生插件的许可声明。
+第三方代码和内置（vendored）的上游代码，包括 `crates/builtins/LICENSE` 中标明的第三方部分，仍遵循各自上游的许可证。每个发布的组件都附带自己的 `THIRD-PARTY-NOTICES.txt`：CLI（`packages/coding-agent`）、原生插件（`packages/natives`）和 robomp（`python/robomp`）。`omp --license` 会打印 CLI 和原生插件的许可声明。
 
 © 2025 Mario Zechner  
 © 2025-2026 Can Bölük  

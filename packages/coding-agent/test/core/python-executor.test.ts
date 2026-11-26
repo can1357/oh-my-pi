@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { disposeAllKernelSessions, executePythonWithKernel } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { spillTo } from "../helpers/spill";
 import { FakeKernel } from "./helpers";
 
 describe("executePythonWithKernel", () => {
@@ -96,8 +97,7 @@ describe("executePythonWithKernel", () => {
 		const artifactPath = path.join(tempDir.path(), "0.python.txt");
 
 		const result = await executePythonWithKernel(kernel, "print('big')", {
-			artifactPath,
-			artifactId: "0",
+			allocateArtifact: spillTo(artifactPath, "0"),
 		});
 
 		expect(result.truncated).toBe(true);

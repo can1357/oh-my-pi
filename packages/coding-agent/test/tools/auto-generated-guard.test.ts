@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { assertEditableFile } from "@oh-my-pi/pi-coding-agent/tools/auto-generated-guard";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 let tempDir: string;
 let testSettings: Settings;

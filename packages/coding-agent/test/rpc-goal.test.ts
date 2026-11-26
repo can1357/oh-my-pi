@@ -49,6 +49,7 @@ describe("RPC goal command", () => {
 		script?: "complete" | "idle" | "slow";
 		plan?: boolean;
 		persist?: boolean;
+		restrict?: boolean;
 	}): Promise<RpcClient> {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-goal-"));
 		client = new RpcClient({
@@ -61,6 +62,7 @@ describe("RPC goal command", () => {
 				GOAL_RPC_SCRIPT: options.script ?? "complete",
 				GOAL_RPC_PLAN: options.plan ? "1" : "0",
 				GOAL_RPC_PERSIST: options.persist ? "1" : "0",
+				GOAL_RPC_RESTRICT: options.restrict ? "1" : "0",
 			},
 		});
 		await client.start();
@@ -91,6 +93,18 @@ describe("RPC goal command", () => {
 		const state = await rpc.getState();
 		expect(state.goal).toBeNull();
 		expect(state.messageCount).toBe(0);
+	}, 30_000);
+
+	test("a --no-tools session refuses create and keeps its exact tool list", async () => {
+		const rpc = await start({ continuation: true, restrict: true });
+		const refused = await rejectionOf(rpc.goal("create", { objective: "no goal tool here" }));
+		expect(refused).toMatchObject({
+			command: "goal",
+			message: "Goal mode is unavailable in a --no-tools session.",
+		});
+		const state = await rpc.getState();
+		expect(state.goal).toBeNull();
+		expect(state.dumpTools?.map(tool => tool.name)).toEqual(["read"]);
 	}, 30_000);
 
 	test("continuation stops after a turn with no progress and the goal stays active", async () => {
@@ -137,6 +151,109 @@ describe("RPC goal command", () => {
 		expect(dropped.goal).toBeNull();
 		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toEqual(toolsBefore);
 		expect((await rpc.goal("create", { objective: "again" })).goal?.status).toBe("active");
+	}, 30_000);
+
+	test("a tool enabled during goal mode stays available after pause, resume and drop", async () => {
+		// Drive the in-process RpcGoalController and read its live tool roster directly:
+		// the RPC client's get_state -> dumpTools path needs the native shellBuiltins export.
+		const makeGoal = (objective: string, status: "active" | "paused" = "active"): GoalModeState => ({
+			enabled: status === "active",
+			mode: "active",
+			goal: {
+				id: "g1",
+				objective,
+				status,
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: 0,
+				updatedAt: 0,
+			},
+		});
+
+		let goalState: GoalModeState | undefined;
+		let tools: string[] = ["read"];
+		const session = {
+			settings: Settings.isolated({ "goal.continuationModes": [] }),
+			sessionManager: {
+				getSessionId: () => "t1",
+				buildSessionContext: () => ({ mode: "none" }),
+				appendModeChange: () => {},
+				appendCustomEntry: () => {},
+			},
+			isDisposed: false,
+			isSessionTransitioning: false,
+			isStreaming: false,
+			hasAdmittedSubmission: false,
+			queuedMessageCount: 0,
+			getPlanModeState: () => undefined,
+			getGoalModeState: () => goalState,
+			setGoalModeState: (state: GoalModeState | undefined) => {
+				goalState = state;
+			},
+			getEnabledToolNames: () => [...tools],
+			setActiveToolsByName: async (names: string[]) => {
+				tools = [...names];
+			},
+			getTodoPhases: () => [],
+			promptCustomMessage: async () => true,
+			waitForIdle: async () => {},
+			goalRuntime: {
+				buildContinuationPrompt: () => "continue",
+				clearAccounting: () => {},
+				createGoal: async ({ objective }: { objective: string }) => {
+					goalState = makeGoal(objective);
+					return goalState;
+				},
+				resumeGoal: async () => {
+					if (goalState?.goal.status !== "paused") throw new Error("No paused goal.");
+					goalState = makeGoal(goalState.goal.objective);
+					return goalState;
+				},
+				pauseGoal: async () => {
+					if (!goalState) return undefined;
+					goalState = makeGoal(goalState.goal.objective, "paused");
+					return goalState;
+				},
+				dropGoal: async () => {
+					if (!goalState) return undefined;
+					const dropped = { ...goalState.goal, status: "dropped" as const };
+					const droppedState: GoalModeState = { ...goalState, enabled: false, goal: dropped };
+					// Mirror the runtime's goal_updated(dropped): observe() queues #exit,
+					// which handle("drop") then awaits before reporting state.
+					controller.observe({
+						type: "goal_updated",
+						goal: dropped,
+						state: droppedState,
+					} as unknown as AgentSessionEvent);
+					goalState = undefined;
+					return dropped;
+				},
+			},
+		};
+		const controller = new RpcGoalController(session as unknown as RpcGoalSession);
+		const toolNames = (): string[] => [...tools];
+
+		expect(toolNames()).not.toContain("goaltest_late_tool");
+		await controller.handle({ op: "create", objective: "keep the late tool" });
+		expect(toolNames()).toContain("goal");
+		expect(toolNames()).not.toContain("goaltest_late_tool");
+
+		// A deferred extension enables its tool only after goal entry.
+		await session.setActiveToolsByName([...session.getEnabledToolNames(), "goaltest_late_tool"]);
+		expect(toolNames()).toContain("goaltest_late_tool");
+		expect(toolNames()).toContain("goal");
+
+		await controller.handle({ op: "pause" });
+		expect(toolNames()).toContain("goaltest_late_tool");
+		expect(toolNames()).not.toContain("goal");
+
+		await controller.handle({ op: "resume" });
+		expect(toolNames()).toContain("goaltest_late_tool");
+		expect(toolNames()).toContain("goal");
+
+		await controller.handle({ op: "drop" });
+		expect(toolNames()).toContain("goaltest_late_tool");
+		expect(toolNames()).not.toContain("goal");
 	}, 30_000);
 
 	test("with rpc continuation opted in, create drives turns until the agent completes the goal", async () => {
@@ -413,7 +530,7 @@ describe("RPC goal command", () => {
 });
 
 describe("RpcGoalController continuation gate", () => {
-	const agentEnd = { type: "agent_end", messages: [], isTerminal: true } as unknown as AgentSessionEvent;
+	const agentEnd = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
 	const hostInput = { type: "message_start", message: { role: "user", content: [] } } as unknown as AgentSessionEvent;
 
 	function fakeSession(admit: (customType: string) => Promise<boolean>) {
@@ -471,8 +588,7 @@ describe("RpcGoalController continuation gate", () => {
 			isStreaming: false,
 			hasAdmittedSubmission: false,
 			queuedMessageCount: 0,
-			hasPendingAsyncWork: () => false,
-			settleAsyncWork: async () => {},
+			isRunActive: false,
 			getPlanModeState: () => undefined,
 			getGoalModeState: () => goalState,
 			setGoalModeState: (state: GoalModeState | undefined) => {
@@ -574,7 +690,6 @@ describe("RpcGoalController continuation gate", () => {
 		});
 		const toolTurnEnd = {
 			type: "agent_end",
-			isTerminal: true,
 			messages: [
 				{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } }] },
 				{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "x" }], isError: false },
@@ -872,7 +987,7 @@ describe("RpcGoalController continuation gate", () => {
 		await nextMacrotask();
 		expect(admitted).toEqual(["goal-continuation"]);
 
-		// A reload reopens the same transcript and detaches that turn: its terminal agent_end never comes.
+		// A reload reopens the same transcript and detaches that turn: its agent_end never comes.
 		await controller.beginSessionChange();
 		await controller.endSessionChange({ detachedRun: true });
 		await nextMacrotask();

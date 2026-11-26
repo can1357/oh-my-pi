@@ -80,7 +80,8 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		const rotated = {
 			access: "server-access-rotated",
 			refresh: "server-refresh-rotated",
-			expires: Date.now() + 120_000,
+			// Outside Anthropic's 5-minute renewal window.
+			expires: Date.now() + 3_600_000,
 			accountId: "account-1",
 			email: "a@example.com",
 		};
@@ -371,8 +372,13 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			initialSnapshot: initial.snapshot,
 			streamSnapshots: false,
 		});
+		// Reports probed from a stored row carry that row's id (#19492).
+		const codexId = serverStore!.listAuthCredentials("openai-codex")[0]!.id;
 		try {
-			expect(await remote.getUsageReport("anthropic", credential)).toEqual(anthropicReport);
+			expect(await remote.getUsageReport("anthropic", credential)).toEqual({
+				...anthropicReport,
+				metadata: { ...anthropicReport.metadata, credentialId: entry.id },
+			});
 			expect(fastFetch).toHaveBeenCalledTimes(1);
 			expect(slowFetch).not.toHaveBeenCalled();
 
@@ -382,9 +388,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			expect((await aggregate)?.map(report => report.provider).sort()).toEqual(["anthropic", "openai-codex"]);
 			expect(fastFetch).toHaveBeenCalledTimes(1);
 			expect(slowFetch).toHaveBeenCalledTimes(1);
-			expect(await remote.getUsageReport("openai-codex", { ...credential, accountId: "codex-account" })).toEqual(
-				codexReport,
-			);
+			expect(await remote.getUsageReport("openai-codex", { ...credential, accountId: "codex-account" })).toEqual({
+				...codexReport,
+				metadata: { ...codexReport.metadata, credentialId: codexId },
+			});
 		} finally {
 			releaseSlow.resolve();
 			remote.close();
@@ -985,13 +992,13 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			metadata: { email: "carol@example.com" },
 		};
 		const geminiReport: UsageReport = {
-			provider: "google-gemini-cli",
+			provider: "zai",
 			fetchedAt: now,
 			limits: [
 				{
-					id: "google-gemini-cli:pro",
+					id: "zai:pro",
 					label: "Pro",
-					scope: { provider: "google-gemini-cli", accountId: " account-dave " },
+					scope: { provider: "zai", accountId: " account-dave " },
 					amount: { usedFraction: 0.2, unit: "percent" },
 				},
 			],
@@ -1033,7 +1040,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 				{ email: "dave@example.com" },
 				{ email: "dave@example.com", accountId: " account-dave " },
 			]) {
-				const gemini = await remoteStore.getUsageReport("google-gemini-cli", credential(dave));
+				const gemini = await remoteStore.getUsageReport("zai", credential(dave));
 				expect(gemini?.metadata?.currentTierId).toBe("standard-tier");
 			}
 

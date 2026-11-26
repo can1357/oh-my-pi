@@ -17,8 +17,9 @@ describe("RPC queued-message editing", () => {
 	let client: RpcClient;
 	let directory: string;
 
-	/** `script` selects a scripted first model call; see the fixture's QUEUED_RPC_SCRIPT. */
-	function createClient(script?: "hold" | "until-steer" | "internal-steer" | "live-steer"): RpcClient {
+	/** Selects the fixture's first model call (QUEUED_RPC_SCRIPT). */
+	type FirstCallScript = "hold" | "until-steer" | "internal-steer" | "live-steer";
+	function createClient(script?: FirstCallScript): RpcClient {
 		return new RpcClient({
 			command: [process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
 			cwd: directory,
@@ -36,8 +37,29 @@ describe("RPC queued-message editing", () => {
 		await removeWithRetries(directory);
 	});
 
-	test("validates removal and delivers only the surviving queued request", async () => {
+	/** Wait past the loop's initial steering poll so edits target an in-flight turn. */
+	async function startStreamingTurn(script: FirstCallScript = "hold"): Promise<string> {
+		client = createClient(script);
 		await client.start();
+		const turnStarted = Promise.withResolvers<void>();
+		const unsubscribe = client.onEvent(event => {
+			if (event.type === "turn_start") turnStarted.resolve();
+		});
+		try {
+			const id = await client.prompt("start a long turn");
+			await withTimeout(turnStarted.promise, 10_000, "First turn never started streaming");
+			return id;
+		} finally {
+			unsubscribe();
+		}
+	}
+
+	function userTexts(messages: AgentMessage[]): unknown[] {
+		return messages.filter(message => message.role === "user").map(message => message.content);
+	}
+
+	test("validates removal and delivers only the surviving queued request", async () => {
+		await startStreamingTurn("until-steer");
 		await client.followUp("cancel this");
 		await client.followUp("keep this");
 		expect(await rejectionOf(client.removeQueuedMessage(null as unknown as string, "followUp"))).toMatchObject({
@@ -57,28 +79,21 @@ describe("RPC queued-message editing", () => {
 		expect(await client.removeQueuedMessage("cancel this", "followUp")).toEqual({ removed: false });
 		expect((await client.getState()).queuedMessageCount).toBe(1);
 
-		const idle = Promise.withResolvers<void>();
-		const unsubscribe = client.onEvent(event => {
-			if (event.type === "agent_end") idle.resolve();
-		});
-		try {
-			await client.prompt("resume");
-			await withTimeout(idle.promise, 10_000, "Surviving RPC message did not finish");
-		} finally {
-			unsubscribe();
-		}
+		// Release the model call; the loop delivers steering first, then the surviving follow-up.
+		await client.steer("resume");
+		await client.waitForSettled(10_000);
 
 		expect(await client.removeQueuedMessage("keep this", "followUp")).toEqual({ removed: false });
 		expect((await client.getState()).queuedMessageCount).toBe(0);
-		const messages = await client.getMessages();
-		expect(messages.filter(message => message.role === "user").map(message => message.content)).toEqual([
+		expect(userTexts(await client.getMessages())).toEqual([
+			[{ type: "text", text: "start a long turn" }],
 			[{ type: "text", text: "resume" }],
 			[{ type: "text", text: "keep this" }],
 		]);
 	}, 30_000);
 
 	test("returns the removed message's images so the client can restore its draft", async () => {
-		await client.start();
+		await startStreamingTurn();
 		const image = { type: "image" as const, mimeType: "image/png", data: "AAAA" };
 		await client.followUp("with image", [image]);
 		expect(await client.removeQueuedMessage("with image", "followUp")).toEqual({ removed: true, images: [image] });
@@ -101,7 +116,7 @@ describe("RPC queued-message editing", () => {
 	});
 
 	test("queue_update mirrors get_state.queuedMessages, matches the removal invariant, and never repeats", async () => {
-		await client.start();
+		await startStreamingTurn("until-steer");
 
 		const updates: Array<{ steering: string[]; followUp: string[]; liveSteered: number }> = [];
 		const unsubscribe = client.onSessionEvent(event => {
@@ -136,16 +151,9 @@ describe("RPC queued-message editing", () => {
 			await client.followUp("delivered");
 			expect(updates.at(-1)?.followUp).toEqual(["delivered"]);
 
-			const idle = Promise.withResolvers<void>();
-			const unsubscribeIdle = client.onEvent(event => {
-				if (event.type === "agent_end") idle.resolve();
-			});
-			try {
-				await client.prompt("go");
-				await withTimeout(idle.promise, 10_000, "Turn did not finish");
-			} finally {
-				unsubscribeIdle();
-			}
+			await client.steer("go");
+			await client.waitForSettled(10_000);
+			expect(userTexts(await client.getMessages()).at(-1)).toEqual([{ type: "text", text: "delivered" }]);
 			expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
 			expect((await client.getState()).queuedMessages).toEqual({ steering: [], followUp: [], liveSteered: 0 });
 
@@ -160,7 +168,7 @@ describe("RPC queued-message editing", () => {
 	}, 30_000);
 
 	test("rejects malformed promotion, preserves missing targets, and promotes without duplicate delivery", async () => {
-		await client.start();
+		await startStreamingTurn("until-steer");
 		await client.followUp("queued request");
 		expect(await rejectionOf(client.promoteQueuedMessage(null as unknown as string))).toMatchObject({
 			command: "promote_queued_message",
@@ -168,21 +176,13 @@ describe("RPC queued-message editing", () => {
 		expect(await client.promoteQueuedMessage("missing")).toEqual({ promoted: false });
 		expect((await client.getState()).queuedMessageCount).toBe(1);
 
-		const idle = Promise.withResolvers<void>();
-		const unsubscribe = client.onEvent(event => {
-			if (event.type === "agent_end") idle.resolve();
-		});
-		try {
-			expect(await client.promoteQueuedMessage("queued request")).toEqual({ promoted: true });
-			await withTimeout(idle.promise, 10_000, "Promoted RPC message did not finish");
-		} finally {
-			unsubscribe();
-		}
+		expect(await client.promoteQueuedMessage("queued request")).toEqual({ promoted: true });
+		await client.waitForSettled(10_000);
 
 		expect(await client.promoteQueuedMessage("queued request")).toEqual({ promoted: false });
 		expect((await client.getState()).queuedMessageCount).toBe(0);
-		const messages = await client.getMessages();
-		expect(messages.filter(message => message.role === "user").map(message => message.content)).toEqual([
+		expect(userTexts(await client.getMessages())).toEqual([
+			[{ type: "text", text: "start a long turn" }],
 			[{ type: "text", text: "queued request" }],
 		]);
 	}, 30_000);
@@ -198,13 +198,7 @@ describe("RPC queued-message editing", () => {
 		};
 
 		// The first turn streams until the promoted steer is queued.
-		client = createClient("until-steer");
-		await client.start();
-
-		const agentStarted = Promise.withResolvers<void>();
-		const unsubscribe = client.onEvent(event => {
-			if (event.type === "agent_start") agentStarted.resolve();
-		});
+		const firstId = await startStreamingTurn("until-steer");
 		const results: RpcPromptResultFrame[] = [];
 		const bothReported = Promise.withResolvers<void>();
 		const unsubscribeResults = client.onPromptResult(result => {
@@ -212,9 +206,6 @@ describe("RPC queued-message editing", () => {
 			if (results.length === 2) bothReported.resolve();
 		});
 		try {
-			const firstId = await client.prompt("start a long turn");
-			await withTimeout(agentStarted.promise, 10_000, "First turn never started streaming");
-
 			const queuedId = await client.prompt("queued with image", [image], "followUp");
 			expect(await client.promoteQueuedMessage("queued with image")).toEqual({ promoted: true });
 
@@ -228,27 +219,10 @@ describe("RPC queued-message editing", () => {
 			}
 		} finally {
 			unsubscribeResults();
-			unsubscribe();
 		}
 	}, 30_000);
 
 	describe("abort_and_restore_queue", () => {
-		/** Starts the fixture under `script` with a first turn that streams until aborted. */
-		async function startStreamingTurn(script: "hold" | "internal-steer" | "live-steer" = "hold"): Promise<void> {
-			client = createClient(script);
-			await client.start();
-			const agentStarted = Promise.withResolvers<void>();
-			const unsubscribe = client.onEvent(event => {
-				if (event.type === "agent_start") agentStarted.resolve();
-			});
-			try {
-				await client.prompt("start a long turn");
-				await withTimeout(agentStarted.promise, 10_000, "First turn never started streaming");
-			} finally {
-				unsubscribe();
-			}
-		}
-
 		/** Re-reads session state until `check` holds. The fixture changes these queues inside
 		 *  the model call without emitting an event, so each `get_state` round trip is the wait. */
 		async function untilState(check: (state: RpcSessionState) => boolean, message: string): Promise<void> {
@@ -279,10 +253,6 @@ describe("RPC queued-message editing", () => {
 				unsubscribe();
 			}
 			return client.getMessages();
-		}
-
-		function userTexts(messages: AgentMessage[]): unknown[] {
-			return messages.filter(message => message.role === "user").map(message => message.content);
 		}
 
 		const expectedUserTurns = [
@@ -426,5 +396,62 @@ describe("RPC queued-message editing", () => {
 			const maxBytes = Buffer.byteLength(JSON.stringify(expected));
 			expect(fitAbortAndRestoreQueueResponse("stop", restored, maxBytes)).toEqual(expected);
 		});
+	});
+
+	describe("abort_and_deliver_queue and resume", () => {
+		const isContinuation = (message: AgentMessage) =>
+			message.role === "assistant" && JSON.stringify(message.content).includes("Handled queued request");
+
+		/** Re-reads the transcript until the interrupted run's continuation has answered. */
+		async function untilContinued(): Promise<AgentMessage[]> {
+			let messages: AgentMessage[] = [];
+			await withTimeout(
+				(async () => {
+					while (!(messages = await client.getMessages()).some(isContinuation));
+				})(),
+				10_000,
+				"The interrupted run never continued",
+			);
+			return messages;
+		}
+
+		test("abort_and_deliver_queue continues the run with queued input, and does nothing without it", async () => {
+			await startStreamingTurn();
+			expect(await client.abortAndDeliverQueue()).toBe(false);
+			expect((await client.getState()).isStreaming).toBe(true);
+
+			await client.steer("queued steer");
+			expect(await client.abortAndDeliverQueue()).toBe(true);
+			const messages = await untilContinued();
+			expect(userTexts(messages)).toEqual([
+				[{ type: "text", text: "start a long turn" }],
+				[{ type: "text", text: "queued steer" }],
+			]);
+			expect(
+				messages.find(message => message.role === "assistant" && message.stopReason === "aborted"),
+			).toMatchObject({ errorMessage: USER_INTERRUPT_LABEL });
+		}, 30_000);
+
+		test("resume delivers a prompt sent just before it instead of the continue directive", async () => {
+			await startStreamingTurn();
+			const steered = client.prompt("late steer", undefined, "steer");
+			await client.resume();
+			await steered;
+			expect(userTexts(await untilContinued())).toEqual([
+				[{ type: "text", text: "start a long turn" }],
+				[{ type: "text", text: "late steer" }],
+			]);
+		}, 30_000);
+
+		test("resume interrupts a run with nothing queued and continues it, and refuses an empty session", async () => {
+			await client.start();
+			expect(await rejectionOf(client.resume())).toMatchObject({ command: "resume", message: "Nothing to resume" });
+			await client.stop();
+
+			await startStreamingTurn();
+			await client.resume();
+			// Interrupted before any output, the prompt runs again as is: no second user turn.
+			expect(userTexts(await untilContinued())).toEqual([[{ type: "text", text: "start a long turn" }]]);
+		}, 30_000);
 	});
 });

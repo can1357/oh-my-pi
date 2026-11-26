@@ -17,6 +17,8 @@ import {
 	getUpdateStateDir,
 	isCompiledBinary,
 	isEnoent,
+	logger,
+	pathIsWithinLexical,
 	VERSION,
 	WhichCachePolicy,
 } from "@oh-my-pi/pi-utils";
@@ -24,7 +26,6 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
 import { Settings, settings } from "../config/settings";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	isTimeoutError,
 	isUnsupportedProxyError,
@@ -50,6 +51,7 @@ import {
 } from "./npm-registry";
 
 import { cfgUpdateChannel } from "../modes/settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
@@ -217,29 +219,6 @@ export interface BinaryReplacementOptions {
 	verifyInstalledVersion: (expectedVersion: string) => Promise<InstalledVersionVerification>;
 }
 
-/**
- * Parse update subcommand arguments.
- * Returns undefined if not an update command.
- */
-export function parseUpdateArgs(
-	args: string[],
-): { force: boolean; check: boolean; plugins: boolean; channel?: UpdateChannel } | undefined {
-	if (args.length === 0 || args[0] !== "update") {
-		return undefined;
-	}
-
-	const canary = args.includes("--canary");
-	const stable = args.includes("--stable");
-	if (canary && stable) throw new Error("--canary and --stable are mutually exclusive");
-
-	return {
-		force: args.includes("--force") || args.includes("-f"),
-		check: args.includes("--check") || args.includes("-c"),
-		plugins: args.includes("--plugins") || args.includes("-l"),
-		channel: canary ? "canary" : stable ? "stable" : undefined,
-	};
-}
-
 async function getBunGlobalBinDir(): Promise<string | undefined> {
 	if (!$which("bun")) return undefined;
 	try {
@@ -367,8 +346,7 @@ function bunShimMarkerPath(launcherPath: string): string {
 function isPathInDirectoryLexical(filePath: string, directoryPath: string): boolean {
 	const normalizedPath = normalizePathForComparison(path.resolve(filePath));
 	const normalizedDirectory = normalizePathForComparison(path.resolve(directoryPath));
-	const relativePath = path.relative(normalizedDirectory, normalizedPath);
-	return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+	return pathIsWithinLexical(normalizedDirectory, normalizedPath);
 }
 
 function isPathInDirectory(filePath: string, directoryPath: string): boolean {
@@ -1092,7 +1070,7 @@ export async function verifyInstalledVersion(expectedVersion: string): Promise<I
 }
 
 function printVerifiedVersion(expectedVersion: string, binaryPath?: string): void {
-	const icon = theme?.status?.success ?? "✔";
+	const icon = currentTheme().symbols.symbol("status.success");
 	const location = binaryPath ? ` at ${binaryPath}` : "";
 	console.log(chalk.green(`\n${icon} Updated to ${expectedVersion}${location}`));
 }
@@ -1104,21 +1082,32 @@ function formatVerificationFailure(result: InstalledVersionVerification, expecte
 	return `could not verify updated version${result.path ? ` at ${result.path}` : ""}`;
 }
 
-/**
- * Print post-update verification result.
- */
-function printVerificationResult(result: InstalledVersionVerification, expectedVersion: string): void {
+/** Publish extension assets from a verified launcher, not from the process that updated it. */
+export async function syncRelayAfterVerifiedUpdate(launcher: string | undefined): Promise<void> {
+	if (!launcher) return;
+	try {
+		const result = await $`${launcher} browser-relay sync`.quiet().nothrow();
+		if (result.exitCode !== 0) {
+			logger.warn("browser relay sync after update failed", {
+				launcher,
+				exitCode: result.exitCode,
+				error: result.stderr.toString().trim(),
+			});
+		}
+	} catch (error) {
+		logger.warn("browser relay sync after update failed", { launcher, error: String(error) });
+	}
+}
+
+/** Report verification and publish assets only when the requested installed version was confirmed. */
+async function finishVerifiedUpdate(result: InstalledVersionVerification, expectedVersion: string): Promise<void> {
 	if (result.ok) {
 		printVerifiedVersion(expectedVersion, result.path);
+		await syncRelayAfterVerifiedUpdate(result.path);
 		return;
 	}
 	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
 	console.log(chalk.yellow(`You may need to reinstall: ${installerHint()}`));
-}
-
-/** Verify the PATH-resolved launcher and print the outcome. */
-async function printVerification(expectedVersion: string): Promise<void> {
-	printVerificationResult(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 async function unlinkIfExists(filePath: string): Promise<void> {
@@ -1544,7 +1533,7 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
 			`${formatVerificationFailure(verification, release.version)}; reinstall with: ${installerHint()}`,
 		);
 	}
-	printVerifiedVersion(release.version);
+	await finishVerifiedUpdate(verification, release.version);
 }
 
 /** Older bun releases predate `--minimum-release-age` and reject unknown flags, so probe the installed help output before passing it. */
@@ -1699,7 +1688,7 @@ export async function updateViaManager(
 	const launcherNeedsRepair = !result.ok && (launcherIsBroken || launcherIsOlder);
 	if (!launcherNeedsRepair) {
 		if (installError) throw installError;
-		printVerificationResult(result, release.version);
+		await finishVerifiedUpdate(result, release.version);
 		return;
 	}
 	if (!launcherPath) {
@@ -1738,7 +1727,7 @@ async function updateViaHomebrew(expectedVersion: string, force: boolean): Promi
 		throw new Error(`brew ${args[0]} failed with exit code ${exitCode}`);
 	}
 
-	await printVerification(expectedVersion);
+	await finishVerifiedUpdate(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
@@ -1760,7 +1749,7 @@ async function updateViaMise(expectedVersion: string, force: boolean): Promise<v
 		}
 	}
 
-	await printVerification(expectedVersion);
+	await finishVerifiedUpdate(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
 // Monotonic within this process so two updates started in the same millisecond
@@ -1770,7 +1759,7 @@ let updateAttemptSeq = 0;
 
 /**
  * Applies an HDiffPatch single-stream patch to `oldPath`, writing `outPath`;
- * `applyBinaryPatch` from pi-natives in production.
+ * `applyBinaryPatch` from omp-natives in production.
  */
 export type BinaryPatchApplier = (oldPath: string, patchPath: string, outPath: string) => Promise<number>;
 
@@ -1930,7 +1919,7 @@ export async function updateViaBinaryAt(
 		await sweepStaleUpdateArtifacts(targetPath);
 		return result;
 	});
-	printVerifiedVersion(build.version, verification.path ?? targetPath);
+	await finishVerifiedUpdate({ ...verification, path: verification.path ?? targetPath }, build.version);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -1979,7 +1968,7 @@ export async function updateViaShimTakeover(
 	// Serialize the launcher swap and artifact sweep so two overlapping updates
 	// never retire the same shims or reclaim a live run's backup before its
 	// verification can roll it back.
-	await withFileLock(exePath, async () => {
+	const verification = await withFileLock(exePath, async () => {
 		console.log(chalk.dim(`Installing ${APP_NAME}.exe beside the script launcher...`));
 		await fs.promises.rename(tempPath, exePath);
 		// Retire the shims so PATH resolution lands on the new exe. Renamed, not
@@ -2036,6 +2025,7 @@ export async function updateViaShimTakeover(
 		for (const ext of [".exe", "", ".cmd", ".ps1", ".bat"]) {
 			await sweepStaleUpdateArtifacts(path.join(launcherDir, `${APP_NAME}${ext}`));
 		}
+		return verification;
 	});
 	for (const { launcher } of forwarded) {
 		console.log(chalk.dim(`Converted ${launcher} to a forwarder (it could not be removed).`));
@@ -2047,7 +2037,7 @@ export async function updateViaShimTakeover(
 			),
 		);
 	}
-	printVerifiedVersion(build.version);
+	await finishVerifiedUpdate({ ...verification, path: exePath }, build.version);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -2143,7 +2133,7 @@ function acquireInstallLock(): FileLockHandle {
 function announceOffer(version: string, request: UpdateRequest): boolean {
 	const comparison = compareVersions(version, VERSION);
 	if (comparison <= 0 && !request.force && !request.isChannelSwitch) {
-		const icon = theme?.status?.success ?? "✔";
+		const icon = currentTheme().symbols.symbol("status.success");
 		console.log(chalk.green(`${icon} Already up to date`));
 		return false;
 	}
@@ -2354,29 +2344,4 @@ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutco
 	} finally {
 		lock?.release();
 	}
-}
-
-/**
- * Print update command help.
- */
-export function printUpdateHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} update`)} - Check for and install updates
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} update [options]
-
-${chalk.bold("Options:")}
-  -c, --check     Check for updates without installing
-  -f, --force     Force reinstall even if up to date
-  -l, --plugins   Update installed plugins
-  --canary        Switch to the canary channel and update
-  --stable        Switch back to the stable channel
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} update              Update to latest version
-  ${APP_NAME} update --check      Check if updates are available
-  ${APP_NAME} update --force      Force reinstall
-  ${APP_NAME} update -l           Update installed plugins
-  ${APP_NAME} update --canary    Switch to the canary channel and update
-`);
 }

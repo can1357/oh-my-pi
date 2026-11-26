@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getSegmenter } from "@oh-my-pi/pi-tui";
+import { getSegmenter } from "../utils/text-width";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -12,6 +12,7 @@ import extractInputTemplate from "../prompts/memories/sharpshooter-extract-input
 import extractSystemTemplate from "../prompts/memories/sharpshooter-extract-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { customMessageContentText } from "../session/checkpoint-entries";
+import { journalCompletion } from "../session/model-usage-journal";
 import { appendSharpshooterDelta } from "./queue";
 import type { SharpshooterDelta, SharpshooterDeltaKind, SharpshooterDeltaSource, SharpshooterFriction } from "./types";
 
@@ -248,6 +249,7 @@ async function runSharpshooterExtraction(
 	if (!model || session.isDisposed || (cfgOffline.get(settings) && session.model?.provider !== model.provider)) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
+	const journal = journalCompletion(session.sessionManager, { purpose: "sharpshooter:extract" });
 	const response = await retryTransientCompletion(
 		() => {
 			if (cfgOffline.get(settings) && session.model?.provider !== model.provider) {
@@ -266,6 +268,7 @@ async function runSharpshooterExtraction(
 					maxTokens: 2048,
 					reasoning: clampThinkingLevelForModel(model, Effort.Low),
 					toolChoice: "required",
+					onAttempt: message => journal?.(message, input),
 				},
 			);
 		},

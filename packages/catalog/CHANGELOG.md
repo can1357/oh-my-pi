@@ -2,6 +2,169 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed unused exports `hasQuotaTierPolicy` (`/compat/behavior`), `hasRoutingVariants` (`/compat/taxonomy`), `toFirepassPublicModelId` (`/fireworks-model-id`), `isAzureDeploymentsUrl` (`/hosts`) and `toPositiveNumberOrNull` (`/utils`) ([#20528](https://github.com/can1357/oh-my-pi/pull/20528))
+- Removed Devin Fusion pairings (`fusion-<lead>-sidekick-*`) from the model list: omp runs only the lead, so the 1000+ rows duplicated the lead models pinned to one thinking level
+
+### Added
+
+- Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
+
+- Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Devin's Fast models (`-fast`) are no longer listed separately: each model carries its fast lane, which `/fast` switches on
+
+### Added
+
+- Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
+
+## [19.2.1] - 2026-11-25
+
+### Fixed
+
+- Fixed Codex service tiers, such as Ultrafast, being hidden for accounts that support them when the first logged-in account has a plan that does not.
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added Otari credential helpers and endpoint-aware model discovery, supporting stored `{ token, baseUrl }` credentials and US/EU endpoints.
+- Added GLM-5.4 to the Zhipu Coding Plan with image input, a 1M-token context window, and low/high/max thinking levels; it is preferred for the `slow` role over GLM-5.3.
+- Added OpenRouter chat-model discovery for tool-capable models through the OpenAI-compatible provider-models API.
+- Added Gemini-compatible tool schema conversion for OpenAI-compatible providers; GitHub Copilot Gemini models now use the appropriate schema format.
+
+### Changed
+
+- Updated the `judge` role for OpenCode Go and Zen to prefer OpenCode's free `jev-1.13-free` model, with Zen's `jev-1.14` as a fallback.
+- Changed ai&'s default model to `moonshotai/kimi-k3`, replacing the unavailable `moonshotai/kimi-k2.7-code`.
+- Classified OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models as judge models rather than chat models.
+- Removed StepFun's `dr-search-api` web-search SKU from chat-model listings.
+- Updated Devin and Cursor pricing and usage accounting for image tokens and long-context GPT-5.6 models to match their published rates and limits.
+- Repeated provider resolution reuses bundled model fingerprints instead of serializing the same catalog rows again.
+
+### Fixed
+
+- Improved QwenCloud Token Plan discovery errors by reporting the endpoint host and underlying failure reason when the models endpoint cannot be loaded.
+- Fixed Bedrock Kimi K3.1 requests failing because of unsupported temperature settings, and fixed Kimi K3.1 Pro Highspeed requests failing due to invalid output-token and reasoning-effort settings.
+- Fixed Claude models on Google Vertex failing after the active tool set changed during a session.
+- Fixed Claude models on OpenRouter preserving thinking and reasoning context across follow-up requests and tool calls.
+- Fixed Llama 3.x models served through vLLM-based hosts failing after multiple tool calls in one turn.
+- Fixed Devin accounts belonging to separate organizations under the same email address being merged.
+- Fixed GPT-6.1 Terra sending an unsupported reasoning level when thinking was disabled.
+- Fixed GPT-6.2 and later OpenAI Responses models losing reasoning context after session pruning.
+- Fixed GitHub Copilot model listings to respect the account's available and enabled model roster, including after restarts.
+- Fixed Codex models discovered before their bundled definitions were available displaying slug-style names instead of their normal display names.
+
+## [19.1.1] - 2026-11-23
+
+### Added
+
+- Z.AI (`zai`) now discovers the models available to your GLM Coding Plan key, so newly released GLM models appear without waiting for a catalog update.
+- Added `getUpstreamPin()` and `routedModelsAreEqual()` to `@oh-my-pi/pi-catalog/models` for distinguishing aggregator models routed to different upstream providers.
+- Added `@oh-my-pi/pi-catalog/discovery/pi-native` and `piNativeModelManagerOptions()` for reading a provider's model roster from an auth gateway's `GET /v1/pi/models`.
+
+### Fixed
+
+- Fixed Llama 3.x models failing after turns that invoked multiple tools when served through vLLM-based hosts, including CoreWeave through OpenRouter.
+- Devin usage is now kept separate for organizations that share the same email address.
+- Updated Devin image token accounting to match Devin’s published 1,089-token charge per image across supported Gemini image models.
+- Corrected Devin pricing and context limits for GPT-5.6 Sol, Terra, and Luna Fast lanes, including long-context rates above 272K input tokens and the standard 272K limit when Extended Context is disabled.
+- Corrected Cursor pricing for GPT-5.6 Sol, Terra, and Luna models so output above 272K input tokens uses the documented 1.5× rate.
+- Turning thinking off for GPT-6.1 Terra now uses the supported `none` reasoning effort.
+- Fixed GPT-6.2 and later OpenAI Responses models losing reasoning context after session pruning and subsequent tool calls.
+- Corrected Bedrock Kimi K3.1 Pro Highspeed reasoning options and effort handling.
+- GitHub Copilot now lists only models available to the account, including after restarting.
+- Codex models discovered before being bundled now use their formatted display names, such as `GPT-6.2 Sol`.
+
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- Removed the built-in Gemini CLI OAuth provider (`google-gemini-cli`). Google Antigravity and Antigravity CLI remain available.
+
+### Added
+
+- Added runtime provider rules (`setRuntimeProviderRule` in `compat/cascade`). They apply KDL directives to one provider's models, win ties with bundled rules, and clear rule-derived caches when they change.
+- Added the `prompt-perturbation` catalog axis, which opts a provider or model into per-install prompt paraphrasing.
+- Added the `uncached-instructions` compatibility flag for GPT-6.2 models across all hosts, moving system prompts out of the uncached Responses `instructions` field.
+
+### Fixed
+
+- Fixed Vercel AI Gateway model refreshes so public models remain discoverable when a stored API key has expired.
+- Fixed OpenRouter models that require reasoning but do not advertise effort levels; requests that disable thinking now use the lowest supported reasoning effort instead of failing.
+- Fixed Gemini 4 models (Argon, Carbon, Hydrogen, and Neon) failing with empty malformed responses when messages arrived immediately after tool results.
+- Updated pricing for newly served Cursor models to use their documented per-token rates instead of being reported as free.
+- Fixed Codex client version caching so its cache file is stored under the configured `$XDG_CACHE_HOME/omp` directory.
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- Added Liquid AI's `d1.2` and `d1.2-ultra` judge models; `liquid` now defaults to `d1.2` ([#19753](https://github.com/can1357/oh-my-pi/pull/19753) by [@alphastorm](https://github.com/alphastorm))
+- Added `gemini-4-neon` to the bundled Antigravity CLI roster, with the `low`/`medium`/`high`/`xhigh` thought levels `agy` offers for it ([#19787](https://github.com/can1357/oh-my-pi/pull/19787) by [@ataberkus](https://github.com/ataberkus)).
+- `Model.snapcompactShape` (`{ variant, frameSize? }`) gives a model its own snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+
+### Fixed
+
+- Discovered Kiro models that cannot turn reasoning off now use their lowest supported effort when thinking is set to off ([#19722](https://github.com/can1357/oh-my-pi/pull/19722) by [@emotionbug](https://github.com/emotionbug))
+- Kiro accepts AWS GovCloud (US) profile ARNs (`arn:aws-us-gov:codewhisperer:…`), which were previously skipped during profile listing ([#19726](https://github.com/can1357/oh-my-pi/pull/19726) by [@TechDufus](https://github.com/TechDufus))
+- Google Antigravity no longer lists Gemini 4 Hydrogen's sonar monitor slot or its tiered High/XHigh SKUs as separate models; the tiered SKUs fold into the one Gemini 4 Hydrogen model ([#19795](https://github.com/can1357/oh-my-pi/pull/19795) by [@eggpeat](https://github.com/eggpeat))
+- Gemini 4 Neon on Google Antigravity now shows as one model whose thinking level (low, medium, high, xhigh) selects the matching SKU, instead of four separate models, and is priced at $3/$15 per million tokens ($0.15 cached) instead of $0 ([#19789](https://github.com/can1357/oh-my-pi/pull/19789) by [@eggpeat](https://github.com/eggpeat))
+- Gemini 4 Neon now collapses into one model on Gemini CLI too, and on the Gemini API and Vertex AI offers the xhigh thinking level and long outputs up to 262,144 tokens, with its $3/$15 Gemini API price
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for prompt-cache prewarming on the first-party Anthropic endpoint via the `isPromptCachePrewarmSupported` compatibility capability.
+
+### Fixed
+
+- Fixed hosted judgment requests for TypeSafe, OpenRouter, Command Code, and OpenCode Zen when evaluating more than 32 questions.
+- Improved Devin image handling to support more conversation images within provider limits, and updated image compaction for Devin Gemini models to reflect their billed token usage.
+- Fixed Devin Gemini model pricing so models switch from promotional to list pricing when promotions end.
+- Fixed Kiro API key authentication (`KIRO_API_KEY` and `ksk_…`) so model listing, chat, and `/usage` requests work correctly.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `writeModelCacheAsync()` and `forEachInSlices()`: model refreshes now build and cache discovered models in slices that yield to the event loop; `writeModelCache()` returns its outcome and no longer rewrites a provider whose rows are unchanged
+
+### Changed
+
+- `readModelCache()` parses a payload once per process: cache files holding identical rows return the same shared row objects
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed Factory Droid's Muse Spark 1.3 support so image inputs work and the model is available without the retired feature flag.
+- Fixed GitLab Duo Claude models so earlier reasoning context is handled correctly during follow-up turns and compaction.
+- Fixed stale Command Code model metadata, including image-input support, reasoning controls, token pricing, and deployment context limits.
+- Fixed retry-reset timezone handling for custom providers using the Zhipu Coding Plan endpoint, including base URLs with trailing slashes.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added Modal as a hosted inference provider.
+
+### Changed
+
+- Changed the local speech model from Kokoro to Phonon 31M.
+- Improved reasoning capability detection by preserving unverified thinking-level support and using endpoint-specific probe results when available.
+
+### Fixed
+
+- Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
+
 ## [18.20.3] - 2026-11-16
 
 ### Added

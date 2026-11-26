@@ -208,11 +208,26 @@ export function normalizePathForComparison(inputPath: string): string {
  * candidate against several static roots can normalize each side once and
  * reuse the public helpers' containment semantics without repeating realpath
  * work.
+ *
+ * The comparison itself is lexical: it never resolves symlinks. Callers that
+ * want a purely lexical check may pass `path.resolve()`d paths instead, as long
+ * as both sides are prepared the same way.
  */
 export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	// `..name` is a child; only a `..` segment leaves the root.
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
 	return relative;
+}
+
+/**
+ * Lexical containment: `candidate` is `root` itself or below it. Symlinks are not resolved; the
+ * comparison is `path.relative`'s, so it follows the platform (case-insensitive on Windows).
+ * Callers resolve or normalize both sides first. Use {@link pathIsWithin} to compare through
+ * symlinks.
+ */
+export function pathIsWithinLexical(root: string, candidate: string): boolean {
+	return relativePathWithinNormalizedRoot(root, candidate) !== null;
 }
 
 /** `options` apply to `candidate` only. */
@@ -802,6 +817,11 @@ export function getPythonEnvDir(): string {
 	return dirs.rootSubdir("python-env", "data");
 }
 
+/** Get managed Ghidra installs, JDK, PyGhidra venv and Gradle cache (~/.omp/ghidra). */
+export function getGhidraDir(): string {
+	return dirs.rootSubdir("ghidra", "data");
+}
+
 /** Get the shared Python gateway state directory (~/.omp/agent/python-gateway; XDG default: $XDG_STATE_HOME/omp/python-gateway). */
 export function getPythonGatewayDir(): string {
 	return dirs.agentSubdir(undefined, "python-gateway", "state");
@@ -829,6 +849,11 @@ export function getWebKitHostPath(platform: NodeJS.Platform = process.platform):
 /** Get the browser relay extension install directory (~/.omp/browser-relay). */
 export function getBrowserRelayDir(): string {
 	return dirs.rootSubdir("browser-relay", "data");
+}
+
+/** Get the install registry shared by every omp profile and browser. */
+export function getBrowserRelayInstallRegistryFile(): string {
+	return dirs.baseRootSubdir(path.join("browser-relay", "installs.json"));
 }
 
 /** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
@@ -909,9 +934,23 @@ export function getAuthBrokerSnapshotCachePath(): string {
 	return dirs.rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
 }
 
+/**
+ * Get the cached OpenAI Codex client version record
+ * (~/.omp/agent/codex-client-version.json; XDG default: $XDG_CACHE_HOME/omp/codex-client-version.json).
+ * It is a refetchable cache, not config, so it belongs under the cache dir.
+ */
+export function getCodexClientVersionPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "codex-client-version.json", "cache");
+}
+
 /** Get the commit-author avatar cache directory (~/.omp/cache/avatars). */
 export function getAvatarCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
+}
+
+/** Get the directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH (~/.omp/cache/bun-stub). */
+export function getBunStubDir(): string {
+	return dirs.rootSubdir(path.join("cache", "bun-stub"), "cache");
 }
 
 /** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
@@ -992,6 +1031,11 @@ export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");
 }
 
+/** Get the path to transcripts.db (full-text index of session transcripts). */
+export function getTranscriptIndexDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "transcripts.db", "data");
+}
+
 /** Get the path to models.db (model cache database). */
 export function getModelDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "models.db", "data");
@@ -1035,11 +1079,6 @@ export function getBlobsDir(agentDir?: string): string {
 /** Get the custom themes directory (~/.omp/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "themes");
-}
-
-/** Get the tools directory (~/.omp/agent/tools). */
-export function getToolsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "tools");
 }
 
 /** Get the slash commands directory (~/.omp/agent/commands). */
@@ -1136,38 +1175,15 @@ export function getSecretPlaceholderKeyPath(): string {
 	return keyPath;
 }
 
-/** Directory holding the per-model tiny-worker sockets and logs (~/.omp/run/tiny; XDG default: $XDG_STATE_HOME/omp/run/tiny). */
-export function getTinyWorkerRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "tiny"), "state");
+/** Runtime directory of the single per-user omp daemon (~/.omp/run/daemon; XDG default: $XDG_STATE_HOME/omp/run/daemon). Shared across profiles; holds its socket, token, sqlite store and unit logs. */
+export function getDaemonDir(): string {
+	return dirs.baseRootSubdir(path.join("run", "daemon"), "state");
 }
 
-/** Directory holding the per-model mnemopi embedding server endpoints and logs (~/.omp/run/mnemopi; XDG default: $XDG_STATE_HOME/omp/run/mnemopi). */
-export function getMnemopiEmbedRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "mnemopi"), "state");
-}
-
-/** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
-export function getDaemonRuntimeRoot(): string {
-	return dirs.rootSubdir(path.join("run", "daemons"), "state");
-}
-
-/** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
+/** Get the per-project runtime directory (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
 export function getDaemonRuntimeDir(projectDir: string): string {
 	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-	return path.join(getDaemonRuntimeRoot(), key);
-}
-
-/** Root directory containing every machine-global daemon service scope (~/.omp/run/daemons/global; XDG default: $XDG_STATE_HOME/omp/run/daemons/global). Shared across profiles. */
-export function getGlobalDaemonRuntimeRoot(): string {
-	return dirs.baseRootSubdir(path.join("run", "daemons", "global"), "state");
-}
-
-/** Get a profile-independent runtime directory for a machine-global daemon service. */
-export function getGlobalDaemonRuntimeDir(service: string): string {
-	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(service)) {
-		throw new Error(`Invalid global daemon service name: ${JSON.stringify(service)}`);
-	}
-	return path.join(getGlobalDaemonRuntimeRoot(), service);
+	return path.join(dirs.rootSubdir(path.join("run", "daemons"), "state"), key);
 }
 
 /**
@@ -1177,11 +1193,6 @@ export function getGlobalDaemonRuntimeDir(service: string): string {
  */
 export function getSessionOwnersDir(): string {
 	return dirs.baseRootSubdir(path.join("run", "session-owners"), "state");
-}
-
-/** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
-export function getProviderInFlightRoot(): string {
-	return dirs.rootSubdir(path.join("run", "provider-inflight"), "state");
 }
 
 /** Get the marketplaces registry path (~/.omp/marketplaces.json; XDG default: $XDG_DATA_HOME/omp/marketplaces.json). Adopts a legacy registry on first XDG resolution. */

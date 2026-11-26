@@ -6,7 +6,7 @@ import {
 	renderGoalPrompt,
 	renderTrustedObjective,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { Goal } from "@oh-my-pi/pi-coding-agent/tools/details/goal";
 import type { GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { escapeXmlText } from "@oh-my-pi/pi-utils";
 
@@ -251,6 +251,41 @@ describe("goal runtime", () => {
 		expect(harness.hiddenMessages).toHaveLength(2);
 	});
 
+	it("resuming a paused goal whose budget is spent stays budget-limited instead of reporting active", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: true,
+				mode: "active",
+				goal: createGoal({ status: "budget-limited", tokenBudget: 100_000, tokensUsed: 156_977 }),
+			},
+		});
+
+		await harness.runtime.pauseGoal();
+		const resumed = await harness.runtime.resumeGoal();
+
+		expect(resumed.enabled).toBe(true);
+		expect(resumed.goal.status).toBe("budget-limited");
+		expect(harness.runtime.buildContinuationPrompt()).toBeUndefined();
+
+		await harness.runtime.onBudgetMutated(200_000);
+		expect(harness.getState()?.goal.status).toBe("active");
+	});
+
+	it("resuming a paused goal with budget left reactivates it", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: false,
+				mode: "active",
+				goal: createGoal({ status: "paused", tokenBudget: 100_000, tokensUsed: 99_999 }),
+			},
+		});
+
+		const resumed = await harness.runtime.resumeGoal();
+
+		expect(resumed.goal.status).toBe("active");
+		expect(harness.runtime.buildContinuationPrompt()).toBeDefined();
+	});
+
 	it("pauses an active goal when an interruption aborts the task", async () => {
 		const harness = createHarness({
 			state: { enabled: true, mode: "active", goal: createGoal() },
@@ -399,5 +434,30 @@ describe("goal runtime", () => {
 		harness.setUsage({ input: 45 });
 		await harness.runtime.flushUsage("suppressed");
 		expect(harness.getState()?.goal.tokensUsed).toBe(45);
+	});
+
+	it("does not re-charge usage that dips below the last flushed baseline", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal({ tokenBudget: 100 }) },
+		});
+
+		harness.runtime.onTurnStart("turn-1");
+		harness.setUsage({ input: 40, output: 10 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(50);
+
+		// A lower sample (worker aggregate disappeared) must not move the baseline down.
+		harness.setUsage({ input: 10, output: 0 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(50);
+
+		// Recovery up to the old high-water is not new spend.
+		harness.setUsage({ input: 40, output: 10 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(50);
+
+		harness.setUsage({ input: 45, output: 12 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(57);
 	});
 });

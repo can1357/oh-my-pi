@@ -1,5 +1,7 @@
 /**
- * Concise markdown transcript serializer for `history://` URLs.
+ * Concise markdown transcript serializer for advisor and watched-session
+ * views; `history://` reads render through `transcript-view.ts`, which shares
+ * {@link formatHistoryEventLine} and {@link formatToolCallPrimaryArg}.
  *
  * Unlike `session-dump-format.ts` (verbose `/dump` export), this emits a
  * compressed transcript: full user/assistant/developer text, tool call +
@@ -19,7 +21,8 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
-import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { PLAN_MODE_CONTEXT_MESSAGE_TYPE } from "./messages";
+import { truncateMiddle } from "../tools/streaming-output";
 
 export interface HistoryFormatOptions {
 	/** Optional H1 prepended to the transcript. */
@@ -151,7 +154,7 @@ export function formatExecutionSourcePreview(source: string, transform?: ToolIOT
 }
 
 /** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
-function contentToText(content: string | readonly (TextContent | ImageContent)[]): string {
+export function contentToText(content: string | readonly (TextContent | ImageContent)[]): string {
 	if (typeof content === "string") return content;
 	const parts: string[] = [];
 	for (const block of content) {
@@ -277,7 +280,12 @@ function boundedAskJson(value: unknown, transform?: (text: string) => string): s
 	);
 }
 
-function boundedFencedToolContext(text: string, language: string, maxLines = EXPANDED_TOOL_IO_MAX_LINES): string {
+/** Bound and fence a tool I/O excerpt. `truncated` is true when this advisor cap shortened it (#12777). */
+function boundedFencedToolContext(
+	text: string,
+	language: string,
+	maxLines = EXPANDED_TOOL_IO_MAX_LINES,
+): { content: string; truncated: boolean } {
 	const longestFence = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
 	// A pathological run can make Markdown fences larger than the whole budget.
 	// Use indented code in that case: constant wrapper cost and no delimiter collision.
@@ -288,16 +296,14 @@ function boundedFencedToolContext(text: string, language: string, maxLines = EXP
 			maxLines,
 		});
 		const bounded = truncated.truncated ? `${marker}\n${truncated.content}` : truncated.content;
-		return bounded.replace(/^/gm, "    ");
+		return { content: bounded.replace(/^/gm, "    "), truncated: truncated.truncated === true };
 	}
 	const fenceBytes = Math.max(3, longestFence + 1) * 2 + language.length + 2;
-	return fencedText(
-		truncateMiddle(text, {
-			maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
-			maxLines,
-		}).content,
-		language,
-	);
+	const bounded = truncateMiddle(text, {
+		maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
+		maxLines,
+	});
+	return { content: fencedText(bounded.content, language), truncated: bounded.truncated === true };
 }
 
 function expandedAskDetails(
@@ -348,7 +354,7 @@ function toolCallLine(
 	if (expandEditDiffs) {
 		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
 		if (typeof diff === "string" && diff.trim()) {
-			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff", EXPANDED_DIFF_MAX_LINES)}`;
+			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff", EXPANDED_DIFF_MAX_LINES).content}`;
 		}
 	}
 
@@ -357,17 +363,35 @@ function toolCallLine(
 		if (name === "ask") {
 			const html = args?.html;
 			if (typeof html === "string") {
-				sections.push(`Ask input:\n${boundedFencedToolContext(transformExpandedToolIO?.(html) ?? html, "html")}`);
+				sections.push(
+					`Ask input:\n${boundedFencedToolContext(transformExpandedToolIO?.(html) ?? html, "html").content}`,
+				);
 			} else {
 				// An orphaned result (its call not in view) still names the questions it answered.
 				const askQuestions = expandedAskDetails(result, transformExpandedToolIO);
-				if (askQuestions) sections.push(`Ask input:\n${boundedFencedToolContext(askQuestions, "json")}`);
+				if (askQuestions) sections.push(`Ask input:\n${boundedFencedToolContext(askQuestions, "json").content}`);
 			}
 		}
 		if (result) {
 			const resultText = expandedToolResultText(visibleResultText);
 			if (resultText) {
-				sections.push(`Tool result:\n${boundedFencedToolContext(resultText, "text")}`);
+				const bounded = boundedFencedToolContext(resultText, "text");
+				// The cut lines were part of the result the main thread received, so the label says only
+				// that this view cut them. The tool's own limits (summary, meta.limits) are not checked
+				// here, so no completeness is claimed; a tool-side truncation (meta.truncation) is named
+				// independently of this view's cap, so a small tool-truncated result is not mislabelled.
+				const toolTruncated =
+					isRecord(result.details) &&
+					isRecord(result.details.meta) &&
+					result.details.meta.truncation !== undefined;
+				const label = toolTruncated
+					? bounded.truncated
+						? "Tool result (shortened here for advisor view only; the tool itself truncated its output):"
+						: "Tool result (the tool itself truncated its output):"
+					: bounded.truncated
+						? "Tool result (shortened here for advisor view only; the omitted lines were part of the result the main thread received):"
+						: "Tool result:";
+				sections.push(`${label}\n${bounded.content}`);
 			}
 		}
 		if (sections.length > 0) base = `${base}\n${sections.join("\n")}`;
@@ -411,7 +435,10 @@ function executionLine(
  * reviewer — and its constraints don't drive the file-write misreads this
  * targets.
  */
-export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
+export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set([
+	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
+	"plan-mode-reference",
+]);
 
 /**
  * Hidden non-primary custom messages whose content is needed to understand visible transcript entries:
@@ -473,6 +500,53 @@ function customOneLiner(msg: CustomMessage | HookMessage, transform?: ToolIOTran
 		}
 		default:
 			return `[${msg.customType}] ${previewLine(contentToText(msg.content), transform)}`;
+	}
+}
+
+/**
+ * One line for a message outside the user–assistant exchange: a user `!`/`$`
+ * execution, a custom or hook message, a branch or compaction summary, a file
+ * mention. `undefined` for exchange messages and for messages transcripts
+ * hide. Shared by this serializer and the budgeted transcript view
+ * (`transcript-view.ts`).
+ */
+export function formatHistoryEventLine(msg: AgentMessage, transform?: ToolIOTransform): string | undefined {
+	switch (msg.role) {
+		case "bashExecution": {
+			const bashMsg = msg as BashExecutionMessage;
+			return bashMsg.excludeFromContext ? undefined : executionLine("bash", bashMsg.command, bashMsg, transform);
+		}
+		case "pythonExecution": {
+			const pythonMsg = msg as PythonExecutionMessage;
+			return pythonMsg.excludeFromContext
+				? undefined
+				: executionLine("python", pythonMsg.code, pythonMsg, transform);
+		}
+		case "custom":
+		case "hookMessage": {
+			const custom = msg as CustomMessage | HookMessage;
+			if (custom.role === "custom" && custom.excludeFromContext) return undefined;
+			if (
+				custom.display === false &&
+				!PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType) &&
+				CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES[custom.customType] !== true
+			) {
+				return undefined;
+			}
+			return customOneLiner(custom, transform);
+		}
+		case "branchSummary": {
+			const branchMsg = msg as BranchSummaryMessage;
+			return `[branch] from ${branchMsg.fromId}: ${previewLine(branchMsg.summary, transform)}`;
+		}
+		case "compactionSummary":
+			return `[compaction] ${previewLine((msg as CompactionSummaryMessage).summary, transform)}`;
+		case "fileMention": {
+			const fileMsg = msg as FileMentionMessage;
+			return `[file-mention] ${previewLine(fileMsg.files.map(f => f.path).join(", "), transform)}`;
+		}
+		default:
+			return undefined;
 	}
 }
 
@@ -600,26 +674,14 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 				lastWatchedLabel = undefined;
 				break;
 			}
-			case "bashExecution": {
-				const bashMsg = msg as BashExecutionMessage;
-				if (bashMsg.excludeFromContext) break;
-				const bashLine = executionLine("bash", bashMsg.command, bashMsg, opts?.transformExpandedToolIO);
-				if (opts?.watchedRoles) {
-					pushWatchedRole("**user**:", bashLine);
-				} else {
-					lines.push(bashLine, "");
-					lastWatchedLabel = undefined;
-				}
-				break;
-			}
+			case "bashExecution":
 			case "pythonExecution": {
-				const pythonMsg = msg as PythonExecutionMessage;
-				if (pythonMsg.excludeFromContext) break;
-				const pythonLine = executionLine("python", pythonMsg.code, pythonMsg, opts?.transformExpandedToolIO);
+				const line = formatHistoryEventLine(msg, opts?.transformExpandedToolIO);
+				if (line === undefined) break;
 				if (opts?.watchedRoles) {
-					pushWatchedRole("**user**:", pythonLine);
+					pushWatchedRole("**user**:", line);
 				} else {
-					lines.push(pythonLine, "");
+					lines.push(line, "");
 					lastWatchedLabel = undefined;
 				}
 				break;
@@ -627,13 +689,8 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "custom":
 			case "hookMessage": {
 				const custom = msg as CustomMessage | HookMessage;
-				if (
-					custom.display === false &&
-					!PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType) &&
-					CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES[custom.customType] !== true
-				) {
-					break;
-				}
+				const line = formatHistoryEventLine(custom, opts?.transformExpandedToolIO);
+				if (line === undefined) break;
 				if (opts?.expandPrimaryContext && PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType)) {
 					const text = contentToText(custom.content).trim();
 					if (text) {
@@ -645,32 +702,16 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 						);
 					}
 				} else {
-					lines.push(customOneLiner(custom, opts?.transformExpandedToolIO), "");
+					lines.push(line, "");
 				}
 				lastWatchedLabel = undefined;
 				break;
 			}
-			case "branchSummary": {
-				const branchMsg = msg as BranchSummaryMessage;
-				lines.push(
-					`[branch] from ${branchMsg.fromId}: ${previewLine(branchMsg.summary, opts?.transformExpandedToolIO)}`,
-					"",
-				);
-				lastWatchedLabel = undefined;
-				break;
-			}
-			case "compactionSummary": {
-				const compactMsg = msg as CompactionSummaryMessage;
-				lines.push(`[compaction] ${previewLine(compactMsg.summary, opts?.transformExpandedToolIO)}`, "");
-				lastWatchedLabel = undefined;
-				break;
-			}
+			case "branchSummary":
+			case "compactionSummary":
 			case "fileMention": {
-				const fileMsg = msg as FileMentionMessage;
-				lines.push(
-					`[file-mention] ${previewLine(fileMsg.files.map(f => f.path).join(", "), opts?.transformExpandedToolIO)}`,
-					"",
-				);
+				const line = formatHistoryEventLine(msg, opts?.transformExpandedToolIO);
+				if (line !== undefined) lines.push(line, "");
 				lastWatchedLabel = undefined;
 				break;
 			}

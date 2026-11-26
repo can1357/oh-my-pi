@@ -246,15 +246,19 @@ describe("default echo/printf redirect rule", () => {
 		for (const command of [
 			"echo $(printf foo; printf bar) > out.txt",
 			"echo `date; ls` > out.txt",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			"echo ${x:-a;b} > out.txt",
 			"echo $(ls > /dev/null) > out.txt",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			"echo ${a:-${b}} > out.txt",
 			"echo $(( (1 + 2) * 3 )) > out.txt",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			"printf %s ${HOME:-${USER}} >> out.txt",
 		]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
 		}
 		expect(checkBashInterception("echo $(ls) ; ls > f", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 		expect(checkBashInterception("echo ${a:-${b}}; ls 2>e.log", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
 			false,
 		);
@@ -266,6 +270,7 @@ describe("default echo/printf redirect rule", () => {
 	it("matches commands with many stderr sinks without exponential backtracking", () => {
 		const start = performance.now();
 		const echo = checkBashInterception(
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			"echo hi" + " 2>/dev/null 2>>/dev/null 2>&1 \\; <&0 $(a; b) `c; d` ${e:-f;g}".repeat(20),
 			["write"],
 			DEFAULT_BASH_INTERCEPTOR_RULES,
@@ -312,6 +317,34 @@ describe("default echo/printf redirect rule", () => {
 		expect(
 			checkBashInterception("cat 2>/dev/null <<'EOF'\nx\nEOF", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
 		).toBe(false);
+	});
+});
+
+describe("default Perl in-place rule", () => {
+	it.each([
+		`perl -e 'print "re-index\\n"'`,
+		"perl script.pl -i",
+		"perl -- -i",
+		"perl -e 1 -- -i",
+		"perl -e -i",
+		"perl -e'print q( -i )'",
+		"perl -I -include -e 1",
+		"perl -Ilib -MList::Util=min -e 1",
+		"perl -Ci -e 1",
+	])("does not route %s to edit", command => {
+		expect(checkBashInterception(command, ["edit"]).block).toBe(false);
+	});
+
+	it.each([
+		"perl -lpi -e 's/a/b/' f",
+		"perl -i.bak -pe 's/a/b/' f",
+		"perl -0777 -Mstrict -pi -e 1 f",
+		"perl -e 's/a/b/' -pi f",
+		"perl -I 'some lib' -ni -e 1 f",
+		"perl -C -pi -e 1 f",
+		"perl -x -pi f",
+	])("routes %s to edit", command => {
+		expect(checkBashInterception(command, ["edit"]).suggestedTool).toBe("edit");
 	});
 });
 

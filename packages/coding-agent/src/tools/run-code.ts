@@ -1,4 +1,4 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 
 const NON_SERIALIZABLE_RUN_ARGUMENT = "Run argument is not JSON-serializable; pass plain data";
 
@@ -43,6 +43,22 @@ export function renderRunArg(value: unknown): string {
 		) {
 			return `new RegExp(${JSON.stringify(marker.source)}, ${JSON.stringify(marker.flags ?? "")})`;
 		}
+	}
+
+	// Markers nest inside options (`requests({filter: /x/})`), so containers render member by member.
+	if (Array.isArray(value)) {
+		return `[${value.map(item => (item === undefined ? "null" : renderRunArg(item))).join(",")}]`;
+	}
+	if (isPlainObject(value)) {
+		const members: string[] = [];
+		for (const key in value) {
+			const item = value[key];
+			if (item === undefined) continue;
+			// A quoted `"__proto__"` key in a literal sets the prototype; a computed one is an own property.
+			const name = key === "__proto__" ? `["__proto__"]` : JSON.stringify(key);
+			members.push(`${name}:${renderRunArg(item)}`);
+		}
+		return `{${members.join(",")}}`;
 	}
 
 	let rendered: string | undefined;
