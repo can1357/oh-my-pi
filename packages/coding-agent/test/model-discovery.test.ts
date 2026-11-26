@@ -2774,6 +2774,56 @@ describe("ModelRegistry runtime discovery", () => {
 			.find(m => m.provider === "openai-test" && m.id === "openai-test/no-context-model");
 		expect(fallback?.contextWindow).toBe(128000);
 	});
+	test("openai-models-list discovery reads the endpoint's min_prompt_price and min_completion_price as cost", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "openai-test/priced-model", min_prompt_price: 0.05, min_completion_price: 0.25 },
+							{ id: "openai-test/free-model", min_prompt_price: 0, min_completion_price: 0 },
+							{ id: "openai-test/unpriced-model" },
+							{
+								id: "openai-test/priced-embedder",
+								output_modalities: ["embedding"],
+								min_prompt_price: 0.02,
+								min_completion_price: 0,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const find = (id: string) => registry.getAll().find(m => m.provider === "openai-test" && m.id === id);
+		expect(find("openai-test/priced-model")?.cost).toEqual({
+			input: 0.05,
+			output: 0.25,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+		expect(find("openai-test/free-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(find("openai-test/unpriced-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		// Embedding rows are task rows, a separate branch of discoverOpenAIModelsList.
+		expect(registry.find("openai-test", "openai-test/priced-embedder")?.cost).toEqual({
+			input: 0.02,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+	});
 	test("openai-models-list uses top_provider.max_completion_tokens over the bundled reference", async () => {
 		writeRawModelsJson({
 			"openai-test": {
@@ -3941,6 +3991,45 @@ describe("ModelRegistry runtime discovery", () => {
 		// never pinning the model at a broken `0` window.
 		const zeroCtx = registry.getAll().find(m => m.provider === "proxy-test" && m.id === "zero-context-model");
 		expect(zeroCtx?.contextWindow).toBe(128000);
+	});
+
+	test("proxy discovery offline start lists rows cached under the context-v6 key", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				discovery: { type: "proxy" },
+			},
+		});
+		// Rows warmed before the openai-models-list cache bump are stored under context-v6.
+		writeModelCache(
+			"proxy-test:proxy-v2-context-v6",
+			Date.now(),
+			[
+				buildModel({
+					id: "cached-proxy-model",
+					name: "Cached Proxy Model",
+					api: "openai-completions",
+					provider: "proxy-test",
+					baseUrl: "http://127.0.0.1:9998/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 65536,
+					maxTokens: 8192,
+				}),
+			],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				throw new Error("Offline fetch should not be called");
+			},
+		});
+		await registry.refresh("offline");
+		expect(registry.find("proxy-test", "cached-proxy-model")).toBeDefined();
 	});
 
 	test("proxy discovery honors API-reported input modalities and output cap", async () => {

@@ -1236,6 +1236,20 @@ function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec
 	} as ModelSpec<Api>;
 }
 
+/**
+ * One `/v1/models` row's own list price, in the catalog's per-million-token
+ * units (`min_prompt_price` / `min_completion_price`). A row that reports no
+ * positive price stays at zero, the local-unknown value.
+ */
+function extractOpenAIModelsListCost(item: { min_prompt_price?: unknown; min_completion_price?: unknown }) {
+	return {
+		input: toPositiveNumberOrUndefined(item.min_prompt_price) ?? 0,
+		output: toPositiveNumberOrUndefined(item.min_completion_price) ?? 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+	};
+}
+
 export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -1303,6 +1317,8 @@ export async function discoverOpenAIModelsList(
 						reasoning_effort_map?: unknown;
 						reasoning_required?: unknown;
 						service_tiers?: unknown;
+						min_prompt_price?: unknown;
+						min_completion_price?: unknown;
 					}>;
 				};
 			}),
@@ -1371,7 +1387,7 @@ export async function discoverOpenAIModelsList(
 				reasoning: false,
 				input,
 				supportsTools: false,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost: extractOpenAIModelsListCost(item),
 				// Embeddings, judges, speech and transcription cap their input by
 				// context; image jobs carry no token window. None produces output tokens.
 				contextWindow: task.kind === "image" ? null : reportedContextWindow,
@@ -1407,10 +1423,7 @@ export async function discoverOpenAIModelsList(
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
-			// Proxy/gateway pricing is provider-specific and rarely matches
-			// upstream bundled catalogs, so keep costs local-unknown even
-			// when we successfully recover the upstream model identity.
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: extractOpenAIModelsListCost(item),
 			contextWindow,
 			// Cap a provider-advertised output limit or the reference's output limit at
 			// the discovered context window so a larger limit can never request more

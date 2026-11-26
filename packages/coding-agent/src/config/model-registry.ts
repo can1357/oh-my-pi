@@ -3170,10 +3170,13 @@ export class ModelRegistry {
 	/**
 	 * Namespace suffix for the `discovery.advertisedReasoning` opt-out. Rows built
 	 * under one mode must never satisfy the other's cache read: under the
-	 * `offline` strategy nothing else refetches them.
+	 * `offline` strategy nothing else refetches them. `contextVersion` is the
+	 * calling namespace's own version, so one namespace's bump never orphans
+	 * another's rows.
 	 */
-	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig): string {
-		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
+	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig, contextVersion: number): string {
+		const version = `context-v${contextVersion}`;
+		return providerConfig.discovery.advertisedReasoning === false ? `advertised-off-${version}` : version;
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -3197,12 +3200,14 @@ export class ModelRegistry {
 			// model; warm v5 rows stayed without the aliases, so an unsupported
 			// requested effort kept clamping to the tier below and a thinking-off
 			// request could reach a route that rejects it.
+			// context-v7 invalidates rows cached before `min_prompt_price` and
+			// `min_completion_price` were read; warm v6 rows held every row at cost 0.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
 			return providerConfig.discovery.injectV1 === false
-				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig)}`
-				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig, 7)}`
+				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig, 7)}`;
 		}
 		if (providerConfig.discovery.type === "proxy") {
 			// proxy-v2 invalidates rows cached before a proxy row's advertised
@@ -3210,7 +3215,9 @@ export class ModelRegistry {
 			// provider id) pinned gateway ids at `reasoning: false`. The opt-out
 			// gets its own namespace for the same reason it does above: under the
 			// `offline` strategy nothing else would refetch the other mode's rows.
-			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+			// Stays on context-v6: the context-v7 bump is for openai-models-list rows only,
+			// and a shared version here would orphan every warm proxy row.
+			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig, 6)}`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
