@@ -748,27 +748,14 @@ class TerminalSnapshotDecoder {
 	}
 }
 
-function formatTimeoutClampNotice(
-	requestedTimeoutSec: number,
-	effectiveTimeoutSec: number,
-	maxTimeout: number,
-): string | undefined {
-	if (requestedTimeoutSec === effectiveTimeoutSec) return undefined;
-	const cappedByGlobal = maxTimeout > 0 && effectiveTimeoutSec === maxTimeout && maxTimeout < TOOL_TIMEOUTS.bash.max;
-	const limit = cappedByGlobal
-		? `global tools.maxTimeout ceiling ${maxTimeout}s`
-		: `allowed range ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}s`;
-	return `Timeout clamped to ${effectiveTimeoutSec}s (requested ${requestedTimeoutSec}s; ${limit}).`;
-}
-
 /**
  * Records handler answers to a command's URL writes (`> proc://<id>/kill`, `> out://`) as
  * result notices: the shell itself shows only an errno for a refused write.
  */
 function noticeUrlWrites(notices: string[]): (report: UrlWriteReport) => void {
 	return ({ url, text, failed }) => {
-		if (failed) notices.push(`Write to ${url} failed: ${text}`);
-		else if (text) notices.push(`${url}: ${text}`);
+		if (failed) notices.push(`[${url} failed: ${text}]`);
+		else if (text) notices.push(`[${url}: ${text}]`);
 	};
 }
 
@@ -1600,6 +1587,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		options: {
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
+			/** Why the call left the foreground early; see {@link formatBackgroundNotice}. */
+			reason?: string;
 			replies?: readonly string[];
 			trace?: ShellTrace;
 			toolCommands?: readonly ToolCommandDispatch[];
@@ -1627,7 +1616,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, options.reason));
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
 			details,
@@ -2009,17 +1998,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				);
 			}
 			if (rawTimeout !== undefined)
-				pendingNotices.push("Ignored timeout: service-only; readiness follows ready.timeout.");
+				pendingNotices.push("[timeout ignored: use ready.timeout]");
 			if (rawAsync === true)
-				pendingNotices.push("Ignored async: service-only; a service start is asynchronous already.");
+				pendingNotices.push("[async ignored: services start async]");
 			// Host and timeout configure a readiness condition without naming one.
 			if (
 				ready === undefined &&
 				(blankToUndefined(rawReady?.host) !== undefined || Number.isFinite(rawReady?.timeout))
 			)
-				pendingNotices.push("Ignored ready: it needs log or port; the service started without a readiness wait.");
+				pendingNotices.push("[ready ignored: needs log or port]");
 		} else if (ready !== undefined) {
-			pendingNotices.push("Ignored ready: service-only, and no service name was given.");
+			pendingNotices.push("[ready ignored: needs name]");
 		}
 		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
@@ -2037,7 +2026,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const notifyNotice =
 			notifySource === undefined
 				? undefined
-				: `Output lines matching /${notifySource}/ arrive as follow-ups while it runs.`;
+				: `[/${notifySource}/ matches arrive as follow-ups]`;
 
 		const toolCommandNameList = toolCommandNames(this.session);
 		const toolCommands = new Set(toolCommandNameList);
@@ -2066,18 +2055,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const repaired = repairHeredocContinuations(command);
 		if (repaired !== null) {
-			pendingNotices.push(
-				"Ran without the `\\` after `<<EOF &&`: a line continuation there makes the next line a command and starts the heredoc body after it. End such lines with the operator alone.",
-			);
+			pendingNotices.push("[dropped stray `\\` after `<<EOF &&`]");
 			command = repaired;
 		}
 
 		if (cfgWorktreeClone.get(this.session.settings)) {
 			const rewritten = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());
 			if (rewritten !== command) {
-				pendingNotices.push(
-					"Ran `git worktree add` as `omp worktree add`: a copy-on-write clone of the checkout without .git, other worktrees, or untracked .env files. Set worktree.clone=false for plain git.",
-				);
+				pendingNotices.push("[ran as `omp worktree add`: CoW clone without .git or untracked .env]");
 				command = rewritten;
 			}
 		}
@@ -2160,7 +2145,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					content: [
 						{
 							type: "text",
-							text: `${name}: starting${pid === undefined ? "" : ` pid=${pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.${notifyLine ? `\n${notifyLine}` : ""}`,
+							text: `${name}: starting${pid === undefined ? "" : ` pid=${pid}`}\n[readiness wait cut short: incoming message; see proc://${name}]${notifyLine ? `\n${notifyLine}` : ""}`,
 						},
 					],
 					details: { service: { name, state: daemon.state, ready: false, timedOut: false, pid } },
@@ -2170,9 +2155,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				`${daemon.key}: ${daemon.state}${pid === undefined ? "" : ` pid=${pid}`}${daemon.readyAt === undefined ? "" : " ready"}`,
 			];
 			if (service.readyTimedOut)
-				lines.push(
-					`NOT ready — readiness timed out after ${ready?.timeout ?? 30}s; process state: ${daemon.state}.`,
-				);
+				lines.push(`[not ready: timed out after ${ready?.timeout ?? 30}s]`);
 			if (daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
 			lines.push(...pendingNotices);
 			if (notifyLine) lines.push(notifyLine);
@@ -2199,9 +2182,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
 		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec, maxTimeout);
 		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
-		if (timeoutSec !== undefined) {
-			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec, maxTimeout);
-			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
+		if (timeoutSec !== undefined && timeoutSec !== requestedTimeoutSec) {
+			pendingNotices.push(`[timeout clamped: ${requestedTimeoutSec}s → ${timeoutSec}s]`);
 		}
 
 		if (asyncRequested) {
@@ -2316,19 +2298,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
 			// "approval": a tool command is asking the user; the prompt stays open while the job runs on.
-			// `job.notices` also carries the notices the run added so far.
-			const notices =
+			const reason =
 				waitResult.kind === "steer"
-					? [...job.notices, "Backgrounded early to handle an incoming message; the command keeps running."]
+					? "incoming message"
 					: waitResult.kind === "approval"
-						? [
-								...job.notices,
-								"Backgrounded while a tool command waits for the user's approval; the command keeps running.",
-							]
-						: job.notices;
+						? "awaiting approval"
+						: undefined;
 			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
 				requestedTimeoutSec,
-				notices,
+				// `job.notices` also carries the notices the run added so far.
+				notices: job.notices,
+				reason,
 				replies: job.replies,
 				trace: job.getLatestTrace(),
 				toolCommands: job.toolCommands(),
@@ -2621,7 +2601,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				};
 
 				const bridgeNotices: string[] = [];
-				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
+				if (finalOutput.truncated) bridgeNotices.push("[output truncated]");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
@@ -2651,7 +2631,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const interactiveUi = canUseInteractiveBashPty(pty === true, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {
-			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
+			pendingNotices.push("[pty unavailable; ran without]");
 		}
 		const wallTimeStart = performance.now();
 		// Each frame of the card repeats the latest preview with the replies so far; the transcript draws the new ones.

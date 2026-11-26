@@ -2687,10 +2687,8 @@ function b() {
 			expect(result.details?.async?.state).toBe("running");
 			expect(result.details?.async?.type).toBe("bash");
 			// Auto-backgrounded after its foreground wait: the deadline counts the job's whole run, not time left.
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
-			expect(getTextOutput(result)).toContain(
-				"(killed once it has run 3600s in total; `timeout: 0` disables the deadline)",
-			);
+			expect(getTextOutput(result)).toContain("[backgrounded as ");
+			expect(getTextOutput(result)).toContain("killed at 3600s total");
 
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
@@ -2754,7 +2752,7 @@ function b() {
 			// The steer backgrounds the command instead of killing it: the call
 			// returns a running job and the command finishes on its own.
 			expect(result.details?.async?.state).toBe("running");
-			expect(getTextOutput(result)).toContain("Backgrounded early to handle an incoming message");
+			expect(getTextOutput(result)).toContain("(incoming message)");
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected a steer-backgrounded job id");
@@ -2803,7 +2801,7 @@ function b() {
 
 			expect(result.details?.timeoutSeconds).toBe(0.05);
 			expect(result.details?.async?.state).toBe("running");
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
+			expect(getTextOutput(result)).toContain("[backgrounded as ");
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected an auto-backgrounded job id");
@@ -2823,7 +2821,7 @@ function b() {
 
 			const output = getTextOutput(result);
 			expect(output).toContain("ok");
-			expect(output).toContain("Timeout clamped to 3600s (requested 7200s; allowed range 1-3600s).");
+			expect(output).toContain("[timeout clamped: 7200s → 3600s]");
 			expect(result.details?.timeoutSeconds).toBe(3600);
 			expect(result.details?.requestedTimeoutSeconds).toBe(7200);
 		});

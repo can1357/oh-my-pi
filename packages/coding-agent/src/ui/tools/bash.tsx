@@ -241,8 +241,8 @@ function stripNotices(raw: string, details: BashDetails | undefined): { text: st
 	let text =
 		job?.state === "running"
 			? stripTrailingNotice(raw, line => {
-					const prefix = `Backgrounded as job ${job.jobId}`;
-					return line.startsWith(prefix) && (line[prefix.length] === ";" || line[prefix.length] === " ");
+					const prefix = `[backgrounded as ${job.jobId}`;
+					return line.startsWith(prefix) && (line[prefix.length] === "," || line[prefix.length] === " ");
 				})
 			: raw;
 	text = stripOutputNotice(text, details?.meta);

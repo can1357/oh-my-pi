@@ -647,7 +647,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			},
 		);
 
-		const backgroundStartResult = (extraNotice?: string) =>
+		const backgroundStartResult = (reason?: string) =>
 			this.#buildBackgroundStartResult(
 				jobId,
 				cells,
@@ -656,7 +656,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				latestText,
 				latestDetails,
 				clampedCellTimeoutSec,
-				extraNotice,
+				reason,
 			);
 		if (startBackgrounded) {
 			return backgroundStartResult();
@@ -687,11 +687,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		autoBgManager.backgroundJob(jobId);
 		// "steer": a queued user/peer message arrived mid-wait — background the
 		// cell (it keeps running) so the message injects promptly.
-		const steerNotice =
-			waitResult.kind === "steer"
-				? "Backgrounded early to handle an incoming message; the cell keeps running."
-				: undefined;
-		return backgroundStartResult(steerNotice);
+		return backgroundStartResult(waitResult.kind === "steer" ? "incoming message" : undefined);
 	}
 
 	/**
@@ -708,7 +704,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		previewText: string,
 		latestDetails: EvalToolDetails | undefined,
 		timeoutSec: number | undefined,
-		extraNotice?: string,
+		reason?: string,
 	): AgentToolResult<EvalToolDetails> {
 		// latestDetails snapshots are per-update copies (buildUpdateDetails), so
 		// tagging the async marker on cannot leak into later job progress.
@@ -732,10 +728,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (trimmedPreview.length > 0) {
 			lines.push(trimmedPreview, "");
 		}
-		if (extraNotice) {
-			lines.push(extraNotice, "");
-		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, reason));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 
