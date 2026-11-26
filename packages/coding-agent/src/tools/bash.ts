@@ -696,10 +696,9 @@ const NO_PIDS = (): readonly number[] => [];
  * Shown when a call ran in a fork of the session's busy shell (it overlapped a parallel or backgrounded call)
  * and what it set could not be carried back into the session's shell.
  */
-const FORK_STATE_LOST_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
+const FORK_STATE_LOST_NOTICE = "[shell busy; state not kept]";
 /** Shown when such a call left background jobs running: they stay in the copy. */
-const FORK_JOBS_NOTICE =
-	"Background jobs started here run in a copy of the busy session shell; later calls' jobs, wait and %N won't see them.";
+const FORK_JOBS_NOTICE = "[jobs invisible to later calls]";
 
 /**
  * Names what a command changed in the session shell that the next call starts without: a `cd`
@@ -709,7 +708,7 @@ function formatShellResetNotice(result: BashResult | BashInteractiveResult, sess
 	const reset: string[] = [];
 	if ("movedCwd" in result && result.movedCwd) reset.push(`cwd → ${sessionCwd}`);
 	if ("errexit" in result && result.errexit) reset.push("set -e off");
-	return reset.length > 0 ? `Reset before the next call: ${reset.join(", ")}.` : undefined;
+	return reset.length > 0 ? `[next call: ${reset.join(", ")}]` : undefined;
 }
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {

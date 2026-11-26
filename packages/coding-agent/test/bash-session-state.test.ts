@@ -129,7 +129,7 @@ it.skipIf(process.platform === "win32")(
 		expect((await run(tool, "sleep 2")).async?.state).toBe("running");
 
 		const overlapping = await run(tool, "/bin/sleep 30 & printf %s $!");
-		expect(overlapping.text).toContain("Background jobs started here run in a copy of the busy session shell");
+		expect(overlapping.text).toContain("[jobs invisible to later calls]");
 		const pid = Number.parseInt(overlapping.text, 10);
 		try {
 			Bun.gc(true);

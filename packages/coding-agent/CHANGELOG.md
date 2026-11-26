@@ -25,6 +25,7 @@
 - Expanded `bash.gitGuard` protection in shared checkouts to cover more history-changing Git operations, including rebase, merge, pull, cherry-pick, revert, amend, and non-dry-run clean operations.
 - Improved bash approval guidance by explaining which shell syntax prevents a `bash.patterns` rule from bypassing approval prompts.
 - Exiting or restarting no longer flashes a "Closing session…" toast; a status appears only when closing takes longer than 3 seconds.
+- Shortened and bracketed bash's session-shell notices (`[next call: cwd → …, set -e off]`, `[shell busy; state not kept]`, `[jobs invisible to later calls]`).
 - `cfg://` writes to map settings such as `modelRoles` now change only the entries they name (`null` removes one), so approval prompts and transcripts show just those entries instead of the whole map, and saving one entry keeps the others in your config.
 
 ### Fixed
