@@ -61,6 +61,13 @@ describe("wrap", () => {
 			expect(row).toContain("48;5;236");
 		}
 	});
+
+	it("closes inverse video at row ends while colors carry on", () => {
+		const rows = wrap("\x1b[38;5;196m\x1b[7minverse content that wraps across lines\x1b[27m\x1b[0m", 16);
+		expect(rows.length).toBeGreaterThan(1);
+		for (const row of rows.slice(0, -1)) expect(row.endsWith("\x1b[27m")).toBe(true);
+		for (const row of rows.slice(1)) expect(row).toContain("38;5;196");
+	});
 });
 
 describe("wrapChars", () => {
