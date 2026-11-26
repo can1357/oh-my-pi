@@ -17,7 +17,7 @@
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
-- Fixed a cache-lookup error appearing in GitHub Copilot Claude replies and next-input suggestions ([#20689](https://github.com/can1357/oh-my-pi/pull/20689) by [@wapenshaw](https://github.com/wapenshaw)).
+- GitHub Copilot Claude replies and next-input suggestions no longer include the provider cache-lookup error ([#20689](https://github.com/can1357/oh-my-pi/pull/20689) by [@wapenshaw](https://github.com/wapenshaw)).
 
 ## [19.2.1] - 2026-11-25
 
