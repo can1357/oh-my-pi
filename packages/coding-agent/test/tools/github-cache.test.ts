@@ -853,3 +853,60 @@ describe("getOrFetchPr (gh-wired wrapper)", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("GitLab cache isolation and open-state soft TTL", () => {
+	it("uses 15s soft TTL for 'opened' MRs and isolates project paths when GH_HOST is set", async () => {
+		const prevGhHost = process.env.GH_HOST;
+		process.env.GH_HOST = "gitlab.example.com";
+		try {
+			const settings = Settings.isolated({ "github.cache.softTtlSec": 300 });
+			const project = "gitlab.example.com/acme/api";
+			const now = Date.now();
+			const fetchedAt = now - 10_000;
+			putCached({
+				repo: project,
+				kind: "mr",
+				number: 4,
+				includeComments: true,
+				payload: { state: "opened" },
+				rendered: "open-mr",
+				fetchedAt,
+			});
+			expect(getCached(project, "mr", 4, true)?.repo).toBe(project);
+
+			let fetches = 0;
+			const fresh = await getOrFetchView({
+				repo: project,
+				kind: "mr",
+				number: 4,
+				includeComments: true,
+				settings,
+				now,
+				fetchFresh: async () => {
+					fetches += 1;
+					return { rendered: "refreshed", sourceUrl: undefined, payload: { state: "opened" } };
+				},
+			});
+			expect(fresh.status).toBe("fresh");
+			expect(fetches).toBe(0);
+
+			const refreshed = await getOrFetchView({
+				repo: project,
+				kind: "mr",
+				number: 4,
+				includeComments: true,
+				settings,
+				now: now + 10_000,
+				fetchFresh: async () => {
+					fetches += 1;
+					return { rendered: "refreshed", sourceUrl: undefined, payload: { state: "opened" } };
+				},
+			});
+			expect(refreshed.status).toBe("refreshed");
+			expect(fetches).toBe(1);
+		} finally {
+			if (prevGhHost === undefined) delete process.env.GH_HOST;
+			else process.env.GH_HOST = prevGhHost;
+		}
+	});
+});
