@@ -612,7 +612,7 @@ mod tests {
 		            value=hi><td>CCCCC</table>";
 		assert_eq!(
 			dump(html).unwrap(),
-			"   CAPTION: \"Inventory\"\n\n      A \"Y\"     C\n   AAAA hi___ CCCCC\n"
+			"   CAPTION: \"Inventory\"\n\n      A \"Y\"     C\n   AAAA _____ CCCCC\n"
 		);
 	}
 
@@ -627,7 +627,7 @@ mod tests {
 	fn nested_grid_preserves_inline_text_and_fields() {
 		let html = "<table><tr><td>Outer<table><tr><td><q>I</q><td>Row<tr><td>Inner<td><input \
 		            size=3 value=x></table>After<td>End</table>";
-		assert_eq!(dump(html).unwrap(), "    Outer\n   \"I\"   Row\n   Inner x__\n   After End\n");
+		assert_eq!(dump(html).unwrap(), "    Outer\n   \"I\"   Row\n   Inner ___\n   After End\n");
 	}
 
 	#[test]

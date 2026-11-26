@@ -1,6 +1,6 @@
 //! Visible labels for links, embedded images and named tab stops.
 
-use super::{Align, Element, Node, Reader, attr, flag};
+use super::{Align, Element, Node, Reader, attr, flag, image_alt};
 
 const TOOLBAR_RELATIONS: &[&str] = &[
 	"home",
@@ -126,6 +126,14 @@ impl Reader<'_> {
 	}
 
 	pub(super) fn image(&mut self, tag: &Element) {
+		// Alt text the Markdown writer omits (decorative, or repeated by the
+		// caption or label after it) is not shown here either.
+		if tag.name() == "img"
+			&& tag.attr("alt").is_some_and(|alt| !alt.trim().is_empty())
+			&& image_alt(self.dom, self.dropped, self.root_end, tag).is_none()
+		{
+			return;
+		}
 		let object = tag.name() == "object";
 		let src = attr(tag, if object { "data" } else { "src" });
 		let file = src.rsplit('/').next().unwrap_or_default();
