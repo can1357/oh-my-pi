@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import { type DomQuery, domQueryFor } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/dom";
@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 /**
- * A tab on a daemon whose engine answers `dom` reads through `dom`; `kit`
+ * A tab on a daemon whose engine answers `dom` reads through `dom` (null leaves the request pending); `kit`
  * stubs the page kit's methods for the helpers that still use it.
  */
 async function nativeTab(
@@ -29,7 +29,10 @@ async function nativeTab(
 ): Promise<{ fake: FakeDaemon; tab: TernTab }> {
 	daemon = await startFakeDaemon(
 		(op): FakeAnswer => {
-			if (op.op === "dom") return { ok: dom(op) };
+			if (op.op === "dom") {
+				const reply = dom(op);
+				return reply === null ? null : { ok: reply };
+			}
 			if (op.op === "eval") {
 				const args = Array.isArray(op.args) ? op.args : [];
 				const stub = typeof args[0] === "string" ? kit[args[0]] : undefined;
@@ -238,6 +241,42 @@ describe("TernTab on native DOM reads", () => {
 		actionBudget(tab, 150);
 		await expect(tab.click("#x")).rejects.toThrow(why);
 		expect(trace(fake)).not.toContain("input");
+	});
+
+	it("reports the disabled target when the next resolve exhausts the wire budget", async () => {
+		let resolves = 0;
+		const { fake, tab } = await nativeTab(request => {
+			if (request.read === "query") return { nodes: [BUTTON], total: 1 };
+			return ++resolves === 1 ? { state: "disabled", node: BUTTON } : null;
+		});
+		actionBudget(tab, 300);
+		await expect(tab.click("#x")).rejects.toThrow("the element is disabled (1 match(es))");
+		expect(resolves).toBe(2);
+		expect(inputEvents(fake)).toEqual([]);
+	});
+
+	it.each([
+		["late point", OK, "the element is disabled"],
+		["read error", { error: { kind: "invalid", message: "read refused" } }, "read refused"],
+	] as const)("does not act on a %s that arrives after the deadline", async (_case, reply, why) => {
+		const start = Date.now();
+		const budget = 2_000;
+		let resolves = 0;
+		const { fake, tab } = await nativeTab(request => {
+			if (request.read === "query") return { nodes: [BUTTON], total: 1 };
+			if (++resolves === 1) return { state: "disabled", node: BUTTON };
+			clock.mockReturnValue(start + budget);
+			return reply;
+		});
+		const clock = spyOn(Date, "now").mockReturnValue(start);
+		try {
+			actionBudget(tab, budget);
+			await expect(tab.click("#x")).rejects.toThrow(why);
+			expect(resolves).toBe(2);
+			expect(inputEvents(fake)).toEqual([]);
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
 	it("waits natively and hands out a handle holding the matched node's ref", async () => {

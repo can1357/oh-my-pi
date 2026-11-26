@@ -1,9 +1,15 @@
-import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
+import {
+	type Agent,
+	type AgentMessage,
+	type AgentToolResult,
+	type AgentTurnEndContext,
+	ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { getUpstreamPin, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
-import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
+import { AUTO_PREWALK_ESCALATE_TIMEOUT_MS, type AutoPrewalkDecision } from "../auto-prewalk/classifier";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -16,23 +22,19 @@ import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with 
 import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with { type: "text" };
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
+import { prewalkWouldBeNoop } from "../thinking/levels";
 import { isMCPToolName } from "../tools/builtin-names";
-import {
-	replaceTabs,
-	shortenEmbeddedPaths,
-	shortenPath,
-	TRUNCATE_LENGTHS,
-	truncateToWidth,
-} from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { shortenEmbeddedPaths, shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import type { PlanProposalHandler } from "../tools/resolve";
 import { toolCommandDispatches } from "../tools/tool-commands";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
 import { PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import { cfgPrewalkAuto } from "./settings";
+import { cfgPrewalkAuto, cfgPrewalkAutoTarget, PREWALK_INITIAL_TARGET } from "./settings";
 const PREWALK_CONTINUE_MESSAGE_TYPE = "prewalk-continue";
 const PREWALK_CHECKLIST_MESSAGE_TYPE = "prewalk-checklist";
 
@@ -85,16 +87,27 @@ export interface PrewalkCoordinatorHost {
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 	resolveDefaultPrewalk(): Prewalk | undefined;
-	/** Resolves `prewalk.autoTarget`; warns and returns undefined when it cannot be used. */
-	resolveAutoPrewalkTarget(): Prewalk | undefined;
+	/** Resolves `selector` (default `prewalk.autoTarget`); warns and returns undefined when it cannot be used. */
+	resolveAutoPrewalkTarget(selector?: string): Prewalk | undefined;
+	/** Resolves `prewalk.from` as the `escalate` planner, or says why it cannot be used. */
+	resolveAutoPrewalkPlanner(): Prewalk | string;
+	/** Loads a planner's runtime metadata and credential, or says why it cannot be used. */
+	prepareAutoPrewalkPlanner(model: Model): Promise<Model | string>;
 	/** Judges a new task for `prewalk.auto`; undefined when there is nothing to judge. */
-	classifyAutoPrewalk(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined>;
+	classifyAutoPrewalk(
+		request: string,
+		signal: AbortSignal,
+		timeoutMs?: number,
+	): Promise<AutoPrewalkDecision | undefined>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		isCurrent?: () => boolean,
+		metadataResolved?: boolean,
 	): Promise<boolean>;
+	/** An automatic effort change: recorded and published, without taking ownership like a user selection. */
+	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
 	setActiveToolsByName(names: string[]): Promise<void>;
 	restoreNonMCPToolPresentation(
 		nonMCPToolNames: string[],
@@ -122,14 +135,16 @@ export interface PrewalkCoordinatorOptions {
 	suppressAutoPrewalk?: boolean;
 }
 
-/** The models around a completed handoff, kept to return to the planning model. */
+/** A completed handoff, or `escalate`'s switch to the planner: where the session went, and where to return. */
 interface PrewalkHandoff {
-	source: Model;
-	sourceThinkingLevel: ConfiguredThinkingLevel | undefined;
 	target: Model;
 	targetThinkingLevel: ConfiguredThinkingLevel | undefined;
-	/** Armed by `prewalk.auto`: the handoff belongs to one task, so the next task returns to `source`. */
+	/** Armed by `prewalk.auto`: the handoff belongs to one task, so the next task returns to `restoreTo`. */
 	auto: boolean;
+	/** Where the return goes: the handoff's source, or where the task started before `escalate` moved it. */
+	restoreTo: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined };
+	/** Set once `escalate` moved this task to its planner: the task and decision, kept for a retried preparation. */
+	escalation?: { task: AgentMessage; decision: AutoPrewalkDecision };
 }
 
 /** Coordinates one-way model prewalks and automatic plan-yolo handoffs. */
@@ -152,6 +167,8 @@ export class PrewalkCoordinator {
 	#autoArm: Prewalk | undefined;
 	/** Session-local opt-out from auto-prewalk: `/prewalk off`, or `--no-prewalk` at startup. `/new` clears it. */
 	#autoSuppressed: boolean;
+	/** Auto-prewalk fallbacks already reported in this session. */
+	readonly #warned = new Set<string>();
 
 	constructor(host: PrewalkCoordinatorHost, options: PrewalkCoordinatorOptions = {}) {
 		this.#host = host;
@@ -220,6 +237,7 @@ export class PrewalkCoordinator {
 	async resetForNewSession(enabled: boolean): Promise<void> {
 		const handoff = this.#handoff;
 		this.#autoSuppressed = false;
+		this.#warned.clear();
 		const restoreSource = handoff !== undefined && (enabled || handoff.auto) && this.#onHandoffTarget(handoff);
 		this.#scrubPlanNudge(undefined, true);
 		this.#clearPrewalkState();
@@ -247,22 +265,24 @@ export class PrewalkCoordinator {
 	}
 
 	async #restoreSource(handoff: PrewalkHandoff): Promise<void> {
-		if (cfgOffline.get(this.#host.settings) && handoff.source.provider !== this.#host.model()?.provider) return;
+		const { model, thinkingLevel } = handoff.restoreTo;
+		if (cfgOffline.get(this.#host.settings) && model.provider !== this.#host.model()?.provider) return;
 		const epoch = this.#selectionEpoch;
 		try {
 			// A selection made while the planning model loads owns the session; do not override it.
-			const restored = await this.#host.setModelTemporary(
-				handoff.source,
-				handoff.sourceThinkingLevel,
+			const restored = await this.#switch(
+				model,
+				thinkingLevel,
 				() => this.#selectionEpoch === epoch,
+				handoff.escalation !== undefined,
 			);
 			// Temporary selection treats undefined as "keep/default"; restoration must preserve
 			// the original selector, including auto or an explicitly inherited effort.
-			if (restored) this.#host.restoreThinkingLevel(handoff.sourceThinkingLevel);
+			if (restored) this.#host.restoreThinkingLevel(thinkingLevel);
 		} catch (error) {
 			this.#host.emitNotice(
 				"warning",
-				`Prewalk: could not restore ${handoff.source.provider}/${handoff.source.id}: ${error instanceof Error ? error.message : String(error)}`,
+				`Prewalk: could not restore ${model.provider}/${model.id}: ${error instanceof Error ? error.message : String(error)}`,
 				"prewalk",
 			);
 		}
@@ -274,45 +294,127 @@ export class PrewalkCoordinator {
 	}
 
 	/** Effective `prewalk.auto` mode: session opt-outs and plan mode (whose plan-file write would trip a handoff) turn it off. */
-	#autoMode(): "off" | "suggest" | "on" {
+	#autoMode(): "off" | "suggest" | "on" | "escalate" {
 		if (this.#autoSuppressed || this.#host.getPlanModeState()?.enabled === true) return "off";
 		return cfgPrewalkAuto.get(this.#host.settings);
 	}
 
 	/**
-	 * Starts a new user task. An auto handoff belongs to the task that armed it, so the
-	 * session returns to that task's planning model unless a later explicit selection took ownership. An auto arm
-	 * the previous task never used is dropped so this task is judged on its own. Manual and configured arms stay.
+	 * Starts a new user task. An auto handoff belongs to the task that armed it, so the session returns to where
+	 * that task started unless a later explicit selection took ownership. An auto arm the previous task never used is
+	 * dropped so this task is judged on its own. Manual and configured arms stay. A retried preparation of the task
+	 * `escalate` moved to its planner keeps that move.
 	 */
-	async beginAutoTask(): Promise<void> {
+	async beginAutoTask(task: AgentMessage): Promise<void> {
+		const handoff = this.#handoff;
+		if (handoff?.escalation?.task === task) return;
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
 			this.#scrubPlanNudge(undefined, true);
 			this.#clearPrewalkState();
 		}
-		const handoff = this.#handoff;
 		if (!handoff?.auto) return;
 		this.releaseHandoff();
 		if (this.#onHandoffTarget(handoff)) await this.#restoreSource(handoff);
 	}
 
 	/**
-	 * Starts judging a new user task. Undefined when auto-prewalk is off for this turn or an arm already owns it.
-	 * Never rejects: a failed judgment resolves undefined, so the turn proceeds as if auto-prewalk were off.
+	 * Starts judging a new user task; undefined when auto-prewalk is off for this turn or an arm already owns it.
+	 * Resolves once the task is routed: right away, with the judgment still running alongside setup, unless `escalate`
+	 * can move the task to its planner, which settles (with any switch) before setup reads the model. Never rejects:
+	 * a failed judgment resolves undefined, so the turn proceeds as if auto-prewalk were off.
 	 */
-	classifyAuto(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined> | undefined {
-		if (this.#autoMode() === "off" || this.#prewalk !== undefined) return undefined;
-		return this.#host.classifyAutoPrewalk(request, signal).catch(error => {
+	async classifyAuto(
+		request: string,
+		signal: AbortSignal,
+		task: AgentMessage,
+		isCurrent: () => boolean,
+	): Promise<{ decision: Promise<AutoPrewalkDecision | undefined> } | undefined> {
+		const mode = this.#autoMode();
+		if (mode === "off" || this.#prewalk !== undefined) return undefined;
+		const escalation = this.#handoff?.escalation;
+		if (escalation?.task === task) return { decision: Promise.resolve(escalation.decision) };
+		let planner: Prewalk | undefined;
+		if (mode === "escalate") {
+			const resolved = this.#host.resolveAutoPrewalkPlanner();
+			if (typeof resolved === "string") {
+				this.#warnOnce(`Auto-prewalk: ${resolved}; staying on the active model.`);
+			} else if (!this.#isNoop(resolved)) {
+				planner = resolved;
+			}
+		}
+		// Without a planner to move to, the judge runs alongside setup on its usual budget, as under `on`.
+		if (!planner) return { decision: this.#judge(request, signal) };
+		return { decision: Promise.resolve(await this.#escalate(request, signal, task, isCurrent, planner)) };
+	}
+
+	/**
+	 * `escalate`: a confidently front-loaded task moves to `prewalk.from` to plan, as an automatic model change the next
+	 * task returns from. Setup waits for this, so the judge gets a shorter budget and the planner's metadata and
+	 * credential load while it runs. A planner that cannot be used leaves the task on the active model.
+	 */
+	async #escalate(
+		request: string,
+		signal: AbortSignal,
+		task: AgentMessage,
+		isCurrent: () => boolean,
+		planner: Prewalk,
+	): Promise<AutoPrewalkDecision | undefined> {
+		const baseline = this.#host.model();
+		// An unset effort (the provider default) is spelled `inherit` in the return target: as a prewalk target,
+		// `undefined` means "keep the current effort", which would leave `@initial` on the planner's effort.
+		const baselineThinkingLevel = this.#host.configuredThinkingLevel() ?? ThinkingLevel.Inherit;
+		const epoch = this.#selectionEpoch;
+		const prepared = this.#host.prepareAutoPrewalkPlanner(planner.target);
+		const decision = await this.#judge(request, signal, AUTO_PREWALK_ESCALATE_TIMEOUT_MS);
+		if (!baseline || !decision?.arm) return decision;
+		const model = await prepared;
+		if (typeof model === "string") {
+			this.#warnOnce(`Auto-prewalk: ${model}; staying on the active model.`);
+			return decision;
+		}
+		// The one check before the switch: the prompt still wants routing, and no selection took the session while the
+		// judge ran. Once the switch starts, only a newer selection stops it: a switch that lands leaves its receipt, so
+		// an abort or a retried preparation still returns to the baseline.
+		if (!isCurrent() || this.#selectionEpoch !== epoch) return decision;
+		let moved = false;
+		try {
+			moved = await this.#switch(model, planner.thinkingLevel, () => this.#selectionEpoch === epoch, true, true);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.#warnOnce(
+				`Auto-prewalk: could not switch to ${model.provider}/${model.id}: ${reason}; staying on the active model.`,
+			);
+		}
+		if (moved) {
+			this.#handoff = {
+				target: model,
+				targetThinkingLevel: this.#host.configuredThinkingLevel(),
+				auto: true,
+				restoreTo: { model: baseline, thinkingLevel: baselineThinkingLevel },
+				escalation: { task, decision },
+			};
+		}
+		return decision;
+	}
+
+	/** Asks the judge; never rejects. Every judgment logs its latency, so the escalate budget can be checked in use. */
+	async #judge(request: string, signal: AbortSignal, timeoutMs?: number): Promise<AutoPrewalkDecision | undefined> {
+		const started = performance.now();
+		const decision = await this.#host.classifyAutoPrewalk(request, signal, timeoutMs).catch((error: unknown) => {
 			logger.debug("auto-prewalk: skipped after a failure", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			return undefined;
 		});
+		logger.debug("auto-prewalk: judged", { ms: Math.round(performance.now() - started), route: decision?.route });
+		return decision;
 	}
 
 	/**
 	 * Applies a decision right before its task is dispatched; synchronous, so nothing can interleave before the
-	 * request carries it. `suggest` reports the decision. Under `on`, a confident prewalk arms a handoff from the
-	 * active model to the auto target and returns the plan nudge for the caller to deliver with the task.
+	 * request carries it. `suggest` reports the decision. Under `on` and `escalate`, a confident prewalk arms a handoff
+	 * from the active model (the planner, once `escalate` moved there) to the auto target and returns the plan nudge
+	 * for the caller to deliver with the task.
 	 */
 	applyAuto(decision: AutoPrewalkDecision | undefined): AgentMessage | undefined {
 		const mode = this.#autoMode();
@@ -325,16 +427,51 @@ export class PrewalkCoordinator {
 					: decision.arm
 						? `prewalk ${chance}`
 						: `prewalk ${chance} (below threshold)`;
-			if (mode === "suggest") this.#host.emitNotice("info", `Auto-prewalk: ${summary}`, "prewalk");
-			else logger.debug("auto-prewalk: not armed", { decision: summary });
+			if (mode === "suggest") {
+				const preview = decision.arm ? this.#escalatePreview() : "";
+				this.#host.emitNotice("info", `Auto-prewalk: ${summary}${preview}`, "prewalk");
+			} else logger.debug("auto-prewalk: not armed", { decision: summary });
 			return undefined;
 		}
-		const target = this.#host.resolveAutoPrewalkTarget();
+		const target = this.#autoTarget(mode);
 		// Already on the target: nothing to hand off, and nothing worth reporting on every task.
 		if (!target || this.#isNoop(target)) return undefined;
 		const planMessage = this.#armPending(target.target, target.thinkingLevel);
 		if (planMessage) this.#autoArm = this.#prewalk;
 		return planMessage;
+	}
+
+	/** Under `suggest`, the planner `escalate` would move this task to; empty when it would plan on the active model. */
+	#escalatePreview(): string {
+		const planner = this.#host.resolveAutoPrewalkPlanner();
+		return typeof planner === "string" || this.#isNoop(planner)
+			? ""
+			: `; escalate would plan on ${planner.target.provider}/${planner.target.id}`;
+	}
+
+	/**
+	 * `@initial` returns to where an `escalate` task started. An `escalate` task that never moved is already there, so
+	 * there is nothing to hand off; under `on` it warns once and falls back to the default target.
+	 */
+	#autoTarget(mode: "on" | "escalate"): Prewalk | undefined {
+		if (cfgPrewalkAutoTarget.get(this.#host.settings) !== PREWALK_INITIAL_TARGET) {
+			return this.#host.resolveAutoPrewalkTarget();
+		}
+		const handoff = this.#handoff;
+		if (handoff?.escalation)
+			return { target: handoff.restoreTo.model, thinkingLevel: handoff.restoreTo.thinkingLevel };
+		if (mode === "escalate") return undefined;
+		const fallback = cfgPrewalkAutoTarget.default;
+		this.#warnOnce(
+			`Auto-prewalk: target ${PREWALK_INITIAL_TARGET} needs prewalk.auto: escalate; handing off to ${fallback} instead.`,
+		);
+		return this.#host.resolveAutoPrewalkTarget(fallback);
+	}
+
+	#warnOnce(message: string): void {
+		if (this.#warned.has(message)) return;
+		this.#warned.add(message);
+		this.#host.emitNotice("warning", message, "prewalk");
 	}
 
 	#disarmNoop(prewalk: Prewalk): void {
@@ -422,12 +559,16 @@ export class PrewalkCoordinator {
 		const source = this.#host.model();
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		const auto = this.#autoArm === prewalk;
+		// The handoff of a task `escalate` moved to its planner keeps that move's receipt, so the next task returns to
+		// where the task started.
+		const escalated = auto && this.#handoff?.escalation ? this.#handoff : undefined;
 		const epoch = this.#selectionEpoch;
 		this.#switching = prewalk;
-		const switched = await this.#host.setModelTemporary(
+		const switched = await this.#switch(
 			target,
 			prewalk.thinkingLevel,
 			() => this.#selectionEpoch === epoch,
+			escalated !== undefined,
 		);
 		const disarmed = this.#switching !== prewalk;
 		this.#switching = undefined;
@@ -457,11 +598,11 @@ export class PrewalkCoordinator {
 		}
 		if (source) {
 			this.#handoff = {
-				source,
-				sourceThinkingLevel,
 				target,
 				targetThinkingLevel: this.#host.configuredThinkingLevel(),
 				auto,
+				restoreTo: escalated?.restoreTo ?? { model: source, thinkingLevel: sourceThinkingLevel },
+				escalation: escalated?.escalation,
 			};
 		}
 		this.#host.emitNotice(
@@ -481,6 +622,26 @@ export class PrewalkCoordinator {
 			display: false,
 			timestamp: Date.now(),
 		});
+	}
+
+	/**
+	 * Moves the session for prewalk. The moves of a task `escalate` routed (to its planner, the handoff, and the
+	 * return) only change effort when the model stays, so the provider session survives them; any other move is a
+	 * temporary model change.
+	 */
+	async #switch(
+		model: Model,
+		thinkingLevel: ConfiguredThinkingLevel | undefined,
+		isCurrent: () => boolean,
+		escalated: boolean,
+		metadataResolved?: boolean,
+	): Promise<boolean> {
+		if (!escalated || !routedModelsAreEqual(this.#host.model(), model)) {
+			return this.#host.setModelTemporary(model, thinkingLevel, isCurrent, metadataResolved);
+		}
+		if (!isCurrent()) return false;
+		this.#host.setThinkingLevel(thinkingLevel);
+		return true;
 	}
 
 	/** Drops a pending prewalk hand-off (e.g. `prewalk.enabled` turned off); no-op when none is armed. */

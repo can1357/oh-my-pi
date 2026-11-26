@@ -25,7 +25,7 @@ import { formatModelString, getModelMatchPreferences, resolveCliModel } from "..
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "../session/auth-storage";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { concreteThinkingLevel, resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking/levels";
 
 /** Injection point for the provider call; tests pass a synthetic event stream. */
 export type StreamSimpleFn = (

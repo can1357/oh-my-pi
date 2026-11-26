@@ -4,8 +4,13 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
+import {
+	isQueuedMessageList,
+	queueShorthandMarks,
+	splitQueuedMessages,
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Composer } from "../src/ui/composer/composer";
 
 // Drives the real editor submit handler through the builtin slash dispatch
 // path. Before #3148 only a handful of commands recorded their text (each
@@ -14,42 +19,20 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 // addToHistory call. The fix centralizes recording after dispatch, with a
 // secret filter (shouldSkipHistory) for credential-bearing commands.
 function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
-	const addToHistory = vi.fn();
 	const handleMCPCommand = vi.fn(async () => {});
 	const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const prompt = vi.fn(async () => false);
 	const onInputCallback = vi.fn();
 	const shutdown = vi.fn(async () => {});
-	let text = "";
-	const editor = {
-		onSubmit: undefined as undefined | ((t: string) => Promise<void>),
-		getText: () => text,
-		setText: (t: string) => {
-			text = t;
-		},
-		setCollapsedText: (t: string) => {
-			text = t;
-		},
-		composerChips: () => [],
-		addToHistory,
-		pendingImages: [] as ImageContent[],
-		pendingImageLinks: [] as (string | undefined)[],
-		imageLinks: undefined as (string | undefined)[] | undefined,
-		clearDraft(historyText?: string) {
-			if (historyText !== undefined) addToHistory(historyText);
-			text = "";
-			this.imageLinks = undefined;
-			this.pendingImages = [];
-			this.pendingImageLinks = [];
-		},
-	};
+	const editor = new Composer();
+	const addToHistory = vi.spyOn(editor, "addToHistory");
 	// Mirrors the real contract: a pending submission is recorded as a local
 	// submission until its canonical user `message_start` lands.
 	const locallySubmittedUserSignatures = new Set<string>();
 	const sessionManager = { sessionId: "session-a", getSessionId: () => sessionManager.sessionId };
 	const ctx = {
-		editor,
+		composer: editor,
 		sessionManager,
 		session: {
 			messages,
@@ -67,7 +50,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 		collabGuest: undefined,
 		shutdown,
 		locallySubmittedUserSignatures,
-		flushPendingBashComponents: vi.fn(),
+		flushPendingExecRuns: vi.fn(),
 		handleHotkeysCommand: vi.fn(),
 		handleMCPCommand,
 		showStatus: vi.fn(),
@@ -83,7 +66,6 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 			locallySubmittedUserSignatures.add(`${input.text}\u0000${input.images?.length ?? 0}`);
 			return { ...input, cancelled: false, started: false };
 		},
-		ui: { requestRender: vi.fn() },
 		compactionQueuedMessages: [],
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -155,8 +137,8 @@ describe("input controller — slash command history (#3148)", () => {
 			},
 		});
 		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
-		editor.pendingImages = [image];
-		editor.pendingImageLinks = ["file:///draft.png"];
+		editor.pendingImages.push(image);
+		editor.pendingImageLinks.push("file:///draft.png");
 		controllerFor(ctx);
 
 		await editor.onSubmit?.("/id [Image #1]");
@@ -185,7 +167,7 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.(input);
 
 		expect(showStatus).toHaveBeenCalledWith("/queue is host-only during a collab session");
-		expect(editor.getText()).toBe(input);
+		expect(editor.text()).toBe(input);
 		expect(addToHistory).not.toHaveBeenCalled();
 		expect(followUp).not.toHaveBeenCalled();
 		expect(prompt).not.toHaveBeenCalled();
@@ -288,8 +270,8 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 		const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
 		const { ctx, editor, shutdown, onInputCallback } = makeCtx();
 		controllerFor(ctx);
-		editor.pendingImages = [image];
-		editor.pendingImageLinks = [undefined];
+		editor.pendingImages.push(image);
+		editor.pendingImageLinks.push(undefined);
 
 		await editor.onSubmit?.("exit [Image #1]");
 
@@ -365,10 +347,10 @@ describe("input controller — bare slash commands opt-in", () => {
 
 			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
 			expect(onInputCallback).not.toHaveBeenCalled();
-			expect(editor.getText()).toBe("hotkeys");
+			expect(editor.text()).toBe("hotkeys");
 			expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Enter again to run /hotkeys"));
 
-			await editor.onSubmit?.(editor.getText());
+			await editor.onSubmit?.(editor.text());
 
 			expect(ctx.handleHotkeysCommand).toHaveBeenCalledTimes(1);
 			expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
@@ -443,7 +425,7 @@ describe("input controller — bare slash commands opt-in", () => {
 
 		expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
 		expect(onInputCallback.mock.calls.map(call => call[0].text)).toEqual(["fix the build"]);
-		expect(editor.getText()).toBe("hotkeys");
+		expect(editor.text()).toBe("hotkeys");
 	});
 
 	it.each(["hotkeys please", " hotkeys", "hotkeys.", "notacommand"])(
@@ -465,8 +447,8 @@ describe("input controller — bare slash commands opt-in", () => {
 		const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
 		const { ctx, editor, onInputCallback } = makeCtx();
 		controllerFor(ctx);
-		editor.pendingImages = [image];
-		editor.pendingImageLinks = [undefined];
+		editor.pendingImages.push(image);
+		editor.pendingImageLinks.push(undefined);
 
 		await editor.onSubmit?.("hotkeys [Image #1]");
 
@@ -511,5 +493,13 @@ describe("yield queue list parsing", () => {
 		expect(splitQueuedMessages("1. first\n3. third")).toEqual(["1. first\n3. third"]);
 		expect(isQueuedMessageList("1. first\n2. second\n3. third\n4.")).toBe(true);
 		expect(splitQueuedMessages("1. first\n2. second\n3. third\n4.")).toEqual(["first", "second", "third"]);
+	});
+
+	it("locates the prefix and list markers in the draft across a padded body and CRLF breaks", () => {
+		const text = "->  a) first\r\nb) second";
+		const marks = queueShorthandMarks(text);
+		expect(marks?.prefix).toEqual({ from: 0, to: 2 });
+		expect(marks?.markers.map(({ from, to }) => text.slice(from, to))).toEqual(["a)", "b)"]);
+		expect(queueShorthandMarks("a) first\nb) second")).toBeUndefined();
 	});
 });

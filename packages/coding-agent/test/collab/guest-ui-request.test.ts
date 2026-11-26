@@ -33,6 +33,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import { instrumentRelay, waitFor } from "./helpers/throttled-host";
 
@@ -213,24 +214,22 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 				setDisableReasoning: () => {},
 			},
 		},
-		statusContainer: { clear: () => {} },
-		pendingShellContainer: { clear: () => {} },
-		pendingMessagesContainer: { clear: () => {} },
+		clearTransientSessionUi: () => {},
+		clearWorking: () => false,
+		ensureWorkingRow: () => {},
+		updatePendingMessagesDisplay: () => {},
 		compactionQueuedMessages: [],
-		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
-		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
 			setAwaitingAnswer: () => {},
-			invalidate: () => {},
 			resetActiveTime: () => {},
+			refresh: () => {},
 			markActivityStart: () => {},
 			markActivityEnd: () => {},
 		},
-		ui: { requestRender: () => {} },
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
@@ -259,6 +258,7 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 			Object.assign(ctx, { collabGuest: guest });
 		},
 		closeLinkBrowser: () => {},
+		configureDialogEditor: () => {},
 		rerenderInLinkBrowser: () => {},
 		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
@@ -492,10 +492,8 @@ function makeHostContext(): InteractiveModeContext {
 		statusLine: {
 			setCollabStatus: () => {},
 			setAwaitingAnswer: () => {},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: () => {},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
@@ -799,38 +797,34 @@ describe("guest ask unavailable literal answer (#4375)", () => {
 	});
 });
 
-// ── Guest ask multi-select Next gating (#4375: PRRT_kwDOQxs0bc6OFbDW) ───────
+// ── Guest ask multi-select Next ──────────────────────────────────────────────
 //
-// The local rich dialog disables the Next row on a single-question
-// multi-select until at least one option or custom input is chosen. The guest
-// mirror has no "disabled row" concept on the wire, so it must OMIT Next from
-// the option list until an answer exists, then include it on the next round.
-// This test pins that wire-level contract by inspecting consecutive
-// ui-request frames.
+// Like the local dialog, the guest mirror never forces an answer: Next is on
+// the option list from the first round, so an empty multi-select can be sent.
 
 /** Context double with the extra members `#showLocalAskDialog` touches when
- *  mounting the local AskDialogComponent. The local dialog is never driven
+ *  mounting the local ask dialog. The local dialog is never driven
  *  (no input), so it never settles and the remote guest wins the race.
  *  Reuses makeHostContext for the CollabHost-facing members. */
 function makeAskHostContext(): InteractiveModeContext {
 	const base = makeHostContext();
-	// Stub only the surface the local ask-dialog mount path calls: the ask's and
-	// composer's containers, ui focus/render, the composer's border, and editor. The real
+	// Stub only the surface the local ask-dialog mount path calls: the shell (its ask slot and
+	// focus), the composer, and the status line's awaiting-answer flag. The real
 	// InteractiveModeContext has many more members; the double-cast below is
 	// the established test pattern in this file (see makeHostContext) for a
 	// complex interface that is only partially exercised.
+	const ui = createInteractiveModeContext();
 	const stub = {
 		...base,
-		editorContainer: { clear: () => {}, addChild: () => {} },
-		askContainer: { addChild: () => {}, removeChild: () => {} },
-		editor: { getText: () => "", setText: () => {} },
+		shell: ui.shell,
+		composer: ui.composer,
+		hud: ui.hud,
+		keybindings: ui.keybindings,
+		showEditorAreaDialog: ui.showEditorAreaDialog,
+		interceptInput: ui.interceptInput,
+		dialogVim: ui.dialogVim,
 		closeLinkBrowser: () => {},
-		ui: {
-			requestRender: () => {},
-			setFocus: () => {},
-			terminal: { rows: 40, columns: 80 },
-			addInputListener: () => () => {},
-		},
+		statusLine: { ...base.statusLine, setAwaitingAnswer: () => {} },
 	};
 	return stub as unknown as InteractiveModeContext;
 }
@@ -1027,7 +1021,7 @@ describe("collab TUI guest resync", () => {
 	});
 });
 
-describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () => {
+describe("guest ask multi-select Next", () => {
 	/** Skip ui-request-end dismissal frames, wait for the next ui-request. */
 	async function nextUiRequest(guest: {
 		nextFrame(): Promise<CollabFrame>;
@@ -1047,7 +1041,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		return frame.request.options.map(o => (typeof o === "string" ? o : o.label));
 	}
 
-	it("omits Next from the first ui-request, includes it after a toggle", async () => {
+	it("offers Next before anything is checked and submits the empty answer", async () => {
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
@@ -1068,25 +1062,15 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			];
 			const result = controller.showAskDialog(questions);
 
-			// First ui-request: Next must be absent (no answer yet).
 			const first = await nextUiRequest(guest);
-			const firstLabels = selectLabels(first);
-			expect(firstLabels).not.toContain("Next →");
+			expect(selectLabels(first)).toContain("Next →");
+			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Next →" });
 
-			// Guest toggles Option A — a real answer, not Next/Other/Chat.
-			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Option A" });
-
-			// Second ui-request: Next must now be present.
-			const second = await nextUiRequest(guest);
-			const secondLabels = selectLabels(second);
-			expect(secondLabels).toContain("Next →");
-
-			// Guest selects Next to submit.
-			guest.socket.send({ t: "ui-response", reqId: second.request.reqId, value: "Next →" });
 			const settled = await result;
 			expect(settled?.kind).toBe("submit");
 			if (settled?.kind === "submit") {
-				expect(settled.results[0]?.selectedOptions).toEqual(["Option A"]);
+				expect(settled.results[0]?.selectedOptions).toEqual([]);
+				expect(settled.results[0]?.customInput).toBeUndefined();
 			}
 			guest.socket.close();
 		} finally {
@@ -1307,17 +1291,17 @@ describe("guest HTML form race", () => {
 			expect(db.request.initialIndex).toBe(1);
 			guest.socket.send({ t: "ui-response", reqId: db.request.reqId, value: "SQLite" });
 
-			// A required group offers Next only once something is checked.
+			// A required group offers Next before anything is checked: the form flags rules, never blocks.
 			const extras = await nextUiRequest(guest);
 			if (extras.request.kind !== "select") throw new Error(`expected select, got ${extras.request.kind}`);
-			expect(extras.request.options).toEqual(["Cache", "Queue", "Other (type your own)"]);
+			expect(extras.request.options).toEqual(["Cache", "Queue", "Other (type your own)", "Next →"]);
 			guest.socket.send({ t: "ui-response", reqId: extras.request.reqId, value: "Queue" });
 			const extrasNext = await nextUiRequest(guest);
 			if (extrasNext.request.kind !== "select") throw new Error(`expected select, got ${extrasNext.request.kind}`);
 			expect(extrasNext.request.checkedIndices).toEqual([1]);
 			guest.socket.send({ t: "ui-response", reqId: extrasNext.request.reqId, value: "Next →" });
 
-			// A value the form rejects is asked again with the reason.
+			// A value breaking the form's rules is asked again with the reason; sending it again keeps it.
 			const workers = await nextUiRequest(guest);
 			if (workers.request.kind !== "editor") throw new Error(`expected editor, got ${workers.request.kind}`);
 			expect(workers.request.prefill).toBe("3");
@@ -1326,9 +1310,9 @@ describe("guest HTML form race", () => {
 			if (retry.request.kind !== "editor") throw new Error(`expected editor, got ${retry.request.kind}`);
 			expect(retry.request.prefill).toBe("0");
 			expect(retry.request.title).not.toBe(workers.request.title);
-			guest.socket.send({ t: "ui-response", reqId: retry.request.reqId, value: "8" });
+			guest.socket.send({ t: "ui-response", reqId: retry.request.reqId, value: "0" });
 
-			expect(await result).toEqual({ data: { plan: "v2", db: "sqlite", extras: ["queue"], workers: 8 } });
+			expect(await result).toEqual({ data: { plan: "v2", db: "sqlite", extras: ["queue"], workers: 0 } });
 			guest.socket.close();
 		} finally {
 			await host.stop("test done");

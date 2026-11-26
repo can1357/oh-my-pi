@@ -1,16 +1,69 @@
 # Changelog
 
 ## [Unreleased]
-### Changed
 
-- Google Antigravity requests now identify as Antigravity 2.34.0 instead of 2.26.0 when the update manifest cannot be reached ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
+### Removed
+
+- Removed unused exports `hasQuotaTierPolicy` (`/compat/behavior`), `hasRoutingVariants` (`/compat/taxonomy`), `toFirepassPublicModelId` (`/fireworks-model-id`), `isAzureDeploymentsUrl` (`/hosts`) and `toPositiveNumberOrNull` (`/utils`) ([#20528](https://github.com/can1357/oh-my-pi/pull/20528))
+- Removed Devin Fusion pairings (`fusion-<lead>-sidekick-*`) from the model list: omp runs only the lead, so the 1000+ rows duplicated the lead models pinned to one thinking level
 
 ### Added
 
+- Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
+
+- Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Google Antigravity model discovery now sends a request id, plus the account's tier and a configured cloud location, like the native client ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
-- Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
-- Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.
+### Changed
+
+- Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Devin's Fast models (`-fast`) are no longer listed separately: each model carries its fast lane, which `/fast` switches on
+- Google Antigravity requests now identify as Antigravity 2.34.0 instead of 2.26.0 when the update manifest cannot be reached ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
+
+### Added
+
+- Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
+
+## [19.2.1] - 2026-11-25
+
+### Fixed
+
+- Fixed Codex service tiers, such as Ultrafast, being hidden for accounts that support them when the first logged-in account has a plan that does not.
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added Otari credential helpers and endpoint-aware model discovery, supporting stored `{ token, baseUrl }` credentials and US/EU endpoints.
+- Added GLM-5.4 to the Zhipu Coding Plan with image input, a 1M-token context window, and low/high/max thinking levels; it is preferred for the `slow` role over GLM-5.3.
+- Added OpenRouter chat-model discovery for tool-capable models through the OpenAI-compatible provider-models API.
+- Added Gemini-compatible tool schema conversion for OpenAI-compatible providers; GitHub Copilot Gemini models now use the appropriate schema format.
+
+### Changed
+
+- Updated the `judge` role for OpenCode Go and Zen to prefer OpenCode's free `jev-1.13-free` model, with Zen's `jev-1.14` as a fallback.
+- Changed ai&'s default model to `moonshotai/kimi-k3`, replacing the unavailable `moonshotai/kimi-k2.7-code`.
+- Classified OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models as judge models rather than chat models.
+- Removed StepFun's `dr-search-api` web-search SKU from chat-model listings.
+- Updated Devin and Cursor pricing and usage accounting for image tokens and long-context GPT-5.6 models to match their published rates and limits.
+- Repeated provider resolution reuses bundled model fingerprints instead of serializing the same catalog rows again.
+
+### Fixed
+
+- Improved QwenCloud Token Plan discovery errors by reporting the endpoint host and underlying failure reason when the models endpoint cannot be loaded.
+- Fixed Bedrock Kimi K3.1 requests failing because of unsupported temperature settings, and fixed Kimi K3.1 Pro Highspeed requests failing due to invalid output-token and reasoning-effort settings.
+- Fixed Claude models on Google Vertex failing after the active tool set changed during a session.
+- Fixed Claude models on OpenRouter preserving thinking and reasoning context across follow-up requests and tool calls.
+- Fixed Llama 3.x models served through vLLM-based hosts failing after multiple tool calls in one turn.
+- Fixed Devin accounts belonging to separate organizations under the same email address being merged.
+- Fixed GPT-6.1 Terra sending an unsupported reasoning level when thinking was disabled.
+- Fixed GPT-6.2 and later OpenAI Responses models losing reasoning context after session pruning.
+- Fixed GitHub Copilot model listings to respect the account's available and enabled model roster, including after restarts.
+- Fixed Codex models discovered before their bundled definitions were available displaying slug-style names instead of their normal display names.
 
 ## [19.1.1] - 2026-11-23
 
@@ -32,19 +85,6 @@
 - Corrected Bedrock Kimi K3.1 Pro Highspeed reasoning options and effort handling.
 - GitHub Copilot now lists only models available to the account, including after restarting.
 - Codex models discovered before being bundled now use their formatted display names, such as `GPT-6.2 Sol`.
-- Fixed Bedrock Kimi K3.1 requests that set a temperature (history summaries, skill routing hints) failing with "This model doesn't support the temperature field" ([#20239](https://github.com/can1357/oh-my-pi/issues/20239))
-- Fixed Llama 3.x models failing with "This model only supports single tool-calls at once!" after a turn that called several tools, on hosts serving them through vLLM (such as CoreWeave behind OpenRouter)
-- Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's Gemini 4 Neon images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's Gemini 4 Hydrogen and Argon and Gemini 3.5 and 3.8 Flash images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#20038](https://github.com/can1357/oh-my-pi/pull/20038) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's GPT-5.6 Sol, Terra and Luna Fast lanes are now costed at Devin's published long-context rates above 272K input tokens and, with Extended Context off, capped at 272K like the standard lanes ([#20094](https://github.com/can1357/oh-my-pi/pull/20094) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's GPT-5.6 Sol is costed above 272K input tokens at Devin's published $8 / $30 rate instead of $10 / $45 derived from its new standard-context price ([#20094](https://github.com/can1357/oh-my-pi/pull/20094) by [@will-bogusz](https://github.com/will-bogusz))
-- Cursor's GPT-5.6 Sol, Terra and Luna (standard and Fast) now price output above 272K input tokens at 1.5x the base rate, as each model's Cursor docs page publishes, instead of the base rate ([#20093](https://github.com/can1357/oh-my-pi/pull/20093) by [@will-bogusz](https://github.com/will-bogusz))
-- Turning thinking off on GPT-6.1 Terra now sends reasoning effort `none`, which the model supports, instead of falling back to `low` ([#20144](https://github.com/can1357/oh-my-pi/pull/20144) by [@Komzpa](https://github.com/Komzpa))
-- Fixed GPT-6.2 and later OpenAI Responses models lacking thinking prefix-binding, so sessions pruned already-sent tool results and the API dropped later reasoning items ([#19721](https://github.com/can1357/oh-my-pi/issues/19721), [#19988](https://github.com/can1357/oh-my-pi/pull/19988) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed Bedrock's Kimi K3.1 Pro Highspeed profiles missing the `xhigh` and `max` reasoning efforts, offering an unsupported `minimal`, and sending token budgets instead of effort controls ([#19998](https://github.com/can1357/oh-my-pi/pull/19998) by [@alblez](https://github.com/alblez))
-- Fixed GitHub Copilot listing bundled models the account's `/models` roster omits, and models Copilot disables for the account, including after a restart ([#14832](https://github.com/can1357/oh-my-pi/issues/14832), [#19984](https://github.com/can1357/oh-my-pi/pull/19984) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed Codex models discovered before they are bundled for `openai-codex` showing Codex's slug-style name, e.g. `GPT-6.2-Sol` instead of `GPT-6.2 Sol` ([#20167](https://github.com/can1357/oh-my-pi/issues/20167))
 
 ## [19.1.0] - 2026-11-21
 

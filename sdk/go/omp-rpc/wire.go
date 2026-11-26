@@ -2237,11 +2237,11 @@ func (v *ContextUsage) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
-// Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.
+// Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`. Input the agent already took leads its list until the transcript records it.
 type QueuedMessagesState struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
-	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	// Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
 }
 
@@ -2647,7 +2647,11 @@ type BashResult struct {
 	ArtifactError map[string]json.RawMessage `json:"artifactError,omitempty"`
 	Minimized     map[string]json.RawMessage `json:"minimized,omitempty"`
 	WorkingDir    *string                    `json:"workingDir,omitempty"`
-	Images        []ImageContent             `json:"images,omitempty"`
+	// The command ended in another directory than it started in; the next command starts in its own cwd.
+	MovedCwd *bool `json:"movedCwd,omitempty"`
+	// The command ended with `set -e` on; the next command starts with it off.
+	Errexit *bool          `json:"errexit,omitempty"`
+	Images  []ImageContent `json:"images,omitempty"`
 	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	Trace map[string]json.RawMessage `json:"trace,omitempty"`
 	// Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.
@@ -2681,6 +2685,8 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("artifactError", &out.ArtifactError)
 	d.optional("minimized", &out.Minimized)
 	d.optional("workingDir", &out.WorkingDir)
+	d.optional("movedCwd", &out.MovedCwd)
+	d.optional("errexit", &out.Errexit)
 	d.optional("images", &out.Images)
 	d.optional("trace", &out.Trace)
 	d.optional("fork", &out.Fork)
@@ -4705,7 +4711,7 @@ func (v GoalUpdatedEvent) MarshalJSON() ([]byte, error) {
 type QueueUpdateEvent struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
-	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	// Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
 }
 

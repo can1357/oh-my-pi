@@ -533,7 +533,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			// override applies per request, not only at login.
 			const projectId = (isAntigravity && process.env.ANTIGRAVITY_PROJECT_ID) || parsedCredentials.projectId;
 			// AuthStorage already refreshed credentials before threading them
-			// here (see {@link OAUTH_REFRESH_SKEW_MS}). If the credential lands
+			// here (see {@link oauthRefreshSkewMs}). If the credential lands
 			// expired we bail rather than POSTing a stale token; the next call
 			// — driven by AuthStorage's invalidate+retry path — will carry a
 			// fresh credential.

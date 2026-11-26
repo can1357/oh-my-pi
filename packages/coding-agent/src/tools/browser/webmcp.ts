@@ -1,5 +1,5 @@
-import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { truncateHeadBytes } from "../streaming-output";
+import { ToolError } from "../tool-errors";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { Protocol } from "devtools-protocol";
 import type { CDPSession, Frame, Page } from "puppeteer-core";
