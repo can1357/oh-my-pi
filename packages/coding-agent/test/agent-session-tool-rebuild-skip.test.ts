@@ -1712,6 +1712,39 @@ Unavailable; invocations fail:
 		expect(delivered).toHaveLength(1);
 		expect(delivered[0]).toContain("mcp__nucleus_search");
 	});
+
+	it("keeps the startup MCP connect's mounts model-visible without rendering them", async () => {
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			toolCommands: createTestToolCommandState(),
+			responses: [{ content: ["ok"] }],
+		});
+		cfgToolsCommandDocs.set(session.settings, "builtins");
+		cfgToolsCommandInline.set(session.settings, ["mcp__nucleus_*"]);
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "toolCommands") notices.push(event.message);
+		});
+
+		// The startup connect (a fresh start or a resume) mounts every server's tools, some only after
+		// discovery returns; its own "MCP finished" line reports the servers, so a "Tool commands: added …"
+		// list is noise.
+		const discovery = Promise.withResolvers<void>();
+		session.setMCPStartupConnecting(discovery.promise);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		await session.refreshMCPTools([search]);
+		expect(notices).toEqual([]);
+		await session.prompt("hello");
+		const delivered = mountNoticesIn(contexts[0]);
+		expect(delivered).toHaveLength(1);
+		expect(delivered[0]).toContain("mcp__nucleus_search");
+
+		// Once every startup server has connected or failed, a server that mounts later is a change the user sees.
+		discovery.resolve();
+		await discovery.promise;
+		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+		await session.refreshMCPTools([search, fetch]);
+		expect(notices).toEqual(["Tool commands: added mcp__nucleus_fetch"]);
+	});
 	it("restores the active-tool predicate when a rebuild fails mid-flight", async () => {
 		let blockRebuild = false;
 		const rebuildStarted = Promise.withResolvers<void>();

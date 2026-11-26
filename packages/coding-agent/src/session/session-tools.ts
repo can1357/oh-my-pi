@@ -118,6 +118,8 @@ export interface SessionToolsHost {
 	clientBridge(): ClientBridge | undefined;
 	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
+	/** Whether the MCP servers configured at startup are still connecting (their mounts are no mid-session change). */
+	mcpStartupConnecting(): boolean;
 	isStreaming(): boolean;
 	/**
 	 * Aborts once per user steering-message arrival; the ACP permission gate
@@ -1921,9 +1923,14 @@ export class SessionTools {
 			removedNames,
 		);
 		if (cfgStartupQuiet.get(this.#host.settings) || !cfgToolsCommandNotices.get(this.#host.settings)) return;
+		// The startup connect reports its servers itself ("MCP finished …"): its MCP mounts are no change to announce.
+		const startup = this.#host.mcpStartupConnecting();
+		const shownAdded = startup ? addedNames.filter(name => !isMCPToolName(name)) : addedNames;
+		const shownRemoved = startup ? removedNames.filter(name => !isMCPToolName(name)) : removedNames;
+		if (shownAdded.length === 0 && shownRemoved.length === 0) return;
 		const parts: string[] = [];
-		if (addedNames.length > 0) parts.push(`added ${addedNames.join(", ")}`);
-		if (removedNames.length > 0) parts.push(`removed ${removedNames.join(", ")}`);
+		if (shownAdded.length > 0) parts.push(`added ${shownAdded.join(", ")}`);
+		if (shownRemoved.length > 0) parts.push(`removed ${shownRemoved.join(", ")}`);
 		this.#host.emitNotice("info", `Tool commands: ${parts.join("; ")}`, "toolCommands");
 	}
 

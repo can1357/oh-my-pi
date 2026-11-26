@@ -3098,6 +3098,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					})();
 					initialMcpDiscovery = discovery;
 					liveSession.setPendingMCPDiscovery(discovery);
+					// Servers still connecting when discovery returns mount later through `onToolsChanged`; the
+					// startup connect lasts until every configured server has connected or failed.
+					liveSession.setMCPStartupConnecting(discovery.then(() => deferredMCPManager.waitForStartup(0)));
 				};
 			} else {
 				const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
