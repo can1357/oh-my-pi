@@ -196,9 +196,9 @@ function bashValueBranch(bin: string, v: ValueSource): string {
 		case "sessions":
 			return `COMPREPLY=( $(compgen -W "$(command ${bin} __complete sessions -- "$cur" 2>/dev/null | cut -f1)" -- "$cur") ); return 0`;
 		case "file":
-			return `COMPREPLY=( $(compgen -f -- "$cur") ); compopt -o filenames; return 0`;
+			return "_omp_path -f; return 0";
 		case "dir":
-			return `COMPREPLY=( $(compgen -d -- "$cur") ); compopt -o filenames; return 0`;
+			return "_omp_path -d; return 0";
 	}
 }
 
@@ -242,6 +242,17 @@ function generateBash(spec: CompletionSpec): string {
 }`);
 	parts.push("");
 
+	// Keep each path intact without relying on Bash 4's mapfile.
+	parts.push(`_omp_path() {
+	local candidate
+	COMPREPLY=()
+	while IFS= read -r candidate; do
+		COMPREPLY+=("$candidate")
+	done < <(compgen "$1" -- "$cur")
+	compopt -o filenames
+}`);
+	parts.push("");
+
 	// Root handler: top-level flags + subcommand names.
 	const subTokens = spec.commands.flatMap(commandTokens).sort();
 	parts.push(`_omp_root() {
@@ -264,7 +275,7 @@ ${bashFlagCase(bin, spec.root.flags)}
 		const elseBranch = argWords
 			? `COMPREPLY=( $(compgen -W "${argWords}" -- "$cur") )`
 			: fileArg
-				? `COMPREPLY=( $(compgen -f -- "$cur") ); compopt -o filenames`
+				? "_omp_path -f"
 				: ":";
 		parts.push(`_omp_cmd_${bashFn(c.name)}() {
 	case "$prev" in

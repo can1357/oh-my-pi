@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { isAdvisorTranscriptName } from "../advisor/transcript-recorder";
+import { isAdvisorTranscriptName } from "../advisor/transcript-names";
 import { getAgentTombstonePath } from "../registry/agent-tombstone";
 import { resolveSessionLeafId, type SessionEntry, type SessionHeader } from "./session-entries";
 import { loadSessionFile, parseSessionContent, type SessionLoadResult } from "./session-loader";
@@ -31,16 +31,33 @@ export interface SubSession {
 	malformedRecords: number;
 }
 
+/** A child transcript file next to a session, found without reading it. */
+export interface SubSessionFile {
+	/** Slash-joined id relative to the main session ("ToolAsk", "ToolAsk/Helper"). */
+	key: string;
+	/** Transcript stem, e.g. "ToolAsk" or "__advisor.reviewer". */
+	agentId: string;
+	/** Key of the parent sub-session, or null when spawned by the main session. */
+	parent: string | null;
+	file: string;
+	/** A tombstone sidecar sits next to the transcript: the subagent was explicitly killed. */
+	aborted: boolean;
+}
+
 /** Receives the key of a subagent transcript that exists but has no readable session header. */
 export type UnreadableSubSessionHandler = (key: string) => void;
 
-/** Read-only discovery scope and malformed-transcript reporting for child collectors. */
-export interface CollectSubSessionsOptions {
-	onUnreadable?: UnreadableSubSessionHandler;
+/** Which child transcripts {@link listSubSessionFiles} finds. */
+export interface SubSessionScope {
 	/** Include advisor transcripts for read-only exports, never task restoration. */
 	includeAdvisors?: boolean;
 	/** Include gc-compressed transcripts for read-only exports. */
 	includeCompressed?: boolean;
+}
+
+/** Read-only discovery scope and malformed-transcript reporting for child collectors. */
+export interface CollectSubSessionsOptions extends SubSessionScope {
+	onUnreadable?: UnreadableSubSessionHandler;
 }
 
 /**
@@ -56,11 +73,43 @@ export async function collectSubSessions(
 	options: CollectSubSessionsOptions = {},
 ): Promise<Record<string, SubSession>> {
 	const result: Record<string, SubSession> = {};
-	const transcriptName =
-		options.includeCompressed && sessionFile.endsWith(".jsonl.gz") ? sessionFile.slice(0, -3) : sessionFile;
-	if (!transcriptName.endsWith(".jsonl")) return result;
-	await collectSubSessionsFromDir(transcriptName.slice(0, -6), null, result, options);
+	for (const found of await listSubSessionFiles(sessionFile, options)) {
+		const loaded = await loadCollectedSession(found.file);
+		if (!loaded) continue;
+		const { entries: fileEntries, malformedRecords, invalidHeader } = loaded;
+		// Empty files load as [] and are skipped; a corrupt or missing header is reported so exports do
+		// not look complete while omitting the transcript.
+		if (!invalidHeader && fileEntries.length > 0) {
+			const header = (fileEntries.find(e => e.type === "session") as SessionHeader | undefined) ?? null;
+			const entries = fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+			result[found.key] = {
+				agentId: found.agentId,
+				parent: found.parent,
+				header,
+				entries,
+				leafId: resolveSessionLeafId(entries),
+				aborted: found.aborted,
+				malformedRecords,
+			};
+		} else if (invalidHeader) {
+			options.onUnreadable?.(found.key);
+		}
+	}
 	return result;
+}
+
+/**
+ * Child transcript files stored next to a session file, each before its own
+ * children, siblings by name. Reads directories only. Advisors and compressed
+ * transcripts are opt-in, as in {@link collectSubSessions}.
+ */
+export async function listSubSessionFiles(sessionFile: string, scope: SubSessionScope = {}): Promise<SubSessionFile[]> {
+	const found: SubSessionFile[] = [];
+	const transcriptName =
+		scope.includeCompressed && sessionFile.endsWith(".jsonl.gz") ? sessionFile.slice(0, -3) : sessionFile;
+	if (!transcriptName.endsWith(".jsonl")) return found;
+	await listSubSessionDir(transcriptName.slice(0, -6), null, found, scope);
+	return found;
 }
 
 /** Decompress archives before handing their JSONL to the central session parser. */
@@ -75,11 +124,11 @@ async function loadCollectedSession(file: string): Promise<SessionLoadResult | n
 	}
 }
 
-async function collectSubSessionsFromDir(
+async function listSubSessionDir(
 	dir: string,
 	parentKey: string | null,
-	out: Record<string, SubSession>,
-	options: CollectSubSessionsOptions,
+	out: SubSessionFile[],
+	scope: SubSessionScope,
 ): Promise<void> {
 	let dirents: fs.Dirent[];
 	try {
@@ -96,44 +145,31 @@ async function collectSubSessionsFromDir(
 	}
 	for (const name of [...fileNames].sort()) {
 		const compressed = name.endsWith(".jsonl.gz");
-		if (compressed && !options.includeCompressed) continue;
+		if (compressed && !scope.includeCompressed) continue;
 		const transcriptName = compressed ? name.slice(0, -3) : name;
 		if (
 			!transcriptName.endsWith(".jsonl") ||
 			name.includes(".bak") ||
-			(!options.includeAdvisors && isAdvisorTranscriptName(transcriptName))
+			(!scope.includeAdvisors && isAdvisorTranscriptName(transcriptName))
 		)
 			continue;
 		// A live transcript wins over an archive of the same session during gc.
 		if (compressed && fileNames.has(transcriptName)) continue;
 		const agentId = transcriptName.slice(0, -6);
 		const key = parentKey ? `${parentKey}/${agentId}` : agentId;
-		const loaded = await loadCollectedSession(path.join(dir, name));
-		if (!loaded) continue;
-		const { entries: fileEntries, malformedRecords, invalidHeader } = loaded;
-		// Empty files load as [] and are skipped; a corrupt or missing header is reported so exports do
-		// not look complete while omitting the transcript.
-		if (!invalidHeader && fileEntries.length > 0) {
-			const header = (fileEntries.find(e => e.type === "session") as SessionHeader | undefined) ?? null;
-			const entries = fileEntries.filter((e): e is SessionEntry => e.type !== "session");
-			out[key] = {
-				agentId,
-				parent: parentKey,
-				header,
-				entries,
-				leafId: resolveSessionLeafId(entries),
-				aborted:
-					fileNames.has(getAgentTombstonePath(transcriptName)) ||
-					(compressed && fileNames.has(getAgentTombstonePath(name))),
-				malformedRecords,
-			};
-		} else if (invalidHeader) {
-			options.onUnreadable?.(key);
-		}
+		out.push({
+			key,
+			agentId,
+			parent: parentKey,
+			file: path.join(dir, name),
+			aborted:
+				fileNames.has(getAgentTombstonePath(transcriptName)) ||
+				(compressed && fileNames.has(getAgentTombstonePath(name))),
+		});
 		// Only descend into real child directories: a transcript stem such as "." or ".."
 		// would revisit an ancestor, and symlinked directories can loop back into the tree.
 		if (childDirectories.has(agentId)) {
-			await collectSubSessionsFromDir(path.join(dir, agentId), key, out, options);
+			await listSubSessionDir(path.join(dir, agentId), key, out, scope);
 		}
 	}
 }

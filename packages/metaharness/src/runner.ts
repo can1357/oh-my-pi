@@ -20,6 +20,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
  *   metaharness harbor --help
  */
 import type { Server } from "bun";
+import { BENCH_SETTINGS } from "./bench-settings";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 
 // ────────────────────────────────────────────────────────────────────── config
@@ -1477,7 +1478,7 @@ export function buildHarborEnv(
 	if (cfg.thinking) env.OMP_BENCH_THINKING = cfg.thinking;
 	if (cfg.agentArgs.length > 0) env.OMP_BENCH_AGENT_ARGS = JSON.stringify(cfg.agentArgs);
 	if (cfg.tools) env.OMP_BENCH_TOOLS = cfg.tools.join(",");
-	if (Object.keys(cfg.settings).length > 0) env.OMP_BENCH_SETTINGS = JSON.stringify(cfg.settings);
+	env.OMP_BENCH_SETTINGS = JSON.stringify({ ...BENCH_SETTINGS, ...cfg.settings });
 	if (cfg.webSearch) env.OMP_BENCH_WEB_SEARCH = "1";
 	env.OMP_BENCH_GATEWAY = cfg.gateway ? "1" : "0";
 	if (cfg.gateway) {

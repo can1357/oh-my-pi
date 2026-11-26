@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import { type } from "@oh-my-pi/omptype";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import dsmDocumentation from "../prompts/tools/dsm.md" with { type: "text" };

@@ -666,6 +666,21 @@ describe("queued message preparation", () => {
 		expect(userTexts(mock.calls[0].context.messages)).toEqual(["ordinary"]);
 	});
 
+	it("makes no provider call when an idle drain's follow-up is withdrawn before delivery", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		agent.replaceMessages([createUserMessage("previous request")]);
+		agent.followUp(createUserMessage("withdrawn follow-up"));
+		agent.addBeforeQueuedMessageDequeueHook(() => agent.clearFollowUpQueue());
+
+		await agent.continue(undefined, { queuedOnly: true });
+		expect(mock.calls).toHaveLength(0);
+
+		await agent.continue();
+		expect(mock.calls).toHaveLength(1);
+		expect(userTexts(mock.calls[0].context.messages)).toEqual(["previous request"]);
+	});
+
 	it("aborting live follow-up preparation leaves the original for a later response", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
 		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
