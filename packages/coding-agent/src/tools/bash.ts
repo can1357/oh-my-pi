@@ -1132,7 +1132,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const isToolActive = (name: string, fallback: boolean): boolean => this.session.isToolActive?.(name) ?? fallback;
 		const shellConfig = this.session.settings.getShellConfig();
 		const approvalPatternsActive =
-			canToolAllowAvoidPrompt("bash", "execute", { settings: this.session.settings }) &&
+			canToolAllowAvoidPrompt("bash", "exec", { settings: this.session.settings }) &&
 			this.#patternPolicies().session.rules.some(rule => rule.approval === "allow");
 		return prompt.render(bashDescription, {
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),

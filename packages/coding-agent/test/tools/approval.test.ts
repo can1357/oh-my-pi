@@ -3,6 +3,7 @@ import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import {
 	type ApprovalMode,
+	canToolAllowAvoidPrompt,
 	denyError,
 	formatApprovalPrompt,
 	requestApproval,
@@ -1734,5 +1735,21 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 			}),
 		).toEqual({ approvalMode: "yolo", userPolicies: { bash: "deny" } });
 		expect(resolveApprovalFromContext({ autoApprove: true })).toEqual({ approvalMode: "yolo", userPolicies: {} });
+	});
+});
+
+describe("canToolAllowAvoidPrompt", () => {
+	const canAllow = (overrides: Record<string, unknown>) =>
+		canToolAllowAvoidPrompt("bash", "exec", { settings: Settings.isolated(overrides) });
+
+	it("is true only when an unmatched call prompts and a tool allow would skip it", () => {
+		expect(canAllow({ "tools.approvalMode": "write" })).toBe(true);
+		expect(canAllow({ "tools.approvalMode": "always-ask" })).toBe(true);
+		// Yolo already runs the unmatched call; a user `prompt` makes it ask, and a tool allow still wins.
+		expect(canAllow({ "tools.approvalMode": "yolo" })).toBe(false);
+		expect(canAllow({ "tools.approvalMode": "yolo", "tools.approval": { bash: "prompt" } })).toBe(true);
+		// A user `allow` never prompts; a user `deny` blocks even a tool allow.
+		expect(canAllow({ "tools.approvalMode": "write", "tools.approval": { bash: "allow" } })).toBe(false);
+		expect(canAllow({ "tools.approvalMode": "write", "tools.approval": { bash: "deny" } })).toBe(false);
 	});
 });
