@@ -23,6 +23,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "../../../src/ui/theme/service";
 import { blockText, transcriptText } from "../../helpers/transcript-text";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-coding-agent/tools/details/bash";
@@ -55,6 +56,14 @@ function bashResult(
 		...(exitCode === undefined ? {} : { exitCode }),
 	};
 	return { content: [{ type: "text" as const, text }], details };
+}
+
+function waitResult(status: "running" | "completed", durationMs: number) {
+	const details: CoordinationDetails = {
+		op: "wait",
+		jobs: [{ id: "Job1", type: "task", status, label: "Long task", durationMs }],
+	};
+	return { content: [{ type: "text" as const, text: `${status} wait` }], details };
 }
 
 describe("EventController async update finalization", () => {
@@ -448,6 +457,107 @@ describe("EventController async update finalization", () => {
 		await controller.handleEvent({ type: "agent_start" });
 
 		expect(isSettled(component.block.node)).toBe(true);
+	});
+
+	it("keeps an executing wait card repainting across a turn boundary", async () => {
+		const { controller, pendingTools } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
+		});
+		const component = pendingTools.get("tc-wait")!;
+		sealed.push(component);
+		component.call!.setExpanded(true);
+		const painted = () => blockText(component.block, 100);
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
+			partialResult: waitResult("running", 757_000),
+		});
+		expect(painted()).toContain("12m37s");
+
+		// A new turn starts while the wait is still executing.
+		await controller.handleEvent({ type: "agent_start" });
+		expect(pendingTools.get("tc-wait")).toBe(component);
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
+			partialResult: waitResult("running", 915_000),
+		});
+		expect(painted()).toContain("15m15s");
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			result: waitResult("completed", 916_000),
+			isError: false,
+		});
+		expect(painted()).toContain("15m16s");
+		expect(pendingTools.has("tc-wait")).toBe(false);
+		expect(isSettled(component.block.node)).toBe(true);
+	});
+
+	it("settles a read group closed before a turn boundary once its in-flight read ends", async () => {
+		const { controller, ctx } = createFixture();
+		// The streamed call creates the group; its start then marks the read executing.
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tc-read", name: "read", arguments: { path: "a.ts" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			stopReason: "toolUse",
+			timestamp: 1,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		await controller.handleEvent({ type: "message_start", message });
+		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-read",
+			toolName: "read",
+			args: { path: "a.ts" },
+		});
+		const group = ctx.pendingTools.get("tc-read")!;
+		sealed.push(group);
+		// A later non-read call closes the read group to new reads.
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			args: { command: "sleep 9" },
+		});
+		sealed.push(ctx.pendingTools.get("tc-bash")!);
+
+		// A new turn starts while the read is still executing.
+		await controller.handleEvent({ type: "agent_start" });
+		expect(ctx.pendingTools.get("tc-read")).toBe(group);
+		expect(isSettled(group.block.node)).toBe(false);
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-read",
+			toolName: "read",
+			result: { content: [{ type: "text", text: "x" }], isError: false },
+			isError: false,
+		});
+		expect(isSettled(group.block.node)).toBe(true);
 	});
 
 	it("keeps a parked task card available across the next agent turn", async () => {
