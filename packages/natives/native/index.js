@@ -59,6 +59,7 @@ export const VcsRepo = nativeBindings.VcsRepo ?? missingNativeClass("VcsRepo");
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
 export const __ompSetGrammarDir = nativeBindings.__ompSetGrammarDir ?? missingNativeExport("__ompSetGrammarDir");
 export const __piNativesBuildVersion = nativeBindings.__piNativesBuildVersion;
+export const analyzeBashApproval = nativeBindings.analyzeBashApproval ?? missingNativeExport("analyzeBashApproval");
 export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
 export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
 export const appleFmGenerate = nativeBindings.appleFmGenerate ?? missingNativeExport("appleFmGenerate");

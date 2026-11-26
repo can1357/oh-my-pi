@@ -36,7 +36,7 @@ import { ToolAbortError } from "./tool-errors";
 // Storage layer
 // ────────────────────────────────────────────────────────────────────────────
 
-export type CacheKind = "issue" | "pr" | "pr-diff" | "mr-diff";
+export type CacheKind = "issue" | "pr" | "pr-diff" | "mr" | "mr-diff" | "gl-issue";
 
 const DEFAULT_CACHE_AUTH_KEY = "default";
 
@@ -121,14 +121,14 @@ export function openDb(): Database | null {
 		// prepare() keeps the closed connection alive and the file locked on Windows.
 		const userVersion = (db.query("PRAGMA user_version").get() as { user_version?: number } | undefined)
 			?.user_version;
-		if (userVersion !== undefined && userVersion < 4) {
+		if (userVersion !== undefined && userVersion < 5) {
 			db.run("DROP TABLE IF EXISTS github_view_cache");
 		}
 		db.run(`
 			CREATE TABLE IF NOT EXISTS github_view_cache (
 				auth_key        TEXT    NOT NULL,
 				repo             TEXT    NOT NULL,
-				kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff','mr-diff')),
+				kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff','mr','mr-diff','gl-issue')),
 				number           INTEGER NOT NULL,
 				include_comments INTEGER NOT NULL,
 				fetched_at       INTEGER NOT NULL,
@@ -152,7 +152,7 @@ export function openDb(): Database | null {
 			);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_fetched ON github_view_cache(fetched_at);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_generation_retained ON github_view_cache_generation(retained_at);
-			PRAGMA user_version = 4;
+			PRAGMA user_version = 5;
 		`);
 		protectDbFiles(dbPath);
 		cachedDb = db;
@@ -330,8 +330,10 @@ export function resolveGitlabCacheAuthKey(host: string): string | undefined {
  * instance, so an explicit `github.com/` prefix then stays and keeps its own
  * rows instead of answering with another host's issue.
  */
-function normalizeRepo(repo: string): string {
-	const ref = parseRepoRef(repo.toLowerCase());
+function normalizeRepo(repo: string, kind?: CacheKind): string {
+	const lower = repo.toLowerCase();
+	if (kind === "mr" || kind === "mr-diff" || kind === "gl-issue") return lower;
+	const ref = parseRepoRef(lower);
 	return ref.host && ref.host !== defaultGhHost() ? `${ref.host}/${ref.slug}` : ref.slug;
 }
 
@@ -349,7 +351,7 @@ export function getCached<T = unknown>(
 			.query(
 				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
 			)
-			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0) as Row | undefined;
+			.get(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0) as Row | undefined;
 		if (!row) return null;
 		let payload: T;
 		try {
@@ -416,7 +418,7 @@ export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): n
 	const db = openDb();
 	if (!db) return null;
 	const authKey = input.authKey ?? DEFAULT_CACHE_AUTH_KEY;
-	const repo = normalizeRepo(input.repo);
+	const repo = normalizeRepo(input.repo, input.kind);
 	const includeComments = input.includeComments ? 1 : 0;
 	const payloadJson = JSON.stringify(input.payload);
 	let fetchedAt = input.fetchedAt ?? Date.now();
@@ -495,7 +497,7 @@ export function getCachedGeneration<T = unknown>(
 			.query(
 				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, retained_at, payload, rendered, source_url FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
 			)
-			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt) as
+			.get(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0, fetchedAt) as
 			| (Row & { retained_at: number })
 			| undefined;
 		if (!row) return null;
@@ -537,7 +539,7 @@ function deleteCachedGeneration(
 	try {
 		db.query(
 			"DELETE FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
-		).run(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt);
+		).run(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0, fetchedAt);
 	} catch (err) {
 		logger.debug("github cache: generation delete failed", { err: String(err) });
 	}
@@ -581,7 +583,7 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
 			input.authKey ?? DEFAULT_CACHE_AUTH_KEY,
-			normalizeRepo(input.repo),
+			normalizeRepo(input.repo, input.kind),
 			input.kind,
 			input.number,
 			input.includeComments ? 1 : 0,
@@ -611,14 +613,14 @@ export function invalidate(
 		if (includeComments === undefined) {
 			db.query("DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ?").run(
 				authKey,
-				normalizeRepo(repo),
+				normalizeRepo(repo, kind),
 				kind,
 				number,
 			);
 		} else {
 			db.query(
 				"DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
-			).run(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0);
+			).run(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0);
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidate failed", { err: String(err) });
@@ -644,7 +646,13 @@ export function invalidateAllForNumber(number: number, repo?: string): void {
 		if (repo === undefined) {
 			db.query("DELETE FROM github_view_cache WHERE number = ?").run(number);
 		} else {
-			db.query("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, normalizeRepo(repo));
+			const ghRepo = normalizeRepo(repo);
+			const glRepo = normalizeRepo(repo, "mr");
+			if (ghRepo === glRepo) {
+				db.query("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, ghRepo);
+			} else {
+				db.query("DELETE FROM github_view_cache WHERE number = ? AND repo IN (?, ?)").run(number, ghRepo, glRepo);
+			}
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForNumber failed", { err: String(err) });
@@ -678,7 +686,13 @@ export function invalidateAllForRepo(repo?: string): void {
 		if (repo === undefined) {
 			db.query("DELETE FROM github_view_cache").run();
 		} else {
-			db.query("DELETE FROM github_view_cache WHERE repo = ?").run(normalizeRepo(repo));
+			const ghRepo = normalizeRepo(repo);
+			const glRepo = normalizeRepo(repo, "mr");
+			if (ghRepo === glRepo) {
+				db.query("DELETE FROM github_view_cache WHERE repo = ?").run(ghRepo);
+			} else {
+				db.query("DELETE FROM github_view_cache WHERE repo IN (?, ?)").run(ghRepo, glRepo);
+			}
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForRepo failed", { err: String(err) });
@@ -688,11 +702,20 @@ export function invalidateAllForRepo(repo?: string): void {
 /** Drop live PR rows after a push, leaving issues and retained snapshots alone. */
 export function invalidatePullRequestsForRepo(repo: string): void {
 	invalidationEpoch++;
-	const normalized = normalizeRepo(repo);
+	const ghRepo = normalizeRepo(repo);
+	const glRepo = normalizeRepo(repo, "mr");
 	const db = openDb();
 	if (!db) return;
 	try {
-		db.query("DELETE FROM github_view_cache WHERE repo = ? AND kind IN ('pr', 'pr-diff')").run(normalized);
+		if (ghRepo === glRepo) {
+			db.query("DELETE FROM github_view_cache WHERE repo = ? AND kind IN ('pr', 'pr-diff', 'mr', 'mr-diff')").run(
+				ghRepo,
+			);
+		} else {
+			db.query(
+				"DELETE FROM github_view_cache WHERE (repo = ? AND kind IN ('pr', 'pr-diff')) OR (repo = ? AND kind IN ('mr', 'mr-diff'))",
+			).run(ghRepo, glRepo);
+		}
 	} catch (err) {
 		logger.debug("github cache: invalidatePullRequestsForRepo failed", { err: String(err) });
 	}
@@ -826,7 +849,7 @@ function scheduleBackgroundRefresh<T>(
 	includeComments: boolean,
 	fetchFresh: () => Promise<FreshResult<T>>,
 ): void {
-	const key = `${authKey}|${normalizeRepo(repo)}|${kind}|${number}|${includeComments ? 1 : 0}`;
+	const key = `${authKey}|${normalizeRepo(repo, kind)}|${kind}|${number}|${includeComments ? 1 : 0}`;
 	if (inflightRefreshes.has(key)) return;
 	inflightRefreshes.add(key);
 	queueMicrotask(() => {
@@ -853,9 +876,11 @@ const OPEN_STATE_SOFT_TTL_MS = 15_000;
 
 /** Whether `payload` is an open issue/PR view, whose state can still change. */
 function isOpenView(kind: CacheKind, payload: unknown): boolean {
-	if (kind !== "issue" && kind !== "pr") return false;
-	const state = payload !== null && typeof payload === "object" ? (payload as { state?: unknown }).state : undefined;
-	return typeof state === "string" && state.toUpperCase() === "OPEN";
+	const state = payload !== null && typeof payload === "object" && "state" in payload ? payload.state : undefined;
+	if (typeof state !== "string") return false;
+	if (kind === "issue" || kind === "pr") return state.toUpperCase() === "OPEN";
+	if (kind === "mr" || kind === "gl-issue") return state.toLowerCase() === "opened";
+	return false;
 }
 
 export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise<CacheLookupResult<T>> {
