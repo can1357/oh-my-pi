@@ -48,6 +48,12 @@ export interface MarkdownOptions {
 	/** Wrap links in OSC 8 hyperlinks (default false). */
 	readonly hyperlinks?: boolean;
 	/**
+	 * Draw ` (href)` after a link label that is not the href itself (default:
+	 * the host's {@link markdownLook}). Only honored with `hyperlinks`: an
+	 * unlinked label alone would lose the destination.
+	 */
+	readonly linkUrls?: boolean;
+	/**
 	 * Draw top-level H1 headings at double size with OSC 66 text sizing, over
 	 * their row and one reserved blank row (default false: the terminal must
 	 * draw OSC 66).
@@ -527,6 +533,7 @@ function createRenderer(tokens: readonly Token[], fullWidth: number, options: Ma
 		inline: {
 			styles,
 			hyperlinks: options.hyperlinks ?? false,
+			linkUrls: drawsLinkUrls(options),
 			linkTarget: options.linkTarget,
 			extensionLink: extensionLinkTest(options.linkSchemes ?? []),
 			marks: options.marks,
@@ -745,6 +752,7 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.paddingX ?? 0,
 		options.colorful ?? true,
 		options.hyperlinks ?? false,
+		drawsLinkUrls(options),
 		options.textSizing ?? false,
 		options.mermaid ?? true,
 		options.textStyle ?? "",
@@ -752,6 +760,11 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.linkSchemes?.join(",") ?? "",
 		links,
 	].join("|");
+}
+
+/** Whether named links draw their ` (href)` suffix: always without OSC 8, where the label alone loses the target. */
+function drawsLinkUrls(options: MarkdownOptions): boolean {
+	return options.linkUrls !== false || options.hyperlinks !== true;
 }
 
 /** The reference definitions of a lexed document, as a key part ("" when there are none). */
@@ -869,11 +882,17 @@ export function renderMarkdown(source: string, width: number, options: MarkdownO
 	return [...renderMarkdownFrame(source, width, options).rows];
 }
 
-/** `options` with the host's look where they leave `colorful` or `mermaid` unset. */
+/** `options` with the host's look where they leave `colorful`, `mermaid` or `linkUrls` unset. */
 function withHostLook(options: MarkdownOptions): MarkdownOptions {
-	if (options.colorful !== undefined && options.mermaid !== undefined) return options;
+	if (options.colorful !== undefined && options.mermaid !== undefined && options.linkUrls !== undefined)
+		return options;
 	const look = markdownLook();
-	return { ...options, colorful: options.colorful ?? look.colorful, mermaid: options.mermaid ?? look.mermaid };
+	return {
+		...options,
+		colorful: options.colorful ?? look.colorful,
+		mermaid: options.mermaid ?? look.mermaid,
+		linkUrls: options.linkUrls ?? look.linkUrls,
+	};
 }
 
 /**
