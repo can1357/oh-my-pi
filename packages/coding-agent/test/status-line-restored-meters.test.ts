@@ -122,7 +122,7 @@ describe("active time per session", () => {
 		expect(line.activeMs()).toBe(0);
 	});
 
-	it("opens a fresh meter only while the session's run goes on across the file change", () => {
+	it("carries an open window over the file change only while the session's run goes on", () => {
 		vi.useFakeTimers();
 		setSystemTime(2_000_000);
 		// `/fork` or `/wt` while the run waits on background work: same session, new file, run still open.
@@ -143,5 +143,17 @@ describe("active time per session", () => {
 		Object.assign(resumed, { sessionFile: "/s/resumed.jsonl" });
 		resumedLine.refresh();
 		expect(resumedLine.facts().turnStartedAt).toBeUndefined();
+	});
+
+	it("ticks a run that starts on the new file before the status line reads it", () => {
+		vi.useFakeTimers({ now: 3_000_000 });
+		const session = statusSession({ sessionFile: "/s/main.jsonl" });
+		const line = statusLine(session, { ...BARE, leftSegments: ["time_spent"] });
+		expect(line.facts().activeMs).toBe(0);
+		// An idle `/fork` whose `session_switch` hook starts a turn: the file changes, then the run starts.
+		Object.assign(session, { sessionFile: "/s/forked.jsonl", runStartedAt: 3_000_000 });
+		line.markActivityStart();
+		vi.advanceTimersByTime(3_000);
+		expect(line.facts().activeMs).toBe(3_000);
 	});
 });
