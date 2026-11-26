@@ -117,7 +117,7 @@ export class InputDecoder {
 	#flushRecords(): void {
 		const bytes = this.#recordBytes;
 		this.#recordBytes = "";
-		// One read's records go to the relay together, so a record-encoded paste burst stays one read.
+		// Keep consecutive records together until the read ends or direct input must follow them.
 		if (bytes) this.#relay.process(bytes);
 	}
 
@@ -127,7 +127,6 @@ export class InputDecoder {
 			if (!this.#processing) this.#flushRecords();
 			return;
 		}
-		// Keep a run of Win32 records together without letting later raw input overtake it.
 		if (direct) this.#flushRecords();
 		const tsp = parseTspMessage(seq);
 		if (tsp) {
