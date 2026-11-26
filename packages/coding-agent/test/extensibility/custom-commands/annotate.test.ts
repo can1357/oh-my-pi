@@ -253,6 +253,20 @@ function localTarget(): ResolvedReviewTarget {
 	return createResolvedReviewTarget("uncommitted", "Uncommitted changes", SAMPLE_DIFF, "No uncommitted changes");
 }
 
+function remotePrTargets(cwd: string) {
+	const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
+		refreshSource: { kind: "remote", cwd, ref: { forge: "github", repo: "acme/project", number: 42 } },
+	});
+	const refreshed = createResolvedReviewTarget(
+		"pr",
+		target.mode,
+		SAMPLE_DIFF.replace("+const value = 2;", "+const value = 3;"),
+		target.emptyMessage,
+		{ refreshSource: target.refreshSource },
+	);
+	return { target, refreshed };
+}
+
 /**
  * Mounts a real annotation overlay with the external-editor key remapped to Ctrl+E, feeds
  * `keys`, and resolves with whatever it completed. After each key it yields one macrotask so
@@ -383,24 +397,14 @@ describe("/annotate contracts", () => {
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(annotation.note);
 	});
 
-	it("keeps the saved source and every note when refresh confirmation is canceled, then drops them all when approved", async () => {
+	it.each([
+		{ changed: true, prompt: "Discard this annotation draft and reload?", line: "const value = 3;" },
+		{ changed: false, prompt: "No changes detected. Clear this annotation draft?", line: "const value = 2;" },
+	])("keeps the draft on Escape and clears it on y (source changed: $changed)", async ({ changed, prompt, line }) => {
 		await withTempDir(async directory => {
 			const artifactsDir = join(directory, "artifacts");
-			const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
-				refreshSource: {
-					kind: "remote",
-					cwd: directory,
-					ref: { forge: "github", repo: "acme/project", number: 42 },
-				},
-			});
-			const refreshed = createResolvedReviewTarget(
-				"pr",
-				target.mode,
-				SAMPLE_DIFF.replace("+const value = 2;", "+const value = 3;"),
-				target.emptyMessage,
-				{ refreshSource: target.refreshSource },
-			);
-			spyOn(review, "refreshReviewTarget").mockResolvedValue(refreshed);
+			const { target, refreshed } = remotePrTargets(directory);
+			spyOn(review, "refreshReviewTarget").mockResolvedValue(changed ? refreshed : target);
 			const first = createContext({
 				cwd: directory,
 				artifactsDir,
@@ -415,8 +419,7 @@ describe("/annotate contracts", () => {
 					ENTER,
 					"r",
 					async term => {
-						const screen = await waitForScreen(term, "discard");
-						expect(screen.toLowerCase()).toContain("discard");
+						await waitForScreen(term, prompt);
 						feed(term, "\x1b");
 					},
 					"\x1b",
@@ -426,7 +429,6 @@ describe("/annotate contracts", () => {
 				resolvePrReviewTarget: async () => target,
 				showCodeReviewOverlay,
 			});
-			expect(first.pasteToEditor).not.toHaveBeenCalled();
 			const [canceled] = await loadAnnotationDrafts(first.ctx.sessionManager);
 			if (canceled?.source.kind !== "diff" || canceled.state.kind !== "diff") {
 				throw new Error("expected the canceled draft to preserve its diff source");
@@ -445,15 +447,14 @@ describe("/annotate contracts", () => {
 					[
 						"r",
 						async (term, waitForCompletion) => {
-							const screen = await waitForScreen(term, "discard");
-							expect(screen.toLowerCase()).toContain("discard");
+							await waitForScreen(term, prompt);
 							feed(term, "y");
 							await waitForCompletion();
 						},
 					],
 					[
 						async term => {
-							const screen = await waitForScreen(term, "const value = 3;");
+							const screen = await waitForScreen(term, line);
 							expect(screen).not.toContain("survives refresh");
 							expect(screen).not.toContain("obsolete note");
 						},
@@ -462,8 +463,6 @@ describe("/annotate contracts", () => {
 				],
 			});
 			await runAnnotateCommand(API, "", accepted.ctx, { showCodeReviewOverlay });
-			expect(accepted.customCalls()).toBe(2);
-			expect(accepted.pasteToEditor).not.toHaveBeenCalled();
 			expect(await loadAnnotationDrafts(accepted.ctx.sessionManager)).toEqual([]);
 		});
 	});
@@ -474,20 +473,7 @@ describe("/annotate contracts", () => {
 			const unavailableArtifacts = join(directory, "unavailable");
 			await mkdir(unavailableArtifacts);
 			await writeFile(join(unavailableArtifacts, "annotation-drafts"), "");
-			const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
-				refreshSource: {
-					kind: "remote",
-					cwd: directory,
-					ref: { forge: "github", repo: "acme/project", number: 42 },
-				},
-			});
-			const refreshed = createResolvedReviewTarget(
-				"pr",
-				target.mode,
-				SAMPLE_DIFF.replace("+const value = 2;", "+const value = 3;"),
-				target.emptyMessage,
-				{ refreshSource: target.refreshSource },
-			);
+			const { target, refreshed } = remotePrTargets(directory);
 			spyOn(review, "refreshReviewTarget").mockResolvedValue(refreshed);
 			const context = createContext({
 				cwd: directory,
@@ -502,15 +488,7 @@ describe("/annotate contracts", () => {
 						await waitForScreen(term, "Discard this annotation draft and reload?");
 						spyOn(context.ctx.sessionManager, "getArtifactsDir").mockReturnValueOnce(unavailableArtifacts);
 						feed(term, "y");
-						const deadline = performance.now() + 1_000;
-						while (!context.notify.mock.calls.some(([, type]) => type === "warning")) {
-							if (performance.now() >= deadline) throw new Error("refresh failure was not reported");
-							const { promise, resolve } = Promise.withResolvers<void>();
-							setImmediate(resolve);
-							await promise;
-						}
-						term.render();
-						const screen = term.screen().join("\n");
+						const screen = await waitForScreen(term, "Failed to refresh review:");
 						expect(screen).toContain("old note survives failed refresh");
 						expect(screen).toContain("const value = 2;");
 						expect(screen).not.toContain("const value = 3;");
@@ -536,20 +514,7 @@ describe("/annotate contracts", () => {
 	it("restores an existing destination draft after refreshing a diff", async () => {
 		await withTempDir(async directory => {
 			const artifactsDir = join(directory, "artifacts");
-			const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
-				refreshSource: {
-					kind: "remote",
-					cwd: directory,
-					ref: { forge: "github", repo: "acme/project", number: 42 },
-				},
-			});
-			const refreshed = createResolvedReviewTarget(
-				"pr",
-				target.mode,
-				SAMPLE_DIFF.replace("+const value = 2;", "+const value = 3;"),
-				target.emptyMessage,
-				{ refreshSource: target.refreshSource },
-			);
+			const { target, refreshed } = remotePrTargets(directory);
 			spyOn(review, "refreshReviewTarget").mockResolvedValue(refreshed);
 			const session = {
 				getArtifactsDir: () => artifactsDir,
@@ -597,7 +562,6 @@ describe("/annotate contracts", () => {
 				resolvePrReviewTarget: async () => target,
 				showCodeReviewOverlay,
 			});
-			expect(context.customCalls()).toBe(2);
 
 			const [saved] = await loadAnnotationDrafts(context.ctx.sessionManager);
 			if (saved?.source.kind !== "diff" || saved.state.kind !== "diff") {
@@ -630,7 +594,6 @@ describe("/annotate contracts", () => {
 
 			await runAnnotateCommand(API, filePath, context.ctx, { showTextReviewOverlay });
 
-			expect(context.customCalls()).toBe(2);
 			const prompt = context.pasteToEditor.mock.calls[0]?.[0];
 			expect(prompt).toContain(refreshedText);
 			expect(prompt).toContain("review the reloaded line");

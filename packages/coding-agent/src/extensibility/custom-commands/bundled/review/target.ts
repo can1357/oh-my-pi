@@ -26,7 +26,7 @@ export interface ResolvedReviewTarget {
 	filteredMessage?: string;
 	diffInstruction?: string;
 	contextInstruction?: string;
-	/** Base URL for per-file slices of the original, unfiltered PR/MR diff. */
+	/** Base URL for per-file slices. A refreshed remote diff gets a URL only after it is pinned. */
 	prDiffUrl?: string;
 	/** Leading `?at=<generation>` when `prDiffUrl` is pinned, otherwise empty. */
 	prDiffQuery?: string;

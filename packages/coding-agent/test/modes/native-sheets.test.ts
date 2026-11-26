@@ -470,7 +470,7 @@ describe("sheets Tern draws", () => {
 		closed();
 	});
 
-	it("titles the annotation sheet by what is under review", async () => {
+	it("keeps a note through native unchanged-refresh cancellation and a refused LLM handoff, then pastes it", async () => {
 		await using ui = await nativeShell(mode.shell);
 		const file: ReviewDiffFile = {
 			path: "src/value.ts",
@@ -499,6 +499,10 @@ describe("sheets Tern draws", () => {
 								results.push(result);
 								done();
 							},
+							onRefresh: async () => {
+								await review.confirmDiscardForRefresh(false);
+							},
+							onBeforeReview: () => "Paste annotations instead: no snapshot link.",
 						},
 						{ theme: currentTheme, size: () => host.size() },
 					);
@@ -519,10 +523,29 @@ describe("sheets Tern draws", () => {
 			modal: true,
 		});
 		expect(screen.p.role).toBeUndefined();
+		ui.click("button", "refresh");
+		expect(ui.node("button", "refresh-confirm").p).toMatchObject({
+			text: "Clear draft",
+			title: "No changes detected. Clear this annotation draft?",
+		});
+		ui.click("button", "refresh-confirm");
+		await Promise.resolve();
+		await Promise.resolve();
 
-		ui.type(ESCAPE);
+		ui.type("a");
+		ui.type("\x1b[200~keep this note\x1b[201~");
+		ui.type(ENTER);
+		ui.click("button", "refresh");
+		ui.click("button", "refresh-cancel");
+		await Promise.resolve();
+		await Promise.resolve();
+		ui.click("button", "review");
+		expect(ui.node("text", "warning").p.title).toContain("Paste annotations instead");
+		ui.click("button", "paste");
 		await shown;
-		expect(results).toEqual([undefined]);
+		expect(results).toMatchObject([
+			{ action: "paste", annotations: [{ path: "src/value.ts", note: "keep this note" }] },
+		]);
 		closed();
 	});
 

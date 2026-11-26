@@ -228,7 +228,16 @@ function railRows(model: AnnotationReviewModel, rows: number, width: number, the
 }
 
 function actionRows(model: AnnotationReviewModel, theme: Theme): string[] {
-	if (model.refreshConfirmationPending) return [];
+	const confirmation = model.refreshConfirmationCopy;
+	if (confirmation) {
+		return model.actions.map((_, index) =>
+			index === 0
+				? theme.style("strong", confirmation.question)
+				: index === 1
+					? theme.fg("dim", `${key("y")} ${confirmation.accept} · ${key(model.cancelKey)}/n keep draft`)
+					: "",
+		);
+	}
 	const nav = theme.symbols.symbol("nav.cursor");
 	return model.actions.map((action, index) => {
 		const label = action === DISCARD_ANNOTATIONS_ACTION && model.discardArmed ? "Confirm: discard all notes" : action;
@@ -357,12 +366,6 @@ function helpText(model: AnnotationReviewModel): string {
 }
 
 function footerRows(model: AnnotationReviewModel, width: number, chooserRowsMax: number, height: number, theme: Theme) {
-	if (model.refreshConfirmationPending) {
-		return [
-			theme.style("strong", "Discard this annotation draft and reload?"),
-			theme.fg("dim", `${key("y")} reload · ${key(model.cancelKey)}/n keep draft`),
-		];
-	}
 	if (model.chooser) return chooserRows(model, width, chooserRowsMax, theme);
 	if (model.annotating) {
 		const { action, location } = noteCaption(model);
@@ -376,7 +379,7 @@ function footerRows(model: AnnotationReviewModel, width: number, chooserRowsMax:
 		const editorMax = Math.max(1, Math.min(MAX_EDITOR_ROWS, height - 12));
 		return [caption, ...editorRows(model, width, editorMax, theme), theme.fg("dim", hints.join(" · "))];
 	}
-	return [theme.fg("dim", helpText(model))];
+	return [model.warning ? theme.fg("warning", statusText(model.warning)) : theme.fg("dim", helpText(model))];
 }
 
 /** The focused file's full path over the rows from its rail entry down, when the rail cuts it. */
@@ -432,7 +435,7 @@ export function annotationFrame(
 	const sidebar = rail ? railWidth(width) : 0;
 	const inner = Math.max(1, width - 4);
 	const bodyWidth = rail ? Math.max(0, width - sidebar - 7) : inner;
-	const actionCount = model.refreshConfirmationPending ? 0 : model.actions.length;
+	const actionCount = model.actions.length;
 	const chooserBase = height - (actionCount + 7);
 	const footer = footerRows(
 		model,
@@ -455,7 +458,7 @@ export function annotationFrame(
 	const maxOffset = Math.max(0, total - bodyRows);
 	let offset = Math.max(0, Math.min(model.offset, maxOffset));
 	if (model.viewportDriven) {
-		if (!model.refreshConfirmationPending && !model.annotating && !model.chooser && body.rowBySource.length > 0) {
+		if (!model.annotating && !model.chooser && body.rowBySource.length > 0) {
 			const cursor = viewportSource(body.rowBySource, offset, bodyRows, model.viewportTowardEnd, maxOffset);
 			if (cursor !== model.sourceIndex) body = build(cursor);
 		}

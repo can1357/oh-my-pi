@@ -107,7 +107,7 @@ export function annotationReviewSheet(model: AnnotationReviewModel): SheetAttrib
 export function AnnotationReview(props: { readonly model: AnnotationReviewModel }): JSXNode {
 	const model = props.model;
 	const rev = model.rev;
-	const editing = () => model.annotating || model.chooser !== undefined || model.refreshConfirmationPending;
+	const editing = () => model.annotating || model.chooser !== undefined;
 
 	const lines = () => (
 		<list
@@ -343,38 +343,11 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 
 	const composerMode = computed(() => {
 		rev();
-		return model.refreshConfirmationPending
-			? "refresh-confirmation"
-			: model.chooser
-				? "chooser"
-				: model.annotating
-					? "note"
-					: "";
+		return model.chooser ? "chooser" : model.annotating ? "note" : "";
 	});
 
 	const composer = () => {
 		switch (composerMode()) {
-			case "refresh-confirmation":
-				return (
-					<col key="refresh-confirmation" role="omp.review.composer">
-						<text key="caption" spans={[{ s: "strong", t: "Discard this annotation draft and reload?" }]} />
-						<row gap="sm">
-							<FooterButton
-								act="refresh-confirm"
-								label={() => "Discard and reload"}
-								title={() => "Discard this annotation draft and reload"}
-								tone="warning"
-								keys={["y"]}
-							/>
-							<FooterButton
-								act="refresh-cancel"
-								label={() => "Keep draft"}
-								title={() => "Keep this annotation draft"}
-								keys={["escape"]}
-							/>
-						</row>
-					</col>
-				);
 			case "chooser":
 				return (
 					<col key="chooser" role="omp.review.composer">
@@ -531,10 +504,40 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 
 	const footer = () => {
 		rev();
-		if (model.refreshConfirmationPending) return undefined;
+		const confirmation = model.refreshConfirmationCopy;
+		if (confirmation) {
+			return (
+				<row key="actions" role="omp.actions" gap="sm" align="center">
+					<text grow={1} spans={[{ s: "strong", t: confirmation.question }]} />
+					<FooterButton
+						act="refresh-confirm"
+						label={() => confirmation.accept}
+						title={() => confirmation.question}
+						tone="warning"
+						keys={["y"]}
+					/>
+					<FooterButton
+						act="refresh-cancel"
+						label={() => "Keep draft"}
+						title={() => "Keep this annotation draft"}
+						keys={keysOf(model.cancelKey)}
+					/>
+				</row>
+			);
+		}
 		return (
 			<row key="actions" role="omp.actions" gap="sm" align="center">
-				<KeycapHints nodeKey="hints" hints={hints} />
+				{model.warning ? (
+					<text
+						key="warning"
+						grow={1}
+						truncate="end"
+						title={statusText(model.warning)}
+						spans={[{ s: "warning", t: statusText(model.warning) }]}
+					/>
+				) : (
+					<KeycapHints nodeKey="hints" hints={hints} />
+				)}
 				{refreshButton}
 				<FooterButton act="close" label={() => "Cancel"} title={() => "Cancel  esc"} keys={["escape"]} />
 				<FooterButton
@@ -610,7 +613,7 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 					{pane()}
 				</row>
 			)}
-			{footer()}
+			{footer}
 		</col>
 	) as UiNode;
 	return root;

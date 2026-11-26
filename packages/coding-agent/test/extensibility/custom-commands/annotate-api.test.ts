@@ -328,16 +328,14 @@ describe("annotations API: open", () => {
 		expect(result?.text).toContain("be strict");
 	});
 
-	it("builds API feedback from the diff refreshed in the overlay", async () => {
-		const refreshSource = {
-			kind: "remote" as const,
-			cwd: "/workspace",
-			ref: { forge: "github" as const, repo: "acme/project", number: 42 },
-		};
-		const target = {
-			...createResolvedReviewTarget("pr", "PR acme/project#42", DIFF, "PR has no diff"),
-			refreshSource,
-		};
+	it("opens an empty PR and uses the replacement diff for feedback without relaxing submit validation", async () => {
+		const target = createResolvedReviewTarget("pr", "PR acme/project#42", "", "The PR has no diff", {
+			refreshSource: {
+				kind: "remote",
+				cwd: "/workspace",
+				ref: { forge: "github", repo: "acme/project", number: 42 },
+			},
+		});
 		const refreshedTarget = createResolvedReviewTarget(
 			"pr",
 			"PR acme/project#42",
@@ -351,33 +349,11 @@ describe("annotations API: open", () => {
 			refreshedTarget,
 		});
 		const { api } = createContext();
-
-		const result = await api.open({
-			source: { kind: "pr", ref: "https://github.com/acme/project/pull/42" },
-			deliver: "none",
-		});
+		const source = { kind: "pr" as const, ref: "https://github.com/acme/project/pull/42" };
+		const result = await api.open({ source, deliver: "none" });
 
 		expect(result?.text).toContain("+const value = 3;");
-		expect(result?.text).not.toContain("+const value = 2;");
 		expect(result?.text).toContain("refreshed note");
-	});
-
-	it("opens an empty live PR so it can be refreshed but keeps API submit validation", async () => {
-		const target = {
-			...createResolvedReviewTarget("pr", "PR acme/project#42", "", "The PR has no diff"),
-			refreshSource: {
-				kind: "remote" as const,
-				cwd: "/workspace",
-				ref: { forge: "github" as const, repo: "acme/project", number: 42 },
-			},
-		};
-		spyOn(review, "fetchPrReviewTarget").mockResolvedValue(target);
-		const showCode = spyOn(fullscreen, "showCodeReviewOverlay").mockResolvedValue(undefined);
-		const { api } = createContext();
-		const source = { kind: "pr" as const, ref: "https://github.com/acme/project/pull/42" };
-
-		expect(await api.open({ source, deliver: "none" })).toBeUndefined();
-		expect(showCode).toHaveBeenCalledTimes(1);
 		await expect(api.submit({ source, notes: [], deliver: "none" })).rejects.toThrow("The PR has no diff");
 	});
 

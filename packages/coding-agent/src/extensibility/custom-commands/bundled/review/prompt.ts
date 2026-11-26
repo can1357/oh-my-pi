@@ -105,25 +105,39 @@ export function buildCodeReviewFeedback(
 	return review ? buildReviewPrompt(target, formatted) : formatted;
 }
 
-function reviewDiffQuery(target: ResolvedReviewTarget): string {
+/** Pin the exact diff at handoff, without replacing the forge's shared live cache row. */
+export function prepareReviewTarget(target: ResolvedReviewTarget): ResolvedReviewTarget {
 	const pending = target.pendingPrDiffGeneration;
 	const source = target.refreshSource;
-	if (!pending || source?.kind !== "remote" || source.ref.forge !== "github") return target.prDiffQuery ?? "";
-	if (
-		!resolveCacheTtl(findScopedSettings(source.cwd)).enabled ||
-		resolveGithubCacheAuthKey() !== pending.cacheAuthKey
-	) {
-		return "";
+	if (pending && source?.kind === "remote" && source.ref.forge === "github") {
+		if (
+			resolveCacheTtl(findScopedSettings(source.cwd)).enabled &&
+			resolveGithubCacheAuthKey() === pending.cacheAuthKey
+		) {
+			const { repo, number } = source.ref;
+			const generationAt = gh.retainPrDiffGeneration({
+				repo,
+				number,
+				rendered: target.rawDiff,
+				files: parsePrUnifiedDiff(target.rawDiff).files,
+				fetchedAt: pending.fetchedAt,
+				cacheAuthKey: pending.cacheAuthKey,
+			});
+			if (generationAt !== null) {
+				return {
+					...target,
+					prDiffUrl: `pr://${repo}/${number}/diff`,
+					prDiffQuery: `?at=${generationAt}`,
+					pendingPrDiffGeneration: undefined,
+				};
+			}
+		}
+		target = { ...target, pendingPrDiffGeneration: undefined };
 	}
-	const generationAt = gh.retainPrDiffGeneration({
-		repo: source.ref.repo,
-		number: source.ref.number,
-		rendered: target.rawDiff,
-		files: parsePrUnifiedDiff(target.rawDiff).files,
-		fetchedAt: pending.fetchedAt,
-		cacheAuthKey: pending.cacheAuthKey,
-	});
-	return generationAt === null ? "" : `?at=${generationAt}`;
+	if (target.kind === "pr" && !target.prDiffUrl && exceedsInlineDiffLimit(target)) {
+		throw new Error("Paste annotations instead: this refreshed diff is too large and has no snapshot link.");
+	}
+	return target;
 }
 
 function exceedsInlineDiffLimit(target: ResolvedReviewTarget): boolean {
@@ -144,7 +158,7 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 	assertReviewablePatchSize(target);
 	const skipDiff = exceedsInlineDiffLimit(target);
 	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / target.snapshot.files.length)) : 0;
-	const prDiffQuery = reviewDiffQuery(target);
+	const prDiffQuery = target.prDiffQuery ?? "";
 	const files = target.snapshot.files.map(file =>
 		renderReviewPromptFile(file, linesPerFile, target.prDiffUrl, prDiffQuery),
 	);
@@ -164,6 +178,7 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 		diffInstruction: target.diffInstruction,
 		contextInstruction: target.contextInstruction,
 		suppliedPatch: target.kind === "patch",
+		remoteDiff: target.kind === "pr",
 		prDiffUrl: target.prDiffUrl,
 		prDiffQuery,
 		additionalInstructions: additionalInstructions?.trim(),

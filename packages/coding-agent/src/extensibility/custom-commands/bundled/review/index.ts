@@ -19,7 +19,7 @@ import { resolveToCwd } from "../../../../tools/path-utils";
 import { listDirectChildRepos } from "../../../../utils/active-repo-context";
 import { github } from "../../../../utils/github";
 import { gitlab } from "../../../../utils/gitlab";
-import { buildReviewPrompt } from "./prompt";
+import { buildReviewPrompt, prepareReviewTarget } from "./prompt";
 import {
 	createResolvedReviewTarget,
 	getReviewTargetIssue,
@@ -247,7 +247,7 @@ async function fetchRemoteReviewTarget(
 						...(settings ? { settings } : {}),
 					});
 			return createResolvedReviewTarget("pr", label, lookup.rendered, emptyMessage, {
-				prDiffUrl: `mr://${ref.repo}/${ref.number}/diff`,
+				prDiffUrl: live ? undefined : `mr://${ref.repo}/${ref.number}/diff`,
 				refreshSource,
 			});
 		} catch (error) {
@@ -268,7 +268,7 @@ async function fetchRemoteReviewTarget(
 				? { fetchedAt, cacheAuthKey }
 				: undefined;
 		return createResolvedReviewTarget("pr", label, lookup.rendered, emptyMessage, {
-			prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
+			prDiffUrl: live ? undefined : `pr://${ref.repo}/${ref.number}/diff`,
 			refreshSource,
 			pendingPrDiffGeneration,
 		});
@@ -626,7 +626,7 @@ function reviewTargetPrompt(
 		if (ctx.hasUI) ctx.ui.notify(issue, "warning");
 		return undefined;
 	}
-	return buildReviewPrompt(target, instructions);
+	return buildReviewPrompt(prepareReviewTarget(target), instructions);
 }
 
 function buildHeadlessReviewPrompt(focus: string | undefined, repository: string | undefined): string {

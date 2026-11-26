@@ -40,6 +40,8 @@ export type AnnotationReviewInput =
 
 export interface AnnotationReviewCallbacks {
 	onComplete(result: CodeReviewOverlayResult | TextReviewOverlayResult | undefined): void;
+	/** Return a reason to keep the pane and draft open instead of submitting a review. */
+	onBeforeReview?(): string | undefined;
 	onWarning?(message: string): void;
 	/** Edit the note draft in the host's editor; `commit` puts the result back (null: unchanged). */
 	onAnnotationExternalEditor?(draft: string, commit: (text: string | null) => void): void | Promise<void>;
@@ -75,6 +77,11 @@ export interface TextNote {
 	readonly sourceIndex: number;
 	readonly annotation: TextReviewAnnotation;
 }
+
+type RefreshConfirmationCopy = {
+	readonly question: string;
+	readonly accept: string;
+};
 
 const MIN_BODY_ROWS = 3;
 const FAST_ROWS = 5;
@@ -116,6 +123,7 @@ export class AnnotationReviewModel {
 	finished = false;
 	notes: DiffNote[] = [];
 	refreshing = false;
+	warning: string | undefined;
 	textNotes: TextNote[] = [];
 	undoStack: { notes: DiffNote[]; textNotes: TextNote[] }[] = [];
 	/** The lines' scroll offset (in the terminal's geometry). */
@@ -128,6 +136,7 @@ export class AnnotationReviewModel {
 		| {
 				readonly promise: Promise<boolean>;
 				readonly resolve: (confirmed: boolean) => void;
+				readonly changed: boolean;
 		  }
 		| undefined;
 	#external = false;
@@ -185,7 +194,7 @@ export class AnnotationReviewModel {
 
 	/** After moves, as a draw does: the view scrolls to the cursor, or (after paging) the cursor follows the view. */
 	#settle(): void {
-		if (!this.#unsettled || this.#refreshDecision) return;
+		if (!this.#unsettled) return;
 		this.#unsettled = false;
 		const frame = this.reference();
 		this.offset = frame.offset;
@@ -571,7 +580,9 @@ export class AnnotationReviewModel {
 				...(this.#textEdited ? { editedText: this.textSource.text } : {}),
 			});
 		} else {
-			this.#finish({ action: this.actionIndex === 0 ? "review" : "paste", annotations: this.getAnnotations() });
+			const action = this.actionIndex === 0 ? "review" : "paste";
+			if (action === "review" && (this.warning = this.callbacks.onBeforeReview?.()) !== undefined) return;
+			this.#finish({ action, annotations: this.getAnnotations() });
 		}
 	}
 
@@ -771,16 +782,26 @@ export class AnnotationReviewModel {
 			this.touch();
 		}
 	}
-	get refreshConfirmationPending(): boolean {
-		return this.#refreshDecision !== undefined;
+	get refreshConfirmationCopy(): RefreshConfirmationCopy | undefined {
+		const decision = this.#refreshDecision;
+		if (!decision) return undefined;
+		return decision.changed
+			? {
+					question: "Discard this annotation draft and reload?",
+					accept: "Discard and reload",
+				}
+			: {
+					question: "No changes detected. Clear this annotation draft?",
+					accept: "Clear draft",
+				};
 	}
 
-	confirmDiscardForRefresh(): Promise<boolean> {
+	confirmDiscardForRefresh(changed: boolean): Promise<boolean> {
 		if (this.#refreshDecision) return this.#refreshDecision.promise;
 		if (this.finished) return Promise.resolve(false);
-		if (!this.hasNotes() && !this.annotating && !this.#textEdited) return Promise.resolve(true);
+		if (changed && !this.hasNotes() && !this.annotating && !this.#textEdited) return Promise.resolve(true);
 		const { promise, resolve } = Promise.withResolvers<boolean>();
-		this.#refreshDecision = { promise, resolve };
+		this.#refreshDecision = { promise, resolve, changed };
 		this.touch();
 		return promise;
 	}
@@ -797,14 +818,14 @@ export class AnnotationReviewModel {
 		const refresh = this.callbacks.onRefresh;
 		if (!refresh || this.refreshing || this.finished) return;
 		this.refreshing = true;
+		this.warning = undefined;
 		this.touch();
 		try {
 			await refresh();
 		} catch (error) {
-			if (!this.finished)
-				this.callbacks.onWarning?.(
-					`Failed to refresh review: ${error instanceof Error ? error.message : String(error)}`,
-				);
+			if (!this.finished) {
+				this.warning = `Failed to refresh review: ${error instanceof Error ? error.message : String(error)}`;
+			}
 		} finally {
 			this.refreshing = false;
 			if (!this.finished) this.touch();

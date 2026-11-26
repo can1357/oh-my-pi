@@ -13,7 +13,7 @@ import type { SendUserMessageOptions } from "../../../../session/agent-session";
 import { splitTextLines } from "../../../../modes/view-model/overlays/annotation-overlay";
 import type { CodeReviewAnnotation, TextReviewAnnotation, TextReviewSource } from "./annotation-types";
 import { fetchPrReviewTarget, parseReviewPrRef } from "../review";
-import { assertReviewablePatchSize, buildCodeReviewFeedback } from "../review/prompt";
+import { assertReviewablePatchSize, buildCodeReviewFeedback, prepareReviewTarget } from "../review/prompt";
 import {
 	createResolvedReviewTarget,
 	getReviewTargetIssue,
@@ -205,7 +205,12 @@ export function createAnnotationsAPI(
 			const target = await resolveDiffTarget(ctx, request.source);
 			const annotations = matchDiffNotes(target, request.notes);
 			const review = request.review === true;
-			const text = buildCodeReviewFeedback(target, annotations, review, request.focus);
+			const text = buildCodeReviewFeedback(
+				review ? prepareReviewTarget(target) : target,
+				annotations,
+				review,
+				request.focus,
+			);
 			return {
 				kind: "diff",
 				text,

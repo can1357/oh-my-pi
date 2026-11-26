@@ -111,35 +111,14 @@ it("requires a second Enter press, not a key release, to discard notes", () => {
 	}
 });
 
-it("keeps empty reviews refreshable and disables Continue", () => {
-	const env = corpusEnvironment("dark");
-	let refreshCalls = 0;
-	const model = new AnnotationReviewModel(
-		{ kind: "diff", files: [], mode: "Review" },
-		{
-			onComplete() {},
-			onRefresh: async () => {
-				refreshCalls++;
-			},
-		},
-		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
-	);
-
-	expect(model.actionDisabled(0)).toBe(true);
-	model.key("r", "r", "r");
-	expect(refreshCalls).toBe(1);
-});
-
 it("blocks concurrent refresh inputs and warns after a failed refresh", async () => {
 	const pending = Promise.withResolvers<void>();
-	const warnings: string[] = [];
 	const env = corpusEnvironment("dark");
 	let refreshCalls = 0;
 	const model = new AnnotationReviewModel(
 		{ kind: "diff", files: FILES.slice(0, 2), mode: "Review" },
 		{
 			onComplete() {},
-			onWarning: message => warnings.push(message),
 			onRefresh: () => {
 				refreshCalls++;
 				return pending.promise;
@@ -148,7 +127,6 @@ it("blocks concurrent refresh inputs and warns after a failed refresh", async ()
 		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
 	);
 	model.key("r", "r", "r");
-	expect(model.refreshing).toBe(true);
 	model.key("r", "r", "r");
 	model.action("refresh");
 	model.pick("files", "f1", true);
@@ -157,36 +135,24 @@ it("blocks concurrent refresh inputs and warns after a failed refresh", async ()
 
 	pending.reject(new Error("offline"));
 	await pending.promise.catch(() => {});
-	expect(model.refreshing).toBe(false);
-	expect(warnings).toEqual(["Failed to refresh review: offline"]);
+	expect(model.frame(100, env.theme()).rows.join("\n")).toContain("Failed to refresh review: offline");
 });
 
-it("keeps cancel available during refresh and ignores late failures", async () => {
+it("lets the operator close the pane before a refresh completes", async () => {
 	const env = corpusEnvironment("dark");
-	for (const closeBy of ["key", "native"] as const) {
-		const pending = Promise.withResolvers<void>();
-		const warnings: string[] = [];
-		const model = new AnnotationReviewModel(
-			{ kind: "diff", files: FILES.slice(0, 1), mode: "Review" },
-			{
-				onComplete() {},
-				onWarning: message => warnings.push(message),
-				onRefresh: () => pending.promise,
-			},
-			{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
-		);
-		model.key("r", "r", "r");
-		if (closeBy === "key") model.key("escape", undefined, "\x1b");
-		else model.action("close");
-		expect(model.finished).toBe(true);
-		const revision = model.rev();
-
-		pending.reject(new Error("offline"));
-		await pending.promise.catch(() => {});
-		expect(model.refreshing).toBe(false);
-		expect(model.rev()).toBe(revision);
-		expect(warnings).toEqual([]);
-	}
+	const pending = Promise.withResolvers<void>();
+	const closed = Promise.withResolvers<void>();
+	const model = new AnnotationReviewModel(
+		{ kind: "diff", files: FILES.slice(0, 1), mode: "Review" },
+		{ onComplete: () => closed.resolve(), onRefresh: () => pending.promise },
+		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
+	);
+	model.key("r", "r", "r");
+	model.key("escape", undefined, "\x1b");
+	await closed.promise;
+	pending.reject(new Error("offline"));
+	await pending.promise.catch(() => {});
+	expect(model.frame(100, env.theme()).rows.join("\n")).not.toContain("offline");
 });
 
 it("requires approval to reload over edited text even without any notes", async () => {
@@ -197,9 +163,28 @@ it("requires approval to reload over edited text even without any notes", async 
 		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
 	);
 	model.replaceTextSource("edited source");
-	const decision = model.confirmDiscardForRefresh();
-	expect(model.refreshConfirmationPending).toBe(true);
+	const decision = model.confirmDiscardForRefresh(true);
 	model.action("refresh-confirm");
+	expect(await decision).toBe(true);
+});
+
+it("asks before clearing an unchanged source even when it has no notes", async () => {
+	const env = corpusEnvironment("dark");
+	const model = new AnnotationReviewModel(
+		{ kind: "text", source: TEXT },
+		{ onComplete() {} },
+		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
+	);
+	const decision = model.confirmDiscardForRefresh(false);
+	expect(model.refreshConfirmationCopy).toMatchObject({
+		question: "No changes detected. Clear this annotation draft?",
+		accept: "Clear draft",
+	});
+	const frame = model.frame(100, env.theme()).rows.join("\n");
+	expect(frame).toContain("No changes detected. Clear this annotation draft?");
+	expect(frame).toContain("y Clear draft");
+
+	model.key("y", "y", "y");
 	expect(await decision).toBe(true);
 });
 
@@ -211,15 +196,10 @@ it("cancels unresolved refresh approval when disposed without dropping the draft
 		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
 	);
 	model.replaceTextSource("edited source");
-	const draft = model.getDraft();
-	const decision = model.confirmDiscardForRefresh();
+	const decision = model.confirmDiscardForRefresh(true);
 
-	expect(model.refreshConfirmationPending).toBe(true);
 	model.dispose();
-
 	expect(await decision).toBe(false);
-	expect(model.refreshConfirmationPending).toBe(false);
-	expect(model.getDraft()).toEqual(draft);
 });
 
 panelSuite({

@@ -15,7 +15,10 @@ import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-ent
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
-import { buildCodeReviewFeedback } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/prompt";
+import {
+	buildReviewPrompt,
+	prepareReviewTarget,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/prompt";
 import * as glab from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
 import {
 	readUncommittedReviewTarget,
@@ -23,7 +26,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/target";
 import {
 	getCached,
-	getCachedGeneration,
 	resetForTests as resetCacheForTests,
 	resolveGithubCacheAuthKey,
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
@@ -328,7 +330,7 @@ describe("ReviewCommand", () => {
 		}
 	});
 
-	it("refreshes a GitHub review target live and pins it only on review handoff", async () => {
+	it("hands off an exact GitHub refresh snapshot without replacing the live cache row", async () => {
 		const dir = createTempDir();
 		const previousToken = process.env.GH_TOKEN;
 		const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
@@ -337,10 +339,6 @@ describe("ReviewCommand", () => {
 		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
 		resetCacheForTests();
 		retainGeneration.mockRestore();
-		const retainPrDiffGeneration = gh.retainPrDiffGeneration;
-		const retainSpy = spyOn(gh, "retainPrDiffGeneration").mockImplementation(options =>
-			retainPrDiffGeneration(options),
-		);
 		const generatedDiff = `diff --git a/dist/generated.js b/dist/generated.js
 --- a/dist/generated.js
 +++ b/dist/generated.js
@@ -349,7 +347,7 @@ describe("ReviewCommand", () => {
 +new generated
 `;
 		const updatedDiff = `${generatedDiff}${SAMPLE_PR_DIFF}`;
-		const diffSpy = spyOn(github, "text").mockResolvedValueOnce(SAMPLE_PR_DIFF).mockResolvedValueOnce(updatedDiff);
+		spyOn(github, "text").mockResolvedValueOnce(SAMPLE_PR_DIFF).mockResolvedValueOnce(updatedDiff);
 		const ref = {
 			forge: "github" as const,
 			repo: "owner/repo",
@@ -363,44 +361,24 @@ describe("ReviewCommand", () => {
 			const initial = await withActiveSettings(settings, () => fetchPrReviewTarget(dir, ref));
 			const cacheAuthKey = resolveGithubCacheAuthKey();
 			if (!cacheAuthKey) throw new Error("Could not resolve GitHub cache identity for the test");
-			expect(initial.prDiffQuery).toBeUndefined();
-			expect(retainSpy).not.toHaveBeenCalled();
 			expect(getCached<PrDiffPayload>("owner/repo", "pr-diff", 123, false, cacheAuthKey)?.rendered).toBe(
 				SAMPLE_PR_DIFF,
 			);
-			const refreshed = await withActiveSettings(settings, () =>
-				refreshReviewTarget({ ...initial, repository: "/repo-root" }),
+			const refreshed = await withActiveSettings(settings, () => refreshReviewTarget(initial));
+			expect(getCached<PrDiffPayload>("owner/repo", "pr-diff", 123, false, cacheAuthKey)?.rendered).toBe(
+				SAMPLE_PR_DIFF,
 			);
-			expect(refreshed.rawDiff).toBe(updatedDiff);
-			expect(refreshed.prDiffQuery).toBeUndefined();
-			expect(refreshed.repository).toBe("/repo-root");
-			expect(refreshed.snapshot.files.map(file => file.path)).toEqual(["src/pr.ts"]);
-			expect(diffSpy).toHaveBeenCalledTimes(2);
-			const pending = refreshed.pendingPrDiffGeneration;
-			if (!pending) throw new Error("Refreshed target is missing its pending generation metadata");
-			expect(
-				getCachedGeneration<PrDiffPayload>("owner/repo", "pr-diff", 123, false, pending.fetchedAt, cacheAuthKey)
-					?.rendered,
-			).not.toBe(updatedDiff);
 
-			const paste = buildCodeReviewFeedback(refreshed, [], false, "Keep these notes");
-			expect(paste).toContain("Keep these notes");
-			expect(retainSpy).not.toHaveBeenCalled();
 			process.env.GH_TOKEN = "different-review-token";
-			const mismatchedFeedback = buildCodeReviewFeedback(refreshed, [], true, undefined);
-			const differentAuthKey = resolveGithubCacheAuthKey();
-			expect(differentAuthKey).not.toBe(cacheAuthKey);
-			expect(mismatchedFeedback).toBeDefined();
-			expect(mismatchedFeedback).not.toContain("?at=");
-			expect(retainSpy).not.toHaveBeenCalled();
+			const inline = buildReviewPrompt(prepareReviewTarget(refreshed));
+			expect(inline).toContain(updatedDiff.trim());
+			expect(inline).not.toContain("pr://");
 			process.env.GH_TOKEN = "review-refresh-token";
 
-			const resumedTarget = JSON.parse(JSON.stringify(refreshed)) as typeof refreshed;
-			const feedback = buildCodeReviewFeedback(resumedTarget, [], true, undefined);
-			const generationMatch = feedback?.match(/\?at=(\d+)/);
-			expect(generationMatch).not.toBeNull();
-			const refreshedGenerationId = Number(generationMatch![1]);
-			expect(feedback).toContain(`pr://owner/repo/123/diff/2?at=${refreshedGenerationId}`);
+			const feedback = buildReviewPrompt(prepareReviewTarget(refreshed));
+			const generationMatch = feedback.match(/pr:\/\/owner\/repo\/123\/diff\/2\?at=(\d+)/);
+			if (!generationMatch) throw new Error("expected the refreshed file's pinned diff URL");
+			const refreshedGenerationId = Number(generationMatch[1]);
 			const pinned = gh.getPinnedPrDiff({
 				repo: "owner/repo",
 				number: 123,
@@ -408,12 +386,9 @@ describe("ReviewCommand", () => {
 				cacheAuthKey,
 			});
 			expect(pinned?.rendered).toBe(updatedDiff);
-			expect(pinned?.payload.files).toEqual(parsePrUnifiedDiff(updatedDiff).files);
-			expect(pinned?.payload.files).toHaveLength(2);
 			expect(getCached<PrDiffPayload>("owner/repo", "pr-diff", 123, false, cacheAuthKey)?.rendered).toBe(
 				SAMPLE_PR_DIFF,
 			);
-			expect(retainSpy).toHaveBeenCalledTimes(1);
 		} finally {
 			resetCacheForTests();
 			if (previousToken === undefined) delete process.env.GH_TOKEN;
@@ -425,14 +400,13 @@ describe("ReviewCommand", () => {
 		}
 	});
 
-	it("refreshes GitLab review targets through the guarded fresh fetch with their serialized project ref", async () => {
+	it("uses fresh GitLab hunks without sending the reviewer back to the cached MR, even when large", async () => {
 		const dir = createTempDir();
-		const diffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
-		const freshSpy = spyOn(glab, "fetchMrDiffFreshGuarded").mockResolvedValue({
-			rendered: "",
-			sourceUrl: undefined,
-			payload: { unified: "", files: [] },
-		});
+		spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const updated = SAMPLE_PR_DIFF.replace("+export const pr = true;", "+export const pr = check();");
+		spyOn(glab, "fetchMrDiffFreshGuarded")
+			.mockResolvedValueOnce(makePrDiffLookup(updated))
+			.mockResolvedValueOnce(makePrDiffLookup(updated + " ".repeat(50_000)));
 		const ref = {
 			forge: "gitlab" as const,
 			repo: "gitlab.example/group/project",
@@ -443,61 +417,33 @@ describe("ReviewCommand", () => {
 
 		const initial = await fetchPrReviewTarget(dir, ref);
 		const refreshed = await refreshReviewTarget(initial);
-
-		expect(initial.refreshSource).toEqual({
-			kind: "remote",
-			cwd: dir,
-			ref: { forge: "gitlab", repo: "gitlab.example/group/project", number: 7 },
-		});
-		expect(refreshed.rawDiff).toBe("");
-		expect(refreshed.prDiffUrl).toBe("mr://gitlab.example/group/project/7/diff");
-		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, project: "gitlab.example/group/project", iid: 7 });
-		expect(freshSpy).toHaveBeenCalledWith(dir, "gitlab.example/group/project", 7, undefined);
+		const feedback = buildReviewPrompt(prepareReviewTarget(refreshed));
+		expect(feedback).toContain(updated.trim());
+		expect(feedback).not.toContain("+export const pr = true;");
+		expect(feedback).not.toContain("mr://");
+		const tooLarge = await refreshReviewTarget(refreshed);
+		expect(() => prepareReviewTarget(tooLarge)).toThrow("Paste annotations instead");
 	});
 
-	it("does not retain a review snapshot when the GitHub cache is disabled", async () => {
+	it("inlines a refreshed GitHub diff without live links when the cache is disabled", async () => {
 		const dir = createTempDir();
-		const previousToken = process.env.GH_TOKEN;
-		const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
-		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-off-"));
-		process.env.GH_TOKEN = "review-cache-disabled";
-		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
-		resetCacheForTests();
 		const settings = Settings.isolated({ "github.cache.enabled": false });
 		spyOn(github, "text").mockResolvedValue(SAMPLE_PR_DIFF);
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		try {
-			const result = await withActiveSettings(settings, () =>
-				command.execute(["https://github.com/owner/repo/pull/123"], {
-					hasUI: false,
-				} as unknown as HookCommandContext),
-			);
-			expect(retainGeneration).not.toHaveBeenCalled();
-			expect(result).toBeDefined();
-			expect(result!).toContain("pr://owner/repo/123/diff/");
-			expect(result!).not.toContain("?at=");
-			const ref = {
-				forge: "github" as const,
-				repo: "owner/repo",
-				number: 123,
-				raw: "https://github.com/owner/repo/pull/123",
-				kind: "github-url" as const,
-			};
-			const initial = await withActiveSettings(settings, () => fetchPrReviewTarget(dir, ref));
-			const refreshed = await withActiveSettings(settings, () => refreshReviewTarget(initial));
-			const feedback = withActiveSettings(settings, () => buildCodeReviewFeedback(refreshed, [], true, undefined));
-			expect(feedback).toBeDefined();
-			expect(feedback).not.toContain("?at=");
-			expect(retainGeneration).not.toHaveBeenCalled();
-		} finally {
-			resetCacheForTests();
-			if (previousToken === undefined) delete process.env.GH_TOKEN;
-			else process.env.GH_TOKEN = previousToken;
-			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
-			resetCacheForTests();
-			await removeWithRetries(cacheDir);
-		}
+		const ref = {
+			forge: "github" as const,
+			repo: "owner/repo",
+			number: 123,
+			raw: "https://github.com/owner/repo/pull/123",
+			kind: "github-url" as const,
+		};
+		await withActiveSettings(settings, async () => {
+			const initial = await fetchPrReviewTarget(dir, ref);
+			expect(buildReviewPrompt(prepareReviewTarget(initial))).toContain("pr://owner/repo/123/diff/");
+			const refreshed = await refreshReviewTarget(initial);
+			const feedback = buildReviewPrompt(prepareReviewTarget(refreshed));
+			expect(feedback).toContain(SAMPLE_PR_DIFF.trim());
+			expect(feedback).not.toContain("pr://");
+		});
 	});
 
 	it.each([
