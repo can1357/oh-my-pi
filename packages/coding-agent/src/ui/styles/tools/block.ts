@@ -116,41 +116,54 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 }
 
 /**
- * `block` cut to `rows` rows: its head (through its first non-blank row: a
- * framed look's titled edge, a boxed look's pad and title) over its newest
- * rows. The tail never starts inside an image: its draw rides on the image's
- * last row and moves up over the reserved rows above it (`anchoredRows`), so a
- * cut image would paint over the head. Hits are clipped to the rows kept; a
- * cursor in a dropped row goes. Undefined when the head leaves no row for the
- * tail.
+ * `block` cut to `rows` rows: its heading (the look's `heading` rows, else
+ * through its first non-blank row: a framed look's titled edge) over the
+ * newest rows that fit. An image is kept whole or dropped: its draw rides on
+ * its last row and moves up over the reserved rows above it (`anchoredRows`),
+ * so a cut image would paint over the rows above it; older rows fill the room
+ * a dropped image leaves. Hits are clipped to the rows kept; a cursor in a
+ * dropped row goes. Undefined when the heading leaves no room or no row fits.
  */
 function headAndTail(block: Block, rows: number): Block | undefined {
-	const head = block.rows.findIndex(row => Bun.stripANSI(row).trim().length > 0) + 1;
-	if (head === 0 || head >= rows) return undefined;
-	let cut = block.rows.length - (rows - head);
-	while (cut < block.rows.length && holdsImage(block.rows[cut]!) && holdsImage(block.rows[cut - 1]!)) cut++;
+	const total = block.rows.length;
+	const head = block.heading ?? block.rows.findIndex(row => Bun.stripANSI(row).trim().length > 0) + 1;
+	if (head <= 0 || head >= rows) return undefined;
+	// Newest first, one row or one whole image at a time.
+	const tail: number[] = [];
+	let room = rows - head;
+	for (let end = total; end > head && room > 0;) {
+		let start = end - 1;
+		while (start > head && holdsImage(block.rows[start]!) && holdsImage(block.rows[start - 1]!)) start--;
+		if (end - start <= room) {
+			for (let source = end - 1; source >= start; source--) tail.push(source);
+			room -= end - start;
+		}
+		end = start;
+	}
+	if (tail.length === 0) return undefined;
+	tail.reverse();
+	// Where each source row lands; -1 when dropped.
+	const to = new Array<number>(total).fill(-1);
+	for (let source = 0; source < head; source++) to[source] = source;
+	tail.forEach((source, at) => {
+		to[source] = head + at;
+	});
 	const hits = block.hits?.flatMap(hit => {
-		const end = hit.row + hit.height;
 		const kept: Hit[] = [];
-		if (hit.row < head) kept.push({ ...hit, height: Math.min(end, head) - hit.row });
-		if (end > cut) {
-			const from = Math.max(hit.row, cut);
-			kept.push({ ...hit, row: from - cut + head, height: end - from });
+		for (let source = hit.row; source < hit.row + hit.height; source++) {
+			const row = to[source] ?? -1;
+			if (row < 0) continue;
+			const last = kept.at(-1);
+			if (last && last.row + last.height === row) kept[kept.length - 1] = { ...last, height: last.height + 1 };
+			else kept.push({ ...hit, row, height: 1 });
 		}
 		return kept;
 	});
-	const cursor = block.cursor;
-	const cursorRow = !cursor
-		? undefined
-		: cursor.row < head
-			? cursor.row
-			: cursor.row >= cut
-				? cursor.row - cut + head
-				: undefined;
+	const cursorRow = block.cursor ? (to[block.cursor.row] ?? -1) : -1;
 	return {
-		rows: [...block.rows.slice(0, head), ...block.rows.slice(cut)],
+		rows: [...block.rows.slice(0, head), ...tail.map(source => block.rows[source]!)],
 		...(hits && hits.length > 0 ? { hits } : {}),
-		...(cursor && cursorRow !== undefined ? { cursor: { row: cursorRow, col: cursor.col } } : {}),
+		...(block.cursor && cursorRow >= 0 ? { cursor: { row: cursorRow, col: block.cursor.col } } : {}),
 	};
 }
 
@@ -221,7 +234,7 @@ function paintLookRows(node: UiNode, cx: PaintContext): Block {
 		if (inner.rows.length === 0) return EMPTY_BLOCK;
 		const key = tint(toolProps(node));
 		const rows = ["", ...inner.rows.map(row => ` ${row}`), ""].map(row => tintRow(cx.theme, key, row, cx.width));
-		return { rows };
+		return { rows, ...(inner.heading === undefined ? {} : { heading: inner.heading + 1 }) };
 	}
 	const paddingX = look.inset ? terminalPaddingX() : 0;
 	if (paddingX > 0) {

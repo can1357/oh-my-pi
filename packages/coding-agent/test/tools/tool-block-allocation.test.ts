@@ -79,6 +79,22 @@ describe("tool block viewport allocation", () => {
 		expect(rows[1]).toContain("MCP");
 	});
 
+	it("keeps every row of a wrapped title", () => {
+		const name = `inspect_${"very_long_segment_".repeat(5)}end`;
+		const call = toolCall({
+			name,
+			args: { q: "x" },
+			result: { content: [{ type: "text", text: lines("line", 30) }] },
+			expanded: true,
+		});
+		const rows = text(paint(call, 8).rows);
+		expect(rows).toHaveLength(8);
+		// The title wraps past the first row; its tail must stay above the newest output.
+		const title = rows.join("").replace(/\s+/g, "");
+		expect(title).toContain(name);
+		expect(rows.at(-2)).toContain("line 29");
+	});
+
 	it("never starts the tail inside an image, whose draw would move up over the head", () => {
 		// SIXEL-style rows: three reserved rows, the draw on the last one moving up over them.
 		const images: PaintImages = {
@@ -97,8 +113,10 @@ describe("tool block viewport allocation", () => {
 			expanded: true,
 		});
 
-		// Head plus three tail rows: a plain cut keeps the image's last two reserved rows and its draw.
+		// Head plus three tail rows: the 4-row image cannot fit, so it is dropped whole and the rows above it fill in.
 		const { rows } = paint(call, 4, images);
+		expect(rows).toHaveLength(4);
+		expect(text(rows)[1]).toContain("out 29");
 		expect(text(rows)[0]).toContain("╭");
 		rows.forEach((row, at) => {
 			const up = Number(/\x1b\[(\d+)A/.exec(row)?.[1] ?? 0);
