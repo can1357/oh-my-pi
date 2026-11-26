@@ -137,7 +137,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
+import { collectDeclaredToolNames, completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2619,6 +2619,7 @@ export function convertMessages(
 			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
 		return id;
 	};
+	const declaredToolNames = collectDeclaredToolNames(context.tools);
 	const transformedMessages = transformMessages(
 		context.messages,
 		model,
@@ -2626,6 +2627,8 @@ export function convertMessages(
 		maxNormalizedToolCallIdLength,
 		duplicateToolCallIdSuffixPrefix,
 		compat,
+		undefined,
+		declaredToolNames,
 	);
 
 	const remappedToolCallIds = new Map<string, string[]>();
