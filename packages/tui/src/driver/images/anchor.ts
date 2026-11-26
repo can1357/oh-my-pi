@@ -8,19 +8,18 @@
  * row, draws, and restores the cursor. The other rows are reserved: empty
  * but not blank (a reset), so nothing treats them as trimmable padding.
  */
+import { hasGraphics } from "../output/ansi";
 
 /** A reserved image row. */
 export const RESERVED_ROW = "\x1b[0m";
 
-/** An image sequence: SIXEL (and any tmux-wrapped sequence) as DCS, a kitty placement as APC, iTerm2 as OSC 1337. */
-const IMAGE_SEQUENCE = /\x1b(?:P|_G|\]1337;)/;
-
 /**
- * Whether `row` is part of an image (reserved, or carrying its sequence): escape-only, yet not
- * blank. Row trimmers keep these rows, or the image loses its place on screen.
+ * Whether `row` is part of an image (reserved, or carrying a graphics sequence per
+ * {@link hasGraphics}): escape-only, yet not blank. Row trimmers keep these rows, or the image
+ * loses its place on screen.
  */
 export function holdsImage(row: string): boolean {
-	return row === RESERVED_ROW || IMAGE_SEQUENCE.test(row);
+	return row === RESERVED_ROW || hasGraphics(row);
 }
 
 /** `rows` rows drawing `sequence` from the first one. A single row is the bare sequence. */
