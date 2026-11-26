@@ -4,19 +4,20 @@ import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import type { SessionMessageEntry } from "../../../../src/session/session-entries";
 import { TreeSelector, type TreeSelectorNode } from "../../../../src/ui/overlays/pickers/tree-selector";
 import { pickerSuite } from "./harness";
 
-const userNode = (id: string, parentId: string | null, text: string, timestamp: number): TreeSelectorNode => ({
-	entry: {
+function userNode(id: string, parentId: string | null, text: string, timestamp: number): TreeSelectorNode {
+	const entry: SessionMessageEntry = {
 		type: "message",
 		id,
 		parentId,
 		timestamp: "2026-01-01T00:00:00Z",
 		message: { role: "user", content: text, timestamp },
-	} as unknown as TreeSelectorNode["entry"],
-	children: [],
-});
+	};
+	return { entry, children: [] };
+}
 
 function build(): { roots: TreeSelectorNode[]; leaf: string } {
 	let n = 0;
