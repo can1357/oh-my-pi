@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { $ } from "bun";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -61,5 +62,32 @@ describe("git linked worktree resolution", () => {
 		fs.mkdirSync(bare, { recursive: true });
 
 		expect(vcs.git(bare)?.linkedWorktree() ?? null).toBeNull();
+	});
+
+	it("runs a .git/info/attributes filter when a linked worktree falls back to a plain checkout", async () => {
+		const repo = path.join(tempRoot, "repo");
+		const filter = path.join(tempRoot, "filter.sh");
+		fs.writeFileSync(
+			filter,
+			`#!/bin/sh
+if [ "$1" = smudge ]; then sed 's/TOKEN/REAL/'; else sed 's/REAL/TOKEN/'; fi
+`,
+		);
+		await $`git init -q -b main ${repo}`.quiet();
+		await $`git -C ${repo} config filter.t.smudge ${`sh '${filter}' smudge`}`.quiet();
+		await $`git -C ${repo} config filter.t.clean ${`sh '${filter}' clean`}`.quiet();
+		await $`git -C ${repo} config filter.t.required true`.quiet();
+		fs.writeFileSync(path.join(repo, ".git", "info", "attributes"), "*.txt filter=t\n");
+		fs.writeFileSync(path.join(repo, "b.txt"), "REAL two\n");
+		await $`git -C ${repo} add -A`.quiet();
+		await $`git -C ${repo} -c user.name=Test -c user.email=test@example.invalid -c commit.gpgsign=false commit -qm init`.quiet();
+		// core.sparseCheckout makes the clone refuse, so worktreeAdd takes the plain-checkout fallback.
+		await $`git -C ${repo} config core.sparseCheckout true`.quiet();
+
+		const worktree = path.join(tempRoot, "wt");
+		const result = await vcs.requireGit(repo).worktreeAdd(worktree, "HEAD", { detach: true, clone: true });
+
+		expect(result.cloneError).toBeDefined();
+		expect(fs.readFileSync(path.join(worktree, "b.txt"), "utf8")).toBe("REAL two\n");
 	});
 });
