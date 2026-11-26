@@ -48,14 +48,17 @@ describe("service-tier credential selection", () => {
 	let authStorage: AuthStorage;
 	const usageByAccount = new Map<string, UsageReport>();
 	/** Set by a test to stall usage reads until it releases them. */
-	let usageHold: { started: PromiseWithResolvers<void>; release: Promise<void> } | undefined;
+	let usageHold: { accountId?: string; started: PromiseWithResolvers<void>; release: Promise<void> } | undefined;
 
 	beforeEach(() => {
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const usageProvider = (id: string): UsageProvider => ({
 			id,
 			async fetchUsage(params) {
-				if (usageHold) {
+				if (
+					usageHold &&
+					(usageHold.accountId === undefined || usageHold.accountId === params.credential.accountId)
+				) {
 					usageHold.started.resolve();
 					await usageHold.release;
 				}
@@ -196,6 +199,51 @@ describe("service-tier credential selection", () => {
 					credentialId: pro.credentialId,
 					explicit: true,
 				});
+			});
+		}
+
+		for (const repin of [false, true]) {
+			const outcome = repin ? "does not replace a renewed pin" : "records past a concurrent re-record";
+			test(`a scoped fallback ${outcome}`, async () => {
+				setCodexUsage(0.6);
+				const provider = "openai-codex";
+				const sessionId = "scoped-fallback";
+				const pinned = authStorage.oauth.accounts(provider).find(account => account.accountId === "acct-pro");
+				if (!pinned) throw new Error("expected acct-pro");
+				expect(authStorage.sessions.pin(provider, sessionId, pinned.credentialId)).toBe(true);
+				store.upsertCredentialBlock({
+					credentialId: pinned.credentialId,
+					providerKey: "openai-codex:oauth",
+					blockScope: "spark",
+					blockedUntilMs: Date.now() + HOUR_MS,
+				});
+
+				const started = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				usageHold = { accountId: "acct-plus", started, release: release.promise };
+				const fallback = authStorage.keys.getWithCredential(provider, sessionId, {
+					modelId: "gpt-5.3-codex-spark",
+					serviceTier: "priority",
+				});
+				await Promise.race([
+					started.promise,
+					fallback.then(result => {
+						throw new Error(`Spark selection finished before its usage read: ${result?.apiKey}`);
+					}),
+				]);
+				usageHold = undefined;
+				try {
+					// Chat ignores Spark's block and re-records the pinned account first.
+					expect(await authStorage.keys.get(provider, sessionId, { modelId: MODEL })).toBe("oauth-acct-pro");
+					if (repin) expect(authStorage.sessions.pin(provider, sessionId, pinned.credentialId)).toBe(true);
+				} finally {
+					release.resolve();
+				}
+
+				expect((await fallback)?.apiKey).toBe("oauth-acct-plus");
+				expect(await authStorage.keys.get(provider, sessionId, { modelId: MODEL })).toBe(
+					repin ? "oauth-acct-pro" : "oauth-acct-plus",
+				);
 			});
 		}
 	});

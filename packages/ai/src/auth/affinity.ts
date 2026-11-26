@@ -27,6 +27,7 @@ type PersistedSticky = {
 	type: AuthCredential["type"];
 	credentialId: number;
 	explicit: boolean;
+	pinGeneration?: string;
 	lastUsedAtMs: number;
 };
 
@@ -38,6 +39,8 @@ export type SessionCredential = {
 	lastUsedAtMs?: number;
 	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
 	explicit?: true;
+	/** Changes only when an explicit pin is installed, not when it serves a request. */
+	readonly pinGeneration?: string;
 };
 
 /** One installed restriction: the allowed OAuth identity keys and the lease that lifts it. */
@@ -174,12 +177,14 @@ export class SessionAffinity implements SessionsApi {
 			previous?.type === type &&
 			(credentialId !== undefined ? previous.credentialId === credentialId : previous.index === index);
 		const isExplicit = explicit || (sameCredential && previous?.explicit === true);
+		const pinGeneration = explicit ? crypto.randomUUID() : isExplicit ? previous?.pinGeneration : undefined;
 		const sessionCredential: SessionCredential = {
 			type,
 			index,
 			credentialId,
 			lastUsedAtMs: nowMs,
 			...(isExplicit ? { explicit: true as const } : {}),
+			...(pinGeneration === undefined ? {} : { pinGeneration }),
 		};
 		sessionMap.set(sessionId, sessionCredential);
 
@@ -193,6 +198,7 @@ export class SessionAffinity implements SessionsApi {
 			persisted.type === type &&
 			persisted.credentialId === credentialId &&
 			persisted.explicit === isExplicit &&
+			persisted.pinGeneration === pinGeneration &&
 			Math.abs(nowMs - persisted.lastUsedAtMs) < SESSION_STICKY_PERSIST_INTERVAL_MS
 		) {
 			return;
@@ -203,6 +209,7 @@ export class SessionAffinity implements SessionsApi {
 				type,
 				credentialId,
 				explicit: isExplicit,
+				pinGeneration,
 				lastUsedAtMs: nowMs,
 			});
 		} catch (err) {
@@ -212,11 +219,9 @@ export class SessionAffinity implements SessionsApi {
 	}
 
 	/**
-	 * Records the credential an automatic selection chose. `basis` is the
-	 * session's {@link get} result from when that selection began; an explicit
-	 * pin recorded since then wins and the choice is dropped, so a selection
-	 * already under way (startup prewarm, concurrent request) cannot undo
-	 * `/session pin`.
+	 * Records the credential an automatic selection chose unless a newer explicit
+	 * pin superseded its {@link get} snapshot. Re-recording a serving pin keeps
+	 * its generation, so it does not invalidate a concurrent selection.
 	 */
 	recordSelection(
 		provider: string,
@@ -227,7 +232,14 @@ export class SessionAffinity implements SessionsApi {
 	): void {
 		if (!sessionId) return;
 		const current = this.get(provider, sessionId);
-		if (current?.explicit === true && current !== basis) return;
+		if (
+			current?.explicit === true &&
+			(basis?.explicit !== true ||
+				current.pinGeneration !== basis.pinGeneration ||
+				current.credentialId !== basis.credentialId)
+		) {
+			return;
+		}
 		this.record(provider, sessionId, type, index);
 	}
 
@@ -307,12 +319,14 @@ export class SessionAffinity implements SessionsApi {
 					credentialId: val.credentialId,
 					lastUsedAtMs: val.lastUsedAtMs,
 					...(val.explicit === true ? { explicit: true } : {}),
+					...(val.pinGeneration === undefined ? {} : { pinGeneration: val.pinGeneration }),
 				};
 				if (typeof val.lastUsedAtMs === "number") {
 					SessionAffinity.#sessionsFor(this.#persistedSticky, provider).set(sessionId, {
 						type: val.type,
 						credentialId: val.credentialId,
 						explicit: val.explicit === true,
+						pinGeneration: val.pinGeneration,
 						lastUsedAtMs: val.lastUsedAtMs,
 					});
 				}
