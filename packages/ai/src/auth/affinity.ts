@@ -144,9 +144,11 @@ export class SessionAffinity implements SessionsApi {
 		}
 	}
 
-	/** Drop only this in-memory session pin after OAuth selection falls through. */
-	forget(provider: string, sessionId: string): void {
-		this.#sessionLastCredential.get(provider)?.delete(sessionId);
+	/** Drop the in-memory pin when OAuth falls through, unless it was set after selection began. */
+	forget(provider: string, sessionId: string | undefined, basis: SessionCredential | undefined): void {
+		if (!sessionId) return;
+		const sessions = this.#sessionLastCredential.get(provider);
+		if (sessions && !SessionAffinity.#hasNewerPin(sessions.peek(sessionId), basis)) sessions.delete(sessionId);
 	}
 
 	/**
@@ -230,17 +232,17 @@ export class SessionAffinity implements SessionsApi {
 		index: number,
 		basis: SessionCredential | undefined,
 	): void {
-		if (!sessionId) return;
-		const current = this.get(provider, sessionId);
-		if (
+		if (!sessionId || SessionAffinity.#hasNewerPin(this.get(provider, sessionId), basis)) return;
+		this.record(provider, sessionId, type, index);
+	}
+
+	static #hasNewerPin(current: SessionCredential | undefined, basis: SessionCredential | undefined): boolean {
+		return (
 			current?.explicit === true &&
 			(basis?.explicit !== true ||
 				current.pinGeneration !== basis.pinGeneration ||
 				current.credentialId !== basis.credentialId)
-		) {
-			return;
-		}
-		this.record(provider, sessionId, type, index);
+		);
 	}
 
 	/**

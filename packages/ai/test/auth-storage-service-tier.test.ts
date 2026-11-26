@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { SERVICE_TIER_UNAVAILABLE_FEATURE, streamSimple } from "@oh-my-pi/pi-ai";
 import type { ApiKeyResolveContext } from "@oh-my-pi/pi-ai/auth-retry";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { type ApiKeyCredential, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -252,11 +252,11 @@ describe("service-tier credential selection", () => {
 		const MODEL = "claude-opus-5-5";
 		const fast = { modelId: MODEL, serviceTier: "priority" } as const;
 
-		async function setUp(fastMode: boolean): Promise<void> {
-			await authStorage.credentials.set("anthropic", [
-				oauth("acct-max"),
-				{ type: "api_key", key: "sk-ant-api-console", source: "login" },
-			]);
+		const consoleKey: ApiKeyCredential = { type: "api_key", key: "sk-ant-api-console", source: "login" };
+
+		async function setUp(fastMode: boolean, apiKey: ApiKeyCredential | null = consoleKey): Promise<void> {
+			const subscription = oauth("acct-max");
+			await authStorage.credentials.set("anthropic", apiKey ? [subscription, apiKey] : [subscription]);
 			usageByAccount.set("acct-max", {
 				provider: "anthropic",
 				fetchedAt: Date.now(),
@@ -280,13 +280,7 @@ describe("service-tier credential selection", () => {
 		});
 
 		test("an environment API key serves fast requests, and a refusal without a stored row sidelines it", async () => {
-			await authStorage.credentials.set("anthropic", [oauth("acct-max")]);
-			usageByAccount.set("acct-max", {
-				provider: "anthropic",
-				fetchedAt: Date.now(),
-				limits: [window("anthropic", "anthropic:5h", "5h", 5 * HOUR_MS, 0.1)],
-				metadata: { accountId: "acct-max", fastMode: false },
-			});
+			await setUp(false, null);
 			const refusal = { serviceTier: "priority", modelId: MODEL } as const;
 
 			await withEnv({ ANTHROPIC_API_KEY: "sk-ant-api-env", ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
@@ -307,6 +301,50 @@ describe("service-tier credential selection", () => {
 				expect(rearmed?.apiKey).toBe("sk-ant-api-env");
 			});
 		});
+
+		for (const source of ["login", "stored", "environment"] as const) {
+			test(`fast fallback to the ${source} key preserves a pin made during OAuth selection`, async () => {
+				const provider = "anthropic";
+				const sessionId = "fast-fallback";
+				const environmentKey = source === "environment" ? "sk-ant-api-env" : undefined;
+				const storedKey: ApiKeyCredential =
+					source === "login" ? consoleKey : { type: "api_key", key: consoleKey.key };
+				await setUp(false, environmentKey ? null : storedKey);
+				const account = authStorage.oauth.accounts(provider)[0];
+				if (!account) throw new Error("expected the subscription account");
+
+				await withEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+					await withEnv({ ANTHROPIC_API_KEY: environmentKey }, async () => {
+						const started = Promise.withResolvers<void>();
+						const release = Promise.withResolvers<void>();
+						usageHold = { started, release: release.promise };
+						const fallback = authStorage.keys.getWithCredential(provider, sessionId, fast);
+						try {
+							await Promise.race([
+								started.promise,
+								fallback.then(() => {
+									throw new Error("fast selection finished before reading OAuth usage");
+								}),
+							]);
+							if (environmentKey) {
+								// An environment fallback can drop a live pin even when no cached copy can restore it.
+								vi.spyOn(store, "setCache").mockImplementationOnce(() => {
+									throw new Error("sticky cache unavailable");
+								});
+							}
+							expect(authStorage.sessions.pin(provider, sessionId, account.credentialId)).toBe(true);
+						} finally {
+							release.resolve();
+						}
+						expect((await fallback)?.apiKey).toBe(environmentKey ?? storedKey.key);
+					});
+					expect(authStorage.sessions.sticky?.(provider, sessionId)).toMatchObject({
+						credentialId: account.credentialId,
+						explicit: true,
+					});
+				});
+			});
+		}
 
 		test("a subscription with fast mode keeps the request", async () => {
 			await setUp(true);

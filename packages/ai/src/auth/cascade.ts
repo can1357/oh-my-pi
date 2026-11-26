@@ -12,7 +12,7 @@ import * as AIError from "../error";
 import { getProviderDefinition } from "../registry";
 import { assertProviderEnabled, providerPauseReason } from "../registry/oauth";
 import { AUTHENTICATED_SENTINEL, type ProviderDefinition } from "../registry/types";
-import type { SessionAffinity } from "./affinity";
+import type { SessionAffinity, SessionCredential } from "./affinity";
 import { type CredentialBlocks, providerTypeKey, serviceTierBlockScope } from "./blocks";
 import type { CredentialPool } from "./pool";
 import type { ApiKeySelection } from "./rank";
@@ -456,10 +456,11 @@ export class KeyCascade implements KeysApi {
 		provider: string,
 		sessionId: string | undefined,
 		options: AuthApiKeyOptions | undefined,
+		sessionBasis: SessionCredential | undefined,
 		{ selection, serviceTierUnavailable }: StoredApiKeyChoice,
 	): Promise<ResolvedApiKey | undefined> {
 		if (options?.recordAffinity !== false) {
-			this.#deps.affinity.record(provider, sessionId, "api_key", selection.index);
+			this.#deps.affinity.recordSelection(provider, sessionId, "api_key", selection.index, sessionBasis);
 		}
 		const credentialId = this.#deps.pool.entries(provider)[selection.index]?.id;
 		const apiKey = await this.#deps.overrides.resolve(selection.credential.key);
@@ -478,6 +479,7 @@ export class KeyCascade implements KeysApi {
 		provider: string,
 		sessionId: string | undefined,
 		options: AuthApiKeyOptions | undefined,
+		sessionBasis: SessionCredential | undefined,
 	): Promise<ResolvedApiKey | undefined> {
 		const tierScope = serviceTierBlockScope(options?.serviceTier, options?.modelId);
 		if (tierScope === undefined) return undefined;
@@ -488,7 +490,7 @@ export class KeyCascade implements KeysApi {
 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
 		);
 		if (loginKey) {
-			return this.#useStoredApiKey(provider, sessionId, options, {
+			return this.#useStoredApiKey(provider, sessionId, options, sessionBasis, {
 				selection: loginKey,
 				serviceTierUnavailable: false,
 			});
@@ -496,9 +498,8 @@ export class KeyCascade implements KeysApi {
 
 		const envKey = getEnvApiKey(provider);
 		if (envKey && envKey !== AUTHENTICATED_SENTINEL && !this.#deps.blocks.isUnstoredKeyRefused(provider, tierScope)) {
-			// As on the ordinary environment path: the request is not
-			// OAuth-authenticated, so the session's OAuth pin must not attribute it.
-			if (sessionId) this.#deps.affinity.forget(provider, sessionId);
+			// Do not attribute an environment-key request to the OAuth account it bypassed.
+			this.#deps.affinity.forget(provider, sessionId, sessionBasis);
 			return { apiKey: envKey };
 		}
 
@@ -510,7 +511,10 @@ export class KeyCascade implements KeysApi {
 		);
 		return (
 			storedKey &&
-			this.#useStoredApiKey(provider, sessionId, options, { selection: storedKey, serviceTierUnavailable: false })
+			this.#useStoredApiKey(provider, sessionId, options, sessionBasis, {
+				selection: storedKey,
+				serviceTierUnavailable: false,
+			})
 		);
 	}
 
@@ -568,7 +572,7 @@ export class KeyCascade implements KeysApi {
 		if (oauthResolved) {
 			const serviceTierUnavailable = oauthResolved.serviceTierOffered === false;
 			if (serviceTierUnavailable && !restricted) {
-				const tierApiKey = await this.#resolveServiceTierApiKey(provider, sessionId, options);
+				const tierApiKey = await this.#resolveServiceTierApiKey(provider, sessionId, options, sessionBasis);
 				if (tierApiKey) return tierApiKey;
 			}
 			const { credentialId, credential } = oauthResolved;
@@ -603,12 +607,10 @@ export class KeyCascade implements KeysApi {
 			options,
 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
 		);
-		if (loginApiKey) return this.#useStoredApiKey(provider, sessionId, options, loginApiKey);
+		if (loginApiKey) return this.#useStoredApiKey(provider, sessionId, options, sessionBasis, loginApiKey);
 
-		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
-		// env/api_key, not OAuth, so clear it now so getOAuthAccountId() correctly
-		// suppresses account_uuid for this session.
-		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
+		// Past OAuth: drop stale OAuth attribution without disturbing a newer explicit pin.
+		this.#deps.affinity.forget(provider, sessionId, sessionBasis);
 
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
 		if (fallbackKey !== undefined) {
@@ -623,7 +625,7 @@ export class KeyCascade implements KeysApi {
 			options,
 			credential => credential.source !== "login",
 		);
-		if (storedApiKey) return this.#useStoredApiKey(provider, sessionId, options, storedApiKey);
+		if (storedApiKey) return this.#useStoredApiKey(provider, sessionId, options, sessionBasis, storedApiKey);
 		if (oauthRefreshFailure) throw oauthRefreshFailure;
 		return undefined;
 	}
