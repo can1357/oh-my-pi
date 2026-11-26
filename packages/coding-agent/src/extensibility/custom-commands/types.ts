@@ -9,6 +9,7 @@ import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type { ExtensionUIContext } from "../extensions/types";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import type { ExecOptions, ExecResult, HookCommandContext } from "../../extensibility/hooks/types";
 import type { AutocompleteItem } from "../../autocomplete/autocomplete";
 import type * as PiCodingAgent from "../../index";
@@ -19,6 +20,11 @@ export type { ExecOptions, ExecResult, HookCommandContext };
 /** Interactive capabilities available to user-invoked commands, not hooks. */
 export interface CustomCommandContext extends HookCommandContext {
 	ui: ExtensionUIContext;
+	/**
+	 * URL router of the session running the command: its extensions' schemes, then the built-ins.
+	 * Classifies transcript URLs (reply writes, grouped reads) the way that session's transcript does.
+	 */
+	urlRouter: InternalUrlRouter;
 }
 
 /**

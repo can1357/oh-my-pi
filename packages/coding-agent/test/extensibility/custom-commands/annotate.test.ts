@@ -46,6 +46,15 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/annotation-types";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 const ENTER = "\r";
 const UP = "\x1b[A";
@@ -105,6 +114,8 @@ interface ContextOptions {
 	customResult?: unknown;
 	inputResult?: string | undefined;
 	editorResult?: string | undefined;
+	/** The running session's router; a context without a session classifies URLs by the built-ins. */
+	urlRouter?: InternalUrlRouter;
 }
 
 function createContext(options: ContextOptions = {}) {
@@ -156,6 +167,7 @@ function createContext(options: ContextOptions = {}) {
 			getArtifactsDir: () => null,
 		},
 		ui: { select, input, editor, custom, pasteToEditor, notify, setStatus },
+		urlRouter: options.urlRouter ?? InternalUrlRouter.builtins(),
 	} as unknown as CustomCommandContext;
 	return {
 		ctx,
@@ -561,6 +573,81 @@ describe("/annotate contracts", () => {
 		expect(pickedSelections[0]?.entry).toBe(assistant);
 		expect(showTextReviewOverlay).toHaveBeenCalledTimes(1);
 	});
+
+	it("reads a reply written to an extension's scheme as the picked turn's prose through the session's router", async () => {
+		using dir = TempDir.createSync("@annotate-session-router-");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled test model");
+		// `memo://` sends its writes to the user, like `out://`.
+		const memo: ProtocolHandler = {
+			scheme: "memo",
+			spec: {
+				backing: "remote",
+				selectors: "none",
+				immutable: false,
+				write: { via: "handler", payload: "verbatim", scope: "reply", tier: () => "write" },
+			},
+			resolve: async url => ({ url: url.href, content: "memo", contentType: "text/plain" }),
+			write: async () => {},
+		};
+		const { session } = await createAgentSession({
+			cwd: dir.path(),
+			agentDir: dir.path(),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, dir.join("models.yml")),
+			settings: Settings.isolated({ "async.enabled": false, "compaction.enabled": false, "todo.enabled": false }),
+			model,
+			toolNames: ["read", "write"],
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			enableLsp: false,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			extensions: [
+				pi => {
+					pi.registerUrlScheme(memo);
+				},
+			],
+		});
+		try {
+			const base = makeAssistantEntry("assistant-memo", "unused", "user-memo");
+			const assistant: SessionMessageEntry = {
+				...base,
+				message: {
+					...base.message,
+					content: [
+						{ type: "text", text: "Answering through memo." },
+						{
+							type: "toolCall",
+							id: "memo-write",
+							name: "write",
+							arguments: { path: "memo://user", content: "the memo reply" },
+						},
+					],
+				} as AgentMessage,
+			};
+			const { ctx, pickedSelections } = createContext({
+				branch: [makeUserEntry("user-memo", "answer via memo"), assistant],
+				customKeys: [ENTER],
+				urlRouter: session.urlRouter,
+			});
+			let picked: TextReviewSource | undefined;
+			const showTextReviewOverlay = vi.fn(async (_ctx: AnnotationOverlayContext, source: TextReviewSource) => {
+				picked = source;
+				return { action: "paste" as const, annotations: [{ scope: "text" as const, note: "memo note" }] };
+			});
+
+			await runAnnotateCommand(API, "session", ctx, { showTextReviewOverlay });
+
+			expect(pickedSelections[0]?.entry).toBe(assistant);
+			// The session's router knows `memo://` writes are replies, so the turn's prose carries the reply.
+			expect(picked?.text).toBe("Answering through memo.\n\nthe memo reply");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	}, 30_000);
 
 	it("summarizes an older session message while preserving its exact quote and note", async () => {
 		const sourceText = `older source ${"x".repeat(1200)}`;

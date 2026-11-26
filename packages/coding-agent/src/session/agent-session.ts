@@ -10486,10 +10486,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		// Get command context from extension runner (includes session control methods)
 		const baseCtx = this.#createCommandContext();
-		const ctx = {
+		const ctx: CustomCommandContext = {
 			...baseCtx,
 			hasQueuedMessages: baseCtx.hasPendingMessages,
-		} as unknown as CustomCommandContext;
+			urlRouter: this.urlRouter,
+		};
 
 		try {
 			const args = parseCommandArgs(argsString);
