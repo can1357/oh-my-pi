@@ -143,7 +143,9 @@ export class SessionStatusLine implements StatusLineModel {
 	/**
 	 * Active-processing time per viewed session (a focused subagent's turns never feed main's): the
 	 * completed windows since the last reset and the open one's start. A session whose file changed in
-	 * place (`/resume`, `/move`, a fork) starts a fresh meter.
+	 * place (`/resume`, `/move`, a fork) starts a fresh meter; an open window carries over to it, from
+	 * the change, while the session's run goes on across it (a fork or `/wt` while the run waits on
+	 * background work).
 	 */
 	readonly #meters = new WeakMap<AgentViewSession, ActiveMeter>();
 	/** The active model's next tariff change, and the wakeup repainting the cost at it. */
@@ -375,7 +377,13 @@ export class SessionStatusLine implements StatusLineModel {
 		const session = this.#session;
 		const file = session.sessionFile;
 		let meter = this.#meters.get(session);
-		if (meter && file !== undefined && meter.file !== undefined && meter.file !== file) meter = undefined;
+		if (meter && file !== undefined && meter.file !== undefined && meter.file !== file) {
+			// An open window carries over, from the change, while the run goes on across it; its clock is
+			// already ticking. A closed one stays closed: a run starting on the new file opens it itself.
+			const carried = meter.since !== undefined && session.runStartedAt !== undefined;
+			meter = { activeMs: 0, since: carried ? Date.now() : undefined, file };
+			this.#meters.set(session, meter);
+		}
 		if (!meter) {
 			meter = { activeMs: 0, since: undefined, file };
 			this.#meters.set(session, meter);

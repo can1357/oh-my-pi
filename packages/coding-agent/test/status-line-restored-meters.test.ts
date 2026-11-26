@@ -121,4 +121,39 @@ describe("active time per session", () => {
 		(main as unknown as { sessionFile: string }).sessionFile = "/s/resumed.jsonl";
 		expect(line.activeMs()).toBe(0);
 	});
+
+	it("carries an open window over the file change only while the session's run goes on", () => {
+		vi.useFakeTimers();
+		setSystemTime(2_000_000);
+		// `/fork` or `/wt` while the run waits on background work: same session, new file, run still open.
+		const forked = statusSession({ sessionFile: "/s/main.jsonl", runStartedAt: 2_000_000 });
+		const forkedLine = statusLine(forked, BARE);
+		forkedLine.markActivityStart();
+		setSystemTime(2_005_000);
+		Object.assign(forked, { sessionFile: "/s/forked.jsonl" });
+		forkedLine.refresh();
+		expect(forkedLine.facts().turnStartedAt).toBe(2_005_000);
+		setSystemTime(2_007_000);
+		expect(forkedLine.activeMs()).toBe(2_000);
+
+		// `/resume` after a run that closed without `agent_end`: its window was left open, the run is over.
+		const resumed = statusSession({ sessionFile: "/s/main.jsonl" });
+		const resumedLine = statusLine(resumed, BARE);
+		resumedLine.markActivityStart();
+		Object.assign(resumed, { sessionFile: "/s/resumed.jsonl" });
+		resumedLine.refresh();
+		expect(resumedLine.facts().turnStartedAt).toBeUndefined();
+	});
+
+	it("ticks a run that starts on the new file before the status line reads it", () => {
+		vi.useFakeTimers({ now: 3_000_000 });
+		const session = statusSession({ sessionFile: "/s/main.jsonl" });
+		const line = statusLine(session, { ...BARE, leftSegments: ["time_spent"] });
+		expect(line.facts().activeMs).toBe(0);
+		// An idle `/fork` whose `session_switch` hook starts a turn: the file changes, then the run starts.
+		Object.assign(session, { sessionFile: "/s/forked.jsonl", runStartedAt: 3_000_000 });
+		line.markActivityStart();
+		vi.advanceTimersByTime(3_000);
+		expect(line.facts().activeMs).toBe(3_000);
+	});
 });
