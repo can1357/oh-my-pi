@@ -739,7 +739,7 @@ export interface InlineByteCapOptions {
 	maxBytes?: number;
 	/**
 	 * Persist the full text as a session artifact. When an artifact id is
-	 * returned, a `[raw output: local://<id>.log]` footer is appended so the
+	 * returned, a `[raw output: local://<id>.log:raw]` footer is appended so the
 	 * elided bytes stay recoverable.
 	 */
 	saveArtifact?: (full: string) => string | undefined | Promise<string | undefined>;
@@ -765,7 +765,7 @@ function trimTailToLineBoundary(text: string): string {
  * ~60% of the budget from the head and ~25% from the tail — cut on line
  * boundaries, never splitting a multi-byte UTF-8 sequence — with an elision
  * marker between. The remaining ~15% is slack for the marker and the optional
- * `[raw output: local://<id>.log]` footer, so the result stays under `maxBytes`.
+ * `[raw output: local://<id>.log:raw]` footer, so the result stays under `maxBytes`.
  */
 export async function enforceInlineByteCap(text: string, options: InlineByteCapOptions): Promise<string> {
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;

@@ -103,7 +103,7 @@ describe("enforceInlineByteCap", () => {
 		});
 		// saveArtifact receives the full original text, not the elided version.
 		expect(saved).toBe(text);
-		expect(result.endsWith("[raw output: local://17.log]")).toBe(true);
+		expect(result.endsWith("[raw output: local://17.log:raw]")).toBe(true);
 		expect(result).toMatch(MARKER_PATTERN);
 	});
 

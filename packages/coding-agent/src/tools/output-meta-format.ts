@@ -197,10 +197,12 @@ export function stripTrailingNotice(
 const RAW_OUTPUT_PREFIX = "[raw output: ";
 
 const RAW_OUTPUT_SUFFIX = "]";
+/** The read selector the footer names; `:raw` reads the spill's original text. */
+export const RAW_OUTPUT_SELECTOR = ":raw";
 
 /** The footer naming the spill that holds the raw output a tool result was cut from. */
 export function formatRawOutputNotice(artifactId: string): string {
-	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_OUTPUT_SUFFIX}`;
+	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_OUTPUT_SELECTOR}${RAW_OUTPUT_SUFFIX}`;
 }
 
 /** The column-cap clause {@link formatOutputNotice} puts in a notice, alone or after other parts. */
