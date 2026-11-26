@@ -16,6 +16,7 @@ import {
 	assertGitlabHostTrustedForEnvToken,
 	GITLAB_HOST_PATTERN,
 	GITLAB_PATH_SEGMENT_PATTERN,
+	isGitlabHostSegment,
 	resolveDefaultGitlabProjectMemoized,
 } from "./glab-mr";
 import type { GlMrApi, GlUserApi } from "./gl-types";
@@ -77,10 +78,6 @@ export async function defaultGitlabHost(cwd: string, signal?: AbortSignal): Prom
 	return "gitlab.com";
 }
 
-function isHostSegment(segment: string): boolean {
-	return segment.includes(".") || segment.includes(":") || segment === "localhost";
-}
-
 function parseGitlabNamespaceRef(
 	raw: string,
 	fallbackHost: string,
@@ -110,7 +107,7 @@ function parseGitlabNamespaceRef(
 	} else {
 		const cleaned = trimmed.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
 		const parts = cleaned.split("/").filter(Boolean);
-		if (parts.length >= minSegments + 1 && isHostSegment(parts[0]!)) {
+		if (parts.length >= minSegments + 1 && isGitlabHostSegment(parts[0]!)) {
 			host = parts[0]!.toLowerCase();
 			segments = parts.slice(1);
 		} else {
@@ -141,7 +138,7 @@ export function hasExplicitGitlabHost(raw: string, minSegments: number = 2): boo
 		.replace(/^\/+|\/+$/g, "")
 		.split("/")
 		.filter(Boolean);
-	return parts.length >= minSegments + 1 && isHostSegment(parts[0]!);
+	return parts.length >= minSegments + 1 && isGitlabHostSegment(parts[0]!);
 }
 
 export function parseGitlabProjectRef(raw: string, fallbackHost: string): GitlabProjectRef {

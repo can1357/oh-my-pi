@@ -194,7 +194,7 @@ function callSubject(args: GithubArgs | undefined): string[] {
 	return parts;
 }
 
-function label(title: string, subject: readonly string[] = []): TspSpan[] {
+export function label(title: string, subject: readonly string[] = []): TspSpan[] {
 	const spans: TspSpan[] = [{ s: "toolTitle strong", t: title }];
 	for (const part of subject) spans.push({ t: " " }, { s: "muted", t: part });
 	return spans;
@@ -219,7 +219,7 @@ function statusText(status: string | undefined, conclusion: string | null | unde
 	return (status ?? "queued").replace(/_/g, " ");
 }
 
-function seconds(value: number | undefined): string | undefined {
+export function seconds(value: number | undefined): string | undefined {
 	if (value === undefined) return undefined;
 	if (value < 60) return `${Math.round(value)}s`;
 	return `${Math.floor(value / 60)}m${Math.round(value % 60)}s`;

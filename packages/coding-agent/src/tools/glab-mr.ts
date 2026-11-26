@@ -22,6 +22,11 @@ export const GITLAB_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 /** A GitLab host with optional port; rejects userinfo, paths, and control characters. */
 export const GITLAB_HOST_PATTERN = /^[A-Za-z0-9.-]+(?::\d+)?$/;
 
+/** Whether the first segment of a `[host/]group/project` ref names a host (dotted, ported, or `localhost`). */
+export function isGitlabHostSegment(segment: string): boolean {
+	return segment.includes(".") || segment.includes(":") || segment === "localhost";
+}
+
 /** Parse a GitLab project web URL into a `<host>/<namespace…>/<project>` ref. */
 export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
 	let url: URL;

@@ -26,6 +26,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { parseGitUrl } from "../extensibility/plugins/git-url";
 import { formatRepoRef } from "./gh-common";
 import { invalidateAllForNumber, invalidateAllForRepo, invalidatePullRequestsForRepo } from "./github-cache";
+import { isGitlabHostSegment } from "./glab-mr";
 import { tokenizeShellSegments } from "./shell-tokenize";
 
 const PR_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
@@ -161,7 +162,7 @@ function normalizeGlabRepoFlag(raw: string): string | undefined {
 	const hostPart = trimmed.slice(0, firstSlash);
 	const rest = trimmed.slice(firstSlash + 1);
 	if (!rest.includes("/")) return undefined;
-	if (hostPart.includes(".") || hostPart.includes(":") || hostPart === "localhost") {
+	if (isGitlabHostSegment(hostPart)) {
 		return `${hostPart.toLowerCase()}/${rest}`;
 	}
 	return undefined;

@@ -24,6 +24,7 @@ import {
 	GITLAB_HOST_PATTERN,
 	GITLAB_PATH_SEGMENT_PATTERN,
 	getOrFetchMrDiff,
+	isGitlabHostSegment,
 	resolveDefaultGitlabProjectMemoized,
 } from "../tools/glab-mr";
 import { formatFreshnessNote } from "../tools/github-cache";
@@ -182,7 +183,7 @@ export function parseMrUrl(url: InternalUrl): ParsedMrUrl {
 
 	const listSegments = all.slice(1);
 	if (
-		(host.includes(".") || host.includes(":") || host === "localhost") &&
+		isGitlabHostSegment(host) &&
 		GITLAB_HOST_PATTERN.test(host) &&
 		listSegments.length >= 2 &&
 		listSegments.every(segment => GITLAB_PATH_SEGMENT_PATTERN.test(segment))

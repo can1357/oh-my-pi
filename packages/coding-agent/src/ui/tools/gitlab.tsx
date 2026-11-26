@@ -6,7 +6,7 @@
  */
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspTone } from "@oh-my-pi/pi-wire";
 import type {
 	GlPipelineWatchFailedLogDetails,
 	GlPipelineWatchJobDetails,
@@ -17,6 +17,7 @@ import { sanitizeDisplayLines, sanitizeDisplayWarning, shortenEmbeddedPaths } fr
 import type { ToolPresenter, ToolView } from "./contract";
 import { resultText } from "./default";
 import type { GithubState, GithubTerm, GithubTermFailedLog, GithubTermJob, GithubTermRun } from "./github";
+import { label, seconds } from "./github";
 import { registerToolPresenter } from "./registry";
 
 export interface GitlabArgs {
@@ -108,12 +109,6 @@ function callSubject(args: GitlabArgs | undefined): string[] {
 	return parts;
 }
 
-function label(title: string, subject: readonly string[] = []): TspSpan[] {
-	const spans: TspSpan[] = [{ s: "toolTitle strong", t: title }];
-	for (const part of subject) spans.push({ t: " " }, { s: "muted", t: part });
-	return spans;
-}
-
 function outputLines(text: string): string[] {
 	const lines = replaceTabs(text).split("\n");
 	while (lines.length > 0 && lines[0]!.trim() === "") lines.shift();
@@ -127,12 +122,6 @@ function jobStateOf(job: GlPipelineWatchJobDetails): GithubState {
 	if (FAILURE_STATUSES.has(status)) return job.allowFailure ? "pending" : "failure";
 	if (RUNNING_STATUSES.has(status)) return "running";
 	return "pending";
-}
-
-function seconds(value: number | undefined): string | undefined {
-	if (value === undefined) return undefined;
-	if (value < 60) return `${Math.round(value)}s`;
-	return `${Math.floor(value / 60)}m${Math.round(value % 60)}s`;
 }
 
 function formatFailedLog(log: GlPipelineWatchFailedLogDetails): GithubTermFailedLog {
