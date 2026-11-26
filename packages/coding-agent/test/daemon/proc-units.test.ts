@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { DaemonCompletionEvent, DaemonEvent, DaemonNotifyEvent, DaemonOp } from "../../src/daemon/protocol";
 import { type DaemonConn, pidAlive, rejection, shProc, TestDaemon, until } from "../fixtures/daemon-proc-harness";
 
@@ -268,6 +269,53 @@ describe.skipIf(process.platform === "win32")("daemon proc units", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	for (const pty of [false, true]) {
+		it(
+			`stop also ends a descendant that started its own session and ignores SIGTERM (pty: ${pty})`,
+			async () => {
+				const { conn, root } = await startDaemon();
+				const pidFile = path.join(root, "detached.pid");
+				const launcher = path.join(root, "launcher.js");
+				// Like Playwright's runner and webServer: the launcher stays up and dies on SIGTERM; its
+				// child runs in a new session, ignores SIGTERM, and reports its pid once that handler is set.
+				const child = `process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+				await fs.writeFile(
+					launcher,
+					[
+						'const fs = require("node:fs");',
+						`require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(child)}], { detached: true, stdio: "ignore" });`,
+						`const ready = setInterval(() => { if (fs.existsSync(${JSON.stringify(pidFile)}) && fs.readFileSync(${JSON.stringify(pidFile)}, "utf8").length > 0) { clearInterval(ready); console.log("up"); } }, 20);`,
+						"setInterval(() => {}, 1000);",
+					].join("\n"),
+				);
+				await conn.openProc(
+					`detached-${pty}`,
+					shProc(`exec "${process.execPath}" "${launcher}"`, root, {
+						pty,
+						ready: { log: "up", timeoutMs: 5_000 },
+					}),
+				);
+				const detached = Process.fromPid(Number(await fs.readFile(pidFile, "utf8")));
+				if (!detached) throw new Error("detached descendant already exited");
+				try {
+					expect(detached.status()).toBe(ProcessStatus.Running);
+
+					const stopped = await conn.request({ op: "stop", unit: `detached-${pty}`, timeoutMs: 500 });
+
+					expect(stopped.unit.state).toBe("exited");
+					await until(
+						() => (detached.status() === ProcessStatus.Running ? undefined : true),
+						"detached descendant to exit",
+						3_000,
+					);
+				} finally {
+					if (detached.status() === ProcessStatus.Running) detached.killTree();
+				}
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
 
 	it(
 		"restart on-failure relaunches a crashing unit with a growing backoff, and stop during the backoff ends it for good",
