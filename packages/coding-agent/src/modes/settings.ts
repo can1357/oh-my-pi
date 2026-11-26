@@ -623,6 +623,19 @@ export const cfgTuiMaxFps = register({
 	},
 });
 
+export const cfgTuiShowLinkUrl = register({
+	id: "tui.showLinkUrl",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Link URLs",
+		description:
+			"Show the target URL in parentheses after named markdown links; off only hides it where terminal hyperlinks make the label clickable",
+	},
+});
+
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
