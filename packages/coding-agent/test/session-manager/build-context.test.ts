@@ -475,6 +475,86 @@ describe("buildSessionContext", () => {
 			]);
 		});
 
+		it("keeps the rebuilt context before a notebook write identical, so resume keeps the cached prefix", () => {
+			const writeCall = msg("2", "1", "assistant", "saving notes");
+			if (writeCall.message.role !== "assistant") throw new Error("Expected assistant");
+			writeCall.message.content.push({
+				type: "toolCall",
+				id: "n1",
+				name: "context_notes",
+				arguments: { text: "v1" },
+			});
+			writeCall.message.stopReason = "toolUse";
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "v1" },
+				id: "3",
+				parentId: "2",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const writeResult = (parentId: string): SessionMessageEntry => ({
+				type: "message",
+				id: "4",
+				parentId,
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "n1",
+					toolName: "context_notes",
+					content: [{ type: "text", text: "Context notes saved." }],
+					isError: false,
+					timestamp: 1,
+				},
+			});
+			const start = msg("1", null, "user", "start");
+			const reply = msg("5", "4", "assistant", "done");
+			const next = msg("6", "5", "user", "continue");
+			// The live window after the write holds the tool call and its result, never the notebook.
+			const live = buildSessionContext([start, writeCall, writeResult("2"), reply, next]);
+			const resumed = buildSessionContext([start, writeCall, notes, writeResult("3"), reply, next]);
+			expect(resumed.messages.slice(0, 3)).toEqual(live.messages.slice(0, 3));
+			expect(resumed.messages.map(message => message.role)).toEqual([
+				"user",
+				"assistant",
+				"toolResult",
+				"custom",
+				"assistant",
+				"user",
+			]);
+		});
+
+		it("keeps the compaction summary at the head when a notebook from before the compaction is superseded", () => {
+			const notesEntry = (id: string, parentId: string, text: string): SessionEntry => ({
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text },
+				id,
+				parentId,
+				timestamp: "2025-01-01T00:00:00Z",
+			});
+			const start = msg("1", null, "user", "first");
+			const working = msg("2", "1", "assistant", "working");
+			const beforeCompaction = notesEntry("3", "2", "v1");
+			const summary = compaction("4", "3", "Summary of work", "");
+			const afterCompaction = msg("5", "4", "user", "after compact");
+			// The compaction discards the earlier entry, so its notebook sits after the summary in the live window.
+			const live = buildSessionContext([start, working, beforeCompaction, summary, afterCompaction]);
+			const superseded = notesEntry("6", "5", "v2");
+			const resumed = buildSessionContext([
+				start,
+				working,
+				beforeCompaction,
+				summary,
+				afterCompaction,
+				superseded,
+				msg("7", "6", "user", "continue"),
+			]);
+			expect(resumed.messages[0]).toEqual(live.messages[0]);
+			expect(live.messages.map(message => message.role)).toEqual(["compactionSummary", "custom", "user"]);
+			expect(resumed.messages.map(message => message.role)).toEqual(["compactionSummary", "user", "custom", "user"]);
+		});
+
 		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
 			// thinking on the next request; native replay must not do that. The
