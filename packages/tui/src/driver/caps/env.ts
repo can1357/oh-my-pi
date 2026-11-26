@@ -82,6 +82,19 @@ export function forcedImageProtocol(env: Env): TerminalCapabilities["images"] | 
 	return FORCED_IMAGES[value];
 }
 
+/**
+ * `PI_CELL_SIZE` (`<width>x<height>` in pixels, e.g. `12x24`): null when unset or malformed.
+ * A pinned size takes precedence over the terminal's own reports, which some
+ * hosts (Windows OpenSSH) answer with placeholder pixel sizes.
+ */
+export function forcedCellSize(env: Env): TerminalCapabilities["cell"] {
+	const match = /^(\d+)x(\d+)$/.exec(env.PI_CELL_SIZE?.trim() ?? "");
+	if (!match) return null;
+	const w = Number(match[1]);
+	const h = Number(match[2]);
+	return w > 0 && h > 0 ? { w, h } : null;
+}
+
 export interface ImageContext {
 	readonly platform: NodeJS.Platform;
 	/** WSL: the Windows host renders. */
@@ -155,7 +168,7 @@ export function capabilitiesFromEnv(env: Env, context: EnvCapabilityContext): Te
 		bracketedPaste: true,
 		background: null,
 		dark: darkFromColorFgBg(env) ?? true,
-		cell: null,
+		cell: forcedCellSize(env),
 		multiplexer,
 		tsp: false,
 	};

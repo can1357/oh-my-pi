@@ -13,7 +13,7 @@ import { enableConsoleVtInput, restoreConsoleInputMode } from "@oh-my-pi/pi-nati
 import { logger } from "@oh-my-pi/pi-utils";
 import { isDarkBackground } from "../caps/color";
 import { detectTerminal } from "../caps/detect";
-import { rawBackspaceIsCtrl, synchronizedOutputOverride } from "../caps/env";
+import { forcedCellSize, rawBackspaceIsCtrl, synchronizedOutputOverride } from "../caps/env";
 import type { InputEvent, TerminalCapabilities } from "../contract";
 import { type Clock, systemClock } from "../input/clock";
 import { GLYPH_CONFIRMATION_CODEPOINT, GLYPH_SUPPORT_QUERY, glyphRegistrations, parseGlyphReply } from "../glyphs";
@@ -243,6 +243,8 @@ export class ProcessTerminalInput implements TerminalInput {
 	#sixelAdvertised = false;
 	#sixelGeometry = false;
 	#forcedImages: boolean;
+	/** `PI_CELL_SIZE` pins the cell size: terminal size reports keep it. */
+	#forcedCell: boolean;
 	/** The attached tmux client draws SIXEL (asked once). */
 	#tmuxClientSixel: boolean | undefined;
 	// Cursor position.
@@ -278,6 +280,7 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#baseline = detected.capabilities;
 		this.#capabilities = this.#baseline;
 		this.#forcedImages = env.PI_FORCE_IMAGE_PROTOCOL !== undefined && env.PI_FORCE_IMAGE_PROTOCOL !== "";
+		this.#forcedCell = forcedCellSize(env) !== null;
 		this.#size = this.#osSize();
 
 		this.#decoder = new InputDecoder(
@@ -970,13 +973,13 @@ export class ProcessTerminalInput implements TerminalInput {
 				return;
 			}
 			case "windowSize": {
-				if (reply.unit === "cell" && reply.width > 0 && reply.height > 0) {
+				if (!this.#forcedCell && reply.unit === "cell" && reply.width > 0 && reply.height > 0) {
 					this.#update({ cell: { w: reply.width, h: reply.height } });
 				}
 				return;
 			}
 			case "inBandResize": {
-				if (reply.cols > 0 && reply.rows > 0 && reply.widthPx > 0 && reply.heightPx > 0) {
+				if (!this.#forcedCell && reply.cols > 0 && reply.rows > 0 && reply.widthPx > 0 && reply.heightPx > 0) {
 					this.#update({
 						cell: { w: Math.round(reply.widthPx / reply.cols), h: Math.round(reply.heightPx / reply.rows) },
 					});

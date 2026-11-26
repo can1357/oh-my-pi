@@ -401,6 +401,15 @@ describe("ProcessTerminalInput probe replies", () => {
 		expect(h.resizes).toHaveLength(1);
 	});
 
+	it("keeps a PI_CELL_SIZE cell size over the terminal's size reports", () => {
+		const h = setup({ env: { PI_CELL_SIZE: "12x24" } });
+		void h.input.start();
+		h.feed("\x1b[?2048;2$y");
+		h.bytes("\x1b[6;18;9t\x1b[48;40;120;800;1200t");
+		expect(h.resizes).toEqual([[120, 40]]);
+		expect(h.input.capabilities.cell).toEqual({ w: 12, h: 24 });
+	});
+
 	it("enables SIXEL from DA1 plus a positive XTSMGRAPHICS geometry", () => {
 		const h = setup();
 		void h.input.start();
