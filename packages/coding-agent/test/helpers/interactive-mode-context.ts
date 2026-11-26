@@ -478,6 +478,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 				renderSvg: signal(false),
 				renderEmbeds: signal(false),
 				figureCell: signal<FigureCell | undefined>(undefined),
+				figureRows: () => undefined,
 				tableCharts: signal(true),
 				shellVisualization: signal(true),
 				mcpMarkdown: signal(false),

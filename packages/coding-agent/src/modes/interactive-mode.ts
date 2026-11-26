@@ -280,7 +280,7 @@ import type {
 } from "./types";
 import type { TodoItem, TodoPhase } from "../tools/details/todo";
 import type { ConversationPosition } from "./utils/conversation-position";
-import { DEFAULT_FIGURE_CELL, type FigureCell } from "../ui/transcript/figures/svg";
+import { DEFAULT_FIGURE_CELL, type FigureCell, figureMaxRows } from "../ui/transcript/figures/svg";
 import { setImageBlobWriter } from "../ui/transcript/image-links";
 import { followInlineImageLimits } from "../ui/transcript/messages/image";
 import { imageLinksForMessage, UiHelpers } from "./utils/ui-helpers";
@@ -694,6 +694,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		renderSvg: signal(true),
 		renderEmbeds: signal(true),
 		figureCell: signal<FigureCell | undefined>(undefined),
+		figureRows: () => figureMaxRows(this.shell.size().rows),
 		tableCharts: () => this.tableChartsVisible,
 		shellVisualization: signal(true),
 		mcpMarkdown: signal(false),
