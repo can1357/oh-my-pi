@@ -111,6 +111,13 @@ function replyLike(head: string): "yes" | "maybe" | "no" {
 	return "no";
 }
 
+/** A late TSP tail can contain spaces and end in the same read as real typing. */
+function closesTspString(data: string, head: string): boolean {
+	if (!TSP_OPENERS.some(opener => head.startsWith(opener))) return false;
+	if (head.endsWith(ESC)) return data.startsWith("\\");
+	return /^[^\x00-\x1f\x7f]*(?:\x1b\\|\x07)/.test(data);
+}
+
 /**
  * A read that cannot continue a pending string payload: a key arrived instead.
  * A new escape sequence always interrupts; a control key does too (DCS
@@ -121,7 +128,7 @@ function interruptsString(data: string, head: string, stalled: boolean): boolean
 	const code = data.charCodeAt(0);
 	if (code === 0x1b) return data.length > 1 && data[1] !== "\\";
 	if (code === 0x07) return false;
-	if (code === 0x20) return stalled;
+	if (code === 0x20) return stalled && !closesTspString(data, head);
 	if (code === 0x0d || code === 0x0a) return stalled || head[1] !== "P";
 	return code < 0x20 || code === 0x7f;
 }
@@ -261,7 +268,7 @@ export class InputTokenizer {
 		if (this.#dormant) {
 			const dormant = this.#dormant;
 			this.#dormant = null;
-			if (now <= dormant.until && continuesString(data)) {
+			if (now <= dormant.until && (closesTspString(data, dormant.head) || continuesString(data))) {
 				this.#buf = dormant.head;
 				this.#hint = 0;
 				this.#str = { lastRead: now, suspects: [], resumed: true };

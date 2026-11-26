@@ -1,7 +1,7 @@
 // Adapted from markit-ai (MIT). See ../NOTICE.
 
+import { renderHtml } from "@oh-my-pi/pi-natives";
 import { XMLParser } from "@oh-my-pi/pi-utils/xml";
-import { createTurndown, normalizeTablesHtml } from "../../utils/turndown";
 import type { ConversionResult, Converter, StreamInfo } from "../types";
 import { ZipPackage } from "@oh-my-pi/pi-utils/ar";
 
@@ -94,7 +94,6 @@ export class EpubConverter implements Converter {
 		const spineOrder = spineList.map(s => s["@_idref"]);
 		// Resolve file paths
 		const basePath = opfPath.includes("/") ? opfPath.substring(0, opfPath.lastIndexOf("/")) : "";
-		const turndown = createTurndown();
 		const sections: string[] = [];
 		// Add metadata header
 		const metaLines: string[] = [];
@@ -112,7 +111,7 @@ export class EpubConverter implements Converter {
 			if (!html) continue;
 			// Strip script/style, convert to markdown
 			const cleaned = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");
-			const md = turndown.turndown(normalizeTablesHtml(cleaned)).trim();
+			const md = (await renderHtml(cleaned, { mode: "full" })).trim();
 			if (md) sections.push(md);
 		}
 		return {
