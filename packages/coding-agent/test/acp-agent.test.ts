@@ -9,7 +9,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ContextUsage, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -23,6 +23,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import * as persistedAgents from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -47,6 +48,7 @@ import type {
 	PromptRequest,
 	RequestPermissionRequest,
 	SessionNotification,
+	SessionUpdate,
 	Validator,
 } from "@oh-my-pi/pi-utils/acp";
 import {
@@ -61,6 +63,13 @@ import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp"
 
 import { cfgMcpStartupTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import {
+	cfgCompactionMethodOrder,
+	cfgCompactionModelThresholds,
+	cfgCompactionThresholdPercent,
+	cfgCompactionThresholdTokens,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { resolveAutoCompactionThresholdTokens } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {
@@ -348,8 +357,21 @@ class FakeAgentSession {
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
 
-	getContextUsage(): undefined {
-		return undefined;
+	/** Context tokens `getContextUsage` reports against the current model's window; `undefined` reports no usage. */
+	contextTokens: number | undefined;
+
+	getContextUsage(): ContextUsage | undefined {
+		if (this.contextTokens === undefined) return undefined;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		return {
+			tokens: this.contextTokens,
+			contextWindow,
+			percent: contextWindow > 0 ? (this.contextTokens / contextWindow) * 100 : 0,
+		};
+	}
+
+	getAutoCompactionThresholdTokens(): number | undefined {
+		return resolveAutoCompactionThresholdTokens(this.settings, this.model, false);
 	}
 
 	readonly #sessionChangeCallbacks = new Set<() => void>();
@@ -524,6 +546,20 @@ interface AgentHarness {
 function getChunkMessageId(notification: SessionNotification): string | undefined {
 	const update = notification.update as { messageId?: string | null };
 	return typeof update.messageId === "string" ? update.messageId : undefined;
+}
+
+/** The session's latest `usage_update`, narrowed to that variant. */
+function lastUsageUpdate(
+	updates: SessionNotification[],
+	sessionId: string,
+): Extract<SessionUpdate, { sessionUpdate: "usage_update" }> | undefined {
+	for (let index = updates.length - 1; index >= 0; index--) {
+		const notification = updates[index];
+		if (notification.sessionId === sessionId && notification.update.sessionUpdate === "usage_update") {
+			return notification.update;
+		}
+	}
+	return undefined;
 }
 
 function expectAcpNotifications(updates: SessionNotification[]): void {
@@ -1841,7 +1877,7 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const live = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(live.sessionId)!;
-		(session as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+		session.contextTokens = 10;
 		const costing = (total: number) => {
 			const message = makeAssistantMessage("spent");
 			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
@@ -1899,6 +1935,74 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("reports the resolved auto-compaction point in usage_update _meta", async () => {
+		const harness = await createHarness();
+		const live = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(live.sessionId)!;
+		session.contextTokens = 10;
+		const model = session.model!;
+		const prompt = async () => {
+			await harness.agent.prompt({ sessionId: live.sessionId, prompt: [{ type: "text", text: "ping" }] });
+			return lastUsageUpdate(harness.updates, live.sessionId);
+		};
+
+		try {
+			cfgCompactionThresholdTokens.set(Settings.instance, 64_000);
+			let usage = await prompt();
+			expect(usage?.size).toBe(200_000);
+			expect(usage?._meta?.compaction).toEqual({ thresholdTokens: 64_000 });
+
+			// The model's own percentage entry outranks the global fixed limit.
+			cfgCompactionModelThresholds.set(Settings.instance, { [`${model.provider}/${model.id}`]: "75%" });
+			usage = await prompt();
+			expect(usage?.size).toBe(200_000);
+			expect(usage?._meta?.compaction).toEqual({ thresholdTokens: 150_000 });
+
+			// No compaction method (what the legacy `strategy: off` migrates to): omp never compacts.
+			cfgCompactionMethodOrder.set(Settings.instance, []);
+			usage = await prompt();
+			expect(usage?.size).toBe(200_000);
+			expect(usage?._meta?.compaction).toBeUndefined();
+
+			// Only a method this model cannot run (snapcompact needs image input).
+			cfgCompactionMethodOrder.set(Settings.instance, ["snapcompact"]);
+			await session.setModel({ ...model, input: ["text"] });
+			usage = await prompt();
+			expect(usage?.size).toBe(200_000);
+			expect(usage?._meta?.compaction).toBeUndefined();
+		} finally {
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("reports the compaction point of the model whose window usage_update reports", async () => {
+		const harness = await createHarness();
+		const live = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(live.sessionId)!;
+		session.contextTokens = 10;
+		await session.sessionManager.ensureOnDisk();
+		cfgCompactionThresholdPercent.set(Settings.instance, 50);
+		// The model switches to a 1M window while the end-of-turn update is being prepared.
+		const largeModel: Model = { ...TEST_MODELS[1], contextWindow: 1_000_000 };
+		const hydrate = spyOn(persistedAgents, "registerPersistedSubagents").mockImplementation(async () => {
+			await session.setModel(largeModel);
+		});
+
+		try {
+			await harness.agent.prompt({ sessionId: live.sessionId, prompt: [{ type: "text", text: "ping" }] });
+			expect(hydrate).toHaveBeenCalled();
+			const usage = lastUsageUpdate(harness.updates, live.sessionId);
+			// Window and point both from the 200K model that took the turn: half of 200K, not half of 1M.
+			expect(usage?.size).toBe(200_000);
+			expect(usage?._meta?.compaction).toEqual({ thresholdTokens: 100_000 });
+		} finally {
+			hydrate.mockRestore();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
 	it("counts a loaded session's persisted background subagent spend (#19102)", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
@@ -1924,7 +2028,7 @@ describe("ACP agent", () => {
 		try {
 			await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
 			const loaded = harness.sessions.at(-1)!;
-			(loaded as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+			loaded.contextTokens = 10;
 			await harness.agent.prompt({ sessionId: stored.sessionId, prompt: [{ type: "text", text: "ping" }] });
 
 			const last = harness.updates

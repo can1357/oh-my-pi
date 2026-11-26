@@ -2886,6 +2886,8 @@ export class AcpAgent implements Agent {
 
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
+			// Read beside the usage, before the cost await: a model switch during it must not put one model's point on another's window.
+			const thresholdTokens = record.session.getAutoCompactionThresholdTokens();
 			const cost = await this.#sessionTreeCost(record);
 			await this.#connection.sessionUpdate({
 				sessionId,
@@ -2894,6 +2896,8 @@ export class AcpAgent implements Agent {
 					size: contextUsage.contextWindow,
 					used: contextUsage.tokens ?? 0,
 					cost: cost > 0 ? { amount: cost, currency: "USD" } : undefined,
+					// Where omp auto-compacts now, so clients can show it beside the full window.
+					_meta: thresholdTokens !== undefined ? { compaction: { thresholdTokens } } : undefined,
 				},
 			});
 		}
