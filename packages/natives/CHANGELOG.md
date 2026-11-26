@@ -45,6 +45,10 @@
 - Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
 - Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
 - Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
+- Added `analyzeBashApproval(command, dialect?)`: synchronous Bash 5.3 / Zsh 5.9 AST analyzer for `bash` tool approval ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
+- Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
+- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
 
 ### Changed
 
