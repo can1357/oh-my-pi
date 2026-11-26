@@ -4604,6 +4604,15 @@ export interface ShellFsStatFs {
   nameMax?: number | bigint
 }
 
+/**
+ * Index of the local target command word in `words` after walking past known
+ * launchers.
+ *
+ * Returns `null` when the target runs remotely (`ssh`) or no command word
+ * remains.
+ */
+export declare function shellLaunchIndex(words: Array<string>, windows?: boolean | undefined | null): number | null
+
 /** Options for configuring a persistent shell session. */
 export interface ShellOptions {
   /** Environment variables to apply once per session. */

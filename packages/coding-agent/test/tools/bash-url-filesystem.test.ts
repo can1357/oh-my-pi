@@ -177,6 +177,14 @@ describe("bash internal URLs through the shell filesystem", () => {
 			const wrappedOmp = await run(`PATH="$PWD:$PATH" nice -n 5 omp read local://data.txt:1-1`);
 			expect(wrappedOmp.isError).toBeUndefined();
 			expect(wrappedOmp.text).toContain("read\nlocal://data.txt:1-1\n");
+
+			const envBin = path.join(tempDir, "env");
+			await fs.writeFile(envBin, `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, {
+				mode: 0o755,
+			});
+			const wrappedOptsOmp = await run(`'${envBin}' -C local://data.txt omp read local://data.txt:1-1`);
+			expect(wrappedOptsOmp.isError).toBeUndefined();
+			expect(wrappedOptsOmp.text).toContain(`-C\n${data}\nomp\nread\nlocal://data.txt:1-1\n`);
 		},
 	);
 

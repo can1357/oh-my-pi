@@ -12,7 +12,7 @@
  * external's arguments. Everything else is left exactly as written.
  */
 import * as fs from "node:fs/promises";
-import { ShellFsOp } from "@oh-my-pi/pi-natives";
+import { ShellFsOp, shellLaunchIndex } from "@oh-my-pi/pi-natives";
 import { isCmdShell } from "@oh-my-pi/pi-utils/procmgr";
 import type { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { isShellEnvironmentAssignment, lexShellCommand, type ShellToken } from "./shell-tokenize";
@@ -32,84 +32,13 @@ export function urlBacking(filesystem: InternalUrlFilesystem): UrlBacking {
 const URL_ROOT = /^[A-Za-z][A-Za-z0-9+.-]+:\/\//;
 /** An unquoted redirection operator attached to its target (`<local://in`, `2>>local://log`). */
 const REDIRECT = /^\d*(?:<>|>>|<|>)/;
-/** `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`: a here-document and its delimiter. */
+/** A bare unquoted redirection operator whose target is the next word (`>`, `2>>`, `<<-`). */
+const BARE_REDIRECT = /^\d*(?:<>|>>|<<<|<<-?|[<>])$/;
+/** An unquoted redirection operator with or without an attached target (`2>/dev/null`, `>out`). */
+const ATTACHED_REDIRECT = /^\d*(?:<>|>>|<<<|<<-?|[<>])/;
 const HEREDOC = /(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))/g;
 const WORD_SAFE = /^[A-Za-z0-9_./:@%+=,-]+$/;
 const GLOB_RUN = /([*?[\]{}]+)/;
-
-interface WrapperSpec {
-	readonly names: readonly string[];
-	readonly shortVals: string;
-	readonly longVals: readonly string[];
-	readonly stopShorts?: string;
-	readonly stopLongs?: readonly string[];
-	readonly assignments?: "shell" | "env";
-	readonly skipArgs?: number;
-}
-
-/** Wrappers that exec a target command, paired with the options that consume a following word. */
-const WRAPPERS: readonly WrapperSpec[] = [
-	{
-		names: ["env"],
-		shortVals: "uCSaP",
-		longVals: ["--unset", "--chdir", "--split-string", "--argv0", "--env0-from"],
-		assignments: "env",
-	},
-	{
-		names: ["sudo", "doas"],
-		shortVals: "ugCDhpRrTtUac",
-		longVals: [
-			"--user",
-			"--group",
-			"--close-from",
-			"--chdir",
-			"--host",
-			"--prompt",
-			"--chroot",
-			"--role",
-			"--command-timeout",
-			"--type",
-			"--other-user",
-		],
-		assignments: "shell",
-	},
-	{ names: ["nice"], shortVals: "n", longVals: ["--adjustment"] },
-	{ names: ["nohup", "setsid", "ifne"], shortVals: "", longVals: [] },
-	{ names: ["time"], shortVals: "of", longVals: ["--output", "--format"], assignments: "shell" },
-	{ names: ["timeout", "gtimeout"], shortVals: "sk", longVals: ["--signal", "--kill-after"], skipArgs: 1 },
-	{ names: ["stdbuf"], shortVals: "ioe", longVals: ["--input", "--output", "--error"] },
-	{ names: ["command"], shortVals: "", longVals: [], stopShorts: "vV" },
-	{ names: ["exec"], shortVals: "a", longVals: [] },
-	{
-		names: ["xargs"],
-		shortVals: "adEILnPs",
-		longVals: ["--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars", "--process-slot-var"],
-	},
-	{
-		names: ["npx"],
-		shortVals: "pcw",
-		longVals: [
-			"--package",
-			"--call",
-			"--cache",
-			"--userconfig",
-			"--prefix",
-			"--loglevel",
-			"--workspace",
-			"--shell",
-			"--registry",
-			"--node-options",
-		],
-		stopShorts: "c",
-		stopLongs: ["--call"],
-	},
-	{
-		names: ["bunx"],
-		shortVals: "pc",
-		longVals: ["--package", "--shell", "--registry", "--minimum-release-age", "--cwd", "--config"],
-		stopShorts: "c",
-	},
-];
 
 const PREFIX_KEYWORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!", "{"]);
 
@@ -140,81 +69,86 @@ function isOmp(word: string): boolean {
 	return name === "omp" || name === "omp.exe";
 }
 
-function findWrapper(word: string, cmd: boolean): WrapperSpec | undefined {
-	let name = word.slice(Math.max(word.lastIndexOf("/"), word.lastIndexOf("\\")) + 1);
-	if (cmd && name.toLowerCase().endsWith(".exe")) name = name.slice(0, -4);
-	return WRAPPERS.find(w => w.names.includes(name));
+/** Whether a `&` or `|` separator token is part of a redirection operator (`2>&1`, `&>/dev/null`, `>|out`). */
+function isRedirectSeparator(tokens: readonly ShellToken[], index: number, start: number): boolean {
+	const raw = tokens[index].raw;
+	if (/^&[ \t]*$/.test(raw) && index > start) {
+		const prev = tokens[index - 1];
+		if (prev.kind === "word" && /^\d*[<>]$/.test(prev.raw)) return true;
+	}
+	if (/^[ \t]*&$/.test(raw) && index + 1 < tokens.length) {
+		const next = tokens[index + 1];
+		if (next.kind === "word" && next.raw.startsWith(">")) return true;
+	}
+	if (/^\|[ \t]*$/.test(raw) && index > start) {
+		const prev = tokens[index - 1];
+		if (prev.kind === "word" && /^\d*>$/.test(prev.raw)) return true;
+	}
+	return false;
 }
 
-function skipWrapper(
-	words: readonly { raw: string; value: string }[],
-	from: number,
-	wrapper: WrapperSpec,
-): number | undefined {
-	let i = from;
-	while (i < words.length) {
-		const w = words[i].value;
-		if (w === "--") {
-			i++;
-			break;
-		}
-		if (!w.startsWith("-") || w === "-") break;
-		if (w.startsWith("--")) {
-			const eq = w.indexOf("=");
-			const optName = eq >= 0 ? w.slice(0, eq) : w;
-			if (wrapper.stopLongs?.includes(optName)) return undefined;
-			if (eq >= 0) i++;
-			else i += wrapper.longVals.includes(w) ? 2 : 1;
-			continue;
-		}
-		let consumed = false;
-		for (let k = 1; k < w.length; k++) {
-			if (wrapper.stopShorts?.includes(w[k])) return undefined;
-			if (wrapper.shortVals.includes(w[k])) {
-				i += k + 1 < w.length ? 1 : 2;
-				consumed = true;
-				break;
-			}
-		}
-		if (!consumed) i++;
-	}
-	if (wrapper.assignments === "shell") {
-		while (i < words.length && isShellEnvironmentAssignment(words[i].value)) i++;
-	} else if (wrapper.assignments === "env") {
-		if (words[i]?.value === "-") i++;
-		while (i < words.length && words[i].value.includes("=")) i++;
-	}
-	return i + (wrapper.skipArgs ?? 0);
-}
-
-/** Whether the simple command in `tokens[start..end]` runs `omp` as its command word (directly or behind wrappers). */
-function commandRunsOmp(tokens: readonly ShellToken[], start: number, end: number, cmd: boolean): boolean {
-	const words: { raw: string; value: string }[] = [];
+/**
+ * Token indices in `tokens[start..end]` whose literal URLs belong to `omp` itself
+ * (directly or behind launchers), so their bare/option URLs stay as written while
+ * redirections, wrapper options, and `$(…)` substitutions are still rewritten.
+ */
+function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: number, cmd: boolean): Set<number> {
+	const words: { index: number; raw: string; value: string }[] = [];
+	let skipTarget = false;
 	for (let i = start; i < end; i++) {
 		const token = tokens[i];
-		if (token.kind === "word") words.push(token);
+		if (token.kind !== "word") continue;
+		if (skipTarget) {
+			skipTarget = false;
+			continue;
+		}
+		if (BARE_REDIRECT.test(token.raw)) {
+			skipTarget = true;
+			continue;
+		}
+		if (ATTACHED_REDIRECT.test(token.raw)) {
+			continue;
+		}
+		words.push({ index: i, raw: token.raw, value: token.value });
 	}
-	let i = 0;
+
+	let cmdStart = 0;
+	const leadingAssignIndices: number[] = [];
 	if (!cmd) {
-		while (i < words.length) {
-			const w = words[i];
-			if ((w.raw === w.value && PREFIX_KEYWORDS.has(w.value)) || isShellEnvironmentAssignment(w.raw)) {
-				i++;
+		while (cmdStart < words.length) {
+			const w = words[cmdStart];
+			if (w.raw === w.value && PREFIX_KEYWORDS.has(w.value)) {
+				cmdStart++;
+				continue;
+			}
+			if (isShellEnvironmentAssignment(w.raw)) {
+				leadingAssignIndices.push(w.index);
+				cmdStart++;
 				continue;
 			}
 			break;
 		}
 	}
-	while (i < words.length) {
-		const word = words[i].value;
-		if (isOmp(word)) return true;
-		const wrapper = findWrapper(word, cmd);
-		if (!wrapper) return false;
-		const next = skipWrapper(words, i + 1, wrapper);
-		if (next === undefined) return false;
-		i = next;
+
+	const cmdWords = words.slice(cmdStart);
+	if (cmdWords.length === 0) return new Set();
+	const target = shellLaunchIndex(
+		cmdWords.map(w => w.value),
+		cmd || undefined,
+	);
+	if (target === null || target >= cmdWords.length || !isOmp(cmdWords[target].value)) {
+		return new Set();
 	}
-	return false;
+
+	const literal = new Set<number>();
+	// Leading shell assignments belong to `omp` itself only when invoked directly (not behind a wrapper).
+	if (target === 0) {
+		for (const idx of leadingAssignIndices) literal.add(idx);
+	}
+	for (let i = target; i < cmdWords.length; i++) {
+		literal.add(cmdWords[i].index);
+	}
+	return literal;
 }
 
 /** `text` as one literal shell word. */
@@ -299,16 +233,26 @@ class HostUrls {
 		let start = 0;
 		while (start < tokens.length) {
 			let end = start;
-			while (end < tokens.length && !(tokens[end].kind === "separator" && /[\n;&|()]/.test(tokens[end].raw))) {
+			while (
+				end < tokens.length &&
+				!(
+					tokens[end].kind === "separator" &&
+					/[\n;&|()]/.test(tokens[end].raw) &&
+					!isRedirectSeparator(tokens, end, start)
+				)
+			) {
 				end++;
 			}
-			// `omp` resolves the URLs it is given itself (`omp read skill://x:1-20`): test only the
-			// command word of each simple command after leading assignments and wrappers.
-			const omp = commandRunsOmp(tokens, start, end, this.#cmd);
+			// `omp` resolves the URLs it is given itself (`omp read skill://x:1-20`): exempt only
+			// `omp`'s own command words (and direct leading assignments), while still rewriting
+			// wrapper options, redirections, and nested `$(…)` substitutions.
+			const literal = ompLiteralTokens(tokens, start, end, this.#cmd);
 			for (let i = start; i < end; i++) {
 				const token = tokens[i];
-				if (token.kind === "separator" || omp || !token.value.includes("://")) {
+				if (token.kind === "separator" || !token.value.includes("://")) {
 					out += token.raw;
+				} else if (literal.has(i)) {
+					out += token.raw.includes("$(") ? await this.#substitutions(token.raw) : token.raw;
 				} else {
 					out += await this.#word(token.raw, token.value);
 				}

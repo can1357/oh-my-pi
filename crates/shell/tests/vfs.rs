@@ -654,6 +654,44 @@ async fn non_omp_commands_naming_omp_receive_host_paths_for_url_arguments() {
 	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
+/// Wrapper-owned option URLs and wrapper environment URLs ahead of `omp` still
+/// resolve to host paths while `omp`'s own operands remain literal.
+#[cfg(unix)]
+#[tokio::test]
+async fn launcher_option_urls_before_omp_still_resolve_to_host_paths() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	let bin = tempfile::tempdir().expect("program directory");
+	let env_bin = bin.path().join("env");
+	fs::write(
+		&env_bin,
+		b"#!/bin/sh\nprintf 'ref=%s\\n' \"$REF\"\nfor arg; do printf 'arg:%s\\n' \"$arg\"; done\n",
+	)
+	.expect("stand-in env");
+	fs::set_permissions(&env_bin, fs::Permissions::from_mode(0o755)).expect("executable env");
+	let script = format!(
+		"REF=virtual://docs/a.txt '{env_bin}' -C virtual://docs omp read virtual://docs/a.txt",
+		env_bin = env_bin.display(),
+	);
+	let run = run_virtual(directory.path(), &script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let docs_path = docs.display().to_string();
+	let file_path = docs.join("a.txt").display().to_string();
+	let expected = [
+		format!("ref={file_path}"),
+		"arg:-C".to_owned(),
+		format!("arg:{docs_path}"),
+		"arg:omp".to_owned(),
+		"arg:read".to_owned(),
+		"arg:virtual://docs/a.txt".to_owned(),
+	];
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
+}
+
 /// A provider directory that aliases a real one is a usable working directory
 /// for a child process, and the `PWD` the child inherits names that same host
 /// directory rather than the URL it cannot open; one that aliases nothing is

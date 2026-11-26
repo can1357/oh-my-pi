@@ -101,22 +101,29 @@ impl Rest {
 /// containing `://`, or an environment value that is one): then it resolves
 /// first, else it spawns as it is.
 pub(super) fn names_url(spec: &SpawnSpec<'_>) -> bool {
-	is_url(spec.path)
-		|| is_url(spec.cwd)
-		|| ((spec.argv.iter().skip(1).any(|arg| arg.contains_str("://"))
-			|| spec.env.iter().any(|(name, value)| env_url(name, value)))
-			&& !runs_omp(spec.path.as_bytes(), spec.argv))
-}
-
-/// Whether `path`/`argv` runs `omp`: as the program itself, or as the target
-/// command behind known wrappers (`nice`, `nohup`, `npx`, `bunx`, `sudo`,
-/// `env`, `time`, …) and their options.
-fn runs_omp(path: &[u8], argv: &[BString]) -> bool {
-	if is_omp(path) {
+	if is_url(spec.path) || is_url(spec.cwd) {
 		return true;
 	}
-	let launch = crate::bash::trace::viz::embedded::launch(argv);
-	!launch.remote && argv.get(launch.at).is_some_and(|word| is_omp(word))
+	let omp_at = omp_argv_index(spec.path.as_bytes(), spec.argv);
+	let argv_end = omp_at.unwrap_or(spec.argv.len());
+	spec.argv[..argv_end]
+		.iter()
+		.skip(1)
+		.any(|arg| arg.contains_str("://"))
+		|| (omp_at != Some(0) && spec.env.iter().any(|(name, value)| env_url(name, value)))
+}
+
+/// Index of `omp` in `argv` when `path`/`argv` invokes `omp` locally: `0` when
+/// `omp` is the spawned program itself, or the target index behind known
+/// wrappers (`nice`, `nohup`, `npx`, `bunx`, `sudo`, `env`, `time`, `xargs`,
+/// `uv run`, …) and their options. Returns `None` for non-`omp` commands and
+/// remote (`ssh`) launches.
+fn omp_argv_index(path: &[u8], argv: &[BString]) -> Option<usize> {
+	if is_omp(path) {
+		return Some(0);
+	}
+	let launch = crate::bash::launch::launch(argv);
+	(!launch.remote && argv.get(launch.at).is_some_and(|word| is_omp(word))).then_some(launch.at)
 }
 
 /// Whether `word` names the `omp` program, by any path.
@@ -240,10 +247,10 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 		},
 		_ => names.path.clone(),
 	};
-	let literal = runs_omp(&names.path, &names.argv);
+	let omp_at = omp_argv_index(&names.path, &names.argv);
 	let mut argv = Vec::with_capacity(names.argv.len());
 	for (i, arg) in names.argv.iter().enumerate() {
-		let host = if i == 0 || literal {
+		let host = if i == 0 || omp_at.is_some_and(|at| i >= at) {
 			None
 		} else {
 			host_arg(fs, arg.as_bstr()).await
@@ -252,7 +259,7 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 	}
 	// What the child's environment says differently from the shell's.
 	let mut hosted: Vec<(BString, BString)> = Vec::new();
-	if !literal {
+	if omp_at != Some(0) {
 		for (name, value) in names.env.iter() {
 			if env_url(name, value)
 				&& let Some(host) = host_arg(fs, value).await
@@ -375,7 +382,7 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_omp_matches_only_program_or_wrapped_command() {
+	fn omp_argv_index_matches_only_program_or_wrapped_command() {
 		for non_omp in [
 			&["grep", "omp", "local://out.txt"][..],
 			&["nice", "-n", "5", "grep", "omp", "local://out.txt"][..],
@@ -392,29 +399,38 @@ mod tests {
 			&["ssh", "host", "omp", "read", "local://out.txt"][..],
 		] {
 			let args = bvec(non_omp);
-			assert!(!runs_omp(args[0].as_bytes(), &args), "expected false for {non_omp:?}");
+			assert_eq!(
+				omp_argv_index(args[0].as_bytes(), &args),
+				None,
+				"expected None for {non_omp:?}"
+			);
 		}
 
-		for omp_cmd in [
-			&["omp", "read", "local://out.txt"][..],
-			&["/usr/local/bin/omp", "read", "local://out.txt"][..],
-			&["nice", "-n", "5", "omp", "read", "local://out.txt"][..],
-			&["nice", "-10", "omp", "read", "local://out.txt"][..],
-			&["sudo", "-u", "root", "FOO=bar", "nice", "omp", "read", "local://out.txt"][..],
-			&["/usr/bin/env", "-", "FOO=local://a", "omp", "read", "local://out.txt"][..],
-			&["npx", "--loglevel", "warn", "omp", "read", "local://out.txt"][..],
-			&["bunx", "--minimum-release-age", "86400", "omp", "read", "local://out.txt"][..],
-			&["timeout", "-k", "5", "30", "omp", "read", "local://out.txt"][..],
-			&["nohup", "omp", "read", "local://out.txt"][..],
-			&["setsid", "omp", "read", "local://out.txt"][..],
-			&["time", "FOO=bar", "omp", "read", "local://out.txt"][..],
-			&["stdbuf", "-oL", "omp", "read", "local://out.txt"][..],
-			&["xargs", "-n", "1", "omp", "read", "local://out.txt"][..],
-			&["ifne", "omp", "read", "local://out.txt"][..],
-			&["uv", "run", "-w", "requests", "omp", "read", "local://out.txt"][..],
+		for (omp_cmd, expected_at) in [
+			(&["omp", "read", "local://out.txt"][..], 0),
+			(&["/usr/local/bin/omp", "read", "local://out.txt"][..], 0),
+			(&["nice", "-n", "5", "omp", "read", "local://out.txt"][..], 3),
+			(&["nice", "-10", "omp", "read", "local://out.txt"][..], 2),
+			(&["sudo", "-u", "root", "FOO=bar", "nice", "omp", "read", "local://out.txt"][..], 5),
+			(&["/usr/bin/env", "-C", "local://dir", "omp", "--version"][..], 3),
+			(&["/usr/bin/env", "-", "FOO=local://a", "omp", "read", "local://out.txt"][..], 3),
+			(&["npx", "--loglevel", "warn", "omp", "read", "local://out.txt"][..], 3),
+			(&["bunx", "--minimum-release-age", "86400", "omp", "read", "local://out.txt"][..], 3),
+			(&["timeout", "-k", "5", "30", "omp", "read", "local://out.txt"][..], 4),
+			(&["nohup", "omp", "read", "local://out.txt"][..], 1),
+			(&["setsid", "omp", "read", "local://out.txt"][..], 1),
+			(&["time", "FOO=bar", "omp", "read", "local://out.txt"][..], 2),
+			(&["stdbuf", "-oL", "omp", "read", "local://out.txt"][..], 2),
+			(&["xargs", "-a", "local://list", "omp", "read", "local://out.txt"][..], 3),
+			(&["ifne", "omp", "read", "local://out.txt"][..], 1),
+			(&["uv", "run", "-w", "requests", "omp", "read", "local://out.txt"][..], 4),
 		] {
 			let args = bvec(omp_cmd);
-			assert!(runs_omp(args[0].as_bytes(), &args), "expected true for {omp_cmd:?}");
+			assert_eq!(
+				omp_argv_index(args[0].as_bytes(), &args),
+				Some(expected_at),
+				"expected Some({expected_at}) for {omp_cmd:?}"
+			);
 		}
 	}
 }

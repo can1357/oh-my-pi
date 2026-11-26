@@ -129,6 +129,30 @@ describe("hostCommandUrls", () => {
 		);
 		expect(await host("if grep omp local://x.md; then :; fi")).toBe("if grep omp /host/x.md; then :; fi");
 		expect(await host("echo hi >& local://out.txt")).toBe("echo hi >& /host/out.txt");
+		expect(await host("xargs -a local://list omp read local://x.md")).toBe(
+			"xargs -a /host/list omp read local://x.md",
+		);
+		expect(await host("/usr/bin/env -C local://dir omp --version")).toBe("/usr/bin/env -C /host/dir omp --version");
+		expect(await host("uv run omp read local://x.md && uv run -m omp local://x.md")).toBe(
+			"uv run omp read local://x.md && uv run -m omp /host/x.md",
+		);
+		expect(await host("uv run --directory local://proj omp read local://x.md")).toBe(
+			"uv run --directory /host/proj omp read local://x.md",
+		);
+		expect(await host(`REF="$(cat local://ref.txt)" omp --version`)).toBe(`REF="$(cat /host/ref.txt)" omp --version`);
+		expect(await host(`omp read "$(cat local://ref.txt)" local://x.md`)).toBe(
+			`omp read "$(cat /host/ref.txt)" local://x.md`,
+		);
+		expect(await host("2>/dev/null omp read local://x.md")).toBe("2>/dev/null omp read local://x.md");
+		expect(await host("2> /dev/null omp read local://x.md")).toBe("2> /dev/null omp read local://x.md");
+		expect(await host("2>&1 omp read local://x.md")).toBe("2>&1 omp read local://x.md");
+		expect(await host("nice -n 5 2>/dev/null omp read local://x.md")).toBe(
+			"nice -n 5 2>/dev/null omp read local://x.md",
+		);
+		expect(await host("2>local://err.log omp read local://x.md > local://out.txt")).toBe(
+			"2>/host/err.log omp read local://x.md > /host/out.txt",
+		);
+		expect(await host("ssh host omp read local://x.md")).toBe("ssh host omp read /host/x.md");
 	});
 
 	it("treats a here-document body as input, not command text", async () => {
