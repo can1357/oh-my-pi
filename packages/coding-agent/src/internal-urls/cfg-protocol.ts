@@ -488,6 +488,14 @@ export class CfgProtocolHandler implements ProtocolHandler {
 					.trim(),
 			);
 		}
+		// A session override deep-merges over the configured record, so it cannot remove entries configured there.
+		if (patch && !save) {
+			const configured = settings.underlyingValue(leaf);
+			const kept = Object.keys(patch).filter(key => patch[key] === null && entryOf(configured, key) !== undefined);
+			if (kept.length > 0) {
+				throw new Error(prompt.render(cfgEntryConfiguredTemplate, { path: leaf.id, keys: kept, saveUrl }).trim());
+			}
+		}
 		const host = approvalHost;
 		if (!host) {
 			throw new Error(
