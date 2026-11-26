@@ -119,6 +119,7 @@ test("terminal: a <mark> in an option row is highlighted, wrapped rows too", () 
 	expect(long.length).toBeGreaterThan(1);
 	expect(long.join(" ")).toBe(WORDS);
 });
+
 test("wraps a long textarea line and keeps the caret row visible in a short terminal", () => {
 	const onSubmit = vi.fn();
 	const model = new HtmlFormModel(
