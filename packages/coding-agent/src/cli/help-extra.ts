@@ -58,6 +58,7 @@ export function getExtraHelpText(): string {
   YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
   SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
+  ARKANECLOUD_API_KEY        - ArkaneCloud inference models
   SCW_SECRET_KEY             - Scaleway Generative APIs models
   OTARI_API_KEY              - Otari AI gateway (workspace models)
   OTARI_BASE_URL             - Otari API root (EU or self-hosted, e.g. https://host/api/v1)

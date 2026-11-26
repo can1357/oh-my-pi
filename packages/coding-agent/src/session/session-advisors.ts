@@ -48,6 +48,7 @@ import {
 	type AdvisorReviewMode,
 	type AdvisorRuntimeStatus,
 	type AdvisorSyncBacklog,
+	discoverAdvisorConfigs,
 	getOrCreateAdvisorProviderSessionId,
 	slugifyAdvisorName,
 } from "../advisor/config";
@@ -499,6 +500,8 @@ export interface SessionAdvisorsOptions {
 	configs?: AdvisorConfig[];
 	/** WATCHDOG.yml problems found during discovery; surfaced once as a warning. */
 	configWarnings?: string[];
+	/** User configuration directory used for WATCHDOG.yml reloads. */
+	configDir?: string;
 	streamFn?: StreamFn;
 	/** Builds each advisor's provider request transform; called once per advisor agent. */
 	createTransformProviderContext?: () => (
@@ -612,6 +615,7 @@ export class SessionAdvisors {
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
+	readonly #advisorConfigDir: string | undefined;
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
@@ -680,6 +684,7 @@ export class SessionAdvisors {
 		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
+		this.#advisorConfigDir = options.configDir;
 		this.#advisorStreamFn = options.streamFn;
 		this.#createTransformProviderContext = options.createTransformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
@@ -1396,8 +1401,6 @@ export class SessionAdvisors {
 				emissionGuard,
 			);
 
-			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
-			// instructions; `config.instructions` adds this advisor's specialization.
 			const systemPrompt = [prompt.render(advisorSystemPrompt, { max_notes_per_update: budgetPerUpdate })];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorMemoryPrompt) systemPrompt.push(this.#advisorMemoryPrompt);
@@ -2929,6 +2932,17 @@ export class SessionAdvisors {
 	 */
 	get configWarnings(): readonly string[] {
 		return this.#advisorConfigWarnings;
+	}
+
+	/** Discover the current WATCHDOG.yml roster before applying it to the session. */
+	async reloadConfigs(): Promise<{ count: number; warnings: string[] }> {
+		const cwd = this.#host.sessionManager.getCwd();
+		const { advisors, sharedInstructions, sharedMaxNotesPerUpdate, warnings } = await discoverAdvisorConfigs(
+			cwd,
+			this.#advisorConfigDir,
+		);
+		const count = this.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
+		return { count, warnings };
 	}
 
 	/**
