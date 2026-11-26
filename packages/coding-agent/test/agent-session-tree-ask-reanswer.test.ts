@@ -21,7 +21,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+import type { AskToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/ask";
 
 const TEST_MODEL = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 
@@ -242,12 +242,8 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			const { session, sessionManager } = ctx;
 
 			sessionManager.appendMessage(userMsg("please deploy"));
-			// Legacy persisted args from the `questions[]` contract carry no form `html`.
-			sessionManager.appendMessage(
-				toolCallMsg("ask-call-bad", "ask", {
-					questions: [{ id: "deploy_target", question: "Which deploy target?", options: [{ label: "staging" }] }],
-				}),
-			);
+			// Neither form `html` nor a legacy `questions[]` entry with its question text.
+			sessionManager.appendMessage(toolCallMsg("ask-call-bad", "ask", { questions: [{ id: "deploy_target" }] }));
 			const trBadId = sessionManager.appendMessage(toolResultMsg("ask-call-bad", "ask", "User selected: staging"));
 			sessionManager.appendMessage(assistantMsg("deploying to staging"));
 

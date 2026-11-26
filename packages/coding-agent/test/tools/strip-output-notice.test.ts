@@ -8,8 +8,12 @@
  * string twice — once from the body content, once as the styled warning line.
  */
 import { describe, expect, it } from "bun:test";
-import { type OutputMeta, stripGeneratedOutputNotice, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import {
+	type OutputMeta,
+	stripGeneratedOutputNotice,
+	stripOutputNotice,
+} from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 const truncation: OutputMeta = {
@@ -58,7 +62,7 @@ describe("stripOutputNotice", () => {
 	it("removes the notice for tail truncation including artifact reference", () => {
 		const body = "long output…";
 		const notice = formatOutputNotice(tailTruncation);
-		expect(notice).toContain("artifact://abc123");
+		expect(notice).toContain("local://abc123.log");
 
 		expect(stripOutputNotice(body + notice, tailTruncation)).toBe(body);
 	});

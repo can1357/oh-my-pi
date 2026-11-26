@@ -1,7 +1,6 @@
 import type { AgentOptions } from "@oh-my-pi/pi-agent-core";
 import type { OAuthAccessResolution, OAuthRefreshReason } from "@oh-my-pi/pi-ai";
-import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
-import * as AIError from "@oh-my-pi/pi-ai/error";
+import { type ApiKeyResolver, createOAuthProvenance, refreshReasonFor } from "@oh-my-pi/pi-ai/auth-retry";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { AuthStorage } from "../session/auth-storage";
 import type { SecurityAccountRef, SecurityAuthRef } from "./contracts";
@@ -147,15 +146,19 @@ export function createExactSecurityOAuthResolver(
 		if (model.provider !== account.provider) {
 			throw new Error("Security scan authentication provider mismatch");
 		}
+		// The bearer may be a structured credential wrapping the access token, so
+		// a 401 names the token behind the bearer the request actually sent.
+		const provenance = createOAuthProvenance();
 		const resolver: ApiKeyResolver = async context => {
 			if (context.lastChance) return undefined;
 			const resolution = await resolveExactSecurityOAuthAccess(authStorage, account, {
 				forceRefresh: context.error !== undefined,
-				refreshReason: AIError.status(context.error) === 401 ? "auth-recovery" : undefined,
-				rejectedAccessToken: context.previousKey,
+				refreshReason: refreshReasonFor(context.error),
+				rejectedAccessToken: provenance.accessFor(context.previousKey),
 				signal: context.signal,
 			});
-			return resolution.accessToken;
+			provenance.record({ apiKey: resolution.apiKey, oauthAccess: resolution.accessToken });
+			return resolution.apiKey;
 		};
 		return resolver;
 	};

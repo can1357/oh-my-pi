@@ -1,6 +1,11 @@
-import { inflateSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
 import type { BoxEdges, ImageContent } from "@oh-my-pi/pi-ai";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+
+let zlibCache: typeof Zlib | undefined;
+function inflateSync(buf: Zlib.InputType): Buffer {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache.inflateSync(buf);
+}
 import { JUDGMENT_IMAGE_PATCH_SIDE, judgmentImagePatches } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { encodeRawPng } from "./png-encode";
 
@@ -45,12 +50,15 @@ export interface ImageBytesInput {
 // binding constraint once images are downsized to 1568px (Anthropic's internal threshold).
 const DEFAULT_MAX_BYTES = 500 * 1024;
 
-// Smallest edge length (px) vision backends reliably accept. They tile images into
-// fixed patches (Anthropic uses 28px) and reject degenerate sub-patch images — e.g.
-// the 1x1 PNG an empty chart render emits — with a hard 400 ("Could not process
-// image") that can poison the whole request. 200px is the smallest size Anthropic
-// documents as valid (200x200 = 64 visual tokens); undersized images are scaled up.
-const DEFAULT_MIN_DIMENSION = 200;
+/**
+ * Smallest edge length (px) vision backends reliably accept. They tile images into
+ * fixed patches (Anthropic uses 28px) and reject degenerate sub-patch images — e.g.
+ * the 1x1 PNG an empty chart render emits — with a hard 400 ("Could not process
+ * image") that can poison the whole request. 200px is the smallest size Anthropic
+ * documents as valid (200x200 = 64 visual tokens); {@link resizeImage} scales
+ * undersized images up.
+ */
+export const DEFAULT_MIN_DIMENSION = 200;
 
 const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP">> = {
 	// Anthropic's "internal recommended size" — Claude internally caps images at
@@ -62,7 +70,8 @@ const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP">> = {
 	minDimension: DEFAULT_MIN_DIMENSION,
 };
 
-interface ImageHeaderDimensions {
+/** An image's size and format as its header declares them. */
+export interface ImageHeaderDimensions {
 	width: number;
 	height: number;
 	mimeType: string;
@@ -226,7 +235,8 @@ function readJpegHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | u
 	return undefined;
 }
 
-function readImageHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | undefined {
+/** The size a PNG or JPEG header declares, without decoding the image; `undefined` for any other bytes. */
+export function readImageHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | undefined {
 	return readPngHeaderDimensions(buffer) ?? readJpegHeaderDimensions(buffer);
 }
 
@@ -700,8 +710,11 @@ function padRgba(source: RgbaPixels, width: number, height: number, left: number
 	return encodeRawPng(canvas, width, height, 4);
 }
 
-/** How to map an image's content rectangle through its padding and capture scale. */
-function paddedMapping(result: ResizedImage, content: BoxEdges, scale: number, target: string): string {
+/**
+ * How to map positions on a padded image to `target`: through `content`, the source's rectangle on it, and
+ * `scale`, the source pixels per target pixel. Shared by {@link formatDimensionNote} and browser screenshots.
+ */
+export function paddedMapping(result: ResizedImage, content: BoxEdges, scale: number, target: string): string {
 	const left = Math.round(content.left * result.width);
 	const top = Math.round(content.top * result.height);
 	const contentWidth = (content.right - content.left) * result.width;
@@ -734,52 +747,4 @@ export function formatDimensionNote(result: ResizedImage): string | undefined {
 	}
 	const scale = result.originalWidth / result.width;
 	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply coordinates by ${scale.toFixed(2)} to map to original image.]`;
-}
-
-/** What a browser screenshot covers, which sets the CSS pixel space its image coordinates map to. */
-export type ScreenshotArea = "viewport" | "page" | "element";
-
-const SCREENSHOT_AREA_TARGET: Record<ScreenshotArea, string> = {
-	viewport: "viewport CSS pixels for tab.clickAt",
-	page: "CSS pixels from the page's top-left corner (tab.clickAt takes viewport pixels)",
-	element: "CSS pixels from the element's top-left corner",
-};
-
-/**
- * Map displayed screenshot coordinates to the CSS pixels the page and `tab.clickAt` use: the capture
- * holds `scale` image pixels per CSS pixel before any resize, or `undefined` when it could not be read.
- */
-function formatScreenshotCoordinateNote(
-	resized: ResizedImage,
-	capture: { area: ScreenshotArea; scale: number | undefined },
-): string | undefined {
-	if (!resized.originalWidth || !resized.width) return undefined;
-	if (capture.scale === undefined || !(capture.scale > 0)) {
-		return "The screenshot's scale to CSS pixels could not be read; target elements by selector or id rather than tab.clickAt.";
-	}
-	if (resized.paddedContent) {
-		return paddedMapping(resized, resized.paddedContent, capture.scale, SCREENSHOT_AREA_TARGET[capture.area]);
-	}
-	const factor = (resized.originalWidth / resized.width / capture.scale).toFixed(2);
-	if (factor === "1.00") return undefined;
-	return `Multiply image coordinates by ${factor} to get ${SCREENSHOT_AREA_TARGET[capture.area]}.`;
-}
-
-/**
- * One line for a browser screenshot: the size the model sees, where the full-size file went when it was
- * kept, and the image-to-CSS-pixel mapping.
- */
-export function formatScreenshot(opts: {
-	saveFullRes: boolean;
-	dest: string;
-	resized: ResizedImage;
-	capture: { area: ScreenshotArea; scale: number | undefined };
-}): string[] {
-	let line = `Screenshot ${opts.resized.width}x${opts.resized.height}`;
-	if (opts.saveFullRes) line += `, full size saved to ${shortenPath(opts.dest)}`;
-	line += ".";
-	if (opts.resized.decodeFailed) line += " The image decoder failed, so this is the original image.";
-	const coordinateNote = formatScreenshotCoordinateNote(opts.resized, opts.capture);
-	if (coordinateNote) line += ` ${coordinateNote}`;
-	return [line];
 }

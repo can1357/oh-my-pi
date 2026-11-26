@@ -22,7 +22,7 @@ function tuiRuntime() {
 	const showWarning = vi.fn();
 	const runtime = {
 		ctx: {
-			editor: { setText } as unknown as InteractiveModeContext["editor"],
+			composer: { setText } as unknown as InteractiveModeContext["composer"],
 			handleCompactCommand,
 			showWarning,
 		} as unknown as InteractiveModeContext,
@@ -43,6 +43,16 @@ describe("/compact dispatch (ACP)", () => {
 			await executeAcpBuiltinSlashCommand(`/compact ${mode}`, h.runtime);
 			expect(h.compact).toHaveBeenCalledWith(undefined, { mode });
 		}
+	});
+
+	it("treats mode names in /handoff arguments as focus rather than as a different compaction mode", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/handoff soft failure", h.runtime);
+		await executeAcpBuiltinSlashCommand("/compact handoff soft failure", h.runtime);
+		expect(h.compact.mock.calls).toEqual([
+			["soft failure", { mode: "handoff" }],
+			["soft failure", { mode: "handoff" }],
+		]);
 	});
 
 	it("splits a mode from its focus instructions", async () => {

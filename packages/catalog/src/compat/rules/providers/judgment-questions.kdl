@@ -4,9 +4,7 @@
 // adapter, not provider name: self-hosted servers are user-configured judge
 // rows under arbitrary provider ids.
 //
-// Unassigned, verified without a count cap (token budget only): TypeSafe jev
-// (docs.typesafe.ai/models: 64k tokens per request), the same jev behind
-// OpenRouter Decisions, Command Code and OpenCode Zen, Kev
+// Unassigned, verified without a count cap (token budget only): Kev
 // (github.com/jaredpalmer/kev: "A request may carry any number of
 // questions"), and wev / OpenJev-4B (github.com/alanhuangyoo/OpenJev, which
 // answers under any requested name).
@@ -16,8 +14,15 @@
 //
 // Not isolatable: openjev-sglang (github.com/ekzhang/openjev-sglang) caps at
 // 64 but answers as `jev-latest` or its upstream model name, the same ids as
-// uncapped hosts.
+// hosted jev; the hosted cap of 32 below stays under it.
 on-api "typesafe" "openrouter-decisions" {
+	// Hosted jev (TypeSafe, and the same backend behind OpenRouter Decisions,
+	// Command Code and OpenCode Zen) answers HTTP 400 `questions must map 1
+	// through 32 ids to typed questions` above 32 questions, observed since
+	// 2026-10-01 despite docs.typesafe.ai/models citing only a 64k-token budget.
+	models "jev*" "*/jev*" {
+		judgment-questions-max 32
+	}
 	// residue: no taxonomy class covers self-hosted OpenJEV deployments. An
 	// `openjev-*` gateway answered HTTP 422 `at most 16 items`
 	// (https://github.com/can1357/oh-my-pi/issues/15081); which server that is
@@ -56,5 +61,12 @@ on-api "openrouter-decisions" {
 on-api "nace-systemone" {
 	models "*" {
 		judgment-questions-max 512
+	}
+}
+// Gemini Decisions takes 1 to 1,000 questions per request
+// (aistudio.google.com/docs/decisions-api#limits).
+on-api "google-decisions" {
+	models "*" {
+		judgment-questions-max 1000
 	}
 }

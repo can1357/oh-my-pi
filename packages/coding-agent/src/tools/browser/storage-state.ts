@@ -3,7 +3,7 @@ import * as path from "node:path";
 
 import { type } from "@oh-my-pi/omptype";
 import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import type { Cookie, CookieParam, Page } from "puppeteer-core";
 import { resolveToCwd } from "../path-utils";
 import { throwIfAborted } from "../tool-errors";
@@ -153,9 +153,17 @@ const CookieObject = type({
 	"sameSite?": "'Strict' | 'Lax' | 'None' | undefined",
 });
 
-function parseCookieObject(value: unknown): BrowserCookieInput {
+const COOKIE_SHAPES =
+	"Pass cookie objects ({ name, value, domain?, path?, url?, expires?, httpOnly?, secure?, sameSite? }), an array of them as tab.cookies() returns, a Cookie header, a cURL dump, or a JSON array string.";
+
+/** Parse one cookie object; `index` names it in the error, which never echoes cookie values. */
+function parseCookieObject(value: unknown, index: number): BrowserCookieInput {
 	const cookie = CookieObject(value);
-	if (cookie instanceof type.errors) throw new ToolError(COOKIE_PARSE_ERROR);
+	if (cookie instanceof type.errors) {
+		const fields = [...new Set(cookie.map(error => String(error.path[0] ?? "")))].filter(Boolean);
+		const problem = fields.length > 0 ? `has an invalid or missing ${fields.join(", ")}` : "is not a cookie object";
+		throw new ToolError(`${COOKIE_PARSE_ERROR}: item ${index} ${problem}. ${COOKIE_SHAPES}`);
+	}
 	// The result is a fresh object. An absent field must not shadow the scope merged in after it (`{ ...scope, ...cookie }`).
 	const fields: Record<string, unknown> = cookie;
 	for (const key in fields) {
@@ -202,7 +210,7 @@ function parseCookieString(source: string): BrowserCookieInput[] {
 			throw new ToolError(COOKIE_PARSE_ERROR);
 		}
 		if (!Array.isArray(parsed) || parsed.length === 0) throw new ToolError(COOKIE_PARSE_ERROR);
-		return parsed.map(parseCookieObject);
+		return parsed.map((cookie: unknown, index) => parseCookieObject(cookie, index));
 	}
 	const curlHeaders = extractCurlCookieHeaders(trimmed);
 	if (curlHeaders.length > 0) return curlHeaders.flatMap(parseCookieHeader);
@@ -211,13 +219,14 @@ function parseCookieString(source: string): BrowserCookieInput[] {
 
 /** Parse `tab.setCookies()` arguments (objects, Cookie headers, cURL dumps, JSON arrays, trailing scope). */
 export function normalizeCookieArguments(args: unknown[]): CookieParam[] {
-	if (args.length === 0) throw new ToolError(COOKIE_PARSE_ERROR);
-	const items = [...args];
+	// `tab.cookies()` returns an array, so `setCookies(await other.cookies())` passes every cookie as one argument.
+	const items = args.flat();
+	if (items.length === 0) throw new ToolError(COOKIE_PARSE_ERROR);
 	const trailing = items.at(-1);
 	const scope = isScope(trailing) ? (items.pop() as CookieScope) : undefined;
 	if (items.length === 0) throw new ToolError(COOKIE_PARSE_ERROR);
-	const parsed = items.flatMap(item =>
-		typeof item === "string" ? parseCookieString(item) : [parseCookieObject(item)],
+	const parsed = items.flatMap((item, index) =>
+		typeof item === "string" ? parseCookieString(item) : [parseCookieObject(item, index)],
 	);
 	return parsed.map(cookie => ({ ...scope, ...cookie }));
 }
@@ -344,8 +353,8 @@ function parseStorageState(value: unknown): BrowserStorageState {
 	if (!isRecord(value) || !Array.isArray(value.cookies) || !Array.isArray(value.origins)) {
 		throw new ToolError(STORAGE_STATE_ERROR);
 	}
-	const cookies = value.cookies.map(cookie => {
-		const parsed = parseCookieObject(cookie);
+	const cookies = value.cookies.map((cookie: unknown, index) => {
+		const parsed = parseCookieObject(cookie, index);
 		if (!parsed.domain || !parsed.path || parsed.expires === undefined) throw new ToolError(STORAGE_STATE_ERROR);
 		return {
 			...parsed,

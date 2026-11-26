@@ -8,6 +8,7 @@ import {
 	chatTextBackend,
 	createNativeJudge,
 	nativeJudgmentAcceptsImages,
+	isGatewayCredentialsExhausted,
 	JudgmentApiError,
 	JudgmentParseError,
 	NativeJudge,
@@ -1268,6 +1269,42 @@ describe("NativeJudge", () => {
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
 	});
 
+	it("sends a gateway's credentials-exhausted 502 once but retries any other 502", async () => {
+		const exhausted = {
+			type: "upstream_credentials_exhausted",
+			is_bifrost_error: false,
+			status_code: 502,
+			error: { type: "upstream_credentials_exhausted", message: "all keys failed" },
+		};
+		let calls = 0;
+		const gateway = new NativeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				calls++;
+				return Response.json(exhausted, { status: 502, headers: { "retry-after-ms": "1" } });
+			},
+		});
+		const error = await gateway.judge(request).catch(e => e);
+		expect(error).toBeInstanceOf(JudgmentApiError);
+		expect(isGatewayCredentialsExhausted(error)).toBe(true);
+		expect(calls).toBe(1);
+
+		const statuses = [502, 502, 200];
+		const flaky = new NativeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				const status = statuses.shift() ?? 200;
+				if (status === 200) return answered();
+				return Response.json(
+					{ error: { type: "bad_gateway", message: "upstream reset" } },
+					{ status, headers: { "retry-after-ms": "1" } },
+				);
+			},
+		});
+		expect((await flaky.judge(request)).answers.urgent.noul).toBe(0.92);
+		expect(statuses).toEqual([]);
+	});
+
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {
 		let calls = 0;
 		const rejecting = new NativeJudge({
@@ -1500,6 +1537,29 @@ describe("NativeJudge OpenAI Decisions dialect", () => {
 		expect(result.usage).toMatchObject({ input: 42, output: 0, totalTokens: 42 });
 	});
 
+	it("reads chat-style prompt/completion usage from gateways such as Bifrost", async () => {
+		const judge = createNativeJudge(
+			{ ...luna, provider: "bifrost", baseUrl: "http://bifrost.test:8080/v1" },
+			{
+				apiKey: "sk-bf-test",
+				fetch: async () =>
+					Response.json({
+						model: "gpt-6-luna",
+						answers: [{ type: "predicate", name: "urgent", probability: 0.8 }],
+						usage: { prompt_tokens: 437, completion_tokens: 72, total_tokens: 509 },
+					}),
+			},
+		);
+
+		const result = await judge.judge({
+			state: { ticket: "The site is down." },
+			questions: { urgent: { type: "noul", instructions: "Is it urgent?" } },
+		});
+
+		expect(result.answers).toEqual({ urgent: { type: "noul", noul: 0.8 } });
+		expect(result.usage).toMatchObject({ input: 437, output: 72, totalTokens: 509 });
+	});
+
 	it("encodes separate ordered images as data URLs after JSON state text", async () => {
 		const visionLuna = { ...luna, input: ["text" as const, "image" as const] };
 		const state = {
@@ -1683,6 +1743,126 @@ describe("NativeJudge OpenAI Decisions dialect", () => {
 		await expect(
 			judge.judge({ state: "s", questions: { urgent: { type: "noul", instructions: "Urgent?" } } }),
 		).rejects.toThrow(/refused to answer question "urgent"/);
+	});
+});
+
+describe("NativeJudge Gemini Decisions dialect", () => {
+	const decision = buildModel({
+		id: "gemini-decision-1",
+		name: "Gemini Decision 1",
+		api: "google-decisions",
+		provider: "google",
+		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: null,
+	});
+
+	it("sends questions under positional keys with the API key header and maps the answers back to their ids", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = createNativeJudge(decision, {
+			apiKey: "AIza-test",
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					answers: {
+						q0: { type: "noul", noul: 0.94, confidence: 0.94 },
+						q1: {
+							type: "choice",
+							choice: "billing",
+							probabilities: { billing: 0.93, shipping: 0.07 },
+							confidence: 0.93,
+						},
+						q2: {
+							type: "score",
+							score: 1.1,
+							legend: { "0": "Cosmetic", "1": "Workaround", "2": "Blocked" },
+							probabilities: { "0": 0.1, "1": 0.7, "2": 0.2 },
+							confidence: 0.7,
+						},
+					},
+					usage: { total_input_tokens: 42, total_output_tokens: 0, total_tokens: 42 },
+				});
+			},
+		});
+
+		// Ids outside the API's `[A-Za-z0-9_-]{1,64}` question keys.
+		const result = await judge.judge({
+			state: { ticket: "The package arrived with a broken screen." },
+			questions: {
+				"src/order.ts:damaged": {
+					type: "noul",
+					instructions: "Does the customer report a damaged item?",
+					criteria: { true: "The item itself is damaged." },
+				},
+				"team?": {
+					type: "choice",
+					instructions: "Who handles it?",
+					criteria: { billing: "Refunds", shipping: null },
+				},
+				severity: { type: "score", instructions: "How severe?", criteria: ["Cosmetic", "Workaround", "Blocked"] },
+			},
+		});
+
+		expect(calls[0].url).toBe("https://generativelanguage.googleapis.com/v1beta/decisions");
+		const headers = new Headers(calls[0].init?.headers);
+		expect(headers.get("x-goog-api-key")).toBe("AIza-test");
+		expect(headers.get("authorization")).toBeNull();
+		expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+			model: "gemini-decision-1",
+			input: '{"ticket":"The package arrived with a broken screen."}',
+			questions: {
+				q0: {
+					type: "noul",
+					instructions: "Does the customer report a damaged item?",
+					criteria: { true_description: "The item itself is damaged." },
+				},
+				q1: { type: "choice", instructions: "Who handles it?", criteria: { billing: "Refunds", shipping: "" } },
+				q2: { type: "score", instructions: "How severe?", criteria: ["Cosmetic", "Workaround", "Blocked"] },
+			},
+		});
+		expect(result.answers).toEqual({
+			"src/order.ts:damaged": { type: "noul", noul: 0.94 },
+			"team?": {
+				type: "choice",
+				choice: "billing",
+				confidence: 0.93,
+				probabilities: { billing: 0.93, shipping: 0.07 },
+			},
+			severity: { type: "score", score: 1.1, confidence: 0.7, probabilities: { "0": 0.1, "1": 0.7, "2": 0.2 } },
+		});
+		expect(result).toMatchObject({ api: "google-decisions", provider: "google", model: "gemini-decision-1" });
+		expect(result.usage).toMatchObject({ input: 42, output: 0, totalTokens: 42 });
+	});
+
+	it("sends images as base64 image blocks after the state text", async () => {
+		const inputs: unknown[] = [];
+		const judge = createNativeJudge(decision, {
+			apiKey: "AIza-test",
+			fetch: async (_url, init) => {
+				inputs.push(JSON.parse(String(init?.body)).input);
+				return Response.json({
+					answers: { q0: { type: "noul", noul: 0.5, confidence: 0.5 } },
+					usage: { total_input_tokens: 2, total_output_tokens: 0 },
+				});
+			},
+		});
+
+		await judge.judge({
+			state: "Inspect the photos.",
+			questions: { urgent: { type: "noul", instructions: "Is it urgent?" } },
+			images: IMAGE_REFS,
+		});
+
+		expect(inputs).toEqual([
+			[
+				{ type: "text", text: "Inspect the photos." },
+				{ type: "image", data: "AQID", mime_type: "image/png" },
+				{ type: "image", data: "BAUG", mime_type: "image/jpeg" },
+			],
+		]);
 	});
 });
 

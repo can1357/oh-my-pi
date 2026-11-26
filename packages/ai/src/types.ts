@@ -40,6 +40,7 @@ import type { ApiKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { FallbackParam, MessageCreateParamsStreaming, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
@@ -50,6 +51,7 @@ import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -83,11 +85,13 @@ export interface ApiOptionsMap {
 	"google-generative-ai": GoogleOptions;
 	"google-gemini-cli": GoogleGeminiCliOptions;
 	"google-vertex": GoogleVertexOptions;
+	"kiro-api": KiroOptions;
 	"ollama-chat": OllamaChatOptions;
 	"cursor-agent": CursorOptions;
 	"factory-droid-agent": FactoryDroidOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"antigravity-acp": AntigravityCliOptions;
 	"apple-foundation-models": AppleFoundationModelsOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
@@ -281,6 +285,36 @@ export function shouldSendServiceTier(
 		return serviceTier === "priority";
 	}
 	return false;
+}
+
+/**
+ * Whether each account that discovery listed for `model` offers `serviceTier`,
+ * keyed by the account key of {@link Model.accountAccess}. Each account is
+ * judged by {@link shouldSendServiceTier} against its own advertised tier list
+ * instead of the model's cross-account union, so a plan-gated tier (Codex
+ * Ultrafast) is sent to, and credential selection prefers, only the accounts
+ * that hold it. `undefined` when discovery recorded no per-account tier list,
+ * leaving every account on the model-level answer.
+ */
+export function serviceTierOffersByAccount(
+	model: ServiceTierModel & Pick<Model, "accountAccess">,
+	serviceTier: ServiceTier | null | undefined,
+): Record<string, boolean> | undefined {
+	const accountAccess = model.accountAccess;
+	if (!serviceTier || !accountAccess) return undefined;
+	let reported = false;
+	const offers: Record<string, boolean> = {};
+	for (const accountKey in accountAccess) {
+		const access = accountAccess[accountKey]!;
+		reported ||= access.serviceTiers !== undefined;
+		offers[accountKey] = shouldSendServiceTier(serviceTier, {
+			provider: model.provider,
+			api: model.api,
+			identity: model.identity,
+			serviceTiers: access.serviceTiers,
+		});
+	}
+	return reported ? offers : undefined;
 }
 
 /**
@@ -524,6 +558,11 @@ export interface StreamOptions {
 	 */
 	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/**
+	 * Leave other models' reasoning, which would replay as text, out of the
+	 * request. Anthropic Messages only; other providers ignore it.
+	 */
+	omitDemotedReasoning?: boolean;
+	/**
 	 * Anthropic on-demand compaction (`compact-2026-09-04` beta). Sends a
 	 * top-level `compaction: { type: "summarize", instructions? }` request; the
 	 * signed summary arrives as an {@link AnthropicCompactionPayload}.
@@ -627,12 +666,15 @@ export interface StreamOptions {
 	 * Providers can use this to persist transport/session state between turns.
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
+	/** @internal Registry-scoped models.db for persistent unknown-model thinking probes. */
+	thinkingCapabilityDbPath?: string;
 	/**
 	 * Session a side request branches from, so it can read the parent's cached
 	 * prefix. Providers that keep per-conversation request controls (OpenAI
 	 * `configuration_update` effort baselines) plan the request against a copy
 	 * of that session's controls, never changing the parent's state; the Codex
-	 * backend also routes it with the parent's cache affinity (session headers).
+	 * backend and OpenCode (`x-opencode-session`) also route it with the
+	 * parent's cache affinity (session headers).
 	 */
 	parentSessionId?: string;
 	/**
@@ -698,7 +740,7 @@ export interface StreamOptions {
 	 * in the iterator while waiting for the first semantic stream event. Set to
 	 * `0` to disable both layers for this request. After the first semantic
 	 * event arrives, `streamIdleTimeoutMs` governs inter-event stalls. Falls
-	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 100s default.
+	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 900s default.
 	 * OpenAI-family transports additionally honor
 	 * `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS` as the most-specific override and
 	 * floor the first-event budget at the resolved idle (per-call
@@ -717,7 +759,7 @@ export interface StreamOptions {
 	 * mid-stream stalls (broker dies, half-open socket, model produces no real
 	 * progress for too long). Set to `0` to disable. Falls back to
 	 * `PI_STREAM_IDLE_TIMEOUT_MS` (alias: `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`)
-	 * and then to a 120s default.
+	 * and then to a 900s default.
 	 */
 	streamIdleTimeoutMs?: number;
 	/**
@@ -766,6 +808,19 @@ export interface StreamOptions {
 	 * observes limit headers, and decides capacity waits.
 	 */
 	anthropicSlowMode?: AnthropicSlowModeHooks;
+	/**
+	 * Prompt-cache pre-warm (Anthropic Messages only). The provider builds the
+	 * request exactly as it would otherwise (same `onPayload` hooks, auth, and
+	 * headers, so the cache key is identical), then sends it non-streaming
+	 * with `max_tokens: 0`: the endpoint reads the prompt, refreshes the cache
+	 * at its breakpoints, and returns usage with no output billed. The stream
+	 * emits `start` then `done` with empty content, `stopReason: "length"`,
+	 * and that usage. Ends in an `error` event, sending nothing, when the
+	 * request has budget thinking, a forced `tool_choice`, or structured
+	 * output, which the endpoint rejects. Other providers ignore the flag and generate normally,
+	 * so callers gate it on `isPromptCachePrewarmSupported`.
+	 */
+	prewarm?: boolean;
 }
 
 /**
@@ -897,10 +952,16 @@ export type StreamFunction<TApi extends Api> = (
 	options: OptionsForApi<TApi>,
 ) => AssistantMessageEventStream;
 
+/**
+ * Responses API assistant message phase. `partial_answer` (Codex 0.162+) marks
+ * answer text that more output or tool calls may follow; `final_answer` ends the turn.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer" | "partial_answer";
+
 export interface TextSignatureV1 {
 	v: 1;
 	id: string;
-	phase?: "commentary" | "final_answer";
+	phase?: AssistantMessagePhase;
 }
 
 export interface TextContent {
@@ -1087,6 +1148,13 @@ export interface OpenAIResponsesHistoryPayload {
 	provider?: string;
 	dt?: boolean;
 	items: Array<Record<string, unknown>>;
+	/**
+	 * Set on a turn whose request was retried after the server refused replayed
+	 * encrypted reasoning (key rotation, another credential). That retry carried
+	 * no encrypted reasoning from earlier turns, and later requests omit it too,
+	 * so the refused blobs are never sent again.
+	 */
+	encryptedReasoningFloor?: boolean;
 }
 
 /** Anthropic `output_config.effort` level. */
@@ -1211,12 +1279,36 @@ export interface GeminiNativeContentPayload {
 	content: { role?: string; parts: Record<string, unknown>[]; [key: string]: unknown };
 }
 
+/** Row counts of an agy conversation store at a turn end; truncating to them rewinds the conversation there. */
+export interface AntigravityCliCheckpoint {
+	steps: number;
+	generations: number;
+	executions: number;
+}
+
+/**
+ * Where an Antigravity CLI (`agy`) step ran. Written and read by the
+ * `antigravity-acp` transport: when the transcript diverges from agy's own
+ * history, it rewinds agy's conversation to the newest turn end whose digest
+ * still matches instead of replaying the whole transcript as text.
+ */
+export interface AntigravityCliPayload {
+	type: "antigravityCli";
+	/** agy conversation (ACP session) the step ran in. */
+	conversationId: string;
+	/** Structural digest of the transcript through this message. */
+	digest: string;
+	/** Present on the step that ended agy's turn. */
+	checkpoint?: AntigravityCliCheckpoint;
+}
+
 export type ProviderPayload =
 	| OpenAIResponsesHistoryPayload
 	| AnthropicMessagePayload
 	| AnthropicCompactionPayload
 	| CursorHistoryPayload
-	| GeminiNativeContentPayload;
+	| GeminiNativeContentPayload
+	| AntigravityCliPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
@@ -1327,6 +1419,8 @@ export interface AssistantMessage {
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Provider request id (Anthropic's `request-id` response header); provider support asks for it when a request is refused or fails. */
+	requestId?: string;
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as
 	 * reported in the response (e.g. OpenRouter's top-level `provider` field:
@@ -1373,6 +1467,11 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
+	 * True when the agent loop ended the turn with this error itself (for example, after the model
+	 * kept missing a soft tool requirement), so no provider request failed.
+	 */
+	errorFromAgentLoop?: boolean;
+	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
 	 * triggered an in-provider fallback retry that succeeded without the
@@ -1391,6 +1490,8 @@ export interface AssistantMessage {
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
+	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1728,7 +1829,10 @@ export interface Context {
 	systemPrompt?: string[];
 	messages: Message[];
 	tools?: Tool[];
-	/** Definitions of tools the transcript's latest Anthropic request declared but that are no longer in `tools`; only the Anthropic provider reads it. */
+	/**
+	 * Definitions of declared tools that are not in `tools`: those the transcript's latest Anthropic request declared,
+	 * or, before any request declared tools, those that may become active later. Only the Anthropic provider reads it.
+	 */
 	inactiveTools?: Tool[];
 }
 
@@ -1767,4 +1871,6 @@ export interface AnthropicFallbackCreditHandle {
 	expiresAt: number;
 	/** The refused response's content, in `AssistantMessage` block form. */
 	refusedContent?: AssistantMessage["content"];
+	/** How many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 }

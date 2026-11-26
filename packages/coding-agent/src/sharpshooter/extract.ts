@@ -2,8 +2,9 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getSegmenter } from "@oh-my-pi/pi-tui";
+import { getSegmenter } from "../utils/text-width";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -11,6 +12,7 @@ import extractInputTemplate from "../prompts/memories/sharpshooter-extract-input
 import extractSystemTemplate from "../prompts/memories/sharpshooter-extract-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { customMessageContentText } from "../session/checkpoint-entries";
+import { journalCompletion } from "../session/model-usage-journal";
 import { appendSharpshooterDelta } from "./queue";
 import type { SharpshooterDelta, SharpshooterDeltaKind, SharpshooterDeltaSource, SharpshooterFriction } from "./types";
 
@@ -166,10 +168,16 @@ export function buildSharpshooterEnvelope(
 export async function resolveSharpshooterModel(
 	settings: Settings,
 	modelRegistry: ModelRegistry,
+	provider?: string,
 ): Promise<Model | undefined> {
+	const offline = cfgOffline.get(settings);
+	if (offline && !provider) return undefined;
+	const models = offline
+		? modelRegistry.getAll().filter(model => model.provider === provider)
+		: modelRegistry.getAll();
 	const selector = cfgSharpshooterModel.get(settings);
 	if (selector) {
-		const resolved = resolveModelRoleValue(selector, modelRegistry.getAll(), {
+		const resolved = resolveModelRoleValue(selector, models, {
 			settings,
 			matchPreferences: getModelMatchPreferences(settings),
 		});
@@ -177,7 +185,12 @@ export async function resolveSharpshooterModel(
 		logger.debug("Sharpshooter extraction model selector did not resolve", { selector });
 	}
 
-	const fallback = resolveRoleSelection(["smol"], settings, modelRegistry.getAvailable())?.model;
+	const available = modelRegistry.getAvailable();
+	const fallback = resolveRoleSelection(
+		["smol"],
+		settings,
+		offline ? available.filter(model => model.provider === provider) : available,
+	)?.model;
 	if (!fallback) logger.debug("Sharpshooter extraction skipped: no model available");
 	return fallback;
 }
@@ -232,13 +245,17 @@ async function runSharpshooterExtraction(
 	envelope: SharpshooterEnvelope,
 ): Promise<void> {
 	const { session, settings, modelRegistry, agentDir } = options;
-	const model = await resolveSharpshooterModel(settings, modelRegistry);
-	if (!model || session.isDisposed) return;
+	const model = await resolveSharpshooterModel(settings, modelRegistry, session.model?.provider);
+	if (!model || session.isDisposed || (cfgOffline.get(settings) && session.model?.provider !== model.provider)) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
+	const journal = journalCompletion(session.sessionManager, { purpose: "sharpshooter:extract" });
 	const response = await retryTransientCompletion(
-		() =>
-			completeSimple(
+		() => {
+			if (cfgOffline.get(settings) && session.model?.provider !== model.provider) {
+				throw new Error("Sharpshooter model provider differs from the active session provider");
+			}
+			return completeSimple(
 				model,
 				{
 					systemPrompt: [prompt.render(extractSystemTemplate)],
@@ -251,8 +268,10 @@ async function runSharpshooterExtraction(
 					maxTokens: 2048,
 					reasoning: clampThinkingLevelForModel(model, Effort.Low),
 					toolChoice: "required",
+					onAttempt: message => journal?.(message, input),
 				},
-			),
+			);
+		},
 		{ provider: model.provider },
 	);
 	if (response.stopReason === "error") {

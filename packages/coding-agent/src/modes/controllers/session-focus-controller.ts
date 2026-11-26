@@ -272,7 +272,6 @@ export class SessionFocusController {
 			if (generation !== this.#attachGeneration) return;
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.updateEditorBorderColor();
-			this.ctx.ui.requestRender();
 		} catch (error) {
 			if (generation === this.#attachGeneration) {
 				this.#focusedAgentId = undefined;
@@ -312,10 +311,13 @@ export class SessionFocusController {
 		this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 		// Reset run bookkeeping before replay populates pending tool handles.
 		const statusRead = arrivals();
-		if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
-		else {
+		// A run paused between loops (awaiting jobs, child agents or queued input) is
+		// still active: program status stays `working`, not idle because nothing streams.
+		if (target.isStreaming || target.runStartedAt !== undefined) {
+			await this.ctx.eventController.handleEvent({ type: "agent_start" });
+			if (!target.isStreaming) this.ctx.eventController.showAsyncWait();
+		} else {
 			setRunStatus({ state: "idle" });
-			this.ctx.eventController.markViewIdle();
 		}
 		if (generation !== this.#attachGeneration) return undefined;
 		const replayed = new Map<unknown, AgentMessage[]>();

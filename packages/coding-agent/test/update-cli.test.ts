@@ -17,11 +17,9 @@ import {
 	buildNpmUpdateEnv,
 	buildRenameCleanupPackages,
 	type InstalledVersionVerification,
-	managedInstallName,
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
-	parseUpdateArgs,
 	pruneBunInstallCache,
 	type ReleaseInfo,
 	type RenameMigrationSteps,
@@ -41,7 +39,6 @@ import {
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 const npmBinary = $which("npm");
@@ -159,28 +156,6 @@ describe("update command plugin dispatch", () => {
 	});
 });
 
-describe("parseUpdateArgs", () => {
-	it("preserves the legacy plugin update shorthand", () => {
-		expect(parseUpdateArgs(["update", "-l"])).toEqual({
-			force: false,
-			check: false,
-			plugins: true,
-			channel: undefined,
-		});
-	});
-
-	it("parses update channels", () => {
-		expect(parseUpdateArgs(["update", "--canary"])?.channel).toBe("canary");
-		expect(parseUpdateArgs(["update", "--stable"])?.channel).toBe("stable");
-		expect(parseUpdateArgs(["update"])?.channel).toBeUndefined();
-	});
-
-	it("rejects conflicting update channels", () => {
-		expect(() => parseUpdateArgs(["update", "--canary", "--stable"])).toThrow(
-			"--canary and --stable are mutually exclusive",
-		);
-	});
-});
 describe("parseReportedVersion", () => {
 	it("preserves the prerelease suffix so a canary launcher verifies as up to date", () => {
 		// Regression: dropping `-canary.1` made a correctly installed canary
@@ -1625,9 +1600,6 @@ describe("update-cli concurrent binary updates", () => {
 	const verify = async () => ({ ok: true, actual: version });
 
 	async function prepare(): Promise<{ dir: string; targetPath: string }> {
-		const loadedTheme = await getThemeByName("dark");
-		if (!loadedTheme) throw new Error("theme unavailable");
-		setThemeInstance(loadedTheme);
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const dir = await makeTempDir();
 		const targetPath = path.join(dir, "omp");
@@ -1736,49 +1708,6 @@ describe("verifyInstalledVersion", () => {
 		} finally {
 			process.env.PATH = originalPath;
 		}
-	});
-});
-
-describe("managedInstallName", () => {
-	async function managedRoot(): Promise<string> {
-		const root = await makeTempDir();
-		await fs.mkdir(path.join(root, "versions"));
-		await fs.mkdir(path.join(root, "bin"));
-		await Bun.write(path.join(root, "versions", "1.0.0"), "omp");
-		await Bun.write(path.join(root, "manager.json"), JSON.stringify({ manager: "tern", name: "Tern" }));
-		return root;
-	}
-
-	it.skipIf(process.platform === "win32")(
-		"names the manager through the launcher symlink and a link outside the root",
-		async () => {
-			const root = await managedRoot();
-			const launcher = path.join(root, "bin", "omp");
-			await fs.symlink(path.join("..", "versions", "1.0.0"), launcher);
-			const outside = path.join(await makeTempDir(), "omp");
-			await fs.symlink(launcher, outside);
-
-			expect(await managedInstallName(launcher)).toBe("Tern");
-			expect(await managedInstallName(outside)).toBe("Tern");
-		},
-	);
-
-	it("names the manager of a copied launcher (Windows layout)", async () => {
-		const root = await managedRoot();
-		const copy = path.join(root, "bin", "omp.exe");
-		await Bun.write(copy, "omp");
-
-		expect(await managedInstallName(copy)).toBe("Tern");
-	});
-
-	it("treats a binary without a readable manifest as unmanaged", async () => {
-		const plain = path.join(await makeTempDir(), "bin", "omp");
-		await Bun.write(plain, "omp");
-		expect(await managedInstallName(plain)).toBeUndefined();
-
-		const root = await managedRoot();
-		await Bun.write(path.join(root, "manager.json"), "{not json");
-		expect(await managedInstallName(path.join(root, "versions", "1.0.0"))).toBeUndefined();
 	});
 });
 

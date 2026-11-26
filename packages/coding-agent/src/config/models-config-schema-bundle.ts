@@ -1,6 +1,32 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
+import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
+import {
+	isConfigurableFrameSize,
+	MAX_CONFIGURED_FRAME_SIZE,
+	MIN_CONFIGURED_FRAME_SIZE,
+	SHAPE_VARIANT_NAMES,
+} from "@oh-my-pi/snapcompact";
+
+/**
+ * Input modalities the catalog can express (`input-modalities` axis). A
+ * models.yml may name others; the file normalizer drops those before this
+ * schema runs, so the schema and the normalizer have to read the same list.
+ */
+export function supportedInputModalities(): readonly string[] {
+	const declared = AXES["input-modalities"].values;
+	const modalities: string[] = [];
+	if (declared) {
+		for (const value of declared) {
+			if (typeof value === "string") modalities.push(value);
+		}
+	}
+	if (modalities.length === 0) {
+		throw new Error("catalog input-modalities axis declares no modalities");
+	}
+	return modalities;
+}
 
 function validateMaxContextWindow(
 	value: { maxContextWindow?: number; contextWindow?: number },
@@ -118,7 +144,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -128,6 +154,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		type.enumerated(...Object.keys(RUNNER_API_KINDS).filter(api => api !== "web-search")),
 	);
 	const ModelKindSchema = type.enumerated(...MODEL_KINDS.filter(kind => kind !== "search"));
+	const ModelInputSchema = type.enumerated(...supportedInputModalities()).array();
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
@@ -183,6 +210,18 @@ export const getModelsConfigSchemaBundle = once(() => {
 		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "cl100k" | "o200k"',
 	);
 
+	const SnapcompactShapeSchema = type({
+		variant: type.enumerated(...SHAPE_VARIANT_NAMES),
+		"frameSize?": "number",
+	}).narrow(
+		(value, ctx) =>
+			value.frameSize === undefined ||
+			isConfigurableFrameSize(value.frameSize) ||
+			ctx.mustBe(
+				`snapcompactShape.frameSize an integer from ${MIN_CONFIGURED_FRAME_SIZE} to ${MAX_CONFIGURED_FRAME_SIZE}`,
+			),
+	);
+
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
 		"api?": ApiSchema,
@@ -219,9 +258,10 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -279,9 +319,10 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"kind?": ModelKindSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -327,7 +368,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	});
 
 	const ProviderDiscoverySchema = type({
-		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" | "apple-foundation-models"',
+		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" | "openrouter" | "apple-foundation-models"',
 		"timeoutMs?": "number",
 		/**
 		 * Defaults to `true`. Set `false` to fetch the model list from
@@ -406,7 +447,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 * every model under this provider via the auth-gateway's
 		 * `POST /v1/pi/stream` endpoint instead of the per-provider SDK. The
 		 * provider's `baseUrl` must point at a compatible `omp auth-gateway`
-		 * and `apiKey` must carry the gateway bearer.
+		 * and `apiKey` must carry the gateway bearer. The provider's model list
+		 * comes from the gateway's `GET /v1/pi/models`.
 		 */
 		"transport?": '"pi-native"',
 	}).narrow((value, ctx) => {

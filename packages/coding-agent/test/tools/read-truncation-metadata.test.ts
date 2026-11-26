@@ -1,18 +1,23 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-tui/theme";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tools/read";
-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-coding-agent/tools/details/read";
+import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { readToolRenderer } from "@oh-my-pi/pi-tui/tools/read";
+import { printRows } from "../../src/ui/print-rows";
+import { ToolBlock } from "../../src/ui/transcript/tool-block";
+import { toolCall, toolText } from "../helpers/tool-text";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
@@ -32,14 +37,6 @@ describe("read truncation metadata", () => {
 	let root: string;
 	let session: ToolSession;
 	let tool: ReadTool;
-	let uiTheme: Theme;
-
-	beforeAll(async () => {
-		await initTheme(false, undefined, undefined, "dark", "light");
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		uiTheme = theme;
-	});
 
 	beforeEach(async () => {
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "read-truncation-metadata-"));
@@ -70,7 +67,7 @@ describe("read truncation metadata", () => {
 		await Bun.write(path.join(root, "bytes.txt"), lines.join("\n"));
 
 		const result = persistedResult(await tool.execute("local-bytes", { path: "bytes.txt:raw:1-100" }));
-		const expectedBody = lines.slice(0, 49).join("\n");
+		const expectedBody = `${lines.slice(0, 49).join("\n")}\n`;
 		expect(textOutput(result)).toBe(expectedBody);
 		expect(result.details?.displayContent?.text).toBe(expectedBody);
 		expect(result.details?.truncation).toMatchObject({
@@ -79,7 +76,7 @@ describe("read truncation metadata", () => {
 			totalLines: 100,
 			totalBytes: Buffer.byteLength(lines.join("\n")),
 			outputLines: 49,
-			outputBytes: Buffer.byteLength(expectedBody),
+			outputBytes: Buffer.byteLength(lines.slice(0, 49).join("\n")),
 			firstLineExceedsLimit: false,
 			lastLinePartial: false,
 		} satisfies ReadTruncationStats);
@@ -89,7 +86,7 @@ describe("read truncation metadata", () => {
 		});
 		const meta = result.details?.meta?.truncation;
 		if (!meta) throw new Error("Expected continuation metadata");
-		expect(formatTruncationMetaNotice(meta)).toContain("Use :50 to continue");
+		expect(formatTruncationMetaNotice(meta)).toContain("Use :50- to continue");
 	});
 
 	it("does not turn an oversized local first line into an editable partial hashline", async () => {
@@ -112,8 +109,8 @@ describe("read truncation metadata", () => {
 
 	it("retains the partial UTF-8 preview and oversized-line warning for streamed artifact reads", async () => {
 		const line = "é".repeat(36_000);
-		await Bun.write(path.join(root, "artifacts", "0.read.log"), `before\n${line}\nafter`);
-		const result = persistedResult(await tool.execute("artifact-line", { path: "artifact://0:raw:2-2" }));
+		await Bun.write(path.join(root, "artifacts", "local", "0.log"), `before\n${line}\nafter`);
+		const result = persistedResult(await tool.execute("artifact-line", { path: "local://0.log:raw:2-2" }));
 		const preview = line.slice(0, DEFAULT_MAX_BYTES / 2);
 
 		expect(textOutput(result)).toBe(preview);
@@ -131,11 +128,7 @@ describe("read truncation metadata", () => {
 			outputBytes: Buffer.byteLength(preview),
 		});
 		expect(result.details?.meta?.truncation?.nextOffset).toBeUndefined();
-		const rendered = readToolRenderer
-			.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { path: "artifact://0:raw:2-2" })
-			.render(100)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
+		const rendered = toolText({ name: "read", args: { path: "local://0.log:raw:2-2" }, result, width: 100 });
 		expect(rendered).toContain("First line exceeds");
 		expect(rendered).not.toContain("Showing 0 of");
 	});
@@ -180,10 +173,13 @@ describe("read truncation metadata", () => {
 						details: { ...details, truncation: { ...details.truncation, content: displayBody } },
 					}),
 				);
-				const options = { expanded, isPartial: false };
 				const args = { path: "rows.zip:rows.txt" };
-				const current = readToolRenderer.renderResult({ ...result, details }, options, uiTheme, args).render(100);
-				const previous = readToolRenderer.renderResult(legacy, options, uiTheme, args).render(100);
+				const rows = (card: AgentToolResult<ReadToolDetails>): string[] => {
+					const call = toolCall({ name: "read", args, result: card, expanded });
+					return printRows(() => ToolBlock({ call }), 100);
+				};
+				const current = rows({ ...result, details });
+				const previous = rows(legacy);
 				expect(current).toEqual(previous);
 				expect(current.map(line => Bun.stripANSI(line)).join("\n")).toContain("row-0001");
 			}

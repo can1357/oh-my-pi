@@ -6,7 +6,7 @@ import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core"
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
@@ -222,7 +222,7 @@ describe("read tool .sample.txt dispatch", () => {
 			const result = await tool.execute("read-busy", { path: filePath }, undefined, undefined, context);
 			const output = textOutput(result);
 			expect(output).toContain("macOS sample profile: demo (pid 42)");
-			expect(output).not.toMatch(/Use :\d+ to continue/);
+			expect(output).not.toMatch(/Use :\d+-? to continue/);
 			const artifactId = result.details?.meta?.truncation?.artifactId;
 			expect(artifactId).toBeDefined();
 			const artifactPath = await sessionManager.getArtifactPath(artifactId ?? "");

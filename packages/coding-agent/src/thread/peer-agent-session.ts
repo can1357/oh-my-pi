@@ -12,9 +12,11 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "../irc/irc-types";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type {
+	AgentModelChange,
+	AgentModelSelectionState,
 	AgentSessionAdvisorOverview,
 	AgentSessionHandle,
 	AgentSessionLoopHandle,
@@ -120,6 +122,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 		return this.#field("ircWakesPending");
 	}
 
+	get hasPendingWake(): boolean {
+		return this.#field("hasPendingWake");
+	}
+
 	get messages(): AgentMessage[] {
 		return mainBridge().remote.callSync("readMessages", this);
 	}
@@ -221,6 +227,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 		return mainBridge().remote.call("abort", this, options);
 	}
 
+	applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState> {
+		return mainBridge().remote.call("applyAgentModelChange", this, change);
+	}
+
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void> {
 		return mainBridge().remote.call("setWorkPoolYieldItems", this, items);
 	}
@@ -235,6 +245,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatch(event: AgentSessionEvent): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(event);
@@ -248,6 +259,7 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatchRunState(state: SessionRunState): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#runStateListeners]) {
 			try {
 				listener(state);

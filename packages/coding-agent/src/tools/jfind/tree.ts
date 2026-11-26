@@ -7,7 +7,7 @@
  */
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { buildPathTree, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { type InternalUrlFilesystem, type UrlFileStat, UrlFsError } from "../../internal-urls/url-filesystem";
@@ -28,7 +28,7 @@ export type SearchRoot = { path: string; type: "directory" } | { path: string; t
 /**
  * Resolve a `find` scope (empty = `cwd`) to an existing directory or file,
  * host path or internal URL alike, through `filesystem`.
- * @throws {ToolError} line-range selector, missing path, or neither file nor directory.
+ * @throws {ToolError} http(s) URL, line-range selector, missing path (naming a `;` list as such), or neither file nor directory.
  */
 export async function resolveSearchRoot(
 	filesystem: InternalUrlFilesystem,
@@ -36,6 +36,11 @@ export async function resolveSearchRoot(
 	cwd: string,
 ): Promise<SearchRoot> {
 	if (input.length === 0) return { path: path.resolve(cwd), type: "directory" };
+	if (/^https?:\/\//i.test(input)) {
+		throw new ToolError(
+			`find searches local paths and internal URLs, not http(s) URLs: ${input}. Fetch it with read, or search it with grep.`,
+		);
+	}
 	// `find` judges whole files, so a trailing `:N-M` would silently be ignored.
 	if (InternalUrlRouter.instance().split(input).sel !== undefined) {
 		throw new ToolError(`find searches whole files; line-range selectors are not supported: ${input}`);
@@ -45,7 +50,13 @@ export async function resolveSearchRoot(
 	try {
 		stat = await filesystem.stat(root);
 	} catch (error) {
-		if (error instanceof UrlFsError && error.code === "ENOENT") throw new ToolError(`Path not found: ${input}`);
+		if (error instanceof UrlFsError && error.code === "ENOENT") {
+			throw new ToolError(
+				input.includes(";")
+					? `find takes one path, not a \`;\` list: ${input}. Call find once per path, or use grep for lists.`
+					: `Path not found: ${input}`,
+			);
+		}
 		throw error;
 	}
 	if (stat.type === "directory") return { path: root, type: "directory" };

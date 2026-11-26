@@ -1,6 +1,7 @@
-import { logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "../utils/render-utils";
+import { memoryNoticeErrorText } from "../memory-backend/messages";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
@@ -21,16 +22,11 @@ import {
 	resolveSeedsForScope,
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
-import { countUserTurns, extractMessages } from "./transcript";
+import { countUserTurns, extractMessages, retentionStart } from "./transcript";
 import { type DrainResult, HindsightOutbox, type RetainInput } from "./outbox";
 
 /** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
 export const HINDSIGHT_NOTICE_SOURCE = "Hindsight";
-
-/** Error text for a failure notice: it can carry server response text, so strip terminal controls and bound it. */
-function noticeErrorText(errorText: string): string {
-	return truncate(sanitizeText(errorText).replace(/\s+/g, " ").trim(), 200);
-}
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
@@ -186,7 +182,9 @@ export class HindsightRetainQueue {
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
 			logger.warn("Hindsight outbox drain failed", { bankId: this.#state.bankId, error: errorText });
-			notice(`Hindsight outbox unavailable: ${noticeErrorText(errorText)}. Undelivered memories stay on disk.`);
+			notice(
+				`Hindsight outbox unavailable: ${memoryNoticeErrorText(errorText)}. Undelivered memories stay on disk.`,
+			);
 			this.#schedule(RETAIN_FLUSH_INTERVAL_MS);
 			return;
 		}
@@ -210,7 +208,7 @@ export class HindsightRetainQueue {
 		// One notice per outage, not per retry.
 		if (++this.#failures === 1) {
 			notice(
-				`Memory retention failed; ${result.kept} ${result.kept === 1 ? "memory" : "memories"} kept in the Hindsight outbox for retry: ${noticeErrorText(result.error)}`,
+				`Memory retention failed; ${result.kept} ${result.kept === 1 ? "memory" : "memories"} kept in the Hindsight outbox for retry: ${memoryNoticeErrorText(result.error)}`,
 			);
 		}
 		// Exponential backoff from the debounce interval; ±20% jitter spreads processes sharing an outage.
@@ -266,6 +264,10 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	// or silently retaining nothing forever. Hashing is orders of magnitude
 	// cheaper than the re-formatting this cache avoids.
 	#lastRetainedPrefixKey: string = "";
+	/** In-flight transcript retain run; see {@link #requestRetain}. */
+	#retainRun?: Promise<void>;
+	/** Retain requested while {@link #retainRun} is in flight. */
+	#pendingRetain?: "auto" | "forced";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	#recallGeneration = 0;
@@ -377,7 +379,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 			if (this.#recallGeneration === generation) {
 				this.session.emitNotice(
 					"warning",
-					`Memory recall failed: ${noticeErrorText(errorText)}`,
+					`Memory recall failed: ${memoryNoticeErrorText(errorText)}`,
 					HINDSIGHT_NOTICE_SOURCE,
 				);
 			}
@@ -450,12 +452,42 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		}
 	}
 
-	async maybeRetainOnAgentEnd(): Promise<void> {
+	/**
+	 * Single-flight entry for transcript retains. At most one retain runs per session;
+	 * requests arriving meanwhile coalesce into one follow-up that re-reads the session
+	 * when it starts, so it carries the latest turns. A forced request wins over a
+	 * pending auto one. Resolves once the queue drains.
+	 */
+	#requestRetain(forced: boolean): Promise<void> {
+		this.#pendingRetain = forced || this.#pendingRetain === "forced" ? "forced" : "auto";
+		// #drainRetains always awaits before returning, so its `finally` cannot clear
+		// #retainRun before this assignment lands.
+		this.#retainRun ??= this.#drainRetains();
+		return this.#retainRun;
+	}
+
+	async #drainRetains(): Promise<void> {
+		try {
+			while (this.#pendingRetain) {
+				const kind = this.#pendingRetain;
+				this.#pendingRetain = undefined;
+				if (kind === "forced") await this.#forceRetain();
+				else await this.#retainIfDue();
+			}
+		} finally {
+			this.#retainRun = undefined;
+		}
+	}
+
+	async #retainIfDue(): Promise<void> {
 		if (!this.config.autoRetain) return;
-		// Cheap gate first: most agent_end events are not retain turns, so skip text extraction.
-		const userTurns = countUserTurns(this.session.sessionManager);
+		// Cheap gate first: most turn ends are not retain turns, so skip text extraction.
+		const manager = this.session.sessionManager;
+		const entries = manager.getEntries();
+		const start = retentionStart(entries, manager.getHeader?.());
+		const userTurns = countUserTurns(entries, start);
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
-		const messages = extractMessages(this.session.sessionManager);
+		const messages = extractMessages(entries, start);
 		if (messages.length === 0) return;
 
 		try {
@@ -478,8 +510,15 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		}
 	}
 
-	async forceRetainCurrentSession(): Promise<void> {
-		const messages = extractMessages(this.session.sessionManager);
+	/** `/memory enqueue`: rebuild retention for the current session, after any in-flight retain settles. */
+	forceRetainCurrentSession(): Promise<void> {
+		return this.#requestRetain(true);
+	}
+
+	async #forceRetain(): Promise<void> {
+		const manager = this.session.sessionManager;
+		const entries = manager.getEntries();
+		const messages = extractMessages(entries, retentionStart(entries, manager.getHeader?.()));
 		if (messages.length === 0) return;
 		// Forced retains are user-initiated rebuilds (`/memory enqueue`): drop the
 		// incremental cache so the full transcript is reformatted and resent even
@@ -524,7 +563,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 			};
 		}
 
-		const history = extractMessages(this.session.sessionManager);
+		const history = extractMessages(this.session.sessionManager.getEntries());
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
@@ -682,8 +721,11 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	attachSessionListeners(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = this.session.subscribe(event => {
-			if (event.type === "agent_end") {
-				void this.maybeRetainOnAgentEnd();
+			// The run's `agent_end` waits until no job, child agent or peer can resume it;
+			// a yielded pause is the model finishing its turn while such work keeps the run
+			// open. Non-yielded pauses continue the model's own work (retry, compaction).
+			if (event.type === "agent_end" || (event.type === "agent_pause" && event.yielded)) {
+				void this.#requestRetain(false);
 				// Drain any queued tool-initiated retain calls now that the turn
 				// is settled. The queue is also debounced/size-bounded, but
 				// flushing here keeps the bank fresh between turns.

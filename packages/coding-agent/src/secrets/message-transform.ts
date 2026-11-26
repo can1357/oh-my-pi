@@ -8,6 +8,7 @@ import type {
 	ProviderPayload,
 	TextContent,
 } from "@oh-my-pi/pi-ai";
+import { dropReasoningDetailsEnvelopes } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
@@ -547,7 +548,9 @@ function deobfuscateTextBlocks(
  * attestation over the function call it rides on, so replaying obfuscated
  * arguments under a signature issued for the raw ones pairs a valid signature
  * with a payload it does not cover. `intent` and `rawBlock` are harness-side
- * fields the signed part never carries, so they keep it.
+ * fields the signed part never carries, so they keep it. Either change also
+ * drops the turn's chat-completions `reasoning_details` envelope, which holds
+ * the raw reasoning text and every call's signature.
  * https://ai.google.dev/gemini-api/docs/thought-signatures
  */
 function obfuscateAssistantContentForReplay(
@@ -561,6 +564,7 @@ function obfuscateAssistantContentForReplay(
 			sharedRegexSecretValues,
 		);
 	let changed = false;
+	let replayStateChanged = false;
 	const result = content.map((block): AssistantMessage["content"][number] => {
 		if (block.type === "text") {
 			const text = obfuscate(block.text);
@@ -572,6 +576,7 @@ function obfuscateAssistantContentForReplay(
 			const thinking = obfuscate(block.thinking);
 			if (thinking === block.thinking) return block;
 			changed = true;
+			replayStateChanged = true;
 			return { ...block, thinking, thinkingSignature: undefined };
 		}
 		if (block.type === "toolCall") {
@@ -580,13 +585,14 @@ function obfuscateAssistantContentForReplay(
 			const rawBlock = block.rawBlock === undefined ? undefined : obfuscate(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return args === block.arguments
-				? { ...block, intent, rawBlock }
-				: { ...block, arguments: args, intent, rawBlock, thoughtSignature: undefined };
+			if (args === block.arguments) return { ...block, intent, rawBlock };
+			replayStateChanged = true;
+			return { ...block, arguments: args, intent, rawBlock, thoughtSignature: undefined };
 		}
 		return block;
 	});
-	return changed ? result : content;
+	if (!changed) return content;
+	return replayStateChanged ? dropReasoningDetailsEnvelopes(result) : result;
 }
 
 /**
@@ -657,11 +663,7 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 			}
 			continue;
 		}
-		if (
-			message.role !== "user" &&
-			message.role !== "toolResult" &&
-			!(message.role === "developer" && message.attribution === "user")
-		) {
+		if (message.role !== "user" && message.role !== "toolResult" && message.role !== "developer") {
 			continue;
 		}
 		const target = message as UserFacingMessage;
@@ -678,7 +680,9 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 
 /**
  * Redact secrets from outbound messages. User messages, tool results, and
- * user-authored developer messages (e.g. `@file` mentions) are obfuscated.
+ * developer messages of any attribution are obfuscated: agent-attributed
+ * notices (background job results, hook and extension messages) carry command
+ * text and output just like tool results do.
  * Assistant replay content is re-obfuscated too, because session restoration
  * expands keyed placeholders locally before the next provider request. Inline
  * image bytes are never walked.
@@ -712,11 +716,7 @@ function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]
 				current = replay;
 			}
 		}
-		if (
-			current.role !== "user" &&
-			current.role !== "toolResult" &&
-			!(current.role === "developer" && current.attribution === "user")
-		) {
+		if (current.role !== "user" && current.role !== "toolResult" && current.role !== "developer") {
 			if (current.role !== "assistant") return current;
 			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
 			if (content === current.content) return current;

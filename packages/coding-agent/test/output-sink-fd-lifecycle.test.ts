@@ -2,12 +2,13 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
-import { OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
+import { OutputSink } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { removeWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
+import { flush } from "./helpers/fake-clock";
+import { spillTo } from "./helpers/spill";
+import { toolText } from "./helpers/tool-text";
 
 const createdTempDirs: string[] = [];
 
@@ -54,7 +55,10 @@ describe("OutputSink fd lifecycle", () => {
 		// not strengthen that boundary and only multiply serial file I/O.
 		for (let i = 0; i < 72; i++) {
 			const artifactPath = path.join(dir, `spill-${i}.txt`);
-			const sink = new OutputSink({ artifactPath, artifactId: `art-${i}`, spillThreshold: 16 });
+			const sink = new OutputSink({
+				allocateArtifact: spillTo(artifactPath, `art-${i}`),
+				spillThreshold: 16,
+			});
 			spill(sink);
 			// Error/abort path: bail without dump().
 			await sink.dispose();
@@ -69,7 +73,10 @@ describe("OutputSink fd lifecycle", () => {
 	test("dump() then dispose() closes the sink exactly once", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "spill.txt");
-		const sink = new OutputSink({ artifactPath, artifactId: "once", spillThreshold: 16 });
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "once"),
+			spillThreshold: 16,
+		});
 		spill(sink);
 
 		const summary = await sink.dump();
@@ -87,7 +94,10 @@ describe("OutputSink fd lifecycle", () => {
 	test("push() after finalize is dropped and never resurrects the descriptor", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "spill.txt");
-		const sink = new OutputSink({ artifactPath, artifactId: "drop", spillThreshold: 16 });
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "drop"),
+			spillThreshold: 16,
+		});
 		spill(sink);
 		await sink.dispose();
 
@@ -113,8 +123,7 @@ describe("OutputSink fd lifecycle", () => {
 		});
 		const end = vi.spyOn(writer, "end");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "capped",
+			allocateArtifact: spillTo(artifactPath, "capped"),
 			spillThreshold: 16,
 			artifactMaxBytes: 40,
 			artifactHeadBytes: 20,
@@ -140,8 +149,13 @@ describe("OutputSink fd lifecycle", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "blocked");
 		await fs.mkdir(artifactPath);
-		const sink = new OutputSink({ artifactPath, artifactId: "incomplete", spillThreshold: 4 });
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "incomplete"),
+			spillThreshold: 4,
+		});
 		sink.push("lost-before-failure");
+		// Let the spill claim settle so the open fails before the target changes.
+		await flush();
 		await fs.rmdir(artifactPath);
 		sink.push("tail");
 		const summary = await sink.dump();
@@ -151,7 +165,7 @@ describe("OutputSink fd lifecycle", () => {
 		expect(summary.artifactError).toBe("open");
 		expect(summary.artifactId).toBeUndefined();
 		expect(notice).toContain("not saved completely");
-		expect(notice).not.toContain("artifact://");
+		expect(notice).not.toMatch(/local:\/\/\d+\.log/);
 		expect(await Bun.file(artifactPath).exists()).toBe(false);
 	});
 
@@ -159,11 +173,12 @@ describe("OutputSink fd lifecycle", () => {
 		const dir = await createTempDir();
 		const writer = instrumentArtifact(path.join(dir, "write.txt"));
 		const sink = new OutputSink({
-			artifactPath: path.join(dir, "write.txt"),
-			artifactId: "write",
+			allocateArtifact: spillTo(path.join(dir, "write.txt"), "write"),
 			spillThreshold: 4,
 		});
 		sink.push("prefix");
+		// Let the spill claim settle so "prefix" reaches the real writer.
+		await flush();
 		const write = vi.spyOn(writer, "write").mockImplementation(() => {
 			throw new Error("write failed");
 		});
@@ -189,7 +204,10 @@ describe("OutputSink fd lifecycle", () => {
 		const pendingWrite = Promise.withResolvers<number>();
 		vi.spyOn(writer, "write").mockReturnValue(pendingWrite.promise);
 		const end = vi.spyOn(writer, "end");
-		const sink = new OutputSink({ artifactPath, artifactId: "async", spillThreshold: 4 });
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "async"),
+			spillThreshold: 4,
+		});
 		sink.push("prefix");
 		const dumping = sink.dump();
 		pendingWrite.reject(new Error("asynchronous write failed"));
@@ -209,7 +227,10 @@ describe("OutputSink fd lifecycle", () => {
 			throw new Error("flush failed");
 		});
 		const end = vi.spyOn(writer, "end");
-		const sink = new OutputSink({ artifactPath, artifactId: "flush", spillThreshold: 4 });
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "flush"),
+			spillThreshold: 4,
+		});
 		sink.push("prefix");
 		const summary = await sink.dump();
 		await sink.dispose();
@@ -235,7 +256,10 @@ describe("OutputSink fd lifecycle", () => {
 			await release.promise;
 			throw new Error("end failed");
 		});
-		const sink = new OutputSink({ artifactPath, artifactId: "end", spillThreshold: 4 });
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "end"),
+			spillThreshold: 4,
+		});
 		sink.push("prefix");
 		sink.replace("ok");
 		const disposing = sink.dispose();
@@ -252,20 +276,24 @@ describe("OutputSink fd lifecycle", () => {
 		expect(summary.artifactError).toBe("end");
 		expect(summary.artifactId).toBeUndefined();
 		expect(notice).toContain("not saved completely");
-		expect(notice).not.toContain("artifact://");
+		expect(notice).not.toMatch(/local:\/\/\d+\.log/);
 		expect(end).toHaveBeenCalledTimes(1);
 		expect(await Bun.file(artifactPath).text()).toBe("prefix");
 		const meta = outputMeta().truncationFromSummary(summary, { direction: "tail" }).get();
-		const uiTheme = await getThemeByName("dark");
-		if (!uiTheme) throw new Error("Expected dark theme");
-		const component = bashToolRenderer.renderResult(
-			{ content: [{ type: "text", text: summary.output + notice }], details: { meta }, isError: false },
-			{ expanded: true, isPartial: false, renderContext: { isFullOutput: true } },
-			uiTheme,
-			{ command: "printf ok" },
+		const rendered = sanitizeText(
+			toolText({
+				name: "bash",
+				args: { command: "printf ok" },
+				result: {
+					content: [{ type: "text", text: summary.output + notice }],
+					details: { meta },
+					isError: false,
+				},
+				expanded: true,
+				width: 160,
+			}),
 		);
-		const rendered = sanitizeText(component.render(160).join("\n"));
 		expect(rendered).toContain("not saved completely");
-		expect(rendered).not.toContain("artifact://");
+		expect(rendered).not.toMatch(/local:\/\/\d+\.log/);
 	});
 });

@@ -335,21 +335,21 @@ describe("native IPC", () => {
 			});
 		`;
 		const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "inherit" });
-		// Real time is the subject here: a leaked loop ref means the child never
-		// exits, so the only observable failure is the deadline expiring. One
-		// deadline bounds every step, so a stall reports where it stopped.
-		const deadline = Bun.sleep(10_000).then(() => "timeout" as const);
-		const connection = await Promise.race([accepted, deadline]);
-		if (connection === "timeout") {
+		try {
+			// Booting the child loads the native addon, which takes seconds on a loaded
+			// machine; only a child that never connects at all fails here.
+			const connection = await Promise.race([accepted, Bun.sleep(45_000).then(() => undefined)]);
+			if (!connection) throw new Error("the child never connected");
+			const peer = record(connection);
+			// Real time is the subject from here: a leaked loop ref means the child
+			// never exits, so the only observable failure is the deadline expiring.
+			const deadline = Bun.sleep(10_000).then(() => "timeout" as const);
+			expect(await Promise.race([child.exited, deadline])).toBe(0);
+			expect(await new Response(child.stdout).text()).toContain("connected");
+			expect(await Promise.race([peer.closed.then(() => "closed" as const), deadline])).toBe("closed");
+			expect(peer.reason).toBeNull();
+		} finally {
 			child.kill();
-			throw new Error("the child never connected");
 		}
-		const peer = record(connection);
-		const exited = await Promise.race([child.exited, deadline]);
-		if (exited === "timeout") child.kill();
-		expect(exited).toBe(0);
-		expect(await new Response(child.stdout).text()).toContain("connected");
-		expect(await Promise.race([peer.closed.then(() => "closed" as const), deadline])).toBe("closed");
-		expect(peer.reason).toBeNull();
-	});
+	}, 60_000);
 });

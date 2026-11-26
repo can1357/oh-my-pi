@@ -22,6 +22,8 @@ import type {
 	SessionMessageEntry,
 	SessionModelUsageEntry,
 	SessionServiceTierChangeEntry,
+	SessionTypedEntry,
+	SnapcompactCompactionStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -117,6 +119,24 @@ function isServiceTierChange(entry: SessionEntry): entry is SessionServiceTierCh
 function isToolResultMessage(entry: SessionEntry): entry is SessionMessageEntry {
 	if (entry.type !== "message") return false;
 	return (entry as SessionMessageEntry).message?.role === "toolResult";
+}
+
+/**
+ * Build the row for a snapcompact compaction entry. Entries of other methods,
+ * legacy entries without `tokensAfter`, and malformed ones yield null.
+ */
+function extractSnapcompactCompaction(
+	sessionFile: string,
+	folder: string,
+	entry: SessionEntry,
+): SnapcompactCompactionStats | null {
+	if (entry.type !== "compaction") return null;
+	const { id, timestamp, method, tokensBefore, tokensAfter } = entry as SessionTypedEntry;
+	if (method !== "snapcompact" || typeof id !== "string" || id.length === 0) return null;
+	if (!isFiniteCount(tokensBefore) || !isFiniteCount(tokensAfter)) return null;
+	const ts = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
+	if (!Number.isFinite(ts)) return null;
+	return { sessionFile, entryId: id, folder, timestamp: ts, tokensBefore, tokensAfter };
 }
 
 /**
@@ -315,6 +335,17 @@ function extractStats(
 	};
 }
 
+/**
+ * Stored for a `model_usage` entry whose `purpose` is missing or not a string:
+ * a non-null purpose is what keeps the row off the conversation turns.
+ */
+const UNKNOWN_PURPOSE = "unknown";
+
+/**
+ * Row for a `model_usage` entry (usage of a model call that is not a
+ * conversation turn). It keeps the entry's raw `purpose`, which assistant
+ * messages lack, and the request timings newer entries carry.
+ */
 function extractModelUsageStats(
 	sessionFile: string,
 	folder: string,
@@ -322,7 +353,7 @@ function extractModelUsageStats(
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
-	return extractStats(
+	const stats = extractStats(
 		sessionFile,
 		folder,
 		{
@@ -340,11 +371,16 @@ function extractModelUsageStats(
 				stopReason: entry.stopReason ?? "stop",
 				errorMessage: entry.errorMessage,
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+				duration: isFiniteCount(entry.duration) ? entry.duration : undefined,
+				ttft: isFiniteCount(entry.ttft) ? entry.ttft : undefined,
 			},
 		},
 		undefined,
 		agentType,
 	);
+	if (!stats) return null;
+	stats.purpose = typeof entry.purpose === "string" && entry.purpose.length > 0 ? entry.purpose : UNKNOWN_PURPOSE;
+	return stats;
 }
 
 /** Message timestamp, falling back to the entry's ISO timestamp, then 0. */
@@ -503,10 +539,66 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	return entries;
 }
 
-/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier and the Spotlight state. */
-function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): ServiceTierByFamily | undefined {
+/**
+ * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as the coding agent's
+ * `isUserTurnInitiator` defines them.
+ */
+function startsNewRequest(entry: SessionEntry): boolean {
+	if (entry.type === "reset_boundary") return true;
+	if (entry.type !== "custom_message" || !("customType" in entry) || !("attribution" in entry)) return false;
+	return entry.attribution === "user" && (entry.customType === "skill-prompt" || entry.customType === "collab-prompt");
+}
+
+/**
+ * Links each user message to its reply across tail reads. The agent writes non-message entries (the system-prompt
+ * digest, extension notices, side-model usage, title changes) between a user message and its reply, so the reply is
+ * the first assistant message descending from the user message through such entries. Another message or a new
+ * request on the way ends that branch only; a sibling branch can still carry the reply.
+ */
+class ReplyTracker {
+	/** User messages still awaiting a reply and the non-message entries beneath them, each to its user message. */
+	readonly #waiting: Map<string, string>;
+
+	constructor(waiting?: Record<string, string>) {
+		this.#waiting = new Map(waiting ? Object.entries(waiting) : undefined);
+	}
+
+	get state(): Record<string, string> {
+		return Object.fromEntries(this.#waiting);
+	}
+
+	/** The user message `entry` answers, if `entry` is an assistant message descending from it through non-message entries. */
+	visit(entry: SessionEntry): string | undefined {
+		if (isUserMessage(entry)) {
+			this.#waiting.set(entry.id, entry.id);
+			return undefined;
+		}
+		const parentId = "parentId" in entry ? entry.parentId : undefined;
+		const user = typeof parentId === "string" ? this.#waiting.get(parentId) : undefined;
+		if (!user) return undefined;
+		if (isAssistantMessage(entry)) {
+			for (const [waitingId, waitingUser] of this.#waiting) {
+				if (waitingUser === user) this.#waiting.delete(waitingId);
+			}
+			return user;
+		}
+		if (entry.type !== "message" && !startsNewRequest(entry) && "id" in entry && typeof entry.id === "string") {
+			this.#waiting.set(entry.id, user);
+		}
+		return undefined;
+	}
+}
+
+/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier, the awaited replies and the Spotlight state. */
+function scanPrefixState(
+	bytes: Uint8Array,
+	spotlight: SpotlightCollector,
+	replies: ReplyTracker,
+): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
+		replies.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 		else spotlight.visit(entry);
 	});
@@ -523,6 +615,8 @@ export interface SessionParserState {
 	serviceTier: ServiceTierByFamily | null;
 	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
 	spotlight?: SpotlightParserState;
+	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
+	pendingReplies?: Record<string, string>;
 }
 
 export interface ParseSessionResult {
@@ -531,6 +625,7 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	snapcompactCompactions: SnapcompactCompactionStats[];
 	spotlight: SpotlightParseRows;
 	newOffset: number;
 	parserState?: SessionParserState;
@@ -582,15 +677,23 @@ export async function parseSessionFile(
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
+	const snapcompactCompactions: SnapcompactCompactionStats[] = [];
 	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
 	const callsById = new Map<string, ToolCallStats>();
 	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
+	let replies = new ReplyTracker();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
+		const answered = replies.visit(entry);
 		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+			return;
+		}
+		const compaction = extractSnapcompactCompaction(sessionPath, folder, entry);
+		if (compaction) {
+			snapcompactCompactions.push(compaction);
 			return;
 		}
 		if (isUserMessage(entry)) {
@@ -622,12 +725,11 @@ export async function parseSessionFile(
 				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
 			}
 			// Persist links even when the user entry was ingested in an earlier tail read.
-			const parentId = entry.parentId;
 			const msg = entry.message;
-			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+			if (answered && msg.role === "assistant" && msg.model && msg.provider) {
 				userLinks.push({
 					sessionFile: sessionPath,
-					entryId: parentId,
+					entryId: answered,
 					model: msg.model,
 					provider: msg.provider,
 				});
@@ -650,7 +752,8 @@ export async function parseSessionFile(
 					const previous = await readCheckpoint(handle, fromOffset);
 					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
 				}
-				resume = !reset;
+				// A cursor written before replies were tracked rebuilds its state from the prefix instead.
+				resume = !reset && state.pendingReplies !== undefined;
 			}
 			if (fromOffset > info.size) reset = true;
 			if (replay) resume = false;
@@ -660,9 +763,10 @@ export async function parseSessionFile(
 			if (resume) {
 				currentServiceTier = state?.serviceTier ?? undefined;
 				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+				replies = new ReplyTracker(state?.pendingReplies);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
-				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
@@ -684,6 +788,7 @@ export async function parseSessionFile(
 				userLinks: [],
 				toolCalls: [],
 				toolResults: [],
+				snapcompactCompactions: [],
 				spotlight: emptySpotlightRows(),
 				newOffset: fromOffset,
 			};
@@ -698,6 +803,7 @@ export async function parseSessionFile(
 		userLinks,
 		toolCalls,
 		toolResults,
+		snapcompactCompactions,
 		spotlight: spotlight.rows,
 		newOffset,
 		reset,
@@ -711,6 +817,7 @@ export async function parseSessionFile(
 			checkpoint,
 			serviceTier: currentServiceTier ?? null,
 			spotlight: spotlight.state,
+			pendingReplies: replies.state,
 		},
 	};
 }

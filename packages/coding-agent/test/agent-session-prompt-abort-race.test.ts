@@ -1,13 +1,11 @@
 /**
- * abort() can land while prompt() is still normalizing images or building the
- * vision-model description for a text-only model — both run before
+ * abort() can land while prompt() is still normalizing images, which runs before
  * PromptOptions.onPromptAdmitted fires. The prompt must be dropped (handed to
- * setPromptDropped) instead of starting a turn or entering a queue afterward,
- * and abort() must cancel an in-flight vision description rather than wait on it.
+ * setPromptDropped) instead of starting a turn or entering a queue afterward.
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -16,7 +14,6 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { withTimeout } from "@oh-my-pi/pi-utils";
 
@@ -39,7 +36,6 @@ describe("AgentSession prompt admission racing abort", () => {
 
 	async function createSession(
 		responses: Array<() => MockResponse | Promise<MockResponse>>,
-		textOnly = false,
 		options: {
 			modelRegistry?: Pick<ModelRegistry, "getApiKey">;
 			clientBridge?: unknown;
@@ -50,19 +46,21 @@ describe("AgentSession prompt admission racing abort", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
-		const model: Model = textOnly ? { ...bundled, input: ["text"] } : bundled;
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			initialState: { model: bundled, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
 		});
-		const fallbackRegistry = new ModelRegistry(authStorage);
+		// A real registry keeps the lookups the session runs (fallback-chain
+		// resolution calls find()); tests only script its key resolution.
+		const modelRegistry = new ModelRegistry(authStorage);
+		if (options.modelRegistry) spyOn(modelRegistry, "getApiKey").mockImplementation(options.modelRegistry.getApiKey);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry: (options.modelRegistry ?? fallbackRegistry) as never,
+			modelRegistry,
 			...(options.extensionRunner ? { extensionRunner: options.extensionRunner as never } : {}),
 		});
 		if (options.clientBridge) {
@@ -70,7 +68,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		}
 		const dropped: string[] = [];
 		session.setPromptDropped(prompt => dropped.push(prompt.text));
-		return { session, dropped, modelRegistry: options.modelRegistry ?? fallbackRegistry };
+		return { session, dropped, modelRegistry };
 	}
 
 	/** Holds image normalization for image-bearing calls until released. */
@@ -239,41 +237,6 @@ describe("AgentSession prompt admission racing abort", () => {
 
 		await withTimeout(steered.promise, 2_000, "The steer queued as the turn ended never ran");
 		expect({ agentEnds, queued: session.agent.hasQueuedMessages() }).toEqual({ agentEnds: 2, queued: false });
-	});
-
-	it("cancels an in-flight vision description on abort and drops the prompt", async () => {
-		const streamCalls: string[] = [];
-		const { session, dropped } = await createSession(
-			[
-				() => {
-					streamCalls.push("started");
-					return { content: ["should not run"] };
-				},
-			],
-			true,
-		);
-		const describeStarted = Promise.withResolvers<AbortSignal | undefined>();
-		const spy = spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementation(
-			async (_images, _deps, signal) => {
-				describeStarted.resolve(signal);
-				// Stands in for a provider that never answers: only the signal ends it.
-				const { promise, resolve } = Promise.withResolvers<void>();
-				signal?.addEventListener("abort", () => resolve(), { once: true });
-				await promise;
-				return [];
-			},
-		);
-		restores.push(() => spy.mockRestore());
-
-		const promptPromise = session.prompt("describe this", { images: [IMAGE] });
-		const signal = await withTimeout(describeStarted.promise, 2_000, "Vision description never started");
-		expect(signal?.aborted).toBe(false);
-		await session.abort({ reason: USER_INTERRUPT_LABEL });
-
-		expect(signal?.aborted).toBe(true);
-		expect(await withTimeout(promptPromise, 2_000, "Abort did not release the vision description")).toBe(true);
-		expect(dropped).toEqual(["describe this"]);
-		expect(streamCalls).toEqual([]);
 	});
 
 	it("joinActiveTurn refuses a steer that races abort instead of stranding it behind the cancel", async () => {
@@ -485,7 +448,6 @@ describe("AgentSession prompt admission racing abort", () => {
 					return { content: ["should not stream"] };
 				},
 			],
-			false,
 			// deferAgentInitiatedTurns marks the session as ACP-owned: no
 			// continuation may run without a client-owned prompt.
 			{ modelRegistry, clientBridge: { capabilities: {}, deferAgentInitiatedTurns: true } },
@@ -539,7 +501,6 @@ describe("AgentSession prompt admission racing abort", () => {
 					return { content: ["drained steer turn"] };
 				},
 			],
-			false,
 			{ modelRegistry },
 		);
 
@@ -575,7 +536,6 @@ describe("AgentSession prompt admission racing abort", () => {
 					return { content: ["first turn"] };
 				},
 			],
-			false,
 			{
 				extensionRunner: {
 					getCommand: (name: string) => (name === "queued-cmd" ? { name: "queued-cmd" } : undefined),

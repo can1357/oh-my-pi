@@ -178,6 +178,11 @@ function makeTieredReport(account: string): UsageReport {
 	};
 }
 
+/** Expected shape of a stored-row report after collection: tagged with the probing row's id. */
+function withCredentialId(report: UsageReport, credentialId = 1): UsageReport {
+	return { ...report, metadata: { ...report.metadata, credentialId } };
+}
+
 function usageHeaders(fiveHour: string, sevenDay: string, sevenDayModelScoped?: string): Record<string, string> {
 	return {
 		"anthropic-ratelimit-unified-5h-utilization": fiveHour,
@@ -479,7 +484,7 @@ describe("AuthStorage usage cache: Claude rate limits", () => {
 		let usageRequests = 0;
 		const usageFetch = (async (input: string | URL | Request) => {
 			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-			if (url.search === "") usageRequests += 1;
+			if (url.pathname.endsWith("/usage") && url.search === "") usageRequests += 1;
 			if (usageRequests === 1) {
 				return Response.json(
 					{ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } },
@@ -545,7 +550,7 @@ describe("AuthStorage usage cache: explicit invalidation", () => {
 			expect(calls).toBe(1);
 
 			expireCachePayloads(store);
-			expect(await storage.usage.reports()).toEqual([recovered]);
+			expect(await storage.usage.reports()).toEqual([withCredentialId(recovered)]);
 			expect(calls).toBe(2);
 		} finally {
 			storage.close();
@@ -631,10 +636,11 @@ describe("AuthStorage usage cache: explicit invalidation", () => {
 			const peer = storage.usage.reports();
 			release.resolve(stale);
 
-			expect(await Promise.all([initial, refreshed, peer])).toEqual([[fresh], [fresh], [fresh]]);
+			const taggedFresh = withCredentialId(fresh);
+			expect(await Promise.all([initial, refreshed, peer])).toEqual([[taggedFresh], [taggedFresh], [taggedFresh]]);
 			expect(calls).toBe(2);
 			expect(peak).toBe(1);
-			expect(await storage.usage.reports()).toEqual([fresh]);
+			expect(await storage.usage.reports()).toEqual([withCredentialId(fresh)]);
 			expect(calls).toBe(2);
 		} finally {
 			release.resolve(null);
@@ -676,7 +682,7 @@ describe("AuthStorage usage cache: explicit invalidation", () => {
 			await storage.usage.invalidate("openai-codex");
 			release.resolve(report);
 
-			expect(await pending).toEqual([report]);
+			expect(await pending).toEqual([withCredentialId(report)]);
 			expect(calls).toBe(1);
 		} finally {
 			release.resolve(null);
@@ -1543,5 +1549,83 @@ describe("AuthStorage usage cache: organization scope identity", () => {
 		expect(key).not.toBe(usageCacheIdentity({ ...credential, activeOrganizationId: "workos-b" }));
 		expect(key).not.toBe(usageCacheIdentity({ ...credential, region: "eu" }));
 		expect(key).not.toBe(usageCacheIdentity({ ...credential, inferenceRegion: "global" }));
+	});
+});
+
+describe("AuthStorage usage cache: runtime usage provider registration", () => {
+	const noResolver = { usageProviderResolver: () => undefined };
+
+	function extensionRow(): StoredAuthCredential {
+		return { ...oauthRow(1, "a@example.com"), provider: "anthropic-2" };
+	}
+
+	function extensionProvider(onFetch: () => void): UsageProvider {
+		return {
+			id: "anthropic-2",
+			supports: params => params.provider === "anthropic-2",
+			async fetchUsage() {
+				onFetch();
+				return { ...makeReport("a@example.com"), provider: "anthropic-2" };
+			},
+		};
+	}
+
+	async function extensionReports(storage: AuthStorage): Promise<UsageReport[]> {
+		return ((await storage.usage.reports()) ?? []).filter(report => report.provider === "anthropic-2");
+	}
+
+	it("keeps another process's reports when an extension registers a provider with no other adapter", async () => {
+		const store = makeStore([extensionRow()]);
+		let calls = 0;
+		const first = new AuthStorage(store, noResolver);
+		await first.credentials.reload();
+		first.usage.setProvider(
+			"anthropic-2",
+			extensionProvider(() => calls++),
+		);
+		expect(await extensionReports(first)).toHaveLength(1);
+		first.close();
+
+		const second = new AuthStorage(store, noResolver);
+		await second.credentials.reload();
+		second.usage.setProvider(
+			"anthropic-2",
+			extensionProvider(() => calls++),
+		);
+		try {
+			expect(await extensionReports(second)).toHaveLength(1);
+			expect(calls).toBe(1);
+
+			await second.usage.invalidate("anthropic-2");
+			expect(await extensionReports(second)).toHaveLength(1);
+			expect(calls).toBe(2);
+		} finally {
+			second.close();
+		}
+	});
+
+	it("invalidates cached reports when an extension replaces the provider's adapter", async () => {
+		const store = makeStore([extensionRow()]);
+		let firstCalls = 0;
+		let secondCalls = 0;
+		const storage = new AuthStorage(store, noResolver);
+		await storage.credentials.reload();
+		try {
+			storage.usage.setProvider(
+				"anthropic-2",
+				extensionProvider(() => firstCalls++),
+			);
+			expect(await extensionReports(storage)).toHaveLength(1);
+
+			storage.usage.setProvider(
+				"anthropic-2",
+				extensionProvider(() => secondCalls++),
+			);
+			expect(await extensionReports(storage)).toHaveLength(1);
+			expect(firstCalls).toBe(1);
+			expect(secondCalls).toBe(1);
+		} finally {
+			storage.close();
+		}
 	});
 });

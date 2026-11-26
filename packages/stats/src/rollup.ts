@@ -27,12 +27,14 @@
 
 import type { Database } from "bun:sqlite";
 import { currentDb, unpricedRequestSql } from "./db";
+import { isDecisionModelApi, sideChannelCategory } from "./side-channels";
 import type {
 	AgentType,
 	AgentTypeStats,
 	AggregatedStats,
 	CostTimeSeriesPoint,
 	DailyActivityPoint,
+	DashboardStats,
 	FolderStats,
 	ModelPerformancePoint,
 	ModelStats,
@@ -40,10 +42,12 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	SideChannelStats,
 	TimeSeriesPoint,
 	ToolModelStats,
 	ToolTimeSeriesPoint,
 	ToolUsageStats,
+	UsageAttributionTotals,
 } from "./types";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -53,7 +57,7 @@ const DAY_MS = 24 * HOUR_MS;
  * Bump when the rollup schema or fact definitions change: the tables are then
  * dropped and every hour is rebuilt from the raw tables.
  */
-const ROLLUP_VERSION = "2";
+const ROLLUP_VERSION = "3";
 const ROLLUP_VERSION_KEY = "rollup_version";
 /** Bump when the dirty-marking triggers change; they are then recreated in place. */
 const TRIGGER_VERSION = "4";
@@ -79,13 +83,25 @@ const REFRESH_MAX_BATCH = 64;
 // the raw read paths so both produce identical columns.
 // ---------------------------------------------------------------------------
 
-const MESSAGE_DIMENSIONS = "model, provider, folder, agent_type";
+/**
+ * `purpose` (NULL on assistant messages) and `api` carry the attribution of
+ * off-transcript model calls. Both stay raw: the purpose's category and whether
+ * the api is a native judgment api are decided in TypeScript at read time, so
+ * re-cutting either needs no rebuild.
+ */
+const MESSAGE_DIMENSION_COLUMNS = ["model", "provider", "folder", "agent_type", "purpose", "api"] as const;
+const MESSAGE_DIMENSIONS = MESSAGE_DIMENSION_COLUMNS.join(", ");
+
+/** The message dimensions as columns of `messages` qualified by `p`. */
+function messageDimensions(p: string): string {
+	return MESSAGE_DIMENSION_COLUMNS.map(column => `${p}${column}`).join(", ");
+}
 
 /** Additive per-bucket facts over `messages` (columns qualified by `p`). */
 function messageFacts(bucketExpr: string, p: string): string {
 	return `
 		${bucketExpr} AS bucket,
-		${p}model AS model, ${p}provider AS provider, ${p}folder AS folder, ${p}agent_type AS agent_type,
+		${MESSAGE_DIMENSION_COLUMNS.map(column => `${p}${column} AS ${column}`).join(", ")},
 		COUNT(*) AS requests,
 		SUM(CASE WHEN ${p}stop_reason = 'error' THEN 1 ELSE 0 END) AS failed,
 		SUM(${p}input_tokens) AS input_tokens,
@@ -226,6 +242,8 @@ export function ensureRollupSchema(database: Database): void {
 				provider TEXT NOT NULL,
 				folder TEXT NOT NULL,
 				agent_type TEXT NOT NULL,
+				purpose TEXT,
+				api TEXT NOT NULL,
 				requests INTEGER NOT NULL,
 				failed INTEGER NOT NULL,
 				input_tokens INTEGER NOT NULL,
@@ -527,7 +545,7 @@ function messageSource(database: Database, cutoff: number | null, fine: boolean)
 			`SELECT ${messageFacts("d.bucket", "m.")}
 			 FROM rollup_dirty d JOIN messages m ON m.timestamp >= d.bucket AND m.timestamp < d.bucket + ${HOUR_MS}
 			 ${hi !== null ? "WHERE d.bucket >= ?" : ""}
-			 GROUP BY d.bucket, m.model, m.provider, m.folder, m.agent_type`,
+			 GROUP BY d.bucket, ${messageDimensions("m.")}`,
 		);
 		if (hi !== null) params.push(hi);
 	}
@@ -574,8 +592,12 @@ function toolSource(database: Database, cutoff: number | null, fine: boolean): S
 }
 
 /** Run `select … FROM (<facts>) f <tail>` over the message facts for a window. */
-function queryMessages<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number }, select: string, tail = ""): T[] {
-	const database = currentDb();
+function queryMessages<T>(
+	window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number },
+	select: string,
+	tail = "",
+	database: Database | null = currentDb(),
+): T[] {
 	if (!database) return [];
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = messageSource(database, normalizeCutoff(window.cutoff), fine);
@@ -595,8 +617,32 @@ function normalizeCutoff(cutoff: number | null | undefined): number | null {
 	return cutoff === undefined || cutoff === null || cutoff <= 0 ? null : cutoff;
 }
 
+/**
+ * Series bucket for a fact row. Day buckets are the local calendar date
+ * (`YYYY-MM-DD` in the server's timezone, the viewer's when both run on one
+ * machine; the client tolerates a mismatch by floor-matching, see
+ * `client/data/series.ts`), so a day matches the date the user sees. Rolled
+ * hours are attributed by their start, so half-hour UTC offsets shift a day
+ * boundary by up to 30 minutes, as in {@link getProviderHourlyBurn}. Shorter
+ * buckets stay epoch-aligned.
+ */
 function seriesBucket(bucketMs: number): string {
+	if (bucketMs === DAY_MS) return "date(f.bucket / 1000, 'unixepoch', 'localtime')";
+	return epochBucket(bucketMs);
+}
+
+/** Epoch-aligned bucket start (ms) for a fact row, at any bucket size. */
+function epochBucket(bucketMs: number): string {
 	return `(f.bucket / ${bucketMs}) * ${bucketMs}`;
+}
+
+/**
+ * Epoch ms for a {@link seriesBucket} value. A local date resolves the way the
+ * client's day axis does (an offset-less date-time parses as local time), so
+ * both agree even on a day whose midnight a DST change skips.
+ */
+function seriesTimestamp(bucket: number | string): number {
+	return typeof bucket === "string" ? Date.parse(`${bucket}T00:00:00`) : bucket;
 }
 
 // ---------------------------------------------------------------------------
@@ -695,10 +741,19 @@ export function getStatsByFolder(cutoff: number | null = null, limit = Number.MA
 	).map(row => ({ folder: row.folder, ...toAggregatedStats(row) }));
 }
 
-/** Token usage per agent type (main, subagent, advisor). */
-export function getStatsByAgentType(cutoff: number | null = null): AgentTypeStats[] {
-	return queryMessages<{
+/**
+ * Usage attributed to what spent it: conversation turns per agent type (main,
+ * subagent, advisor) and side channels per category, apart for decision models.
+ * Rows are grouped by their raw dimensions and classified here (see
+ * `side-channels.ts`), so every row lands in exactly one group.
+ */
+export function getUsageAttribution(
+	cutoff: number | null = null,
+): Pick<DashboardStats, "byAgentType" | "bySideChannel"> {
+	const rows = queryMessages<{
 		agent_type: string | null;
+		purpose: string | null;
+		api: string;
 		requests: number;
 		input_tokens: number | null;
 		output_tokens: number | null;
@@ -707,30 +762,65 @@ export function getStatsByAgentType(cutoff: number | null = null): AgentTypeStat
 		cost_total: number | null;
 	}>(
 		{ cutoff },
-		`f.agent_type AS agent_type, SUM(f.requests) AS requests, SUM(f.input_tokens) AS input_tokens,
+		`f.agent_type AS agent_type, f.purpose AS purpose, f.api AS api,
+		 SUM(f.requests) AS requests, SUM(f.input_tokens) AS input_tokens,
 		 SUM(f.output_tokens) AS output_tokens, SUM(f.cache_read_tokens) AS cache_read_tokens,
 		 SUM(f.cache_write_tokens) AS cache_write_tokens, TOTAL(f.cost_total) AS cost_total`,
-		"GROUP BY f.agent_type",
-	).map(row => ({
-		agentType: (row.agent_type as AgentType | null) ?? "main",
-		totalRequests: row.requests,
-		totalInputTokens: row.input_tokens ?? 0,
-		totalOutputTokens: row.output_tokens ?? 0,
-		totalCacheReadTokens: row.cache_read_tokens ?? 0,
-		totalCacheWriteTokens: row.cache_write_tokens ?? 0,
-		totalCost: row.cost_total ?? 0,
-	}));
+		"GROUP BY f.agent_type, f.purpose, f.api",
+	);
+	const emptyTotals = (): UsageAttributionTotals => ({
+		totalRequests: 0,
+		totalInputTokens: 0,
+		totalOutputTokens: 0,
+		totalCacheReadTokens: 0,
+		totalCacheWriteTokens: 0,
+		totalCost: 0,
+	});
+	const byAgentType = new Map<AgentType, AgentTypeStats>();
+	const bySideChannel = new Map<string, SideChannelStats>();
+	for (const row of rows) {
+		const category = sideChannelCategory(row.purpose);
+		let totals: UsageAttributionTotals;
+		if (category === null) {
+			const agentType = (row.agent_type as AgentType | null) ?? "main";
+			let stat = byAgentType.get(agentType);
+			if (!stat) {
+				stat = { agentType, ...emptyTotals() };
+				byAgentType.set(agentType, stat);
+			}
+			totals = stat;
+		} else {
+			const decision = isDecisionModelApi(row.api);
+			const key = `${decision ? "decision" : "model"}:${category}`;
+			let stat = bySideChannel.get(key);
+			if (!stat) {
+				stat = { category, decision, ...emptyTotals() };
+				bySideChannel.set(key, stat);
+			}
+			totals = stat;
+		}
+		totals.totalRequests += row.requests;
+		totals.totalInputTokens += row.input_tokens ?? 0;
+		totals.totalOutputTokens += row.output_tokens ?? 0;
+		totals.totalCacheReadTokens += row.cache_read_tokens ?? 0;
+		totals.totalCacheWriteTokens += row.cache_write_tokens ?? 0;
+		totals.totalCost += row.cost_total ?? 0;
+	}
+	return {
+		byAgentType: [...byAgentType.values()],
+		bySideChannel: [...bySideChannel.values()].sort((a, b) => b.totalRequests - a.totalRequests),
+	};
 }
 
 /** Requests, errors, tokens and cost per bucket. */
 export function getTimeSeries({ cutoff, bucketMs }: RangeWindow): TimeSeriesPoint[] {
-	return queryMessages<{ bucket: number; requests: number; errors: number; tokens: number; cost: number }>(
+	return queryMessages<{ bucket: number | string; requests: number; errors: number; tokens: number; cost: number }>(
 		{ cutoff, bucketMs },
 		`${seriesBucket(bucketMs)} AS bucket, SUM(f.requests) AS requests, SUM(f.failed) AS errors,
 		 SUM(f.total_tokens) AS tokens, TOTAL(f.cost_total) AS cost`,
 		"GROUP BY 1 ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		requests: row.requests,
 		errors: row.errors,
 		tokens: row.tokens,
@@ -740,17 +830,22 @@ export function getTimeSeries({ cutoff, bucketMs }: RangeWindow): TimeSeriesPoin
 
 /** Requests per bucket per (model, provider). */
 export function getModelTimeSeries({ cutoff, bucketMs }: RangeWindow): ModelTimeSeriesPoint[] {
-	return queryMessages<{ bucket: number; model: string; provider: string; requests: number }>(
+	return queryMessages<{ bucket: number | string; model: string; provider: string; requests: number }>(
 		{ cutoff, bucketMs },
 		`${seriesBucket(bucketMs)} AS bucket, f.model AS model, f.provider AS provider, SUM(f.requests) AS requests`,
 		"GROUP BY 1, f.model, f.provider ORDER BY 1",
-	).map(row => ({ timestamp: row.bucket, model: row.model, provider: row.provider, requests: row.requests }));
+	).map(row => ({
+		timestamp: seriesTimestamp(row.bucket),
+		model: row.model,
+		provider: row.provider,
+		requests: row.requests,
+	}));
 }
 
 /** Average TTFT and output tokens/s per bucket per (model, provider). */
 export function getModelPerformanceSeries({ cutoff, bucketMs }: RangeWindow): ModelPerformancePoint[] {
 	return queryMessages<{
-		bucket: number;
+		bucket: number | string;
 		model: string;
 		provider: string;
 		requests: number;
@@ -763,7 +858,7 @@ export function getModelPerformanceSeries({ cutoff, bucketMs }: RangeWindow): Mo
 		 TOTAL(f.tps_sum) / NULLIF(SUM(f.tps_n), 0) AS avg_tps`,
 		"GROUP BY 1, f.model, f.provider ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		model: row.model,
 		provider: row.provider,
 		requests: row.requests,
@@ -775,7 +870,7 @@ export function getModelPerformanceSeries({ cutoff, bucketMs }: RangeWindow): Mo
 /** Daily cost per (model, provider) with the per-component split. */
 export function getCostTimeSeries(cutoff: number | null = null): CostTimeSeriesPoint[] {
 	return queryMessages<{
-		bucket: number;
+		bucket: string;
 		model: string;
 		provider: string;
 		cost: number;
@@ -793,7 +888,7 @@ export function getCostTimeSeries(cutoff: number | null = null): CostTimeSeriesP
 		 SUM(f.requests) AS requests`,
 		"GROUP BY 1, f.model, f.provider ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		model: row.model,
 		provider: row.provider,
 		cost: row.cost,
@@ -877,28 +972,44 @@ export function getProviderHourlyBurn(cutoff: number | null = null): ProviderHou
 }
 
 /**
+ * Whether the stored rollup was built under this build's {@link ROLLUP_VERSION}.
+ * Only {@link ensureRollupSchema} rebuilds an older one, so a connection that
+ * skips it (the read-only `/usage` paint) must not trust the rollup otherwise.
+ */
+function rollupIsCurrent(database: Database): boolean {
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(ROLLUP_VERSION_KEY);
+	return row?.value === ROLLUP_VERSION;
+}
+
+/**
  * Per-local-day request/token/cost totals since `cutoff`, oldest first, read
  * from the hourly rollup. Returns null when the local UTC offset is not a whole
  * hour (now or at `cutoff`), since hourly buckets then straddle local midnight,
- * or while the dirty backlog is too large for exact reads; callers then
- * aggregate the raw rows instead.
+ * when the stored rollup is missing or was built under another version, or
+ * while the dirty backlog is too large for exact reads; callers then aggregate
+ * the raw rows instead.
  */
-export function getDailyActivityFromRollup(cutoff: number): DailyActivityPoint[] | null {
+export function getDailyActivityFromRollup(
+	cutoff: number,
+	database: Database | null = currentDb(),
+): DailyActivityPoint[] | null {
 	if (new Date().getTimezoneOffset() % 60 !== 0 || new Date(cutoff).getTimezoneOffset() % 60 !== 0) return null;
-	const database = currentDb();
-	if (!database || !dirtyIsSmall(database)) return null;
+	if (!database || !rollupIsCurrent(database) || !dirtyIsSmall(database)) return null;
 	return queryMessages<{ day: string; cost: number; requests: number; total_tokens: number | null }>(
 		{ cutoff },
 		`date(f.bucket / 1000, 'unixepoch', 'localtime') AS day, TOTAL(f.cost_total) AS cost,
 		 SUM(f.requests) AS requests, SUM(f.total_tokens) AS total_tokens`,
 		"GROUP BY day ORDER BY day",
+		database,
 	).map(row => ({ day: row.day, cost: row.cost, requests: row.requests, totalTokens: row.total_tokens ?? 0 }));
 }
 
 /** Tokens/cost per bucket per provider. */
 export function getProviderTimeSeries({ cutoff, bucketMs }: RangeWindow): ProviderTimeSeriesPoint[] {
 	return queryMessages<{
-		bucket: number;
+		bucket: number | string;
 		provider: string;
 		total_tokens: number;
 		cost: number;
@@ -911,7 +1022,7 @@ export function getProviderTimeSeries({ cutoff, bucketMs }: RangeWindow): Provid
 		 TOTAL(f.cost_total) AS cost, SUM(f.unpriced) AS unpriced, SUM(f.requests) AS requests`,
 		"GROUP BY 1, f.provider ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		provider: row.provider,
 		totalTokens: row.total_tokens,
 		cost: row.cost,
@@ -1034,11 +1145,16 @@ export function getToolStatsByModel(cutoff: number | null = null): ToolModelStat
 
 /** Calls and errors per bucket per tool. */
 export function getToolTimeSeries({ cutoff, bucketMs }: RangeWindow): ToolTimeSeriesPoint[] {
-	return queryTools<{ bucket: number; tool_name: string; calls: number; errors: number }>(
+	return queryTools<{ bucket: number | string; tool_name: string; calls: number; errors: number }>(
 		{ cutoff, bucketMs },
 		`${seriesBucket(bucketMs)} AS bucket, f.tool_name AS tool_name, SUM(f.calls) AS calls, SUM(f.errors) AS errors`,
 		"GROUP BY 1, f.tool_name ORDER BY 1",
-	).map(row => ({ timestamp: row.bucket, tool: row.tool_name, calls: row.calls, errors: row.errors }));
+	).map(row => ({
+		timestamp: seriesTimestamp(row.bucket),
+		tool: row.tool_name,
+		calls: row.calls,
+		errors: row.errors,
+	}));
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,14 +1227,14 @@ export function getContextFactSeries(database: Database, { cutoff, bucketMs }: R
 	type Row = { bucket: number; agent_type: AgentType; n: number | null };
 	const toolRows = database
 		.query(
-			`SELECT ${seriesBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.result_chars) AS n
+			`SELECT ${epochBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.result_chars) AS n
 			 FROM (${tools.sql}) f GROUP BY 1, 2`,
 		)
 		.all(...tools.params) as Row[];
 	for (const row of toolRows) point(row.bucket, row.agent_type).resultChars += row.n ?? 0;
 	const messageRows = database
 		.query(
-			`SELECT ${seriesBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.output_tokens) AS n
+			`SELECT ${epochBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.output_tokens) AS n
 			 FROM (${messages.sql}) f GROUP BY 1, 2`,
 		)
 		.all(...messages.params) as Row[];

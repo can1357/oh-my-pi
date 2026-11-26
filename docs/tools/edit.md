@@ -6,11 +6,11 @@
 
 - Entry and mode registration: `packages/coding-agent/src/edit/index.ts`
 - Mode schemas: `packages/coding-agent/src/edit/schemas.ts`
-- Model-facing prompts: `crates/pi-edit/prompts/`; compact hashline variant: `packages/coding-agent/src/edit/hashline-compact.md`
-- Constrained-decoding grammars: `crates/pi-edit/grammars/`
-- Native bridge: `crates/pi-natives/src/edit.rs` — `EditSession`, `EditStore`, inspection, prompt/grammar exports
-- Hashline parser/application: `crates/pi-edit/src/modes/hashline/`
-- Snapshot/register state: `crates/pi-edit/src/store.rs`; staging, streaming previews, and result shaping: `crates/pi-edit/src/session.rs`
+- Model-facing prompts: `crates/edit/prompts/`; compact hashline variant: `packages/coding-agent/src/edit/hashline-compact.md`
+- Constrained-decoding grammars: `crates/edit/grammars/`
+- Native bridge: `crates/natives/src/edit.rs` — `EditSession`, `EditStore`, inspection, prompt/grammar exports
+- Hashline parser/application: `crates/edit/src/modes/hashline/`
+- Snapshot/register state: `crates/edit/src/store.rs`; staging, streaming previews, and result shaping: `crates/edit/src/session.rs`
 - Host writes, LSP integration, and parse-regression handling: `packages/coding-agent/src/edit/index.ts`
 - Mode selection/settings: `packages/coding-agent/src/utils/edit-mode.ts`, `packages/coding-agent/src/edit/settings.ts`
 
@@ -25,7 +25,26 @@
 
 Supported modes are `hashline`, `apply_patch`, `patch`, `replace`, and `sloppy`. `edit.mode: none` (or `PI_EDIT_VARIANT=none`) instead unregisters `edit`, wins over `edit.modelVariants`, turns off hashline anchors, and keeps `bash` registered regardless of `bash.enabled`; explicit tool lists still get `bash` only when they name it. `edit.modelVariants` uses the longest case-insensitive substring match against the active model string; equal-length matches keep config order. `PI_EDIT_VARIANT` pins the mode exactly; for settings-derived `hashline`, `PI_STRICT_EDIT_MODE` disables the model-family fallback to `replace` (Kimi, MiMo, MiniMax, DeepSeek, StepFun, Codex Spark, and GLM 5.3 Flash).
 
-This page primarily documents hashline. The schema, prompt, examples, renderer, and optional Lark format switch with the mode. Models with `editPromptVariant: "compact"` receive the compact hashline prompt. In `apply_patch` custom-tool mode the wire name is `apply_patch`; dispatch, including `xd://apply_patch`, still reaches the same internal tool. The tool is strict, essential, and uses exclusive concurrency.
+This page primarily documents hashline. The schema, prompt, examples, renderer, and optional Lark format switch with the mode. Models with `editPromptVariant: "compact"` receive the compact hashline prompt. In `apply_patch` custom-tool mode the wire name is `apply_patch`; a Codex-style shell call (`apply_patch <<'EOF' … EOF`, or the patch quoted) reaches the same internal tool when no `apply_patch` program is on `PATH`. The tool is strict, essential, and uses exclusive concurrency.
+
+## `magic` mode
+
+`edit.mode: magic` (or `PI_EDIT_VARIANT=magic`) keeps the `edit` tool but changes its contract: the payload describes the changes in words, one section per file, and an auxiliary model writes each file's patch. `edit.modelVariants` cannot select it. Source: `packages/coding-agent/src/edit/magic.ts`; model-facing prompt: `packages/coding-agent/src/prompts/tools/magic-edit.md`.
+
+```text
+# src/jobs.ts
+- In `drain()`, declare `limit` before `batch`.
+# src/parse.ts
+- Rename every `retrunValue` to `returnValue`.
+```
+
+The schema is `{ input: string }`. Providers with custom-tool grammars receive the payload's Lark grammar and send it raw, as in `hashline` mode. A line starting with `# ` opens the next file unless it sits inside a code fence; text before the first `# path` line is rejected. Sections naming the same path merge.
+
+1. The apply model sees the file or a numbered excerpt. It can `search` for literal text and `read` any part of the current draft, including omitted lines and its own edits.
+2. It uses exact `old_string` → `new_string` replacements. A missed or ambiguous match returns an error without discarding successful draft edits. The model can inspect the draft and correct the failed change in another turn.
+3. Once the model reports completion, a previously parseable file must still parse. If syntax regresses, the model can repair the draft. Only the completed draft is written through the normal edit engine, which refuses a stale snapshot and reports the resulting diff and diagnostics.
+
+Files are independent. An unfinished, declined, timed-out, or rejected section leaves its file unchanged and reports `[path] not applied: <reason>` alongside any successful diffs. The caller's edit format and `edit.magic.model` setting are unchanged.
 
 ## Input
 
@@ -69,7 +88,7 @@ Only body-bearing `PUT ...:` headers take body rows. Every body row is `+TEXT`; 
 
 Block forms resolve from the opening line through the tree-sitter node's end. Anchor the construct opener, never a closing delimiter, last visible line, blank line, or inner statement. A single-line node is rejected with guidance to use the corresponding explicit-line operation. `PUT >N*:` lowers to ordinary `PUT >N:` with a warning when no block resolves; replace/cut block forms fail instead of guessing.
 
-Leading decorators, attributes, and doc-comments may be separate syntax nodes. Anchor the first decorator when the parser groups it with the declaration; otherwise use an explicit range. Standalone line comments are not swept automatically. In Markdown, a heading's block includes its body and deeper subsections through the next heading of equal or higher level.
+Leading decorators, attributes, and doc-comments may be separate syntax nodes. Anchor the first decorator when the parser groups it with the declaration. In Rust, the first outer attribute (`#[...]`) or outer doc comment (`///`, `/** */`) of an item also resolves through the item, past any further attributes and comments. A later attribute or doc comment of the same item, or one with no item after it, is rejected like a single-line node, however many lines it spans. Otherwise use an explicit range. Standalone line comments are not swept automatically. In Markdown, a heading's block includes its body and deeper subsections through the next heading of equal or higher level.
 
 Use tight ranges and separate non-adjacent changes. Do not use `edit` merely to reformat or restyle code; run the project's formatter after the substantive edit.
 
@@ -127,11 +146,15 @@ MV lib/welcome.py
 | `replace`     | `path`, `old_string`, `new_string`, optional `replace_all`                                        | Replace quoted text in one file.                                                                                          |
 | `patch`       | `path`, `edits: Array<{ op?: "create" \| "delete" \| "update"; rename?: string; diff?: string }>` | Patch entries all target the top-level `path`; separate calls for different files.                                        |
 | `apply_patch` | `input`                                                                                           | Combined `*** Begin Patch` payload with `*** Add File`, `*** Update File`, `*** Move to`, and `*** Delete File` sections. |
-| `sloppy`      | `input`                                                                                           | `*** Edit File: path`, then `*** Find` plus `*** Replace`, `*** Insert Before`, or `*** Insert After`.                    |
+| `sloppy`      | `input`                                                                                           | `*** Edit File: path`, then `*** Find` plus `*** Replace`, `*** Insert Before`/`After`, `*** Cut`, or `*** Paste Before`/`After`. |
 
-`sloppy` uses existing-text anchors, not snapshot tags. Find must identify one match unless the file header ends in ` all`; bare `*** Edit File:` continues the current target. Bodies are raw text, without diff prefixes or closing markers. `…` in Find captures omitted text; Replace re-emits those captures in order. Insert keeps the anchor and treats `…` literally. Every pair addresses the original file; matching/validation failures occur before writes.
+`sloppy` uses existing-text anchors, not snapshot tags. Find must identify one match unless it is `*** Find all` (or the file header ends in ` all`), which changes every match; for a bare identifier that means whole words. Bodies are raw text, without diff prefixes or closing markers. `…` in Find captures omitted text; Replace re-emits those captures in order. A Find of a first line, a `…` line, and a last line addresses a block, closing at the line that ends that block rather than a nested or continued one. Insert keeps the anchor and treats `…` literally. `*** Cut` takes the matched lines and the next `*** Paste Before`/`*** Paste After` puts them beside its own match; neither has a body, and a paste that fails leaves the block in place. A Find with no action is rejected. Every pair addresses the original file; matching/validation failures occur before writes.
 
-The mode prompts in `crates/pi-edit/prompts/` define the full syntax.
+For a whole multiline construct, put the action and the opening-line prefix on one line: `*** Replace Block: opener`, `*** Delete Block: opener`, `*** Cut Block: opener`, or `*** Paste Before Block: opener` / `*** Paste After Block: opener`. The header only locates the old block. Replace takes the complete final code, including the opening line if it stays; the other block actions take no body. An unresolved syntax block, shared closing line, or ambiguous opener is rejected. Use a text Find with distinctive context instead. `Delete Block` also accepts two adjacent byte-identical copies: it keeps the first and removes the separator and second copy.
+
+A sloppy tool call can recover `*** Update File: path` followed by `*** Find`. It also accepts update-only patches with bare `@@` hunks and a final `*** End Patch`. Each hunk's old/context lines must match exactly once. Recovery does not guess a missing target or accept file creation, deletion, or moves.
+
+The mode prompts in `crates/edit/prompts/` define the full syntax.
 
 `apply_patch` matches complete old/context lines in this order: exact, trailing
 whitespace trimmed, both ends trimmed, then Unicode punctuation normalized.
@@ -152,7 +175,7 @@ the first filesystem write; a later invalid section leaves all files unchanged.
 
 ## Output and side effects
 
-Hashline applies in one tool call; it does not use the staged `xd://resolve` / `xd://reject` flow used by `ast_edit`.
+Hashline applies in one tool call; it does not use the staged `resolve` / `reject` preview flow used by `ast_edit`.
 
 A successful hashline section returns a fresh `[path#TAG]` header, optional block-resolution and move lines, a compact post-edit preview when available, and a `Warnings:` block when recovery or normalization produced warnings. `EditToolDetails` can include the unified `diff`, `firstChangedLine`, diagnostics, operation (`update` or `delete` in hashline mode), path/move metadata, `oldText` / `newText`, `snapshotsPruned`, and per-file results. Multi-section input returns one aggregate result. Stored before/after snapshot text is capped at 32,768 characters per file and across a multi-file result; later entries may retain their diff but omit snapshot text.
 

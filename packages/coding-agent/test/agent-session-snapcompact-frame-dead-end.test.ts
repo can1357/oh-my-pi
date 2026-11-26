@@ -13,7 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
@@ -43,7 +43,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		authStorage.keys.setRuntime("deepseek", "test-key");
+		authStorage.keys.setRuntime("fireworks", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -685,7 +685,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 	it("skips the frame rescue when the active model's wire strips image input", async () => {
 		// Declares image input, so only the wire predicate tells it apart from a vision model.
-		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("deepseek", "deepseek-v4-flash") });
+		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("fireworks", "deepseek-v4-flash") });
 		vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });

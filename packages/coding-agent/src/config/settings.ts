@@ -28,10 +28,11 @@ import {
 	isRecord,
 	logger,
 	MAIN_CONFIG_FILENAMES,
+	pathIsWithinLexical,
 	procmgr,
 } from "@oh-my-pi/pi-utils";
+import { pollFile } from "@oh-my-pi/pi-natives/file-poll";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { isLightTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
@@ -57,6 +58,7 @@ import {
 import "./all-settings";
 import { cfgDisabledProviders, cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
+import { isLightTheme } from "../ui/theme/service";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -159,8 +161,10 @@ type PersistedReloadMode = "strict" | "keep-last-good";
 /** Layer refreshes serialized by `Settings.#exclusive`: disk reloads and cwd re-scopes. */
 type LayerRefreshKind = PersistedReloadMode | "rescope";
 
-/** Quiet period after the last config-file event before the watcher reloads from disk. */
+/** Quiet period after the last config-file change before reloading from disk. */
 const CONFIG_WATCH_DEBOUNCE_MS = 200;
+/** Stat-poll interval for config sources while {@link Settings.startWatching} is active. */
+const CONFIG_POLL_INTERVAL_MS = 500;
 
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
@@ -436,8 +440,46 @@ function normalizePathPrefix(prefix: string): string {
 }
 
 function pathMatchesPrefix(cwd: string, prefix: string): boolean {
-	const relative = path.relative(normalizePathPrefix(prefix), path.resolve(cwd));
-	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+	return pathIsWithinLexical(normalizePathPrefix(prefix), path.resolve(cwd));
+}
+
+/**
+ * Phonon voice replacing each retired Kokoro voice family, keyed by Kokoro's
+ * accent/gender prefix (`af_heart` → American female → `harper`).
+ */
+const PHONON_VOICE_FOR_KOKORO_PREFIX: Record<string, string> = {
+	af_: "harper",
+	am_: "easton",
+	bf_: "maeve",
+	bm_: "edwin",
+};
+
+/**
+ * Local TTS moved from Kokoro-82M to Phonon 31M: rewrite configured Kokoro
+ * voice ids (`tts.localVoice`, `speech.voice`) to the Phonon voice of the same
+ * accent and gender, and a `local/kokoro` speech role to `local/phonon-31m`.
+ * Handles nested and quoted-dotted sources.
+ */
+function migrateKokoroSpeechSettings(raw: RawSettings): void {
+	const phononVoice = (value: unknown): string | undefined =>
+		typeof value === "string" ? PHONON_VOICE_FOR_KOKORO_PREFIX[value.slice(0, 3)] : undefined;
+	const phononRole = (value: unknown): unknown =>
+		value === "local/kokoro"
+			? "local/phonon-31m"
+			: Array.isArray(value)
+				? value.map(entry => (entry === "local/kokoro" ? "local/phonon-31m" : entry))
+				: value;
+	const leaves: Array<[root: string, leaf: string, migrate: (value: unknown) => unknown]> = [
+		["tts", "localVoice", value => phononVoice(value) ?? value],
+		["speech", "voice", value => phononVoice(value) ?? value],
+		["modelRoles", "speech", phononRole],
+	];
+	for (const [root, leaf, migrate] of leaves) {
+		const rootObj = raw[root];
+		if (isRecord(rootObj) && leaf in rootObj) rootObj[leaf] = migrate(rootObj[leaf]);
+		const dotted = `${root}.${leaf}`;
+		if (dotted in raw) raw[dotted] = migrate(raw[dotted]);
+	}
 }
 
 function stringArrayFromUnknown(value: unknown): string[] {
@@ -546,41 +588,102 @@ function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setti
 	}
 }
 
+/** Path prefixes a path-scoped array entry names under `path`, `paths`, `pathPrefix`, `pathPrefixes`. */
+function pathScopePrefixes(entry: Record<string, unknown>): string[] {
+	return [
+		...stringArrayFromUnknown(entry.path),
+		...stringArrayFromUnknown(entry.paths),
+		...stringArrayFromUnknown(entry.pathPrefix),
+		...stringArrayFromUnknown(entry.pathPrefixes),
+	];
+}
+
+/**
+ * Default entries an object-item path-scoped `list` keeps: a non-empty list of only scoped entries
+ * adds to the setting's default (the built-in interceptor rules) rather than replacing it, so this
+ * returns that default; any unscoped entry makes the list replace it, so this returns `[]`.
+ * Read by {@link resolvePathScopedArray} and by layered merges, which must keep that meaning once a
+ * higher layer prepends unscoped entries onto a scoped-only lower list.
+ */
+function scopedListDefault(setting: AnySetting, list: readonly unknown[]): readonly unknown[] {
+	const { definition } = setting;
+	if (definition.type !== "array" || definition.pathScoped?.itemType !== "object" || list.length === 0) return [];
+	return list.some(entry => isRecord(entry) && pathScopePrefixes(entry).length === 0) ? [] : definition.default;
+}
+
+/**
+ * Appends the object `entries` that apply at `cwd` to `resolved`.
+ * An entry naming no path prefix (none of the scope keys, or only unusable values such as YAML's
+ * `path: ~` = null) is unscoped and passes through unchanged. A scoped entry whose prefix covers `cwd`
+ * contributes its remaining fields as an inline rule, then its nested `values`/`items`/`valuesKey`
+ * entries resolved the same way, so no rule it carries is dropped inside its scope.
+ */
+function resolvePathScopedObjects(
+	entries: readonly unknown[],
+	valuesKey: string,
+	cwd: string,
+	resolved: unknown[],
+): void {
+	for (const entry of entries) {
+		if (!isRecord(entry)) continue;
+		const prefixes = pathScopePrefixes(entry);
+		if (prefixes.length === 0) {
+			resolved.push(entry);
+			continue;
+		}
+		if (!prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
+
+		const {
+			path: _path,
+			paths: _paths,
+			pathPrefix: _prefix,
+			pathPrefixes: _prefixes,
+			values,
+			items,
+			[valuesKey]: nested,
+			...inlineRule
+		} = entry;
+		if (Object.keys(inlineRule).length > 0) resolved.push(inlineRule);
+		for (const list of [values, items, nested]) {
+			if (Array.isArray(list)) resolvePathScopedObjects(list, valuesKey, cwd, resolved);
+		}
+	}
+}
+
 /** Value `setting` has in the `merged` layers, path-scoped entries resolved for `cwd`; `null` counts as unset. */
 function configuredValue(merged: RawSettings, setting: AnySetting, cwd: string): unknown {
 	const value = getByPath(merged, setting.segments);
 	if (value === undefined || value === null) return undefined;
-	return resolvePathScopedStringArray(setting, value, cwd) ?? value;
+	return resolvePathScopedArray(setting, value, cwd) ?? value;
 }
 
-function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
+function resolvePathScopedArray(setting: AnySetting, value: unknown, cwd: string): unknown[] | undefined {
 	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
 
-	const resolved: string[] = [];
+	const resolved: unknown[] = [];
+	if (scope.itemType === "object") {
+		resolvePathScopedObjects(value, scope.valuesKey, cwd, resolved);
+		resolved.push(...scopedListDefault(setting, value));
+		return resolved;
+	}
+
 	for (const entry of value) {
 		if (typeof entry === "string") {
 			resolved.push(entry);
 			continue;
 		}
-		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+		if (!isRecord(entry)) continue;
 
-		const scoped: Record<string, unknown> = entry;
-		const prefixes = [
-			...stringArrayFromUnknown(scoped.path),
-			...stringArrayFromUnknown(scoped.paths),
-			...stringArrayFromUnknown(scoped.pathPrefix),
-			...stringArrayFromUnknown(scoped.pathPrefixes),
-		];
+		const prefixes = pathScopePrefixes(entry);
 		if (prefixes.length === 0 || !prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
 
 		resolved.push(
-			...stringArrayFromUnknown(scoped.values),
-			...stringArrayFromUnknown(scoped.items),
-			...stringArrayFromUnknown(scoped[scope.valuesKey]),
+			...stringArrayFromUnknown(entry.values),
+			...stringArrayFromUnknown(entry.items),
+			...stringArrayFromUnknown(entry[scope.valuesKey]),
 		);
 	}
-
 	return resolved;
 }
 
@@ -726,9 +829,9 @@ export class Settings {
 	#activeReload?: { kind: LayerRefreshKind; promise: Promise<void> };
 	/** Whether {@link startWatching} is active. */
 	#watchingFiles = false;
-	/** Directory watchers for config sources, keyed by directory, with the basenames that trigger a reload. */
-	#fileWatchers = new Map<string, { watcher: fs.FSWatcher; names: Set<string> }>();
-	/** Debounce timer for watcher-triggered reloads. */
+	/** Disposers of the stat polls on config sources, keyed by resolved path. */
+	#configPolls = new Map<string, () => void>();
+	/** Debounce timer for poll-triggered reloads. */
 	#watchReloadTimer?: NodeJS.Timeout;
 
 	/** Whether to persist changes */
@@ -742,7 +845,12 @@ export class Settings {
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
 
-	private constructor(options: SettingsOptions = {}) {
+	/**
+	 * `projection`: a derived read-only view of another instance ({@link grantAuthority}), not a
+	 * session's settings; it stays out of the registry so legacy {@link findScopedSettings}
+	 * lookups never resolve to it.
+	 */
+	private constructor(options: SettingsOptions = {}, { projection = false }: { projection?: boolean } = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
@@ -750,7 +858,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
-		liveSettingsInstances.add(new WeakRef(this));
+		if (!projection) liveSettingsInstances.add(new WeakRef(this));
 		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
 	}
 
@@ -850,7 +958,7 @@ export class Settings {
 		if (this.#derived && this.#parent) return this.#parent.grantAuthority();
 		const revision = this.revision;
 		if (this.#grantView?.revision === revision) return this.#grantView.view;
-		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir }, { projection: true });
 		view.#storage = this.#storage;
 		view.#global = this.#operatorLayers();
 		inheritWarnings(view, this);
@@ -1332,19 +1440,20 @@ export class Settings {
 	}
 
 	/**
-	 * Apply on-disk edits live: watch the directories holding config.yml, the
-	 * project settings files, and `--config` overlays, and run a debounced
-	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values; a single value this build cannot read keeps its
-	 * last good value). Arming a watch also schedules one reload, so
-	 * edits that landed before it went live are not lost. Only the persisting
-	 * process-global instance watches; other instances ignore the call. Stopped
-	 * by {@link stopWatching} / {@link cancelPendingSaves}.
+	 * Apply on-disk edits live: stat-poll config.yml, the project settings
+	 * files, and `--config` overlays, and run a debounced keep-last-good reload
+	 * (a file that fails to parse or validate keeps its layer's last good
+	 * values; a single value this build cannot read keeps its last good value).
+	 * Each poll stats its path through every symlink, so atomic saves and
+	 * retargeted links surface like edits. Arming a poll also schedules one
+	 * reload, so edits that landed before it went live are not lost. Only the
+	 * persisting process-global instance watches; other instances ignore the
+	 * call. Stopped by {@link stopWatching} / {@link cancelPendingSaves}.
 	 */
 	startWatching(): void {
 		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
 		this.#watchingFiles = true;
-		this.#syncFileWatchers();
+		this.#syncConfigPolls();
 	}
 
 	/** Stop config-file watching started by {@link startWatching}; idempotent. */
@@ -1352,116 +1461,46 @@ export class Settings {
 		this.#watchingFiles = false;
 		clearTimeout(this.#watchReloadTimer);
 		this.#watchReloadTimer = undefined;
-		for (const { watcher } of this.#fileWatchers.values()) watcher.close();
-		this.#fileWatchers.clear();
+		for (const stop of this.#configPolls.values()) stop();
+		this.#configPolls.clear();
 	}
 
-	/** Directory → basenames whose events should trigger a reload, for every current config source. */
-	#configWatchTargets(): Map<string, Set<string>> {
-		const targets = new Map<string, Set<string>>();
-		const addTarget = (dir: string, name: string) => {
-			const names = targets.get(dir);
-			if (names) names.add(name);
-			else targets.set(dir, new Set([name]));
-		};
-		const addFile = (file: string) => {
-			// Walk physically so every symlink hop (including profile/ancestor
-			// directory links) is observed, not just the logical file and final
-			// realpath. Physical directory keys also re-arm a watch after retargeting.
-			const absolute = path.resolve(file);
-			let dir = path.parse(absolute).root;
-			let segments = physicalTargetSegments(absolute);
-			let hops = 0;
-			while (segments.length > 0) {
-				const segment = segments.shift()!;
-				if (segment === "" || segment === ".") continue;
-				if (segment === "..") {
-					dir = path.dirname(dir);
-					continue;
-				}
-				const current = path.join(dir, segment);
-				if (segments.length === 0) addTarget(dir, segment);
-				try {
-					if (fs.lstatSync(current).isSymbolicLink()) {
-						addTarget(dir, segment);
-						if (++hops > MAX_SYMLINK_HOPS) return;
-						const target = fs.readlinkSync(current);
-						if (path.isAbsolute(target)) dir = path.parse(target).root;
-						segments = [...physicalTargetSegments(target), ...segments];
-					} else {
-						dir = current;
-					}
-				} catch {
-					// Watch the nearest existing parent, even when several
-					// directories or a symlink's referent are missing.
-					addTarget(dir, segment);
-					return;
-				}
-			}
-		};
-		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
+	/** Every current config source, resolved; missing ones are polled too, so their creation is seen. */
+	#configWatchPaths(): Set<string> {
 		const projectCwd = path.resolve(this.#cwd);
 		const projectConfigDir = getProjectAgentDir(projectCwd);
-		addFile(path.join(projectConfigDir, "config.yml"));
-		addFile(path.join(projectConfigDir, "settings.json"));
-		addFile(path.join(projectCwd, ".claude", "settings.json"));
-		for (const file of this.#projectSourcePaths) addFile(file);
-		for (const file of this.#configFiles) addFile(file);
-		return targets;
+		const files = [
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			path.join(projectConfigDir, "config.yml"),
+			path.join(projectConfigDir, "settings.json"),
+			path.join(projectCwd, ".claude", "settings.json"),
+			...this.#projectSourcePaths,
+			...this.#configFiles,
+		];
+		return new Set(files.map(file => path.resolve(file)));
 	}
 
-	/**
-	 * Reconcile directory watchers with the current config sources. Watching
-	 * directories (not files) keeps atomic rename-over writes observable.
-	 */
-	#syncFileWatchers(): void {
+	/** Reconcile the stat polls with the current config sources. */
+	#syncConfigPolls(): void {
 		if (!this.#watchingFiles) return;
-		const targets = this.#configWatchTargets();
-		let armed = false;
-		for (const [dir, entry] of this.#fileWatchers) {
-			if (targets.has(dir)) continue;
-			entry.watcher.close();
-			this.#fileWatchers.delete(dir);
+		const files = this.#configWatchPaths();
+		for (const [file, stop] of this.#configPolls) {
+			if (files.has(file)) continue;
+			stop();
+			this.#configPolls.delete(file);
 		}
-		for (const [dir, names] of targets) {
-			const existing = this.#fileWatchers.get(dir);
-			if (existing) {
-				// A newly followed target can share a directory with the old one.
-				// Events for its name were filtered out while the reload was reading
-				// the files, so reconcile once even though no new watch was opened.
-				for (const name of names) {
-					if (!existing.names.has(name)) {
-						armed = true;
-						break;
-					}
-				}
-				existing.names = names;
-				continue;
-			}
-			let watcher: fs.FSWatcher;
-			try {
-				watcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
-					const entry = this.#fileWatchers.get(dir);
-					if (!entry || entry.watcher !== watcher) return;
-					if (filename && !entry.names.has(path.basename(filename.toString()))) return;
-					this.#scheduleWatchReload();
-				});
-			} catch (error) {
-				if (!isEnoent(error))
-					logger.debug("Settings: cannot watch config directory", { dir, error: String(error) });
-				continue;
-			}
-			watcher.on("error", error => {
-				logger.debug("Settings: config directory watcher failed", { dir, error: String(error) });
-				watcher.close();
-				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
-			});
-			this.#fileWatchers.set(dir, { watcher, names });
+		let armed = false;
+		for (const file of files) {
+			if (this.#configPolls.has(file)) continue;
+			this.#configPolls.set(
+				file,
+				pollFile(file, () => this.#scheduleWatchReload(), CONFIG_POLL_INTERVAL_MS),
+			);
 			armed = true;
 		}
-		// The sources were last read before a watch or name was added. Bun also
-		// arms macOS FSEvents asynchronously, so a write in between may raise no
-		// event. Re-read once; the next sync adds nothing new, so it settles.
+		// The sources were last read before a new poll took its first stat,
+		// which is its baseline: a write in between raises no change. Re-read
+		// once; the next sync adds nothing new, so it settles.
 		if (armed) this.#scheduleWatchReload();
 	}
 
@@ -1482,8 +1521,8 @@ export class Settings {
 		} catch (error) {
 			logger.warn("Settings: failed to apply on-disk config change", { error: String(error) });
 		}
-		// Sources may have appeared, moved, or vanished; re-target the watchers.
-		this.#syncFileWatchers();
+		// Sources may have appeared, moved, or vanished; re-target the polls.
+		this.#syncConfigPolls();
 	}
 
 	/**
@@ -1800,7 +1839,7 @@ export class Settings {
 			}
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
-			this.#syncFileWatchers();
+			this.#syncConfigPolls();
 		} catch (error) {
 			settled.reject(error);
 			throw error;
@@ -2083,6 +2122,45 @@ export class Settings {
 		this.#setProjectModelRoleValue(role, null);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, undefined);
+	}
+
+	/** Replace roles in the configured storage layer and synchronize runtime overrides. */
+	replaceModelRoles(modelRoles: ReadOnlyDict<string>): void {
+		const project = cfgModelRoleStorage.get(this) === "project";
+		const roles = new Set([...Object.keys(this.getModelRoles()), ...Object.keys(modelRoles)]);
+		for (const role of roles) {
+			const value = Object.hasOwn(modelRoles, role) ? modelRoles[role] : undefined;
+			if (project) {
+				if (value !== undefined) this.setProjectModelRole(role, value);
+				else if (this.getProjectModelRole(role) || this.getModelRoleProvenance(role) === "runtime") {
+					this.clearProjectModelRole(role);
+				}
+			} else if (
+				value !== undefined ||
+				this.getGlobalModelRole(role) !== undefined ||
+				this.getModelRoleProvenance(role) === "runtime"
+			) {
+				this.setModelRole(role, value);
+			}
+		}
+	}
+
+	/**
+	 * Detached in-memory copy with {@link replaceModelRoles} applied: same layer precedence, no saves,
+	 * no notifications. Read its roles and their provenance; never write through it.
+	 */
+	previewModelRoles(modelRoles: ReadOnlyDict<string>): Settings {
+		const preview = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir }, { projection: true });
+		preview.#parent = this.#parent;
+		// The role mutators replace their layer's modelRoles map instead of editing it in place.
+		preview.#global = { ...this.#global };
+		preview.#project = { ...this.#project };
+		preview.#configOverlay = this.#configOverlay;
+		preview.#overrides = { ...this.#overrides };
+		preview.#savedRuntimeModelRoleOverrides = new Map(this.#savedRuntimeModelRoleOverrides);
+		preview.#remerge();
+		preview.replaceModelRoles(modelRoles);
+		return preview;
 	}
 
 	/**
@@ -2805,7 +2883,9 @@ export class Settings {
 		const sourcePaths: string[] = [];
 		let shellPathSource: string | undefined;
 		for (const item of items) {
-			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path), {
+				arrays: "combine",
+			});
 			sourcePaths.push(item.path);
 			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 		}
@@ -2842,7 +2922,7 @@ export class Settings {
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
-			settings = this.#deepMerge(settings, overlay);
+			settings = this.#deepMerge(settings, overlay, { arrays: "combine" });
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
 		return { settings, shellPathSource };
@@ -3554,13 +3634,13 @@ export class Settings {
 			delete raw["task.completionProbeMs"];
 		}
 
-		// Early per-agent toggles were persisted as booleans even though the
-		// runtime record contract is "on"/"off"/model pattern. Normalize each
-		// layer before merging so project-level false still overrides global true.
+		// Per-agent records accept booleans from early persisted toggles and
+		// hand-written YAML, though the runtime contract is "on"/"off"/model pattern.
+		// Normalize each layer before merging so project-level false still overrides global true.
 		{
 			const taskObj = isRecord(raw.task) ? raw.task : undefined;
 			if (taskObj) {
-				for (const key of ["agentPrewalk", "agentAdvisor"]) {
+				for (const key of ["agentPrewalk", "agentAdvisor", "agentPrewalkAuto"]) {
 					const overrides = isRecord(taskObj[key]) ? taskObj[key] : undefined;
 					if (!overrides) continue;
 					for (const agentName in overrides) {
@@ -3591,9 +3671,11 @@ export class Settings {
 			value => typeof value === "number" && Number.isFinite(value),
 		);
 
+		migrateKokoroSpeechSettings(raw);
+
 		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
 		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
-		// replacement (`tools.xdev` stays at its own default). Dead keys are
+		// replacement (`tools.commands` stays at its own default). Dead keys are
 		// deleted so they stop lingering in config.yml.
 		const toolsObj = raw.tools as Record<string, unknown> | undefined;
 		if (toolsObj) {
@@ -3664,11 +3746,7 @@ export class Settings {
 				const selector = bundledSelector(provider, model => model.webSearchModel);
 				return selector ? [selector] : [];
 			};
-			const geminiSelectors = (model: string): string[] => [
-				`google-gemini-cli/${model}`,
-				`google-antigravity/${model}`,
-				`google/${model}`,
-			];
+			const geminiSelectors = (model: string): string[] => [`google-antigravity/${model}`, `google/${model}`];
 			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
@@ -3909,6 +3987,21 @@ export class Settings {
 			}
 		}
 		delete raw["computer.backend"];
+
+		// computer.backgroundFallback became computer.takeover, which added the
+		// opt-in `foreground` and `always` modes. `refuse` carries over; the old
+		// `takeover` is the default `fallback`, so it is dropped.
+		const computerSettings = isRecord(raw.computer) ? raw.computer : undefined;
+		const fallback = computerSettings?.backgroundFallback ?? raw["computer.backgroundFallback"];
+		if (fallback === "refuse" && computerSettings?.takeover === undefined && raw["computer.takeover"] === undefined) {
+			if (computerSettings) computerSettings.takeover = "refuse";
+			else raw.computer = { takeover: "refuse" };
+		}
+		if (computerSettings) {
+			delete computerSettings.backgroundFallback;
+			if (Object.keys(computerSettings).length === 0) delete raw.computer;
+		}
+		delete raw["computer.backgroundFallback"];
 
 		delete raw["hindsight.mentalModelRefreshIntervalMs"];
 
@@ -4285,8 +4378,10 @@ export class Settings {
 
 	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
 	#mergeOwnLayers(layers: OwnLayers): RawSettings {
-		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
-		merged = this.#deepMerge(merged, layers.configOverlay);
+		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project), {
+			arrays: "layer",
+		});
+		merged = this.#deepMerge(merged, layers.configOverlay, { arrays: "layer" });
 		return this.#deepMerge(merged, layers.overrides);
 	}
 
@@ -4306,24 +4401,64 @@ export class Settings {
 	/**
 	 * `overrides` deep-merged over `base`. Keys follow the higher layer's order, then base-only keys:
 	 * record order is meaningful to some consumers (`retry.fallbackChains` is searched in order).
+	 * `arrays` decides how an array setting declaring `merge` combines with the lower value:
+	 *  - `"replace"` (default): the higher array replaces it, like every other value.
+	 *  - `"combine"`: the setting's `merge` strategy applies over the lower array as found.
+	 *  - `"layer"`: as `"combine"`, and a lower layer leaving the setting unset (or `null`) contributes its default.
+	 * `prefix` is the dotted path of `base`/`overrides` within the settings tree.
 	 */
-	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
+	#deepMerge(
+		base: RawSettings,
+		overrides: RawSettings,
+		options: { readonly arrays?: "replace" | "combine" | "layer"; readonly prefix?: string } = {},
+	): RawSettings {
+		const { arrays = "replace", prefix = "" } = options;
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
 			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
 
 			if (override === undefined) continue;
+			const settingPath = prefix ? `${prefix}.${key}` : key;
 
+			const isOverrideRecord = typeof override === "object" && override !== null && !Array.isArray(override);
+			const isBaseRecord = typeof baseVal === "object" && baseVal !== null && !Array.isArray(baseVal);
 			if (
-				typeof override === "object" &&
-				override !== null &&
-				!Array.isArray(override) &&
-				typeof baseVal === "object" &&
-				baseVal !== null &&
-				!Array.isArray(baseVal)
+				isOverrideRecord &&
+				(isBaseRecord ||
+					(arrays === "layer" && baseVal === undefined && Object.hasOwn(settingsGroupOnlyPrefixes(), settingPath)))
 			) {
-				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
+				setOwn(
+					result,
+					key,
+					this.#deepMerge((isBaseRecord ? baseVal : {}) as RawSettings, override as RawSettings, {
+						arrays,
+						prefix: settingPath,
+					}),
+				);
+			} else if (arrays !== "replace" && Array.isArray(override)) {
+				const setting = lookupSetting(settingPath);
+				const strategy = setting?.definition.type === "array" ? setting.definition.merge : undefined;
+				const fallbackBase =
+					arrays === "layer" &&
+					(baseVal === undefined || baseVal === null) &&
+					override.length > 0 &&
+					setting?.definition.type === "array"
+						? setting.default
+						: undefined;
+				// A scoped-only lower list stands for its entries plus the default; keep that once higher entries join it.
+				const effectiveBase = Array.isArray(baseVal)
+					? setting
+						? [...baseVal, ...scopedListDefault(setting, baseVal)]
+						: baseVal
+					: fallbackBase;
+				if (override.length > 0 && strategy === "prepend" && Array.isArray(effectiveBase)) {
+					setOwn(result, key, [...override, ...effectiveBase]);
+				} else if (override.length > 0 && strategy === "append" && Array.isArray(effectiveBase)) {
+					setOwn(result, key, [...effectiveBase, ...override]);
+				} else {
+					setOwn(result, key, override);
+				}
 			} else {
 				setOwn(result, key, override);
 			}
@@ -4338,9 +4473,10 @@ export class Settings {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Weak registry of every constructed instance so `resetSettingsForTest` can
- * disarm stray background saves on isolated instances too. WeakRefs never
- * retain instances; the set is cleared on every test reset.
+ * Weak registry of every constructed instance except in-memory projections, so
+ * `resetSettingsForTest` can disarm stray background saves on isolated
+ * instances too and {@link findScopedSettings} can resolve a session by scope.
+ * WeakRefs never retain instances; the set is cleared on every test reset.
  */
 const liveSettingsInstances = new Set<WeakRef<Settings>>();
 

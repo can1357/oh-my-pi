@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { PersistCadence } from "../src/predict/daemon";
+import { PersistCadence } from "../src/daemon/modules/predict";
 
 const DEBOUNCE_MS = 5 * 60_000;
 const MAX_DIRTY_MS = 15 * 60_000;

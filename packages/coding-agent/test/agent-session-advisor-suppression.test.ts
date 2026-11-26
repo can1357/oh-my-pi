@@ -25,12 +25,13 @@ import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { fixedAdvisorTools } from "./helpers/agent-session-setup";
 
 interface MockYieldDetails {
 	status: "success";
@@ -66,6 +67,7 @@ interface AdvisorTestExtensionRunner {
 	hasHandlers(eventType: string): boolean;
 	emitBeforeAgentStart(): Promise<undefined>;
 	emit(event: { type: string; message?: AgentMessage }): Promise<void>;
+	emitSessionStop?(): Promise<undefined>;
 }
 
 describe("AgentSession advisor auto-resume suppression", () => {
@@ -236,7 +238,6 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 			extensionRunner: extensionRunner as never,
 		});
@@ -324,7 +325,6 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -613,7 +613,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		// Reported bug: typing a message during a run (queued as a steer) then pressing
 		// enter again (empty-submit interrupt) recorded the advisor card but stranded the
 		// user message — nothing resumed the run. The preserved advisor card is the
-		// trailing `custom` message, which #canAutoContinueForFollowUp must look past.
+		// trailing `custom` message, which must not stop the queued steer from resuming.
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession([
 			{ content: ["resumed on the steer"] },
 		]);
@@ -638,13 +638,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(userMessageText(session.agent.state.messages)).toContain("also rename the helper");
 	});
 
-	it("leaves a queued user follow-up queued behind a preserved advisor card", async () => {
-		// Same stranding, but the user message was queued as a follow-up (Ctrl+Enter).
-		// Only steering resumes safely behind a preserved advisor card: agentLoopContinue
-		// injects steering before the next model call, keeping the request tail valid. A
-		// follow-up would instead resume by continuing from the advisor card (which converts
-		// to `developer`) as the tail — a provider-invalid request — so it is NOT auto-run.
-		// It stays queued for the next explicit user resume.
+	it("keeps a queued user follow-up on hold after a deliberate user interrupt", async () => {
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession([
 			{ content: ["must not run"] },
 		]);
@@ -736,7 +730,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [parkTool],
+			advisorTools: fixedAdvisorTools(parkTool),
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -981,7 +975,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	});
 
 	it("keeps background wakes after an interrupt that lands while the finished turn still settles", async () => {
-		// The session reports streaming for the whole post-turn unwind — extension hooks,
+		// The session reports streaming for the whole post-turn unwind — stop hooks,
 		// compaction, the advisor drain — long after the turn reached its own end. An Esc
 		// there stops nothing a background completion could restart, and no later turn end
 		// would lift the suppression again, so the wake must survive it.
@@ -990,10 +984,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const extensionRunner: AdvisorTestExtensionRunner = {
 			hasHandlers: () => true,
 			emitBeforeAgentStart: async () => undefined,
-			emit: async event => {
-				if (event.type !== "agent_end") return;
+			emit: async () => {},
+			emitSessionStop: async () => {
 				settling.resolve();
 				await releaseSettle.promise;
+				return undefined;
 			},
 		};
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;

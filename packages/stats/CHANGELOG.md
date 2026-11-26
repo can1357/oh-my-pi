@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+## [19.1.1] - 2026-11-23
+
+### Added
+
+- Added `readDailyActivity()` for reading stored daily activity without being blocked by another process writing to the stats database; it returns `null` when no stats database exists.
+
+### Fixed
+
+- Fixed Spotlight baseline and adjusted-net calculations to use consistent result sets, improving headline and step-row accuracy.
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- Added 2d and 3d range presets with hourly buckets to the stats dashboard time selector ([#19766](https://github.com/can1357/oh-my-pi/issues/19766), [#19774](https://github.com/can1357/oh-my-pi/pull/19774) by [@thekitaev](https://github.com/thekitaev)).
+
+## [19.0.0] - 2026-11-18
+
+### Breaking Changes
+
+- Spotlight recovery counts reads from local spill files toward recovery counts; reads from artifact references in older sessions continue to count as before.
+
+### Added
+
+- Expanded the Overview's Token mix to include off-transcript model calls—such as title generation, job captions, judge queries, and cache warming—with per-source request counts, token totals, and usage shares.
+- Added a Decision models card to the Overview showing requests, tokens, and usage share by judgment use case for native judgment models.
+- Request details for title-generation and judge calls now display the generated reply or recorded judge answers.
+
+### Changed
+
+- Token mix shares for the main agent, subagents, and advisor now reflect conversation turns only, excluding side-channel model calls.
+
+### Fixed
+
+- Hardened the dashboard against DNS rebinding by rejecting requests made through unconfigured public host names. IP addresses, localhost, LAN short names, local network domains, and Tailscale names remain supported; configure reverse-proxy or other custom domains with OMP_STATS_ALLOWED_HOSTS, including wildcard subdomains such as *.example.com.
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed the Gain tab undercounting savings for sessions that use snapcompact context compaction, including backfilling recent compaction history after upgrading.
+
+## [18.20.1] - 2026-11-14
+
+### Fixed
+
+- Fixed Traces tab timing so background jobs show their actual completion times, including accurate idle periods and turn durations.
+- Fixed per-model message counts on the Frustration page to include all answered messages.
+- Improved dashboard responsiveness by keeping other pages and Live status available while Spotlight rebuilds.
+- Fixed daily usage charts to group activity by the user's local calendar day instead of UTC.
+
+## [18.20.0] - 2026-11-12
+
+### Fixed
+
+- Spotlight stats count a `;`/`,` path `read` once with all its parts, and count a later read of any of its files as a re-read or a needed line ([#18713](https://github.com/can1357/oh-my-pi/pull/18713) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

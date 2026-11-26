@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext } from "@oh-my-pi/pi-ai/usage";
-import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeProfilePlan, claudeRankingStrategy, claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 
 const CANONICAL_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
@@ -45,6 +45,7 @@ function params(baseUrl?: string) {
 		credential: {
 			type: "oauth" as const,
 			accessToken: "oat-test",
+			refreshToken: "refresh-test",
 			accountId: "account_test",
 			email: "user@example.com",
 			expiresAt: Date.now() + 60_000,
@@ -188,5 +189,125 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 		// the generic transient classification.
 		expect(plainUsageUrls(urls)).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
 		expect(report?.metadata?.endpoint).toBe(CANONICAL_USAGE_URL);
+	});
+});
+
+describe("claudeUsageProvider fast mode availability", () => {
+	const FAST_MODE_URL = "https://api.anthropic.com/api/claude_code_penguin_mode";
+	const offersFastMode = claudeRankingStrategy.tierGate?.({ serviceTier: "priority" });
+	const answering = (status: number, body: unknown) =>
+		recordingFetch(url => (url === FAST_MODE_URL ? jsonResponse(status, body) : jsonResponse(200, USAGE_PAYLOAD)));
+
+	it("reads the account's entitlement from Claude's own availability check", async () => {
+		const enabled = await claudeUsageProvider.fetchUsage(
+			params(),
+			context(answering(200, { enabled: true, disabled_reason: null }).fetch),
+		);
+		const disabled = await claudeUsageProvider.fetchUsage(
+			params(),
+			context(answering(200, { enabled: false, disabled_reason: "extra_usage_disabled" }).fetch),
+		);
+
+		expect(offersFastMode?.(enabled)).toBe(true);
+		expect(offersFastMode?.(disabled)).toBe(false);
+	});
+
+	it("keeps the previous answer when the check fails, and has none without one", async () => {
+		const { fetch } = answering(503, { error: "unavailable" });
+		const previousReport = {
+			provider: "anthropic" as const,
+			fetchedAt: Date.now() - 60_000,
+			limits: [],
+			metadata: { fastMode: false },
+		};
+
+		const carried = await claudeUsageProvider.fetchUsage(params(), { ...context(fetch), previousReport });
+		const fresh = await claudeUsageProvider.fetchUsage(params(), context(fetch));
+
+		expect(offersFastMode?.(carried)).toBe(false);
+		expect(offersFastMode?.(fresh)).toBeUndefined();
+	});
+
+	it("withdraws fast mode while the usage-credit cap is spent", async () => {
+		const { fetch } = recordingFetch(url =>
+			url === FAST_MODE_URL
+				? jsonResponse(200, { enabled: true })
+				: jsonResponse(200, {
+						...USAGE_PAYLOAD,
+						extra_usage: { is_enabled: true, monthly_limit: 5_000, used_credits: 5_000 },
+					}),
+		);
+
+		const report = await claudeUsageProvider.fetchUsage(params(), context(fetch));
+
+		expect(offersFastMode?.(report)).toBe(false);
+	});
+
+	it("leaves requests for other tiers unsteered", () => {
+		expect(claudeRankingStrategy.tierGate?.({ serviceTier: "flex" })).toBeUndefined();
+	});
+});
+
+describe("claudeUsageProvider subscription plan", () => {
+	const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+	const profile = (type: string, tier: string) => ({
+		organization: { organization_type: type, rate_limit_tier: tier },
+	});
+
+	it("labels Max plans by rate-limit tier and other plans by organization type", () => {
+		expect(claudeProfilePlan(profile("claude_max", "default_claude_max_20x"))).toBe("Max 20x");
+		expect(claudeProfilePlan(profile("claude_max", "default_claude_max_5x"))).toBe("Max 5x");
+		expect(claudeProfilePlan(profile("claude_max", "unrecognised"))).toBe("Max");
+		expect(claudeProfilePlan(profile("claude_enterprise", "default_claude_zero"))).toBe("Enterprise");
+		expect(claudeProfilePlan(profile("something_new", "default"))).toBeUndefined();
+		expect(claudeProfilePlan({ uuid: "no-organization" })).toBeUndefined();
+	});
+
+	it("stamps the profile's plan on the report", async () => {
+		const { fetch } = recordingFetch(url =>
+			url === PROFILE_URL
+				? jsonResponse(200, profile("claude_max", "default_claude_max_5x"))
+				: jsonResponse(200, USAGE_PAYLOAD),
+		);
+
+		const report = await claudeUsageProvider.fetchUsage(params(), context(fetch));
+
+		expect(report?.metadata?.subscriptionPlan).toBe("Max 5x");
+	});
+
+	it("keeps the previous report's plan when the profile probe fails, and reports none without one", async () => {
+		const { fetch } = recordingFetch(url =>
+			url === PROFILE_URL ? jsonResponse(500, { error: "boom" }) : jsonResponse(200, USAGE_PAYLOAD),
+		);
+		const previousReport = {
+			provider: "anthropic" as const,
+			fetchedAt: Date.now() - 60_000,
+			limits: [],
+			metadata: { subscriptionPlan: "Max 20x" },
+		};
+
+		const carried = await claudeUsageProvider.fetchUsage(params(), { ...context(fetch), previousReport });
+		const fresh = await claudeUsageProvider.fetchUsage(params(), context(fetch));
+
+		expect(carried?.metadata?.subscriptionPlan).toBe("Max 20x");
+		expect(fresh?.metadata).not.toHaveProperty("subscriptionPlan");
+	});
+
+	it("lets a changed plan replace the previous report's", async () => {
+		const { fetch } = recordingFetch(url =>
+			url === PROFILE_URL
+				? jsonResponse(200, profile("claude_max", "default_claude_max_20x"))
+				: jsonResponse(200, USAGE_PAYLOAD),
+		);
+		const previousReport = {
+			provider: "anthropic" as const,
+			fetchedAt: Date.now() - 60_000,
+			limits: [],
+			metadata: { subscriptionPlan: "Max 5x" },
+		};
+
+		const report = await claudeUsageProvider.fetchUsage(params(), { ...context(fetch), previousReport });
+
+		expect(report?.metadata?.subscriptionPlan).toBe("Max 20x");
 	});
 });

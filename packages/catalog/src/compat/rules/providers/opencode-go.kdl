@@ -112,18 +112,6 @@ provider "opencode-go" {
 	class "kimi" {
 		thinking-mode "effort"
 	}
-	// The Go gateway proxies Muse Spark's Responses lane to Meta but cannot
-	// round-trip encrypted reasoning: the upstream issues `encrypted_content`
-	// bound to the gateway's own caller, so replaying it on a later step 400s
-	// with "reasoning `encrypted_content` was not issued to this caller"
-	// (#11928). Stop requesting it and drop native reasoning items from replay
-	// so multi-step tool-call turns stop failing.
-	class "meta" {
-		family "muse-spark" {
-			include-encrypted-reasoning #false
-			filter-reasoning-history #true
-		}
-	}
 	class "mimo" {
 		family "v2" {
 			thinking-mode "effort"
@@ -200,5 +188,21 @@ provider "opencode-go" {
 			high "adaptive"
 		}
 		thinking-mode "anthropic-adaptive"
+	}
+	// Go's roster has no System One models, but a Go key is a Console key: the
+	// Console System One endpoint serves the limited-time free Jev to it
+	// (opencode.ai/docs/console/models#jev). The Go gateway path is not that
+	// endpoint, so this row keeps its own base URL.
+	seed api="typesafe" bundle="always" base-url="https://opencode.ai/inference/systemone" {
+		model "jev-1.13-free" name="Jev 1.13 Free" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+	models "jev-1.13-free" {
+		kind "judge"
 	}
 }

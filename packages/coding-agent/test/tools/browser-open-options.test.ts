@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
@@ -63,7 +63,6 @@ describe("browser open options CDP helpers", () => {
 	it("adds the per-open launch switches when requested", () => {
 		const args = buildHeadlessLaunchArgs({ width: 800, height: 600 }, { insecure: true });
 		expect(args).toContain("--hide-scrollbars");
-		expect(args).toContain("--enable-features=WebMCPTesting,DevToolsWebMCPSupport");
 		expect(args).toContain("--ignore-certificate-errors");
 		expect(args).toContain("--allow-file-access-from-files");
 	});
@@ -215,6 +214,27 @@ describe("browser open options CDP helpers", () => {
 		}
 		expect(await Bun.file(path.join(directory, "report.txt", "notes.txt")).text()).toBe("notes");
 		expect(await Bun.file(saved).text()).toBe("bytes");
+	});
+
+	it("publishes under the suggested name after a transient Windows share lock", async () => {
+		const { directory, elsewhere, complete } = await fakeDownloads();
+		const guid = crypto.randomUUID();
+		const saved = path.join(elsewhere, guid);
+		const target = path.join(directory, "report.txt");
+		await Bun.write(saved, "download bytes");
+		const platform = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
+			throw Object.assign(new Error("resource busy or locked"), { code: "EBUSY" });
+		});
+		try {
+			expect(await complete(guid, saved)).toBe(target);
+		} finally {
+			rename.mockRestore();
+			Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		}
+		expect(await Bun.file(target).text()).toBe("download bytes");
+		expect(await Bun.file(saved).exists()).toBe(false);
 	});
 
 	it("keeps the same-named file when a cross-device move fails to copy", async () => {
@@ -567,7 +587,7 @@ await Promise.withResolvers().promise;`;
 			server.stop(true);
 			recycled.stop(true);
 			later.stop(true);
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);

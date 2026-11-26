@@ -1,6 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
+import type { ServiceTier } from "../types";
 import { extractProviderRetryHint } from "../utils/retry-after";
 import type { CredentialRankingContext, CredentialRankingStrategy } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
@@ -11,21 +12,25 @@ import {
 	DEFAULT_BLOCK_MS,
 	credentialBlockScopesForRequest,
 	modelAccountPolicyBlockScope,
+	OAUTH_ORG_POLICY_BLOCK_SCOPE,
 	providerTypeKey,
+	serviceTierBlockScope,
 } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
 import type { KeyOverrides } from "./cascade";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { AuthCredentialStore } from "./store";
-import type {
-	AuthCredential,
-	CredentialRotation,
-	InvalidateCredentialMatchingOptions,
-	LimitsApi,
-	MarkUsageLimitOptions,
-	RotateCredentialOptions,
-	UsageLimitMarkResult,
+import {
+	type AuthCredential,
+	type CredentialRotation,
+	type InvalidateCredentialMatchingOptions,
+	type LimitsApi,
+	type MarkServiceTierUnavailableOptions,
+	type MarkUsageLimitOptions,
+	type RotateCredentialOptions,
+	SERVICE_TIER_BLOCK_MS,
+	type UsageLimitMarkResult,
 } from "./types";
 import type { UsageService } from "./usage";
 import {
@@ -45,6 +50,8 @@ import {
 const SIBLING_UNBLOCK_WAIT_MAX_MS = 5_000;
 /** Slack past a sibling's deadline so the post-wait resolve sees the block expired. */
 const SIBLING_UNBLOCK_SLACK_MS = 25;
+/** Org policy rarely changes during a session; the next request after expiry can probe again. */
+const OAUTH_ORG_POLICY_BLOCK_MS = 7 * 24 * 60 * 60_000;
 
 /** Routing scope and strategy for one failed credential. */
 export type CredentialBlockRouting = {
@@ -214,12 +221,31 @@ export class RateLimits implements LimitsApi {
 				};
 	}
 
-	/** Whether any sibling is unblocked under the scopes selection reads; else the earliest unblock. */
+	#exhaustedOrgPolicyRotation(
+		provider: string,
+		sessionId: string | undefined,
+		requestScopes: readonly string[],
+	): CredentialRotation {
+		const poolUnavailableReason = this.#deps.blocks.describeOrgPolicyPoolExhaustion(
+			provider,
+			sessionId,
+			this.#deps.affinity,
+			requestScopes,
+		);
+		return poolUnavailableReason ? { switched: false, poolUnavailableReason } : { switched: false };
+	}
+
+	/**
+	 * Whether any sibling is unblocked under the scopes selection reads; else the
+	 * earliest unblock. A sibling refused by model or organization policy adds
+	 * no unblock time a caller could usefully wait for.
+	 */
 	#siblingAvailability(
 		provider: string,
 		routing: CredentialBlockRouting,
 		siblings: readonly { credential: AuthCredential; index: number }[],
 	): { free: boolean; retryAtMs?: number } {
+		const modelPolicyScope = modelAccountPolicyBlockScope(routing.rankingContext.modelId);
 		let retryAtMs: number | undefined;
 		for (const sibling of siblings) {
 			// Sibling availability must use the same scope set selection reads, or
@@ -231,6 +257,18 @@ export class RateLimits implements LimitsApi {
 				routing.siblingBlockScopes,
 			);
 			if (siblingBlockedUntil === undefined) return { free: true };
+			if (
+				this.#deps.blocks.isScopeBlocked(
+					provider,
+					routing.providerKey,
+					sibling.index,
+					OAUTH_ORG_POLICY_BLOCK_SCOPE,
+				) ||
+				(modelPolicyScope !== undefined &&
+					this.#deps.blocks.isScopeBlocked(provider, routing.providerKey, sibling.index, modelPolicyScope))
+			) {
+				continue;
+			}
 			if (retryAtMs === undefined || siblingBlockedUntil < retryAtMs) retryAtMs = siblingBlockedUntil;
 		}
 		return { free: false, retryAtMs };
@@ -354,6 +392,43 @@ export class RateLimits implements LimitsApi {
 			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
 		};
 	}
+	async markServiceTierUnavailable(provider: string, options: MarkServiceTierUnavailableOptions): Promise<boolean> {
+		const blockScope = serviceTierBlockScope(options.serviceTier, options.modelId);
+		if (blockScope === undefined) return false;
+		const blockedUntilMs = Date.now() + (options.retryAfterMs ?? SERVICE_TIER_BLOCK_MS);
+		// A refusal already on record means selection knew and the request went
+		// to this credential with the tier regardless: recording it again changes
+		// nothing, so the caller has to stop asking.
+		if (options.credentialId === undefined) {
+			if (this.#deps.blocks.isUnstoredKeyRefused(provider, blockScope)) return false;
+			this.#deps.blocks.markUnstoredKeyRefused(provider, blockScope, blockedUntilMs);
+			return true;
+		}
+		await this.#deps.pool.adoptExternalChanges();
+		const entries = this.#deps.pool.entries(provider);
+		const index = entries.findIndex(entry => entry.id === options.credentialId);
+		const entry = entries[index];
+		if (!entry) return false;
+		const providerKey = providerTypeKey(provider, entry.credential.type);
+		if (this.#deps.blocks.isScopeBlocked(provider, providerKey, index, blockScope)) return false;
+		this.#deps.blocks.mark(
+			provider,
+			providerKey,
+			index,
+			blockedUntilMs,
+			blockScope,
+			options.retryAfterMs !== undefined,
+		);
+		return true;
+	}
+
+	async rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void> {
+		const blockScope = serviceTierBlockScope(serviceTier, modelId);
+		if (blockScope === undefined) return;
+		await this.#deps.pool.adoptExternalChanges();
+		this.#deps.blocks.clearServiceTierRefusals(provider, blockScope);
+	}
+
 	#extractStructuredApiKeyToken(apiKey: string): string | undefined {
 		if (!apiKey.startsWith("{")) return undefined;
 		try {
@@ -430,9 +505,10 @@ export class RateLimits implements LimitsApi {
 	 * - usage-limit / account-rate-limit error → {@link RateLimits.markReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
-	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan, or
-	 *   Anthropic model-not-found 404) → temporarily block only that requested
-	 *   model, then rotate. A denial naming another model or provider changes nothing.
+	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan,
+	 *   Anthropic model-not-found 404, or agy `Unknown model ID`) → temporarily
+	 *   block only that requested model, then rotate. A denial naming another model or provider changes nothing.
+	 * - exact OAuth organization denial → persist a longer account-wide block.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
@@ -462,7 +538,7 @@ export class RateLimits implements LimitsApi {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
-			const retryAfterMs = extractProviderRetryHint(provider, message);
+			const retryAfterMs = extractProviderRetryHint(provider, message, options?.baseUrl);
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,
@@ -480,18 +556,26 @@ export class RateLimits implements LimitsApi {
 			apiKey: options?.apiKey,
 			allowStaleOAuthBearer: accountPolicy,
 		});
-		if (!sessionCredential) return { switched: false };
 		if (accountPolicy) {
 			const modelPolicyScope = modelPolicy ? modelAccountPolicyBlockScope(options?.modelId) : undefined;
 			if (modelPolicy && modelPolicyScope === undefined) return { switched: false };
 			const routing = this.#credentialBlockRouting(
 				provider,
-				sessionCredential.type,
+				sessionCredential?.type ?? "oauth",
 				options?.modelId,
 				modelPolicyScope,
 			);
+			if (!sessionCredential) {
+				// A request-layer recovery may have already recorded the refusal and dropped the pin.
+				return this.#exhaustedOrgPolicyRotation(provider, sessionId, routing.siblingBlockScopes);
+			}
 			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
-			routing.blockScope = modelPolicyScope ?? ACCOUNT_POLICY_BLOCK_SCOPE;
+			const orgPolicy =
+				!modelPolicy &&
+				sessionCredential.type === "oauth" &&
+				AIError.isAnthropicOAuthOrganizationDenial(provider, error);
+			routing.blockScope =
+				modelPolicyScope ?? (orgPolicy ? OAUTH_ORG_POLICY_BLOCK_SCOPE : ACCOUNT_POLICY_BLOCK_SCOPE);
 			const sticky = this.#deps.affinity.get(provider, sessionId);
 			if (
 				!sessionCredential.explicit ||
@@ -504,13 +588,16 @@ export class RateLimits implements LimitsApi {
 				sessionId,
 				sessionCredential.type,
 				sessionCredential.index,
-				Date.now() + DEFAULT_BLOCK_MS,
+				Date.now() + (orgPolicy ? OAUTH_ORG_POLICY_BLOCK_MS : DEFAULT_BLOCK_MS),
 				routing,
 				false,
 				{ signal: options?.signal },
 			);
-			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
+			const rotation = await awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
+			if (rotation.switched || sessionCredential.type !== "oauth") return rotation;
+			return this.#exhaustedOrgPolicyRotation(provider, sessionId, routing.siblingBlockScopes);
 		}
+		if (!sessionCredential) return { switched: false };
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting

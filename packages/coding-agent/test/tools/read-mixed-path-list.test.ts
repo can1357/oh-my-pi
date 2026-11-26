@@ -68,6 +68,16 @@ describe("read with a `;` list mixing URLs and local paths", () => {
 		expect(text).not.toContain("interpreted as");
 	});
 
+	it("splits a `;` list whose parts carry their own `?q=` filter", async () => {
+		await Bun.write(path.join(cwd, "x.json"), JSON.stringify({ a: "x-a", b: "x-b" }));
+		await Bun.write(path.join(cwd, "y.json"), JSON.stringify({ a: "y-a", b: "y-b" }));
+		const text = await readText("x.json?q={a,b};y.json?q=.b");
+		expect(text).toContain("interpreted as 2 paths");
+		expect(text).toContain("x-a");
+		expect(text).toContain("y-b");
+		expect(text).not.toContain("y-a");
+	});
+
 	it("keeps a sqlite query ending in `;` whole", async () => {
 		const text = await readText("data.sqlite?q=SELECT * FROM t;");
 		expect(text).not.toContain("interpreted as");

@@ -1,16 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionFactory, InputEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { getEditorTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -18,9 +16,11 @@ import type { BlobPutOptions, BlobPutResult } from "@oh-my-pi/pi-coding-agent/se
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { Composer } from "../src/ui/composer/composer";
+import { createInputHarness } from "./helpers/input-harness";
 
-const ENTER = "\r";
-const FOLLOW_UP = "\x1b[13;5u";
+const ENTER = "enter";
+const FOLLOW_UP = "ctrl+enter";
 const originalImage: ImageContent = { type: "image", mimeType: "image/png", data: "b3JpZ2luYWw=" };
 const newerImage: ImageContent = { type: "image", mimeType: "image/jpeg", data: "bmV3ZXI=" };
 const transformedImage: ImageContent = { type: "image", mimeType: "image/jpeg", data: "cmVwbGFjZW1lbnQ=" };
@@ -49,7 +49,8 @@ async function createHarness(factory: ExtensionFactory) {
 		"native-input-test",
 	);
 	const runner = new ExtensionRunner([extension], runtime, process.cwd(), sessionManager, {} as ModelRegistry);
-	const editor = new CustomEditor(getEditorTheme());
+	const editor = new Composer();
+	const input = createInputHarness();
 	const prompt = vi.fn(async (_text: string, _options?: PromptOptions) => true);
 	const session = {
 		extensionRunner: runner,
@@ -64,7 +65,9 @@ async function createHarness(factory: ExtensionFactory) {
 		prewarmModelConnection: vi.fn(),
 	};
 	const ctx = {
-		editor,
+		composer: editor,
+		...input.context,
+		shell: { focused: () => editor.field, host: undefined, overlays: { open: () => false } },
 		session,
 		viewSession: session,
 		sessionManager,
@@ -72,13 +75,6 @@ async function createHarness(factory: ExtensionFactory) {
 		settings: Settings.isolated({}),
 		keybindings: KeybindingsManager.inMemory(),
 		dictationSpaceHold: vi.fn(),
-		ui: {
-			requestRender: vi.fn(),
-			addInputListener: vi.fn(),
-			addStartListener: vi.fn(),
-			getFocused: () => editor,
-			terminal: { write: vi.fn() },
-		},
 		compactionQueuedMessages: [],
 		skillCommands: new Map<string, Skill>(),
 		fileSlashCommands: new Set<string>(),
@@ -94,13 +90,14 @@ async function createHarness(factory: ExtensionFactory) {
 		updateEditorBorderColor: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		syncIdleMaintenanceView: vi.fn(),
-		flushPendingBashComponents: vi.fn(),
+		flushPendingExecRuns: vi.fn(),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		handleClearCommand: vi.fn(),
 		resetDisplayAfterAppearanceRefresh: vi.fn(),
 		shutdown: vi.fn(async () => {}),
 		clearEditor: () => editor.clearDraft(),
+		focusAsk: () => false,
 		withLocalSubmission: async <T>(_text: string, submit: () => Promise<T>) => submit(),
 		isGuidedGoalInterviewActive: () => false,
 	} as unknown as InteractiveModeContext;
@@ -118,10 +115,13 @@ async function createHarness(factory: ExtensionFactory) {
 		return enterCompletion;
 	};
 	const followUp = vi.spyOn(controller, "handleFollowUp");
+	function press(key: string): void {
+		input.press(ctx, key, key === ENTER ? { raw: "\r" } : undefined);
+	}
 	function pressSubmit(key: string): Promise<void> {
 		enterCompletion = undefined;
 		const followUpCount = followUp.mock.calls.length;
-		editor.handleInput(key);
+		press(key);
 		if (key === ENTER && enterCompletion) return enterCompletion;
 		if (key === FOLLOW_UP && followUp.mock.calls.length === followUpCount + 1) {
 			return followUp.mock.results[followUpCount].value as Promise<void>;
@@ -129,12 +129,16 @@ async function createHarness(factory: ExtensionFactory) {
 		throw new Error("The editor did not dispatch the submit key");
 	}
 	function draftWithImage(text = "original [Image #1]", image = originalImage, link = "local://original.png") {
-		editor.pendingImages = [image];
-		editor.pendingImageLinks = [link];
-		editor.imageLinks = editor.pendingImageLinks;
+		replaceImages(editor, [image], [link]);
 		editor.setText(text);
 	}
-	return { ctx, editor, session, prompt, runner, blobs, generatedMessages, pressSubmit, draftWithImage };
+	return { ctx, editor, session, prompt, runner, blobs, generatedMessages, press, pressSubmit, draftWithImage };
+}
+
+/** Replace the composer's pending images and their links. */
+function replaceImages(composer: Composer, images: ImageContent[], links: (string | undefined)[]): void {
+	composer.pendingImages.splice(0, composer.pendingImages.length, ...images);
+	composer.pendingImageLinks.splice(0, composer.pendingImageLinks.length, ...links);
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -174,7 +178,6 @@ describe("interactive native input ingress", () => {
 		if (!link) throw new Error("transformed image has no restored link");
 		expect(link.endsWith(".jpg")).toBe(true);
 		expect(h.blobs.get(link)?.toString()).toBe("replacement");
-		expect(h.editor.imageLinks).toEqual([link]);
 		expect(h.ctx.showError).toHaveBeenCalledWith("queue rejected");
 	});
 
@@ -193,14 +196,12 @@ describe("interactive native input ingress", () => {
 		const submitting = h.pressSubmit(FOLLOW_UP);
 		await entered.promise;
 		const repeated = h.pressSubmit(FOLLOW_UP);
-		h.editor.pendingImages = [transformedImage];
-		h.editor.pendingImageLinks = ["local://new.jpeg"];
-		h.editor.imageLinks = h.editor.pendingImageLinks;
+		replaceImages(h.editor, [transformedImage], ["local://new.jpeg"]);
 		h.editor.setText("new draft [Image #1]");
 		release.resolve();
 		await Promise.all([submitting, repeated]);
 		expect(seen).toEqual(["original [Image #1]"]);
-		expect(h.editor.getText()).toBe("new draft [Image #1]");
+		expect(h.editor.expandedText()).toBe("new draft [Image #1]");
 		expect(h.editor.pendingImages).toEqual([transformedImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpeg"]);
 	});
@@ -222,7 +223,7 @@ describe("interactive native input ingress", () => {
 			h.editor.setText("keep this draft");
 			release.resolve();
 			await submitting;
-			expect(h.editor.getText()).toBe("keep this draft");
+			expect(h.editor.expandedText()).toBe("keep this draft");
 			expect(h.editor.pendingImages).toEqual([]);
 		});
 	}
@@ -247,7 +248,7 @@ describe("interactive native input ingress", () => {
 		expect(h.ctx.compactionQueuedMessages).toEqual([
 			{ text: "queued after compaction", mode: "followUp", images: undefined },
 		]);
-		expect(h.editor.getText()).toBe("new draft");
+		expect(h.editor.expandedText()).toBe("new draft");
 	});
 
 	it("Ctrl+Enter /queue queues the attachments of its detached draft", async () => {
@@ -274,7 +275,7 @@ describe("interactive native input ingress", () => {
 		release.resolve();
 		await submitting;
 
-		expect(h.editor.getExpandedText()).toBe("/queue inspect [Image #2]\n\nnewer [Image #1]");
+		expect(h.editor.expandedText()).toBe("/queue inspect [Image #2]\n\nnewer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg", "local://original.png"]);
 		expect(h.ctx.showError).toHaveBeenCalledWith("queue rejected");
@@ -301,7 +302,7 @@ describe("interactive native input ingress", () => {
 			["first [Image #1]", [originalImage]],
 			["second", undefined],
 		]);
-		expect(h.editor.getExpandedText()).toBe("=> second\n\nnewer [Image #1]");
+		expect(h.editor.expandedText()).toBe("=> second\n\nnewer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([newerImage]);
 		expect(h.ctx.showError).toHaveBeenCalledWith("queue rejected");
 	});
@@ -322,7 +323,7 @@ describe("interactive native input ingress", () => {
 		release.resolve();
 		await submitting;
 		expect(h.session.followUp.mock.calls).toEqual([["inspect the result", undefined]]);
-		expect(h.editor.getExpandedText()).toBe("newer [Image #1]");
+		expect(h.editor.expandedText()).toBe("newer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
 	});
@@ -345,7 +346,7 @@ describe("interactive native input ingress", () => {
 		await submitting;
 
 		expect(h.session.followUp.mock.calls).toEqual([["inspect [Image #1]", [originalImage]]]);
-		expect(h.editor.getExpandedText()).toBe("/queue inspect [Image #2]\n\nnewer [Image #1]");
+		expect(h.editor.expandedText()).toBe("/queue inspect [Image #2]\n\nnewer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg", "local://original.png"]);
 		expect(h.ctx.showError).toHaveBeenCalledWith("queue rejected");
@@ -368,7 +369,7 @@ describe("interactive native input ingress", () => {
 		release.resolve();
 		await submitting;
 
-		expect(h.editor.getText()).toBe("same text");
+		expect(h.editor.expandedText()).toBe("same text");
 	});
 
 	it("Ctrl+Enter restores a rejected submission alongside newer text and image attachments", async () => {
@@ -384,14 +385,12 @@ describe("interactive native input ingress", () => {
 		h.draftWithImage();
 		const submitting = h.pressSubmit(FOLLOW_UP);
 		await entered.promise;
-		h.editor.pendingImages = [transformedImage];
-		h.editor.pendingImageLinks = ["local://new.jpeg"];
-		h.editor.imageLinks = h.editor.pendingImageLinks;
+		replaceImages(h.editor, [transformedImage], ["local://new.jpeg"]);
 		h.editor.setText("new draft [Image #1]");
 		release.resolve();
 		await submitting;
-		expect(h.editor.getExpandedText()).toContain("original [Image #2]");
-		expect(h.editor.getExpandedText()).toContain("new draft [Image #1]");
+		expect(h.editor.expandedText()).toContain("original [Image #2]");
+		expect(h.editor.expandedText()).toContain("new draft [Image #1]");
 		expect(h.editor.pendingImages).toEqual([transformedImage, originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpeg", "local://original.png"]);
 	});
@@ -425,21 +424,18 @@ describe("interactive native input ingress", () => {
 		h.draftWithImage("/skill:review original [Image #1]");
 		const submitting = h.pressSubmit(FOLLOW_UP);
 		await entered.promise;
-		h.editor.pendingImages = [transformedImage];
-		h.editor.pendingImageLinks = ["local://new.jpeg"];
-		h.editor.imageLinks = h.editor.pendingImageLinks;
+		replaceImages(h.editor, [transformedImage], ["local://new.jpeg"]);
 		h.editor.setText("new draft [Image #1]");
 		release.resolve();
 		await dispatchEntered.promise;
-		const draftDuringDispatch = h.editor.getText();
+		const draftDuringDispatch = h.editor.expandedText();
 		h.editor.setText(`${draftDuringDispatch} still typing`);
 		dispatchRelease.resolve();
 		await submitting;
 		expect(draftDuringDispatch).toBe("new draft [Image #1]");
-		expect(h.editor.getExpandedText()).toBe("/skill:review original [Image #2]\n\nnew draft [Image #1] still typing");
+		expect(h.editor.expandedText()).toBe("/skill:review original [Image #2]\n\nnew draft [Image #1] still typing");
 		expect(h.editor.pendingImages).toEqual([transformedImage, originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpeg", "local://original.png"]);
-		expect(h.editor.imageLinks).toEqual(["local://new.jpeg", "local://original.png"]);
 	});
 
 	it("Ctrl+Enter restores a rejected builtin /new alongside a newer draft", async () => {
@@ -463,13 +459,12 @@ describe("interactive native input ingress", () => {
 		release.resolve();
 		await submitting;
 
-		expect(h.editor.getExpandedText()).toBe("/new\n\nnewer [Image #1]");
+		expect(h.editor.expandedText()).toBe("/new\n\nnewer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([originalImage, transformedImage]);
 		const link = h.editor.pendingImageLinks[1];
 		if (!link) throw new Error("transformed image has no restored link");
 		expect(h.blobs.get(link)?.toString()).toBe("replacement");
 		expect(h.editor.pendingImageLinks).toEqual(["local://original.png", link]);
-		expect(h.editor.imageLinks).toEqual(["local://original.png", link]);
 		expect(h.ctx.showError).toHaveBeenCalledWith("new session rejected");
 		expect(h.prompt).not.toHaveBeenCalled();
 	});
@@ -497,10 +492,9 @@ describe("interactive native input ingress", () => {
 			images: [originalImage],
 			imageLinks: ["local://original.png"],
 		});
-		expect(h.editor.getExpandedText()).toBe("/plan fix [Image #2]\n\nnewer [Image #1]");
+		expect(h.editor.expandedText()).toBe("/plan fix [Image #2]\n\nnewer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg", "local://original.png"]);
-		expect(h.editor.imageLinks).toEqual(["local://newer.jpg", "local://original.png"]);
 		expect(h.prompt).not.toHaveBeenCalled();
 	});
 
@@ -556,7 +550,7 @@ describe("interactive native input ingress", () => {
 
 			await h.pressSubmit(ENTER);
 
-			expect(h.editor.getExpandedText()).toBe(`/${command} fix this block [Image #1]`);
+			expect(h.editor.expandedText()).toBe(`/${command} fix this block [Image #1]`);
 			expect(h.editor.pendingImages).toEqual([originalImage]);
 			expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
 
@@ -564,20 +558,22 @@ describe("interactive native input ingress", () => {
 			h.editor.setText(`/${command} just text`);
 			await h.pressSubmit(ENTER);
 
-			expect(h.editor.getExpandedText()).toBe(`/${command} just text`);
+			expect(h.editor.expandedText()).toBe(`/${command} just text`);
 		},
 	);
 
 	it.each([
 		["omfg", "handleOmfgCommand"],
-		["handoff", "handleHandoffCommand"],
+		["handoff", "handleCompactCommand"],
 		["cleanse", "handleCleanseCommand"],
 	] as const)("Enter /%s with an image keeps the draft and does not run", async (command, handler) => {
 		const h = await createHarness(() => {});
 		const showWarning = vi.fn();
 		Object.assign(h.session, { customCommands: [], promptTemplates: [] });
 		Object.assign(h.ctx, { showWarning });
-		const run = vi.fn(async () => {});
+		const run = vi.fn(() => {
+			throw new Error("Image submission should not run the command");
+		});
 		h.ctx[handler] = run;
 		h.draftWithImage(`/${command} look at this [Image #1]`);
 
@@ -585,7 +581,7 @@ describe("interactive native input ingress", () => {
 
 		expect(run).not.toHaveBeenCalled();
 		expect(showWarning).toHaveBeenCalledWith(`/${command} takes text only; remove the images to run it`);
-		expect(h.editor.getExpandedText()).toBe(`/${command} look at this [Image #1]`);
+		expect(h.editor.expandedText()).toBe(`/${command} look at this [Image #1]`);
 		expect(h.editor.pendingImages).toEqual([originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
 	});
@@ -602,7 +598,7 @@ describe("interactive native input ingress", () => {
 
 		expect(run).not.toHaveBeenCalled();
 		expect(h.ctx.showStatus).toHaveBeenCalledWith("/tan is host-only during a collab session");
-		expect(h.editor.getExpandedText()).toBe("/tan fix this block [Image #1]");
+		expect(h.editor.expandedText()).toBe("/tan fix this block [Image #1]");
 		expect(h.editor.pendingImages).toEqual([originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
 	});
@@ -628,7 +624,7 @@ describe("interactive native input ingress", () => {
 		release.resolve();
 		await submitting;
 
-		expect(h.editor.getExpandedText()).toBe("newer [Image #1]");
+		expect(h.editor.expandedText()).toBe("newer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([newerImage]);
 
 		await h.pressSubmit(ENTER);
@@ -661,12 +657,12 @@ describe("interactive native input ingress", () => {
 			h.draftWithImage("newer [Image #1]");
 			releaseHook.resolve();
 			await commandEntered.promise;
-			const duringCommand = h.editor.getExpandedText();
+			const duringCommand = h.editor.expandedText();
 			h.editor.setText(`${duringCommand} still typing`);
 			releaseCommand.resolve();
 			await submitting;
 			expect(duringCommand).toBe("newer [Image #1]");
-			expect(h.editor.getExpandedText()).toBe("newer [Image #1] still typing");
+			expect(h.editor.expandedText()).toBe("newer [Image #1] still typing");
 			expect(h.editor.pendingImages).toEqual([originalImage]);
 			expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
 			expect(h.prompt).not.toHaveBeenCalled();
@@ -690,7 +686,7 @@ describe("interactive native input ingress", () => {
 			expect(downstream).not.toHaveBeenCalled();
 			expect(h.ctx.handleClearCommand).not.toHaveBeenCalled();
 			expect(h.prompt).not.toHaveBeenCalled();
-			expect(h.editor.getText()).toBe("");
+			expect(h.editor.expandedText()).toBe("");
 		});
 
 		it(`${label} consumes transformed-empty input before compaction queueing`, async () => {
@@ -704,10 +700,9 @@ describe("interactive native input ingress", () => {
 
 			expect(h.ctx.compactionQueuedMessages).toEqual([]);
 			expect(h.prompt).not.toHaveBeenCalled();
-			expect(h.editor.getText()).toBe("");
+			expect(h.editor.expandedText()).toBe("");
 			expect(h.editor.pendingImages).toEqual([]);
 			expect(h.editor.pendingImageLinks).toEqual([]);
-			expect(h.editor.imageLinks).toBeUndefined();
 		});
 
 		it(`${label} excludes focused chat and its command restrictions from main-session hooks`, async () => {
@@ -750,10 +745,9 @@ describe("interactive native input ingress", () => {
 		clearImages = true;
 		await h.pressSubmit(FOLLOW_UP);
 		expect(h.prompt.mock.calls[1]).toEqual(["text only", { streamingBehavior: "followUp", images: [] }]);
-		expect(h.editor.getText()).toBe("text only");
+		expect(h.editor.expandedText()).toBe("text only");
 		expect(h.editor.pendingImages).toEqual([]);
 		expect(h.editor.pendingImageLinks).toEqual([]);
-		expect(h.editor.imageLinks).toBeUndefined();
 	});
 
 	it("Enter dispatches input once, while continue shortcuts bypass input handlers as resumes", async () => {
@@ -826,10 +820,10 @@ describe("interactive native input ingress", () => {
 		const submitting = h.pressSubmit(FOLLOW_UP);
 		await entered.promise;
 		try {
-			h.editor.handleInput("\x1bl");
-			h.editor.handleInput("\x1b");
-			h.editor.handleInput("\x03");
-			h.editor.handleInput("\x03");
+			h.press("alt+l");
+			h.press("escape");
+			h.press("ctrl+c");
+			h.press("ctrl+c");
 			expect(h.ctx.resetDisplayAfterAppearanceRefresh).toHaveBeenCalled();
 			expect(h.session.abort).toHaveBeenCalledTimes(1);
 			expect(h.ctx.shutdown).toHaveBeenCalledTimes(1);

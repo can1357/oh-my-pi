@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
-import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import { type AgentCostSnapshot, aggregateCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
-import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
+import type { AgentRecordLike } from "../registry/agent-hub-types";
+import { type AgentCostSnapshot, aggregateCost } from "./view-model/overlays/agent-hub-projection";
+import type { AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
+import type { ObservableSession, SessionObserverRegistry } from "../task/session-observer-registry";
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -12,6 +12,7 @@ import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
+import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
@@ -27,7 +28,7 @@ export const agentTranscriptSource: AgentTranscriptSource = {
 	},
 };
 
-/** Host services used by the roster, without exposing runtime implementation to tui. */
+/** Host services the Agent Hub reads (registry, lifecycle, IRC, activity), plus the transcript source its viewer reads. */
 export function createAgentHubRuntime(
 	options: {
 		registry?: AgentRegistryApi;
@@ -39,17 +40,9 @@ export function createAgentHubRuntime(
 		sessionFile?: string | null;
 	} = {},
 ): Pick<
-	AgentHubDeps<AgentRef>,
-	| "registry"
-	| "inSession"
-	| "lifecycle"
-	| "irc"
-	| "activity"
-	| "manageActivityLive"
-	| "transcript"
-	| "loadPersisted"
-	| "getRoleInfo"
-> {
+	AgentHubProps<AgentRef>,
+	"registry" | "inSession" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "loadPersisted" | "getRoleInfo"
+> & { transcript: AgentTranscriptSource } {
 	const registry = options.registry ?? AgentRegistry.global();
 	const rootSessionFile = options.sessionFile?.endsWith(".jsonl") ? options.sessionFile : undefined;
 	const copied = new Set<AgentRecordLike>();
@@ -91,9 +84,14 @@ export function sumSubagentTreeCost(args: {
 	const { observers, rootSessionFile, sessionCosts } = args;
 	const rows: AgentRef[] = [];
 	const observedById = new Map<string, ObservableSession>();
+	// Multi-session hosts (ACP, SDK) register each root as `kind: "main"` under
+	// its own id, not `MAIN_AGENT_ID`. A root and its advisors are billed apart
+	// from the tree, and a root's transcript always belongs to itself.
+	const mainIds = new Set([MAIN_AGENT_ID]);
+	for (const ref of args.refs) if (ref.kind === "main") mainIds.add(ref.id);
 	for (const ref of args.refs) {
-		if (ref.id === MAIN_AGENT_ID) continue;
-		if (ref.kind === "advisor" && (ref.parentId ?? MAIN_AGENT_ID) === MAIN_AGENT_ID) continue;
+		if (mainIds.has(ref.id)) continue;
+		if (ref.kind === "advisor" && mainIds.has(ref.parentId ?? MAIN_AGENT_ID)) continue;
 		const observed = observers.getSession(ref.id);
 		const inTree = ref.sessionFile
 			? rootSessionFile !== undefined && sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile)

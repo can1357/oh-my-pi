@@ -4,14 +4,16 @@ import { type } from "@oh-my-pi/omptype";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
+import { errorMessage, prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
 import consolidateSystemTemplate from "../prompts/memories/sharpshooter-consolidate-system.md" with { type: "text" };
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import { resolveSharpshooterModel } from "./extract";
 import {
 	readSharpshooterState,
@@ -103,7 +105,10 @@ export async function runSharpshooterConsolidation(options: {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sessionId: string;
+	getSessionProvider?: () => string | undefined;
 	force?: boolean;
+	/** Session journal the pass's model usage is billed to; unjournaled when omitted. */
+	usageLedger?: Partial<ModelUsageLedger>;
 }): Promise<SharpshooterConsolidationResult> {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
 	try {
@@ -179,7 +184,9 @@ async function consolidateLocked(
 		settings: Settings;
 		modelRegistry: ModelRegistry;
 		sessionId: string;
+		getSessionProvider?: () => string | undefined;
 		force?: boolean;
+		usageLedger?: Partial<ModelUsageLedger>;
 	},
 	bankDir: string,
 ): Promise<SharpshooterConsolidationResult> {
@@ -199,8 +206,14 @@ async function consolidateLocked(
 			return { ran: false, reason: "empty" };
 		}
 
-		const model = await resolveSharpshooterModel(options.settings, options.modelRegistry);
-		if (!model) return { ran: false, reason: "no_model" };
+		const model = await resolveSharpshooterModel(
+			options.settings,
+			options.modelRegistry,
+			options.getSessionProvider?.(),
+		);
+		if (!model || (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider)) {
+			return { ran: false, reason: "no_model" };
+		}
 
 		const currentFiles = await readCurrentMemoryFiles(options.agentDir, options.cwd);
 		const projectDocs = await readProjectDocs(options.cwd);
@@ -217,9 +230,16 @@ async function consolidateLocked(
 		});
 
 		const maxTokens = sharpshooterConsolidationMaxTokens(model, new Tokenizer(model).countTokens([system, input]));
+		if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
+			return { ran: false, reason: "no_model" };
+		}
+		const journal = journalCompletion(options.usageLedger, { purpose: "sharpshooter:consolidate" });
 		const response = await retryTransientCompletion(
-			() =>
-				completeSimple(
+			() => {
+				if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
+					throw new Error("Sharpshooter model provider differs from the active session provider");
+				}
+				return completeSimple(
 					model,
 					{
 						systemPrompt: [system],
@@ -232,8 +252,10 @@ async function consolidateLocked(
 						maxTokens,
 						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 						toolChoice: "required",
+						onAttempt: message => journal?.(message, input),
 					},
-				),
+				);
+			},
 			{ provider: model.provider },
 		);
 		if (response.stopReason === "error") {
@@ -375,8 +397,4 @@ async function recordConsolidationError(
 	} catch {
 		// The original consolidation error is more actionable than a secondary state-write failure.
 	}
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }

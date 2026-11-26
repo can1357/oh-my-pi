@@ -7,16 +7,30 @@ import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
-import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type TodoItem, type TodoPhase } from "../tools/details/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
 import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
-import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
+import {
+	cfgTodoEager,
+	cfgTodoEnabled,
+	cfgTodoMidRunNudges,
+	cfgTodoReminders,
+	cfgTodoRemindersMax,
+} from "../tools/settings";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
+/** `todo.midRunNudges: capped` — unanswered nudges allowed before going silent until the next reset. */
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
+/**
+ * `todo.midRunNudges: backoff` — how many times the threshold may double while
+ * nudges go unanswered. A model that keeps working without touching `todo`
+ * still gets reminded — at 12, 24, 48, 96, then every 192 mutating results —
+ * instead of falling silent after the second reminder for the rest of the turn.
+ */
+const MID_RUN_NUDGE_BACKOFF_DOUBLINGS = 4;
 const MUTATING_TOOLS: Record<string, true> = {
 	bash: true,
 	eval: true,
@@ -78,14 +92,19 @@ export interface TodoTrackerHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
-	hasPendingAsyncWake(): boolean;
+	/** Something outside the model (a background job, child agent or queued peer message) will resume the run. */
+	hasWakeSources(): boolean;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
+	/** Whether the active goal's token budget is spent; the runtime has told the model to stop new work. */
+	goalBudgetLimited(): boolean;
 	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
 	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	/** Called after every write to the list. */
+	phasesChanged?(): void;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -113,6 +132,7 @@ export class TodoTracker {
 		// bridged call — so the nudge budget re-arms on the progress it
 		// rations. Views, failed batches, and unchanged reads never arrive.
 		this.#midRunNudgeCount = 0;
+		this.#host.phasesChanged?.();
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -233,7 +253,7 @@ export class TodoTracker {
 	/** Checks a terminal assistant turn and schedules continuation for incomplete todos. */
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
-		if (this.#host.planModeEnabled()) return false;
+		if (this.#host.planModeEnabled() || this.#host.goalBudgetLimited()) return false;
 		if (this.#reminderAwaitingProgress) {
 			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
 				attempt: this.#reminderCount,
@@ -283,8 +303,8 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		if (this.#host.hasPendingAsyncWake()) {
-			logger.debug("Todo completion: async jobs in flight will re-wake the loop; skipping reminder", {
+		if (this.#host.hasWakeSources()) {
+			logger.debug("Todo completion: background work or child agents will resume the run; skipping reminder", {
 				incomplete: incomplete.length,
 			});
 			return false;
@@ -328,8 +348,16 @@ export class TodoTracker {
 
 	/** Takes the next hidden mid-run reconciliation nudge, if its budget and guards allow. */
 	takeMidRunNudge(): AgentMessage | null {
-		if (this.#mutationsSinceLastTouch < MID_RUN_NUDGE_MUTATION_THRESHOLD) return null;
-		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		const mode = cfgTodoMidRunNudges.get(this.#host.settings);
+		if (mode === "off") return null;
+		if (mode === "capped" && this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		// Backoff: an ignored nudge doubles the runway before the next one, capped
+		// so a long turn still gets a reminder without nudging on every threshold.
+		const threshold =
+			mode === "backoff"
+				? MID_RUN_NUDGE_MUTATION_THRESHOLD * 2 ** Math.min(this.#midRunNudgeCount, MID_RUN_NUDGE_BACKOFF_DOUBLINGS)
+				: MID_RUN_NUDGE_MUTATION_THRESHOLD;
+		if (this.#mutationsSinceLastTouch < threshold) return null;
 		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
 		const incomplete = this.#phases

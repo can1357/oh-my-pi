@@ -25,9 +25,11 @@ describe("DeepSeek V4.1 Flash", () => {
 		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 
-	test("the exemption does not widen to lookalike or retired SKUs", () => {
-		// Retired V4 SKUs stay text-only by reviewed census decision.
-		expect(bundled("deepseek", "deepseek-v4-flash").compat.stripImageInput).toBe(true);
+	test("the exemption follows DeepSeek's alias routing, not the retired id", () => {
+		// DeepSeek's API serves the retired `deepseek-v4-flash` id with V4.1 Flash.
+		expect(bundled("deepseek", "deepseek-v4-flash").compat.stripImageInput).toBe(false);
+		// Hosts serving the same id still run text-only V4.0 Flash weights.
+		expect(bundled("fireworks", "deepseek-v4-flash").compat.stripImageInput).toBe(true);
 		expect(bundled("deepseek", "deepseek-v4-pro").compat.stripImageInput).toBe(true);
 	});
 

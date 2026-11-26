@@ -469,12 +469,12 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	}
 	const cacheKey = resolvePromptCacheKey(body, headers);
 	if (cacheKey !== undefined) options.promptCacheKey = cacheKey;
-	// Allow-listed header capture. The gateway's `handleFormatEndpoint`
-	// already merges its own pre-capture under whatever the parser sets, but
-	// we populate here too so direct callers of `parseRequest` (tests, custom
-	// wrappers) see the same surface. `anthropic-version` is the most
-	// load-bearing — some downstream Anthropic-API targets reject requests
-	// missing it.
+	// Allow-listed header capture, read back by `encodeStream` (the caller's
+	// `anthropic-beta`) and by direct callers of `parseRequest` (tests, custom
+	// wrappers). The gateway decides which captured values reach the provider
+	// (`applyCallerTrust`): the gateway token's do, a scoped client's do not.
+	// `anthropic-version` is the most load-bearing — some downstream
+	// Anthropic-API targets reject requests missing it.
 	if (headers) {
 		const captured = captureRequestHeaders(headers);
 		if (Object.keys(captured).length > 0) options.headers = captured;

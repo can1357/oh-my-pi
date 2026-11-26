@@ -81,10 +81,7 @@ try {
 	const model = registry.find("denied", "probe");
 	if (!model) throw new Error("Missing synthetic model");
 	const waiting = Promise.withResolvers<void>();
-	if (mode === "queued") {
-		__providerInFlightForTesting.setRoot(path.join(dir.path(), "leases"));
-		configureProviderMaxInFlightRequests({ denied: 1 });
-	}
+	if (mode === "queued") configureProviderMaxInFlightRequests({ denied: 1 });
 	const first =
 		mode === "queued"
 			? streamSimple(
@@ -137,7 +134,7 @@ try {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
-			cacheWarming: false,
+			cacheWarming: "off",
 			contextFiles: [],
 			promptTemplates: [],
 			slashCommands: [],

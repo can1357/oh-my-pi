@@ -15,10 +15,11 @@
  * exact models it lists.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
-import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import type { AgentSource } from "./task-details";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../config/model-selector";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	findOpenRouterRouteVariant,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
@@ -338,7 +339,10 @@ export function assertPerCallModelApproved(
 	if (granted === undefined) {
 		const chat = registry.getAvailable("chat");
 		// Unavailability is never cached: a login can make the model available without a settings change.
-		if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) {
+		if (
+			!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id) &&
+			!findOpenRouterRouteVariant(formatModelString(model), chat)
+		) {
 			throw new PerCallModelUnavailableError(`Per-call model ${target} is not an available chat model.`);
 		}
 		granted = computeGranted(model, target, grants, chat, cache.catalog);

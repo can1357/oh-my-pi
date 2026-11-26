@@ -2,16 +2,39 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	isEnoent,
+	logger,
+	pathIsWithinLexical,
+	postmortem,
+	ptree,
+	stableStringifyJson,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
-import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
-import { connectSharedLspTransport } from "./mux/daemon";
-import { MUX_RESTART_METHOD } from "./mux/protocol";
+import { daemonClient } from "../daemon/client";
+import type { DaemonTunnel } from "../daemon/protocol";
+import { workerEnvFromParent } from "../subprocess/worker-client";
+import { isTimeoutError } from "../utils/fetch-timeout";
+import {
+	LSP_ACQUIRE_METHOD,
+	LSP_MODULE_KIND,
+	LSP_MODULE_VERSION,
+	LSP_STARTUP_MAX_MS,
+	LSP_UNRESERVE_METHOD,
+	type LspAcquireResult,
+	type LspUnitParams,
+	MUX_RESTART_METHOD,
+	MUX_SERVER_EXIT_STDERR_BYTES,
+	type MuxServerExit,
+	parseMuxServerExit,
+} from "./mux/protocol";
 import {
 	type DocumentBuildStatus,
 	FileChangeType,
@@ -26,14 +49,8 @@ import {
 	type ServerConfig,
 	type WorkspaceEdit,
 } from "./types";
-import {
-	detectLanguageId,
-	EquivalentUriMap,
-	fileToUri,
-	mergeDiagnosticLists,
-	readTextFromDisk,
-	uriToFile,
-} from "./utils";
+import { detectLanguageId, mergeDiagnosticLists, readTextFromDisk } from "./utils";
+import { EquivalentUriMap, fileToUri, uriToFile } from "./uri";
 import { WATCHED_FILES_METHOD, WatchedFilesForwarder } from "./watched-files";
 
 /**
@@ -97,10 +114,10 @@ let idleTimeoutMs: number | null = null;
 let idleCheckInterval: NodeJS.Timeout | null = null;
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
-// Broker-shared server mode: language servers hosted by the per-project LSP mux
-// daemon, one per connection; a released server lingers for reuse while the mux runs.
+// Shared server mode: language servers hosted by the omp daemon's `lsp` module, one
+// per attached client; a released server lingers for reuse until its idle policy stops it.
 // The newest hold decides; with none it is off, so embedders and tests that drive
-// getOrCreateClient directly never touch the daemon broker. Each process-binding SDK
+// getOrCreateClient directly never touch the daemon. Each process-binding SDK
 // session holds it from its `lsp.shared` setting until disposed, then hands it back to
 // the previous holder. Only consulted at cold-start, so running clients keep their transport.
 interface SharedLspHold {
@@ -109,7 +126,7 @@ interface SharedLspHold {
 const sharedLspHolds: SharedLspHold[] = [];
 const sharedLspListeners = new Set<(enabled: boolean) => void>();
 
-/** Whether a client cold start attaches to a broker-shared language server. */
+/** Whether a client cold start attaches to a daemon-shared language server. */
 export function isSharedLspEnabled(): boolean {
 	return sharedLspHolds.at(-1)?.enabled ?? false;
 }
@@ -160,6 +177,138 @@ function updateSharedLspHolds(mutate: () => void): void {
 		} catch (error) {
 			logger.warn("Shared LSP mode listener threw", { error });
 		}
+	}
+}
+
+/** Final tunnel bytes kept to find the daemon's server-exit frame; well above its size. */
+const EXIT_TAIL_BYTES = 4 * MUX_SERVER_EXIT_STDERR_BYTES;
+
+/**
+ * Wrap an attached `lsp` unit tunnel as an {@link LspTransport}. Tunnel close
+ * maps to a "process exit" so the crash-recovery path treats a dead daemon
+ * exactly like a dead server: with the server's real exit code and stderr
+ * when the final frame reports them, else code 0 (the daemon went away).
+ * `release` drops the unit lease once the tunnel is gone.
+ */
+function tunnelTransport(tunnel: DaemonTunnel, release: () => void): LspTransport {
+	const exited = Promise.withResolvers<number>();
+	let exitCode: number | null = null;
+	let serverExit: MuxServerExit | undefined;
+	let needDrain = false;
+	let closed = false;
+	const tail: Uint8Array[] = [];
+	let tailBytes = 0;
+	const stdout = new ReadableStream<Uint8Array>({
+		start(controller) {
+			tunnel.start(
+				chunk => {
+					controller.enqueue(chunk);
+					tail.push(chunk);
+					tailBytes += chunk.byteLength;
+					while (tail.length > 1 && tailBytes - tail[0]!.byteLength >= EXIT_TAIL_BYTES) {
+						tailBytes -= tail.shift()!.byteLength;
+					}
+				},
+				() => {
+					closed = true;
+					try {
+						controller.close();
+					} catch {
+						// already errored/closed
+					}
+					serverExit = parseMuxServerExit(Buffer.concat(tail).toString("utf-8"));
+					tail.length = 0;
+					release();
+					exitCode = serverExit?.code ?? 0;
+					exited.resolve(exitCode);
+				},
+			);
+		},
+	});
+	const stdin: LspWriteSink = {
+		write(data) {
+			needDrain = !tunnel.send(data);
+			return typeof data === "string" ? Buffer.byteLength(data, "utf-8") : data.byteLength;
+		},
+		flush() {
+			if (!needDrain || closed) return;
+			return tunnel.drained().then(() => {
+				needDrain = false;
+			});
+		},
+	};
+	return {
+		stdin,
+		stdout,
+		exited: exited.promise,
+		get exitCode() {
+			return exitCode;
+		},
+		pid: tunnel.unit.pids[0],
+		sharedMux: true,
+		kill() {
+			tunnel.close();
+		},
+		peekStderr() {
+			return serverExit?.stderr ?? "";
+		},
+	};
+}
+
+/**
+ * Attach to a daemon-shared language server: reserve a free instance of the
+ * server identity, open (find-or-start) its unit, and tunnel to it. Returns
+ * null (after a debug log) when the daemon is unavailable or lacks the `lsp`
+ * module, so the caller falls back to a process-local spawn.
+ */
+async function connectSharedLspTransport(opts: {
+	command: string;
+	args: string[];
+	cwd: string;
+	env?: Record<string, string>;
+	initializationOptions: unknown;
+	signal?: AbortSignal;
+}): Promise<LspTransport | null> {
+	try {
+		const daemon = await daemonClient();
+		if (daemon.welcome.caps[LSP_MODULE_KIND] !== LSP_MODULE_VERSION) return null;
+		const params: LspUnitParams = {
+			command: opts.command,
+			args: opts.args,
+			cwd: opts.cwd,
+			env: opts.env,
+			initializationOptions: opts.initializationOptions,
+			spawnEnv: workerEnvFromParent(opts.env),
+		};
+		// `acquire` and `open` are quick and not abortable: an abandoned answer would leave a
+		// reservation or lease this process can never drop. Abort is checked between steps.
+		const reservation = await daemon.call<LspAcquireResult>(LSP_MODULE_KIND, LSP_ACQUIRE_METHOD, params);
+		const { scope, key, token } = reservation;
+		let lease: string | undefined;
+		const release = () => {
+			if (lease) void daemon.release(lease).catch(() => {});
+			lease = undefined;
+		};
+		try {
+			opts.signal?.throwIfAborted();
+			const opened = await daemon.open({ kind: LSP_MODULE_KIND, scope, key, params });
+			lease = opened.lease;
+			opts.signal?.throwIfAborted();
+			return tunnelTransport(await daemon.attach(opened.unit.id, token, opts.signal), release);
+		} catch (error) {
+			release();
+			// Without this the instance stays reserved and the next acquire starts a duplicate server.
+			void daemon.call(LSP_MODULE_KIND, LSP_UNRESERVE_METHOD, reservation).catch(() => {});
+			throw error;
+		}
+	} catch (error) {
+		if (opts.signal?.aborted) throw error;
+		logger.debug("Shared LSP transport unavailable; falling back to local spawn", {
+			command: opts.command,
+			cwd: opts.cwd,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return null;
 	}
 }
 
@@ -592,17 +741,13 @@ async function startMessageReader(client: LspClient): Promise<void> {
 							} else if (message.method === "$/progress" && message.params) {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
+									progressReportingClients.add(client);
 									client.activeProgressTokens.add(params.token);
+									clearTimeout(projectQuietTimers.get(client));
 									countFolderLoad(client, -1);
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
-									// After a folder add, only progress that began since ends the load.
-									if (
-										client.activeProgressTokens.size === 0 &&
-										!workspaceFolderStates.get(client)?.pendingLoads
-									) {
-										client.resolveProjectLoaded();
-									}
+									if (client.activeProgressTokens.size === 0) settleProjectLoadWhenQuiet(client);
 								}
 							} else if (message.method === "textDocument/clangd.fileStatus" && message.params) {
 								const params = message.params as { uri: string; state?: string };
@@ -708,6 +853,62 @@ function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: 
 	return [client.cwd, ...(workspaceFolderStates.get(client)?.added.keys() ?? [])].map(workspaceFolder);
 }
 
+/**
+ * How long a server must report no progress after its last task ends before its
+ * project load counts as done. Indexers run in phases (rust-analyzer: fetching,
+ * loading, indexing; clangd: background index) with gaps between them, and
+ * the first gap is not the end of the load.
+ */
+const PROJECT_LOAD_QUIET_MS = 500;
+const projectQuietTimers = new WeakMap<LspClient, NodeJS.Timeout>();
+
+function settleProjectLoadWhenQuiet(client: LspClient): void {
+	clearTimeout(projectQuietTimers.get(client));
+	const timer = setTimeout(() => {
+		projectQuietTimers.delete(client);
+		// After a folder add, only progress that began since ends the load.
+		if (client.activeProgressTokens.size === 0 && !workspaceFolderStates.get(client)?.pendingLoads) {
+			client.resolveProjectLoaded();
+		}
+	}, PROJECT_LOAD_QUIET_MS);
+	timer.unref?.();
+	projectQuietTimers.set(client, timer);
+}
+
+/**
+ * How long a server may stay silent after its first opened document (or a folder add)
+ * before its project load counts as done. Servers that report loads begin `$/progress`
+ * almost at once after that trigger (measured: gopls 0 ms, rust-analyzer 14 ms,
+ * `tsc --lsp` ~270 ms after its first open). pyright, ty, ruff, and
+ * typescript-language-server never report it, so without this every first project-aware
+ * wait on them ran into the 15 s fallback below, pushing the first edit's diagnostics
+ * past its inline budget and timing out `lsp diagnostics`.
+ *
+ * The window deliberately does not start at `initialized`: warmed-up clients are
+ * initialized long before the first tool call, and servers such as `tsc --lsp` and
+ * clangd only begin loading once a file is open, so an `initialized`-anchored window
+ * would end their load before it started.
+ */
+const PROJECT_LOAD_NO_PROGRESS_MS = 2_000;
+/** Clients that have begun at least one `$/progress`; their loads end only through progress. */
+const progressReportingClients = new WeakSet<LspClient>();
+/** Clients whose first document open already started the silent window. */
+const silentLoadOpenedClients = new WeakSet<LspClient>();
+const silentLoadTimers = new WeakMap<LspClient, NodeJS.Timeout>();
+
+function settleProjectLoadWithoutProgress(client: LspClient): void {
+	clearTimeout(silentLoadTimers.get(client));
+	const timer = setTimeout(() => {
+		silentLoadTimers.delete(client);
+		// A server that ever reported progress may be between load phases; its own
+		// progress (or the fallback) ends the load. Folder adds count as pending loads
+		// only until progress begins, which a silent server never sends.
+		if (!progressReportingClients.has(client)) client.resolveProjectLoaded();
+	}, PROJECT_LOAD_NO_PROGRESS_MS);
+	timer.unref?.();
+	silentLoadTimers.set(client, timer);
+}
+
 function countFolderLoad(client: LspClient, delta: number): void {
 	const state = workspaceFolderStates.get(client);
 	if (state) state.pendingLoads = Math.max(0, state.pendingLoads + delta);
@@ -727,6 +928,22 @@ async function realPathOf(filePath: string): Promise<string> {
  */
 async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
 	if (!client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	return foreignCheckout(client, filePath);
+}
+
+/**
+ * The checkout holding `filePath` when the server cannot be told about it: it is
+ * not the checkout of the client's root and the server does not accept
+ * `workspace/didChangeWorkspaceFolders`. Its answers for the file then come from
+ * the root's checkout index.
+ */
+export async function unservedCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
+	if (client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	return foreignCheckout(client, filePath);
+}
+
+/** The checkout holding `filePath` when it differs from the one holding the client's root. */
+async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
 	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
 	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
@@ -800,6 +1017,7 @@ async function addWorkspaceFolders(
 		throw err;
 	}
 	void client.watchedFiles?.refresh();
+	settleProjectLoadWithoutProgress(client);
 	rustAnalyzerReadyClients.delete(client);
 }
 
@@ -980,8 +1198,11 @@ function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
 	if (client.proc.sharedMux || client.config.watchFiles === false) return undefined;
 	client.watchedFiles ??= new WatchedFilesForwarder({
 		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
+		// Changes made by other processes keep the server current but are not use
+		// of it: stamping `lastActivity` here would let any busy workspace pin an
+		// otherwise idle server past `idleTimeoutMs` (issue #20451).
 		send: changes =>
-			sendNotification(
+			writeNotification(
 				client,
 				WATCHED_FILES_METHOD,
 				{ changes },
@@ -1023,17 +1244,23 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 	}
 }
 
-/** Whether the server advertised LSP 3.17 document diagnostic pulls statically or through registration. */
-export function supportsDocumentDiagnostics(client: LspClient): boolean {
-	const staticProvider = client.serverCapabilities?.diagnosticProvider;
-	if (staticProvider) return true;
-
+/**
+ * Whether the server handles `method`: its `capability` provider is set in the
+ * initialize result, or it registered the method dynamically.
+ */
+export function supportsMethod(client: LspClient, capability: string, method: string): boolean {
+	if (client.serverCapabilities?.[capability]) return true;
 	const registrations = client.dynamicCapabilityRegistrations;
 	if (!registrations) return false;
-	for (const method of registrations.values()) {
-		if (method === "textDocument/diagnostic") return true;
+	for (const registered of registrations.values()) {
+		if (registered === method) return true;
 	}
 	return false;
+}
+
+/** Whether the server advertised LSP 3.17 document diagnostic pulls statically or through registration. */
+export function supportsDocumentDiagnostics(client: LspClient): boolean {
+	return supportsMethod(client, "diagnosticProvider", "textDocument/diagnostic");
 }
 
 /**
@@ -1375,11 +1602,8 @@ export function clearInitializationFailure(config: ServerConfig, cwd: string): v
  * Get or create an LSP client for the given server configuration and working directory.
  * @param config - Server configuration
  * @param cwd - Working directory
- * @param initTimeoutMs - Optional hard deadline for the initialize handshake (warmup / other
- *   short-lived callers). When set it takes precedence over `signal` inside `sendRequest`.
- * @param signal - Optional caller abort signal. Threaded into the initialize `sendRequest`
- *   and the `initialized` notification so a wedged server surfaces the caller's
- *   timeout/cancel instead of falling back to the internal 30s default.
+ * @param initTimeoutMs - Optional startup deadline for warmup or other short-lived callers.
+ * @param signal - Caller cancellation or a shorter deadline, observed throughout the handshake.
  */
 export async function getOrCreateClient(
 	config: ServerConfig,
@@ -1442,8 +1666,8 @@ export async function getOrCreateClient(
 	const clientPromise = (async () => {
 		const baseCommand = config.resolvedCommand ?? config.command;
 		const baseArgs = config.args ?? [];
-		// Sent in both the mux handshake and `initialize`: a reused shared server
-		// answers `initialize` from cache, so the mux keys servers on these options.
+		// Sent in both the daemon open params and `initialize`: a reused shared server
+		// answers `initialize` from cache, so the daemon keys servers on these options.
 		// clangd reports per-document build status only when asked; diagnostics waits use it
 		// to tell a finished rebuild from one still running. User options take precedence.
 		const initializationOptions = isClangdConfig(config)
@@ -1455,18 +1679,21 @@ export async function getOrCreateClient(
 			? await getLspmuxCommand(baseCommand, baseArgs)
 			: { command: baseCommand, args: baseArgs };
 
-		// Prefer the broker-shared server unless an external lspmux wrapper is
+		// Prefer the daemon-shared server unless an external lspmux wrapper is
 		// already multiplexing this command. Any shared-path failure falls back
-		// to a private spawn so LSP never regresses on broker trouble.
-		let proc: LspTransport | null = null;
-		if (isSharedLspEnabled() && command === baseCommand) {
-			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
-		}
-		proc ??= ptree.spawn([command, ...args], {
-			cwd,
-			stdin: "pipe",
-			env: env ? { ...Bun.env, ...env } : undefined,
-		});
+		// to a private spawn so LSP never regresses on daemon trouble.
+		const sharedProc =
+			isSharedLspEnabled() && command === baseCommand
+				? await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal })
+				: null;
+		const proc =
+			sharedProc ??
+			ptree.spawn([command, ...args], {
+				cwd,
+				stdin: "pipe",
+				detached: process.platform !== "win32",
+				env: env ? { ...Bun.env, ...env } : undefined,
+			});
 
 		const projectLoad = createProjectLoad();
 		const client: LspClient = {
@@ -1496,7 +1723,6 @@ export async function getOrCreateClient(
 		proc.exited.then(() => {
 			if (clients.get(key) === client) clients.delete(key);
 			maybeStopIdleChecker();
-			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 			client.watchedFiles?.close();
 
@@ -1525,6 +1751,14 @@ export async function getOrCreateClient(
 		// in the process, so its reader's records name none of them.
 		logger.withoutContext(() => startMessageReader(client));
 
+		const defaultStartupMs = signal ? LSP_STARTUP_MAX_MS : DEFAULT_REQUEST_TIMEOUT_MS;
+		const startupMs = Math.min(initTimeoutMs ?? defaultStartupMs, LSP_STARTUP_MAX_MS);
+		const startup = new AbortController();
+		const startupTimer = setTimeout(
+			() => startup.abort(new LspRequestTimeoutError("initialize", startupMs)),
+			startupMs,
+		);
+		const startupSignal = signal ? AbortSignal.any([signal, startup.signal]) : startup.signal;
 		try {
 			// Send initialize request
 			const initResult = (await sendRequest(
@@ -1538,8 +1772,7 @@ export async function getOrCreateClient(
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
-				signal,
-				initTimeoutMs,
+				startupSignal,
 			)) as { capabilities?: unknown };
 
 			if (!initResult) {
@@ -1549,12 +1782,12 @@ export async function getOrCreateClient(
 			client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
 
 			// Finish the initialize handshake before publishing the client as ready.
-			await sendNotification(client, "initialized", {}, signal);
+			await sendNotification(client, "initialized", {}, startupSignal);
 			await sendNotification(
 				client,
 				"workspace/didChangeConfiguration",
 				{ settings: config.settings ?? {} },
-				signal,
+				startupSignal,
 			);
 
 			client.status = "ready";
@@ -1574,17 +1807,25 @@ export async function getOrCreateClient(
 			// Clean up on initialization failure
 			client.status = "error";
 			if (clients.get(key) === client) clients.delete(key);
-			proc.kill();
-			const message = err instanceof Error ? err.message : String(err);
-			// Negative-cache deterministic failures. Timeouts under a
-			// caller-shortened deadline (warmup/writethrough) and caller-signal
-			// aborts are transient — the server may simply be slow or the user may
-			// have cancelled, so a later call with a fresh deadline should retry.
-			if (!signal?.aborted && !(initTimeoutMs !== undefined && message.includes("timed out"))) {
+			// An uninitialized launcher has no LSP shutdown handshake. Kill the local
+			// process group immediately, or detach so the daemon kills its group.
+			if (proc instanceof ptree.ChildProcess) proc.kill(undefined, -1);
+			else proc.kill();
+			const cause = err instanceof Error ? err.message : String(err);
+			const message = `Failed to initialize LSP server ${command}: ${cause}`;
+			if (signal?.aborted) {
+				// Preserve explicit caller cancellation. Tool deadlines still need the command
+				// in their reported error, rather than the generic post-start request timeout.
+				if (!isTimeoutError(signal.reason)) throw err;
+				throw new ToolError(message);
+			}
+			// Short warmup/writethrough budgets don't prove the server is broken.
+			if (initTimeoutMs === undefined || !startup.signal.aborted || startupMs === LSP_STARTUP_MAX_MS) {
 				initFailures.set(key, { at: Date.now(), message });
 			}
-			throw err;
+			throw new Error(message, { cause: err });
 		} finally {
+			clearTimeout(startupTimer);
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 		}
 	})();
@@ -1698,6 +1939,10 @@ function trackOpenedFile(client: LspClient, uri: string, languageId: string, ver
 		reopenedAt: reopened ? Date.now() : undefined,
 	});
 	client.lastActivity = Date.now();
+	if (!silentLoadOpenedClients.has(client)) {
+		silentLoadOpenedClients.add(client);
+		settleProjectLoadWithoutProgress(client);
+	}
 }
 
 /**
@@ -2068,8 +2313,7 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 }
 
 function isPathInsideWorkspace(filePath: string, workspace: string): boolean {
-	const relative = path.relative(workspace, path.resolve(filePath));
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return pathIsWithinLexical(workspace, path.resolve(filePath));
 }
 
 /** Budget for the one-way watched-files notification: a wedged server that
@@ -2380,7 +2624,7 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 /**
  * Tear down a client together with the language-server process behind it.
  *
- * A broker-shared link's own `shutdown`/`exit` only detaches it: the mux answers
+ * A daemon-shared link's own `shutdown`/`exit` only detaches it: the daemon answers
  * both and keeps the server idle for reuse. When the server must not survive —
  * a restart, or a superseded configuration that no reconnect will ask for —
  * ask the mux to kill the link's server first (best-effort: the link may be the
@@ -2561,7 +2805,8 @@ function sendRequestOnce(
 }
 
 /**
- * Send an LSP notification (no response expected).
+ * Send an LSP notification (no response expected) and count it as activity
+ * for the idle timeout.
  * `signal` bounds the underlying `sink.flush()` — without it a server that
  * stops draining stdin blocks every future write on the client's write queue.
  */
@@ -2571,14 +2816,21 @@ export async function sendNotification(
 	params: unknown,
 	signal?: AbortSignal,
 ): Promise<void> {
+	client.lastActivity = Date.now();
+	await writeNotification(client, method, params, signal);
+}
+
+/**
+ * Write an LSP notification without counting it as activity: for traffic omp
+ * relays rather than initiates, such as forwarded watched-file changes.
+ */
+function writeNotification(client: LspClient, method: string, params: unknown, signal?: AbortSignal): Promise<void> {
 	const notification: LspJsonRpcNotification = {
 		jsonrpc: "2.0",
 		method,
 		params,
 	};
-
-	client.lastActivity = Date.now();
-	await queueWriteMessage(client, notification, signal);
+	return queueWriteMessage(client, notification, signal);
 }
 
 /**

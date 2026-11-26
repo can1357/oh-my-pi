@@ -7,11 +7,7 @@ import * as PiCodingAgent from "@oh-my-pi/pi-coding-agent";
  * these root exports disappears, extensions that use it stop loading.
  */
 const rootHelpers: [name: string, kind: "function" | "object"][] = [
-	["formTheme", "object"],
-	["compactText", "function"],
-	["rowsText", "function"],
-	["styledSpans", "function"],
-	["parseXdUrl", "function"],
+	["ansiSpans", "function"],
 	["cfgExtensionTranscriptPresenters", "object"],
 ];
 
@@ -21,5 +17,11 @@ describe("extension helpers exported from the package root", () => {
 	it.each(rootHelpers)("exports %s as a %s", (name, kind) => {
 		expect(root[name]).not.toBeNull();
 		expect(typeof root[name]).toBe(kind);
+	});
+
+	it("exposes the bash tool-command name helper", () => {
+		expect(PiCodingAgent.toolCommandCallName({ name: "bash", arguments: { command: "github pr_view 1" } })).toBe(
+			"github",
+		);
 	});
 });

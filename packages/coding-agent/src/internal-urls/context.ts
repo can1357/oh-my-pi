@@ -4,6 +4,7 @@
  * per-tool literals, so every handler sees the same caller identity.
  */
 import type { ToolSession } from "../tools";
+import { owningSessionId } from "../tools/session-id";
 import { getExperimentalContextSession } from "../tools/context-notes";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { ResolveContext, WriteContext } from "./types";
@@ -14,9 +15,11 @@ import { cfgCompactionExperimentalContextManagement } from "../session/context-s
  * The session's `local://` mapping: its pinned {@link LocalProtocolOptions}
  * (subagents and multi-session hosts pin a parent/foreign root) or else its own
  * artifacts dir and session id, so `local://` never falls through to another
- * session's root.
+ * session's root. Takes a tool session or a `SessionManager`.
  */
-export function sessionLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
+export function sessionLocalProtocolOptions(
+	session: Pick<ToolSession, "localProtocolOptions" | "getArtifactsDir" | "getSessionId">,
+): LocalProtocolOptions {
 	return (
 		session.localProtocolOptions ?? {
 			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
@@ -47,7 +50,7 @@ export function sessionResolveContext(
 		sessionFile: session.getSessionFile() ?? undefined,
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
 		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),
-		sessionId: session.sessionManager?.getSessionId?.() ?? session.getSessionId?.() ?? undefined,
+		sessionId: owningSessionId(session),
 		agentRegistry: session.agentRegistry,
 		localProtocolOptions: contextLocalProtocolOptions(session),
 		skills: session.skills,

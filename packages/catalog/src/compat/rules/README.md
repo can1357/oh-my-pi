@@ -243,6 +243,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `prompt-cache-lookback` is how many block positions back from a cache breakpoint the model's prompt cache looks for an earlier request's entry (Claude: 20, counting the breakpoint; a run of consecutive `tool_use` or `tool_result` blocks is one position). The coding agent reads it through `resolvePromptCacheLookback` and keeps warm-cache tool-result pruning inside the window; unassigned means no known bound.
 
+`prompt-cache-prewarm #true` marks a provider whose own endpoint accepts a `max_tokens: 0` pre-warm request: it reads the prompt, writes or refreshes the cache at its breakpoints, and returns usage with empty content and no output billed (Anthropic; rejected with streaming, budget thinking, forced `tool_choice`, and structured outputs). The coding agent's cache warmer reads it through `isPromptCachePrewarmSupported` and refreshes entries with it instead of a one-token replay, falling back to the replay for the rest of the session when the endpoint rejects it; a custom `baseUrl` reusing the provider id does not qualify. Unassigned means no pre-warm request.
+
 `prompt-cache-persistent #true` marks a provider whose own endpoint keeps prompt-cache entries indefinitely (logged-in Codex accounts). The coding agent reads it through `isPromptCachePersistent` and skips idle compaction, which would only discard a prefix that stays warm; a custom `baseUrl` reusing the provider id does not qualify. Unassigned means entries expire.
 
 `shared-prompt-cache #true` marks a lane that rewards routing related requests under one shared prompt-cache key instead of each conversation's own identity. Missing or `#false` keeps per-conversation routing. Two consumers read it against the model each request actually sends (primary turns, handoff, side requests, and remote compaction under its `remoteCompaction.api`/`model` override):
@@ -345,7 +347,7 @@ behavior {
     exclude-discovery-modes "embedding" "moderation" provider="litellm"
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
-    retry-reset-timezone provider="zai" offset="+08:00"
+    retry-reset-timezone provider="zhipu-coding-plan" base-url="https://open.bigmodel.cn/api/coding/paas/v4" offset="+08:00"
     pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
         alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
     }
@@ -355,6 +357,8 @@ behavior {
     }
 }
 ```
+
+`retry-reset-timezone` matches the provider ID first; `base-url` also applies its offset to custom IDs using the same upstream endpoint. An explicit timezone in the response overrides either assumption.
 
 `exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
 
@@ -386,15 +390,19 @@ auth "anthropic" {
             access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
             refresh "refresh_token"
             expires "seconds" path="expires_in" from="created_at" skew-ms=300000 fallback-ms=3600000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
-            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
+            refresh-expires-in "refresh_token_expires_in"   // seconds until the refresh token ends → `refreshExpires`
+            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url, scope
         }
         userinfo url="https://…/userinfo" email="email" account-id="sub"
         after-exchange hook="anthropic-identity"
         paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
     }
     refresh {                                   // or `refresh "none"` / `refresh hook="name"`
-        token url="…" body="json" { headers { anthropic-beta "oauth-2025-04-20" } }   // defaults to the login token request
+        token url="…" body="json" { headers { User-Agent "…" } }   // defaults to the login token request
         require "projectId"
+        scopes "user:profile" "user:inference"   // sent space-joined as `scope`; a 400 `invalid_scope` retries once without it
+        window-ms 300000                         // renew this close to expiry (default 60000)
+        dead-grant "invalid_grant" except-description="account_on_hold"   // only 400/401 refusals with these codes disable the login
         credential { … }                        // defaults to the login map
         after-refresh hook="…"
     }
@@ -419,14 +427,14 @@ auth "anthropic" {
 
 `login-subscription #true` marks login-sourced API keys as subscription billing, leaving pasted and environment keys metered; absent or `#false` keeps all API keys metered.
 
-`disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice. Delete the line to turn it back on — stored logins come back as they were.
+`disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice, as does listing the id in the coding agent's `auth.unpausedProviders` setting (`setUnpausedProviders` in `@oh-my-pi/pi-ai/oauth`). Delete the line to turn it back on for everyone — stored logins come back as they were.
 
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
 Login kinds:
 
-- `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).
-- `login "oauth-code" { … }` as above; `token`/`refresh` `params` values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`; the standard grant parameters are sent unless `standard=#false`.
+- `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= base-url-append= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it; `base-url-append` ensures a path segment on that value first, e.g. `/v1` for bases that may be bare origins); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).
+- `login "oauth-code" { … }` as above; `token`/`refresh` `params` string values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`, and a numeric value (`expires_in 31536000`) is sent as a JSON number; the standard grant parameters are sent unless `standard=#false`.
 - `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
 

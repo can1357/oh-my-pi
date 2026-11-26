@@ -7,9 +7,11 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { MotionMode } from "../config/motion-presets";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ApprovalMode } from "../tools/approval";
-import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
+	EXTENSION_SHADOWABLE_STRING_FLAGS,
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
 	type ParseDeps,
@@ -82,6 +84,9 @@ export interface Args {
 	noTools?: boolean;
 	noLsp?: boolean;
 	noPty?: boolean;
+	noJudge?: boolean;
+	noSpotlight?: boolean;
+	offline?: boolean;
 	hooks?: string[];
 	extensions?: string[];
 	trustedExtensions?: string[];
@@ -307,14 +312,26 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 					result.unknownFlags.set(flagName, args[++i]);
 				}
 			}
+		} else if (EXTENSION_SHADOWABLE_STRING_FLAGS.has(arg)) {
+			// Bare `--plan` mirrors extension string-flag consumption before
+			// extensions load: a value-like token (`--plan opus`) sets the built-in
+			// field, while a flag-looking token (`--plan --restore sid`,
+			// `--plan --model opus`) stays a flag of its own. Inline `--plan=value`
+			// always consumes its explicit value.
+			if (
+				i + 1 < args.length &&
+				args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG &&
+				(equalsValueIndex !== -1 || !args[i + 1].startsWith("-"))
+			) {
+				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
+				i = consumed.index;
+				STRING_SETTERS[arg](result, consumed.value, parseDeps);
+			}
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
 			if (arg === "--trusted-extension") trustedFlagCount++;
 			// Built-in string flags consume the next token even when it is flag-looking
-			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile").
-			// The one token they must never absorb is the profile bootstrap's internal
-			// boundary sentinel: an extension-shadowable built-in like `--plan` (parsed
-			// here only when its boolean extension is NOT loaded) would otherwise swallow
-			// the marker as its value and drop the user's trailing message.
+			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile"),
+			// except for the profile bootstrap's internal boundary sentinel.
 			if (
 				arg === "--goal" &&
 				(i + 1 >= args.length ||
@@ -368,6 +385,12 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noLsp = true;
 		} else if (arg === "--no-pty") {
 			result.noPty = true;
+		} else if (arg === "--no-judge") {
+			result.noJudge = true;
+		} else if (arg === "--no-spotlight") {
+			result.noSpotlight = true;
+		} else if (arg === "--offline") {
+			result.offline = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {
@@ -449,6 +472,14 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		if (!path.isAbsolute(trustedPath)) {
 			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
 		}
+	}
+
+	// A --no-tools session loads no extensions; an explicit one would be silently ignored.
+	if (
+		result.noTools &&
+		((result.extensions?.length ?? 0) > 0 || (result.hooks?.length ?? 0) > 0 || trustedFlagCount > 0)
+	) {
+		throw new CliUsageError("--no-tools cannot be combined with --extension, -e, --hook, or --trusted-extension");
 	}
 
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {

@@ -34,6 +34,7 @@ import {
 	isForeignUserConfigRoot,
 	isUserConfigRoot,
 	loadFilesFromDir,
+	mergeLoadResults,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -330,10 +331,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	});
 
 	const results = await Promise.all([...projectScans, userScan]);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // Managed skills (auto-learn) are a SEPARATE provider at the lowest skill
@@ -621,7 +619,9 @@ async function loadExtensions(ctx: LoadContext): Promise<LoadResult<Extension>> 
 
 		for (const entry of entries) {
 			if (entry.name.startsWith(".")) continue;
-			if (!entry.isDirectory()) continue;
+			// A linked extension package reports as a link, not a directory; the manifest
+			// probe below narrows it back to a real directory.
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 
 			const extDir = path.join(extensionsDir, entry.name);
 			manifestCandidates.push({
@@ -834,7 +834,9 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 
 		for (const entry of toolEntries) {
 			if (entry.name.startsWith(".")) continue;
-			if (!entry.isDirectory()) continue;
+			// A linked shared tool package reports as a link, not a directory; the index.ts
+			// probe below narrows it back to a real directory.
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 
 			subDirCandidates.push({
 				indexPath: path.join(toolsDir, entry.name, "index.ts"),

@@ -9,10 +9,11 @@
  * the full status. omp only writes the root record; teardown and opting out
  * send `state=clear` so no stale record outlives the session.
  */
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
-import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { truncateLineBytes } from "../tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
 import { setTerminalTitleState, type TerminalTitleState } from "./title-generator";
+import { type Accessor, signal } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 
 /** What a blocked run waits on: an approval (`permission`) or an answer (`question`). */
 export type BlockedKind = "permission" | "question";
@@ -50,6 +51,8 @@ const runtime: {
 	dialogs: BlockedStatus[];
 	/** `terminal.programStatus`; off removes the record and stops reporting. */
 	enabled: boolean;
+	/** True only after a terminal confirms OSC 7501 with a feature-query reply. */
+	supported: boolean;
 	/** Set at teardown so a late transition cannot leave a record in the parent
 	 *  shell's terminal. Released only by {@link initProgramStatus}. */
 	disposed: boolean;
@@ -61,6 +64,7 @@ const runtime: {
 	status: { state: "idle" },
 	dialogs: [],
 	enabled: true,
+	supported: false,
 	disposed: false,
 	reported: undefined,
 	startup: undefined,
@@ -110,12 +114,30 @@ function report(): void {
 function publish(): void {
 	setTerminalTitleState(titleState(shownStatus()));
 	report();
+	syncPromptZones();
 }
 
 function clear(): void {
 	if (runtime.reported === undefined) return;
 	runtime.reported = undefined;
 	writeTerminalSequence(CLEAR_REPORT);
+}
+
+const promptZones = signal(true);
+
+/**
+ * Whether user messages mark OSC 133 prompt zones (reactive; the transcript's
+ * user-message models read it). Off while a confirmed OSC 7501 receiver holds a
+ * `working` or `blocked` record: a mark drops it on every redraw (#17307).
+ * Unknown terminals keep their prompt navigation.
+ */
+export const promptZonesEnabled: Accessor<boolean> = () => promptZones();
+
+function syncPromptZones(): void {
+	const { state } = shownStatus();
+	const hasDroppableRecord =
+		runtime.reported !== undefined && runtime.supported && (state === "working" || state === "blocked");
+	promptZones.set(!hasDroppableRecord);
 }
 
 /**
@@ -151,6 +173,13 @@ export function setProgramStatusEnabled(enabled: boolean): void {
 	runtime.enabled = enabled;
 	if (enabled) report();
 	else clear();
+	syncPromptZones();
+}
+
+/** Update prompt-zone rendering when the terminal's OSC 7501 probe resolves. */
+export function setProgramStatusSupported(supported: boolean): void {
+	runtime.supported = supported;
+	syncPromptZones();
 }
 
 /**
@@ -179,12 +208,14 @@ export function initProgramStatus(options?: { startupRun?: boolean }): void {
 	runtime.disposed = false;
 	runtime.dialogs.length = 0;
 	runtime.startup = undefined;
+	runtime.supported = false;
 	if (options?.startupRun) {
 		runtime.startup = { state: "working" };
 		runtime.status = runtime.startup;
 		// Not `setRunStatus`: the record waits for `setProgramStatusEnabled`, but the title follows now.
 		setTerminalTitleState(titleState(shownStatus()));
 	}
+	syncPromptZones();
 }
 
 /**
@@ -206,4 +237,6 @@ export function settleStartupRun(): void {
 export function disposeProgramStatus(): void {
 	clear();
 	runtime.disposed = true;
+	runtime.supported = false;
+	syncPromptZones();
 }

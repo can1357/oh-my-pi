@@ -103,14 +103,17 @@ export function quotaTierFor(provider: string, model: string): string | undefine
 	return rule.defaultTier;
 }
 
-/** UTC offset for a provider's timezone-naive absolute retry-reset timestamps. */
-export function retryResetTimezoneOffsetFor(provider: string): string | undefined {
-	return behavior.retryResetTimezones.find(rule => rule.provider === provider)?.offset;
-}
-
-/** Whether a provider has catalog-authored model quota scopes. */
-export function hasQuotaTierPolicy(provider: string): boolean {
-	return behavior.quotaTiers.some(rule => rule.provider === provider);
+/** UTC offset for a provider's timezone-naive reset stamps, including its declared upstream endpoint. */
+export function retryResetTimezoneOffsetFor(provider: string, baseUrl?: string): string | undefined {
+	const direct = behavior.retryResetTimezones.find(rule => rule.provider === provider);
+	if (direct) return direct.offset;
+	if (baseUrl === undefined) return undefined;
+	// Custom providers keep the configured spelling; the completions transport
+	// strips trailing slashes before issuing the request, so match the same way.
+	const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+	return behavior.retryResetTimezones.find(
+		rule => rule.baseUrl !== undefined && rule.baseUrl.replace(/\/+$/, "") === normalizedBaseUrl,
+	)?.offset;
 }
 
 /** The provider-default wire model for a model-less hosted operation. */

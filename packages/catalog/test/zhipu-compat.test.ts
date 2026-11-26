@@ -217,10 +217,34 @@ describe("zhipu-coding-plan model discovery", () => {
 
 		expect(flash53?.reasoning).toBe(true);
 		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image"]);
-		// Older flash SKUs stay non-reasoning and text-only.
-		expect(flash47?.reasoning).toBe(false);
+		// Older flash SKUs claim no reasoning identity and stay text-only.
+		expect(flash47?.reasoning).toBeUndefined();
 		expect(flash47 && buildModel(flash47).input).toEqual(["text"]);
-		expect(flashx47?.reasoning).toBe(false);
+		expect(flashx47?.reasoning).toBeUndefined();
 		expect(flashx47 && buildModel(flashx47).input).toEqual(["text"]);
+	});
+
+	it("ships GLM-5.4 with vision, 1M context, and the mandatory-thinking ladder on both coding plans", async () => {
+		const mockFetch: FetchImpl = Object.assign(
+			async (): Promise<Response> =>
+				new Response(JSON.stringify({ data: [{ id: "glm-5.4", name: "GLM-5.4" }] }), {
+					headers: { "content-type": "application/json" },
+				}),
+			{ preconnect: fetch.preconnect },
+		);
+		const discovered = (
+			await zhipuCodingPlanModelManagerOptions({ apiKey: "test-key", fetch: mockFetch }).fetchDynamicModels?.()
+		)?.find(model => model.id === "glm-5.4");
+		const expected = {
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			thinking: { efforts: ["low", "high", "max"], defaultLevel: "max", requiresEffort: true },
+		};
+
+		expect(discovered && buildModel(discovered)).toMatchObject(expected);
+		expect(getBundledModel("zhipu-coding-plan", "glm-5.4")).toMatchObject(expected);
+		expect(getBundledModel("zai", "glm-5.4")).toMatchObject(expected);
 	});
 });

@@ -6,14 +6,13 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs } from "@oh-my-pi/pi-tui";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { isRecord, prompt, relativePathWithinNormalizedRoot, sanitizeText } from "@oh-my-pi/pi-utils";
+import { replaceTabs } from "../utils/text-width";
+import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
 import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
-import { normalizeToLF } from "../edit/normalize";
 import type {
 	ExtensionApprovalAnswer,
 	ExtensionApprovalGrant,
@@ -119,8 +118,8 @@ export interface ResolvedApproval {
 	override: boolean;
 	source?: "tool" | "user" | "mode" | "restriction";
 	/**
-	 * User-policy key that produced `source: "user"` (defaults to the tool name), or the keyed
-	 * sub-tool (an `xd://` device) a tool-owned or mode decision is about.
+	 * `tools.approval` key whose user policy decided the call: the tool's name, or its legacy name
+	 * when a renamed tool inherits that policy. Kept when a restricted folder turns it into a prompt.
 	 */
 	policyKey?: string;
 }
@@ -200,7 +199,6 @@ function resolveCachedModeApproval(
 		tier: decision.tier,
 		override: false,
 		source: "mode" as const,
-		...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 	};
 	const targets = approvalCacheTargets(tool, args);
 	if (targets.length === 0) {
@@ -281,14 +279,11 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 		const tier = isToolTier(record.tier) ? record.tier : "exec";
 		const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
 		const policy = normalizePolicy(record.policy);
-		const policyKey =
-			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
 		return {
 			tier,
 			override: record.override === true,
 			...(policy ? { policy } : {}),
 			...(reason ? { reason } : {}),
-			...(policyKey ? { policyKey } : {}),
 		};
 	}
 
@@ -310,7 +305,7 @@ function getToolDecision(
  * Evaluate a tool's own approval declaration against `args` and return the
  * resulting capability tier, defaulting to `exec` when the tool omits an
  * approval. Unlike reading `tool.approval` directly, this runs function-valued
- * approvals — the write tool's `xd://` gate uses it to take a mounted device's
+ * approvals — the tool-command dispatch uses it to take a mounted tool's
  * argument-dependent tier instead of falling back to `exec`.
  */
 export function resolveToolTier(tool: ApprovalSubject, args: unknown, context?: AgentToolContext): ToolTier {
@@ -348,11 +343,6 @@ export function approvalRestrictions(
  *
  * Resolution order:
  *  1. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
- *     A decision may carry a `policyKey` — `tools.approval.<policyKey>` is then
- *     the user override consulted instead of `tools.approval.<tool.name>`, with
- *     the invoking tool's own policy as the fallback when the user set none for
- *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
- *     policy still honors `tools.approval.write`).
  *  2. User per-tool override, if set and valid.
  *  3. Active mode tier comparison. In `always-ask-cached`, a call whose
  *     `approvalCacheTargets` are all granted in `grants` is allowed instead
@@ -376,7 +366,7 @@ export function resolveApproval(
 	if (resolved.policy === "deny") return resolved;
 	const reason = restrictedFolderReason(tool, args, restrictions);
 	if (reason === undefined) return resolved;
-	// A restricted folder outranks every mode, policy, and grant. `override` keeps nested `xd://`
+	// A restricted folder outranks every mode, policy, and grant. `override` keeps nested tool-command
 	// dispatches asking, and a source other than `mode` makes the prompt neither session-grantable
 	// nor rememberable, so every call asks again.
 	return {
@@ -398,21 +388,14 @@ function resolvePolicy(
 	context?: AgentToolContext,
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args, context);
-	const policyKey = decision.policyKey ?? tool.name;
-	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
-	const fallbackPolicy =
-		policyKey !== tool.name && userPolicy === undefined && Object.hasOwn(userConfig, tool.name)
-			? normalizePolicy(userConfig[tool.name])
-			: undefined;
-	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
-	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
+	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
 
 	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
 	// Fail-closed: only `deny`/`prompt` carry over from the old key, so a
 	// forgotten restrictive policy keeps protecting the renamed tool, while a
 	// stale `allow` cannot mask a `deny` another user sets under the new name.
 	const legacyPolicy =
-		effectiveUserPolicy === undefined &&
+		userPolicy === undefined &&
 		typeof tool.legacyName === "string" &&
 		tool.legacyName !== tool.name &&
 		Object.hasOwn(userConfig, tool.legacyName)
@@ -420,8 +403,8 @@ function resolvePolicy(
 			: undefined;
 	const inheritedPolicy = legacyPolicy === "deny" || legacyPolicy === "prompt" ? legacyPolicy : undefined;
 	const inheritedPolicyKey = inheritedPolicy !== undefined ? tool.legacyName : undefined;
-	const combinedUserPolicy = effectiveUserPolicy ?? inheritedPolicy;
-	const combinedUserPolicyKey = effectiveUserPolicy !== undefined ? userPolicyKey : inheritedPolicyKey;
+	const combinedUserPolicy = userPolicy ?? inheritedPolicy;
+	const combinedUserPolicyKey = userPolicy !== undefined ? tool.name : inheritedPolicyKey;
 
 	if (decision.policy === "deny") {
 		return {
@@ -429,7 +412,6 @@ function resolvePolicy(
 			tier: decision.tier,
 			override: decision.override,
 			source: "tool",
-			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
@@ -450,7 +432,6 @@ function resolvePolicy(
 				tier: decision.tier,
 				override: false,
 				source: "tool",
-				...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 				...(decision.reason ? { reason: decision.reason } : {}),
 			};
 		}
@@ -469,7 +450,6 @@ function resolvePolicy(
 			tier: decision.tier,
 			override: true,
 			source: "tool",
-			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
@@ -480,7 +460,6 @@ function resolvePolicy(
 			tier: decision.tier,
 			override: false,
 			source: "tool",
-			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
@@ -508,17 +487,13 @@ function resolvePolicy(
 		tier: decision.tier,
 		override: false,
 		source: "mode",
-		...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 		...(decision.reason ? { reason: decision.reason } : {}),
 	};
 }
 
 /** Whether `candidate` is `root` or lies below it; both are cache keys, so equally normalized. */
 function isWithinFolder(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	if (relative === "") return true;
-	// `..name` is a child, not an escape: only a `..` segment leaves the root.
-	return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+	return relativePathWithinNormalizedRoot(root, candidate) !== null;
 }
 
 /**
@@ -597,7 +572,7 @@ export function restrictedFolderReason(
 
 /**
  * What an "approve for this session" answer may cover for a `resolved` prompt: the subject the
- * prompt names (the tool, or its `xd://` device) and a grant key that also pins the tier, so
+ * prompt names (the tool) and a grant key that also pins the tier, so
  * approving a write never covers an exec call of the same tool. Undefined when the prompt must
  * stay per-call: only a prompt the approval mode raised is grantable, never a critical override
  * or an explicit `prompt` policy (the user's or the tool's own).
@@ -607,8 +582,7 @@ export function sessionApprovalScope(
 	toolName: string,
 ): { subject: string; key: string } | undefined {
 	if (resolved.policy !== "prompt" || resolved.source !== "mode") return undefined;
-	const subject = resolved.policyKey ?? toolName;
-	return { subject, key: `${subject}\0${resolved.tier}` };
+	return { subject: toolName, key: `${toolName}\0${resolved.tier}` };
 }
 
 /**
@@ -659,7 +633,8 @@ function formatPayloadValue(value: unknown, indent: number): string {
 	if (value === null) return "null";
 	if (typeof value === "boolean" || typeof value === "number") return String(value);
 	if (typeof value === "string") {
-		const normalized = replaceTabs(normalizeToLF(value));
+		// Display only: every line break, a lone CR included, becomes a row.
+		const normalized = replaceTabs(value.replace(/\r\n?/g, "\n"));
 		if (normalized.includes("\n")) {
 			const padding = " ".repeat(indent);
 			// Keep delimiters and commas outside the body, including in arrays.
@@ -700,7 +675,7 @@ function formatPayloadValue(value: unknown, indent: number): string {
 }
 
 /**
- * Layout a decoded device or MCP argument payload:
+ * Layout a decoded tool-command or MCP argument payload:
  * - standard JSON layout with 2-space indentation
  * - multiline strings (manifests, scripts, policy documents) expanded into quoted blocks
  * - tabs sanitized to spaces
@@ -747,13 +722,43 @@ export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reaso
 	return [...approvalHeader(tool, reason), ...approvalDetails(tool, args)].join("\n");
 }
 
+const COMPOUND_COMMAND_COMPACT_MAX_SEGMENTS = 6;
+
+function summarizeCompoundCommandDetails(details: readonly string[]): string {
+	const segments = details.slice(1);
+	if (segments.length <= COMPOUND_COMMAND_COMPACT_MAX_SEGMENTS) {
+		return details.join("\n");
+	}
+	const firstPromptIndex = segments.findIndex(line => line.trimStart().startsWith("? "));
+	const elidedLeading = firstPromptIndex >= 5 ? firstPromptIndex - 3 : 0;
+	const rows: string[] = ["Command:"];
+	if (elidedLeading > 0) {
+		rows.push(`  ✓ … (${elidedLeading} allowed ${elidedLeading === 1 ? "segment" : "segments"})`);
+	}
+	const remaining = segments.slice(elidedLeading);
+	const slots = COMPOUND_COMMAND_COMPACT_MAX_SEGMENTS - (elidedLeading > 0 ? 1 : 0);
+	if (remaining.length <= slots) {
+		rows.push(...remaining);
+	} else {
+		const kept = Math.max(1, slots - 1);
+		const hidden = remaining.length - kept;
+		rows.push(...remaining.slice(0, kept), `  … (${hidden} more ${hidden === 1 ? "segment" : "segments"})`);
+	}
+	return rows.join("\n");
+}
+
 /**
  * The details as one row for a prompt that must stay small: each detail's first line, joined
  * by ` · `, ending in `…` when any detail has more lines. A label alone (`Code:`, its body on
- * the following lines) takes the body's first line after it.
+ * the following lines) takes the body's first line after it. Compound bash `Command:` segment
+ * rows stay on their own lines (with excess leading allowed rows elided so the first prompted
+ * segment is visible on mount).
  */
 function approvalSummary(details: readonly string[]): string | undefined {
 	if (details.length === 0) return undefined;
+	if (details[0] === "Command:" && details.length > 1) {
+		return summarizeCompoundCommandDetails(details);
+	}
 	let omitted = false;
 	const heads = details.map(detail => {
 		const lines = detail.split("\n", 3);
@@ -838,16 +843,23 @@ function approvalGrantChoices(
  * keeps its room), else a select with the full prompt (RPC, ACP, extension hosts). `appendix`
  * lines follow the prompt on both. With a `sessionSubject`, both also offer to approve that
  * subject for the rest of the session; with `grants`, both offer the `always-ask-cached` grants
- * the call can record, and the prompt lists the folder a directory grant would cover. Anything
- * but an explicit approval is `deny`.
+ * the call can record, and the prompt lists the folder a directory grant would cover. `signal`
+ * (the call's abort signal) closes the prompt, so aborting the turn never waits on a prompt
+ * nobody can see or answer. Anything but an explicit approval is `deny`.
  */
 export async function requestApproval(
 	ui: Pick<ExtensionUIContext, "select" | "approve">,
 	tool: ApprovalSubject,
 	args: unknown,
-	options: { reason?: string; appendix?: readonly string[]; sessionSubject?: string; grants?: boolean } = {},
+	options: {
+		reason?: string;
+		appendix?: readonly string[];
+		sessionSubject?: string;
+		grants?: boolean;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<ExtensionApprovalAnswer> {
-	const { reason, appendix = [], sessionSubject } = options;
+	const { reason, appendix = [], sessionSubject, signal } = options;
 	const header = approvalHeader(tool, reason);
 	const details = approvalDetails(tool, args);
 	const session = sessionSubject === undefined ? undefined : `Approve ${sessionSubject} for this session`;
@@ -857,6 +869,7 @@ export async function requestApproval(
 	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
 	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);
 	const full = [...header, ...details, ...(folderBlock ? [folderBlock] : []), ...appendix].join("\n");
+	const dialogOptions = signal ? { signal } : undefined;
 	if (ui.approve) {
 		const summary = approvalSummary(details);
 		const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
@@ -866,12 +879,15 @@ export async function requestApproval(
 			...(compactBlock ? [compactBlock] : []),
 			...appendix,
 		].join("\n");
-		const answer = await ui.approve({
-			full,
-			compact,
-			...(session ? { session } : {}),
-			...(grants.length > 0 ? { grants } : {}),
-		});
+		const answer = await ui.approve(
+			{
+				full,
+				compact,
+				...(session ? { session } : {}),
+				...(grants.length > 0 ? { grants } : {}),
+			},
+			dialogOptions,
+		);
 		if (answer === "once" || (answer === "session" && session)) return answer;
 		if (typeof answer === "object" && answer !== null && grants.some(grant => grant.scope === answer.grant)) {
 			return { grant: answer.grant, always: answer.always === true };
@@ -879,7 +895,7 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices)));
+	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices), dialogOptions));
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

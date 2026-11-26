@@ -1,12 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { getBrowserProfilesDir, isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Socket } from "bun";
 import type { Browser, Page, Target } from "puppeteer-core";
 import { throwIfAborted } from "../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { isPuppeteerTimeout } from "./launch";
 
 const ATTACH_TARGET_SKIP_PATTERN =
@@ -371,6 +372,35 @@ function normalizeCandidateArgs(args: string[]): string[] {
 }
 
 /**
+ * The live Chromium-family browser holding a profile, whatever executable it
+ * runs: a compiled launcher (Arch's /usr/bin/chromium) execs a binary whose
+ * path neither realpath nor {@link resolveWrapperTarget} can derive. POSIX
+ * Chromium links `<profile>/SingletonLock` to `<hostname>-<pid>`; the owner must
+ * still name the profile in its argv, so a stale lock whose pid was recycled is ignored.
+ */
+async function findProfileLockOwner(
+	normalizedUserDataDir: string,
+): Promise<{ owner: Process; executable: string } | null> {
+	const lock = await fs.readlink(path.join(normalizedUserDataDir, "SingletonLock")).catch(() => null);
+	const match = lock ? /^(.+)-(\d+)$/.exec(lock) : null;
+	if (!match || match[1] !== os.hostname()) return null;
+	const owner = Process.fromPid(Number(match[2]));
+	if (!owner || owner.status() !== ProcessStatus.Running) return null;
+	let args: string[];
+	try {
+		args = normalizeCandidateArgs(owner.args());
+	} catch {
+		return null;
+	}
+	const executable = args[0];
+	if (!executable || !isChromiumBrowserExecutable(executable)) return null;
+	const profile = findUserDataDirInArgs(args);
+	return profile !== null && path.isAbsolute(profile) && normalizeUserDataDir(profile) === normalizedUserDataDir
+		? { owner, executable }
+		: null;
+}
+
+/**
  * Return a reusable CDP endpoint for `exe`, or null when no instance is
  * running. Refuse to replace an occupied instance unless the caller can
  * launch an isolated profile.
@@ -393,6 +423,22 @@ export async function findReusableCdp(
 	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
 		candidate => candidate.status() === ProcessStatus.Running,
 	);
+	if (isChromium && normalizedRequestedUserDataDir !== null) {
+		const holder = await findProfileLockOwner(normalizedRequestedUserDataDir);
+		if (holder && !candidates.some(candidate => candidate.pid === holder.owner.pid)) {
+			// Adopt only the requested browser under another path; a different browser
+			// on this profile is not what the caller asked for.
+			const [holderName, ...names] = [holder.executable, exe, executablePath, wrapperTarget ?? exe].map(file =>
+				path.basename(file).replace(/\.exe$/i, ""),
+			);
+			if (!names.includes(holderName!)) {
+				throw new ToolError(
+					`Cannot launch ${path.basename(exe)} because its profile ${requestedUserDataDir} is held by another browser, ${holder.executable} (pid ${holder.owner.pid}). Close that browser, choose another --user-data-dir, or pass its CDP endpoint URL as app.`,
+				);
+			}
+			candidates.push(holder.owner);
+		}
+	}
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
 	for (const process of candidates) {
@@ -442,8 +488,7 @@ export async function findReusableCdp(
 
 export interface PickTargetOptions {
 	matcher?: string;
-	preferVisible?: boolean;
-	/** Relay /json endpoint (e.g. http://127.0.0.1:9224); enables metadata-first target selection. */
+	/** Relay /json endpoint; enables metadata-first target selection. */
 	relayJson?: string;
 	signal?: AbortSignal;
 }
@@ -452,7 +497,6 @@ const PAGE_ATTACH_TIMEOUT_MS = 10_000;
 const FRAME_READY_TIMEOUT_MS = 8_000;
 const FRAME_READY_POLL_MS = 120;
 const RELAY_JSON_TIMEOUT_MS = 3_000;
-const RELAY_VISIBILITY_TIMEOUT_MS = 1_000;
 // A tab opened outside omp reaches the relay's /json, and gets its URL, a few ms after Chrome reports it created.
 const RELAY_MATCH_SETTLE_MS = 2_000;
 const RELAY_MATCH_POLL_MS = 100;
@@ -557,19 +601,19 @@ function isAdoptableRelayEntry(entry: RelayJsonEntry): boolean {
 	);
 }
 
-/** One of the user's Chrome tabs as `browser.targets()` lists it: its `target` (the URL) adopts it. */
-export interface RelayTarget {
+/** A page of a CDP browser (the relay's Chrome, an attached endpoint) as `browser.targets()` lists it: its `target` (the URL) adopts it. */
+export interface CdpTarget {
 	/** The page URL, as `target` takes it (a URL/title substring). */
 	target: string;
 	title: string;
 	url: string;
-	/** Whether it is the active tab of its Chrome window. */
-	shown: boolean;
+	/** Whether it is the active tab of its Chrome window; only the relay reports it. */
+	shown?: boolean;
 }
 
-/** The adoptable pages among relay `/json` entries; malformed, discarded, and internal entries are skipped. */
-export function relayTargets(entries: readonly unknown[]): RelayTarget[] {
-	const targets: RelayTarget[] = [];
+/** The adoptable pages among CDP `/json` entries; malformed, discarded, and internal entries are skipped. */
+export function cdpTargets(entries: readonly unknown[]): CdpTarget[] {
+	const targets: CdpTarget[] = [];
 	for (const raw of entries) {
 		if (!isRecord(raw) || raw.type !== "page" || typeof raw.url !== "string") continue;
 		const entry: RelayJsonEntry = {
@@ -581,25 +625,27 @@ export function relayTargets(entries: readonly unknown[]): RelayTarget[] {
 			discarded: typeof raw.discarded === "string" ? raw.discarded : undefined,
 		};
 		if (!isAdoptableRelayEntry(entry)) continue;
-		targets.push({ target: entry.url, title: entry.title, url: entry.url, shown: entry.active === "true" });
+		const target: CdpTarget = { target: entry.url, title: entry.title, url: entry.url };
+		if (entry.active !== undefined) target.shown = entry.active === "true";
+		targets.push(target);
 	}
 	return targets;
 }
 
-/** The `browser.targets()` listing of relay pages: `- "Title" https://… (active)`. */
-export function describeRelayTargets(targets: readonly RelayTarget[]): string {
-	if (targets.length === 0) return "The relay lists no Chrome pages to adopt.";
+/** The `browser.targets()` listing: `<source> (adopt one …):` then `- "Title" https://… (active)`. */
+export function describeCdpTargets(targets: readonly CdpTarget[], source: string): string {
+	if (targets.length === 0) return `${source}: none to adopt.`;
 	const list = targets
 		.map(entry => `- ${JSON.stringify(entry.title)} ${entry.url}${entry.shown ? " (active)" : ""}`)
 		.join("\n");
-	return `Chrome pages via the relay (adopt one with target set to its URL or a title substring):\n${list}`;
+	return `${source} (adopt one with target set to its URL or a title substring):\n${list}`;
 }
 
-/** The pages of the user's Chrome the relay at `relayJson` can adopt. */
-export async function listRelayTargets(relayJson: string, signal?: AbortSignal): Promise<RelayTarget[]> {
-	const entries = await fetchRelayEntries(relayJson, signal);
-	if (!entries) throw new ToolError(`omp browser relay at ${relayJson} did not list its pages (GET /json failed).`);
-	return relayTargets(entries);
+/** The pages of the CDP browser at `cdpUrl` (its HTTP discovery endpoint, the relay's included) `target` can adopt. */
+export async function listCdpTargets(cdpUrl: string, signal?: AbortSignal): Promise<CdpTarget[]> {
+	const entries = await fetchRelayEntries(cdpUrl, signal);
+	if (!entries) throw new ToolError(`The browser at ${cdpUrl} did not list its pages (GET /json failed).`);
+	return cdpTargets(entries);
 }
 
 function relayEntryMatches(entry: RelayJsonEntry, matcher: string): boolean {
@@ -657,35 +703,6 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 			const pageEntries = entries.filter(e => e.type === "page");
 			const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
 			const targets = browser.targets();
-			if (options.preferVisible && !options.matcher) {
-				const active = pageEntries.filter(e => e.active === "true" && isAdoptableRelayEntry(e));
-				if (active.length > 1) {
-					let firstPage: Page | null = null;
-					let unreadableActive = false;
-					for (const entry of active) {
-						const target = targets.find(t => (t as Target & { _targetId?: string })._targetId === entry.id);
-						if (!target) {
-							unreadableActive = true;
-							continue;
-						}
-						const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
-						if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal))) {
-							unreadableActive = true;
-							continue;
-						}
-						firstPage ??= page;
-						const visible = await abortable(options.signal, () =>
-							Promise.race([
-								page.evaluate(() => document.visibilityState === "visible").catch(() => false),
-								Bun.sleep(RELAY_VISIBILITY_TIMEOUT_MS).then(() => false),
-							]),
-						);
-						if (visible) return page;
-					}
-					if (unreadableActive) throw new ToolError("An active tab is not ready; retry after it loads");
-					if (firstPage) return firstPage;
-				}
-			}
 			if (selected) {
 				const isSelected = (t: Target) => (t as Target & { _targetId?: string })._targetId === selected.id;
 				const attachDeadline = Date.now() + PAGE_ATTACH_TIMEOUT_MS;
@@ -750,11 +767,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}),
 	);
 	const usablePages = discoveredPages.filter((page): page is Page => page !== null);
-	if (hasUnreadablePage && (options.preferVisible || options.matcher)) {
-		if (options.preferVisible && !options.matcher) {
-			const visible = await firstVisiblePage(usablePages, options.signal);
-			if (visible) return visible;
-		}
+	if (hasUnreadablePage && options.matcher) {
 		throw new ToolError("A browser tab is not ready; retry after it loads to avoid selecting a different tab");
 	}
 	if (usablePages.length > 0) return pickPageFromList(usablePages, options);
@@ -786,22 +799,6 @@ async function enrichPages(
 	);
 }
 
-async function firstVisiblePage(pages: Page[], signal?: AbortSignal): Promise<Page | null> {
-	const visibility = await Promise.all(
-		pages.map(
-			async page =>
-				await abortable(signal, () =>
-					Promise.race([
-						page.evaluate(() => document.visibilityState === "visible").catch(() => false),
-						Bun.sleep(RELAY_VISIBILITY_TIMEOUT_MS).then(() => false),
-					]),
-				),
-		),
-	);
-	const foreground = visibility.indexOf(true);
-	return foreground >= 0 ? pages[foreground]! : null;
-}
-
 async function pickPageFromList(pages: Page[], options: PickTargetOptions): Promise<Page> {
 	const enriched = await enrichPages(pages, options.signal);
 	if (options.matcher) {
@@ -816,13 +813,6 @@ async function pickPageFromList(pages: Page[], options: PickTargetOptions): Prom
 	const usable = enriched.filter(
 		p => !ATTACH_TARGET_SKIP_PATTERN.test(p.url) && !ATTACH_TARGET_SKIP_PATTERN.test(p.title),
 	);
-	if (options.preferVisible && usable.length > 1) {
-		const foreground = await firstVisiblePage(
-			usable.map(entry => entry.page),
-			options.signal,
-		);
-		if (foreground) return foreground;
-	}
 	return usable[0]?.page ?? enriched[0]!.page;
 }
 
@@ -834,4 +824,11 @@ export async function gracefulKillTreeOnce(pid: number, gracePeriodMs = 2000): P
 	const process = Process.fromPid(pid);
 	if (!process) return;
 	await process.terminate({ gracefulMs: gracePeriodMs, timeoutMs: 500 });
+}
+
+/** SIGKILL the process tree at once, for our own child whose graceful shutdown has nothing worth keeping. */
+export async function killTreeOnce(pid: number): Promise<void> {
+	const process = Process.fromPid(pid);
+	if (!process) return;
+	await process.terminate({ gracefulMs: -1, timeoutMs: 500 });
 }

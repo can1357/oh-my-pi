@@ -1,5 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { imageAttachmentSource } from "../utils/image-source";
 import { prompt } from "@oh-my-pi/pi-utils";
 import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with { type: "text" };
 import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
@@ -22,7 +22,11 @@ export interface AttachmentSourceNotice {
  * Render the notice for attachment `[Image #index]` / `[Video #index]` so the model can `read`,
  * copy, or upload its file. Undefined when no file backs the attachment.
  */
-export function renderAttachmentSourceNotice(image: ImageContent, index: number): AttachmentSourceNotice | undefined {
+export function renderAttachmentSourceNotice(
+	image: ImageContent,
+	index: number,
+	options?: { askAnswer?: boolean },
+): AttachmentSourceNotice | undefined {
 	const source = imageAttachmentSource(image);
 	if (!source) return undefined;
 	const isVideo = source.kind === "video";
@@ -31,6 +35,7 @@ export function renderAttachmentSourceNotice(image: ImageContent, index: number)
 		content: prompt.render(isVideo ? videoAttachmentPrompt : imageAttachmentPrompt, {
 			index: String(index),
 			path: source.path,
+			askAnswer: options?.askAnswer === true,
 		}),
 		details: { index, path: source.path },
 	};

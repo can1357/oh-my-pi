@@ -393,6 +393,106 @@ describe("AgentSession.newSession boundary", () => {
 		}
 	});
 
+	it("invalidates extension instruction caches only after an in-place clear succeeds", async () => {
+		const loadedInstructions = new Set(["project-rule"]);
+		const observations: Array<{ messageCount: number; sessionId: string }> = [];
+		let switches = 0;
+		const { session, sessionManager, agent } = await createHarness({
+			extension: {
+				name: "clear-instruction-cache",
+				register: pi => {
+					pi.on("session_clear", (_event, ctx) => {
+						observations.push({
+							messageCount: session.messages.length,
+							sessionId: ctx.sessionManager.getSessionId(),
+						});
+						loadedInstructions.clear();
+					});
+					pi.on("session_switch", () => {
+						switches++;
+					});
+				},
+			},
+		});
+		const entryId = sessionManager.appendMessage({ role: "user", content: "project-rule", timestamp: 1 });
+		agent.replaceMessages(sessionManager.buildSessionContext().messages);
+		const originalId = sessionManager.getSessionId();
+		const originalFile = sessionManager.getSessionFile();
+
+		expect(await session.resetSessionContext()).toEqual({ droppedCount: 1 });
+		expect(loadedInstructions.has("project-rule")).toBe(false);
+		expect(observations).toEqual([{ messageCount: 0, sessionId: originalId }]);
+		expect(sessionManager.getSessionFile()).toBe(originalFile);
+		expect(sessionManager.getEntries().find(entry => entry.id === entryId)?.type).toBe("message");
+		expect(sessionManager.buildSessionContext().messages).toEqual([]);
+		expect(switches).toBe(0);
+
+		// An empty successful clear is still a context boundary, not a session switch.
+		loadedInstructions.add("project-rule");
+		expect(await session.resetSessionContext()).toEqual({ droppedCount: 0 });
+		expect(loadedInstructions.has("project-rule")).toBe(false);
+		expect(observations).toEqual([
+			{ messageCount: 0, sessionId: originalId },
+			{ messageCount: 0, sessionId: originalId },
+		]);
+		expect(switches).toBe(0);
+	});
+
+	it("keeps extension instruction caches intact when a busy clear is refused", async () => {
+		let instructionsLoaded = true;
+		const { session, agent } = await createHarness({
+			extension: {
+				name: "busy-clear-instruction-cache",
+				register: pi => {
+					pi.on("session_clear", () => {
+						instructionsLoaded = false;
+					});
+				},
+			},
+		});
+		agent.state.isStreaming = true;
+		try {
+			expect(await session.resetSessionContext()).toBeUndefined();
+			expect(instructionsLoaded).toBe(true);
+		} finally {
+			agent.state.isStreaming = false;
+		}
+	});
+
+	it("waits for clear handlers before releasing the context boundary", async () => {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { session } = await createHarness({
+			extension: {
+				name: "gate-clear-readiness",
+				register: pi => {
+					pi.on("session_clear", async () => {
+						reached.resolve();
+						await release.promise;
+					});
+				},
+			},
+		});
+		const operation = session.resetSessionContext();
+		try {
+			await reached.promise;
+			expect(session.isSessionTransitioning).toBe(true);
+			let ready = false;
+			const waiting = session.waitForSessionTransition().then(() => {
+				ready = true;
+			});
+			await Promise.resolve();
+			expect(ready).toBe(false);
+			release.resolve();
+			expect(await operation).toEqual({ droppedCount: 0 });
+			await waiting;
+			expect(session.isSessionTransitioning).toBe(false);
+		} finally {
+			release.resolve();
+			await operation;
+		}
+	});
+
 	it("releases readiness after a tree hook cancels without moving the leaf", async () => {
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

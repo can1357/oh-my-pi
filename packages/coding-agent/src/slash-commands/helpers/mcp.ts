@@ -1,4 +1,4 @@
-import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { errorMessage, getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
@@ -20,7 +20,7 @@ import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { parseCommandArgs } from "../../utils/command-args";
 import { openPath } from "../../utils/open";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
-import { commandConsumed, errorMessage, parseNamedScopeArgs, parseSubcommand, usage } from "./parse";
+import { commandConsumed, parseNamedScopeArgs, parseSubcommand, usage } from "./parse";
 
 type AcpMcpScope = "user" | "project";
 
@@ -151,7 +151,8 @@ async function withPreparedMcpConnection<T>(
 		// server saved by the TUI/reauth path.
 		manager.setAuthStorage(runtime.session.modelRegistry.authStorage);
 		const resolvedConfig = await manager.prepareConfig(config);
-		connection = await connectToServer(name, resolvedConfig);
+		// Live: these commands report what the server says now, not what the host's store remembers.
+		connection = await connectToServer(name, resolvedConfig, { live: true });
 		return await fn(connection);
 	} finally {
 		if (connection) {
@@ -433,7 +434,7 @@ async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): 
 					: state === "connecting"
 						? " Server reconnecting…"
 						: state === "disconnected"
-							? " Server still disconnected; no background retry is armed for a server that never connected — restart the session (or reconnect it interactively) to use the fresh credential."
+							? " Server still disconnected; restart the session (or reconnect it interactively) to use the fresh credential."
 							: " Credentials apply on the next connection; restart the session if the server stays disconnected.";
 			emit(`✓ Reauthorized "${name}" (${found.scope} config).${suffix}`);
 			return commandConsumed();

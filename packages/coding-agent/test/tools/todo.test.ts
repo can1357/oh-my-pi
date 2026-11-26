@@ -1,8 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	markdownToPhases,
@@ -16,10 +15,18 @@ import {
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
+	type TodoStatus,
 	todoMatchesAnyDescription,
-	todoToolRenderer,
-} from "@oh-my-pi/pi-tui/tools/todo";
-import type { Component } from "@oh-my-pi/pi-tui";
+} from "@oh-my-pi/pi-coding-agent/tools/details/todo";
+import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { ToolBlock, ToolCall, type ToolCallResult } from "../../src/ui/transcript/tool-block";
+import { toolCall } from "../helpers/tool-text";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function createSession(initialPhases: TodoPhase[] = []): ToolSession {
 	let phases = initialPhases;
@@ -36,9 +43,32 @@ function createSession(initialPhases: TodoPhase[] = []): ToolSession {
 	};
 }
 
-beforeAll(async () => {
-	await initTheme();
-});
+const DARK = loadThemeSync("dark");
+
+/** A todo call's transcript card on a 120-column terminal (clock at 0; `tick` advances the strike). */
+function todoCard(call: ToolCall): TestTerminal {
+	return createTestTerminal(() => ({ main: ToolBlock({ call }) }), { columns: 120, rows: 80, theme: DARK, now: 0 });
+}
+
+/** The card's rows (escapes kept) for a result, `args` the call's (undefined: a rebuilt transcript without them). */
+function resultRows(result: ToolCallResult, expanded: boolean, args?: unknown): string {
+	const term = todoCard(toolCall({ name: "todo", args, result, expanded }));
+	try {
+		return term.rows().join("\n");
+	} finally {
+		term.dispose();
+	}
+}
+
+/** The card's rows (escapes kept) while the call's args still stream. */
+function callRows(args: unknown): string {
+	const term = todoCard(new ToolCall({ id: "call-1", name: "todo", args }));
+	try {
+		return term.rows().join("\n");
+	} finally {
+		term.dispose();
+	}
+}
 
 describe("resolveTodoMarkdownPath", () => {
 	it("defaults to TODO.md under cwd", () => {
@@ -56,7 +86,7 @@ describe("resolveTodoMarkdownPath", () => {
 	it("rejects internal URL schemes", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
-		expect(() => resolveTodoMarkdownPath("artifact://todo", cwd)).toThrow("internal scheme");
+		expect(() => resolveTodoMarkdownPath("agent://todo", cwd)).toThrow("internal scheme");
 	});
 });
 
@@ -138,17 +168,19 @@ it("renders completed tasks as checked before revealing strikethrough", async ()
 	const tool = new TodoTool(createSession());
 	await tool.execute("call-1", { op: "init", list: [{ phase: "Execution", items: ["finish"] }] });
 	const result = await tool.execute("call-2", { op: "done", task: "finish" });
-	const options = { expanded: true, isPartial: false, spinnerFrame: 0 };
-	const component = todoToolRenderer.renderResult(result, options, theme);
+	const term = todoCard(toolCall({ name: "todo", args: { op: "done", task: "finish" }, result, expanded: true }));
+	try {
+		const firstFrame = term.rows().join("\n");
+		expect(Bun.stripANSI(firstFrame)).toContain("finish");
+		expect(firstFrame).not.toContain("\x1b[9m");
 
-	const firstFrame = component.render(120).join("\n");
-	expect(Bun.stripANSI(firstFrame)).toContain("finish");
-	expect(firstFrame).not.toContain("\x1b[9m");
-
-	options.spinnerFrame = TODO_STRIKE_HOLD_FRAMES + 1;
-	const revealFrame = component.render(120).join("\n");
-	expect(Bun.stripANSI(revealFrame)).toContain("finish");
-	expect(revealFrame).toContain("\x1b[9m");
+		term.tick(SPINNER_INTERVAL_MS * (TODO_STRIKE_HOLD_FRAMES + 1));
+		const revealFrame = term.rows().join("\n");
+		expect(Bun.stripANSI(revealFrame)).toContain("finish");
+		expect(revealFrame).toContain("\x1b[9m");
+	} finally {
+		term.dispose();
+	}
 });
 
 describe("TodoTool operations", () => {
@@ -180,6 +212,68 @@ describe("TodoTool operations", () => {
 
 		const allTasks = result.details?.phases.flatMap(phase => phase.tasks) ?? [];
 		expect(allTasks.map(task => task.status)).toEqual(["pending", "pending", "in_progress"]);
+	});
+
+	it("applies done and rm to every task in an array across phases", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", {
+			op: "init",
+			list: [
+				{ phase: "A", items: ["a1", "a2"] },
+				{ phase: "B", items: ["b1", "b2"] },
+			],
+		});
+
+		const done = await tool.execute("call-2", { op: "done", task: ["a1", "b1"] });
+		expect(done.isError).toBeUndefined();
+		expect(done.details?.completedTasks).toEqual([
+			{ phase: "A", content: "a1" },
+			{ phase: "B", content: "b1" },
+		]);
+		expect(done.details?.phases.flatMap(phase => phase.tasks.map(task => task.status))).toEqual([
+			"completed",
+			"in_progress",
+			"completed",
+			"pending",
+		]);
+
+		const removed = await tool.execute("call-3", { op: "rm", task: ["a2", "b2"] });
+		expect(removed.details?.phases.map(phase => phase.tasks.map(task => task.content))).toEqual([["a1"], ["b1"]]);
+	});
+
+	it("splits a flattened task string like a path list, preferring verbatim content", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", { op: "init", list: [{ phase: "A", items: ["Fix foo, bar", "a1", "a2", "a3"] }] });
+		const statuses = (phases: TodoPhase[] | undefined) => phases?.[0]?.tasks.map(task => task.status);
+
+		const verbatim = await tool.execute("call-2", { op: "done", task: "Fix foo, bar" });
+		expect(statuses(verbatim.details?.phases)).toEqual(["completed", "in_progress", "pending", "pending"]);
+
+		const partial = await tool.execute("call-3", { op: "done", task: "a2; nope" });
+		const partialText = partial.content.find(part => part.type === "text");
+		expect(partialText?.type === "text" && partialText.text).toContain('Errors: Task "nope" not found');
+
+		const spaced = await tool.execute("call-4", { op: "done", task: " a1  a2 " });
+		expect(statuses(spaced.details?.phases)).toEqual(["completed", "completed", "completed", "in_progress"]);
+
+		const quoted = await tool.execute("call-5", { op: "drop", task: '"a3",' });
+		expect(statuses(quoted.details?.phases)).toEqual(["completed", "completed", "completed", "abandoned"]);
+	});
+
+	it("rejects a task array with a missing entry, or more than one task to start, without changing state", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", { op: "init", list: [{ phase: "A", items: ["a1", "a2", "a3"] }] });
+		const before: TodoStatus[] = ["in_progress", "pending", "pending"];
+
+		const missing = await tool.execute("call-2", { op: "done", task: ["a2", "nope"] });
+		expect(missing.isError).toBe(true);
+		const missingText = missing.content.find(part => part.type === "text");
+		expect(missingText?.type === "text" && missingText.text).toContain('Task "nope" not found');
+		expect(missing.details?.phases[0]?.tasks.map(task => task.status)).toEqual(before);
+
+		const start = await tool.execute("call-3", { op: "start", task: ["a2", "a3"] });
+		expect(start.isError).toBe(true);
+		expect(start.details?.phases[0]?.tasks.map(task => task.status)).toEqual(before);
 	});
 
 	it("appends items to an existing phase", async () => {
@@ -265,7 +359,7 @@ describe("TodoTool operations", () => {
 				{ phase: "B", items: ["b1"] },
 			],
 		});
-		await tool.execute("done", { op: "done" });
+		await tool.execute("done", { op: "done", task: ["a1", "b1"] });
 		const result = await tool.execute("append", { op: "append", items: ["b2"] });
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.phases).toEqual([
@@ -348,18 +442,21 @@ describe("TodoTool operations", () => {
 		expect(allTasks.map(task => task.status)).toEqual(["completed", "completed", "in_progress"]);
 	});
 
-	it("removes all tasks when rm omits task and phase", async () => {
+	it("refuses done and rm that name no task, and reads items as the tasks", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", {
 			op: "init",
-			list: [{ phase: "Work", items: ["First", "Second"] }],
+			list: [{ phase: "Work", items: ["First", "Second", "Third"] }],
 		});
 
-		const result = await tool.execute("call-2", { op: "rm" });
-		expect(result.details?.phases[0]?.tasks).toEqual([]);
-		const summary = result.content.find(part => part.type === "text");
-		if (summary?.type !== "text") throw new Error("Expected text summary");
-		expect(summary.text).toContain("Todo list cleared.");
+		expect((await tool.execute("call-2", { op: "rm" })).isError).toBe(true);
+		expect((await tool.execute("call-3", { op: "done" })).isError).toBe(true);
+		const result = await tool.execute("call-4", { op: "done", items: ["Second"] });
+		expect(result.details?.phases[0]?.tasks.map(task => task.status)).toEqual([
+			"in_progress",
+			"completed",
+			"pending",
+		]);
 	});
 
 	it("drops all tasks in a phase", async () => {
@@ -633,7 +730,7 @@ describe("todoMatchesAnyDescription", () => {
 		expect(todoMatchesAnyDescription("Audit AGENTS.md compliance", ["Audit AGENTS md compliance"])).toBe(true);
 	});
 });
-describe("todoToolRenderer.renderResult phase collapsing", () => {
+describe("todo result card phase collapsing", () => {
 	async function buildThreePhaseAfterDone() {
 		const tool = new TodoTool(createSession());
 		await tool.execute("init", {
@@ -648,8 +745,10 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 		// Beta and Gamma untouched by this update.
 		return tool.execute("done", { op: "done", task: "a1" });
 	}
-	function innerLines(component: Component): string[] {
-		const lines = Bun.stripANSI(component.render(100).join("\n")).split("\n");
+	function innerLines(rendered: string): string[] {
+		const lines = Bun.stripANSI(rendered)
+			.split("\n")
+			.filter(line => line.trim() !== "");
 		return lines.slice(1, -1).map(line =>
 			line
 				.replace(/^│/, "")
@@ -659,11 +758,7 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 	}
 	it("collapses untouched phases to a one-line summary while expanding the active phase", async () => {
 		const result = await buildThreePhaseAfterDone();
-		const component = todoToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme, {
-			op: "done",
-			task: "a1",
-		});
-		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		const rendered = Bun.stripANSI(resultRows(result, false, { op: "done", task: "a1" }));
 		// Active phase's collapsed viewport keeps the just-closed task as the lead
 		// row and shows the promoted current one (#5873), and its header carries
 		// progress so the phase being worked on is not the one phase with no
@@ -685,36 +780,28 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 		// The card's default view is collapsed, so the completion animation the
 		// `completedTasks` plumbing drives has to land there — while the viewport
 		// dropped every closed row, the animation ran against a row nobody rendered.
-		const strikeSpan = (spinnerFrame: number): string => {
-			const rendered = todoToolRenderer
-				.renderResult(result, { expanded: false, isPartial: false, spinnerFrame }, theme, {
-					op: "done",
-					task: "a1",
-				})
-				.render(100)
-				.join("\n");
-			return /\x1b\[9m(.*?)\x1b\[29m/.exec(rendered)?.[1] ?? "";
-		};
-		expect(strikeSpan(0)).toBe("");
-		expect(strikeSpan(TODO_STRIKE_TOTAL_FRAMES)).toBe("a1");
+		const term = todoCard(toolCall({ name: "todo", args: { op: "done", task: "a1" }, result }));
+		const strikeSpan = (): string => /\x1b\[9m(.*?)\x1b\[29m/.exec(term.rows().join("\n"))?.[1] ?? "";
+		try {
+			expect(strikeSpan()).toBe("");
+			term.tick(SPINNER_INTERVAL_MS * TODO_STRIKE_TOTAL_FRAMES);
+			expect(strikeSpan()).toBe("a1");
+		} finally {
+			term.dispose();
+		}
 	});
 	it("falls back to in_progress / completed signals when call args are unavailable", async () => {
 		const result = await buildThreePhaseAfterDone();
 		// Transcript rebuilds may not carry call args; the active (Alpha) phase is
 		// still derived from the in_progress task and the completion transition.
-		const component = todoToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
-		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		const rendered = Bun.stripANSI(resultRows(result, false));
 		expect(rendered).toContain("a2");
 		expect(rendered).not.toContain("b1");
 		expect(rendered).not.toContain("c1");
 	});
 	it("shows every phase fully when manually expanded", async () => {
 		const result = await buildThreePhaseAfterDone();
-		const component = todoToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme, {
-			op: "done",
-			task: "a1",
-		});
-		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		const rendered = Bun.stripANSI(resultRows(result, true, { op: "done", task: "a1" }));
 		expect(rendered).toContain("b1");
 		expect(rendered).toContain("b2");
 		expect(rendered).toContain("c1");
@@ -722,12 +809,10 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 	});
 	it("drops blank separator lines between phases", async () => {
 		const result = await buildThreePhaseAfterDone();
-		const component = todoToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme, {
-			op: "done",
-			task: "a1",
-		});
 		// No empty body line survives between phases.
-		expect(innerLines(component).every(line => line.length > 0)).toBe(true);
+		expect(innerLines(resultRows(result, true, { op: "done", task: "a1" })).every(line => line.length > 0)).toBe(
+			true,
+		);
 	});
 });
 
@@ -851,43 +936,31 @@ describe("selectCollapsedTodos walking viewport (#5873)", () => {
 	});
 });
 
-describe("todoToolRenderer.renderCall malformed-args regression (#2005)", () => {
+describe("todo call card malformed-args regression (#2005)", () => {
 	// Reporter saw `TypeError: args?.ops?.map is not a function` against
 	// Xiaomi Token Plan's Anthropic protocol because `parseStreamingJson`
 	// surfaced `{ ops: "[..." }` shapes mid-stream. The renderer is invoked
 	// on every streaming delta, so any non-array `ops` (string, object,
 	// number) must NOT crash the TUI render loop and trigger the spam-warn /
 	// retry cascade.
-	const renderOptions = { expanded: false, isPartial: true } as const;
-
 	it("does not throw when op is a streaming-truncated number", () => {
 		// Mid-stream the new flat shape can surface `{ op: 1 }` before the
 		// discriminator string lands.
-		const args = { op: 1 } as unknown as Parameters<typeof todoToolRenderer.renderCall>[0];
-		expect(() => todoToolRenderer.renderCall(args, renderOptions, theme)).not.toThrow();
+		expect(() => callRows({ op: 1 })).not.toThrow();
 	});
 
 	it("does not throw when a flat op's items field is a non-array", () => {
-		const args = {
-			op: "append",
-			phase: "Work",
-			items: "Second" as unknown as string[],
-		} as unknown as Parameters<typeof todoToolRenderer.renderCall>[0];
-		expect(() => todoToolRenderer.renderCall(args, renderOptions, theme)).not.toThrow();
+		expect(() => callRows({ op: "append", phase: "Work", items: "Second" })).not.toThrow();
 	});
 
 	it("does not throw on the legacy streaming-truncated `ops` string", () => {
 		// Old transcripts/collab-web still carry `{ ops: "[{" }` mid-stream;
 		// `normalizeTodoArg` must keep tolerating the legacy batch shape.
-		const args = { ops: '[{"op":"init"' } as unknown as Parameters<typeof todoToolRenderer.renderCall>[0];
-		expect(() => todoToolRenderer.renderCall(args, renderOptions, theme)).not.toThrow();
+		expect(() => callRows({ ops: '[{"op":"init"' })).not.toThrow();
 	});
 
 	it("renders op summary metadata for a well-formed flat call", () => {
-		const args = { op: "init", items: ["a", "b", "c"] };
-		const component = todoToolRenderer.renderCall(args, renderOptions, theme);
-		// `Text(text, 0, 0)` from `@oh-my-pi/pi-tui` exposes the content via .render().
-		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		const rendered = Bun.stripANSI(callRows({ op: "init", items: ["a", "b", "c"] }));
 		expect(rendered).toContain("init");
 		expect(rendered).toContain("3 items");
 	});
@@ -900,8 +973,7 @@ describe("todoToolRenderer.renderCall malformed-args regression (#2005)", () => 
 				{ op: "append", phase: "Cleanup", items: ["d"] },
 			],
 		};
-		const component = todoToolRenderer.renderCall(args, renderOptions, theme);
-		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		const rendered = Bun.stripANSI(callRows(args));
 		expect(rendered).toContain("init");
 		expect(rendered).toContain("3 items");
 		expect(rendered).toContain("done");
@@ -911,7 +983,7 @@ describe("todoToolRenderer.renderCall malformed-args regression (#2005)", () => 
 	});
 });
 
-describe("todoToolRenderer.renderResult label sanitization", () => {
+describe("todo result card label sanitization", () => {
 	// A mirrored Cursor snapshot carries provider text verbatim into
 	// `details.phases`, and the renderer interpolates it straight into terminal
 	// output. A label holding ANSI/C0 sequences would rewrite the terminal every
@@ -921,9 +993,8 @@ describe("todoToolRenderer.renderResult label sanitization", () => {
 			content: [{ type: "text" as const, text: "1/1 tasks completed" }],
 			details: { phases, storage: "session" as const },
 			isError: false,
-		} as unknown as Parameters<typeof todoToolRenderer.renderResult>[0];
-		const component = todoToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme);
-		return component.render(120).join("\n");
+		} as unknown as ToolCallResult;
+		return resultRows(result, true);
 	}
 
 	it("strips control sequences from a mirrored task label", () => {
@@ -969,11 +1040,8 @@ describe("todoToolRenderer.renderResult label sanitization", () => {
 			content: [{ type: "text" as const, text: "Todo\u001b[2Jsnapshot not mirrored" }],
 			details: { phases: [], storage: "session" as const },
 			isError: false,
-		} as unknown as Parameters<typeof todoToolRenderer.renderResult>[0];
-		const rendered = todoToolRenderer
-			.renderResult(result, { expanded: true, isPartial: false }, theme)
-			.render(120)
-			.join("\n");
+		} as unknown as ToolCallResult;
+		const rendered = resultRows(result, true);
 
 		expect(rendered).not.toContain("\u001b[2J");
 		expect(Bun.stripANSI(rendered)).toContain("snapshot not mirrored");
@@ -997,29 +1065,21 @@ describe("todoToolRenderer.renderResult label sanitization", () => {
 			content: [{ type: "text" as const, text: "Todo\tsnapshot not mirrored" }],
 			details: { phases: [], storage: "session" as const },
 			isError: false,
-		} as unknown as Parameters<typeof todoToolRenderer.renderResult>[0];
-		const rendered = todoToolRenderer
-			.renderResult(result, { expanded: true, isPartial: false }, theme)
-			.render(120)
-			.join("\n");
+		} as unknown as ToolCallResult;
+		const rendered = resultRows(result, true);
 
 		expect(rendered).not.toContain("\t");
 		expect(Bun.stripANSI(rendered)).toContain("snapshot not mirrored");
 	});
 });
 
-describe("todoToolRenderer.renderCall preview sanitization", () => {
+describe("todo call card preview sanitization", () => {
 	// The streaming preview interpolates partially-parsed, model-authored args
 	// straight into the status header. `renderStatusLine` only flattens CR/LF and
 	// leaves tabs to the caller, so control sequences and tabs must be handled
 	// here or a mid-stream delta rewrites the terminal.
 	function renderArgs(args: unknown): string {
-		const component = todoToolRenderer.renderCall(
-			args as Parameters<typeof todoToolRenderer.renderCall>[0],
-			{ expanded: false, isPartial: true, spinnerFrame: 0 },
-			theme,
-		);
-		return component.render(120).join("\n");
+		return callRows(args);
 	}
 
 	it("strips control sequences from the task and phase fragments", () => {

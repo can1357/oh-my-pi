@@ -1,0 +1,9 @@
+{
+	"name": "shop-core",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"seed": "bun scripts/seed.ts",
+		"test": "bun test"
+	}
+}

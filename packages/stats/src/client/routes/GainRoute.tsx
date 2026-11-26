@@ -26,10 +26,13 @@ export interface GainRouteProps {
 
 const DAY_MS = 86_400_000;
 
-const SOURCE_LABEL: Record<GainSource, string> = { snapcompact: "Snapcompact" };
+const SOURCE_LABEL: Record<GainSource, string> = {
+	snapcompact: "Snapcompact imaged tool results",
+	compaction: "Snapcompact compaction (context freed)",
+};
 
-/** The server buckets gain by UTC calendar day (`YYYY-MM-DD`). */
-const DAY_LABEL = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+/** The server buckets gain by local calendar day (`YYYY-MM-DD`). */
+const DAY_LABEL = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 
 interface SourceRow extends GainSourceTotals {
 	source: GainSource;
@@ -46,13 +49,14 @@ export function GainRoute({ active, range }: GainRouteProps) {
 	const data = gain.data;
 
 	const series = useMemo(() => {
-		const points = (data?.timeSeries ?? []).map(p => ({ ...p, timestamp: Date.parse(`${p.date}T00:00:00Z`) }));
+		// A date-time string without an offset parses as local midnight.
+		const points = (data?.timeSeries ?? []).map(p => ({ ...p, timestamp: Date.parse(`${p.date}T00:00:00`) }));
 		const buckets = bucketAxis(
 			range,
 			points.map(p => p.timestamp),
 			DAY_MS,
 		);
-		const daily = densify(points, buckets, p => p.snapcompact);
+		const daily = densify(points, buckets, p => p.total);
 		let running = 0;
 		const cumulative = daily.map(v => (running += v));
 		return { buckets, daily, cumulative };
@@ -89,7 +93,7 @@ export function GainRoute({ active, range }: GainRouteProps) {
 		<div className="page">
 			<PageHeader
 				title="Gain"
-				description={`Tokens snapcompact kept out of context${scope} in ${meta.windowLabel}.`}
+				description={`Context snapcompact freed by compacting, and tokens it saved by imaging tool results${scope}, in ${meta.windowLabel}.`}
 				actions={
 					projectOptions.length > 0 && (
 						<select
@@ -120,7 +124,7 @@ export function GainRoute({ active, range }: GainRouteProps) {
 							title={`No savings recorded${scope} in ${meta.windowLabel}`}
 							hint={
 								range === "all"
-									? "Savings appear here once snapcompact compacts tool output."
+									? "Savings appear here once snapcompact compacts the context or images tool output."
 									: "Try a longer range."
 							}
 						/>
@@ -156,7 +160,7 @@ export function GainRoute({ active, range }: GainRouteProps) {
 						<Card
 							index={1}
 							title="Savings over time"
-							description="Tokens saved per UTC day, with the running total"
+							description="Tokens saved per day, with the running total"
 							actions={<Legend items={chartSeries.map(s => ({ key: s.key, label: s.label, color: s.color }))} />}
 							stale={gain.stale}
 						>

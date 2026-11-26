@@ -19,10 +19,10 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { finalizeSubagentLifecycle } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import type { AdvisorConfig } from "@oh-my-pi/pi-coding-agent/advisor/advisor-config-types";
 import { AdvisorLoopGuard } from "../src/advisor/loop-guard";
 import { cfgAdvisorReviewInterval } from "../src/advisor/settings";
-import { activateTodoTool, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { activateTodoTool, createInMemoryAuthStorage, fixedAdvisorTools } from "./helpers/agent-session-setup";
 
 const zeroUsage = {
 	input: 0,
@@ -184,7 +184,7 @@ describe("advisor tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry,
-			advisorTools: [failingReadTool],
+			advisorTools: fixedAdvisorTools(failingReadTool),
 			advisorStreamFn,
 			advisorGetToolContext: toolCall => primaryToolContext(toolCall),
 			advisorConfigs:
@@ -325,10 +325,10 @@ describe("advisor tool-call loop guard", () => {
 	});
 
 	it.each([
-		{ device: "mcp__peers_wait", exempt: "mcp__peers_wait", redirects: 0 },
-		{ device: "mcp__other_tool", exempt: "mcp__peers_wait", redirects: 1 },
-		{ device: "mcp__peers_wait", exempt: "write", redirects: 0 },
-	])("applies advisor exemption $exempt to writes to $device", ({ device, exempt, redirects }) => {
+		{ command: "mcp__peers_wait --json {}", exempt: "mcp__peers_wait", redirects: 0 },
+		{ command: "mcp__other_tool --json {}", exempt: "mcp__peers_wait", redirects: 1 },
+		{ command: "mcp__peers_wait --json {}", exempt: "bash", redirects: 0 },
+	])("applies advisor exemption $exempt to the `$command` tool command", ({ command, exempt, redirects }) => {
 		const messages: AgentMessage[] = [];
 		const guard = new AdvisorLoopGuard({
 			settings: Settings.isolated({
@@ -351,8 +351,8 @@ describe("advisor tool-call loop guard", () => {
 						{
 							type: "toolCall",
 							id: `call-${index}`,
-							name: "write",
-							arguments: { path: `xd://${device}`, content: "{}" },
+							name: "bash",
+							arguments: { command },
 						},
 					],
 					api: "anthropic-messages",
@@ -880,7 +880,6 @@ describe("advisor tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			advisorTools: [],
 			advisorStreamFn,
 			advisorConfigs: [
 				{ name: "Parked reviewer", syncBacklog: "off", instructions: "parked-reviewer-marker" },
@@ -941,7 +940,6 @@ describe("advisor tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			advisorTools: [],
 			advisorStreamFn,
 			advisorConfigs: [{ name: "Final reviewer", reviewMode: "agent-end", reviewInterval: 2 }],
 		});

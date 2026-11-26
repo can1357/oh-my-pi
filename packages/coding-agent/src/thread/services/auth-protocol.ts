@@ -41,6 +41,7 @@ import type {
 	DisabledCredentialSummary,
 	InvalidateCredentialMatchingOptions,
 	ListResetCreditsOptions,
+	MarkServiceTierUnavailableOptions,
 	MarkUsageLimitOptions,
 	Model,
 	ModelUsageHealth,
@@ -61,6 +62,7 @@ import type {
 	ResetCreditRedeemOutcome,
 	ResolvedApiKey,
 	RotateCredentialOptions,
+	ServiceTier,
 	StoredAuthCredential,
 	StoredCredentialBlock,
 	UsageHistoryEntry,
@@ -70,6 +72,11 @@ import type {
 	UsageReport,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import type {
+	ImageGenerationOptions,
+	ImageGenerationRequest,
+	ImageGenerationResult,
+} from "@oh-my-pi/pi-ai/images/types";
 import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
 import type {
 	ModelRegistryMirrorBatch,
@@ -85,6 +92,8 @@ import type {
 	AnthropicSlowModeLane,
 } from "../../session/anthropic-slow-mode";
 import type { UsageLimitState } from "../../session/usage-limit";
+import type { SearchParams } from "../../web/search/providers/base";
+import type { SearchResponse } from "../../web/search/types";
 import type { RpcMethod } from "../rpc";
 
 /** Exported-class kind of `AuthStorage`. */
@@ -261,6 +270,11 @@ export type AuthStorageProtocol = {
 		[provider: string, sessionId: string | undefined, options?: RotateCredentialOptions],
 		CredentialRotation
 	>;
+	"limits.markServiceTierUnavailable": RpcMethod<
+		[provider: string, options: MarkServiceTierUnavailableOptions],
+		boolean
+	>;
+	"limits.rearmServiceTier": RpcMethod<[provider: string, serviceTier: ServiceTier, modelId: string], void>;
 	"limits.invalidateMatching": RpcMethod<
 		[provider: string, apiKey: string, options?: InvalidateCredentialMatchingOptions],
 		boolean
@@ -295,9 +309,41 @@ export type MainStreamSimple = (
  * {@link streamOnMain}; `usage` stays on main (main's `AuthStorage` already
  * serves it); OAuth `getApiKey`/`modifyModels` are `rpcSync`.
  */
-export interface WireProviderConfig extends Omit<ProviderConfigInput, "streamSimple" | "usage"> {
+export interface WireProviderConfig extends Omit<
+	ProviderConfigInput,
+	"streamSimple" | "stream" | "generateImage" | "webSearch" | "discoverModels" | "usage"
+> {
 	streamOnMain?: MainStreamSimple;
+	/** The provider `stream` hook, run on main like {@link streamOnMain}. */
+	streamHookOnMain?: MainStreamSimple;
+	/** The provider `generateImage` hook, run on main with the worker's `fetch` bridged. */
+	generateImageOnMain?: MainGenerateImage;
+	/** The provider `webSearch` hook, run on main against main's `AuthStorage` and registry. */
+	webSearchOnMain?: MainWebSearch;
 }
+
+/** Image options as a main-side `generateImage` hook receives them; `fetch` crosses as {@link WorkerFetch}. */
+export interface WireImageOptions extends Omit<ImageGenerationOptions, "fetch"> {
+	fetchOnWorker?: WorkerFetch;
+}
+
+/** A provider `generateImage` hook run on main for a worker. */
+export type MainGenerateImage = (
+	model: Model<Api>,
+	request: ImageGenerationRequest,
+	options: WireImageOptions,
+) => Promise<ImageGenerationResult>;
+
+/**
+ * Search parameters as a main-side `webSearch` hook receives them: main
+ * supplies its own `AuthStorage` and registry; `fetch` crosses as {@link WorkerFetch}.
+ */
+export interface WireSearchParams extends Omit<SearchParams, "authStorage" | "modelRegistry" | "fetch"> {
+	fetchOnWorker?: WorkerFetch;
+}
+
+/** A provider `webSearch` hook run on main for a worker. */
+export type MainWebSearch = (params: WireSearchParams) => Promise<SearchResponse>;
 
 /**
  * A worker's stream options as a main-side `streamSimple` receives them.

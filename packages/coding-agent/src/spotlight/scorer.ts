@@ -1,4 +1,4 @@
-import type { SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightRequestParams } from "../tools/details/spotlight";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { SpotlightClient, SpotlightRequest } from "./client";
 import { SpotlightError } from "./client";
@@ -113,7 +113,14 @@ export class RecordingScorer implements Scorer {
 						error: error.message,
 					});
 					// After a timeout or transport failure, wake the endpoint for the next call.
-					if (error.status === 0 && error.code !== "no_credential" && !signal?.aborted) this.#client.warm();
+					if (
+						error.status === 0 &&
+						error.code !== "no_credential" &&
+						error.code !== "policy" &&
+						!signal?.aborted
+					) {
+						this.#client.warm();
+					}
 					return null;
 				}
 			}),

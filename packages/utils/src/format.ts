@@ -84,7 +84,7 @@ export function countNewlines(text: string): number {
 
 /**
  * Truncate a string to maxLen characters, appending an ellipsis if truncated.
- * For display-width-aware truncation (terminals), use truncateToWidth from @oh-my-pi/pi-tui.
+ * For display-width-aware truncation (terminals), use `truncate` from @oh-my-pi/pi-tui/text/width.
  */
 export function truncate(str: string, maxLen: number, ellipsis = "…"): string {
 	if (str.length <= maxLen) return str;
@@ -110,7 +110,9 @@ export function formatAge(ageSeconds: number | null | undefined): string {
 	const days = Math.floor(hours / 24);
 	const weeks = Math.floor(days / 7);
 	const months = Math.floor(days / 30);
+	const years = Math.floor(days / 365);
 
+	if (years > 0) return `${years}y ago`;
 	if (months > 0) return `${months}mo ago`;
 	if (weeks > 0) return `${weeks}w ago`;
 	if (days > 0) return `${days}d ago`;

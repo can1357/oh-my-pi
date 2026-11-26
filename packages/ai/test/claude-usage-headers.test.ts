@@ -110,7 +110,9 @@ describe("claude usage request headers", () => {
 			ctx,
 		);
 
-		const usageCalls = calls.filter(call => new URL(call.input).search === "");
+		const usageCalls = calls.filter(
+			call => new URL(call.input).pathname.endsWith("/usage") && new URL(call.input).search === "",
+		);
 		expect(usageCalls).toHaveLength(1);
 		expect(usageCalls[0]?.input).toBe("https://api.anthropic.com/api/oauth/usage");
 
@@ -155,6 +157,7 @@ describe("claude usage request headers", () => {
 			{ fetch: fetchMock },
 		);
 
+		expect(report?.limits[0]?.id).toBe("anthropic:5h");
 		expect(report?.limits[0]?.window?.resetsAt).toBeUndefined();
 	});
 

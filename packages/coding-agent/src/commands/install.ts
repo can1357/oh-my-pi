@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { installHelp as commandHelp } from "../cli/command-help";
 import { type PluginAction, type PluginCommandArgs, runPluginCommand } from "../cli/plugin-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 /**
  * Heuristic used to decide whether `omp install <target>` should `link` a
@@ -70,7 +70,7 @@ export default class Install extends Command {
 			process.exit(1);
 		}
 
-		await initTheme();
+		initTheme();
 
 		// Split into local-paths (→ link) and remote specs (→ install). Each batch
 		// preserves user-supplied order so progress output reads naturally.

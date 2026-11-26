@@ -17,12 +17,9 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import {
-	overlayTitleSlotContent,
-	parseTitleSlotFromContent,
-	type SessionTitleUpdate,
-	serializeTitleSlot,
-} from "./session-title-slot";
+import { readSessionHeaderIdSync } from "./session-header-id";
+import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import { purgeDeletedSessionRows } from "./session-db-purge";
 
 /** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
 const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
@@ -223,7 +220,10 @@ export interface SessionStorage {
 	writeLinesAtomic?(path: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
-	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
+	deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void>;
 	/**
 	 * Run a synchronous session mutation under the backend's cross-process
 	 * lock. Optional because only backends with a process-shared lock can
@@ -241,6 +241,14 @@ export interface SessionStorage {
 	 * another process writes a session.
 	 */
 	claimSession?(sessionId: string, sessionPath: string): (() => void) | null;
+	/**
+	 * Whether another live process holds the claim (see `claimSession`) on the
+	 * session journaled at `sessionPath`, observed without taking it, so the
+	 * probe never makes the owner's own claim fail. `SessionManager.continueRecent`
+	 * starts a new session instead of resuming one a running process writes.
+	 * Optional for the same reason as `claimSession`.
+	 */
+	isSessionOwnedElsewhere?(sessionPath: string): boolean;
 	/**
 	 * Atomically delete a session and its artifacts only when `shouldDelete`
 	 * accepts the current session content. Optional because backends without a
@@ -589,39 +597,6 @@ function sessionOwnersDir(): string {
 	return testSessionOwnersDir() ?? getSessionOwnersDir();
 }
 
-/** Bytes read to find a header at claim time: the title slot plus a header line fit well inside. */
-const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
-
-/**
- * The session id in the header of the file at `sessionPath`, read
- * synchronously from a bounded prefix (past the title slot), or `undefined`
- * when there is no readable file or no header in that prefix.
- */
-function readSessionHeaderIdSync(sessionPath: string): string | undefined {
-	let prefix: string;
-	try {
-		const fd = fs.openSync(sessionPath, "r");
-		try {
-			const buf = Buffer.alloc(SESSION_HEADER_PREFIX_BYTES);
-			prefix = buf.toString("utf8", 0, fs.readSync(fd, buf, 0, buf.length, 0));
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		return undefined;
-	}
-	if (parseTitleSlotFromContent(prefix)) prefix = prefix.slice(prefix.indexOf("\n") + 1);
-	const end = prefix.indexOf("\n");
-	if (end === -1) return undefined;
-	try {
-		const entry: unknown = JSON.parse(prefix.slice(0, end));
-		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
-			return typeof entry.id === "string" ? entry.id : undefined;
-		}
-	} catch {}
-	return undefined;
-}
-
 /**
  * The lock path of a session's ownership lease, shared by every acquirer and
  * prober so they cannot disagree on the name. Keyed by the session id from the
@@ -635,16 +610,24 @@ function sessionLeasePath(sessionId: string, createDir: boolean): string {
 		? sessionId
 		: `h-${Bun.hash.wyhash(sessionId).toString(16).padStart(16, "0")}`;
 	const dir = sessionOwnersDir();
-	// Linux (abstract socket) and Windows (named mutex) locks never touch the
-	// filesystem; elsewhere the lock is a `flock` sidecar in that directory. The
-	// sidecars are empty and never removed: unlinking a flock file can split one
-	// lease between a holder of the old inode and a creator of a new one.
-	if (process.platform !== "linux" && process.platform !== "win32") {
+	// Windows (named mutex) locks never touch the filesystem; elsewhere the lock
+	// is a sidecar in that directory. The sidecars are empty and never removed:
+	// unlinking a lock file can split one lease between a holder of the old inode
+	// and a creator of a new one.
+	if (process.platform !== "win32") {
 		if (createDir) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 		// The test-run dir sits in the shared OS temp dir, where another local
 		// user could pre-create it or plant a symlink: refuse anything but a
-		// directory this user owns that nobody else can enter.
-		const st = fs.lstatSync(dir);
+		// directory this user owns that nobody else can enter. A probe of a
+		// directory nobody created yet still goes to the lock, which on Linux
+		// also sees a lease an older build holds as an abstract socket.
+		let st: fs.Stats;
+		try {
+			st = fs.lstatSync(dir);
+		} catch (err) {
+			if (!createDir && isEnoent(err)) return path.join(dir, name);
+			throw err;
+		}
 		const uid = process.getuid?.();
 		if (!st.isDirectory() || (uid !== undefined && st.uid !== uid) || (st.mode & 0o077) !== 0) {
 			throw new Error(`Session ownership lease directory ${dir} is not a private directory owned by this user`);
@@ -673,9 +656,8 @@ export function tryAcquireSessionLease(sessionId: string): FileLockHandle | null
 export function isSessionLeaseHeld(sessionId: string): boolean | null {
 	try {
 		return isFileLockHeld(sessionLeasePath(sessionId, false));
-	} catch (err) {
-		// No sidecar directory yet: nobody has ever claimed a session here.
-		return isEnoent(err) ? false : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -1362,8 +1344,9 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * The lease is an OS lock (abstract socket, named mutex, or `flock` sidecar
-	 * under ~/.omp/run/session-owners), so the kernel drops a dead owner's claim.
+	 * The lease is an OS lock (named mutex on Windows, otherwise an OFD or
+	 * `flock` lock on a sidecar under ~/.omp/run/session-owners), so the kernel
+	 * drops a dead owner's claim.
 	 * Never throws: a lock that cannot be taken for another reason counts as
 	 * owned, so it never moves a session off its file.
 	 */
@@ -1395,6 +1378,13 @@ export class FileSessionStorage implements SessionStorage {
 		};
 	}
 
+	/** A session this process holds, or whose lease cannot be probed, is not owned elsewhere. */
+	isSessionOwnedElsewhere(sessionPath: string): boolean {
+		const sessionId = readSessionHeaderIdSync(sessionPath);
+		if (sessionId === undefined || sessionLeases.has(sessionId)) return false;
+		return isSessionLeaseHeld(sessionId) === true;
+	}
+
 	/**
 	 * Conditionally delete under the same cross-process lock used by the first
 	 * durable append to a draft-only session.
@@ -1424,9 +1414,27 @@ export class FileSessionStorage implements SessionStorage {
 	 * Delete a session file and its artifacts directory.
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
 	 */
-	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-		// Delete the session file itself
-		await this.unlink(sessionPath);
+	async deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
+		// Read the id while the transcript is still here. Rows are purged only
+		// once that transcript is gone, so a failed unlink does not drop
+		// history/stats for a session that is still on disk. A transcript that
+		// is already absent still purges (callers treat ENOENT as success) and
+		// then rethrows, so artifact cleanup does not run for a file this call
+		// did not remove.
+		const sessionId = readSessionHeaderIdSync(sessionPath);
+		let alreadyGone: unknown;
+		try {
+			await this.unlink(sessionPath);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+			alreadyGone = err;
+		}
+		// Best-effort: a busy dashboard store never fails the delete itself.
+		purgeDeletedSessionRows(sessionPath, { ...options, sessionId });
+		if (alreadyGone) throw alreadyGone;
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
@@ -1801,7 +1809,10 @@ export class MemorySessionStorage implements SessionStorage {
 		this.#files.delete(path);
 		return Promise.resolve();
 	}
-	deleteSessionWithArtifacts(_sessionPath: string): Promise<void> {
+	deleteSessionWithArtifacts(
+		_sessionPath: string,
+		_options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
 		return Promise.resolve();
 	}
 

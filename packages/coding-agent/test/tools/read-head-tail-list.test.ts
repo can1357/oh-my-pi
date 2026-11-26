@@ -1,16 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	registerArtifactsDir,
-	resetRegisteredArtifactDirsForTests,
-} from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { parseSel, resolveTailSelector } from "@oh-my-pi/pi-coding-agent/tools/read-selector";
-import { splitInternalUrlSel, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { splitInternalUrlSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
+import { splitPathAndSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -101,8 +102,8 @@ describe("splitting a list that repeats its colon", () => {
 			sel: "-30",
 		});
 		const linesSpec = () => ({ selectors: "lines" as const });
-		expect(splitInternalUrlSel("artifact://7:1-3,:-3:raw", linesSpec)).toEqual({
-			path: "artifact://7",
+		expect(splitInternalUrlSel("local://7.log:1-3,:-3:raw", linesSpec)).toEqual({
+			path: "local://7.log",
 			sel: "1-3,-3:raw",
 		});
 	});
@@ -121,8 +122,8 @@ describe("splitting a list that repeats its colon", () => {
 			sel: "100",
 		});
 		const linesSpec = () => ({ selectors: "lines" as const });
-		expect(splitInternalUrlSel("artifact://7:20:40,85:100:raw", linesSpec)).toEqual({
-			path: "artifact://7",
+		expect(splitInternalUrlSel("local://7.log:20:40,85:100:raw", linesSpec)).toEqual({
+			path: "local://7.log",
 			sel: "20-40,85-100:raw",
 		});
 	});
@@ -137,25 +138,36 @@ describe("splitting a list that repeats its colon", () => {
 describe("read tool head+tail selectors", () => {
 	let testDir: string;
 	let filePath: string;
-	let unregisterArtifactsDir: (() => void) | undefined;
 	let tool: ReadTool;
 
 	beforeEach(async () => {
 		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-head-tail-"));
 		filePath = path.join(testDir, "data.txt");
 		await Bun.write(filePath, rows(200));
-		const artifactDir = path.join(testDir, "session");
-		await fs.mkdir(artifactDir, { recursive: true });
-		await Bun.write(path.join(artifactDir, "7.bash.log"), rows(200));
-		resetRegisteredArtifactDirsForTests();
-		unregisterArtifactsDir = registerArtifactsDir(artifactDir);
+		await Bun.write(path.join(testDir, "session", "local", "7.log"), rows(200));
 		tool = new ReadTool(makeSession(testDir));
 	});
 
 	afterEach(async () => {
-		unregisterArtifactsDir?.();
-		resetRegisteredArtifactDirsForTests();
 		await fs.rm(testDir, { recursive: true, force: true });
+	});
+
+	it("diagnoses a colon between line numbers only when the underlying path exists", async () => {
+		const read = (input: string) => tool.execute("read", { path: input });
+		await expect(read(`${filePath}:1:2`)).rejects.toThrow(":1-2");
+		// A compiler-style line:column must not be offered as a range that fails as reversed.
+		await expect(read(`${filePath}:3:1`)).rejects.toThrow("Use :3 for a single line.");
+		await expect(read(`${filePath}.missing:1:2`)).rejects.toThrow("not found");
+		if (process.platform !== "win32") {
+			await Bun.write(`${filePath}:1`, "literal first\nliteral second\n");
+			expect(getTextOutput(await read(`${filePath}:1:2`))).toContain("literal second");
+		}
+	});
+
+	it("diagnoses a colon between line numbers when the path resolves only by unique suffix", async () => {
+		await Bun.write(path.join(testDir, "nested", "deep.txt"), rows(5));
+
+		await expect(tool.execute("read", { path: "deep.txt:1:2" })).rejects.toThrow(":1-2");
 	});
 
 	for (const selector of ["1-3,-3", "1-3,:-3", "1-3,:-3:raw", "raw:1-3,:-3"]) {
@@ -168,17 +180,17 @@ describe("read tool head+tail selectors", () => {
 	}
 
 	for (const selector of ["1-12,-15", "1-12,:-15:raw"]) {
-		it(`reads the first and last lines of an artifact for :${selector}`, async () => {
-			const output = getTextOutput(await tool.execute("head-tail-artifact", { path: `artifact://7:${selector}` }));
+		it(`reads the first and last lines of a spill for :${selector}`, async () => {
+			const output = getTextOutput(await tool.execute("head-tail-spill", { path: `local://7.log:${selector}` }));
 
 			for (const line of [1, 12, 186, 200]) expect(output).toContain(`row-${line}.`);
 			expect(output).not.toContain("row-100.");
 		});
 	}
 
-	for (const target of ["file", "artifact"] as const) {
+	for (const target of ["file", "spill"] as const) {
 		it(`reads every range of a ${target} list written with colon dashes`, async () => {
-			const base = target === "file" ? filePath : "artifact://7";
+			const base = target === "file" ? filePath : "local://7.log";
 			const output = getTextOutput(await tool.execute("colon-dash", { path: `${base}:2:3,198:199` }));
 
 			for (const line of [2, 3, 198, 199]) expect(output).toContain(`row-${line}.`);

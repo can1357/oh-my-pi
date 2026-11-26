@@ -10,7 +10,7 @@ There are two different bash execution surfaces in coding-agent:
 
 1. **Tool-call surface** (`toolName: "bash"`): used when the model calls the bash tool.
    - Entry point: `BashTool.execute()`.
-   - Parameters include `command`, optional `timeout`, `cwd`, `pty`, and, when `async.enabled` is true, `async`. With `launch.enabled` (default `true`), `name` and `ready` select managed service execution. There is no model-facing `env` parameter.
+   - Parameters include `command`, optional `timeout`, `cwd`, `pty`, and, when `async.enabled` is true, `async`. With `launch.enabled` (default `true`), `name` and `ready` select managed service execution. `notify` is present with either. There is no model-facing `env` parameter.
 2. **User bang-command surface** (`!cmd` from interactive input or RPC `bash` command): session-level helper path.
    - Entry point: `AgentSession.executeBash()`.
 
@@ -26,16 +26,20 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 
 - trims service names and normalizes empty readiness fields,
 - extracts a leading single-line `cd <path> && ...` into `cwd` when `cwd` was not supplied, unless the path needs shell expansion,
-- rejects `async: true` when `async.enabled` is false,
+- treats a nonblank `notify` regex without a service name as `async: true`, and rejects either when `async.enabled` is false,
+- rejects a `notify` regex that does not compile, or a session that cannot take its notices, before running anything,
+- passes `notify` with a service name to the launch broker, which reports the service's matching output,
 - defaults finite-command `timeout` to 300 seconds; `0` explicitly disables the command deadline,
-- rejects `async: true` or any supplied `timeout` in named-service mode; readiness uses `ready.timeout`,
+- ignores `async: true` and any supplied `timeout` in named-service mode, adding a notice for each; readiness uses `ready.timeout`,
 - ignores `ready` without a nonblank `name`, adding a notice.
 
-There are no structured `head` or `tail` parameters. Command text is never rewritten for internal URLs. The embedded shell and its in-process coreutils resolve `scheme://` paths through an injected async filesystem (`InternalUrlFilesystem`) at the moment of each operation, so URLs built from variables, redirections, globs, `cd`, and a URL `cwd` all work. File-backed schemes operate on their backing files, and `ln -s` from one to a host path stores the backing file's path; rendered resources are read-only. An external program has no view of that filesystem, so the program path, every argument (`skill://example-skill/tool.py`, `--index=skill://example-skill/data`), and the working directory it is spawned with are translated to the files they alias. Translation covers whole arguments and `--option=URL` values only; a bare scheme root (`local://`), a root followed by words (`skill:// external command`), and URLs embedded in other text stay literal, as do schemes the filesystem does not route (`https://`, `s3://`) and arguments naming a scheme that aliases no file (`omp://`, `history://`). A URL the provider rejects (an unknown skill, a path escaping its root) fails the command with the provider's error. External programs cannot start in a scheme that aliases no file, nor in a read-only one (`skill://`, `artifact://`), since the child could write anywhere under its working directory; read-only is otherwise enforced only for builtins, so an external program handed a translated read-only path can still write it. `xargs`, `find -exec`/`-execdir`, and `ifne` run their commands through the shell's own dispatch in a subshell, so `… | xargs cat` reaches the in-process `cat` and its URL arguments. The finite-command routes also load configured direnv/devenv changes. SDK callers of the executor can supply an `env` overlay; the bash tool itself uses shell assignments for per-command variables.
+There are no structured `head` or `tail` parameters. Command text is never rewritten for internal URLs. The embedded shell and its in-process coreutils resolve `scheme://` paths through an injected async filesystem (`InternalUrlFilesystem`) at the moment of each operation, so URLs built from variables, redirections, globs, `cd`, and a URL `cwd` all work. File-backed schemes operate on their backing files, and `ln -s` from one to a host path stores the backing file's path; rendered resources are read-only. An external program has no view of that filesystem, so the program path, every argument (`skill://example-skill/tool.py`, `--index=skill://example-skill/data`), and the working directory it is spawned with are translated to the files they alias. Translation covers whole arguments and `--option=URL` values only; a bare scheme root (`local://`), a root followed by words (`skill:// external command`), and URLs embedded in other text stay literal, as do schemes the filesystem does not route (`https://`, `s3://`) and arguments naming a scheme that aliases no file (`omp://`, `history://`). A URL the provider rejects (an unknown skill, a path escaping its root) fails the command with the provider's error. External programs cannot start in a scheme that aliases no file, nor in a read-only one (`skill://`), since the child could write anywhere under its working directory; read-only is otherwise enforced only for builtins, so an external program handed a translated read-only path can still write it. `xargs`, `find -exec`/`-execdir`, and `ifne` run their commands through the shell's own dispatch in a subshell, so `… | xargs cat` reaches the in-process `cat` and its URL arguments. The finite-command routes also load configured direnv/devenv changes. SDK callers of the executor can supply an `env` overlay; the bash tool itself uses shell assignments for per-command variables.
 
 ### Approval policy
 
 The bash tool has the `exec` approval tier. `bash.patterns` rules can explicitly `allow`, `deny`, or `prompt`. By default, allow rules must match the entire command and cannot approve shell-control syntax. The opt-in `bash.allowCompoundCommands: true` additionally recognizes only flat chains of two or more literal commands separated by unquoted `&&`. It resolves the ordered rules independently against each original raw segment, with the first matching rule winning for that segment.
+
+For `allow` rules, leading `NAME=value` assignments are stripped only when `NAME` exactly matches an entry in `bash.allowedEnvVars` or the rule's `env` list; `deny` and `prompt` rules check tokenized segments both with and without leading assignments.
 
 Restrictions are combined conservatively across the chain (and across tokenized segments of non-eligible compound commands): any explicit segment or whole-chain `deny` wins, otherwise any explicit `prompt` wins. A `deny` or `prompt` pattern matching the full chain but no individual segment remains a whole-chain restriction, while later broad restrictions do not override an earlier match for a segment. Operator `deny` rules from `Settings.grantAuthority()` also take precedence over project-layer `bash.patterns`. These restrictions resolve before the existing raw and canonical critical-command checks.
 
@@ -81,7 +85,7 @@ Named-service calls omit the rules whose suggested tool is `bash`, so service co
 
 ## 3) CWD validation and timeout resolution
 
-A host `cwd` is resolved relative to session cwd (`resolveToCwd`) and validated via filesystem `stat`. A recognized internal-URL cwd is normalized and validated through `InternalUrlFilesystem`; it is usable only by the embedded shell, not services or an interactive PTY. Client-terminal routing is skipped for a virtual cwd.
+A host `cwd` is resolved relative to session cwd (`resolveToCwd`) and validated via filesystem `stat`. A recognized internal-URL cwd is normalized and validated through `InternalUrlFilesystem`; the embedded shell enters it, and a service's or pty command's shell process starts in the session cwd and enters it from there. Client-terminal routing is skipped for a virtual cwd.
 
 - missing path -> `ToolError("Working directory does not exist: ...")`
 - non-directory -> `ToolError("Working directory is not a directory: ...")`
@@ -105,6 +109,8 @@ PTY eligibility is decided by `canUseInteractiveBashPty(pty, ctx)` (`src/tools/b
 
 If `pty` is requested but unavailable, the call falls back to non-PTY and appends a `pty requested but unavailable …` notice.
 
+A pty command runs as a shell process (`src/exec/shell-process.ts`): the embedded engine with the tool profile in a process of its own, leading the overlay's pseudo-terminal, so its programs own that terminal (`/dev/tty`, terminal signals, resize). It starts from the session shell's exports, functions and aliases, and its `local://` (spills included), `skill://` and `attachment://` paths resolve to the session's host files; other schemes are missing there.
+
 Before the local PTY/non-PTY choice, a foreground (`async: false`) call can route to a managed background job (auto-backgrounding; see below) or — when the session's client advertises a terminal capability (`clientBridge.capabilities.terminal` + `createTerminal`, with `pty` false) — to a **client-bridge editor terminal** that runs the command remotely (streaming `terminalId` updates, killing on timeout, mapping a signal kill to exit code `137`). Otherwise it uses non-interactive `executeBash()`.
 
 Print mode and non-UI RPC/tool contexts cannot use the local interactive overlay. Named services have their own broker-owned PTY and do not require a TUI.
@@ -114,7 +120,7 @@ Print mode and non-UI RPC/tool contexts cannot use the local interactive overlay
 A nonblank `name` routes to `startService()` before finite-command timeout, async, terminal, or output-sink selection.
 
 - Names are 1–48 characters: an initial letter or digit, followed by letters, digits, dots, underscores, or hyphens. Names are project-broker scoped; starting an existing live name replaces that process.
-- Services execute the configured external shell with its args, prefix, and shell environment plus `PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_TOOL_CALL_ID`, not the embedded shell or finite-command direnv preflight.
+- Services run as a shell process too (the embedded engine with the tool profile, started by the broker), with the configured shell prefix, from the session shell's exports, functions and aliases plus `PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_TOOL_CALL_ID`. Their `local://` (spills included), `skill://` and `attachment://` paths resolve to the owning session's host files; other schemes are missing there.
 - `pty` defaults to `true`; no command deadline is imposed.
 - `ready` must include a log regex or TCP port (1–65535). When both are present, both must pass. TCP host defaults to `127.0.0.1`; readiness timeout defaults to 30 seconds and is clamped to 0.05–3600 seconds.
 - Without a readiness condition, startup returns the running service. With one, startup waits for readiness, exit, or the readiness deadline. A readiness timeout is reported without stopping the process. A queued steering message ends the readiness wait early: the call returns `starting` and the service keeps starting.
@@ -122,6 +128,14 @@ A nonblank `name` routes to `startService()` before finite-command timeout, asyn
 - `read proc://<name>` inspects state and logs; `write proc://<name>` sends input (empty content sends Enter), `write proc://<name>/kill` stops it, and `/mode` accepts `persist`, `session`, or `detached`.
 
 The result carries `details.service` (`name`, `state`, `ready`, `timedOut`, optional `pid`), not finite-command timeout/async metadata.
+
+### The `o2ctl services` shell command
+
+While services can launch, the embedded shell also has an `o2ctl` command (`src/launch/o2ctl-command.ts`, installed with the session's tool commands for each run). Its `services` namespace reaches the same project-scoped registry as `name`; every other `o2ctl` namespace is reserved:
+
+- `o2ctl services add <name> <pid|%job>` adopts a process that is already running (`cmd &`, `nohup cmd &`) as service `<name>` without restarting it (`adoptService()`; the daemon's `open` with `adopt: <pid>`). A `%job` spec names a job of the calling shell that runs a program (the shell passes the program's pid with the request, as `jobs -x` would substitute it). The service is owned by the session and held like a started one (session lifetime, or persistent under `launch.persist`); it is never restarted. The daemon watches it by pid like a detached service, and when its stdout (else stderr) is a regular file (`nohup.out`, `> log`), that file is linked in as the service's output log, so `read proc://<name>` and the service output view show it. Fails when the name belongs to a live service, the pid is not a live process of the user, or it is already a service's process.
+- `o2ctl services ls` lists the project's services (`listServices()`); `o2ctl services stop <name>` stops one (`stopService()`). An adopted service is stopped by SIGTERM to its process tree, then SIGKILL to its whole process family; its process group is not signalled, as it need not lead one.
+- The command exists only in the embedded shell, not in a `pty` command, a service's own shell, or the user's shell.
 
 ## Non-interactive execution engine (`executeBash`)
 
@@ -139,7 +153,7 @@ The result carries `details.service` (`name`, `state`, `ready`, `timedOut`, opti
 Session-level bang-command executions pass the session ID captured when execution starts, preserving result ownership across a branch or session transition.
 
 Tool-call executions pass `sessionKey: this.session.getSessionId?.()`, when available, including calls that start in the foreground on the auto-background path, so variables, functions, and shell options carry over between calls. A managed job that starts in the background (`async: true`, or no foreground wait) uses a per-job `<session>:async:<jobId>` key instead, so it never holds the session's shell. In both surfaces, a session key isolates shell reuse per session; without one, reuse falls back to shell config/snapshot/env.
-Concurrent calls never share one `Shell`: the native session runs one command at a time and `Shell.abort()` kills every in-flight run on it. `executeBash()` tracks in-flight keys in `shellSessionsInUse`; while a key is busy, overlapping calls skip the cache and create a one-shot `Shell` (the same isolation as quarantined sessions), and `BashTool` says so in the call's result (`onSessionShellBusy`). A call that moves to the background keeps the session's shell until it finishes. Only the owning call releases the in-use flag or deletes the cached session in its `finally`.
+Concurrent calls never share one `Shell`: the native session runs one command at a time and `Shell.abort()` kills every in-flight run on it. `executeBash()` tracks in-flight keys in `shellSessionsInUse`; while a key is busy, overlapping calls skip the cache and run in a one-shot `Shell.fork()` of the session's shell, which starts from its state before the running command. When a fork's run settles, `executeBash()` hands it to `Shell.adopt()`: what it set (variables, functions, aliases, options, traps; not the working directory or the hash table) carries back into the session's shell at the end of its running command (at once when it is idle) and into every later fork; a name both set keeps the value of the command that ended last. A fork that left background jobs running is retained while they run, as a released session is. `BashResult.fork` reports both; `BashTool` adds a notice only when the state could not be carried back or background jobs stay in the fork. A call that moves to the background keeps the session's shell until it finishes. Only the owning call releases the in-use flag or deletes the cached session in its `finally`.
 
 `exit`, errexit (`set -e`), and a stray top-level `return`/`break` end the command, not the native session; a timeout, cancellation, or failed run quarantines the session and the next call starts a fresh one.
 
@@ -149,7 +163,7 @@ A session can own more than one shell cache entry: surfaces that need their own 
 
 ## Native shell visualization
 
-`pi-shell` owns Raw/Pseudo generation, static analysis, source mapping, replay reduction and last-setter annotations. It retains the actual parser's `List`, `Command` and `Word` nodes as units compile; arithmetic formatting uses the engine's existing arithmetic parser. There is no second TypeScript AST or shfmt conversion in this path.
+`omp-shell` owns Raw/Pseudo generation, static analysis, source mapping, replay reduction and last-setter annotations. It retains the actual parser's `List`, `Command` and `Word` nodes as units compile; arithmetic formatting uses the engine's existing arithmetic parser. There is no second TypeScript AST or shfmt conversion in this path.
 
 - **Incremental:** only engine-announced syntax is presented as Pseudo. Uncompiled source remains literal; creating or presenting a pending `RunTrace` does not parse ahead.
 - **Live:** the executor attaches each immutable snapshot to its actual native `RunTrace` before publishing it. `RunTrace.present(options)` borrows native syntax/history; the UI does not serialize and reload an AST on each update.
@@ -190,7 +204,7 @@ The per-command child environment is then built by `buildNonInteractiveEnv()` (`
 - editor prompts disabled (`GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`, `EDITOR=true`, `VISUAL=true`),
 - terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
 - package-manager/tooling automation flags for non-interactive behavior (npm/pnpm/yarn/pip/cargo/terraform/gh, …),
-- locale pinned to `LANG=C.UTF-8`/`LC_ALL=C.UTF-8` (byte-order collation, `C` numbers and messages, UTF-8 text) over any inherited locale, unless the caller or direnv env sets `LANG` or an `LC_*` variable; user `!` commands keep the inherited locale, with the UTF-8 default applied on Windows only when none is set,
+- locale pinned to `LANG=C.UTF-8`/`LC_ALL=C.UTF-8` (byte-order collation, `C` numbers and messages, UTF-8 text) over any inherited locale, unless the caller or direnv env sets `LANG` or an `LC_*` variable; macOS ships no `C.UTF-8`, so there `LANG` and every `LC_*` category are `C` except `LC_CTYPE=en_US.UTF-8`, under an empty `LC_ALL`; user `!` commands keep the inherited locale, with the UTF-8 default applied on Windows only when none is set,
 - on Windows, Python UTF-8 stdio defaults (`PYTHONIOENCODING`, `PYTHONUTF8`) are added when neither is inherited or passed.
 
 ## Streaming and cancellation
@@ -258,7 +272,7 @@ Kitty direct-image and Sixel frames are extracted before text sanitization/trunc
 
 ### Shell output minimizer
 
-Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate `bash-original` artifact, referenced by a `[raw output: artifact://<id>]` footer, and returns `{ filter, inputBytes, outputBytes, artifactId }` as `BashResult.minimized`, which the tool result keeps as `details.meta.minimized` and the renderer shows as a `Minimized` footer fact. If saving returns no artifact ID, the lossless sink output is retained instead and no `minimized` is recorded.
+Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate spill, referenced by a `[raw output: local://<id>.log]` footer, and returns `{ filter, inputBytes, outputBytes, artifactId }` as `BashResult.minimized`, which the tool result keeps as `details.meta.minimized` and the renderer shows as a `Minimized` footer fact. If saving returns no artifact ID, the lossless sink output is retained instead and no `minimized` is recorded.
 
 ## Live tool updates and async jobs
 
@@ -270,7 +284,7 @@ When `async.enabled` is true and the call passes `async: true`, `BashTool` start
 
 ### Pipe streams (`proc://<id>/streams`)
 
-Every managed bash job passes a native `PipeStreams` to the embedded shell (`ShellRunOptions.streams`). The engine mirrors the bytes written into each `|` pipe of the run into a per-stream ring (newest 1 MiB; a run keeps up to 16 streams, 4 of them finished) without changing pipe semantics: backpressure, EOF, and an early-exiting consumer (`| head`) widowing the producer behave as on a plain pipe (`pi_shell::bash::Host::pipe_tap`, `crates/pi-shell/src/bash/mem.rs`, `crates/pi-shell/src/taps.rs`). `read proc://<id>/streams` lists them (stream `n` is what stage `n` reads) and `proc://<id>/streams/<n>` returns the decoded, sanitized text, so `cmd | tail -5` can be followed while `tail` holds `cmd`'s output back. The streams stay with the job row until it is evicted. User-shell (zsh/fish) and PTY runs are not tapped, and each stage's stderr still goes to the job's own output.
+Every managed bash job passes a native `PipeStreams` to the embedded shell (`ShellRunOptions.streams`). The engine mirrors the bytes written into each `|` pipe of the run into a per-stream ring (newest 1 MiB; a run keeps up to 16 streams, 4 of them finished) without changing pipe semantics: backpressure, EOF, and an early-exiting consumer (`| head`) widowing the producer behave as on a plain pipe (`omp_shell::bash::Host::pipe_tap`, `crates/shell/src/bash/mem.rs`, `crates/shell/src/taps.rs`). `read proc://<id>/streams` lists them (stream `n` is what stage `n` reads) and `proc://<id>/streams/<n>` returns the decoded, sanitized text, so `cmd | tail -5` can be followed while `tail` holds `cmd`'s output back. The streams stay with the job row until it is evicted. User-shell (zsh/fish) and PTY runs are not tapped, and each stage's stderr still goes to the job's own output.
 
 ### Job widgets
 
@@ -293,7 +307,7 @@ After execution:
 
 Result details can also include resolved/requested timeout, `timeoutDisabled`, client `terminalId`, wall time, async job state, and truncation metadata. Truncation includes direction/reason, total and shown line/byte counts, shown range, and `artifactId` when persistence succeeded.
 
-Built-in tool wrapping appends the model-facing recovery notice automatically, for example `Read artifact://<id> for full output`.
+Built-in tool wrapping appends the model-facing recovery notice automatically, for example `Read local://<id>.log for full output`.
 
 ## Rendering paths
 
@@ -303,7 +317,7 @@ Built-in tool wrapping appends the model-facing recovery notice automatically, f
 
 - collapsed mode shows visual-line-truncated preview,
 - expanded mode shows all currently available output text,
-- warning line includes truncation reason and `artifact://<id>` when truncated,
+- warning line includes truncation reason and `local://<id>.log` when truncated,
 - timeout value (from args) is shown in footer metadata line.
 
 ### Caveat: full artifact expansion
@@ -339,14 +353,14 @@ This table covers finite-command execution; named-service routing is described s
 ## Operational caveats
 
 - Interceptor only blocks commands when suggested tool is currently available in context.
-- If artifact allocation fails, truncation still occurs but no `artifact://` back-reference is available.
+- If artifact allocation fails, truncation still occurs but no `local://N.log` back-reference is available.
 - Ordinary shell session cache entries are process-scoped with no size-based eviction. Cancelled/broken sessions are removed and quarantined; per-job `:async:` entries are removed after completion. Shells with live background children can be retained until those children exit.
 - Timeout shaping is backend-specific: local non-PTY and interactive-PTY timeouts return error results with `details.timedOut`; the client-bridge terminal creation/execution timeout paths throw `ToolError`. Non-timeout cancellations throw across these tool-call routes.
 
 ## Implementation files
 
 - [`src/tools/bash.ts`](../packages/coding-agent/src/tools/bash.ts) — tool entrypoint, normalization/interception, service/async/PTY selection, result/error mapping.
-- [`packages/tui/src/tools/bash.ts`](../packages/tui/src/tools/bash.ts) — bash tool renderer and result detail types.
+- [`packages/coding-agent/src/ui/tools/bash.tsx`](../packages/coding-agent/src/ui/tools/bash.tsx) — bash tool renderer (detail types: `packages/coding-agent/src/tools/details/bash.ts`).
 - [`src/launch/services.ts`](../packages/coding-agent/src/launch/services.ts) — named-service validation and project-broker supervision.
 - [`src/internal-urls/proc-protocol.ts`](../packages/coding-agent/src/internal-urls/proc-protocol.ts) — service/job inspection, input, stop, and lifetime controls.
 - [`src/tools/bash-pty-selection.ts`](../packages/coding-agent/src/tools/bash-pty-selection.ts) — `canUseInteractiveBashPty` predicate for choosing the local PTY overlay.
@@ -356,12 +370,12 @@ This table covers finite-command execution; named-service routing is described s
 - [`src/exec/non-interactive-env.ts`](../packages/coding-agent/src/exec/non-interactive-env.ts) — non-interactive child-process env defaults (`buildNonInteractiveEnv`) used by the non-PTY executor.
 - [`src/exec/direnv.ts`](../packages/coding-agent/src/exec/direnv.ts) — direnv/devenv environment loading used by executor preflight.
 - [`src/tools/bash-interactive.ts`](../packages/coding-agent/src/tools/bash-interactive.ts) — PTY runtime, overlay UI, input normalization, and interactive `TERM` setup.
-- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
+- [`packages/coding-agent/src/tools/streaming-output.ts`](../packages/coding-agent/src/tools/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
 - [`src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — settings-to-output-budget helpers.
-- [`packages/tui/src/tools/output-meta.ts`](../packages/tui/src/tools/output-meta.ts) — truncation metadata and recovery notices.
+- [`packages/coding-agent/src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — truncation metadata and recovery notices.
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — session-level `executeBash` surface.
 - [`src/session/bash-runner.ts`](../packages/coding-agent/src/session/bash-runner.ts) — bang-command execution, result ownership, message recording, and abort lifecycle.
-- [`packages/tui/src/chat/bash-execution.ts`](../packages/tui/src/chat/bash-execution.ts) — interactive `!` command execution component.
+- [`packages/coding-agent/src/ui/transcript/exec-run.tsx`](../packages/coding-agent/src/ui/transcript/exec-run.tsx) — interactive `!` command execution component.
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — wiring for interactive `!` command UI stream/update completion.
 - [`src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts) — RPC `bash` and `abort_bash` command surface.
-- [`src/internal-urls/artifact-protocol.ts`](../packages/coding-agent/src/internal-urls/artifact-protocol.ts) — `artifact://<id>` resolution.
+- [`src/internal-urls/local-protocol.ts`](../packages/coding-agent/src/internal-urls/local-protocol.ts) — `local://` resolution, including spills (`local://<id>.log`).

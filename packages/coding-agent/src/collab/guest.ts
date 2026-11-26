@@ -24,14 +24,15 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, logger, toError } from "@oh-my-pi/pi-utils";
 import { takeAutoRejoin } from "@oh-my-pi/pi-wire";
-import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/view-model/overlays/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { fromWireEvent } from "../session/loop-end-wire";
 import type { SessionEntry } from "../session/session-entries";
 import { mintSessionId, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
-import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { GuestLifecycleEmitter } from "../extensibility/extensions/lifecycle-mirror";
 import { setSessionTerminalTitle } from "../utils/title-generator";
@@ -96,8 +97,7 @@ interface PendingSnapshot {
 /** Minimal context surface the idle-state reconciler mutates. */
 export interface GuestIdleReconcilerCtx {
 	statusLine: { markActivityEnd: () => void };
-	statusContainer: Pick<InteractiveModeContext["statusContainer"], "disposeChildren">;
-	loadingAnimation: { stop: () => void } | undefined;
+	clearWorking: InteractiveModeContext["clearWorking"];
 }
 
 /**
@@ -106,61 +106,32 @@ export interface GuestIdleReconcilerCtx {
  * dropped the event mid-stream. Reached via {@link reconcileGuestSnapshotHostState}
  * (the live `state`-frame and welcome/resync reconciler) when the host reports `isStreaming === false`:
  * folds the in-flight active-time window into the per-session meter (so
- * `time_spent` stops ticking) and stops the `Working…` loader if one is
- * still animating. No-op when the host is still streaming.
+ * `time_spent` stops ticking) and takes down the turn's `Working…` row if one
+ * still shows. No-op when the host is still streaming.
  *
- * Exported for direct unit testing; mutates the loader field on `ctx` so
- * the same loader is not stopped twice on subsequent reconciliations.
+ * Exported for direct unit testing.
  */
 export function reconcileGuestIdleHostState(ctx: GuestIdleReconcilerCtx, isStreaming: boolean): void {
 	if (isStreaming) return;
 	ctx.statusLine.markActivityEnd();
-	if (ctx.loadingAnimation) {
-		ctx.loadingAnimation.stop();
-		ctx.loadingAnimation = undefined;
-		ctx.statusContainer.disposeChildren();
-	}
+	ctx.clearWorking("turn");
 }
 
 /** Reconcile a welcome/resync snapshot's host activity state into the guest meter. */
 export interface GuestSnapshotActivityReconcilerCtx extends GuestIdleReconcilerCtx {
 	statusLine: GuestIdleReconcilerCtx["statusLine"] & { markActivityStart: () => void };
 	/**
-	 * Start (or re-attach) the live "Working…" loader. Mirrors
-	 * `InteractiveModeContext.ensureLoadingAnimation`, which is what
-	 * `EventController` calls on `agent_start`. Required so a guest that
-	 * missed an earlier `agent_start` (a reconnect dropped it mid-stream)
-	 * starts its spinner when the host later reports it is streaming.
+	 * Show the turn's "Working…" row unless a compaction or retry row holds the status row.
+	 * `EventController` calls it on `agent_start`; a guest that missed an earlier `agent_start`
+	 * (a reconnect dropped it mid-stream) needs it when the host later reports it is streaming.
 	 */
-	ensureLoadingAnimation: InteractiveModeContext["ensureLoadingAnimation"];
-	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
-	retryLoader: InteractiveModeContext["retryLoader"];
-}
-
-/** Status-area state which cannot outlive removal of its child components. */
-export interface GuestTransientStatusCtx {
-	statusContainer: Pick<InteractiveModeContext["statusContainer"], "clear">;
-	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
-	retryLoader: InteractiveModeContext["retryLoader"];
-}
-
-/** Stop and forget status-area loaders before detaching their components. */
-export function clearGuestTransientStatus(ctx: GuestTransientStatusCtx): void {
-	if (ctx.autoCompactionLoader) {
-		ctx.autoCompactionLoader.stop();
-		ctx.autoCompactionLoader = undefined;
-	}
-	if (ctx.retryLoader) {
-		ctx.retryLoader.stop();
-		ctx.retryLoader = undefined;
-	}
-	ctx.statusContainer.clear();
+	ensureWorkingRow: InteractiveModeContext["ensureWorkingRow"];
 }
 
 export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconcilerCtx, isStreaming: boolean): void {
 	if (isStreaming) {
 		ctx.statusLine.markActivityStart();
-		if (!ctx.autoCompactionLoader && !ctx.retryLoader) ctx.ensureLoadingAnimation();
+		ctx.ensureWorkingRow();
 		return;
 	}
 	reconcileGuestIdleHostState(ctx, false);
@@ -689,7 +660,8 @@ export class CollabGuestLink {
 				break;
 			}
 			case "event":
-				this.#applyEvent(frame.event);
+				// Hosts send every stopped loop as a flagged `agent_end` (see loop-end-wire.ts).
+				this.#applyEvent(fromWireEvent(frame.event));
 				break;
 			case "state": {
 				this.state = frame.state;
@@ -698,8 +670,6 @@ export class CollabGuestLink {
 				this.#updateStatusSegment();
 				reconcileGuestSnapshotHostState(this.#ctx, frame.state.isStreaming);
 				this.#reconcileLifecycle(frame.state.isStreaming);
-				this.#ctx.statusLine.invalidate();
-				this.#ctx.ui.requestRender();
 				break;
 			}
 			case "bus":
@@ -744,7 +714,7 @@ export class CollabGuestLink {
 		// in-flight assistant message predates the snapshot. message_update
 		// carries the full accumulating message, so synthesize the missing start
 		// before the first orphaned update; every other handler is tolerant of
-		// unknown anchors (guarded by streamingComponent/pendingTools lookups).
+		// unknown anchors (guarded by streaming/pendingTools lookups).
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			this.#assistantStreamSynced = true;
 			this.#streamedSnapshot = event.message;
@@ -817,11 +787,7 @@ export class CollabGuestLink {
 				this.#lifecycleEmitter.emit(runner, { type: "agent_start" });
 			}
 		} else if (this.#lifecycleEmitter.sawAgentStart) {
-			this.#lifecycleEmitter.emit(runner, {
-				type: "agent_end",
-				messages: [...this.#ctx.session.messages],
-				isTerminal: true,
-			});
+			this.#lifecycleEmitter.emit(runner, { type: "agent_end", messages: [...this.#ctx.session.messages] });
 		}
 	}
 
@@ -968,17 +934,11 @@ export class CollabGuestLink {
 
 	#clearTransientUi(): void {
 		this.#clearUiRequests();
-		clearGuestTransientStatus(this.#ctx);
-		this.#ctx.pendingShellContainer.clear();
-		this.#ctx.pendingMessagesContainer.clear();
+		// The view's transient rows, streaming state and pending tools go; the compaction queue
+		// belonged to the session being left, so it is dropped rather than handed to the editor.
+		this.#ctx.clearTransientSessionUi({ viewOnly: true });
 		this.#ctx.compactionQueuedMessages = [];
-		this.#ctx.streamingComponent = undefined;
-		this.#ctx.streamingMessage = undefined;
-		this.#ctx.pendingTools.clear();
-		if (this.#ctx.loadingAnimation) {
-			this.#ctx.loadingAnimation.stop();
-			this.#ctx.loadingAnimation = undefined;
-		}
+		this.#ctx.updatePendingMessagesDisplay();
 	}
 
 	#restoreAfterDisconnect(): void {
@@ -1046,13 +1006,11 @@ export class CollabGuestLink {
 			throw new Error("Local session restoration was cancelled");
 		}
 		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
-		this.#ctx.statusLine.invalidate();
+		this.#ctx.statusLine.refresh();
 		this.#ctx.statusLine.resetActiveTime();
-		this.#ctx.ui.requestRender();
 		this.#ctx.updateEditorBorderColor();
 		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
-		this.#ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
 	#updateStatusSegment(): void {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
@@ -6,11 +6,12 @@ import type {
 	ApiKeyResolver,
 	AssistantMessage,
 	AssistantMessageEvent,
-	AssistantMessageEventStream,
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
@@ -69,6 +70,21 @@ function emptyStream(): AssistantMessageEventStream {
 		for (const event of events) yield event;
 	})();
 	return Object.assign(iterator, { result: async () => message }) as unknown as AssistantMessageEventStream;
+}
+
+/** A stream that records the key its request resolves before replaying {@link fakeStream}. */
+function keyRecordingStream(options: SimpleStreamOptions | undefined, keys: unknown[]): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
+			keys.push(await options.apiKey({ error: undefined, lastChance: false }));
+			for await (const event of fakeStream()) stream.push(event);
+		} catch (error) {
+			stream.fail(error);
+		}
+	})();
+	return stream;
 }
 
 interface FakeRegistryOptions {
@@ -336,21 +352,52 @@ describe("bench OAuth account selection", () => {
 					writeStdout: () => {},
 					writeStderr: () => {},
 					setExitCode: () => {},
-					streamSimple: (_model, _context, options) => {
-						const stream = fakeStream();
-						const iterator = (async function* () {
-							if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
-							keys.push(await options.apiKey({ error: undefined, lastChance: false }));
-							yield* stream;
-						})();
-						return Object.assign(iterator, { result: stream.result });
-					},
+					streamSimple: (_model, _context, options) => keyRecordingStream(options, keys),
 				},
 			);
 			expect(summary.failures).toBe(0);
 			expect(keys).toEqual(["access-b", "access-b"]);
 		} finally {
 			auth.close();
+		}
+	});
+
+	it("sends a structured-credential provider's encoded key for the selected account", async () => {
+		// Antigravity is paused in its auth rules; account selection stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
+		const auth = createInMemoryAuthStorage();
+		try {
+			await auth.credentials.set(
+				"google-antigravity",
+				["a", "b"].map(suffix => ({
+					type: "oauth" as const,
+					access: `access-${suffix}`,
+					refresh: `refresh-${suffix}`,
+					expires: Date.now() + 3_600_000,
+					projectId: `project-${suffix}`,
+					email: `${suffix}@example.com`,
+				})),
+			);
+			const model = fakeModel("google-antigravity", "test-model");
+			const registry = fakeRegistry({ models: [model], authedProviders: ["google-antigravity"] });
+			const keys: unknown[] = [];
+			const summary = await runBenchCommand(
+				{ models: ["google-antigravity/test-model"], flags: { account: 2, runs: 1, json: true } },
+				{
+					createRuntime: async () => ({ modelRegistry: registry, oauth: auth.oauth }),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					streamSimple: (_model, _context, options) => keyRecordingStream(options, keys),
+				},
+			);
+			expect(summary.failures).toBe(0);
+			expect(keys.map(key => JSON.parse(String(key)))).toEqual([
+				expect.objectContaining({ token: "access-b", projectId: "project-b", refreshToken: "refresh-b" }),
+			]);
+		} finally {
+			auth.close();
+			vi.restoreAllMocks();
 		}
 	});
 });
@@ -645,14 +692,18 @@ describe("bench service tier", () => {
 				writeStderr: () => {},
 				setExitCode: () => {},
 				streamSimple: () => {
-					const stream = fakeStream();
-					const iterator = (async function* () {
-						for await (const event of stream) {
-							if (event.type === "done") event.message.disabledFeatures = ["priority"];
-							yield event;
+					const stream = new AssistantMessageEventStream();
+					void (async () => {
+						try {
+							for await (const event of fakeStream()) {
+								if (event.type === "done") event.message.disabledFeatures = ["priority"];
+								stream.push(event);
+							}
+						} catch (error) {
+							stream.fail(error);
 						}
 					})();
-					return Object.assign(iterator, { result: stream.result });
+					return stream;
 				},
 			},
 		);

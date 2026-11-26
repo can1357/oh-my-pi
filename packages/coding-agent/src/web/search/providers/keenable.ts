@@ -192,6 +192,11 @@ export class KeenableProvider extends SearchProvider {
 		return true;
 	}
 
+	/** Without a key, search runs on the keyless public endpoint. */
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return !this.isAvailable(authStorage);
+	}
+
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {
 		return searchKeenable(params);
 	}

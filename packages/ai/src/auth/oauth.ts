@@ -86,6 +86,7 @@ export class OAuthAccounts implements OAuthApi {
 				ctrl.onPrompt({
 					message: `⚠ ${def.name}: use at your own risk\n\n${warning}\n\nType "yes" to accept the risk and continue`,
 					placeholder: "yes",
+					riskAcknowledgement: true,
 				}),
 			);
 			if (answer.trim().toLowerCase() !== "yes") throw new AIError.LoginCancelledError();
@@ -225,11 +226,12 @@ export class OAuthAccounts implements OAuthApi {
 					error: "OAuth access unavailable",
 				};
 			}
-			const { credential } = resolved;
+			const { credential, apiKey } = resolved;
 			return {
 				ok: true,
 				credentialId: selection.credentialId,
 				accessToken: credential.access,
+				apiKey,
 				accountId: credential.accountId,
 				email: credential.email,
 				projectId: credential.projectId,

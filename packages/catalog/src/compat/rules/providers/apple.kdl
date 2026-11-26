@@ -1,5 +1,5 @@
 // Apple Foundation Models: the on-device system language model (macOS 27+,
-// Apple silicon), bridged in-process by pi-natives. Models are discovered at
+// Apple silicon), bridged in-process by omp-natives. Models are discovered at
 // runtime from the model's availability; nothing is bundled.
 
 provider "apple" {

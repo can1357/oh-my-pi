@@ -1,4 +1,5 @@
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import type { SessionCredential } from "./affinity";
 import type {
 	OAuthAuthInfo,
 	OAuthController,
@@ -6,7 +7,7 @@ import type {
 	OAuthPrompt,
 	OAuthProviderId,
 } from "../registry/oauth/types";
-import type { Provider } from "../types";
+import type { Provider, ServiceTier } from "../types";
 import type {
 	ClientUsageIdentity,
 	ClientUsageReport,
@@ -209,6 +210,8 @@ export type CompletionProbeCredential =
 	| {
 			type: "oauth";
 			accessToken: string;
+			/** The request key built by the provider's `getApiKey` hook, when it owns one; send it as-is. */
+			apiKey?: string;
 			refreshToken?: string;
 			expiresAt?: number;
 			accountId?: string;
@@ -276,9 +279,10 @@ export const REMOTE_REFRESH_SENTINEL = "__remote__" as const;
 /** Opaque marker for OAuth refresh tokens retained by a broker. */
 export type RemoteRefreshSentinel = typeof REMOTE_REFRESH_SENTINEL;
 
-/** OAuth credential with refresh token replaced by the broker sentinel. */
-export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh"> & {
+/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable client secrets removed. */
+export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret"> & {
 	refresh: RemoteRefreshSentinel;
+	kiroClientSecret?: never;
 };
 
 /** Discriminated credential payload as published by the broker. */
@@ -349,7 +353,7 @@ export type AuthStorageOptions = {
 	usageLogger?: UsageLogger;
 	/**
 	 * Resolve a config value (API key, header value, etc.) to an actual value.
-	 * - coding-agent injects its resolveConfigValue (supports "!command" syntax via pi-natives)
+	 * - coding-agent injects its resolveConfigValue (supports "!command" syntax via omp-natives)
 	 * - Default: checks environment variable first, then treats as literal
 	 */
 	configValueResolver?: (config: string) => Promise<string | undefined>;
@@ -406,9 +410,11 @@ export type AuthStorageOptions = {
  * `getApiKey` will hand it out. When `false`, `retryAtMs` (epoch ms) carries
  * the earliest moment any same-type sibling's temporary block expires —
  * callers should prefer waiting until then over the provider's (often
- * multi-hour) retry-after when it is sooner. `retryAtMs` is `undefined` when
- * no sibling credentials exist at all, or when the session has no tracked
- * credential to rotate away from.
+ * multi-hour) retry-after when it is sooner. Siblings with a live model-policy
+ * block for the requested model are skipped: they were refused that model, so
+ * their expiry is no recovery. `retryAtMs` is `undefined` when no sibling
+ * credentials exist at all, when every blocked sibling was refused the model,
+ * or when the session has no tracked credential to rotate away from.
  *
  * `blockedUntilMs` (epoch ms) is the just-blocked credential's own unblock
  * deadline — the later of the caller's retry-after and any exhausted window
@@ -491,6 +497,22 @@ export type AuthApiKeyOptions = {
 	 */
 	accountIds?: readonly string[];
 	/**
+	 * Service tier the request will ask for (`/fast`, `/fast ultra`). Selection
+	 * prefers a credential that offers it — an entitled OAuth account, kept even
+	 * on paid overage, else a stored or environment API key — and falls back to
+	 * ordinary balancing across the rest once those are blocked or refused the
+	 * tier. A resolution that could not honor it reports
+	 * {@link ResolvedApiKey.serviceTierUnavailable}.
+	 */
+	serviceTier?: ServiceTier;
+	/**
+	 * Discovery verdicts for `serviceTier` on `modelId`: {@link oauthAccountKey}
+	 * → whether that account's own catalog offers the tier (see
+	 * `serviceTierOffersByAccount`). Accounts discovery did not judge are
+	 * absent and fall back to the provider's usage-report gate.
+	 */
+	serviceTierAccounts?: Readonly<Record<string, boolean>>;
+	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of
 	 * stranding the caller for `timeoutMs * (maxRetries + 1)`.
@@ -534,6 +556,12 @@ export function oauthAccountKey(identity: {
 
 /** Non-secret identity bound to the OAuth credential selected for one request attempt. */
 export interface OAuthRequestIdentity {
+	/**
+	 * Provider account UUID of the selected credential (Anthropic
+	 * `oauth_account.account_uuid`). Non-secret; lets wire identity such as the
+	 * Claude `device_id` follow the account actually serving the request.
+	 */
+	accountId?: string;
 	orgId?: string;
 	region?: string;
 	inferenceRegion?: "global" | "eu" | "us";
@@ -604,8 +632,13 @@ export interface OAuthAccountIdentity {
 	orgName?: string;
 }
 
-/** Successful OAuth access or account-specific failure. */
-export type OAuthAccessResolution = ({ ok: true } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
+/**
+ * Successful OAuth access or account-specific failure. A success also carries
+ * `apiKey`: the bytes the provider's transport sends for this account, which
+ * differ from `accessToken` for providers whose API key is a structured
+ * credential (`api-key-format "structured"`) or a provider `getApiKey` hook.
+ */
+export type OAuthAccessResolution = ({ ok: true; apiKey: string } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
 
 /**
  * Read-only identity of one stored OAuth account, in stable storage order.
@@ -779,6 +812,28 @@ export type MarkUsageLimitOptions = {
 	signal?: AbortSignal;
 };
 
+/** Identify the credential that was refused a service tier, and for how long to stop preferring it. */
+export type MarkServiceTierUnavailableOptions = {
+	/**
+	 * Stored row that served the refused request
+	 * ({@link ResolvedApiKey.credentialId}). Omit when the bearer had no row
+	 * (environment variable, `--api-key`, `models.yml`): the refusal is then
+	 * held in this process against the provider's unstored key.
+	 */
+	credentialId?: number;
+	serviceTier: ServiceTier;
+	modelId: string;
+	/** Provider-stated cooldown; defaults to {@link SERVICE_TIER_BLOCK_MS}. */
+	retryAfterMs?: number;
+};
+
+/**
+ * How long a credential refused a service tier stays out of tier-preferring
+ * selection when the provider states no cooldown. Matches the pause Claude
+ * Code applies after a refused fast-mode request before probing again.
+ */
+export const SERVICE_TIER_BLOCK_MS = 30 * 60_000;
+
 /** Resolve a failed request to its credential and rotate if possible. */
 export type RotateCredentialOptions = {
 	error?: unknown;
@@ -805,6 +860,8 @@ export type RotateCredentialOptions = {
 export interface CredentialRotation {
 	switched: boolean;
 	afterSiblingWait?: boolean;
+	/** Explanation when a restricted pool is blocked and includes an OAuth organization rejection. */
+	poolUnavailableReason?: string;
 }
 
 /** Filter saved reset credits by provider and session. */
@@ -1251,6 +1308,14 @@ export interface SessionsApi {
 	 * headroom, before considering a model/provider fallback.
 	 */
 	release(provider: string, sessionId: string): boolean;
+	/**
+	 * Read-only display and usage-attribution surface: the credential row that
+	 * most recently served `sessionId` for `provider`, including API-key rows
+	 * (which carry no OAuth identity). Selection, ranking, and rotation never
+	 * consult it. Optional because worker/broker seams may not expose it;
+	 * callers must treat its absence as "unknown attribution".
+	 */
+	sticky?(provider: string, sessionId: string | undefined): SessionCredential | undefined;
 }
 
 /** Usage reporting, observation, and provider configuration. */
@@ -1406,6 +1471,24 @@ export interface LimitsApi {
 		sessionId: string | undefined,
 		options?: RotateCredentialOptions,
 	): Promise<CredentialRotation>;
+	/**
+	 * Record that the provider refused `serviceTier` on `modelId` for one
+	 * credential (fast mode not enabled, out of usage credits, fast-mode rate
+	 * limit). Until the block expires, tier-preferring selection treats that
+	 * credential as not offering the tier, so requests move to one that does or
+	 * run at standard speed; ordinary selection is unaffected. Resolves `false`
+	 * when the named stored row is gone or the refusal was already on record —
+	 * selection could not keep the tier away from this credential, so the
+	 * caller drops the tier itself.
+	 */
+	markServiceTierUnavailable(provider: string, options: MarkServiceTierUnavailableOptions): Promise<boolean>;
+	/**
+	 * Forget every recorded refusal of `serviceTier` on `modelId` for a provider
+	 * and drop its cached usage reports, so the next request probes each
+	 * credential for the tier again. For re-arming the tier (`/fast on`) once
+	 * the user has fixed what the provider refused.
+	 */
+	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void>;
 	/** Invalidate a credential matching an API key after authentication failure. */
 	invalidateMatching(
 		provider: string,

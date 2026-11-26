@@ -5,6 +5,7 @@ import { FileType, glob } from "@oh-my-pi/pi-natives";
 import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
+	getBaseConfigRoot,
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
@@ -13,6 +14,7 @@ import {
 	normalizePathForComparison,
 	parseFrontmatter,
 	pathIsWithin,
+	relativePathWithinNormalizedRoot,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled } from "../capability";
@@ -31,7 +33,8 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
+import { parseConfiguredThinkingLevel } from "../thinking/levels";
 import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
@@ -238,6 +241,9 @@ function buildRule(
 		rawMode === "never" || rawMode === "prose-only" || rawMode === "tool-only" || rawMode === "always"
 			? rawMode
 			: undefined;
+	const rawRepeat = frontmatter.repeatMode;
+	const repeatMode: Rule["repeatMode"] =
+		rawRepeat === "once" || rawRepeat === "after-gap" || rawRepeat === "always" ? rawRepeat : undefined;
 	return {
 		name: resolvedName,
 		path: filePath,
@@ -251,6 +257,7 @@ function buildRule(
 		scope,
 		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
+		repeatMode,
 		_source: source,
 	};
 }
@@ -302,7 +309,7 @@ export interface ParsedAgentFields {
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
-	/** `true` = keep `yield` and the output schema when `task.structured` is off. */
+	/** `true` = keep the output schema (and with it `yield`) when `task.structured` is off. */
 	structured?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
@@ -587,6 +594,14 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 	return obj;
 }
 
+/** Concatenate per-root load results in order; warnings are always an array. */
+export function mergeLoadResults<T>(results: readonly LoadResult<T>[]): LoadResult<T> {
+	return {
+		items: results.flatMap(r => r.items),
+		warnings: results.flatMap(r => r.warnings ?? []),
+	};
+}
+
 /**
  * Load files from a directory matching extensions.
  * Uses native glob for fast filesystem scanning with gitignore support.
@@ -702,11 +717,12 @@ function samePath(left: string, right: string): boolean {
 function isWithin(parent: string, child: string): boolean {
 	const normalizedParent = path.resolve(parent);
 	const normalizedChild = path.resolve(child);
-	const relative = path.relative(
-		process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
-		process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
+	return (
+		relativePathWithinNormalizedRoot(
+			process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
+			process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
+		) !== null
 	);
-	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
 /**
@@ -1049,9 +1065,9 @@ export function getProjectDiscoveryCeilings(): ReadonlySet<string> {
 
 /** The current user's config roots are never project anchors. */
 export function isUserConfigRoot(root: string): boolean {
-	const configDir = normalizePathForComparison(path.join(root, getConfigDirName()));
+	const configDir = normalizePathForComparison(path.join(root, SOURCE_PATHS.native.projectDir));
 	return (
-		configDir === normalizePathForComparison(path.join(os.homedir(), getConfigDirName())) ||
+		configDir === normalizePathForComparison(getBaseConfigRoot()) ||
 		configDir === normalizePathForComparison(path.dirname(getPluginsDir()))
 	);
 }
@@ -1112,7 +1128,7 @@ async function resolveProjectRegistryPath(cwd: string, ceilings: ReadonlySet<str
 	}
 
 	// Existing .omp/ directories still win, even above the git root, except foreign user roots.
-	const configDirName = getConfigDirName();
+	const configDirName = SOURCE_PATHS.native.projectDir;
 	let aboveGitRoot = nearestGitRoot === null;
 	dir = path.resolve(cwd);
 	while (!ceilings.has(normalizePathForComparison(dir))) {
@@ -1123,18 +1139,56 @@ async function resolveProjectRegistryPath(cwd: string, ceilings: ReadonlySet<str
 				!isUserConfigRoot(dir) &&
 				(!aboveGitRoot || !(await isForeignUserConfigRoot(dir, configDirName)))
 			) {
-				return path.join(dir, configDirName, "plugins", "installed_plugins.json");
+				return projectRegistryIn(await projectConfigDir(dir));
 			}
 		} catch {
 			// not found at this level — continue up
 		}
+		const legacy = await legacyProjectConfigDir(dir);
+		if (legacy && !isUserConfigRoot(dir)) return projectRegistryIn(legacy);
 		if (dir === nearestGitRoot) aboveGitRoot = true;
 		const parent = path.dirname(dir);
 		if (parent === dir) break; // filesystem root
 		dir = parent;
 	}
 
-	return gitAnchor ? path.join(gitAnchor, getConfigDirName(), "plugins", "installed_plugins.json") : null;
+	return gitAnchor ? projectRegistryIn(await projectConfigDir(gitAnchor)) : null;
+}
+
+function projectRegistryIn(configDir: string): string {
+	return path.join(configDir, "plugins", "installed_plugins.json");
+}
+
+/** `<root>/.omp`, unless only a pre-relocation project config dir holds install state (see {@link legacyProjectConfigDir}). */
+async function projectConfigDir(root: string): Promise<string> {
+	const current = path.join(root, SOURCE_PATHS.native.projectDir);
+	if (await hasProjectInstallState(current)) return current;
+	return (await legacyProjectConfigDir(root)) ?? current;
+}
+
+/**
+ * Builds that joined `PI_CONFIG_DIR` onto the project root wrote project plugin
+ * registries and skill manifests to `<root>/<PI_CONFIG_DIR>` instead of
+ * `<root>/.omp`. Keep reading that directory while it is the only one with
+ * install state, so those installs do not vanish. Only a directory inside
+ * `root` that is not the user config root qualifies.
+ */
+async function legacyProjectConfigDir(root: string): Promise<string | undefined> {
+	const name = getConfigDirName();
+	if (name === SOURCE_PATHS.native.projectDir) return undefined;
+	const dir = path.join(root, name);
+	const relative = path.relative(root, dir);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	if (normalizePathForComparison(dir) === normalizePathForComparison(getBaseConfigRoot())) return undefined;
+	return (await hasProjectInstallState(dir)) ? dir : undefined;
+}
+
+/** Whether `configDir` holds a project plugin registry or skill manifest (`SKILLS_MANIFEST_FILE`). */
+async function hasProjectInstallState(configDir: string): Promise<boolean> {
+	for (const file of [projectRegistryIn(configDir), path.join(configDir, "skills.json")]) {
+		if (await fs.promises.exists(file)) return true;
+	}
+	return false;
 }
 
 /**
@@ -1152,14 +1206,15 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 	const ceilings = getProjectDiscoveryCeilings();
 	const resolved = await resolveProjectRegistryPath(cwd, ceilings);
 	if (resolved) return resolved;
+	const configDirName = SOURCE_PATHS.native.projectDir;
 	// A cwd containing .omp/ at or below a git root already resolved above.
 	if (
 		ceilings.has(normalizePathForComparison(cwd)) ||
 		isUserConfigRoot(cwd) ||
-		(await isForeignUserConfigRoot(cwd, getConfigDirName()))
+		(await isForeignUserConfigRoot(cwd, configDirName))
 	)
 		return undefined;
-	return path.join(cwd, getConfigDirName(), "plugins", "installed_plugins.json");
+	return projectRegistryIn(await projectConfigDir(cwd));
 }
 
 async function canonicalClaudeProjectPath(projectPath: string): Promise<string | null> {

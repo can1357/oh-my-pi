@@ -10,7 +10,11 @@ import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-model
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	getModelMatchPreferences,
+	resolveModelScope,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions as buildCliSessionOptions,
@@ -667,6 +671,23 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("runs a subagent on its parent's model when its deferred pattern matches nothing", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("missing-provider/missing-model"),
+			modelPatternParentFallback: "runtime-provider/runtime-model",
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(modelFallbackMessage).toBe(
+				'Model "missing-provider/missing-model" not found. Using parent model runtime-provider/runtime-model',
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("names the provider's near ids when a deferred provider-qualified pattern stays unresolved", async () => {
 		const { session, modelFallbackMessage } = await createAgentSession(
 			buildSessionOptions("runtime-provider/runtime-modl"),
@@ -686,7 +707,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const { session, modelFallbackMessage } = await createAgentSession({
 			...buildSessionOptions("runtime-provider/runtime-model"),
 			settings,
-			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+			modelPatternParentFallback: "runtime-provider/runtime-fallback-model",
 		});
 
 		try {
@@ -798,7 +819,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			preloadedCustomToolPaths: [],
 			toolNames: ["read"],
 			modelPattern: "runtime-provider/runtime-model",
-			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
+			modelPatternParentFallback: `${parentModel.provider}/${parentModel.id}`,
 		});
 
 		try {
@@ -1396,7 +1417,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(chainFor(session)).toEqual({ keys: [role], candidates: [] });
 
 			// A runtime fallback answers; resume must still restore the primary as the default.
-			session.sessionManager.appendModelChange(fallback, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			session.sessionManager.appendModelChange(fallback, EPHEMERAL_MODEL_CHANGE_ROLE, {
+				fallback: { from: primary, trigger: "request-error" },
+			});
 			session.sessionManager.appendMessage({
 				role: "assistant",
 				content: [{ type: "text", text: "done" }],
@@ -1564,6 +1587,63 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				prefetchSpy.mockRestore();
 				getApiKeySpy.mockRestore();
 				authStorage.close();
+			}
+		},
+	);
+
+	test.each(["default role", "discovered default role", "default retry chain"] as const)(
+		"honors enabledModels pins when selecting from the %s",
+		async source => {
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			authStorage.keys.setRuntime("openrouter", "test-key");
+			const modelsPath = path.join(tempDir, "models.yml");
+			const discovery = source === "discovered default role";
+			const id = discovery ? "test/sdk-discovered-routing" : "z-ai/glm-4.7";
+			const selectors = [`openrouter/${id}@sambanova`, `openrouter/${id}@cerebras`] as const;
+			const retry = source === "default retry chain";
+			const settings = Settings.isolated({
+				enabledModels: [selectors[1]],
+				modelRoles: { default: retry ? "missing-provider/missing-model" : selectors.join(",") },
+				"retry.modelFallback": retry,
+				"retry.fallbackChains": retry ? { default: [...selectors] } : {},
+			});
+			if (discovery) {
+				await Bun.write(
+					modelsPath,
+					JSON.stringify({
+						providers: {
+							openrouter: {
+								baseUrl: "http://127.0.0.1:9995",
+								api: "openai-completions",
+								auth: "none",
+								discovery: { type: "openai-models-list" },
+							},
+						},
+					}),
+				);
+			}
+			let modelListCalls = 0;
+			const modelRegistry = new ModelRegistry(authStorage, modelsPath, {
+				fetch: async input => {
+					if (String(input) !== "http://127.0.0.1:9995/v1/models") throw new Error(`Unexpected URL: ${input}`);
+					modelListCalls++;
+					return Response.json({ data: [{ id, context_length: 65_536 }] });
+				},
+			});
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...buildSessionOptions(""),
+				authStorage,
+				modelRegistry,
+				settings,
+				extensions: [],
+			});
+			try {
+				if (discovery) expect(modelListCalls).toBeGreaterThan(0);
+				expect(session.model && formatModelStringWithRouting(session.model)).toBe(selectors[1]);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
 			}
 		},
 	);
@@ -1858,6 +1938,40 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			}
 		},
 	);
+
+	test.each([
+		{ name: "drops the level a retry-fallback hop applied", userPick: undefined, expected: Effort.High },
+		{ name: "keeps a level the user picked during the fallback", userPick: Effort.Low, expected: Effort.Low },
+	])("resumes the primary after a retry fallback and $name", async ({ userPick, expected }) => {
+		const transcript = () => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendModelChange("anthropic/claude-sonnet-4-5");
+			sessionManager.appendThinkingLevelChange(Effort.High);
+			// A `:xhigh` chain entry: the hop records the fallback model, then the entry's level.
+			sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, {
+				fallback: { from: "anthropic/claude-sonnet-4-5", trigger: "request-error" },
+			});
+			sessionManager.appendThinkingLevelChange(Effort.XHigh, Effort.XHigh);
+			if (userPick) sessionManager.appendThinkingLevelChange(userPick, userPick);
+			sessionManager.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+			return sessionManager;
+		};
+		// Bare resume, and a subagent revival that re-supplies its role selector.
+		for (const modelPattern of [undefined, "anthropic/claude-sonnet-4-5:high"]) {
+			const { session } = await createAgentSession({
+				...buildResumeOptions(),
+				sessionManager: transcript(),
+				settings: Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5:high" } }),
+				...(modelPattern ? { modelPattern } : {}),
+			});
+			try {
+				expect(`${session.model?.provider}/${session.model?.id}`).toBe("anthropic/claude-sonnet-4-5");
+				expect(session.configuredThinkingLevel()).toBe(expected);
+			} finally {
+				await session.dispose();
+			}
+		}
+	});
 
 	test("restores an extension-discovered session model before rejecting headless resume", async () => {
 		const options = buildResumeOptions();

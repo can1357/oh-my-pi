@@ -28,7 +28,7 @@ import {
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
@@ -275,34 +275,6 @@ describe("Mnemopi tool factories", () => {
 		expect(MemoryReflectTool.createIf(session)).toBeInstanceOf(MemoryReflectTool);
 		expect(MemoryEditTool.createIf(session)).toBeInstanceOf(MemoryEditTool);
 	});
-
-	it("names sibling memory tools by their xd:// URL only when they are mounted as devices", () => {
-		const session = makeSession(Settings.isolated({ "memory.backend": "mnemopi" }));
-		const recall = new MemoryRecallTool(session);
-		const reflect = new MemoryReflectTool(session);
-		const edit = new MemoryEditTool(session);
-		const tools = new Map<string, Tool>([
-			["recall", recall],
-			["reflect", reflect],
-			["memory_edit", edit],
-		]);
-		session.xdev = {
-			tools,
-			mountedNames: new Set(["recall", "memory_edit"]),
-			builtInNames: new Set(tools.keys()),
-			isActive: name => name === "reflect",
-		};
-
-		expect(reflect.description).toContain("unlike `xd://recall`, blends them");
-		expect(recall.description).toContain("`reflect`: synthesized answer");
-		expect(recall.description).toContain("Before any `xd://memory_edit update`");
-		expect(edit.description).toContain("Only ids returned by `xd://recall`.");
-
-		// A mounted device without a summary makes catalog summaries read its description;
-		// rendering refs must not depend on them, or this recurses without bound.
-		Object.assign(recall, { summary: undefined });
-		expect(recall.description).toContain("`reflect`: synthesized answer");
-	});
 });
 
 describe("retain.execute", () => {
@@ -402,9 +374,11 @@ describe("retain.execute", () => {
 		await registeredState?.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
-		expect(retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }))).toEqual([
-			{ content: "shared fact", tags: undefined },
+		// Items of one call can share a publication mtime, so their order within the request is unspecified.
+		const sent = retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }));
+		expect(sent.toSorted((a, b) => a.content.localeCompare(b.content))).toEqual([
 			{ content: "explicitly global fact", tags: undefined },
+			{ content: "shared fact", tags: undefined },
 		]);
 	});
 
@@ -1066,9 +1040,34 @@ describe("Mnemopi backend lifecycle", () => {
 
 		expect(warn).toHaveBeenCalledWith("Mnemopi: lifecycle hook failed", {
 			banks: ["test-bank"],
-			operation: "agent_end retention",
+			operation: "turn-end retention",
 			error: "Cannot use a closed database",
 		});
+	});
+
+	it("auto-retains on a yielded agent_pause but not a non-yielded one", async () => {
+		const listeners = new Set<AgentSessionEventListener>();
+		const entries = [{ type: "message", message: { role: "user", content: "turn one" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ retainEveryNTurns: 1 }), {
+			entries: () => entries,
+			listeners,
+		});
+		state.attachSessionListeners();
+		const retained = Promise.withResolvers<void>();
+		const retainSpy = vi.spyOn(state, "retainMessages").mockImplementation(async () => retained.resolve());
+		const emit = (yielded: boolean) => {
+			for (const listener of listeners) {
+				listener({ type: "agent_pause", messages: [], yielded, awaiting: yielded } as never);
+			}
+		};
+
+		emit(false);
+		expect(retainSpy).not.toHaveBeenCalled();
+		emit(true);
+		await retained.promise;
+
+		expect(retainSpy).toHaveBeenCalledTimes(1);
+		expect(retainSpy.mock.calls[0][0]).toEqual([{ role: "user", content: "turn one" }]);
 	});
 
 	it("contains failures before agent-start recall reaches its internal bank guard", async () => {

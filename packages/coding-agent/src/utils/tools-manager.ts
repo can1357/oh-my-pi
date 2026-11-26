@@ -1,13 +1,8 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { $env, $which, fetchWithRetry, getToolsDir, logger, ptree, TempDir, USER_AGENT } from "@oh-my-pi/pi-utils";
-import { extractArchive } from "@oh-my-pi/pi-utils/ar";
-import { type DownloadTracker, trackDownload, withDownload } from "../downloads/activity";
+import { $which, fetchWithRetry, logger, ptree, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import { trackDownload } from "../downloads/activity";
 
-const TOOLS_DIR = getToolsDir();
 const TOOL_DOWNLOAD_TIMEOUT_MS = 120_000;
-const TOOL_METADATA_TIMEOUT_MS = 5000;
 
 type BodyReadResult = Bun.ReadableStreamDefaultReadResult<Uint8Array>;
 type BodyReader = {
@@ -67,140 +62,6 @@ async function writeResponseBody(
 	}
 }
 
-interface ToolConfig {
-	name: string;
-	repo: string; // GitHub repo (e.g., "sharkdp/fd")
-	binaryName: string; // Name of the binary inside the archive
-	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
-	isDirectBinary?: boolean; // If true, asset is a direct binary (not an archive)
-	getAssetName: (version: string, plat: string, architecture: string) => string | null;
-}
-
-const TOOLS: Record<string, ToolConfig> = {
-	sd: {
-		name: "sd",
-		repo: "chmln/sd",
-		binaryName: "sd",
-		tagPrefix: "v",
-		getAssetName: (version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `sd-v${version}-${archStr}-apple-darwin.tar.gz`;
-			} else if (plat === "linux") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `sd-v${version}-${archStr}-unknown-linux-musl.tar.gz`;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `sd-v${version}-${archStr}-pc-windows-msvc.zip`;
-			}
-			return null;
-		},
-	},
-	sg: {
-		name: "ast-grep",
-		repo: "ast-grep/ast-grep",
-		binaryName: "sg",
-		tagPrefix: "",
-		getAssetName: (_version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `ast-grep-${archStr}-apple-darwin.zip`;
-			} else if (plat === "linux") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `ast-grep-${archStr}-unknown-linux-gnu.zip`;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `ast-grep-${archStr}-pc-windows-msvc.zip`;
-			}
-			return null;
-		},
-	},
-	"yt-dlp": {
-		name: "yt-dlp",
-		repo: "yt-dlp/yt-dlp",
-		binaryName: "yt-dlp",
-		tagPrefix: "",
-		isDirectBinary: true,
-		getAssetName: (_version, plat, architecture) => {
-			if (plat === "darwin") {
-				return "yt-dlp_macos"; // Universal binary
-			} else if (plat === "linux") {
-				return architecture === "arm64" ? "yt-dlp_linux_aarch64" : "yt-dlp_linux";
-			} else if (plat === "win32") {
-				return architecture === "arm64" ? "yt-dlp_arm64.exe" : "yt-dlp.exe";
-			}
-			return null;
-		},
-	},
-};
-
-// CLI packages installed via uv/pip
-interface PythonPackageToolConfig {
-	name: string;
-	package: string; // PyPI package name
-	binaryName: string; // CLI command name after install
-}
-
-const PYTHON_TOOLS: Record<string, PythonPackageToolConfig> = {
-	trafilatura: {
-		name: "trafilatura",
-		package: "trafilatura",
-		binaryName: "trafilatura",
-	},
-};
-
-export type ToolName = "sd" | "sg" | "yt-dlp" | "trafilatura";
-
-// Get the path to a tool (system-wide or in our tools dir)
-export function getToolPath(tool: ToolName): string | null {
-	// Check uv/pip-installed CLI packages first
-	const pythonConfig = PYTHON_TOOLS[tool];
-	if (pythonConfig) {
-		return $which(pythonConfig.binaryName);
-	}
-
-	const config = TOOLS[tool];
-	if (!config) return null;
-
-	// Check our tools directory first
-	const localPath = path.join(TOOLS_DIR, config.binaryName + (os.platform() === "win32" ? ".exe" : ""));
-	if (fs.existsSync(localPath)) {
-		return localPath;
-	}
-
-	// Check system PATH
-	return $which(config.binaryName);
-}
-
-// Fetch latest release version from GitHub
-export async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<string> {
-	// Use GITHUB_TOKEN if available
-	const token = $env.GITHUB_TOKEN || $env.GH_TOKEN;
-	const headers: Record<string, string> = { "User-Agent": USER_AGENT };
-	if (token) {
-		headers.Authorization = `Bearer ${token}`;
-	}
-	let response: Response;
-	try {
-		response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-			headers,
-			signal: ptree.combineSignals(signal, TOOL_METADATA_TIMEOUT_MS),
-		});
-	} catch (err) {
-		if (err instanceof Error && err.name === "AbortError") {
-			throw new Error("GitHub API request timed out");
-		}
-		throw err;
-	}
-
-	if (!response.ok) {
-		throw new Error(`GitHub API error: ${response.status}`);
-	}
-
-	const data = (await response.json()) as { tag_name: string };
-	return data.tag_name.replace(/^v/, "");
-}
-
 /** Options for {@link downloadFile}. */
 export interface DownloadFileOptions {
 	signal?: AbortSignal;
@@ -246,92 +107,6 @@ export async function downloadFile(url: string, dest: string, options: DownloadF
 	}
 }
 
-// Download and install a tool
-async function downloadTool(
-	tool: ToolName,
-	signal: AbortSignal | undefined,
-	tracker: DownloadTracker,
-): Promise<string> {
-	const config = TOOLS[tool];
-	if (!config) throw new Error(`Unknown tool: ${tool}`);
-
-	const plat = os.platform();
-	const architecture = os.arch();
-
-	// Get latest version
-	const version = await getLatestVersion(config.repo, signal);
-
-	// Get asset name for this platform
-	const assetName = config.getAssetName(version, plat, architecture);
-	if (!assetName) {
-		throw new Error(`Unsupported platform: ${plat}/${architecture}`);
-	}
-
-	// Create tools directory
-	await fs.promises.mkdir(TOOLS_DIR, { recursive: true });
-
-	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
-	const binaryExt = plat === "win32" ? ".exe" : "";
-	const binaryPath = path.join(TOOLS_DIR, config.binaryName + binaryExt);
-
-	// Handle direct binary downloads (no archive extraction needed)
-	const onProgress = (loaded: number, total: number | undefined): void => tracker.update({ loaded, total });
-	if (config.isDirectBinary) {
-		await downloadFile(downloadUrl, binaryPath, { signal, onProgress });
-		if (plat !== "win32") {
-			await fs.promises.chmod(binaryPath, 0o755);
-		}
-		return binaryPath;
-	}
-
-	// Download archive
-	const archivePath = path.join(TOOLS_DIR, assetName);
-	await downloadFile(downloadUrl, archivePath, { signal, onProgress });
-	tracker.update({ detail: "extracting" });
-
-	// Extract
-	const tmp = await TempDir.create("@omp-tools-extract-");
-
-	try {
-		if (!assetName.endsWith(".tar.gz") && !assetName.endsWith(".zip")) {
-			throw new Error(`Unsupported archive format: ${assetName}`);
-		}
-
-		try {
-			await extractArchive(archivePath, tmp.path());
-		} catch (err) {
-			throw new Error(`Failed to extract ${assetName}: ${err instanceof Error ? err.message : String(err)}`);
-		}
-
-		// Find the binary in extracted files
-		// ast-grep releases the binary directly in the zip, not in a subdirectory
-		let extractedBinary: string;
-		if (tool === "sg") {
-			extractedBinary = path.join(tmp.path(), config.binaryName + binaryExt);
-		} else {
-			const extractedDir = path.join(tmp.path(), assetName.replace(/\.(tar\.gz|zip)$/, ""));
-			extractedBinary = path.join(extractedDir, config.binaryName + binaryExt);
-		}
-
-		if (fs.existsSync(extractedBinary)) {
-			await fs.promises.rename(extractedBinary, binaryPath);
-		} else {
-			throw new Error(`Binary not found in archive: ${extractedBinary}`);
-		}
-
-		// Make executable (Unix only)
-		if (plat !== "win32") {
-			await fs.promises.chmod(binaryPath, 0o755);
-		}
-	} finally {
-		// Cleanup
-		await tmp.remove();
-		await fs.promises.rm(archivePath, { force: true });
-	}
-
-	return binaryPath;
-}
-
 // Install a Python package via uv (preferred) or pip
 async function installPythonPackage(pkg: string, signal?: AbortSignal): Promise<boolean> {
 	if (signal?.aborted) return false;
@@ -370,90 +145,32 @@ async function installPythonPackage(pkg: string, signal?: AbortSignal): Promise<
 	}
 }
 
-// Termux package names for tools
-const TERMUX_PACKAGES: Partial<Record<ToolName, string>> = {
-	sd: "sd",
-	sg: "ast-grep",
-};
-
-// Ensure a tool is available, downloading if necessary
-// Returns the path to the tool, or null if unavailable
-type EnsureToolOptions = {
+/** Options for {@link ensureTool}. */
+export interface EnsureToolOptions {
 	signal?: AbortSignal;
+	/** Suppress install/failure log lines. */
 	silent?: boolean;
-	notify?: (message: string) => void;
-};
+}
 
-export async function ensureTool(tool: ToolName, silentOrOptions?: EnsureToolOptions): Promise<string | undefined> {
-	const { signal, silent = false, notify } = silentOrOptions ?? {};
-	const existingPath = getToolPath(tool);
-	if (existingPath) {
-		return existingPath;
-	}
-	if (signal?.aborted) return undefined;
+/** Locates Trafilatura on PATH or installs it via uv or pip. */
+export async function ensureTool(tool: "trafilatura", options: EnsureToolOptions = {}): Promise<string | undefined> {
+	const { signal, silent = false } = options;
+	const existing = $which(tool);
+	if (existing || signal?.aborted) return existing ?? undefined;
 
-	// On Android/Termux, Linux binaries don't work due to Bionic libc incompatibility.
-	// Users must install via pkg.
-	if (os.platform() === "android") {
-		const pkgName = TERMUX_PACKAGES[tool] ?? tool;
-		if (!silent) {
-			logger.warn(`${TOOLS[tool]?.name ?? tool} not found. Install with: pkg install ${pkgName}`);
-		}
+	if (!silent) logger.debug(`${tool} not found. Installing via uv/pip...`);
+	const tracker = trackDownload(tool, { detail: "installing" });
+	const success = await installPythonPackage(tool, signal);
+	if (signal?.aborted) {
+		tracker.done();
 		return undefined;
 	}
-
-	// Handle uv/pip-installed CLI packages
-	const pythonConfig = PYTHON_TOOLS[tool];
-	if (pythonConfig) {
-		if (!silent) {
-			logger.debug(`${pythonConfig.name} not found. Installing via uv/pip...`);
-		}
-		notify?.(`Installing ${pythonConfig.name}…`);
-		const tracker = trackDownload(pythonConfig.name, { detail: "installing" });
-		const success = await installPythonPackage(pythonConfig.package, signal);
-		if (signal?.aborted) {
-			tracker.done();
-			return undefined;
-		}
-		if (success) {
-			// Re-check for the command after installation
-			const path = $which(pythonConfig.binaryName);
-			if (path) {
-				tracker.done();
-				if (!silent) {
-					logger.debug(`${pythonConfig.name} installed successfully`);
-				}
-				return path;
-			}
-		}
-		tracker.fail(new Error(`could not install ${pythonConfig.package} with uv or pip`));
-		if (!silent) {
-			logger.warn(`Failed to install ${pythonConfig.name}`);
-		}
-		return undefined;
+	const installedPath = success ? $which(tool, { cache: WhichCachePolicy.Fresh }) : undefined;
+	if (installedPath) {
+		tracker.done();
+		return installedPath;
 	}
-
-	const config = TOOLS[tool];
-	if (!config) return undefined;
-
-	// Tool not found - download it
-	if (!silent) {
-		logger.debug(`${config.name} not found. Downloading...`);
-	}
-	notify?.(`Downloading ${config.name}…`);
-
-	try {
-		const path = await withDownload(config.name, tracker => downloadTool(tool, signal, tracker));
-		if (!silent) {
-			logger.debug(`${config.name} installed to ${path}`);
-		}
-		return path;
-	} catch (e) {
-		if (!silent) {
-			logger.warn(`Failed to download ${config.name}`, {
-				error: e instanceof Error ? e.message : String(e),
-			});
-		}
-		return undefined;
-	}
+	tracker.fail(new Error(`could not install ${tool} with uv or pip`));
+	if (!silent) logger.warn(`Failed to install ${tool}`);
+	return undefined;
 }

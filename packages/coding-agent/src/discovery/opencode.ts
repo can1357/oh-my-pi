@@ -27,7 +27,7 @@ import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
+import { slashCommandFrontmatterDisplay } from "../extensibility/inventory/inspector-model";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { settings } from "../config/settings";
 
@@ -38,6 +38,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	mergeLoadResults,
 	resolveUserPath,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -278,8 +279,18 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		});
 		if (!config || !isRecord(config.mcp)) continue;
 
-		for (const name in config.mcp) {
-			const raw = config.mcp[name];
+		// OpenCode v2 nests servers under mcp.servers; older configs use mcp directly.
+		// A flat server named "servers" still has a command or URL of its own.
+		const servers = config.mcp.servers;
+		const serverConfigs =
+			isRecord(servers) &&
+			typeof servers.command !== "string" &&
+			!Array.isArray(servers.command) &&
+			typeof servers.url !== "string"
+				? servers
+				: config.mcp;
+		for (const name in serverConfigs) {
+			const raw = serverConfigs[name];
 			if (!isRecord(raw)) {
 				warnings.push(`Invalid MCP config for "${name}" in ${source.path}`);
 				continue;
@@ -374,10 +385,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	}
 
 	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -462,10 +470,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	}
 
 	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================

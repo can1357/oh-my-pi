@@ -284,14 +284,12 @@ class "anthropic" {
 		family "fable" {
 			revision ">=5" {
 				supports-mid-conversation-system #true
-				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
 			}
 		}
 		family "mythos" {
 			revision ">=5" {
 				supports-mid-conversation-system #true
-				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
 			}
 		}
@@ -303,43 +301,49 @@ class "anthropic" {
 		family "sonnet" {
 			revision ">=5.5" {
 				supports-mid-conversation-system #true
-				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
 			}
 		}
 		family "haiku" {
 			revision ">=5.5 <6" {
 				supports-mid-conversation-system #true
-				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
 			}
 		}
 		family "opus" {
 			revision ">=4.8" {
 				supports-mid-conversation-system #true
-				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
 			}
 		}
 	}
 	// Vertex rejects `thinking.block_binding` on Sonnet 5.5 with 400
-	// `thinking.adaptive.block_binding: Extra inputs are not permitted`, and
+	// `thinking.adaptive.block_binding: Extra inputs are not permitted`,
 	// per-message `output_config` with 400 `messages.N.output_config: Extra
 	// inputs are not permitted` (it takes no `output_config.effort` at all; see
-	// `supports-output-effort` in providers/google-vertex.kdl).
+	// `supports-output-effort` in providers/google-vertex.kdl), and
+	// `tool_removal`/`tool_addition` blocks with 400 `Input tag 'tool_removal'
+	// ... does not match any of the expected tags` (it accepts `mid_conv_system`).
 	on "anthropic" "cloudflare-ai-gateway" {
 		family "fable" {
+			revision ">=5" {
+				supports-mid-conversation-tool-changes #true
+			}
 			revision ">=5.1" {
 				supports-per-message-effort #true
 			}
 		}
 		family "mythos" {
+			revision ">=5" {
+				supports-mid-conversation-tool-changes #true
+			}
 			revision ">=5.1" {
 				supports-per-message-effort #true
 			}
 		}
 		family "sonnet" {
 			revision ">=5.5" {
+				supports-mid-conversation-tool-changes #true
 				supports-thinking-binding-controls #true
 				supports-per-message-effort #true
 			}
@@ -347,11 +351,15 @@ class "anthropic" {
 		// Haiku 5.5 mirrors Sonnet 5.5; Vertex stays off until verified.
 		family "haiku" {
 			revision ">=5.5 <6" {
+				supports-mid-conversation-tool-changes #true
 				supports-thinking-binding-controls #true
 				supports-per-message-effort #true
 			}
 		}
 		family "opus" {
+			revision ">=4.8" {
+				supports-mid-conversation-tool-changes #true
+			}
 			revision ">=5" {
 				supports-per-message-effort #true
 			}
@@ -375,7 +383,7 @@ class "anthropic" {
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
-		"google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" {
+		"google-vertex" "opencode-go" "opencode-zen" "snowflake" "vercel-ai-gateway" {
 		family "haiku" {
 			thinking-mode "budget"
 			// Haiku 5.5 is the first adaptive Haiku: `budget_tokens` is a 400.
@@ -405,7 +413,7 @@ class "anthropic" {
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" \
-		"opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
+		"opencode-go" "opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
 		revision ">=4.7 <45.1" {
 			thinking-mode "anthropic-adaptive"
 		}
@@ -435,8 +443,8 @@ class "anthropic" {
 			}
 		}
 	}
-	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-zen" \
-		"openrouter" "snowflake" "vercel-ai-gateway" "zenmux" {
+	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-go" \
+		"opencode-zen" "openrouter" "snowflake" "vercel-ai-gateway" "zenmux" {
 		revision ">=4.7 <45.1" {
 			thinking-efforts "low" "medium" "high" "xhigh" "max"
 		}
@@ -792,7 +800,7 @@ class "anthropic" {
 	}
 
 	// Cloud Code Assist exposes Claude through Google's wire envelope.
-	on "google-antigravity" "google-gemini-cli" {
+	on "google-antigravity" {
 		supports-function-part-id #true
 		cca-legacy-parameters-schema #true
 	}

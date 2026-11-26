@@ -7,18 +7,21 @@
 
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, type AuthStorage, type Model, tokenUsage } from "@oh-my-pi/pi-ai";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../../config/auxiliary-model-policy";
 import { ModelRegistry } from "../../config/model-registry";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
 import { roleCandidatePool } from "../../config/model-roles";
-import { settings } from "../../config/settings";
+import { settings, type Settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext } from "../../extensibility/custom-tools/types";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
+import { journalCompletion, type ModelUsageLedger } from "../../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../../session/role-models";
-import { discoverAuthStorage } from "../../sdk";
+import { discoverSessionAuthStorage as discoverAuthStorage } from "../../session/auth-broker-config";
 import type { ToolSession } from "../../tools";
 import { throwIfAborted } from "../../tools/tool-errors";
 import {
@@ -26,11 +29,12 @@ import {
 	formatSearchProviderFailures,
 	getGroundedSearchProvider,
 	getSearchProvider,
+	type SearchParams,
 	type SearchProvider,
 	type SearchProviderFailure,
 } from "./provider";
 import { rankXAIProviders, targetsX, xaiModelChain, xSearchAvailable } from "./providers/xai";
-import { applyQueryConstraints, parseSearchQuery } from "./query";
+import { applyQueryConstraints, parseSearchQuery, scopeConstraints } from "./query";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -40,7 +44,11 @@ import {
 	type SearchResultDetails,
 } from "./types";
 
-import { cfgProvidersAntigravityEndpoint, cfgProvidersWebSearchTimeoutSeconds } from "../../session/settings";
+import {
+	cfgProvidersAntigravityEndpoint,
+	cfgProvidersWebKeyless,
+	cfgProvidersWebSearchTimeoutSeconds,
+} from "../../session/settings";
 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
@@ -138,6 +146,15 @@ function fallbackNotes(failed: readonly SearchFailureDetail[], served: { label: 
 	return [`answered by ${served.label} after ${failed.map(f => `${f.label} failed (${f.reason})`).join(" and ")}`];
 }
 
+/** How long an engine that answered HTTP 429 is skipped by the automatic chain. */
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+/**
+ * Engines (`provider/id`) that answered HTTP 429, with when the automatic chain may
+ * try them again. A keyless engine's free tier (Parallel, Exa) rate-limits for minutes,
+ * so retrying it on every call only adds the 429's latency before the fallback answers.
+ */
+const rateLimitedUntil = new Map<string, number>();
+
 function hasRenderableSearchContent(response: SearchResponse): boolean {
 	if (response.answer?.trim()) return true;
 	if (response.sources.length > 0) return true;
@@ -153,7 +170,42 @@ interface ExecuteSearchOptions {
 	sessionId?: string;
 	/** The session's active model; `web/hosted` searches through it. */
 	sessionModel?: Model<Api>;
+	settings?: Settings;
 	signal?: AbortSignal;
+	/** Session journal each provider response's usage is billed to; unjournaled when omitted. */
+	usageLedger?: Partial<ModelUsageLedger>;
+}
+
+/**
+ * A provider response's token usage as an assistant message for the session's usage journal, or
+ * `undefined` when the provider reported neither input nor output tokens. Search usage carries no
+ * cache breakdown and no billed amount, so the cost is the catalog price of the reported tokens:
+ * per-search fees are not in it, and a search-only engine without token rates prices at zero.
+ */
+function searchUsageMessage(
+	model: Model<Api>,
+	response: SearchResponse,
+	duration: number,
+): AssistantMessage | undefined {
+	const reported = response.usage;
+	if (!reported || (reported.inputTokens === undefined && reported.outputTokens === undefined)) return undefined;
+	const usage = tokenUsage(reported.inputTokens, reported.outputTokens);
+	// A provider's total can count token classes (reasoning, cached input) the split leaves out.
+	if (reported.totalTokens !== undefined && reported.totalTokens > usage.totalTokens) {
+		usage.totalTokens = reported.totalTokens;
+	}
+	calculateCost(model, usage);
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: response.provider,
+		model: response.model ?? model.id,
+		usage,
+		stopReason: "stop",
+		timestamp: Date.now(),
+		duration,
+	};
 }
 
 function isHostedPlaceholder(model: Model<Api>): boolean {
@@ -185,10 +237,14 @@ function expandHostedCandidate(
  * or prepend {@link xaiModelChain} when the chain has none. Unchanged without
  * xAI credentials.
  */
-function preferXAI(chain: RoleChainCandidate[], modelRegistry: ModelRegistry): RoleChainCandidate[] {
+function preferXAI(
+	chain: RoleChainCandidate[],
+	modelRegistry: ModelRegistry,
+	activeSettings: Settings,
+): RoleChainCandidate[] {
 	const xai = chain.filter(candidate => candidate.model.webSearch === "xai");
 	if (xai.length > 0) return [...xai, ...chain.filter(candidate => candidate.model.webSearch !== "xai")];
-	return [...xaiModelChain(modelRegistry, settings).map(model => ({ model, explicit: false })), ...chain];
+	return [...xaiModelChain(modelRegistry, activeSettings).map(model => ({ model, explicit: false })), ...chain];
 }
 
 function isHackerNewsEngine(model: Model<Api>): boolean {
@@ -213,24 +269,27 @@ async function executeSearch(
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
 	const { authStorage, sessionId, signal } = options;
-	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
-	const pool = roleCandidatePool("web", settings, modelRegistry);
+	// The session's own settings (an ACP session's project, a subagent overlay) win over the process global.
+	const activeSettings = options.settings ?? settings;
+	const modelRegistry =
+		options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings: activeSettings });
+	const pool = roleCandidatePool("web", activeSettings, modelRegistry);
 	const candidates = params.model
 		? (() => {
-				const resolved = resolveModelRoleValue(params.model, pool, { settings });
+				const resolved = resolveModelRoleValue(params.model, pool, { settings: activeSettings });
 				return resolved.model
 					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
 					: [];
 			})()
-		: resolveRoleChain("web", settings, pool);
+		: resolveRoleChain("web", activeSettings, pool);
 	const parsedQuery = parseSearchQuery(params.query);
 	let expanded = rankXAIProviders(
 		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
 		candidate => candidate.model,
-		settings,
+		activeSettings,
 	);
 	// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
-	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry);
+	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry, activeSettings);
 	// General engines index HN threads sparsely and late; a query whose every
 	// `site:` is Hacker News (with or without a path) tries the HN Search API first.
 	const hnOnly =
@@ -240,14 +299,14 @@ async function executeSearch(
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
-		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
+		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(activeSettings);
 	} catch {
 		antigravityEndpointMode = undefined;
 	}
 
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
-		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
+		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(activeSettings);
 		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
 			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
 		}
@@ -255,14 +314,47 @@ async function executeSearch(
 		// Preserve the default for one-shot callers that do not initialize Settings.
 	}
 
+	// Only a per-request selector reaches a keyless service once the user turned them off.
+	const keylessAllowed = params.model !== undefined || cfgProvidersWebKeyless.get(activeSettings);
+	let keylessSkipped = false;
 	const failures: SearchProviderFailure[] = [];
 	let availableProviderCount = 0;
 	let lastProvider: { id: string; label: string } | undefined;
 	let failedResponseProvider: SearchResponse["provider"] = "none";
+	const scope = parsedQuery.hasConstraints ? scopeConstraints(parsedQuery) : undefined;
+	/** Engines that answered, but with nothing inside the query's scope directives. */
+	const scopeMisses: { id: SearchResponse["provider"]; label: string }[] = [];
+	// The tool result holds the text; this is the only place a search's tokens reach session totals.
+	const journal = journalCompletion(options.usageLedger, { purpose: "web-search", usageOnly: true });
 	for (const candidate of expanded) {
+		if (cfgOffline.get(activeSettings)) {
+			const activeProvider = options.sessionModel?.provider;
+			// Search-only catalog entries use the synthetic "web" provider; their
+			// backend is not the session's model endpoint, so do not infer a match.
+			if (
+				!activeProvider ||
+				candidate.model.provider !== activeProvider ||
+				modelKind(candidate.model) === "search"
+			) {
+				continue;
+			}
+		}
 		let provider: SearchProvider | undefined;
 		const candidateMeta = { id: candidate.model.id, label: candidate.model.name };
 		lastProvider = candidateMeta;
+		const engineKey = `${candidate.model.provider}/${candidate.model.id}`;
+		const cooldownEnds = rateLimitedUntil.get(engineKey);
+		if (cooldownEnds !== undefined && !params.model) {
+			if (cooldownEnds > Date.now()) {
+				const minutes = RATE_LIMIT_COOLDOWN_MS / 60_000;
+				failures.push({
+					provider: candidateMeta,
+					error: new Error(`skipped: rate-limited (429) within the last ${minutes} minutes`),
+				});
+				continue;
+			}
+			rateLimitedUntil.delete(engineKey);
+		}
 		try {
 			const model = candidate.model;
 			if (isHostedPlaceholder(model)) {
@@ -275,6 +367,10 @@ async function executeSearch(
 				provider = await getGroundedSearchProvider(model.webSearch);
 			} else {
 				throw new Error(`Model ${model.provider}/${model.id} does not support web search`);
+			}
+			if (!keylessAllowed && (await provider.isKeyless(authStorage, model))) {
+				keylessSkipped = true;
+				continue;
 			}
 			lastProvider = provider;
 			const available = candidate.explicit
@@ -290,7 +386,8 @@ async function executeSearch(
 			availableProviderCount++;
 			lastProvider = provider;
 
-			const response = await provider.search({
+			const sentAt = Date.now();
+			const searchParams: SearchParams = {
 				query: params.query,
 				parsedQuery,
 				limit: params.limit,
@@ -308,7 +405,13 @@ async function executeSearch(
 				explicit: candidate.explicit,
 				sessionId,
 				antigravityEndpointMode,
-			});
+			};
+			// An extension may own the request for its provider's models; availability stays the backend's.
+			const extensionSearch = modelRegistry.getProviderWebSearch(model.provider);
+			const response = await (extensionSearch ? extensionSearch(searchParams) : provider.search(searchParams));
+			// Before any rejection below: a response a later check discards was still billed.
+			const billed = searchUsageMessage(model, response, Date.now() - sentAt);
+			if (billed) journal?.(billed);
 
 			// A host that silently drops the hosted search tool still answers from the
 			// model's weights; without sources that answer is not a search result.
@@ -320,20 +423,47 @@ async function executeSearch(
 				);
 			}
 
-			// Lenient constraint pass over whatever the provider returned: enforce
-			// site:/inurl:/intitle:/filetype:/date directives the provider could
-			// not (or only partially) honor natively, relaxing any dimension that
-			// would wipe out every result. Citations/answer text stay untouched.
+			// Constraint pass over whatever the provider returned: enforce the
+			// directives the provider could not (or only partially) honor natively.
+			// Scope directives (site:/inurl:/exclusions) hold even when nothing is
+			// left, and also filter citations; intitle:/filetype:/date relax when they
+			// would wipe out every result. Answer text cannot be filtered, so it is
+			// flagged when sources it may draw on were removed.
 			let finalResponse = response;
 			const constraintNotes: string[] = [];
-			if (parsedQuery.hasConstraints && response.sources.length > 0) {
+			if (parsedQuery.hasConstraints && (response.sources.length > 0 || response.citations?.length)) {
 				const filtered = applyQueryConstraints(response.sources, parsedQuery);
-				if (filtered.sources.length !== response.sources.length) {
-					finalResponse = { ...response, sources: filtered.sources };
+				const citations = scope ? response.citations?.filter(scope.matches) : response.citations;
+				if (filtered.sources.length !== response.sources.length || citations !== response.citations) {
+					finalResponse = {
+						...response,
+						sources: filtered.sources,
+						...(citations === undefined ? {} : { citations }),
+					};
 				}
 				for (const label of filtered.dropped) {
 					constraintNotes.push(`no results matched \`${label}\`; the constraint was relaxed`);
 				}
+				if (scope) {
+					if (filtered.sources.length === 0 && !citations?.length) {
+						scopeMisses.push({ id: provider.id, label: provider.label });
+						continue;
+					}
+					const offScope =
+						response.sources.filter(source => !scope.matches(source)).length +
+						(response.citations?.length ?? 0) -
+						(citations?.length ?? 0);
+					if (response.answer?.trim() && offScope > 0) {
+						constraintNotes.push(
+							`removed ${formatCount("source", offScope)} outside \`${scope.label}\`; the answer text is unfiltered and may draw on them`,
+						);
+					}
+				}
+			}
+			if (modelKind(model) !== "search" && finalResponse.answer?.trim()) {
+				constraintNotes.unshift(
+					`synthesized answer by ${model.provider}/${model.id} hosted search, not a result list; check claims against the cited sources`,
+				);
 			}
 
 			if (!hasRenderableSearchContent(finalResponse)) {
@@ -356,13 +486,34 @@ async function executeSearch(
 			throwIfAborted(signal);
 			failedResponseProvider = provider?.id ?? "none";
 			failures.push({ provider: provider ?? candidateMeta, error });
+			if (error instanceof SearchProviderError && error.status === 429) {
+				rateLimitedUntil.set(engineKey, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+			}
 		}
 	}
 
+	if (scope && scopeMisses.length > 0) {
+		// Engines answered, just not inside the requested scope: an empty result, not an error.
+		const searched = scopeMisses.map(miss => miss.label).join(", ");
+		const notes = fallbackNotes(failureDetails(failures), { label: searched });
+		const text = [
+			...notes.map(note => `Note: ${note}`),
+			`No results from ${searched} matched \`${scope.label}\`.`,
+		].join("\n");
+		return {
+			content: [{ type: "text" as const, text }],
+			details: { response: { provider: scopeMisses[0]!.id, sources: [] } },
+		};
+	}
+
 	if (availableProviderCount === 0 && failures.length === 0) {
-		const message = params.model
-			? `No web search model matches selector "${params.model}".`
-			: "No web search model configured.";
+		const message = cfgOffline.get(activeSettings)
+			? "No web search backend is available on the active model's provider under --offline."
+			: params.model
+				? `No web search model matches selector "${params.model}".`
+				: keylessSkipped
+					? "No configured web search service is available, and providers.webKeyless is off. Configure a search credential or turn providers.webKeyless on."
+					: "No web search model configured.";
 		return {
 			content: [{ type: "text" as const, text: `Error: ${message}` }],
 			details: { response: { provider: "none", sources: [] }, error: message },
@@ -400,6 +551,7 @@ export async function runSearchQuery(
 		modelRegistry?: ModelRegistry;
 		sessionId?: string;
 		sessionModel?: Model<Api>;
+		settings?: Settings;
 		signal?: AbortSignal;
 	} = {},
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
@@ -414,6 +566,7 @@ export async function runSearchQuery(
 			modelRegistry: options.modelRegistry,
 			sessionId: options.sessionId,
 			sessionModel: options.sessionModel,
+			settings: options.settings,
 			signal: options.signal,
 		});
 	} finally {
@@ -473,7 +626,9 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 			modelRegistry: this.#session.modelRegistry,
 			sessionId,
 			sessionModel: this.#session.getActiveModel?.(),
+			settings: this.#session.settings,
 			signal,
+			usageLedger: this.#session.sessionManager,
 		});
 	}
 }

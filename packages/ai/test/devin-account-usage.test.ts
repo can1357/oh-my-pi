@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { devinUsageProvider } from "@oh-my-pi/pi-ai/usage/devin";
@@ -188,8 +189,8 @@ describe("Devin account usage", () => {
 		expect(capture.metadata?.ideName).toBe("devin-cli");
 		expect(capture.metadata?.ideType).toBe("chisel");
 		expect(capture.metadata?.extensionName).toBe("chisel");
-		expect(capture.metadata?.ideVersion).toBe("3000.12.43");
-		expect(capture.metadata?.extensionVersion).toBe("3000.12.43");
+		expect(capture.metadata?.ideVersion).toBe("3000.12.57");
+		expect(capture.metadata?.extensionVersion).toBe("3000.12.57");
 		expect(capture.metadata?.locale).toBe("en");
 		expect(capture.metadata?.os).toBe(EXPECTED_OS);
 
@@ -344,5 +345,81 @@ describe("Devin account usage", () => {
 		expect(devinUsageProvider.supports?.(params("raw-token", "api_key"))).toBe(true);
 		expect(devinUsageProvider.supports?.(params(""))).toBe(false);
 		expect(devinUsageProvider.supports?.({ ...params("raw-token"), provider: "cursor" })).toBe(false);
+	});
+});
+
+/** Far-future reset so the quota windows stay current whatever the run date. */
+const FUTURE_RESET_SECONDS = 4_102_444_800n;
+
+/**
+ * Stores one Devin login per token, all under one email, and answers each login's
+ * GetUserStatus with its weekly quota left (percent), on-demand balance (micros),
+ * and a plan-period prompt-credit bucket already spent.
+ */
+async function devinLogins(logins: Record<string, [number, bigint]>) {
+	const store = await SqliteAuthCredentialStore.open(":memory:");
+	const tokens = Object.keys(logins);
+	await new AuthStorage(store).credentials.set(
+		"devin",
+		tokens.map(token => ({ type: "oauth" as const, access: token, refresh: token, expires: 4_102_444_800_000 })),
+	);
+	const usageFetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit) => {
+			const request = fromBinary(GetUserStatusRequestSchema, new Uint8Array(init?.body as Uint8Array));
+			const [weeklyQuotaRemainingPercent, overageBalanceMicros] =
+				logins[tokens.find(token => request.metadata?.apiKey.includes(token)) ?? ""];
+			const payload = userStatusPayload(
+				{ billingStrategy: BillingStrategy.QUOTA, hideDailyQuota: true, monthlyPromptCredits: 500 },
+				{
+					email: "will@example.com",
+					userId: "user-1",
+					usedPromptCredits: 500,
+					weeklyQuotaRemainingPercent,
+					weeklyQuotaResetAtUnix: FUTURE_RESET_SECONDS,
+					overageBalanceMicros,
+				},
+			);
+			return new Response(payload, { headers: { "content-type": "application/proto" } });
+		},
+		{ preconnect: fetch.preconnect },
+	);
+	return { store, usageFetch };
+}
+
+describe("Devin login ranking", () => {
+	test("serves sessions from the login with quota left, moving one pinned on a spent login", async () => {
+		const { store, usageFetch } = await devinLogins({ "spent-token": [0, 150_000_000n], "quota-token": [82, 0n] });
+		try {
+			// Without ranking, sessions take the logins in turn; pin one on the spent login.
+			const unranked = new AuthStorage(store, { usageFetch, rankingStrategyResolver: () => undefined });
+			await unranked.reload();
+			let pinned: string | undefined;
+			for (let i = 0; i < 4 && pinned === undefined; i += 1) {
+				if ((await unranked.keys.get("devin", `pinned-${i}`))?.includes("spent-token")) pinned = `pinned-${i}`;
+			}
+			if (pinned === undefined) throw new Error("expected a session on the spent login");
+
+			const storage = new AuthStorage(store, { usageFetch });
+			await storage.reload();
+			expect(await storage.keys.get("devin", pinned)).toContain("quota-token");
+			for (let i = 0; i < 6; i += 1) {
+				expect(await storage.keys.get("devin", `fresh-${i}`)).toContain("quota-token");
+			}
+		} finally {
+			store.close();
+		}
+	});
+
+	test("falls back to the login its on-demand balance funds once every quota is spent", async () => {
+		const { store, usageFetch } = await devinLogins({ "empty-token": [0, 0n], "funded-token": [0, 150_000_000n] });
+		try {
+			const storage = new AuthStorage(store, { usageFetch });
+			await storage.reload();
+			for (let i = 0; i < 6; i += 1) {
+				expect(await storage.keys.get("devin", `session-${i}`)).toContain("funded-token");
+			}
+		} finally {
+			store.close();
+		}
 	});
 });

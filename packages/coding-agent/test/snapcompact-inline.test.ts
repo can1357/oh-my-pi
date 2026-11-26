@@ -19,7 +19,7 @@ import {
 	type SnapcompactInlineOptions,
 	SnapcompactInlineTransformer,
 } from "@oh-my-pi/pi-coding-agent/session/snapcompact-inline";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -119,7 +119,7 @@ describe("SnapcompactInlineTransformer", () => {
 	it("is a no-op for models whose wire strips image input", async () => {
 		// Declares image input, but the Chat Completions guard replaces every
 		// image with a placeholder, so imaged tool results would reach it empty.
-		const model = getBundledModel("deepseek", "deepseek-v4-flash");
+		const model = getBundledModel("fireworks", "deepseek-v4-flash");
 		const options = withTestShape({ renderSystemPrompt: "all", renderToolResults: true });
 		const context = makeContext();
 		expect(await new SnapcompactInlineTransformer(options).transform(context, model)).toBe(context);
