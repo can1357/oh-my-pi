@@ -47,12 +47,18 @@ describe("service-tier credential selection", () => {
 	let store: SqliteAuthCredentialStore;
 	let authStorage: AuthStorage;
 	const usageByAccount = new Map<string, UsageReport>();
+	/** Set by a test to stall usage reads until it releases them. */
+	let usageHold: { started: PromiseWithResolvers<void>; release: Promise<void> } | undefined;
 
 	beforeEach(() => {
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const usageProvider = (id: string): UsageProvider => ({
 			id,
 			async fetchUsage(params) {
+				if (usageHold) {
+					usageHold.started.resolve();
+					await usageHold.release;
+				}
 				return usageByAccount.get(params.credential.accountId ?? "") ?? null;
 			},
 		});
@@ -61,6 +67,7 @@ describe("service-tier credential selection", () => {
 				provider === "openai-codex" || provider === "anthropic" ? usageProvider(provider) : undefined,
 		});
 		usageByAccount.clear();
+		usageHold = undefined;
 		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
 			const credential = credentials[provider] as OAuthCredentials | undefined;
 			return credential?.accountId ? { apiKey: `oauth-${credential.accountId}`, newCredentials: credential } : null;
@@ -161,6 +168,36 @@ describe("service-tier credential selection", () => {
 			expect(tiered?.apiKey).toBe("oauth-acct-plus");
 			expect(tiered?.serviceTierUnavailable).toBe(true);
 		});
+
+		// The tier path records after resolution; the plain path records inside it.
+		for (const serviceTier of ["priority", undefined] as const) {
+			test(`a pin made while a ${serviceTier ?? "plain"} selection is in flight survives that selection`, async () => {
+				setCodexUsage(0.6);
+				// Hold the ranking's usage reads until the pin lands, as a startup
+				// prewarm still fetching reports does when `/session pin` runs.
+				const started = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				usageHold = { started, release: release.promise };
+				const pro = authStorage.oauth
+					.accounts("openai-codex", "s")
+					.find(account => account.accountId === "acct-pro");
+				if (!pro) throw new Error("expected acct-pro");
+				const request = { modelId: MODEL, serviceTier };
+
+				const prewarm = authStorage.keys.getWithCredential("openai-codex", "s", request);
+				await started.promise;
+				expect(authStorage.sessions.pin("openai-codex", "s", pro.credentialId)).toBe(true);
+				release.resolve();
+				expect((await prewarm)?.apiKey).toBe("oauth-acct-plus");
+
+				const next = await authStorage.keys.getWithCredential("openai-codex", "s", request);
+				expect(next?.apiKey).toBe("oauth-acct-pro");
+				expect(authStorage.sessions.sticky?.("openai-codex", "s")).toMatchObject({
+					credentialId: pro.credentialId,
+					explicit: true,
+				});
+			});
+		}
 	});
 
 	describe("Claude fast mode across a subscription and an API key", () => {

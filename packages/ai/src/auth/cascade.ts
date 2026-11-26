@@ -554,6 +554,7 @@ export class KeyCascade implements KeysApi {
 		// A tier-preferring resolve may still hand the request to an API key, so
 		// the session pin is recorded once the choice is final.
 		const tierPreferring = options?.serviceTier !== undefined;
+		const sessionBasis = this.#deps.affinity.get(provider, sessionId);
 		try {
 			oauthResolved = await this.#deps.selector.resolveOAuth(
 				provider,
@@ -573,7 +574,7 @@ export class KeyCascade implements KeysApi {
 			const { credentialId, credential } = oauthResolved;
 			if (tierPreferring && options?.recordAffinity !== false && credentialId !== undefined) {
 				const index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === credentialId);
-				if (index !== -1) this.#deps.affinity.record(provider, sessionId, "oauth", index);
+				if (index !== -1) this.#deps.affinity.recordSelection(provider, sessionId, "oauth", index, sessionBasis);
 			}
 			const oauthIdentity: OAuthRequestIdentity = {
 				accountId: credential.accountId,

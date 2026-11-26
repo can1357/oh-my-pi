@@ -212,6 +212,26 @@ export class SessionAffinity implements SessionsApi {
 	}
 
 	/**
+	 * Records the credential an automatic selection chose. `basis` is the
+	 * session's {@link get} result from when that selection began; an explicit
+	 * pin recorded since then wins and the choice is dropped, so a selection
+	 * already under way (startup prewarm, concurrent request) cannot undo
+	 * `/session pin`.
+	 */
+	recordSelection(
+		provider: string,
+		sessionId: string | undefined,
+		type: AuthCredential["type"],
+		index: number,
+		basis: SessionCredential | undefined,
+	): void {
+		if (!sessionId) return;
+		const current = this.get(provider, sessionId);
+		if (current?.explicit === true && current !== basis) return;
+		this.record(provider, sessionId, type, index);
+	}
+
+	/**
 	 * Retrieves the last credential used by a session. A restricted session
 	 * never sees a pin outside its allowlist — inherited, restored, or recorded
 	 * before the restriction — so it re-ranks inside the allowlist instead.
