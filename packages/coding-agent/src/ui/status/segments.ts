@@ -12,6 +12,7 @@ import type { StatusLineSegmentId } from "../../config/status-line-schema";
 import { STATUS_LINE_PRESETS } from "../../modes/view-model/status-line/presets";
 import type { StatusLineSegmentOptions, StatusLineSettings } from "../../modes/view-model/status-line/types";
 import { sanitizeStatusText } from "../../modes/view-model/chrome/shared";
+import { truncateToWidth } from "../../utils/text-width";
 import type { StatusFacts } from "./facts";
 import {
 	billingSummary,
@@ -123,9 +124,22 @@ function thinkingPieces(facts: StatusFacts, s: string): [] | [IconPiece, ...Text
 	return [{ icon: `thinking.${level}`, else: level, s, space: "none" }];
 }
 
-function modelName(facts: StatusFacts): string {
-	const name = facts.model?.name || facts.model?.id || "no-model";
-	return name.startsWith("Claude ") ? name.slice(7) : name;
+/**
+ * `id` and `full` show the selector instead of the display name; `showProvider` prefixes the provider;
+ * `maxLength` cuts the end with `…`.
+ */
+function modelLabel(facts: StatusFacts, options: StatusLineSegmentOptions["model"] = {}): string {
+	const model = facts.model;
+	const id = model?.id || "no-model";
+	const raw = model?.name || id;
+	const name = raw.startsWith("Claude ") ? raw.slice(7) : raw;
+	let label = name;
+	if (options.display === "id") label = id;
+	else if (options.display === "full") label = name !== id ? `${id} (${name})` : id;
+	if (options.showProvider && model?.provider) label = `${model.provider}/${label}`;
+	// Ids and providers can come from custom configs; keep the bar on one row.
+	label = sanitizeStatusText(label);
+	return options.maxLength !== undefined ? truncateToWidth(label, options.maxLength) : label;
 }
 
 const ADVISOR_COLORS = { error: "error", quota_exhausted: "warning", running: "success", idle: "dim" } as const;
@@ -173,7 +187,7 @@ function statusSeg(input: SegInput): SegView | null {
 
 function modelSeg(input: SegInput): SegView {
 	const { facts } = input;
-	const name = modelName(facts);
+	const name = modelLabel(facts, input.options.model);
 	const native = nativeAccent(input, "statusLineModel");
 	const look = lookAccent(input, "statusLineModel");
 	const showLevel = input.options.model?.showThinkingLevel !== false;
