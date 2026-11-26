@@ -451,8 +451,10 @@ const USAGE_LIMIT_PATTERN =
 export function isUsageLimitStatus(status: number | undefined): boolean {
 	return status === 429 || status === 402;
 }
+// Vercel AI Gateway answers 402 "A positive credit balance is required" with no
+// quota marker, so it is a billing cap like the rest.
 const STATUS_402_QUOTA_PATTERN =
-	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|credits?|account.?funds)|requires?\s+more\s+credits|billing[-_.\s]*(?:verification|error|issue)|can only afford)\b/i;
+	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|credits?|account.?funds)|requires?\s+more\s+credits|billing[-_.\s]*(?:verification|error|issue)|can only afford|positive\s+credit\s+balance\s+(?:is\s+)?required)\b/i;
 
 // Machine fields survive provider parsing even when the human detail is generic.
 const BILLING_ERROR_CODE_PATTERN = /^billing_(?:error|not_configured)$/i;

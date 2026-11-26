@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Fixed a 402 whose body says `A positive credit balance is required` being treated as a rejection: it now rotates to a sibling account or fallback model ([#20403](https://github.com/can1357/oh-my-pi/pull/20403) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Claude usage reports now label a Team premium seat as "Team 5x" instead of "Max 5x" ([#20677](https://github.com/can1357/oh-my-pi/pull/20677) by [@ndecool](https://github.com/ndecool))
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
