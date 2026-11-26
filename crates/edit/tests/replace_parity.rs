@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use common::run_fixture;
 use omp_edit::{
-	EditMode, PathPolicy,
+	EditMode, Location, PathPolicy,
 	fuzzy::{FindMatchOptions, find_match},
 	path_policy::canonical_key,
 	text::adjust_indentation,
@@ -90,10 +90,8 @@ fn resolves_parent_targets_outside_cwd() {
 		policy
 			.resolve("../outside.txt", &HashMap::new())
 			.unwrap()
-			.location
-			.disk_path()
-			.unwrap(),
-		root.path().join("outside.txt")
+			.location,
+		Location::Disk(root.path().join("outside.txt"))
 	);
 }
 
@@ -110,10 +108,8 @@ fn preserves_absolute_targets_outside_cwd() {
 		policy
 			.resolve(absolute.to_str().unwrap(), &HashMap::new())
 			.unwrap()
-			.location
-			.disk_path()
-			.unwrap(),
-		absolute
+			.location,
+		Location::Disk(absolute)
 	);
 }
 
@@ -130,10 +126,8 @@ fn expands_home_targets_outside_cwd() {
 		policy
 			.resolve("~/.claude/settings.json", &HashMap::new())
 			.unwrap()
-			.location
-			.disk_path()
-			.unwrap(),
-		home.join(".claude/settings.json")
+			.location,
+		Location::Disk(home.join(".claude/settings.json"))
 	);
 }
 
@@ -153,7 +147,7 @@ fn canonical_snapshot_key_resolves_missing_tail_against_existing_ancestor() {
 #[cfg(unix)]
 #[test]
 fn canonical_snapshot_keys_fuse_symlink_equivalent_paths() {
-	use omp_edit::{EditStore, Location};
+	use omp_edit::EditStore;
 
 	let root = tempfile::tempdir().expect("tempdir");
 	let real = root.path().join("real");

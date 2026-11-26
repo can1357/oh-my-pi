@@ -6,7 +6,7 @@
 //! Nothing here touches the filesystem for writes; the [`crate::session`]
 //! drives previews, staging, and the host writer callback.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::{error::EditError, files::FileSource, store::EditStore, stream_json::ArgSnapshot};
 
@@ -69,20 +69,13 @@ impl FileOp {
 }
 
 /// A resolved local filesystem location.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Location {
 	/// A filesystem path.
 	Disk(PathBuf),
 }
 
 impl Location {
-	/// The filesystem path, when this location is backed by disk.
-	pub fn disk_path(&self) -> Option<&Path> {
-		match self {
-			Self::Disk(path) => Some(path),
-		}
-	}
-
 	/// The location as UTF-8, if it can be represented without loss.
 	pub fn as_text(&self) -> Option<&str> {
 		match self {

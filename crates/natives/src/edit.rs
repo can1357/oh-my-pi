@@ -44,7 +44,7 @@ use omp_edit::{
 	EditError, EditMode, EditResult, Location, PathPolicy, Resolved, Session, UrlAnswer,
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
-	path_policy::RecoveryGlob,
+	path_policy::{RecoveryGlob, canonical_key},
 	session::{ApplyRequest, EditWriter, PreviewBatch, SessionConfig, WriteRequest, WriteResponse},
 	store,
 	stream_json::snapshot_from_text,
@@ -251,7 +251,7 @@ pub struct EditApplyOutcome {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn store_key(path: &str) -> Location {
-	Location::Disk(PathBuf::from(path)).canonical_key()
+	Location::Disk(canonical_key(Path::new(path)))
 }
 
 /// Session-scoped snapshots, clipboard registers, and the no-op loop guard.
@@ -523,18 +523,12 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlAnswer {
 		Err(err) => Err(err),
 	};
 	match answer {
-		Ok(answer) => {
-			if let Some(error) = answer.error {
-				UrlAnswer::Refused(error)
-			} else if let Some(path) = answer.path {
-				UrlAnswer::Backed {
-					path:          PathBuf::from(path),
-					plan_writable: answer.plan_writable,
-				}
-			} else {
-				UrlAnswer::Refused(format!("No local file backs {url}"))
-			}
-		},
+		Ok(answer) => UrlAnswer::from_host(
+			url,
+			answer.path.map(PathBuf::from),
+			answer.error,
+			answer.plan_writable,
+		),
 		Err(err) => UrlAnswer::Refused(err.reason),
 	}
 }
@@ -1139,7 +1133,7 @@ mod tests {
 		tree.write("deep/src/other.ts", "");
 		let recovered = recover_one(&tree.0, "src/a.ts").await.unwrap();
 		assert_eq!(recovered.display, "deep/src/a.ts");
-		assert_eq!(recovered.location.disk_path().unwrap(), tree.0.join("deep/src/a.ts"));
+		assert_eq!(recovered.location, Location::Disk(tree.0.join("deep/src/a.ts")));
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

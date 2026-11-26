@@ -379,7 +379,7 @@ mod tests {
 		let mut files = cache(tmp.path());
 		let unrecovered = files.resolve("src/a.ts", true).unwrap();
 		assert_eq!(unrecovered.display, "src/a.ts");
-		assert_eq!(unrecovered.location.disk_path().unwrap(), tmp.path().join("src/a.ts"));
+		assert_eq!(unrecovered.location, Location::Disk(tmp.path().join("src/a.ts")));
 		files.resolve("src/a.ts", true).unwrap();
 		assert_eq!(files.take_recovery_misses(), ["src/a.ts"]);
 		assert!(files.take_recovery_misses().is_empty());
