@@ -20,21 +20,9 @@ export function markdownLook(): MarkdownLook {
 	return look();
 }
 
-/**
- * Set the host's Markdown look (`tui.colorfulMarkdown`, `tui.renderMermaid`,
- * `tui.showLinkUrl`); fields `next` leaves unset keep their value.
- */
-export function setMarkdownLook(next: Partial<MarkdownLook>): void {
+/** Set the host's Markdown look (`tui.colorfulMarkdown`, `tui.renderMermaid`, `tui.showLinkUrl`). */
+export function setMarkdownLook(next: MarkdownLook): void {
 	const current = look();
-	const merged: MarkdownLook = {
-		colorful: next.colorful ?? current.colorful,
-		mermaid: next.mermaid ?? current.mermaid,
-		linkUrls: next.linkUrls ?? current.linkUrls,
-	};
-	if (
-		merged.colorful !== current.colorful ||
-		merged.mermaid !== current.mermaid ||
-		merged.linkUrls !== current.linkUrls
-	)
-		look.set(merged);
+	if (current.colorful !== next.colorful || current.mermaid !== next.mermaid || current.linkUrls !== next.linkUrls)
+		look.set(next);
 }

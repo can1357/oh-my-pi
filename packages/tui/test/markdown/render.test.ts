@@ -354,15 +354,15 @@ describe("inline", () => {
 });
 
 describe("host look", () => {
-	afterEach(() => setMarkdownLook({ linkUrls: true }));
+	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true }));
 
 	it("renders with the host's linkUrls when the caller leaves it unset", () => {
-		setMarkdownLook({ linkUrls: false });
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true })).toEqual(["docs"]);
 	});
 
 	it("lets an explicit linkUrls win over the host look", () => {
-		setMarkdownLook({ linkUrls: false });
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true, linkUrls: true })).toEqual([
 			"docs (https://e.com/d)",
 		]);
