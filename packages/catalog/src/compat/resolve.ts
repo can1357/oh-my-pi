@@ -122,9 +122,9 @@ class IdentityFacts {
 
 /**
  * The id a spec resolves identity and rules under: its own, unless that names
- * no model and the row sends a model that does on the wire. A Devin Fusion
- * pairing runs only its lead, so the lead's reviewed rules (cache-write rate,
- * long-context tier) apply to it at build time.
+ * no model and the row sends a model that does on the wire. A custom alias
+ * (`review-alias` → `gpt-6-luna`) thereby gets the wire model's reviewed rules
+ * at build time.
  */
 function policyModelId(spec: CatalogPolicyInputs): string {
 	const wireId = spec.requestModelId;

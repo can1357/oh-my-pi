@@ -1,6 +1,8 @@
 //! Probe rules for the reader: which secondary URLs stand in for a page, and
 //! when a response to one of them is usable.
 
+use std::borrow::Cow;
+
 use url::Url;
 
 use crate::wall::MIN_RENDERED_CHARS;
@@ -40,13 +42,277 @@ pub fn mime(content_type: &str) -> String {
 		.to_ascii_lowercase()
 }
 
-/// True when a body starts like an HTML document rather than Markdown or text.
+/// True when a body starts like an HTML document rather than Markdown or text,
+/// past a byte-order mark and leading comments.
 pub fn looks_like_html(content: &str) -> bool {
-	let head = content.trim_start().as_bytes();
+	let head = without_leading_comments(content.trim_start_matches('\u{feff}')).as_bytes();
 	let head = &head[..head.len().min(16)];
 	[b"<!doctype".as_slice(), b"<html", b"<head", b"<body"]
 		.iter()
 		.any(|tag| head.len() >= tag.len() && head[..tag.len()].eq_ignore_ascii_case(tag))
+}
+
+/// True for an HTML media type: a probe for Markdown or llms.txt answered with
+/// it got the site's app shell or error page, not the file.
+pub fn is_html_mime(mime: &str) -> bool {
+	matches!(mime, "text/html" | "application/xhtml+xml")
+}
+
+/// Text without the HTML comments it opens with: metadata a renderer hides
+/// (documentation alternates open with a JSON comment).
+fn without_leading_comments(text: &str) -> &str {
+	let mut rest = text.trim_start();
+	while let Some(comment) = rest.strip_prefix("<!--") {
+		let Some(end) = comment.find("-->") else {
+			break;
+		};
+		rest = comment[end + 3..].trim_start();
+	}
+	rest
+}
+
+/// A Markdown source as a reader sees it.
+///
+/// Drops leading HTML comments, the `{% … %}` tags of a Markdoc document, and
+/// the inline HTML wrappers ([`WRAPPER_TAGS`]) that carry no Markdown meaning.
+pub fn markdown_body(text: &str) -> Cow<'_, str> {
+	let text = without_leading_comments(text);
+	let text = if is_markdoc(text) {
+		Cow::Owned(strip_markdoc(text))
+	} else {
+		Cow::Borrowed(text)
+	};
+	let stripped = strip_wrapper_tags(&text);
+	stripped.map_or(text, Cow::Owned)
+}
+
+/// HTML elements a Markdown source wraps text in for styling or scripting
+/// only: their text reads the same without them. Elements Markdown embeds on
+/// purpose (`br`, `details`, `summary`, `sub`, `sup`, `kbd`, tables, images,
+/// links) are not listed; custom elements (`devsite-*`) count as wrappers.
+const WRAPPER_TAGS: [&str; 24] = [
+	"abbr", "article", "aside", "bdi", "bdo", "big", "center", "cite", "data", "dfn", "div",
+	"figure", "font", "footer", "header", "ins", "label", "mark", "nav", "section", "small", "span",
+	"time", "var",
+];
+
+/// The end (exclusive) of a wrapper tag opening at `start` in `line`, or
+/// `None` when no wrapper tag starts there.
+fn wrapper_tag_end(line: &str, start: usize) -> Option<usize> {
+	let bytes = line.as_bytes();
+	let mut i = start + 1;
+	if bytes.get(i) == Some(&b'/') {
+		i += 1;
+	}
+	let name_start = i;
+	if !bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
+		return None;
+	}
+	while bytes
+		.get(i)
+		.is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'-')
+	{
+		i += 1;
+	}
+	let name = &line[name_start..i];
+	// `<https://…>` autolinks and `<T>` placeholders are not tags.
+	if !bytes
+		.get(i)
+		.is_some_and(|&b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+	{
+		return None;
+	}
+	let wrapper = name.contains('-')
+		|| WRAPPER_TAGS
+			.iter()
+			.any(|tag| name.eq_ignore_ascii_case(tag));
+	if !wrapper {
+		return None;
+	}
+	let mut quote = None;
+	while let Some(&b) = bytes.get(i) {
+		match (quote, b) {
+			(None, b'"' | b'\'') => quote = Some(b),
+			(Some(q), _) if b == q => quote = None,
+			(None, b'>') => return Some(i + 1),
+			_ => {},
+		}
+		i += 1;
+	}
+	None
+}
+
+/// Markdown with its wrapper tags removed and their text kept, outside fenced,
+/// indented and inline code; a line holding only such tags is dropped. `None`
+/// when there is none.
+fn strip_wrapper_tags(text: &str) -> Option<String> {
+	if !text.contains('<') {
+		return None;
+	}
+	let mut out = String::with_capacity(text.len());
+	let mut changed = false;
+	for_each_line(text, |line, code| {
+		let indented = line.starts_with('\t') || line.starts_with("    ");
+		if code || indented || !line.contains('<') {
+			out.push_str(line);
+			return;
+		}
+		let bytes = line.as_bytes();
+		let mut kept = String::with_capacity(line.len());
+		let (mut from, mut i, mut tags) = (0, 0, false);
+		while i < bytes.len() {
+			match bytes[i] {
+				b'`' => {
+					let run = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+					let close = "`".repeat(run);
+					i = line[i + run..]
+						.find(&close)
+						.map_or(bytes.len(), |at| i + run + at + run);
+				},
+				b'<' => match wrapper_tag_end(line, i) {
+					Some(end) => {
+						kept.push_str(&line[from..i]);
+						from = end;
+						i = end;
+						tags = true;
+					},
+					None => i += 1,
+				},
+				_ => i += 1,
+			}
+		}
+		if !tags {
+			out.push_str(line);
+			return;
+		}
+		changed = true;
+		kept.push_str(&line[from..]);
+		if kept.trim().is_empty() {
+			return;
+		}
+		out.push_str(&kept);
+	});
+	changed.then_some(out)
+}
+
+/// Call `each` with every line of `text` and whether it belongs to a fenced
+/// code block (fence lines included).
+fn for_each_line(text: &str, mut each: impl FnMut(&str, bool)) {
+	let mut fence: Option<(u8, usize)> = None;
+	for line in text.split_inclusive('\n') {
+		let trimmed = line.trim_start();
+		let marker = trimmed
+			.as_bytes()
+			.first()
+			.copied()
+			.filter(|&b| matches!(b, b'`' | b'~'));
+		let run = marker.map_or(0, |m| trimmed.bytes().take_while(|&b| b == m).count());
+		match (fence, marker) {
+			(None, Some(m)) if run >= 3 => {
+				fence = Some((m, run));
+				each(line, true);
+			},
+			(Some((m, open)), Some(close))
+				if close == m && run >= open && trimmed[run..].trim().is_empty() =>
+			{
+				fence = None;
+				each(line, true);
+			},
+			(Some(_), _) => each(line, true),
+			(None, _) => each(line, false),
+		}
+	}
+}
+
+/// Byte offset of the next Markdoc tag (`{% name … %}`, `{% /name %}`, `{%
+/// name /%}` or an annotation `{% #id .class key=value %}`) in `line` at or
+/// after `from`, outside inline code, and its end.
+fn next_markdoc_tag(line: &str, from: usize) -> Option<(usize, usize)> {
+	let bytes = line.as_bytes();
+	let mut i = from;
+	while i < bytes.len() {
+		match bytes[i] {
+			b'`' => {
+				let run = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+				let close = "`".repeat(run);
+				i = line[i + run..]
+					.find(&close)
+					.map_or(bytes.len(), |at| i + run + at + run);
+			},
+			b'{' if bytes.get(i + 1) == Some(&b'%') => {
+				let end = line[i + 2..].find("%}")? + i + 4;
+				let inner = line[i + 2..end - 2].trim();
+				let first = inner.trim_start_matches('/').chars().next();
+				// Liquid and Jinja tags in prose read the same; the document-level
+				// closing-tag check keeps them apart.
+				if first.is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '#' | '.')) {
+					return Some((i, end));
+				}
+				i = end;
+			},
+			_ => i += 1,
+		}
+	}
+	None
+}
+
+/// True when Markdown outside code uses Markdoc tags with a `{% /name %}`
+/// closing tag or a self-closing `{% name /%}`: Jinja and Liquid write `{%
+/// endname %}`, so their tags, often quoted as examples, are kept.
+fn is_markdoc(text: &str) -> bool {
+	if !text.contains("{%") {
+		return false;
+	}
+	let mut found = false;
+	for_each_line(text, |line, code| {
+		if found || code {
+			return;
+		}
+		let mut from = 0;
+		while let Some((start, end)) = next_markdoc_tag(line, from) {
+			let inner = line[start + 2..end - 2].trim();
+			if inner.starts_with('/') || inner.ends_with('/') {
+				found = true;
+				return;
+			}
+			from = end;
+		}
+	});
+	found
+}
+
+/// Markdown with its Markdoc tags removed outside code; a line holding only
+/// tags is dropped.
+fn strip_markdoc(text: &str) -> String {
+	let mut out = String::with_capacity(text.len());
+	for_each_line(text, |line, code| {
+		if code {
+			out.push_str(line);
+			return;
+		}
+		let mut kept = String::with_capacity(line.len());
+		let mut from = 0;
+		let mut tags = false;
+		while let Some((start, end)) = next_markdoc_tag(line, from) {
+			kept.push_str(&line[from..start]);
+			from = end;
+			tags = true;
+		}
+		if !tags {
+			out.push_str(line);
+			return;
+		}
+		kept.push_str(&line[from..]);
+		if kept.trim().is_empty() {
+			return;
+		}
+		let newline = kept.ends_with('\n');
+		out.push_str(kept.trim_end());
+		if newline {
+			out.push('\n');
+		}
+	});
+	out
 }
 
 /// Collapse blank-line runs and trim. Never shortens content otherwise.
@@ -245,8 +511,44 @@ mod tests {
 	}
 
 	#[test]
+	fn markdoc_tags_are_stripped_outside_code_only() {
+		let doc = "<!--\n{\"title\": \"Array\"}\n-->\n\n## Docs  {% id=\"docs\" %}\n\n{% table \
+		           %}\n* {% icon name=\"id\" /%}Model code\n{% /table %}\n\n```jinja\n{% if x %}{% \
+		           endif %}\n```\n\nUse `{% raw %}` here.\n";
+		assert_eq!(
+			markdown_body(doc),
+			"## Docs\n\n* Model code\n\n```jinja\n{% if x %}{% endif %}\n```\n\nUse `{% raw %}` \
+			 here.\n"
+		);
+		// Jinja quoted in prose has no Markdoc closing tag and stays.
+		let jinja = "Write {% for item in items %} and {% endfor %} around the loop.";
+		assert_eq!(markdown_body(jinja), jinja);
+	}
+
+	#[test]
+	fn inline_html_wrappers_are_stripped_keeping_their_text() {
+		let doc = "<div class=\"note\">\nSet <var class=\"edit\" translate=\"no\">INPUT_URI</var> to \
+		           the <span title='a > b'>bucket</span>.\n</div>\n\n<devsite-selector>Pick \
+		           one</devsite-selector>\n\nPress <kbd>Ctrl</kbd>, see x<sup>2</sup><br>and \
+		           <https://x.test> for Vec<T>.\n\n<details><summary>More</summary>Hidden</details>\n\n\
+		           Use `<span>` in code.\n\n```html\n<div><span>kept</span></div>\n```\n\n    \
+		           <span>indented code</span>\n";
+		assert_eq!(
+			markdown_body(doc),
+			"Set INPUT_URI to the bucket.\n\nPick one\n\nPress <kbd>Ctrl</kbd>, see \
+			 x<sup>2</sup><br>and <https://x.test> for \
+			 Vec<T>.\n\n<details><summary>More</summary>Hidden</details>\n\nUse `<span>` in \
+			 code.\n\n```html\n<div><span>kept</span></div>\n```\n\n    <span>indented \
+			 code</span>\n"
+		);
+		assert!(matches!(markdown_body("# Plain\n\nNo tags < here.\n"), Cow::Borrowed(_)));
+	}
+
+	#[test]
 	fn helpers() {
 		assert!(looks_like_html("  <!DOCTYPE html><html>"));
+		assert!(looks_like_html("\u{feff}<!-- built --> <!doctype html>"));
+		assert!(is_html_mime("text/html") && !is_html_mime("text/markdown"));
 		assert!(!looks_like_html("# <html>"));
 		assert_eq!(finalize("\n a\n\n\n\nb \n"), "a\n\nb");
 		assert_eq!(

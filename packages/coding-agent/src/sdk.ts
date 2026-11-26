@@ -89,7 +89,6 @@ import {
 } from "./config/model-resolver";
 import { formatModelSelectorValue, parseModelString } from "./config/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
-import { buildServiceTierByFamily } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
 import type { CursorMcpResourceAdapter } from "./cursor";
@@ -430,9 +429,7 @@ import {
 	cfgSampling,
 	cfgSkillful,
 	cfgThinkingBudgets,
-	cfgTierAnthropic,
-	cfgTierGoogle,
-	cfgTierOpenai,
+	cfgTiers,
 	systemPromptTemplatePatterns,
 } from "./session/settings";
 import { cfgInterruptMode } from "./modes/settings";
@@ -5025,13 +5022,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const resolvedServiceTierByFamily = options.resolveServiceTierByFamily?.(model);
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
-			(hasServiceTierEntry
-				? (existingSession.serviceTier ?? {})
-				: buildServiceTierByFamily(
-						cfgTierOpenai.get(settings),
-						cfgTierAnthropic.get(settings),
-						cfgTierGoogle.get(settings),
-					));
+			(hasServiceTierEntry ? (existingSession.serviceTier ?? {}) : cfgTiers.get(settings));
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
