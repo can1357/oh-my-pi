@@ -51,6 +51,8 @@ describe("attachment band pictures", () => {
 			const picture = card?.c?.[0]?.p;
 			expect(picture).toMatchObject({ w: 640, h: 480, alt: composer.chipLabel("image", 1) });
 			expect(card?.c?.[1]?.p).toMatchObject({ spans: [{ t: "640x480" }] });
+			expect(card?.p?.kind).toBe("image");
+			expect(card?.p).not.toHaveProperty("expansion");
 			// The bytes are registered: the native backend uploads only blobs it can read back.
 			const blob = String(picture?.blob);
 			expect(Buffer.from(getBlob(blob)?.bytes ?? []).toString("base64")).toBe(PNG_1PX);
@@ -97,6 +99,21 @@ describe("attachment band pictures", () => {
 			expect(cells).toEqual([10, 10, 10, 10]);
 			expect(interior().join("\n")).not.toContain(glyph);
 			expect(images.takeSequences()).toContain("a=t");
+			dispose();
+		});
+	});
+});
+
+describe("attachment band paste cards", () => {
+	test("a paste card names its kind and carries the full pasted text", () => {
+		createRoot(dispose => {
+			const composer = new Composer();
+			const pasted = "one\ntwo\nthree\nfour\nfive\nsix";
+			composer.insertAtom(composer.chipLabel("paste", 1), pasted, { kind: "paste" });
+			const band: JSXNode = ComposerChips({ composer });
+			if (!isUiNode(band)) throw new Error("the band is one node");
+			const [card] = (describeTree(band, staticEnvironment(currentTheme())) as NativeNode).c ?? [];
+			expect(card?.p).toMatchObject({ kind: "paste", expansion: pasted });
 			dispose();
 		});
 	});
