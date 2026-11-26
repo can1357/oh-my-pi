@@ -686,7 +686,6 @@ interface HistoryStorage {
 	getRecent(limit: number): HistoryEntry[];
 }
 
-
 interface LocalHistoryEntry {
 	text: string;
 	draft?: DraftState;
@@ -3098,9 +3097,12 @@ export class Editor implements Component, Focusable {
 			if (!older) return;
 			stash = {
 				text,
-				draft:
-					this.captureDraft(this.captureHistoryState()) ??
-					{ text, pastes: new Map<number, string>(), atoms: new Map<string, string>(), pasteCounter: 0 },
+				draft: this.captureDraft(this.captureHistoryState()) ?? {
+					text,
+					pastes: new Map<number, string>(),
+					atoms: new Map<string, string>(),
+					pasteCounter: 0,
+				},
 				undo: this.#undoStack.slice(),
 				redo: this.#redoStack.slice(),
 				at: -1,
@@ -3112,7 +3114,6 @@ export class Editor implements Component, Focusable {
 			this.#navigateHistory(older ? -1 : 1);
 			if (this.#historyIndex === index) break;
 		}
-		if (this.#historyIndex === from) return;
 		if (this.#historyIndex === from) return;
 		if (stash !== null && this.#historyIndex === -1) {
 			// Back to the live draft: its pastes, atoms, host attachments, and undo history.
