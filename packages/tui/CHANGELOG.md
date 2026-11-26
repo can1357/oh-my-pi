@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Resizing a pane inside Herdr repaints in place instead of looping resize redraws ([#20570](https://github.com/can1357/oh-my-pi/pull/20570) by [@koeria](https://github.com/koeria))
 - A computed value whose owner was disposed no longer runs again when the values it read change, and what it created after the dispose is torn down ([#20670](https://github.com/can1357/oh-my-pi/pull/20670) by [@H4vC](https://github.com/H4vC))
 - Closing a view with tens of thousands of reactive values no longer slows down sharply as the count grows ([#20674](https://github.com/can1357/oh-my-pi/pull/20674) by [@H4vC](https://github.com/H4vC))
 - Typing in an editor holding thousands of lines is about 3x faster per keystroke ([#20659](https://github.com/can1357/oh-my-pi/pull/20659) by [@H4vC](https://github.com/H4vC))
