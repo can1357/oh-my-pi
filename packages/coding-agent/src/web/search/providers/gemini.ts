@@ -17,12 +17,13 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
+import { resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import { clampThinkingLevelForModel, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
-import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { $env, fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import type { ModelRegistry } from "../../../config/model-registry";
@@ -56,6 +57,19 @@ function resolveGeminiDeveloperEndpoint(baseUrl: string): GeminiDeveloperEndpoin
 		url,
 		isCloudflareGateway: parsed.hostname === "gateway.ai.cloudflare.com",
 	};
+}
+
+/** Vertex AI express-mode base URL: the endpoint google-vertex.ts sends a GOOGLE_CLOUD_API_KEY to. */
+const VERTEX_EXPRESS_BASE_URL = `https://${resolveVertexEndpointHost("global")}/v1beta1/publishers/google`;
+
+/**
+ * The GOOGLE_CLOUD_API_KEY that stands in for a missing Developer API key on the `google` provider.
+ * Vertex keys only work on the Vertex endpoint, so the search sends them there, not to generativelanguage.
+ */
+function vertexApiKey(authStorage: AuthStorage, model: Model<Api>): string | undefined {
+	if (model.api !== "google-generative-ai" || model.provider !== "google") return undefined;
+	if (authStorage.keys.source("google") !== undefined) return undefined;
+	return $env.GOOGLE_CLOUD_API_KEY || undefined;
 }
 
 interface GeminiToolParams {
@@ -565,6 +579,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 	// directive-free queries byte-identical.
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const searchQuery = parsed.hasDirectives ? formatQuery(parsed, GOOGLE_QUERY_SYNTAX) : params.query;
+	const vertexKey = vertexApiKey(params.authStorage, params.model);
 	let result: GeminiSearchResult;
 
 	if (params.model.api === "google-gemini-cli") {
@@ -605,6 +620,26 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 				);
 			},
 			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
+		);
+	} else if (vertexKey) {
+		const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+		result = await callGeminiDeveloperSearch(
+			vertexKey,
+			{ url: VERTEX_EXPRESS_BASE_URL, isCloudflareGateway: false },
+			configuredHeaders,
+			selectedModel,
+			searchQuery,
+			params.system_prompt,
+			params.max_output_tokens,
+			params.temperature,
+			{
+				google_search: params.google_search,
+				code_execution: params.code_execution,
+				url_context: params.url_context,
+			},
+			params.fetch,
+			params.signal,
+			params.timeoutMs,
 		);
 	} else if (params.model.api === "google-generative-ai") {
 		const endpoint = resolveGeminiDeveloperEndpoint(params.model.baseUrl);
@@ -674,10 +709,18 @@ export class GeminiProvider extends SearchProvider {
 	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
 		if (model) {
 			if (model.api === "google-gemini-cli") return authStorage.credentials.hasOAuth(model.provider);
-			if (model.api === "google-generative-ai") return authStorage.keys.source(model.provider) !== undefined;
+			if (model.api === "google-generative-ai") {
+				return (
+					authStorage.keys.source(model.provider) !== undefined || vertexApiKey(authStorage, model) !== undefined
+				);
+			}
 			return false;
 		}
-		return authStorage.credentials.hasOAuth("google-antigravity") || authStorage.keys.source("google") !== undefined;
+		return (
+			authStorage.credentials.hasOAuth("google-antigravity") ||
+			authStorage.keys.source("google") !== undefined ||
+			!!$env.GOOGLE_CLOUD_API_KEY
+		);
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

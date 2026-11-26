@@ -410,7 +410,7 @@ function tagModel<T>(row: Model<Api>, key: symbol, state: T): T {
  */
 type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
 
-function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
+export function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
 	try {
 		return new Set(cfgDisabledProviders.get(settingsInstance ?? settings));
 	} catch {
