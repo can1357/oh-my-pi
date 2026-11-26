@@ -485,41 +485,26 @@ impl GitRepo {
 	}
 
 	/// Whether the repository's common git directory is configured as bare
-	/// (`core.bare = true`), without includes, global configuration, or
-	/// environment overrides. Never invokes git.
+	/// (`core.bare = true`), resolving repository-local includes and
+	/// `config.worktree` without global/system configuration or environment
+	/// overrides. Never invokes git.
 	pub fn is_common_repo_bare(&self) -> Result<bool> {
 		let common_dir = &self.info().common_dir;
-		let path = common_dir.join("config");
-		match std::fs::metadata(&path) {
-			Ok(_) => {},
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-				return Ok(common_dir.file_name().is_none_or(|n| n != ".git"));
-			},
-			Err(err) => return Err(Error::backend("git config", err)),
-		}
-		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
-			.map_err(|e| Error::backend("git config", e))?;
-		let mut wt_has_worktree = false;
-		if matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true))) {
-			let worktree_cfg = common_dir.join("config.worktree");
-			match std::fs::metadata(&worktree_cfg) {
-				Ok(_) => {
-					let wt = gix::config::File::from_path_no_includes(
-						worktree_cfg,
-						gix::config::Source::Local,
-					)
-					.map_err(|e| Error::backend("git config", e))?;
-					match wt.boolean("core.bare") {
-						Some(Ok(bare)) => return Ok(bare),
-						Some(Err(err)) => return Err(Error::backend("git config", err)),
-						None => {},
-					}
-					wt_has_worktree = wt.string("core.worktree").is_some();
-				},
-				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
-				Err(err) => return Err(Error::backend("git config", err)),
+		let Some(config) = load_local_config(common_dir.join("config"), common_dir)? else {
+			return Ok(common_dir.file_name().is_none_or(|n| n != ".git"));
+		};
+		let wt_has_worktree = if matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+			&& let Some(wt) = load_local_config(common_dir.join("config.worktree"), common_dir)?
+		{
+			match wt.boolean("core.bare") {
+				Some(Ok(bare)) => return Ok(bare),
+				Some(Err(err)) => return Err(Error::backend("git config", err)),
+				None => {},
 			}
-		}
+			wt.string("core.worktree").is_some()
+		} else {
+			false
+		};
 		match config.boolean("core.bare") {
 			Some(Ok(bare)) => Ok(bare),
 			Some(Err(err)) => Err(Error::backend("git config", err)),
@@ -1440,6 +1425,52 @@ fn cap_bytes(mut bytes: Vec<u8>, max: Option<usize>) -> ShowResult {
 	ShowResult { bytes, truncated }
 }
 
+/// Load a repository-local git config file (`config` or `config.worktree`)
+/// and resolve its `[include]` / `[includeIf]` directives without loading
+/// global/system config or environment overrides.
+fn load_local_config(
+	path: std::path::PathBuf,
+	common_dir: &Path,
+) -> Result<Option<gix::config::File<'static>>> {
+	match std::fs::metadata(&path) {
+		Ok(_) => {},
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+		Err(err) => return Err(Error::backend("git config", err)),
+	}
+	let mut config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+		.map_err(|e| Error::backend("git config", e))?;
+	let home_dir = std::env::var_os("HOME")
+		.or_else(|| std::env::var_os("USERPROFILE"))
+		.map(std::path::PathBuf::from);
+	let head_ref = std::fs::read_to_string(common_dir.join("HEAD"))
+		.ok()
+		.and_then(|head| {
+			head
+				.trim()
+				.strip_prefix("ref:")
+				.map(str::trim)
+				.map(str::to_owned)
+		})
+		.and_then(|target| gix::refs::FullName::try_from(target).ok());
+	let interpolate = gix::config::path::interpolate::Context {
+		git_install_dir: None,
+		home_dir:        home_dir.as_deref(),
+		home_for_user:   Some(gix::config::path::interpolate::home_for_user),
+	};
+	let conditional = gix::config::file::includes::conditional::Context {
+		git_dir:     Some(common_dir),
+		branch_name: head_ref.as_ref().map(gix::refs::FullName::as_ref),
+	};
+	let options = gix::config::file::init::Options {
+		includes: gix::config::file::includes::Options::follow(interpolate, conditional).strict(),
+		..Default::default()
+	};
+	config
+		.resolve_includes(options)
+		.map_err(|e| Error::backend("git config", e))?;
+	Ok(Some(config))
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{fs, process::Command};
@@ -2017,6 +2048,34 @@ mod tests {
 		git(&separate_worktree, &["config", "extensions.worktreeConfig", "true"])?;
 		fs::write(separate_git_dir.join("config.worktree"), "[core]\n\tbare = true\n")?;
 		assert!(GitRepo::require(&sep_linked)?.is_common_repo_bare()?);
+
+		// Repository-local `[include]` overriding `core.bare` and
+		// `extensions.worktreeConfig`.
+		let inc_wt = parent.path().join("inc-main");
+		let inc_git = parent.path().join("inc-git");
+		git(parent.path(), &[
+			"init",
+			"-b",
+			"main",
+			"--separate-git-dir",
+			&inc_git.to_string_lossy(),
+			&inc_wt.to_string_lossy(),
+		])?;
+		git(&inc_wt, &["config", "user.name", "Test User"])?;
+		git(&inc_wt, &["config", "user.email", "test@example.com"])?;
+		commit(&inc_wt, "tracked", "tracked\n", "initial")?;
+		let inc_linked = parent.path().join("inc-linked");
+		git(&inc_wt, &["worktree", "add", "-b", "topic", &inc_linked.to_string_lossy()])?;
+		assert!(!GitRepo::require(&inc_linked)?.is_common_repo_bare()?);
+		fs::write(inc_git.join("bare-override.cfg"), "[core]\n\tbare = true\n")?;
+		git(&inc_wt, &["config", "include.path", "bare-override.cfg"])?;
+		assert!(GitRepo::require(&inc_linked)?.is_common_repo_bare()?);
+
+		// `[include]` enabling `extensions.worktreeConfig` with `config.worktree`
+		// setting `core.bare = true`.
+		fs::write(inc_git.join("bare-override.cfg"), "[extensions]\n\tworktreeConfig = true\n")?;
+		fs::write(inc_git.join("config.worktree"), "[core]\n\tbare = true\n")?;
+		assert!(GitRepo::require(&inc_linked)?.is_common_repo_bare()?);
 		Ok(())
 	}
 }

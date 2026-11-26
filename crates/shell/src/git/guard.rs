@@ -1277,24 +1277,51 @@ fn classify_tree_write(sub: Sub, args: &[Arg<'_>]) -> Verdict {
 	}
 	let flags = Flags::of(sub, args);
 	let mut operands = Vec::new();
-	let (mut new_branch, mut pathspec, mut whole_tree) = (false, false, false);
+	let mut explicit_pathspecs = Vec::new();
+	let mut new_branch = false;
 	for arg in args {
 		match (sub, *arg) {
 			(Sub::Checkout, Arg::Short('b' | 'B')) => new_branch = true,
 			(Sub::Checkout, Arg::Operand(spec)) => {
 				// `-` is the previous branch.
 				new_branch |= spec == "-";
-				whole_tree |= is_whole_tree(spec);
 				operands.push(spec);
 			},
 			(Sub::Checkout | Sub::Restore, Arg::Pathspec(spec))
 			| (Sub::Restore, Arg::Operand(spec)) => {
-				whole_tree |= is_whole_tree(spec);
-				pathspec = true;
+				explicit_pathspecs.push(spec);
 			},
 			_ => {},
 		}
 	}
+	let pathspec = !explicit_pathspecs.is_empty();
+	let (mut any_whole_tree_positive, mut any_positive, mut any_exclude) = (false, false, false);
+	let mut inspect = |spec: &str, count_positive: bool| {
+		if is_exclude_pathspec(spec) {
+			any_exclude = true;
+		} else {
+			if count_positive {
+				any_positive = true;
+			}
+			any_whole_tree_positive |= is_whole_tree_positive(spec);
+		}
+	};
+	if !explicit_pathspecs.is_empty() {
+		for spec in &explicit_pathspecs {
+			inspect(spec, true);
+		}
+	} else if flags.any(&["ours", "theirs"]) {
+		for spec in &operands {
+			inspect(spec, true);
+		}
+	} else {
+		for (idx, spec) in operands.iter().enumerate() {
+			// Without `--` or `--ours`/`--theirs`, `operands[0]` may be a
+			// `<tree-ish>`, so do not let it count as a positive pathspec.
+			inspect(spec, idx > 0);
+		}
+	}
+	let whole_tree = any_whole_tree_positive || (any_exclude && !any_positive);
 	let forced = flags.on("force") || (sub == Sub::Switch && flags.on("discard-changes"));
 	let branch = sub == Sub::Switch || new_branch || flags.any(&["orphan", "detach", "track"]);
 	let paths = sub == Sub::Restore
@@ -1369,21 +1396,42 @@ impl<'a> Flags<'a> {
 	}
 }
 
-/// Whether `spec` covers everything under the working directory or the
-/// repository root: `.`, `*`, `:/`, or a path climbing out with `..`.
-fn is_whole_tree(spec: &str) -> bool {
-	if spec.starts_with(":!") || spec.starts_with(":^") {
-		return true;
+/// Whether `spec` is an exclude pathspec (`:!…`, `:^…`, `:/!…`, `:(exclude)…`).
+fn is_exclude_pathspec(spec: &str) -> bool {
+	if let Some(after) = spec.strip_prefix(":(") {
+		return after
+			.split_once(')')
+			.is_some_and(|(magic, _)| magic.split(',').any(|attr| attr == "exclude"));
 	}
+	spec.strip_prefix(':').is_some_and(|rest| {
+		rest
+			.bytes()
+			.take_while(|b| matches!(b, b'/' | b'!' | b'^'))
+			.any(|b| matches!(b, b'!' | b'^'))
+	})
+}
+
+/// Whether a non-exclude `spec` covers everything under the working directory
+/// or the repository root: `.`, `*`, `**`, `:/`, or a path climbing out with
+/// `..`.
+fn is_whole_tree_positive(spec: &str) -> bool {
 	let mut rest = if let Some(after) = spec.strip_prefix(":(")
-		&& let Some((magic, path)) = after.split_once(')')
+		&& let Some((_, path)) = after.split_once(')')
 	{
-		if magic.split(',').any(|attr| attr == "exclude") {
-			return true;
-		}
 		path
+	} else if let Some(after) = spec.strip_prefix(':') {
+		let magic_len = after
+			.bytes()
+			.take_while(|b| matches!(b, b'/' | b'!' | b'^'))
+			.count();
+		if magic_len > 0 {
+			let tail = &after[magic_len..];
+			tail.strip_prefix(':').unwrap_or(tail)
+		} else {
+			spec
+		}
 	} else {
-		spec.strip_prefix(":/").unwrap_or(spec)
+		spec
 	};
 	while let Some(tail) = rest.strip_prefix("./") {
 		rest = tail;
@@ -1693,6 +1741,15 @@ mod tests {
 			("checkout :(literal).", "Destructive"),
 			("checkout :!foo", "Destructive"),
 			("checkout **", "Destructive"),
+			("checkout --ours -- src :!src/generated", "ConflictOnly"),
+			("checkout --ours src :!src/generated", "ConflictOnly"),
+			("restore src :!src/generated", "ConflictOnly"),
+			("checkout --ours -- :!src/generated", "Destructive"),
+			("checkout --ours -- . :!src/generated", "Destructive"),
+			("checkout main -- :!foo", "Destructive"),
+			("checkout HEAD :!foo", "Destructive"),
+			("checkout --ours -- src :/!src/generated", "ConflictOnly"),
+			("checkout --ours -- :/!src/generated", "Destructive"),
 			("clean -fd", "Clean"),
 			("clean -n", "Allow"),
 			("clean -dn", "Allow"),
