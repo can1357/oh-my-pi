@@ -254,6 +254,29 @@ describe("reactive tracking", () => {
 		});
 	});
 
+	it("reruns effects in the order they subscribed, one that left and came back last", () => {
+		createRoot(dispose => {
+			const s = signal(0);
+			const bReads = signal(true);
+			const order: string[] = [];
+			for (const name of ["a", "b", "c"]) {
+				effect(() => {
+					if (name !== "b" || bReads()) s();
+					order.push(name);
+				});
+			}
+			order.length = 0;
+			s.set(1);
+			expect(order).toEqual(["a", "b", "c"]);
+			bReads.set(false);
+			bReads.set(true);
+			order.length = 0;
+			s.set(2);
+			expect(order).toEqual(["a", "c", "b"]);
+			dispose();
+		});
+	});
+
 	it("stops a disposed effect from rerunning", () => {
 		const s = signal(0);
 		let runs = 0;
