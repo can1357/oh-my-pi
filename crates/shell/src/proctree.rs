@@ -786,8 +786,11 @@ impl Process {
 	/// Sends `TERM_SIGNAL` to the optional process group, every live descendant,
 	/// and the root, then optionally waits up to `graceful_ms` for the tree to
 	/// exit before escalating to `KILL_SIGNAL`. Pass `graceful_ms < 0` to skip
-	/// the wait entirely (the polite signal is still emitted). Returns `true`
-	/// when the tree has exited by the end of the hard wave's wait window.
+	/// the wait entirely (the polite signal is still emitted). A call whose
+	/// `ct` fires before or during the grace period still sends the hard wave,
+	/// at once, and then fails with the cancellation without waiting for the
+	/// exits. Returns `true` when the tree has exited by the end of the hard
+	/// wave's wait window.
 	pub async fn terminate_tree(
 		&self,
 		group: bool,
@@ -913,17 +916,23 @@ impl Process {
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before
-		// KILL).
+		// KILL). A cancellation ends the grace wait, not the termination: the
+		// hard wave goes out at once, so a process that ignores TERM does not
+		// outlive a cancelled call, and the call then reports the cancellation
+		// without waiting for the exits.
+		let mut cancelled = None;
 		if graceful_ms >= 0 {
-			let exited = wait_for_exit(
+			match wait_for_exit(
 				self,
 				&descendants,
 				Some(Duration::from_millis(graceful_ms as u64)),
 				ct.clone(),
 			)
-			.await?;
-			if exited {
-				return Ok(true);
+			.await
+			{
+				Ok(true) => return Ok(true),
+				Ok(false) => {},
+				Err(error) => cancelled = Some(error),
 			}
 		}
 
@@ -947,6 +956,9 @@ impl Process {
 		}
 		if !protected.contains(&self.pid()) {
 			let _ = self.inner.kill(KILL_SIGNAL);
+		}
+		if let Some(error) = cancelled {
+			return Err(error);
 		}
 
 		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
@@ -1523,5 +1535,56 @@ mod tests {
 			.expect("wait result");
 		assert!(exited, "exit resolves the wait");
 		let _ = child.wait();
+	}
+
+	/// A token that fires during the grace period ends the grace wait, not the
+	/// termination: the hard wave still goes out at once, so a child that
+	/// ignores TERM does not outlive the cancelled call. The grace period is
+	/// 60 s and the token fires after 200 ms, so the child is gone within the
+	/// 10 s the test waits only if the cancellation sent the KILL.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_token_that_fires_in_the_grace_period_still_sends_the_kill() {
+		use std::{os::unix::process::CommandExt, process::Command, time::Instant};
+
+		let mut root = Command::new("/bin/sh")
+			.args(["-c", "(trap '' TERM; exec sleep 1000) & wait"])
+			.process_group(0)
+			.spawn()
+			.expect("spawn the root");
+		let process = Process::from_pid(i32::try_from(root.id()).unwrap()).expect("pin the root");
+		let deadline = Instant::now() + Duration::from_secs(10);
+		let child = loop {
+			if let Some(child) = process.children().into_iter().find(|child| {
+				child
+					.args()
+					.first()
+					.is_some_and(|arg| arg.ends_with("sleep"))
+			}) {
+				break child;
+			}
+			assert!(Instant::now() < deadline, "the root never forked its TERM-ignoring sleep");
+			std::thread::sleep(Duration::from_millis(10));
+		};
+
+		let result = process
+			.terminate_tree(false, 60_000, 5000, CancelToken::new(Some(200)))
+			.await;
+		let _ = root.wait();
+		let deadline = Instant::now() + Duration::from_secs(10);
+		while child.status() == ProcessStatus::Running && Instant::now() < deadline {
+			std::thread::sleep(Duration::from_millis(10));
+		}
+		let survived = child.status() == ProcessStatus::Running;
+		if survived {
+			let _ = child.inner.kill(KILL_SIGNAL);
+		}
+		assert_eq!(
+			result
+				.expect_err("the cancelled call reports its cancellation")
+				.to_string(),
+			"Aborted: Timeout"
+		);
+		assert!(!survived, "the child that ignores TERM outlived the cancelled termination");
 	}
 }
