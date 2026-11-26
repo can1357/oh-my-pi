@@ -15,7 +15,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import * as titleDriftClassifier from "@oh-my-pi/pi-coding-agent/session/title-drift-classifier";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools";
-import { setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
+import { logger, setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 type ObservedPromptCall = {
@@ -691,5 +691,19 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(observedCalls[0]?.messageTexts.at(-1)).toBe("list all work trees");
 		expect(observedCalls[0]?.messageTexts[0]).not.toContain("list all work trees");
 		// `preferred` renders the soft nudge, never the hard MUST directive.
+	});
+
+	it.each(["preferred", "always"])("skips todo.eager %s silently when the todo tool is not active", async mode => {
+		await session.dispose();
+		await createSession({ "todo.eager": mode });
+		await session.setActiveToolsByName(["bash"]);
+		const warnSpy = vi.spyOn(logger, "warn");
+
+		await session.prompt("list all work trees");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+		expect(warnSpy.mock.calls.map(([message]) => message)).not.toContainEqual(expect.stringContaining("Eager todo"));
 	});
 });

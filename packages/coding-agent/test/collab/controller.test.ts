@@ -10,7 +10,7 @@
  * real Unix-socket IPC is redirected into a temp dir via a spy on
  * `publishCollabHost`, exactly as in host-registry.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,10 +28,8 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -40,7 +38,11 @@ import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-ind
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { AppFrame } from "../../src/modes/interactive/frame";
+import { Shell } from "../../src/ui/shell/shell";
+import { initTheme } from "../../src/ui/theme/service";
 import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
@@ -56,6 +58,10 @@ import {
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalPiProfile = process.env.PI_PROFILE;
@@ -164,15 +170,13 @@ function makeControllerContext(over: { autoStart?: "off" | "view" | "control"; r
 			},
 		},
 		eventBus: undefined,
-		editor: { setText: () => {} },
+		composer: { setText: () => {} },
 		statusLine: {
 			setCollabStatus: (status: unknown) => {
 				if (status === null) state.tornDown.shift()?.();
 			},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: (message: string) => {
 			state.showStatus.push(message);
 			state.firstStatus.resolve(message);
@@ -286,6 +290,26 @@ afterEach(async () => {
 	await fs.rm(tmp, { recursive: true, force: true });
 });
 
+/** `mode`'s transcript as plain rows at 200 columns. */
+function transcriptText(mode: InteractiveMode): string {
+	const term = createTestTerminal(() => ({ main: mode.shell.transcript.nodes }), { columns: 200, rows: 1000 });
+	try {
+		return term.screen().join("\n");
+	} finally {
+		term.dispose();
+	}
+}
+
+/** A frame on an in-memory terminal (`columns`×`rows`) for an InteractiveMode under test. */
+function testFrame(columns = 80, rows = 24): AppFrame {
+	return new AppFrame({
+		version: "test",
+		shape: "box",
+		quiet: true,
+		terminal: { driver: memoryTerminal({ columns, rows }).options, native: false },
+	});
+}
+
 describe("interactive collaboration startup", () => {
 	let activeSettings: Settings;
 	let testSession: TestSessionContext;
@@ -297,7 +321,7 @@ describe("interactive collaboration startup", () => {
 		originalProject = getProjectDir();
 		setProjectDir(tmp);
 		resetSettingsForTest();
-		await initTheme();
+		initTheme();
 		activeSettings = await Settings.init({ inMemory: true, cwd: tmp });
 		cfgStartupCheckUpdate.override(activeSettings, false);
 		cfgStartupChangelogMode.override(activeSettings, "hidden");
@@ -327,16 +351,7 @@ describe("interactive collaboration startup", () => {
 	});
 
 	it("keeps renderer-only initialization local without changing the saved policy", async () => {
-		mode = new InteractiveMode(
-			testSession.session,
-			"test",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			new Composer({ terminal: new VirtualTerminal() }),
-		);
-		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		mode = new InteractiveMode(testSession.session, "test", undefined, undefined, undefined, undefined, testFrame());
 
 		await mode.init({ suppressWelcomeIntro: true });
 
@@ -358,9 +373,8 @@ describe("interactive collaboration startup", () => {
 				undefined,
 				undefined,
 				undefined,
-				new Composer({ terminal: new VirtualTerminal(200, 60) }),
+				testFrame(200, 60),
 			);
-			spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 			await mode.init({ suppressWelcomeIntro: true });
 			await executeBuiltinSlashCommand("/collab", { ctx: mode });
 			const first = mode.collabHost;
@@ -391,7 +405,8 @@ describe("interactive collaboration startup", () => {
 				{ sessionId: testSession.sessionManager.getSessionId(), generation: 2 },
 			]);
 			if (!replacement) throw new Error("slash command did not replace the stale host");
-			expect(mode.ui.render(200).join("\n")).toContain(replacement.webLink);
+			// The notice shows the web link without its scheme.
+			expect(transcriptText(mode)).toContain(replacement.webLink.replace(/^https?:\/\//, ""));
 			await joinAsWriter(replacement);
 		},
 	);
@@ -404,9 +419,8 @@ describe("interactive collaboration startup", () => {
 			undefined,
 			undefined,
 			undefined,
-			new Composer({ terminal: new VirtualTerminal(200, 60) }),
+			testFrame(200, 60),
 		);
-		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 		await mode.init({ suppressWelcomeIntro: true });
 		const host = await mode.collabController.start({ access: "control" });
 		const asked = Promise.withResolvers<CollabFrame & { t: "ui-request" }>();
@@ -443,7 +457,7 @@ describe("interactive collaboration startup", () => {
 			},
 		);
 		beginStartupComposer({
-			terminal: new VirtualTerminal(),
+			driver: memoryTerminal({ columns: 80, rows: 24 }).options,
 			version: "test",
 			cache: false,
 		});
@@ -502,16 +516,7 @@ describe("interactive collaboration startup", () => {
 		await testSession.sessionManager.ensureOnDisk();
 		await testSession.sessionManager.flush();
 		const localFile = testSession.sessionManager.getSessionFile()!;
-		mode = new InteractiveMode(
-			testSession.session,
-			"test",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			new Composer({ terminal: new VirtualTerminal() }),
-		);
-		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		mode = new InteractiveMode(testSession.session, "test", undefined, undefined, undefined, undefined, testFrame());
 		await mode.init({ suppressWelcomeIntro: true, autoStartCollab: true });
 		await mode.collabController.idle();
 		await executeBuiltinSlashCommand("/collab stop", { ctx: mode });
@@ -774,16 +779,16 @@ describe("interactive collaboration startup", () => {
 			let terminalStopped = false;
 			let hostAtTerminalStop: CollabHost | undefined;
 			let transportOpenAtTerminalStop = false;
-			class StartupTerminal extends VirtualTerminal {
-				override stop(): void {
-					terminalStopped = true;
-					hostAtTerminalStop = mode?.collabHost;
-					transportOpenAtTerminalStop = capturedSockets.some(socket => socket.readyState !== FakeWebSocket.CLOSED);
-					super.stop();
-				}
-			}
+			// The terminal teardown is the shell stopping (its driver restores the terminal).
+			const stopShell = Shell.prototype.stop;
+			spyOn(Shell.prototype, "stop").mockImplementation(function (this: Shell) {
+				terminalStopped = true;
+				hostAtTerminalStop = mode?.collabHost;
+				transportOpenAtTerminalStop = capturedSockets.some(socket => socket.readyState !== FakeWebSocket.CLOSED);
+				return stopShell.call(this);
+			});
 			beginStartupComposer({
-				terminal: new StartupTerminal(),
+				driver: memoryTerminal({ columns: 80, rows: 24 }).options,
 				version: "test",
 				cache: false,
 			});

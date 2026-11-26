@@ -3,13 +3,11 @@
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	fmt,
-	sync::LazyLock,
 };
-
-use regex::Regex;
 
 pub use super::messages::AbsoluteRangeOp;
 use super::{
+	format::is_snapshot_tag,
 	input::Parsed,
 	messages::{
 		self, BARE_BODY_AUTO_PIPED_WARNING, BARE_RANGE_AUTO_PUT_WARNING, COLON_ON_REGISTER_PUT,
@@ -23,18 +21,59 @@ use super::{
 	tokenizer::{BlockTarget, Token, Tokenizer, is_hunk_header_text},
 	types::{Anchor, BlockMode, BlockSpan, Cursor, Edit, FileOp, ParsedRange, PasteTarget},
 };
-use crate::error::EditError;
+use crate::{error::EditError, scan};
 
 const MAX_EXPANDED_RANGE_LINES: u32 = 100_000;
-pub(super) static UNIFIED_HUNK_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
-/// A row shaped like a hunk header (`PUT …`, `CUT …`, `REM`, `MV …`) or a
-/// tagged file header (`[path#TAG]`). Reaching the body as a bare row, it is a
-/// header that failed to parse, never content.
-static HEADER_SHAPED_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^\s*(?:(?:PUT|CUT|REM|MV)(?:\s|$)|\[[^\]]+#[0-9A-Fa-f]{4}\]\s*$)")
-		.expect("valid regex")
-});
+
+/// Whether a row starts with a unified diff header like `@@ -1,2 +4,3 @@`.
+pub(super) fn is_unified_hunk_header(line: &str) -> bool {
+	line
+		.strip_prefix("@@")
+		.and_then(strip_unified_hunk_space)
+		.and_then(strip_unified_hunk_range)
+		.and_then(strip_unified_hunk_space)
+		.and_then(strip_unified_hunk_range)
+		.and_then(strip_unified_hunk_space)
+		.is_some_and(|rest| rest.starts_with("@@"))
+}
+
+/// Strip a whitespace separator before a unified diff range or closing marker.
+fn strip_unified_hunk_space(line: &str) -> Option<&str> {
+	match line.as_bytes() {
+		[b' ', b'!'..=b'~', ..] => Some(&line[1..]),
+		_ => scan::space(line),
+	}
+}
+
+/// Strip a unified diff start and count, with an optional leading sign.
+fn strip_unified_hunk_range(range: &str) -> Option<&str> {
+	let range = range.strip_prefix(['-', '+']).unwrap_or(range);
+	let (_, rest) = scan::digits(range)?;
+	Some(scan::digits(rest.strip_prefix(',')?)?.1)
+}
+
+/// Whether a bare row looks like an operation or a tagged file header.
+fn is_header_shaped(line: &str) -> bool {
+	let line = line.trim_start();
+	if let Some(body) = line.strip_prefix('[') {
+		return body
+			.trim_end()
+			.strip_suffix(']')
+			.and_then(|body| body.rsplit_once('#'))
+			.is_some_and(|(path, tag)| {
+				!path.is_empty() && is_snapshot_tag(tag) && !path.contains(']')
+			});
+	}
+	let verb_len = match line.as_bytes().first() {
+		Some(b'P' | b'C' | b'R') => 3,
+		Some(b'M') => 2,
+		_ => return false,
+	};
+	line.split_at_checked(verb_len).is_some_and(|(verb, rest)| {
+		matches!(verb, "PUT" | "CUT" | "REM" | "MV")
+			&& (rest.is_empty() || scan::space(rest).is_some())
+	})
+}
 
 /// Inverted concrete range with metadata for source-aware enrichment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,7 +374,7 @@ impl Executor {
 			if let Some(message) = bodyless_message(&pending.target, pending.had_colon) {
 				return fail_at(line_num, message);
 			}
-			if HEADER_SHAPED_RE.is_match(text) {
+			if is_header_shaped(text) {
 				return fail_at(line_num, &messages::malformed_header_row_message(text));
 			}
 			let minus = text.trim_start().starts_with('-');
@@ -772,7 +811,7 @@ fn contamination_message(text: &str) -> Option<String> {
 		));
 	}
 	if trimmed.starts_with("@@") {
-		if UNIFIED_HUNK_RE.is_match(trimmed) {
+		if is_unified_hunk_header(trimmed) {
 			return Some(
 				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. Use `PUT \
 				 N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."

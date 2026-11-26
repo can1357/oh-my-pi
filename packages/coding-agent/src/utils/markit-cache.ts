@@ -1,7 +1,7 @@
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getDocumentConversionCacheDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { errorMessage, getDocumentConversionCacheDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import packageJson from "../../package.json" with { type: "json" };
 
 /**
@@ -37,10 +37,6 @@ export function markitConversionCacheKey(bytes: Uint8Array, extension: string): 
 
 function cacheEntryPath(key: string): string {
 	return path.join(getDocumentConversionCacheDir(), `${key}.json`);
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function parseCacheEntry(raw: string): MarkitConversionCacheEntry | null {

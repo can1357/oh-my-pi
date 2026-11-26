@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as os from "node:os";
-import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
+import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-coding-agent/config/spinner-interval";
 import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
 	setTerminalTitle,
+	setExtensionTerminalTitle,
 	initTerminalTitleState,
 	popTerminalTitle,
 	setSessionTerminalTitle,
@@ -207,6 +208,19 @@ describe("disposeTerminalTitleState", () => {
 		resetObserved(writes, windowsTitleMock);
 		vi.advanceTimersByTime(4000);
 		expect(observedTitles(writes, windowsTitleMock)).toEqual([]);
+	});
+
+	it("stops the clock under an extension title and resumes on either release path", () => {
+		setTerminalTitleState("working");
+		for (const release of [() => setExtensionTerminalTitle(""), () => setSessionTerminalTitle("next")]) {
+			setExtensionTerminalTitle("owned");
+			setTerminalTitleState("working");
+			expect(vi.getTimerCount()).toBe(0);
+			release();
+			resetObserved(writes, windowsTitleMock);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(observedTitles(writes, windowsTitleMock)).toHaveLength(1);
+		}
 	});
 
 	it("latches: a direct setTerminalTitle after dispose cannot write the shell's tab", () => {

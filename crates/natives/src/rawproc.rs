@@ -204,9 +204,26 @@ pub struct RawExit {
 #[napi(ts_return_type = "Promise<RawExit>")]
 pub fn reap_child(env: &Env, pid: i32) -> Result<PromiseRaw<'_, RawExit>> {
 	task::future(env, "rawproc.reap_child", async move {
-		tokio::task::spawn_blocking(move || wait_child(pid))
-			.await
-			.map_err(|error| Error::from_reason(format!("reapChild task failed: {error}")))?
+		// Dedicated thread so long-lived child waiters never consume Tokio's
+		// bounded blocking pool.
+		let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+		let spawned = std::thread::Builder::new()
+			.name("pi-reap".into())
+			.stack_size(256 * 1024)
+			.spawn(move || {
+				let _ = done_tx.send(wait_child(pid));
+			});
+		let waited = match spawned {
+			Ok(_) => done_rx
+				.await
+				.map_err(|error| Error::from_reason(format!("reapChild task failed: {error}")))?,
+			// Giving up would leave the child a zombie once it exits; the shared
+			// pool can still queue the wait.
+			Err(_) => tokio::task::spawn_blocking(move || wait_child(pid))
+				.await
+				.map_err(|error| Error::from_reason(format!("reapChild task failed: {error}")))?,
+		};
+		waited
 			.map_err(|error| Error::new(Status::GenericFailure, format!("reapChild {pid}: {error}")))
 	})
 }

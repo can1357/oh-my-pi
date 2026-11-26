@@ -229,10 +229,8 @@ function makeHostHarness(sessionManager: HostReplicationSource): HostHarness {
 		eventBus: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: (msg: string) => statusMessages.push(msg),
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;

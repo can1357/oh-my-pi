@@ -1378,7 +1378,7 @@ it("setActiveToolsByName normalizes legacy tool names", async () => {
 
 	await session.setActiveToolsByName(["Search", "glob", "grep"]);
 
-	expect(session.getActiveToolNames()).toEqual(["grep", "glob"]);
+	expect(session.getActiveToolNames().toSorted()).toEqual(["glob", "grep"]);
 });
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@
 //! recheck immediately before `kill` (the remaining window is a pid wrapping
 //! around within microseconds).
 
-use std::io;
+use std::{collections::HashMap, io};
 
 use bstr::BString;
 
@@ -118,6 +118,86 @@ fn signal_all(mut procs: Vec<ProcInfo>, sig: Signal) -> io::Result<Vec<ProcInfo>
 /// `Ok(false)` when it has exited or the pid now names another process.
 pub fn signal_pinned(p: &ProcInfo, sig: Signal) -> io::Result<bool> {
 	sys::signal_pinned(p, i32::from(sig.number(Platform::current())))
+}
+
+/// `roots` and every process descended from them in `table`, a snapshot of
+/// the process table.
+///
+/// Descendants are their children, the children's children, and so on,
+/// widened by every member of a process group or session a process of the
+/// set leads. The widening keeps what a dying parent leaves to init: a
+/// debugger's inferior in a group of its own, a `setsid` daemon, a job's
+/// `(cmd &)` subshell. Take it before signalling any of them, while the
+/// parent links still hold.
+///
+/// A root counts only while its pid still names the process scanned (same
+/// start time). A group or session member must have started no earlier than
+/// its leader (an older process with that id is in a group or session of a
+/// recycled pid), and the caller's own process, group and session are never
+/// taken in.
+pub fn family(table: &[ProcInfo], roots: &[ProcInfo]) -> Vec<ProcInfo> {
+	let me = std::process::id() as i32;
+	// SAFETY: plain syscalls without pointer arguments.
+	let (my_pgid, my_sid) = unsafe { (libc::getpgid(0), libc::getsid(0)) };
+	let mut by_parent: HashMap<i32, Vec<usize>> = HashMap::new();
+	let mut by_group: HashMap<i32, Vec<usize>> = HashMap::new();
+	let mut by_session: HashMap<i32, Vec<usize>> = HashMap::new();
+	for (i, p) in table.iter().enumerate() {
+		by_parent.entry(p.ppid).or_default().push(i);
+		if p.pgid != my_pgid {
+			by_group.entry(p.pgid).or_default().push(i);
+		}
+		if p.sid != my_sid {
+			by_session.entry(p.sid).or_default().push(i);
+		}
+	}
+	let mut taken = vec![false; table.len()];
+	let mut queue = Vec::new();
+	for (i, p) in table.iter().enumerate() {
+		if p.pid != me && roots.iter().any(|r| r.pid == p.pid && r.start == p.start) {
+			taken[i] = true;
+			queue.push(i);
+		}
+	}
+	while let Some(i) = queue.pop() {
+		let leader = &table[i];
+		let linked = [&by_parent, &by_group, &by_session]
+			.into_iter()
+			.filter_map(|index| index.get(&leader.pid))
+			.flatten();
+		for &j in linked {
+			if !taken[j] && table[j].pid != me && table[j].start >= leader.start {
+				taken[j] = true;
+				queue.push(j);
+			}
+		}
+	}
+	table
+		.iter()
+		.zip(taken)
+		.filter(|&(_, taken)| taken)
+		.map(|(p, _)| p.clone())
+		.collect()
+}
+
+/// Send signal number `sig` to each of `procs` that still is the process
+/// scanned; returns the number of processes signalled.
+///
+/// Zombies are skipped. Each stopped one then gets `SIGCONT`: a stopped
+/// process acts on `TERM` only once continued, and one whose tracer is gone
+/// stays stopped forever. A process that refuses (`EPERM`, a setuid member)
+/// does not spare the rest.
+pub fn signal_each<'a>(procs: impl IntoIterator<Item = &'a ProcInfo>, sig: i32) -> usize {
+	let mut sent = 0;
+	for p in procs.into_iter().filter(|p| p.state != ProcState::Zombie) {
+		if matches!(sys::signal_pinned(p, sig), Ok(true)) {
+			sent += 1;
+			if p.state == ProcState::Stopped {
+				let _ = sys::signal_pinned(p, libc::SIGCONT);
+			}
+		}
+	}
+	sent
 }
 
 /// Split a Linux `/proc/<pid>/stat` line into `(comm, fields after comm)`.

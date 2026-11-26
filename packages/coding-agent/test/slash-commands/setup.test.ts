@@ -12,7 +12,7 @@ function createRuntime() {
 		setText,
 		runtime: {
 			ctx: {
-				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				composer: { setText } as unknown as InteractiveModeContext["composer"],
 				showProviderSetup,
 				showWarning,
 			} as unknown as InteractiveModeContext,

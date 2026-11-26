@@ -171,6 +171,24 @@ function makeAnthropicModel(): Model<"anthropic-messages"> {
 	});
 }
 
+function makeProxyModel<TApi extends "openai-completions" | "anthropic-messages">(
+	api: TApi,
+	baseUrl = "https://proxy.example/v1",
+): Model<TApi> {
+	return buildModel({
+		id: "proxy-model",
+		name: "Proxy Model",
+		api,
+		provider: "proxy",
+		baseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8192,
+	});
+}
+
 function makeOpenCodeGoAnthropicModel(): Model<"anthropic-messages"> {
 	return buildModel({
 		id: "qwen3.7-max",
@@ -299,7 +317,7 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 		});
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
 		expect(setup.headers["User-Agent"]).toBe(USER_AGENT);
-		expect(setup.headers.session_id).toBeUndefined();
+		expect(setup.headers["session-id"]).toBeUndefined();
 	});
 
 	it("falls back to the prompt-cache session id", () => {
@@ -339,14 +357,17 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
 	});
 
-	it("sends session_id and x-client-request-id on OpenAI requests", () => {
+	it("sends codex-rs hyphenated session headers on OpenAI requests", () => {
 		const setup = resolveOpenAIRequestSetup(makeOpenAICompletionsModel(), {
 			apiKey: "key",
 			messages: [],
 			sessionId: "session-1",
 		});
-		expect(setup.headers.session_id).toBe("session-1");
+		expect(setup.headers["session-id"]).toBe("session-1");
+		expect(setup.headers["thread-id"]).toBe("session-1");
 		expect(setup.headers["x-client-request-id"]).toBe("session-1");
+		// Proxies reject underscored header names; codex-rs dropped this spelling.
+		expect(setup.headers.session_id).toBeUndefined();
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBeUndefined();
 		expect(setup.headers["x-litellm-session-id"]).toBeUndefined();
 	});
@@ -366,7 +387,7 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 
 		expect(response.stopReason).toBe("stop");
 		expect(headersSeen[0]?.get("x-litellm-session-id")).toBe("session-1");
-		expect(headersSeen[0]?.get("session_id")).toBeNull();
+		expect(headersSeen[0]?.get("session-id")).toBeNull();
 	});
 
 	it("keeps a configured x-litellm-session-id over the conversation session id", () => {
@@ -742,7 +763,7 @@ describe("Go sibling prompt-cache wire affinity", () => {
 			sessionId: "conversation",
 			promptCacheSessionId: "shared-cache",
 		});
-		expect(setup.headers.session_id).toBe("conversation");
+		expect(setup.headers["session-id"]).toBe("conversation");
 		expect(setup.headers["x-opencode-session"]).toBeUndefined();
 	});
 
@@ -869,6 +890,122 @@ describe("session header on the Anthropic transport", () => {
 		});
 		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
+	});
+});
+
+describe("generic x-session-id fallback", () => {
+	it("sends x-session-id to an OpenAI-compatible host without its own session header", () => {
+		const setup = resolveOpenAIRequestSetup(makeProxyModel("openai-completions"), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "session-1",
+		});
+		expect(setup.headers["x-session-id"]).toBe("session-1");
+		expect(setup.headers["session-id"]).toBeUndefined();
+	});
+
+	it("routes a side request by its parent conversation", () => {
+		const setup = resolveOpenAIRequestSetup(makeProxyModel("openai-completions"), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "parent:side:1",
+			parentSessionId: "parent",
+		});
+		expect(setup.headers["x-session-id"]).toBe("parent");
+	});
+
+	it("keeps a caller-set x-session-id", () => {
+		const setup = resolveOpenAIRequestSetup(makeProxyModel("openai-completions"), {
+			apiKey: "key",
+			messages: [],
+			extraHeaders: { "X-Session-Id": "caller" },
+			sessionId: "session-1",
+		});
+		expect(setup.headers["X-Session-Id"]).toBe("caller");
+		expect(setup.headers["x-session-id"]).toBeUndefined();
+	});
+
+	it("leaves a host's declared session header to its own value and gating", () => {
+		// Morph routes on `x-session-id` itself, carrying the retention-gated cache key.
+		const morph = makeProxyModel("openai-completions", "https://api.morphllm.com/v1");
+		const cached = resolveOpenAIRequestSetup(morph, {
+			apiKey: "key",
+			messages: [],
+			sessionId: "conversation",
+			promptCacheSessionId: "cache-1",
+		});
+		expect(cached.headers["x-session-id"]).toBe("cache-1");
+		const uncached = resolveOpenAIRequestSetup(morph, { apiKey: "key", messages: [], sessionId: "conversation" });
+		expect(uncached.headers["x-session-id"]).toBeUndefined();
+	});
+
+	it("sends x-session-id beside the Claude header to third-party Anthropic hosts, not to Anthropic", () => {
+		const proxy = buildAnthropicClientOptions({
+			model: makeProxyModel("anthropic-messages", "https://proxy.example"),
+			apiKey: "key",
+			sessionId: "session-1",
+		});
+		expect(proxy.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
+		expect(proxy.defaultHeaders["x-session-id"]).toBe("session-1");
+
+		const official = buildAnthropicClientOptions({
+			model: makeAnthropicModel(),
+			apiKey: "sk-ant-oat-test",
+			isOAuth: true,
+			sessionId: "session-1",
+		});
+		expect(official.defaultHeaders["x-session-id"]).toBeUndefined();
+	});
+});
+
+// #20261: `/btw` and other side turns send their own `:side:` sessionId plus
+// `parentSessionId`; OpenCode routes by `x-opencode-session`, so it must carry
+// the parent's id or the side request lands on a worker without its KV cache.
+describe("side request affinity on the OpenCode session header", () => {
+	const side = { sessionId: "parent:side:1", parentSessionId: "parent" };
+
+	it("routes a side request to the parent conversation on a Go Completions lane", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+
+		const response = await completeSimple(
+			makeOpenCodeGoCompletionsLaneModel("deepseek-v4.1-flash"),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{ apiKey: "key", ...side, promptCacheKey: "parent", fetch: fetchMock as typeof fetch },
+		);
+
+		expect(response.stopReason).toBe("stop");
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent");
+	});
+
+	it("routes a side request to the parent conversation on Go Responses and Zen", () => {
+		for (const model of [makeOpenCodeGoMuseModel("muse-spark-1.3"), makeOpenCodeZenMuseModel()]) {
+			const setup = resolveOpenAIRequestSetup(model, { apiKey: "key", messages: [], ...side });
+			expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("parent");
+		}
+	});
+
+	it("keeps the shared family key over the parent on an opted-in Go lane", () => {
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel(), {
+			apiKey: "key",
+			messages: [],
+			...side,
+			promptCacheAffinityKey: "parent:task",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+	});
+
+	it("routes by the parent on OpenCode Anthropic while the Claude session header keeps the side id", () => {
+		const options = buildAnthropicClientOptions({
+			model: makeOpenCodeGoAnthropicModel(),
+			apiKey: "opencode_test_key",
+			...side,
+		});
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("parent");
+		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("parent:side:1");
 	});
 });
 

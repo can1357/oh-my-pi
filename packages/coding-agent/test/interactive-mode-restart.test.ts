@@ -10,8 +10,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as natives from "@oh-my-pi/pi-natives";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode restart", () => {
 	let tempDir: TempDir;
@@ -51,9 +52,15 @@ describe("InteractiveMode restart", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		const mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = () => {};
-		mode.ui.terminal.drainInput = async () => {};
+		const mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		process.argv = [originalArgv[0], originalArgv[1], ...argv];
 		// Stop only at the process replacement boundary; teardown and argv production run for real.
 		const exec = vi.spyOn(natives, "execReplace").mockImplementation(() => undefined as never);

@@ -4,25 +4,25 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { AssistantView, PendingTool } from "../src/modes/types";
+import type { TranscriptBlock } from "../src/ui/shell";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, renderRows, transcriptText } from "./helpers/mode-terminal";
 
 /**
  * Regression for issue #3656 — running `/shake` (or any mid-stream rebuild)
  * while the LLM is still streaming used to wipe the in-flight assistant turn
- * from the chat. `rebuildChatFromMessages` clears `chatContainer` and replays
+ * from the chat. `rebuildChatFromMessages` clears the transcript and replays
  * only committed `state.messages`; the agent's in-flight `streamMessage` and
  * its still-pending tool calls live OUTSIDE `state.messages` until
- * `message_end`, so the live `streamingComponent` and `pendingTools` entries
+ * `message_end`, so the live streaming view and `pendingTools` entries
  * were detached and every subsequent `message_update`/`message_end` event
  * routed deltas into orphaned components that never re-rendered.
  *
@@ -63,14 +63,6 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 	});
 
 	beforeEach(async () => {
-		vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
-		if (typeof process.stdin.setRawMode === "function") {
-			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
-		}
-
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-issue-3656-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -85,8 +77,15 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {
@@ -99,23 +98,22 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		resetSettingsForTest();
 	});
 
+	/** The transcript's blocks. */
+	const blocks = (): readonly TranscriptBlock[] => mode.shell.transcript.blocks();
+
 	function makeStreamingFixture(streaming = true): {
-		streamingComponent: AssistantMessageComponent;
-		pendingTool: ToolExecutionComponent;
+		streamingComponent: AssistantView;
+		pendingTool: PendingTool;
 	} {
-		const streamingComponent = new AssistantMessageComponent();
-		const pendingTool = new ToolExecutionComponent(
-			"bash",
-			{ command: "echo hi" },
-			{},
-			undefined,
-			mode.ui,
-			tempDir.path(),
-			"call-1",
-		);
-		mode.chatContainer.addChild(streamingComponent);
-		mode.chatContainer.addChild(pendingTool);
-		mode.streamingComponent = streamingComponent;
+		const streamingComponent = mode.presentAssistant();
+		const pendingTool = mode.presentToolCall({
+			name: "bash",
+			args: { command: "echo hi" },
+			tool: undefined,
+			id: "call-1",
+			cwd: tempDir.path(),
+		});
+		mode.streaming = streamingComponent;
 		mode.streamingMessage = assistantWithBash("echo hi");
 		mode.pendingTools.set("call-1", pendingTool);
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
@@ -184,7 +182,7 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		await startRead("after", "after-compaction.ts");
 		await finishRead("after");
 
-		const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
+		const rendered = transcriptText(mode.shell);
 		expect(rendered.match(/before-compaction\.ts/g)).toHaveLength(1);
 		expect(rendered.match(/after-compaction\.ts/g)).toHaveLength(1);
 	});
@@ -198,10 +196,14 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		await startRead("next", "next-read.ts");
 		await finishRead("next");
 
-		const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
+		const rendered = transcriptText(mode.shell);
 		expect(rendered.match(/pending-read\.ts/g)).toHaveLength(1);
 		expect(rendered.match(/next-read\.ts/g)).toHaveLength(1);
-		expect(mode.chatContainer.children.filter(child => child instanceof ReadToolGroupComponent)).toHaveLength(1);
+		const groups = blocks().filter(block => {
+			const entry = mode.transcriptEntry(block);
+			return entry?.kind === "tool" && entry.tool.group !== undefined;
+		});
+		expect(groups).toHaveLength(1);
 		expect(mode.pendingTools.size).toBe(0);
 	});
 
@@ -210,8 +212,8 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 
 		mode.rebuildChatFromMessages();
 
-		expect(mode.chatContainer.children).toContain(streamingComponent);
-		expect(mode.streamingComponent).toBe(streamingComponent);
+		expect(blocks()).toContain(streamingComponent.block);
+		expect(mode.streaming).toBe(streamingComponent);
 	});
 
 	it("routes later streamed tool-call deltas into the preserved on-screen component", async () => {
@@ -233,9 +235,9 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 
 		mode.rebuildChatFromMessages();
 
-		const children = mode.chatContainer.children;
-		const streamingIdx = children.indexOf(streamingComponent);
-		const pendingIdx = children.indexOf(pendingTool);
+		const children = blocks();
+		const streamingIdx = children.indexOf(streamingComponent.block);
+		const pendingIdx = children.indexOf(pendingTool.block);
 		expect(streamingIdx).toBeGreaterThanOrEqual(0);
 		expect(pendingIdx).toBeGreaterThan(streamingIdx);
 	});
@@ -250,16 +252,18 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		Object.defineProperty(session.agent.state, "streamMessage", { configurable: true, value: reply });
 		await mode.eventController.handleEvent({ type: "message_start", message: reply } as AgentSessionEvent);
 		await mode.eventController.handleEvent({ type: "message_update", message: reply } as AgentSessionEvent);
-		const drawsAfter = (child: unknown) =>
-			child instanceof AssistantMessageComponent &&
-			Bun.stripANSI(child.render(80).join("\n")).includes("After the call.");
-		const segment = mode.chatContainer.children.find(drawsAfter);
-		if (!segment) throw new Error("expected a component drawing the post-tool text");
+		const drawsAfter = (block: TranscriptBlock) =>
+			mode.transcriptEntry(block)?.kind === "assistant" &&
+			renderRows(() => block.node, 80)
+				.join("\n")
+				.includes("After the call.");
+		const segment = blocks().find(drawsAfter);
+		if (!segment) throw new Error("expected a block drawing the post-tool text");
 
 		mode.rebuildChatFromMessages();
 
-		expect(mode.chatContainer.children).toContain(segment);
-		expect(mode.chatContainer.children.filter(drawsAfter)).toHaveLength(1);
+		expect(blocks()).toContain(segment);
+		expect(blocks().filter(drawsAfter)).toHaveLength(1);
 	});
 
 	it("uses the rendered view session when preserving a focused subagent stream", () => {
@@ -278,22 +282,21 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 
 		mode.rebuildChatFromMessages();
 
-		expect(mode.chatContainer.children).toContain(streamingComponent);
-		expect(mode.chatContainer.children).toContain(pendingTool);
+		expect(blocks()).toContain(streamingComponent.block);
+		expect(blocks()).toContain(pendingTool.block);
 		expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
 	});
 
 	it("does not preserve in-flight tracking when the session is idle (post-stream rebuilds reset cleanly)", () => {
-		const streamingComponent = new AssistantMessageComponent();
-		mode.chatContainer.addChild(streamingComponent);
-		mode.streamingComponent = streamingComponent;
+		const streamingComponent = mode.presentAssistant();
+		mode.streaming = streamingComponent;
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
 
 		mode.rebuildChatFromMessages();
 
 		// Idle rebuilds (resume, /compact post-flush, theme overlay close) treat
-		// `streamingComponent` as stale UI to discard — the chat must be redrawn
+		// the streaming view as stale UI to discard — the chat must be redrawn
 		// purely from committed messages.
-		expect(mode.chatContainer.children).not.toContain(streamingComponent);
+		expect(blocks()).not.toContain(streamingComponent.block);
 	});
 });
