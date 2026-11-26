@@ -14,6 +14,7 @@
 ### Fixed
 
 - Fixed `worktree add` and clone giving clean tracked files the wrong executable bit when `core.filemode` is off; each file now keeps the mode its index entry records, as git does ([#17558](https://github.com/can1357/oh-my-pi/issues/17558), [#20393](https://github.com/can1357/oh-my-pi/pull/20393) by [@JamieJ5926](https://github.com/JamieJ5926))
+- `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave ([#20597](https://github.com/can1357/oh-my-pi/pull/20597) by [@daandden](https://github.com/daandden))
 - Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
 - Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
 - Preserved source-code indentation and linked content cards in URL reads.

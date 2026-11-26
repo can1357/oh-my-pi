@@ -11,6 +11,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { batch, type KeyEvent, type Signal, signal, type TextEdit, untrack } from "@oh-my-pi/pi-tui";
+import { columnOf, layoutText, offsetAt, rowOf } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { applyEdit, applyMaskedEdit } from "../../overlays/panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
@@ -124,20 +125,6 @@ function compactNote(text: string, images: readonly ImageContent[]): { text: str
 	return { text: compacted.text, images: compacted.keep.map(index => images[index]!) };
 }
 
-/** The caret of a multi-line box one line up or down, keeping its column where the line reaches it. */
-function lineStep(line: LineState, delta: 1 | -1): LineState {
-	const { text, cursor } = line;
-	const start = text.slice(0, cursor).lastIndexOf("\n") + 1;
-	const column = cursor - start;
-	if (delta < 0) {
-		const above = text.slice(0, Math.max(0, start - 1)).lastIndexOf("\n") + 1;
-		return { text, cursor: Math.min(above + column, start - 1) };
-	}
-	const end = text.indexOf("\n", cursor);
-	const below = text.indexOf("\n", end + 1);
-	return { text, cursor: Math.min(end + 1 + column, below === -1 ? text.length : below) };
-}
-
 /** Whether `value` leaves its field unanswered, as {@link fieldError} counts emptiness. */
 function isBlank(value: HtmlFormValue | undefined): boolean {
 	return value === undefined || (Array.isArray(value) ? value.length === 0 : String(value).trim() === "");
@@ -176,6 +163,12 @@ export class HtmlFormModel {
 	 * the text above it).
 	 */
 	readonly scrollAnchor = signal<"top" | "bottom">("top");
+	/**
+	 * Cells a textarea's rows wrap at as the terminal card last drew them, so
+	 * Up/Down step through the rows on screen; undefined before that paint
+	 * (Up/Down then step hard lines).
+	 */
+	wrapWidth: number | undefined;
 	readonly focused: Signal<boolean>;
 	readonly #callbacks: HtmlFormCallbacks;
 	#done = false;
@@ -882,10 +875,13 @@ export class HtmlFormModel {
 		const id = listKeyId(key);
 		const box: TextBox = { kind: "text", field: index };
 		if (id === "up" || id === "down") {
-			// A textarea's caret moves between its lines; from its first or last line the highlight moves on.
+			// A textarea's caret moves between its rows as drawn; from its first or last row the highlight moves on.
 			const { text, cursor } = this.#line(box);
-			const inside = (id === "up" ? text.slice(0, cursor) : text.slice(cursor)).includes("\n");
-			if (field.multiline && inside) this.#setLine(box, lineStep({ text, cursor }, id === "up" ? -1 : 1));
+			const rows = field.multiline ? layoutText(text, this.wrapWidth ?? Number.MAX_SAFE_INTEGER) : [];
+			const row = rowOf(rows, cursor);
+			const target = row + (id === "up" ? -1 : 1);
+			if (target >= 0 && target < rows.length)
+				this.#setLine(box, { text, cursor: offsetAt(text, rows, target, columnOf(text, rows[row]!, cursor)) });
 			else this.#move(id === "up" ? -1 : 1);
 			return true;
 		}
