@@ -197,6 +197,8 @@ class FakeAgentSession {
 	retryCalls = 0;
 	/** Backs `modelRegistry.authStorage` for `/mcp reauth` credential round-trips. */
 	authStorage?: AuthStorage;
+	#discoveredModels: Model[] = [];
+	#discovery: Promise<void> | undefined;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(
@@ -218,15 +220,30 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
+	get modelRegistry(): {
+		getApiKey: (model: Model) => Promise<string>;
+		authStorage?: AuthStorage;
+		awaitBackgroundRefresh: () => Promise<void>;
+	} {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			awaitBackgroundRefresh: () => this.#discovery ?? Promise.resolve(),
 			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}
 
+	/** Starts a fake background discovery that adds `models` to the list once `delayMs` has passed. */
+	startBackgroundDiscovery(models: Model[], delayMs: number): void {
+		this.#discovery = new Promise<void>(resolve => {
+			setTimeout(() => {
+				this.#discoveredModels = models;
+				resolve();
+			}, delayMs);
+		});
+	}
+
 	getAvailableModels(): Model[] {
-		return this.models;
+		return [...this.models, ...this.#discoveredModels];
 	}
 
 	getAvailableEffortSelectors(): ReadonlyArray<string> {
@@ -564,6 +581,8 @@ async function createHarness(
 		extensionRunners?: boolean;
 		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
 		authStorage?: AuthStorage;
+		/** Starts a background discovery in each created session, as the CLI does after `session/new` builds it. */
+		backgroundDiscovery?: { models: Model[]; delayMs: number };
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -609,6 +628,9 @@ async function createHarness(
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
 		if (options.authStorage) session.authStorage = options.authStorage;
+		if (options.backgroundDiscovery) {
+			session.startBackgroundDiscovery(options.backgroundDiscovery.models, options.backgroundDiscovery.delayMs);
+		}
 		if (options.extensionRunners) {
 			session.extensionRunner = new ExtensionRunner(
 				[],
@@ -695,6 +717,25 @@ describe("ACP agent", () => {
 		await harness.agent.closeSession({ sessionId: created.sessionId });
 		await harness.agent.loadSession({ sessionId: created.sessionId, cwd: harness.cwdA, mcpServers: [] });
 		expect(harness.sessions.at(-1)?.sessionId).toBe(continued);
+		await harness.agent.dispose();
+	});
+
+	it("lists and accepts a discovery-backed model selected while the catalog refresh is pending", async () => {
+		// Issue #19127: session/new answers while the 1M sibling is still being discovered.
+		const discovered = { ...TEST_MODELS[1]!, id: "gpt-5.4-1m", name: "GPT-5.4 1M", contextWindow: 1_050_000 };
+		const harness = await createHarness({ backgroundDiscovery: { models: [discovered], delayMs: 10 } });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const modelOption = created.configOptions?.find(option => option.id === "model") as
+			| { options?: Array<{ value: string }> }
+			| undefined;
+		expect(modelOption?.options?.map(option => option.value)).toContain("openai/gpt-5.4-1m");
+
+		const selected = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "model",
+			value: "openai/gpt-5.4-1m",
+		});
+		expect(selected.configOptions.find(option => option.id === "model")?.currentValue).toBe("openai/gpt-5.4-1m");
 		await harness.agent.dispose();
 	});
 

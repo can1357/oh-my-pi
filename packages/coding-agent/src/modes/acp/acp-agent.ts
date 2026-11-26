@@ -1957,6 +1957,10 @@ export class AcpAgent implements Agent {
 		// own (ACP sessions run with `enableMCP: false`); read it live so every
 		// reconfiguration's `refreshMCPTools` rebuild renders its instructions.
 		session.setMcpServerInstructionsSource(() => record.mcpManager?.getServerInstructions());
+		// Discovery-backed models (Copilot's 1M siblings) join the registry only when the
+		// background refresh settles. The options returned by session/new and friends, and
+		// the selection validated against them, must read the list after that (issue #19127).
+		await session.modelRegistry.awaitBackgroundRefresh();
 		try {
 			const unsubscribeEvents = session.subscribe(event => {
 				this.#handleLifetimeEvent(record, event);
