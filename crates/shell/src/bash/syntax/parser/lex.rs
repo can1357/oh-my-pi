@@ -529,6 +529,35 @@ impl<'s> Parser<'s> {
 		self.command_token_position(self.lx.last) && !self.lx.casepat
 	}
 
+	/// `time` followed (after an optional `-p`) by an option the keyword does
+	/// not take (`time -l cmd`, `time --verbose cmd`): the word stays a
+	/// command, pi's `time` utility, where bash would only fail running a
+	/// command named like the option. Reads the source ahead, as the posix
+	/// check of [`Self::time_command_acceptable`] does.
+	fn time_utility_follows(&self) -> bool {
+		let buf: &'s [u8] = self.buf;
+		let mut rest = buf.get(self.pos..).unwrap_or_default();
+		for first in [true, false] {
+			let start = rest
+				.iter()
+				.position(|&c| c != b' ' && c != b'\t')
+				.unwrap_or(rest.len());
+			rest = &rest[start..];
+			let end = rest
+				.iter()
+				.position(|c| b" \t\n;&|()<>".contains(c))
+				.unwrap_or(rest.len());
+			let (word, after) = rest.split_at(end);
+			match word {
+				b"-p" if first => rest = after,
+				[b'-', b'-', _, ..] => return true,
+				[b'-', letter, ..] => return letter.is_ascii_alphabetic(),
+				_ => return false,
+			}
+		}
+		false
+	}
+
 	/// bash `time_command_acceptable`.
 	fn time_command_acceptable(&self) -> bool {
 		if self.feat.contains(Features::POSIX) {
@@ -586,9 +615,31 @@ impl<'s> Parser<'s> {
 		self.compound.pop();
 	}
 
+	/// Record a `\`-newline about to be skipped after `&&`, `||`, `|` or `|&`
+	/// while a here-document waits for the next newline: it moves the body
+	/// below the next line.
+	fn note_doc_line_cont(&mut self) {
+		if self.pending.is_empty()
+			|| self.doc_line_cont.is_some()
+			|| !self.frames.is_empty()
+			|| !matches!(self.lx.last, T::AndAnd | T::OrOr | T::Bar | T::BarAnd)
+		{
+			return;
+		}
+		let rest = &self.buf[self.pos.min(self.buf.len())..];
+		let blanks = rest
+			.iter()
+			.take_while(|&&c| matches!(c, b' ' | b'\t'))
+			.count();
+		if rest[blanks..].starts_with(b"\\\n") {
+			self.doc_line_cont = Some(self.off() + blanks as u32);
+		}
+	}
+
 	/// `read_token`.
 	pub(super) fn read_token(&mut self) -> PResult<Tok> {
 		loop {
+			self.note_doc_line_cont();
 			self.skip_blanks();
 			let lo = self.off();
 			let line = self.line;
@@ -1040,7 +1091,7 @@ impl<'s> Parser<'s> {
 		if lx.casepat && k != T::Esac {
 			return None;
 		}
-		if k == T::Time && !self.time_command_acceptable() {
+		if k == T::Time && (!self.time_command_acceptable() || self.time_utility_follows()) {
 			return None;
 		}
 		let lx = &mut self.lx;

@@ -29,8 +29,8 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { shellReservedCommandNames } from "@oh-my-pi/pi-natives";
-import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { truncateHeadBytes } from "./streaming-output";
+import { ToolError } from "./tool-errors";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { isEvalBridgeToolCall, isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { renderToolHelp } from "../exec/tool-cli";

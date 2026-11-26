@@ -4,18 +4,13 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
-
-function plainRows(rows: readonly string[]): string[] {
-	return rows.map(row => Bun.stripANSI(row).trimEnd());
-}
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal } from "./helpers/mode-terminal";
 
 function dump(label: string, rows: readonly string[]): void {
 	console.log(`==== ${label} ====`);
@@ -27,7 +22,16 @@ describe("libkitty end-to-end", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 	let mode: InteractiveMode;
-	let term: VirtualTerminal;
+	let term: ModeTerminal;
+
+	/** The real interactive mode on a `columns`×`rows` in-memory terminal (kitty's VT engine). */
+	function start(columns: number, rows: number): void {
+		term = createModeTerminal({ columns, rows, settings: session.settings });
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, term.frame);
+	}
+	/** Scrollback, then the viewport. */
+	const buffer = (): string[] => [...term.scrollback(), ...term.screen()];
+	const viewport = (): string[] => term.screen();
 
 	beforeAll(() => {
 		initTheme();
@@ -47,13 +51,13 @@ describe("libkitty end-to-end", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		term = new VirtualTerminal(120, 32);
-		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, composer);
+		start(120, 32);
 	});
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
@@ -63,20 +67,20 @@ describe("libkitty end-to-end", () => {
 	it("paints the submitted user message before any model reply", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const pending = mode.getUserInput();
-		await term.waitForRender();
+		await term.settle();
 
-		term.sendInput("hi there omp");
-		await term.waitForRender();
-		term.sendInput("\r");
+		term.type("hi there omp");
+		await term.settle();
+		term.press("enter");
 		const input = await pending;
 		expect(input.text).toBe("hi there omp");
 
 		// The optimistic user-message block must be on the physical screen now,
 		// before any assistant output exists.
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("hi there omp")));
-		const viewport = plainRows(term.getViewport());
-		const hits = viewport.filter(row => row.includes("hi there omp"));
-		if (hits.length !== 1) dump("viewport after submit", viewport);
+		await term.waitFor(() => viewport().some(row => row.includes("hi there omp")));
+		const rows = viewport();
+		const hits = rows.filter(row => row.includes("hi there omp"));
+		if (hits.length !== 1) dump("viewport after submit", rows);
 		expect(hits.length).toBe(1);
 	});
 
@@ -84,33 +88,33 @@ describe("libkitty end-to-end", () => {
 		term.resize(140, 40);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
-		await term.waitForRender();
-		term.sendInput("MARKER_DRAFT");
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFT")));
+		await term.settle();
+		term.type("MARKER_DRAFT");
+		await term.waitFor(() => viewport().some(row => row.includes("MARKER_DRAFT")));
 
 		term.resize(120, 40);
 		await Bun.sleep(300);
-		await term.waitForRender();
+		await term.settle();
 		term.resize(110, 40);
 		await Bun.sleep(300);
-		await term.waitForRender();
+		await term.settle();
 
 		// Content always fit the screen, so the terminal never pushed live rows
 		// into scrollback: the entire buffer must hold exactly one copy.
-		const buffer = plainRows(term.getScrollBuffer());
-		const drafts = buffer.filter(row => row.includes("MARKER_DRAFT"));
-		if (drafts.length !== 1) dump("scroll buffer after resizes", buffer);
+		const rows = buffer();
+		const drafts = rows.filter(row => row.includes("MARKER_DRAFT"));
+		if (drafts.length !== 1) dump("scroll buffer after resizes", rows);
 		expect(drafts.length).toBe(1);
-		const welcomes = buffer.filter(row => row.includes("vtest"));
+		const welcomes = rows.filter(row => row.includes("vtest"));
 		expect(welcomes.length).toBe(1);
 	});
 
 	it("keeps the screen exact through an overflowing shrink", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
-		await term.waitForRender();
-		term.sendInput("MARKER_DRAFT");
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFT")));
+		await term.settle();
+		term.type("MARKER_DRAFT");
+		await term.waitFor(() => viewport().some(row => row.includes("MARKER_DRAFT")));
 
 		// Width+height shrink: the live viewport rewraps taller than the new
 		// screen, so the terminal itself pushes stale top rows into scrollback.
@@ -118,25 +122,24 @@ describe("libkitty end-to-end", () => {
 		// exact screen and no duplicate of the bottom-anchored rows anywhere.
 		term.resize(88, 26);
 		await Bun.sleep(300);
-		await term.waitForRender();
+		await term.settle();
 
-		const viewport = plainRows(term.getViewport());
-		const editors = viewport.filter(row => row.includes("MARKER_DRAFT"));
-		if (editors.length !== 1) dump("viewport after overflowing shrink", viewport);
+		const rows = viewport();
+		const editors = rows.filter(row => row.includes("MARKER_DRAFT"));
+		if (editors.length !== 1) dump("viewport after overflowing shrink", rows);
 		expect(editors.length).toBe(1);
-		expect(viewport.filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
-		const buffer = plainRows(term.getScrollBuffer());
-		expect(buffer.filter(row => row.includes("MARKER_DRAFT")).length).toBe(1);
+		expect(rows.filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
+		expect(buffer().filter(row => row.includes("MARKER_DRAFT")).length).toBe(1);
 	});
 
 	it("keeps one editor through a drag storm, shrink, and grow", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
-		await term.waitForRender();
-		term.sendInput("MARKER_DRAFT");
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFT")));
+		await term.settle();
+		term.type("MARKER_DRAFT");
+		await term.waitFor(() => viewport().some(row => row.includes("MARKER_DRAFT")));
 
-		mode.ui.setResizeScrollback("rebuild");
+		// `tui.resizeScrollback` defaults to "rebuild".
 		// Drag storm: several unsettled steps inside one settle window.
 		term.resize(112, 30);
 		await Bun.sleep(30);
@@ -144,36 +147,35 @@ describe("libkitty end-to-end", () => {
 		await Bun.sleep(30);
 		term.resize(96, 24);
 		await Bun.sleep(300);
-		await term.waitForRender();
+		await term.settle();
 		// Height-only shrink, then a combined grow back out.
 		term.resize(96, 18);
 		await Bun.sleep(300);
-		await term.waitForRender();
+		await term.settle();
 
 		// Observe only paints after the final resize begins: the initial frame
 		// used this same size and must not satisfy the completion condition.
 		let rebuiltSize: string | undefined;
-		const removePaintListener = mode.ui.addPaintListener(paint => {
-			if (paint.reset && !paint.alt) rebuiltSize = `${paint.columns}x${paint.rows}`;
+		const removePaintListener = mode.shell.host!.onFrame(frame => {
+			if (frame.reset && !frame.alt) rebuiltSize = `${frame.columns}x${frame.rows}`;
 		});
 		try {
 			term.resize(120, 32);
-			await term.waitForRender(() => rebuiltSize === "120x32");
+			await term.waitFor(() => rebuiltSize === "120x32");
 			// The polling helper times out without throwing. Require the actual
 			// normal-buffer replay before checking for duplicate transcript rows.
 			expect(rebuiltSize).toBe("120x32");
 
-			const buffer = plainRows(term.getScrollBuffer());
-			const drafts = buffer.filter(row => row.includes("MARKER_DRAFT"));
-			if (drafts.length !== 1) dump("scroll buffer after drag storm", buffer);
+			const rows = buffer();
+			const drafts = rows.filter(row => row.includes("MARKER_DRAFT"));
+			if (drafts.length !== 1) dump("scroll buffer after drag storm", rows);
 			expect(drafts.length).toBe(1);
-			const viewport = plainRows(term.getViewport());
-			expect(viewport.filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
+			expect(viewport().filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
 
 			// The editor is still live: typing paints into the one surviving editor.
-			term.sendInput("X");
-			await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFTX")));
-			expect(plainRows(term.getViewport()).filter(row => row.includes("MARKER_DRAFTX")).length).toBe(1);
+			term.type("X");
+			await term.waitFor(() => viewport().some(row => row.includes("MARKER_DRAFTX")));
+			expect(viewport().filter(row => row.includes("MARKER_DRAFTX")).length).toBe(1);
 		} finally {
 			removePaintListener();
 		}
@@ -216,12 +218,12 @@ describe("libkitty end-to-end", () => {
 		// A short viewport forces the oldest finalized blocks into immutable
 		// terminal history, which is where the regression hid (a plain viewport
 		// repaint leaves retired rows untouched).
-		term = new VirtualTerminal(120, 10);
-		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, composer);
+		mode.stop();
+		term.dispose();
+		start(120, 10);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
-		await term.waitForRender();
+		await term.settle();
 
 		// Observed reasoning content unlocks Ctrl+T and renders the block visible.
 		mode.noteDisplayableThinkingContent(thinkingMessage);
@@ -232,28 +234,24 @@ describe("libkitty end-to-end", () => {
 
 		// Retirement offers one finalized batch per frame under capacity pressure;
 		// drive frames until the thinking turn commits to native scrollback.
-		const committedRows = () => {
-			const { baseY } = term.getBufferPosition();
-			return plainRows(term.getScrollBuffer()).slice(0, baseY);
-		};
+		const committedRows = () => term.scrollback();
 		for (let i = 0; i < 20 && !committedRows().some(row => row.includes(THINK)); i++) {
-			mode.ui.requestRender(true);
-			await term.waitForRender();
+			await term.settle();
 		}
 		expect(committedRows().some(row => row.includes(THINK))).toBe(true);
 
 		// A live editor draft must survive the toggle's history rebuild.
-		term.sendInput("LIVE_EDITOR_DRAFT");
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT")));
+		term.type("LIVE_EDITOR_DRAFT");
+		await term.waitFor(() => viewport().some(row => row.includes("LIVE_EDITOR_DRAFT")));
 
 		// Ctrl+T (0x14): the real keybinding path toggles thinking hidden.
-		term.sendInput("\x14");
-		await term.waitForRender(() => !plainRows(term.getScrollBuffer()).some(row => row.includes(THINK)));
+		term.press("ctrl+t");
+		await term.waitFor(() => !buffer().some(row => row.includes(THINK)));
 
 		// The retired history was cleared and replayed hidden — the marker is gone
 		// from scrollback and viewport alike — while the live editor stays mounted.
-		expect(plainRows(term.getScrollBuffer()).some(row => row.includes(THINK))).toBe(false);
-		expect(plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
+		expect(buffer().some(row => row.includes(THINK))).toBe(false);
+		expect(viewport().some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
 	});
 	it("hides tool activity already retired to native scrollback when the real shortcut toggles", async () => {
 		const usage: Usage = {
@@ -295,12 +293,12 @@ describe("libkitty end-to-end", () => {
 			timestamp: 3,
 		});
 
-		term = new VirtualTerminal(120, 10);
-		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, composer);
+		mode.stop();
+		term.dispose();
+		start(120, 10);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
-		await term.waitForRender();
+		await term.settle();
 
 		// Tool visibility is a global input-controller action; it reads the live keybindings.
 		mode.keybindings.setUserBindings({ "app.tools.toggleVisibility": "alt+o" });
@@ -317,24 +315,20 @@ describe("libkitty end-to-end", () => {
 			mode: "none",
 		});
 
-		const committedRows = () => {
-			const { baseY } = term.getBufferPosition();
-			return plainRows(term.getScrollBuffer()).slice(0, baseY);
-		};
+		const committedRows = () => term.scrollback();
 		for (let i = 0; i < 20 && !committedRows().some(row => row.includes(TOOL_MARKER)); i++) {
-			mode.ui.requestRender(true);
-			await term.waitForRender();
+			await term.settle();
 		}
 		expect(committedRows().some(row => row.includes(TOOL_MARKER))).toBe(true);
 
-		term.sendInput("LIVE_EDITOR_DRAFT");
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT")));
+		term.type("LIVE_EDITOR_DRAFT");
+		await term.waitFor(() => viewport().some(row => row.includes("LIVE_EDITOR_DRAFT")));
 
 		// Alt+O is the configured app.tools.toggleVisibility binding from this test's keybinding manager.
-		term.sendInput("\x1bo");
-		await term.waitForRender(() => !plainRows(term.getScrollBuffer()).some(row => row.includes(TOOL_MARKER)));
+		term.press("alt+o");
+		await term.waitFor(() => !buffer().some(row => row.includes(TOOL_MARKER)));
 		expect(mode.hideToolActivity).toBe(true);
-		expect(plainRows(term.getScrollBuffer()).some(row => row.includes(TOOL_MARKER))).toBe(false);
-		expect(plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
+		expect(buffer().some(row => row.includes(TOOL_MARKER))).toBe(false);
+		expect(viewport().some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
 	});
 });

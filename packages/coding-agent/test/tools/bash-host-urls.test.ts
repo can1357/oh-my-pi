@@ -3,7 +3,7 @@
  * command gets, checked against a fixed backing, and the shell processes a named service and a pty
  * command run as, through `BashTool` with a real `local://` root.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,12 +16,14 @@ import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { hostCommandUrls, type UrlBacking } from "@oh-my-pi/pi-coding-agent/tools/bash-host-urls";
-import { TUI } from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { initTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { ProcSpec, UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
+import type { ProcSpec, UnitSnapshot } from "@oh-my-pi/pi-coding-agent/daemon/daemon-types";
 import { SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
+import { extensionTheme } from "../../src/ui/extensions/render-output";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 /** `local://<path>` is `/host/<path>`; `local://nope/…` is refused; nothing else is backed. */
 const backing: UrlBacking = async url => {
@@ -112,13 +114,16 @@ describe("hostCommandUrls", () => {
 
 type InteractiveUi = Pick<NonNullable<AgentToolContext["ui"]>, "custom">;
 
-/** A UI whose `custom()` mounts the pty overlay on a headless TUI and resolves with its result. */
+/** A UI whose `custom()` runs the pty console's factory on a headless 100×30 host and resolves with its result. */
 function headlessUi(): InteractiveUi {
-	const custom: InteractiveUi["custom"] = async <T>(
-		factory: (tui: TUI, uiTheme: Theme, keybindings: KeybindingsManager, done: (result: T) => void) => unknown,
-	): Promise<T> => {
-		const { promise, resolve } = Promise.withResolvers<T>();
-		await factory(new TUI(new VirtualTerminal(100, 30)), theme, KeybindingsManager.inMemory(), resolve);
+	const custom: InteractiveUi["custom"] = async (factory, _options) => {
+		const { promise, resolve } = Promise.withResolvers<never>();
+		await factory(
+			{ requestRender() {}, size: () => ({ columns: 100, rows: 30 }), suspend: run => run() },
+			extensionTheme(currentTheme()),
+			KeybindingsManager.inMemory(),
+			value => resolve(value as never),
+		);
 		return promise;
 	};
 	return { custom };
@@ -225,7 +230,6 @@ describe("bash internal URLs outside the embedded shell", () => {
 	});
 
 	it.skipIf(ptyUnavailable)("runs a pty command on the files its URLs alias", async () => {
-		initTheme();
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: "/bin/bash",
 			args: ["-c"],
@@ -254,7 +258,6 @@ describe("bash internal URLs outside the embedded shell", () => {
 	it.skipIf(ptyUnavailable)(
 		"runs a pty command in the session's shell: omp's jq on a local:// file, the session's functions and exports",
 		async () => {
-			initTheme();
 			vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 				shell: "/bin/bash",
 				args: ["-c"],

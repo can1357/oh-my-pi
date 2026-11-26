@@ -1281,4 +1281,85 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		});
 		expect(secondSwitched.switched).toBe(false);
 	});
+
+	test("a new restricted session does not reuse a login rejected by its organization", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		const provider = "anthropic";
+		const now = Date.now();
+		const dayMs = 24 * 60 * 60_000;
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		const accounts = ["denied", "spent", "outside"];
+		await storage.credentials.set(
+			provider,
+			accounts.map(account => ({
+				type: "oauth",
+				access: `${account}-access`,
+				refresh: `${account}-refresh`,
+				expires: now + 8 * dayMs,
+				email: `${account}@example.test`,
+				orgId: `${account}-org`,
+			})),
+		);
+		const allowed = ["email:denied@example.test|org:denied-org", "email:spent@example.test|org:spent-org"];
+		const spent = store.listAuthCredentials(provider)[1]!;
+		const spentUntil = now + 30 * 60_000;
+		storage.blocks.upsert({
+			credentialId: spent.id,
+			providerKey: `${provider}:oauth`,
+			blockScope: "",
+			blockedUntilMs: spentUntil,
+		});
+		storage.sessions.restrict(provider, "first-child", allowed);
+		const key = await storage.keys.get(provider, "first-child");
+		expect(key).toBe("denied-access");
+		const error =
+			'403 {"error":{"type":"permission_error","details":{"error_code":"oauth_not_allowed_for_organization"}}}';
+		const denied = await storage.limits.rotate(provider, "first-child", {
+			apiKey: key,
+			error,
+			waitForSibling: false,
+		});
+		expect(denied.switched).toBe(false);
+		const reason = denied.poolUnavailableReason;
+		expect(reason).toContain(`${allowed[0]} rejected by org policy`);
+		expect(reason).toContain(`${allowed[1]} usage-limited until ${new Date(spentUntil).toISOString()}`);
+		// The request-layer rotation may already have cleared the pin when the turn handles the same error.
+		expect(await storage.limits.rotate(provider, "first-child", { error })).toEqual(denied);
+
+		clock.mockReturnValue(now + 2 * 60_000);
+		const fresh = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await fresh.credentials.reload();
+		fresh.sessions.restrict(provider, "next-child", allowed);
+		await expect(fresh.keys.get(provider, "next-child")).rejects.toThrow(reason);
+		expect(await fresh.keys.get(provider, "parent")).toBe("outside-access");
+
+		clock.mockReturnValue(now + 2 * dayMs);
+		expect(await fresh.keys.get(provider, "next-child")).toBe("spent-access");
+		fresh.sessions.restrict(provider, "denied-only-child", allowed.slice(0, 1));
+		await expect(fresh.keys.get(provider, "denied-only-child")).rejects.toThrow(
+			/denied@example\.test.*rejected by org policy/,
+		);
+
+		clock.mockReturnValue(now + 7 * dayMs + 1);
+		expect(await fresh.keys.get(provider, "denied-only-child")).toBe("denied-access");
+	});
+
+	test("a generic Anthropic permission error does not quarantine the login", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "anthropic";
+		await authStorage.credentials.set(provider, {
+			type: "oauth",
+			access: "token",
+			refresh: "refresh",
+			expires: farExpiry(),
+			orgId: "org",
+		});
+		const key = await authStorage.keys.get(provider, "generic-permission");
+		await authStorage.limits.rotate(provider, "generic-permission", {
+			apiKey: key,
+			error: new ProviderHttpError("Permission denied for this request.", 403, { code: "permission_error" }),
+		});
+		expect(await authStorage.keys.get(provider, "next-request")).toBe("token");
+	});
 });

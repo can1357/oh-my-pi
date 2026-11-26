@@ -1,5 +1,11 @@
 import * as path from "node:path";
-import * as zlib from "node:zlib";
+import type * as Zlib from "node:zlib";
+
+let zlibCache: typeof Zlib | undefined;
+function getZlib(): typeof Zlib {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache;
+}
 import { readUInt16LE, readUInt32LE, readUInt64LE, writeUInt16LE, writeUInt32LE, writeUInt64LE } from "./bytes";
 import { crc32 } from "./checksums";
 import { bzip2Decompress } from "./codecs/bzip2";
@@ -338,7 +344,7 @@ async function decodeMember(
 			case 0:
 				return compressed;
 			case 8:
-				return zlib.inflateRawSync(compressed, { maxOutputLength: Math.max(size, 1) });
+				return getZlib().inflateRawSync(compressed, { maxOutputLength: Math.max(size, 1) });
 			case 12:
 				return await bzip2Decompress(compressed, size);
 			case 14: {
@@ -627,7 +633,7 @@ export async function encodeZip(members: Iterable<readonly [string, Uint8Array]>
 			const nameBytes = TEXT_ENCODER.encode(name);
 			if (nameBytes.byteLength > U16_MAX) throw new ArchiveError(`ZIP member path '${name}' is too long to write`);
 			if (data.byteLength >= U32_MAX) throw new ArchiveError(`ZIP member '${name}' is too large to write`);
-			const deflated = data.byteLength === 0 ? undefined : zlib.deflateRawSync(data);
+			const deflated = data.byteLength === 0 ? undefined : getZlib().deflateRawSync(data);
 			const payload = deflated && deflated.byteLength < data.byteLength ? deflated : data;
 			const method = payload === data ? 0 : 8;
 			if (payload.byteLength >= U32_MAX || localSize >= U32_MAX) {

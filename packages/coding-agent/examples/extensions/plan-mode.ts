@@ -19,7 +19,6 @@
  * 3. Or start in plan mode with --plan flag
  */
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { Key } from "@oh-my-pi/pi-tui";
 
 // Read-only tools for plan mode
 const PLAN_MODE_TOOLS = ["read", "bash", "search", "find"];
@@ -290,7 +289,7 @@ export default function planModeExtension(pi: ExtensionAPI) {
 	});
 
 	// Register Shift+P shortcut
-	pi.registerShortcut(Key.shift("p"), {
+	pi.registerShortcut("shift+p", {
 		description: "Toggle plan mode",
 		handler: async ctx => {
 			await togglePlanMode(ctx);

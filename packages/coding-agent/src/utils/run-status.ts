@@ -9,11 +9,11 @@
  * the full status. omp only writes the root record; teardown and opting out
  * send `state=clear` so no stale record outlives the session.
  */
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
-import { setPromptZonesEnabled } from "@oh-my-pi/pi-tui/chat/user-message";
-import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { truncateLineBytes } from "../tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
 import { setTerminalTitleState, type TerminalTitleState } from "./title-generator";
+import { type Accessor, signal } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 
 /** What a blocked run waits on: an approval (`permission`) or an answer (`question`). */
 export type BlockedKind = "permission" | "question";
@@ -123,16 +123,21 @@ function clear(): void {
 	writeTerminalSequence(CLEAR_REPORT);
 }
 
+const promptZones = signal(true);
+
 /**
- * Keep OSC 133 prompt marks off the screen while a confirmed OSC 7501 receiver
- * holds a `working` or `blocked` record: a mark drops it on every redraw
- * (#17307). Unknown terminals keep their prompt navigation.
+ * Whether user messages mark OSC 133 prompt zones (reactive; the transcript's
+ * user-message models read it). Off while a confirmed OSC 7501 receiver holds a
+ * `working` or `blocked` record: a mark drops it on every redraw (#17307).
+ * Unknown terminals keep their prompt navigation.
  */
+export const promptZonesEnabled: Accessor<boolean> = () => promptZones();
+
 function syncPromptZones(): void {
 	const { state } = shownStatus();
 	const hasDroppableRecord =
 		runtime.reported !== undefined && runtime.supported && (state === "working" || state === "blocked");
-	setPromptZonesEnabled(!hasDroppableRecord);
+	promptZones.set(!hasDroppableRecord);
 }
 
 /**

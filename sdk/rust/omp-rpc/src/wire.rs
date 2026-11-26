@@ -2959,13 +2959,13 @@ pub struct ContextUsage {
 	pub percent: f64,
 }
 
-/// Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.
+/// Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`. Input the agent already took leads its list until the transcript records it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedMessagesState {
 	pub steering: Vec<String>,
 	#[serde(rename = "followUp")]
 	pub follow_up: Vec<String>,
-	/// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	/// Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.
 	#[serde(rename = "liveSteered", default = "default_queued_messages_state_live_steered")]
 	pub live_steered: i64,
 }
@@ -3215,6 +3215,12 @@ pub struct BashResult {
 	pub minimized: Option<Map<String, Value>>,
 	#[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
 	pub working_dir: Option<String>,
+	/// The command ended in another directory than it started in; the next command starts in its own cwd.
+	#[serde(rename = "movedCwd", default, skip_serializing_if = "Option::is_none")]
+	pub moved_cwd: Option<bool>,
+	/// The command ended with `set -e` on; the next command starts with it off.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub errexit: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
@@ -4070,7 +4076,7 @@ pub struct QueueUpdateEvent {
 	pub steering: Vec<String>,
 	#[serde(rename = "followUp")]
 	pub follow_up: Vec<String>,
-	/// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	/// Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.
 	#[serde(rename = "liveSteered", default = "default_queue_update_event_live_steered")]
 	pub live_steered: i64,
 }

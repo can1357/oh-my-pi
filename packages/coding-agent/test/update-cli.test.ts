@@ -20,7 +20,6 @@ import {
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
-	parseUpdateArgs,
 	pruneBunInstallCache,
 	type ReleaseInfo,
 	type RenameMigrationSteps,
@@ -40,7 +39,6 @@ import {
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 const npmBinary = $which("npm");
@@ -158,28 +156,6 @@ describe("update command plugin dispatch", () => {
 	});
 });
 
-describe("parseUpdateArgs", () => {
-	it("preserves the legacy plugin update shorthand", () => {
-		expect(parseUpdateArgs(["update", "-l"])).toEqual({
-			force: false,
-			check: false,
-			plugins: true,
-			channel: undefined,
-		});
-	});
-
-	it("parses update channels", () => {
-		expect(parseUpdateArgs(["update", "--canary"])?.channel).toBe("canary");
-		expect(parseUpdateArgs(["update", "--stable"])?.channel).toBe("stable");
-		expect(parseUpdateArgs(["update"])?.channel).toBeUndefined();
-	});
-
-	it("rejects conflicting update channels", () => {
-		expect(() => parseUpdateArgs(["update", "--canary", "--stable"])).toThrow(
-			"--canary and --stable are mutually exclusive",
-		);
-	});
-});
 describe("parseReportedVersion", () => {
 	it("preserves the prerelease suffix so a canary launcher verifies as up to date", () => {
 		// Regression: dropping `-canary.1` made a correctly installed canary
@@ -1624,9 +1600,6 @@ describe("update-cli concurrent binary updates", () => {
 	const verify = async () => ({ ok: true, actual: version });
 
 	async function prepare(): Promise<{ dir: string; targetPath: string }> {
-		const loadedTheme = await getThemeByName("dark");
-		if (!loadedTheme) throw new Error("theme unavailable");
-		setThemeInstance(loadedTheme);
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const dir = await makeTempDir();
 		const targetPath = path.join(dir, "omp");

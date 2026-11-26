@@ -496,7 +496,7 @@ describe("devin native discovery request", () => {
 			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
 		};
 		const discovered = await fetchDevinModels({ apiKey: "sk-ws-01-legacy", fetch: fetchImpl });
-		expect(discovered?.map(entry => entry.id)).toEqual(["swe-1-6", "swe-1-6-fast"]);
+		expect(discovered?.map(entry => entry.id)).toEqual(["swe-1-6"]);
 		expect(identities).toEqual(["chisel"]);
 	});
 
@@ -560,7 +560,7 @@ describe("devin native discovery request", () => {
 			vi.advanceTimersByTime(14_999);
 			expect(catalog.signal()?.aborted).toBe(false);
 			catalog.respond();
-			expect((await pending)?.map(entry => entry.id)).toEqual(["swe-1-6", "swe-1-6-fast"]);
+			expect((await pending)?.map(entry => entry.id)).toEqual(["swe-1-6"]);
 		});
 
 		it("gives up at 15s and reports failed discovery", async () => {
@@ -602,41 +602,14 @@ describe("devin native display filtering", () => {
 		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
 	});
 
-	it("sends Fusion pairings through an available lead rather than the composite uid", async () => {
-		const pairing = (uid: string, init: Partial<ConfigInit> = {}) =>
-			config({ uid, isModelRouter: true, harnessUids: ["fusion"], ...init });
+	it("drops Fusion pairings, which would only re-list their lead", async () => {
+		const composite = (uid: string) => config({ uid, isModelRouter: true, harnessUids: ["fusion"] });
 		const configs = [
-			config({
-				uid: "gpt-6-sol-high",
-				contextWindow: 400_000,
-				maxOutputTokens: 128_000,
-				features: { supportsToolCalls: true, supportsImages: true },
-				dimensions: [
-					{ label: "Input", value: 2 },
-					{ label: "Output", value: 8 },
-				],
-			}),
-			config({ uid: "gpt-6-sol-high-priority" }),
-			config({ uid: "claude-opus-5-high" }),
-			config({ uid: "claude-opus-5-high-priority", disabled: true }),
-			config({ uid: "claude-opus-5-5-high-fast" }),
-			config({ uid: "claude-opus-5-5-high-priority" }),
-			config({ uid: "swe-2-high" }),
-			config({ uid: "kimi-k3", disabled: true }),
-			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
-				contextWindow: 1_000_000,
-				maxOutputTokens: 256_000,
-				dimensions: [
-					{ label: "Input", value: 10 },
-					{ label: "Output", value: 50 },
-				],
-			}),
-			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
-			pairing("fusion-sidekick-swe-2-high"),
-			pairing("fusion"),
+			config({ uid: "gpt-6-sol-high" }),
+			composite("fusion-gpt-6-sol-high-sidekick-swe-2-high"),
+			composite("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high"),
+			// No lead in the uid: a composite of its own, not a pairing.
+			composite("fusion-sidekick-swe-2-high"),
 		];
 		const payload = toBinary(
 			GetCliModelConfigsResponseSchema,
@@ -646,32 +619,7 @@ describe("devin native display filtering", () => {
 			apiKey: SESSION_TOKEN,
 			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
 		});
-		const find = (id: string) => fetched?.find(entry => entry.id === id);
-		const wireId = (id: string) => find(id)?.requestModelId;
-		expect(wireId("fusion-gpt-6-sol-high-sidekick-swe-2-high")).toBe("gpt-6-sol-high");
-		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
-		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
-		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
-		expect(wireId("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-5-high-fast");
-		// No live lead: the composite uid is unservable, so the pairing is not listed.
-		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
-		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
-		expect(wireId("fusion")).toBeUndefined();
-		// Only the lead runs, so limits and pricing are the lead's, not the
-		// composite card's. Discovery carries the lead's card as reported; the
-		// lead's own cache-write rate and long-context tier apply at build.
-		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
-		expect(routed?.contextWindow).toBe(400_000);
-		expect(routed?.maxTokens).toBe(128_000);
-		expect(routed?.input).toEqual(["text", "image"]);
-		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
-		expect(buildModel(routed!).cost).toEqual({
-			input: 2,
-			output: 8,
-			cacheRead: 0,
-			cacheWrite: 2.5,
-			longContext: { inputThreshold: 272_000, input: 4, output: 12, cacheRead: 0, cacheWrite: 5 },
-		});
+		expect(fetched?.map(entry => entry.id).sort()).toEqual(["fusion-sidekick-swe-2-high", "gpt-6-sol-high"]);
 	});
 
 	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
@@ -709,9 +657,8 @@ describe("devin server metadata normalization", () => {
 		expect(model("legacy-plain").reasoning).toBe(false);
 	});
 
-	it("strips the image modality from the SWE-1.6 lanes despite the server flag", () => {
+	it("strips the image modality from SWE-1.6 despite the server flag", () => {
 		expect(model("swe-1-6").input).toEqual(["text"]);
-		expect(model("swe-1-6-fast").input).toEqual(["text"]);
 	});
 
 	it("keeps the server's blurb and badges, and leaves them unset otherwise", () => {
@@ -767,7 +714,6 @@ describe("devin server-declared family collapsing", () => {
 		// The server's default tier becomes the family's default effort.
 		expect(mercury.defaultLevel).toBe(Effort.High);
 		expect(thinking("gemini-3-7-flash").defaultLevel).toBe(Effort.Medium);
-		expect(thinking("claude-opus-5-fast").defaultLevel).toBe(Effort.High);
 	});
 
 	it("routes the family default wire uid and keeps the widest member limits", () => {
@@ -794,20 +740,23 @@ describe("devin server-declared family collapsing", () => {
 		expect(thinking("gemini-3-7-flash").requiresEffort).toBe(true);
 	});
 
-	it("splits Fast Mode order 1 into a -fast sibling with its own default", () => {
+	it("folds the Fast Mode lane into its standard row as the /fast route", () => {
+		expect(models.some(entry => entry.id.endsWith("-fast"))).toBe(false);
 		expect(thinking("claude-opus-5").effortRouting).toEqual({
 			medium: "claude-opus-5-medium",
 			high: "claude-opus-5-high",
 		});
 		expect(model("claude-opus-5").requestModelId).toBe("claude-opus-5-medium");
-		expect(model("claude-opus-5-fast").name).toBe("Claude Opus 5 Fast");
-		expect(thinking("claude-opus-5-fast").effortRouting).toEqual({
-			medium: "claude-opus-5-medium-fast",
-			high: "claude-opus-5-high-fast",
+		// Each effort's wire uid pairs with the fast uid serving the same effort.
+		expect(model("claude-opus-5").priorityLane).toMatchObject({
+			id: "claude-opus-5-fast",
+			routes: {
+				"claude-opus-5-medium": "claude-opus-5-medium-fast",
+				"claude-opus-5-high": "claude-opus-5-high-fast",
+			},
 		});
-		// Server truth wins over the static fallback table's five-tier ladder.
-		expect(thinking("claude-opus-5-fast").efforts).toEqual([Effort.Medium, Effort.High]);
-		expect(model("claude-opus-5-fast").requestModelId).toBe("claude-opus-5-high-fast");
+		// Rows without an effort ladder pair their single wire uids.
+		expect(model("swe-1-6").priorityLane?.routes).toEqual({ "swe-1-6": "swe-1-6-fast" });
 	});
 
 	it("splits context lanes and maps the Thinking axis onto off and high routes", () => {
@@ -1066,6 +1015,23 @@ describe("devin catalog pricing", () => {
 			output: 30,
 			cacheRead: 0.8,
 			cacheWrite: 10,
+		});
+	});
+
+	it("prices a folded fast lane under its own listed id's rules", () => {
+		const sol = buildModel({
+			...spec("gpt-5-6-sol", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }),
+			priorityLane: {
+				id: "gpt-5-6-sol-fast",
+				routes: { "gpt-5-6-sol-high": "gpt-5-6-sol-high-priority" },
+				cost: { input: 10, output: 60, cacheRead: 1, cacheWrite: 0 },
+			},
+		});
+		expect(sol.cost.longContext).toMatchObject({ input: 8, output: 30 });
+		// Fast Sol's published tier, not the standard lane's, and its own cache-write rate.
+		expect(sol.priorityLane?.cost).toMatchObject({
+			cacheWrite: 12.5,
+			longContext: { inputThreshold: 272_000, input: 16, output: 60, cacheRead: 1.6, cacheWrite: 20 },
 		});
 	});
 

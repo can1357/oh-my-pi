@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, pathIsWithinLexical } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -132,11 +132,6 @@ async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<Clau
 	return null;
 }
 
-function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
-	const relative = path.relative(rootPath, targetPath);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 /**
  * Resolve manifest-declared component paths within a plugin root.
  *
@@ -194,7 +189,7 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 	}
 	for (const { entryPath, key } of configured) {
 		const resolved = path.resolve(root.path, entryPath);
-		if (!isWithinPluginRoot(root.path, resolved)) {
+		if (!pathIsWithinLexical(root.path, resolved)) {
 			warnings.push(
 				`[claude-plugins] Ignoring ${String(key)} path outside plugin root for ${root.id}: ${entryPath}`,
 			);
@@ -238,7 +233,20 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 					}),
 				),
 			);
-			return { scanResults, resolveWarnings };
+			// Claude Code parity: `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}`
+			// resolve in skill Markdown bodies (#20165) — substitute the plugin
+			// install path when the content is loaded, not in bash.
+			const substitutedResults = scanResults.map(result => ({
+				items: result.items.map(item => ({
+					...item,
+					content: substitutePluginRoot(item.content, root.path),
+					// Forward the install path so read-time body rendering
+					// (`skill://` reads, `/skill:` expansion) can substitute too.
+					_source: { ...item._source, pluginRoot: root.path },
+				})),
+				warnings: result.warnings,
+			}));
+			return { scanResults: substitutedResults, resolveWarnings };
 		}),
 	);
 	for (const { scanResults, resolveWarnings } of results) {
@@ -313,7 +321,9 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 									{
 										name: root.plugin ? `${root.plugin}:${cmdName}` : cmdName,
 										path: dir,
-										content,
+										// Claude Code parity: resolve ${CLAUDE_PLUGIN_ROOT} /
+										// ${OMP_PLUGIN_ROOT} in command Markdown bodies (#20165).
+										content: substitutePluginRoot(content, root.path),
 										level: root.scope,
 										_source: createSourceMeta(PROVIDER_ID, dir, root.scope, root.origin),
 									},
@@ -332,7 +342,9 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 							return {
 								name: root.plugin ? `${root.plugin}:${cmdName}` : cmdName,
 								path: filePath,
-								content,
+								// Claude Code parity: resolve ${CLAUDE_PLUGIN_ROOT} /
+								// ${OMP_PLUGIN_ROOT} in command Markdown bodies (#20165).
+								content: substitutePluginRoot(content, root.path),
 								level: root.scope,
 								_source: source,
 							};
@@ -502,7 +514,7 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 			const configured = pointer.trim();
 			if (configured.length === 0) continue;
 			const resolved = path.resolve(root.path, configured);
-			if (!isWithinPluginRoot(root.path, resolved)) {
+			if (!pathIsWithinLexical(root.path, resolved)) {
 				return {
 					path: null,
 					inlineServers: null,
