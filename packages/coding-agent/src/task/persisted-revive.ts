@@ -435,6 +435,10 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 						},
 					}
 				: {}),
+			// A named model held to its own list at spawn stays held to it.
+			...(init.retryFallback?.exclusive
+				? { exclusiveRetryFallbackRole: subagentRetryFallbackRole(ref.id), disableServerSideFallback: true }
+				: {}),
 			expectedAgentRef: expectedRef,
 			taskDepth,
 			toolNames: init.tools,

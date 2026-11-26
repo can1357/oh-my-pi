@@ -39,6 +39,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { PerCallModelError, PerCallModelUnavailableError } from "@oh-my-pi/pi-coding-agent/task/model-approval";
@@ -1459,6 +1460,63 @@ describe("persisted subagent revival", () => {
 		expect(findRetryFallbackCandidates(context, chainKey, live, grok).map(candidate => candidate.raw)).toEqual([
 			"openai/gpt-4o-mini",
 		]);
+	});
+
+	it("keeps a named model held to its own chain after cold revival", async () => {
+		const cwd = makeTempDir("@pi-revive-named-model-");
+		const named = "anthropic/claude-opus-4";
+		const sessionFile = await createPersistedSession(cwd, false, undefined, undefined, {
+			resolvedModel: named,
+			retryFallback: { primary: named, chain: [], exclusive: true },
+		});
+		const parentSettings = Settings.isolated({ "retry.fallbackChains": { [named]: ["google/gemini-2.5-pro"] } });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, { settings: parentSettings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const revivedSettings = capturedOptions?.settings;
+		if (!revivedSettings) throw new Error("Expected revived child settings");
+		const opus = buildModel({
+			provider: "anthropic",
+			id: "claude-opus-4",
+			name: "claude-opus-4",
+			api: "anthropic-messages",
+			baseUrl: "https://anthropic.example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const recovery = new TurnRecovery(
+			{
+				model: () => opus,
+				thinkingLevel: () => undefined,
+				sessionManager: {},
+				settings: revivedSettings,
+				modelRegistry: {
+					find: (provider: string, id: string) =>
+						provider === opus.provider && id === opus.id ? opus : undefined,
+					hasProvider: () => true,
+				},
+				configWarnings: [],
+			} as unknown as TurnRecoveryHost,
+			{
+				exclusiveRetryFallbackRole: capturedOptions?.exclusiveRetryFallbackRole,
+				deferFallbackChainValidation: true,
+			},
+		);
+		const candidates = recovery
+			.retryFallbackChainKeys(named)
+			.flatMap(role => recovery.findRetryFallbackCandidates(role, named).map(candidate => candidate.raw));
+		expect(candidates).toEqual([]);
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {

@@ -192,6 +192,53 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 		expect(result.model?.provider).toBe("opencode-zen");
 		expect(result.model?.id).toBe("qwen3.6-plus-free");
 	});
+
+	test("tries later named entries and reports unauthenticated models when parent fallback is disabled", async () => {
+		const registryWithSecond = createMockRegistry({
+			models: [unauthedTaskModel, sharedModel, parentModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+		const selected = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
+			"deepseek/deepseek-v4-pro",
+			registryWithSecond,
+			undefined,
+			undefined,
+			{ allowParentFallback: false },
+		);
+		expect(selected.model?.id).toBe("shared-id");
+		expect(selected.thinkingLevel?.toString()).toBe("high");
+		expect(selected.authFallbackUsed).toBe(false);
+		expect(selected.unauthenticatedModels).toBeUndefined();
+
+		const unauthedSecond: Model<Api> = buildModel({
+			id: "claude-opus-4",
+			name: "Claude Opus 4",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+		const registryBothUnauthed = createMockRegistry({
+			models: [unauthedTaskModel, unauthedSecond, parentModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+		const failed = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free", "anthropic/claude-opus-4"],
+			"deepseek/deepseek-v4-pro",
+			registryBothUnauthed,
+			undefined,
+			undefined,
+			{ allowParentFallback: false },
+		);
+		expect(failed.model).toBeUndefined();
+		expect(failed.authFallbackUsed).toBe(false);
+		expect(failed.unauthenticatedModels).toEqual(["opencode-zen/qwen3.6-plus-free", "anthropic/claude-opus-4"]);
+	});
 });
 
 describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth", () => {
