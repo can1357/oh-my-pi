@@ -126,6 +126,16 @@ describe("DOM scraper compatibility", () => {
 		expect(div.cloneNode(true).outerHTML).toBe(div.outerHTML);
 	});
 
+	test("reads HTML textarea and title as RCDATA but keeps SVG title as elements", () => {
+		const { document } = parseHTML(
+			"<title>A <b> &amp; B</title><textarea>x <t> &lt;y&gt;</textarea><p>after</p><svg><title><tspan>s</tspan></title></svg>",
+		);
+		expect(document.querySelector("title")?.textContent).toBe("A <b> & B");
+		expect(document.querySelector("textarea")?.textContent).toBe("x <t> <y>");
+		expect(document.querySelector("p")?.textContent).toBe("after");
+		expect(document.querySelector("svg title tspan")?.textContent).toBe("s");
+	});
+
 	test("supports every selector family used by consumers", () => {
 		const { document } = parseHTML(
 			'<main id="root"><article id="a" class="card featured" data-kind="news-item" title="alpha beta"><h2>A</h2><p class="body">One</p></article><article id="b" class="card" data-kind="blog"><h2>B</h2><p class="body muted">Two</p></article><aside id="c"></aside></main>',

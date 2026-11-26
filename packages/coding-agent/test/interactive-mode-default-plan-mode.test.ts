@@ -4,7 +4,6 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -17,6 +16,8 @@ import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/inte
 import { resolveToolCommand, type ToolCommandState } from "../src/tools/tool-commands";
 
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 function makeTool(name: string): AgentTool {
 	return {
@@ -142,7 +143,15 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			toolCommands,
 		});
 		session = createdSession;
-		mode = new InteractiveMode(createdSession, "test");
+		mode = new InteractiveMode(
+			createdSession,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		return mode;
 	}
 
@@ -194,7 +203,16 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			},
 		});
 
-		const resumedMode = new InteractiveMode(currentSession, "test");
+		const resumedMode = new InteractiveMode(
+			currentSession,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
+		mode?.stop();
 		mode = resumedMode;
 		await resumedMode.init({ suppressWelcomeIntro: true });
 		expect(resumedMode.planModeEnabled).toBe(true);

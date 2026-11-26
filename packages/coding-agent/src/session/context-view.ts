@@ -9,13 +9,13 @@ import {
 	type ContextViewData,
 	type ContextViewEntry,
 	type ContextViewSourceMarker,
-} from "@oh-my-pi/pi-tui/chrome/context-view-model";
+} from "./context-view-model";
 import {
 	type ContextBreakdown,
 	claimPromptSources,
 	type SystemPromptSource,
 	toolSchemaFragments,
-} from "@oh-my-pi/pi-tui/status-line/context-usage";
+} from "./context-usage";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
@@ -360,7 +360,7 @@ function appendAssistantMessageEntries(
 function appendMessageEntries(session: AgentSession, state: SnapshotBuildState): void {
 	const tokenizer = session.agent.tokenizer;
 	const sourceMessages = session.agent.state.messages;
-	const convertedMessages = convertMessagesForContextView(sourceMessages);
+	const convertedMessages = convertMessagesForContextView(sourceMessages, session.model);
 	const latestSurvivingAssistantIndex = convertedMessages.findLastIndex(
 		({ message }) => message.role === "assistant" && isSurvivingAssistant(message, session.model ?? undefined),
 	);

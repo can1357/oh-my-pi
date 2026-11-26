@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
-import type { AnnotationOverlayDraft, TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { AnnotationReviewModel } from "../../../../ui/overlays/panels/annotation-review-model";
+import type { AnnotationOverlayDraft, TextReviewSource } from "./annotation-types";
 import { isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import type { ReadonlySessionManager } from "../../../../session/session-manager";
 import { writeFileAtomically } from "../../../../utils/atomic-file";
@@ -113,6 +113,16 @@ export function hasAnnotationDraftsSync(artifactsDir: string, sessionId: string)
 	}
 }
 
+/** An annotation review tied to its draft (see {@link openAnnotationDraft}). */
+export interface OpenAnnotationDraft {
+	/** A saved draft was found and will be replayed. */
+	readonly restored: boolean;
+	/** Replay the saved state into `review` and track it for saving. */
+	restore(review: AnnotationReviewModel): void;
+	/** Save the review's state, or drop the draft once its notes were sent or emptied. */
+	close(result: { action: string } | undefined): Promise<void>;
+}
+
 /**
  * Tie an overlay to the draft for `source`: {@link restore} replays the saved state
  * (`resumed`, or the draft saved for the same source), and {@link close} saves the
@@ -123,18 +133,14 @@ export async function openAnnotationDraft(
 	session: DraftSession,
 	source: AnnotationDraftSource,
 	resumed?: AnnotationDraft,
-): Promise<{
-	restored: boolean;
-	restore(overlay: AnnotationOverlay): void;
-	close(result: { action: string } | undefined): Promise<void>;
-}> {
+): Promise<OpenAnnotationDraft> {
 	const key = annotationDraftKey(source);
 	const saved = resumed ?? (await loadAnnotationDrafts(session)).find(draft => draft.key === key);
 	// An open overlay holds the session: a close-time cleanup (or shutdown) racing the save must not delete it.
 	const artifactsDir = session.getArtifactsDir();
 	const openDirectory = artifactsDir ? draftDirectory(artifactsDir, session.getSessionId()) : undefined;
 	if (openDirectory) OPEN_DRAFTS.add(openDirectory);
-	let overlay: AnnotationOverlay | undefined;
+	let overlay: AnnotationReviewModel | undefined;
 	const persist = async (sent: boolean) => {
 		const state = overlay?.getDraft();
 		if (!state) return;

@@ -147,16 +147,16 @@ describe("TernSocketClient", () => {
 		expect(client.supports("fork")).toBe(false);
 	});
 
-	it("sends a fork to a Tern that lists it and resolves the new pane's block", async () => {
+	it("sends a fork to a Tern that lists it and resolves the block and tab it opened", async () => {
 		daemon = await startFakeDaemon(() => ({ ok: {} }), {
 			welcome: { ops: ["browser", "fork"] },
-			fork: () => ({ ok: { block: 9 } }),
+			fork: () => ({ ok: { block: 9, tab: 4 } }),
 		});
 		client = new TernSocketClient({ socketPath: daemon.socketPath });
 		await client.connect();
 		expect(client.supports("fork")).toBe(true);
-		expect(await client.fork({ block: 5 })).toBe(9);
-		expect(daemon.forks).toEqual([{ id: 1, op: { block: 5 } }]);
+		expect(await client.fork({ block: 5, tab: true })).toEqual({ block: 9, tab: 4 });
+		expect(daemon.forks).toEqual([{ id: 1, op: { block: 5, tab: true } }]);
 	});
 
 	it("turns a fork error answer into a TernError carrying its kind", async () => {
