@@ -616,6 +616,23 @@ collapse {
 	// Retired id: the Codex image model was relabeled to what the backend runs
 	// (gpt-image-2-codex); keep saved `openai-codex/gpt-image-1` roles resolving.
 	provider-alias "openai-codex" "gpt-image-1" "gpt-image-2"
+	// Legacy Nyte routing aliases resolve to their canonical TrustedRouter presets.
+	provider-alias "trustedrouter" "nyte/auto" "trustedrouter/auto"
+	provider-alias "trustedrouter" "nyte/auto-routing" "trustedrouter/auto"
+	provider-alias "trustedrouter" "trustedrouter/auto-routing" "trustedrouter/auto"
+	provider-alias "trustedrouter" "nyte/zdr" "trustedrouter/zdr"
+	provider-alias "trustedrouter" "nyte/e2e" "trustedrouter/e2e"
+	provider-alias "trustedrouter" "nyte/confidential" "trustedrouter/confidential"
+	provider-alias "trustedrouter" "nyte/fast" "trustedrouter/fast"
+	provider-alias "trustedrouter" "nyte/cheap" "trustedrouter/cheap"
+	provider-alias "trustedrouter" "nyte/free" "trustedrouter/free"
+	provider-alias "trustedrouter" "nyte/eu" "trustedrouter/eu"
+	provider-alias "trustedrouter" "nyte/trusted" "trustedrouter/trusted"
+	provider-alias "trustedrouter" "nyte/green" "trustedrouter/green"
+	provider-alias "trustedrouter" "nyte/frontier" "trustedrouter/frontier"
+	provider-alias "trustedrouter" "nyte/advanced" "trustedrouter/advanced"
+	provider-alias "trustedrouter" "nyte/professional" "trustedrouter/professional"
+	provider-alias "trustedrouter" "nyte/efficient" "trustedrouter/efficient"
 	// Retired rich-lane ids: AvailableModels discovery named Grok 4.5/4.6 lanes
 	// after the unprefixed model name before they adopted these family ids
 	// (#14164). Family `aliases` (not `provider-alias`) so saved selectors and

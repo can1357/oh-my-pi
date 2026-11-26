@@ -1,0 +1,13 @@
+// Validation targets `/v1/key`, not `/v1/models`: `/v1/models` is the public
+// catalog and answers 200 for any bearer, whereas `/v1/key` is an
+// authenticated, non-billable GET that rejects invalid keys with 401.
+auth "trustedrouter" {
+	name "TrustedRouter"
+	login "api-key" {
+		auth-url "https://trustedrouter.com/console/api-keys"
+		instructions "Create or copy an API key from the TrustedRouter console (keys look like sk-tr-...)"
+		prompt "Paste your TrustedRouter API key" placeholder="sk-tr-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="TrustedRouter" url="https://api.trustedrouter.com/v1/key" base-url-env="TRUSTEDROUTER_BASE_URL" base-url-append="/v1" base-url-path="/key"
+	}
+}

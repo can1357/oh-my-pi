@@ -1,0 +1,27 @@
+// TrustedRouter (trustedrouter.com): an OpenAI-compatible AI gateway with an
+// attested prompt path (`https://api.trustedrouter.com/v1`, or regional/custom
+// endpoints via `TRUSTEDROUTER_BASE_URL`). `GET /v1/models` is public and
+// authoritative for the live chat roster, pricing, limits, modalities, tools,
+// and reasoning controls, so nothing is bundled.
+provider "trustedrouter" {
+	default-model "trustedrouter/auto"
+	env "TRUSTEDROUTER_API_KEY"
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	// Same-id rows on other hosts carry different prices, limits, and
+	// reasoning capabilities.
+	skip-cross-provider-reference-fills #true
+	// Deliberately NO `discovery` node: `GET /v1/models` is public and live
+	// gateway truth, so enrolling in generate-models.ts would freeze a
+	// multi-hundred-model snapshot into models.json on every regen.
+
+	// Qwen and other model families share TrustedRouter's OpenAI-compatible
+	// reasoning dialect (`reasoning_effort` / `reasoning.enabled`) rather than
+	// model-native `enable_thinking`.
+	thinking-format "openai"
+	// Thinking-off is `reasoning: { enabled: false }`; intensity stays on the
+	// top-level `reasoning_effort`. Rows with mandatory reasoning clamp to
+	// their lowest published effort instead (`lowest-effort`, set per row by
+	// discovery), and effort-only rows with a `none` tier use `none-effort`.
+	reasoning-disable-mode "cline-enabled-false"
+}

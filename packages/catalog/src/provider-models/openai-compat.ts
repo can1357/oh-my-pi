@@ -47,6 +47,7 @@ import {
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { parseOtariCredential } from "../wire/otari";
+import { normalizeTrustedRouterBaseUrl } from "../wire/trustedrouter";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
@@ -9020,5 +9021,182 @@ export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): Mod
 					fetch: config?.fetch,
 				}),
 		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// TrustedRouter
+// ---------------------------------------------------------------------------
+
+/** Extract raw wire effort strings from a TrustedRouter row's `reasoning` or `trustedrouter.capabilities`. */
+function trustedRouterRawEfforts(
+	reasoning: Record<string, unknown> | undefined,
+	capabilities: Record<string, unknown> | undefined,
+): readonly string[] {
+	const fromReasoning = Array.isArray(reasoning?.supported_efforts)
+		? reasoning.supported_efforts.filter((value): value is string => typeof value === "string")
+		: [];
+	if (fromReasoning.length > 0) {
+		return fromReasoning;
+	}
+	return Array.isArray(capabilities?.reasoning_effort)
+		? capabilities.reasoning_effort.filter((value): value is string => typeof value === "string")
+		: [];
+}
+
+function mapTrustedRouterThinkingConfig(
+	reasoning: Record<string, unknown> | undefined,
+	rawEfforts: readonly string[],
+	canDisable: boolean,
+): ThinkingConfig | undefined {
+	const efforts = THINKING_EFFORTS.filter(effort => rawEfforts.includes(effort));
+	if (efforts.length === 0) {
+		return undefined;
+	}
+	const defaultLevel =
+		typeof reasoning?.default_effort === "string"
+			? THINKING_EFFORTS.find(effort => effort === reasoning.default_effort)
+			: undefined;
+	return {
+		mode: "effort",
+		efforts,
+		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+		// Published both ways so a model-identity default (e.g. a `-thinking` id
+		// read as reasoning-locked) cannot override what the row says.
+		requiresEffort: !canDisable,
+	};
+}
+
+function mapTrustedRouterModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	const tr = isRecord(entry.trustedrouter) ? entry.trustedrouter : undefined;
+	if (
+		tr?.internal_only === true ||
+		tr?.configuration_hidden === true ||
+		tr?.synthetic_monitor === true ||
+		tr?.supports_chat === false
+	) {
+		return null;
+	}
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	if (
+		typeof tr?.supports_chat !== "boolean" &&
+		Array.isArray(architecture?.output_modalities) &&
+		architecture.output_modalities.length > 0 &&
+		!architecture.output_modalities.includes("text")
+	) {
+		return null;
+	}
+
+	const params = Array.isArray(entry.supported_parameters)
+		? entry.supported_parameters.filter((value): value is string => typeof value === "string")
+		: undefined;
+	const capabilities = isRecord(tr?.capabilities) ? tr.capabilities : undefined;
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+	const reasoning = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const rawEfforts = trustedRouterRawEfforts(reasoning, capabilities);
+	const supportsReasoning =
+		reasoning !== undefined ||
+		rawEfforts.length > 0 ||
+		(params !== undefined && (params.includes("reasoning") || params.includes("reasoning_effort")));
+	const canDisable =
+		reasoning !== undefined
+			? reasoning.mandatory !== true
+			: rawEfforts.length > 0
+				? rawEfforts.includes("none")
+				: (params?.includes("reasoning") ?? false);
+	const thinking = supportsReasoning ? mapTrustedRouterThinkingConfig(reasoning, rawEfforts, canDisable) : undefined;
+
+	const disableMode: OpenAICompat["reasoningDisableMode"] = !supportsReasoning
+		? undefined
+		: !canDisable
+			? "lowest-effort"
+			: params && !params.includes("reasoning") && rawEfforts.includes("none")
+				? "none-effort"
+				: undefined;
+	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
+
+	// The host-wide wire shape (`thinking-format "openai"` and
+	// `reasoning-disable-mode "cline-enabled-false"`) lives in
+	// `providers/trustedrouter.kdl`; only per-row facts are mapped here.
+	const compat: OpenAICompat = {
+		// Reasons without publishing an effort ladder: never send an
+		// identity-derived `reasoning_effort` it never advertised.
+		...(supportsReasoning && thinking === undefined && { supportsReasoningEffort: false }),
+		...(disableMode !== undefined && { reasoningDisableMode: disableMode }),
+		// A disableable default-off model needs an explicit switch-on when
+		// thinking is requested, or picking a thinking level leaves it off.
+		...(supportsReasoning &&
+			canDisable &&
+			reasoning?.default_enabled === false && {
+				whenThinking: { extraBody: { reasoning: { enabled: true } } },
+			}),
+		// TrustedRouter skips routes lacking `tool_choice` and returns 400 when
+		// no route accepts it, so omit `tool_choice` unless the row advertises it.
+		...(!supportsToolChoice && { supportsToolChoice: false }),
+	};
+
+	const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
+		? toInputCapabilities(architecture.input_modalities)
+		: typeof architecture?.modality === "string" && architecture.modality.split("->")[0]?.includes("image")
+			? ["text", "image"]
+			: ["text"];
+	const supportsTools =
+		params !== undefined
+			? params.includes("tools")
+			: typeof capabilities?.tools === "boolean"
+				? capabilities.tools
+				: undefined;
+
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		reasoning: supportsReasoning,
+		...(thinking ? { thinking } : {}),
+		...(Object.keys(compat).length > 0 ? { compat } : {}),
+		input,
+		...(supportsTools !== undefined ? { supportsTools } : {}),
+		cost: perTokenPricingCost(entry.pricing),
+		contextWindow: toPositiveNumber(entry.context_length, toPositiveNumber(topProvider?.context_length, null)),
+		maxTokens: toPositiveNumber(
+			topProvider?.max_completion_tokens,
+			toPositiveNumber(entry.max_completion_tokens, null),
+		),
+	};
+}
+
+/**
+ * TrustedRouter model manager: `GET /v1/models` is the public live catalog
+ * (hundreds of chat models plus `trustedrouter/*` routing presets), so nothing
+ * is bundled and discovery runs with or without an API key. Rows marked
+ * `internal_only`, `configuration_hidden`, `synthetic_monitor`, or
+ * `supports_chat: false` are dropped. Each row's `reasoning` block
+ * (`mandatory`, `default_enabled`, `supported_efforts`, `default_effort`),
+ * `trustedrouter.capabilities`, and `supported_parameters` set its reasoning
+ * and tool compat; the host-wide dialect lives in `providers/trustedrouter.kdl`.
+ */
+export function trustedRouterModelManagerOptions(
+	config?: ModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = normalizeTrustedRouterBaseUrl(config?.baseUrl?.trim() || Bun.env.TRUSTEDROUTER_BASE_URL);
+	return {
+		providerId: "trustedrouter",
+		cacheProviderId: resolveModelCacheProviderId("trustedrouter", { baseUrl }),
+		dynamicCostAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "trustedrouter",
+				baseUrl,
+				apiKey: config?.apiKey,
+				retryWithoutApiKeyOnUnauthorized: true,
+				mapModel: mapTrustedRouterModel,
+				fetch: config?.fetch,
+			}),
 	};
 }
