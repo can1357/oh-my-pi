@@ -8,9 +8,11 @@ use std::{
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
 	process::{Command, Stdio},
+	time::Duration,
 };
 
 use gix::bstr::{BString, ByteSlice};
+use tokio_util::sync::CancellationToken;
 
 use super::{
 	GitRepo,
@@ -229,8 +231,19 @@ impl GitRepo {
 	/// the object is written by `git commit-tree -S` so Git runs the
 	/// configured signer; a signer failure leaves HEAD unchanged.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
+		self.commit_create_cancellable(message, options, None)
+	}
+
+	/// Like [`GitRepo::commit_create`], honoring `cancel` while waiting on the
+	/// repository's `COMMIT_EDITMSG` lock.
+	pub fn commit_create_cancellable(
+		&self,
+		message: &str,
+		options: &CommitOptions,
+		cancel: Option<&CancellationToken>,
+	) -> Result<String> {
 		self
-			.commit_with_index(message, options, None)
+			.commit_with_index(message, options, None, cancel)
 			.map(|(id, _)| id)
 	}
 
@@ -244,13 +257,25 @@ impl GitRepo {
 		options: &CommitOptions,
 		selection: &str,
 	) -> Result<(String, Vec<String>)> {
+		self.commit_reconciled_cancellable(message, options, selection, None)
+	}
+
+	/// Like [`GitRepo::commit_reconciled`], honoring `cancel` while waiting on
+	/// the repository's `COMMIT_EDITMSG` lock.
+	pub fn commit_reconciled_cancellable(
+		&self,
+		message: &str,
+		options: &CommitOptions,
+		selection: &str,
+		cancel: Option<&CancellationToken>,
+	) -> Result<(String, Vec<String>)> {
 		if options.index_path.is_none() || !options.files.is_empty() {
 			return Err(Error::backend(
 				"git commit",
 				"reconciliation requires a complete private index",
 			));
 		}
-		self.commit_with_index(message, options, Some(selection))
+		self.commit_with_index(message, options, Some(selection), cancel)
 	}
 
 	fn commit_with_index(
@@ -258,7 +283,11 @@ impl GitRepo {
 		message: &str,
 		options: &CommitOptions,
 		reconcile: Option<&str>,
+		cancel: Option<&CancellationToken>,
 	) -> Result<(String, Vec<String>)> {
+		if cancel.is_some_and(CancellationToken::is_cancelled) {
+			return Err(Error::Canceled);
+		}
 		let repo = self.gix()?;
 		// Git rejects a malformed value before doing any work; reading it as
 		// `false` would silently write unsigned commits.
@@ -379,26 +408,19 @@ impl GitRepo {
 		// landed last, including when `no_verify` skips the hook.
 		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
 		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
-		// message, as under `git commit`. When such a hook can run, overlapping
-		// calls hold a repository lock from this write until that hook returns,
-		// so each hook observes the message written for its own commit. The
-		// guard ends here: signing and later hooks must not keep the next
-		// commit waiting. Without a hook nobody consumes the file and the write
-		// stays best-effort.
+		// message, as under `git commit`. Only calls that will actually run a
+		// `commit-msg` hook write the shared file, and each holds a repository
+		// lock from that write until the hook returns, so neither another
+		// verified commit nor an unverified (`no_verify`) or hookless call can
+		// replace the file under a running hook. The guard ends here: signing
+		// and later hooks must not keep the next commit waiting.
 		let editmsg_read = !options.no_verify
 			&& (self.hook_path("commit-msg")?.is_some() || hook_configured(self, "commit-msg")?);
-		{
-			let _editmsg_lock = editmsg_read.then(|| lock_commit_editmsg(&self.info().git_dir));
-			match fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message) {
-				Ok(()) => {},
-				Err(err) if editmsg_read => {
-					return Err(Error::backend("git commit write COMMIT_EDITMSG", err));
-				},
-				Err(_) => {},
-			}
-			if !options.no_verify {
-				run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
-			}
+		if editmsg_read {
+			let _editmsg_lock = lock_commit_editmsg(&self.info().git_dir, cancel)?;
+			fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message)
+				.map_err(|err| Error::backend("git commit write COMMIT_EDITMSG", err))?;
+			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
 		}
 		let message = fs::read_to_string(&message_file.path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
@@ -1261,6 +1283,41 @@ impl Drop for CommitMessageFile {
 	}
 }
 
+/// Open `.git/.omp-commit-editmsg.lock` writable where possible.
+///
+/// Linux NFS requires a writable descriptor for exclusive `flock(2)`, so an
+/// existing lock file must be opened read-write whenever permitted. Only on
+/// `PermissionDenied` (for example a lock file owned by another user on a local
+/// filesystem) do we fall back to a read-only descriptor.
+fn open_commit_editmsg_lock(path: &Path) -> io::Result<fs::File> {
+	let open_rw = || fs::OpenOptions::new().read(true).write(true).open(path);
+	let err = match open_rw() {
+		Ok(file) => return Ok(file),
+		Err(err) if err.kind() == io::ErrorKind::NotFound => {
+			match fs::OpenOptions::new()
+				.read(true)
+				.write(true)
+				.create_new(true)
+				.open(path)
+			{
+				Ok(file) => return Ok(file),
+				// Another caller won the create; open writable so NFS exclusive
+				// locks still work, falling back to read-only only on EACCES.
+				Err(err) if err.kind() == io::ErrorKind::AlreadyExists => match open_rw() {
+					Ok(file) => return Ok(file),
+					Err(err) => err,
+				},
+				Err(err) => return Err(err),
+			}
+		},
+		Err(err) => err,
+	};
+	if err.kind() == io::ErrorKind::PermissionDenied {
+		return fs::File::open(path);
+	}
+	Err(err)
+}
+
 /// Lock `.git/COMMIT_EDITMSG` so a hook that reads the documented path instead
 /// of its argument observes its own call's message. The caller holds the guard
 /// from the shared write until `commit-msg` returns, then drops it; signing and
@@ -1270,32 +1327,36 @@ impl Drop for CommitMessageFile {
 /// the git dir, so it also orders commits driven by other omp processes.
 /// `git commit` takes no such lock and can still interleave.
 ///
-/// An existing file is opened read-only: locking needs no write access, so a
-/// lock file owned by another user still serializes every caller. `None` means
-/// the platform refused (open or lock failure); callers then fall back to the
-/// unserialized write rather than fail a commit that ran correctly before.
-fn lock_commit_editmsg(git_dir: &Path) -> Option<fs::File> {
+/// Opening or locking failure returns an error rather than falling back to an
+/// unlocked write, so a broken or unsupported lock cannot corrupt another
+/// caller's `COMMIT_EDITMSG`. When `cancel` is supplied, contention polls with
+/// short backoff so aborting a waiter interrupts the wait promptly.
+fn lock_commit_editmsg(git_dir: &Path, cancel: Option<&CancellationToken>) -> Result<fs::File> {
 	let path = git_dir.join(".omp-commit-editmsg.lock");
-	let file = match fs::File::open(&path) {
-		Ok(file) => file,
-		Err(err) if err.kind() == io::ErrorKind::NotFound => {
-			match fs::OpenOptions::new()
-				.read(true)
-				.write(true)
-				.create_new(true)
-				.open(&path)
-			{
-				Ok(file) => file,
-				// Another caller won the create; its file needs only read
-				// access to lock, same as any older lock file.
-				Err(err) if err.kind() == io::ErrorKind::AlreadyExists => fs::File::open(&path).ok()?,
-				Err(_) => return None,
-			}
-		},
-		Err(_) => return None,
+	let file = open_commit_editmsg_lock(&path)
+		.map_err(|err| Error::backend("git commit lock COMMIT_EDITMSG", err))?;
+	let Some(cancel) = cancel else {
+		file
+			.lock()
+			.map_err(|err| Error::backend("git commit lock COMMIT_EDITMSG", err))?;
+		return Ok(file);
 	};
-	file.lock().ok()?;
-	Some(file)
+	let mut backoff = Duration::from_millis(5);
+	loop {
+		if cancel.is_cancelled() {
+			return Err(Error::Canceled);
+		}
+		match file.try_lock() {
+			Ok(()) => return Ok(file),
+			Err(fs::TryLockError::WouldBlock) => {
+				std::thread::sleep(backoff);
+				backoff = (backoff * 2).min(Duration::from_millis(25));
+			},
+			Err(fs::TryLockError::Error(err)) => {
+				return Err(Error::backend("git commit lock COMMIT_EDITMSG", err));
+			},
+		}
+	}
 }
 
 /// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the
@@ -1367,22 +1428,41 @@ fn run_commit_hook(
 	})
 }
 
-/// Whether any `hook.<id>.event` names the hook `name`. Git (2.54+) runs such
-/// config-defined hooks in addition to the hooks-directory file; whether one is
-/// disabled or lacks a command is left to `git hook run`.
+/// Whether any enabled `hook.<id>.event` names the hook `name`. Git (2.54+)
+/// runs such config-defined hooks in addition to the hooks-directory file;
+/// `hook.<id>.enabled = false` disables the hook, and an empty `event =`
+/// clears earlier event entries for that hook.
 fn hook_configured(repository: &GitRepo, name: &str) -> Result<bool> {
-	Ok(repository
-		.gix()?
-		.config_snapshot()
-		.sections_by_name("hook")
-		.into_iter()
-		.flatten()
-		.any(|section| {
-			section
-				.values("event")
-				.iter()
-				.any(|event| event.as_ref() == name)
-		}))
+	let repo = repository.gix()?;
+	let config = repo.config_snapshot();
+	let mut seen = HashSet::new();
+	for section in config.sections_by_name("hook").into_iter().flatten() {
+		let Some(subsection) = section.header().subsection_name() else {
+			continue;
+		};
+		if !seen.insert(subsection) {
+			continue;
+		}
+		if matches!(config.boolean_by("hook", Some(subsection), "enabled"), Some(Ok(false))) {
+			continue;
+		}
+		let mut active = false;
+		for event in config
+			.strings_by("hook", Some(subsection), "event")
+			.into_iter()
+			.flatten()
+		{
+			if event.is_empty() {
+				active = false;
+			} else if event.as_ref() == name {
+				active = true;
+			}
+		}
+		if active {
+			return Ok(true);
+		}
+	}
+	Ok(false)
 }
 
 /// Write a signed commit object through `git commit-tree -S`, which runs the
@@ -4250,5 +4330,54 @@ mod tests {
 				 prefix neighbors"
 			);
 		}
+	}
+
+	#[test]
+	fn hook_configured_skips_disabled_and_cleared_hooks() {
+		let (temp, _) = fixture();
+		git(temp.path(), &["config", "hook.disabled.event", "commit-msg"]);
+		git(temp.path(), &["config", "hook.disabled.enabled", "false"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(!hook_configured(&repo, "commit-msg").unwrap());
+
+		git(temp.path(), &["config", "hook.cleared.event", "commit-msg"]);
+		git(temp.path(), &["config", "--add", "hook.cleared.event", ""]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(!hook_configured(&repo, "commit-msg").unwrap());
+
+		git(temp.path(), &["config", "hook.active.event", "commit-msg"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(hook_configured(&repo, "commit-msg").unwrap());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn lock_commit_editmsg_opens_existing_file_writable_and_respects_cancel() {
+		use std::os::fd::AsRawFd;
+		let temp = tempfile::tempdir().unwrap();
+		let git_dir = temp.path();
+
+		// First acquisition creates the lock file; reopening it must keep write
+		// access so Linux NFS exclusive flock(2) succeeds for later callers.
+		let first = lock_commit_editmsg(git_dir, None).unwrap();
+		drop(first);
+
+		let second = lock_commit_editmsg(git_dir, None).unwrap();
+		// SAFETY: F_GETFL takes no extra arguments on a valid open descriptor.
+		let flags = unsafe { libc::fcntl(second.as_raw_fd(), libc::F_GETFL) };
+		assert_eq!(flags & libc::O_ACCMODE, libc::O_RDWR);
+
+		// A cancelled waiter must return Canceled instead of falling back to an
+		// unlocked write while `second` still holds the lock.
+		let cancel = CancellationToken::new();
+		let trigger = cancel.clone();
+		let handle = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(20));
+			trigger.cancel();
+		});
+		let err = lock_commit_editmsg(git_dir, Some(&cancel)).unwrap_err();
+		handle.join().unwrap();
+		assert!(matches!(err, Error::Canceled), "expected Canceled, got {err:?}");
+		drop(second);
 	}
 }

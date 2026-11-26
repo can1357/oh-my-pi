@@ -6,11 +6,6 @@
 
 - Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline rendering or `Reader` for URL reads; interactive terminal browsing is no longer provided.
 
-- Fixed open PTY sessions and `reapChild()` waits each holding a native blocking-pool thread, which stalled new PTY starts and other native blocking work once 8 terminals were open on Windows (512 elsewhere) ([#20283](https://github.com/can1357/oh-my-pi/pull/20283) by [@iliaal](https://github.com/iliaal))
-- Fixed concurrent `commitCreate` calls overwriting the shared `.git/COMMIT_EDITMSG` that a `commit-msg` hook reads, so a legacy hook could validate another call's message ([#20626](https://github.com/can1357/oh-my-pi/pull/20626) by [@eggpeat](https://github.com/eggpeat))
-- Fixed the shell's `open` command on Linux starting a private D-Bus thread pool, one thread per CPU, the first time it reached the session bus ([#20278](https://github.com/can1357/oh-my-pi/pull/20278) by [@iliaal](https://github.com/iliaal))
-- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed standalone binaries failing to start when the natives directory is read-only (or owned by another user) even though it already holds this build's extracted addon ([#20266](https://github.com/can1357/oh-my-pi/issues/20266))
 ### Added
 
 - Added `renderHtml` for Markdown and plain-text rendering. Both `renderHtml` and `Reader` default to reader content selection (`mode: "auto"`), support `mode: "full"` to keep all visible content, and share hidden-content options.
@@ -23,6 +18,7 @@
 - Preserved source-code indentation and linked content cards in URL reads.
 
 - The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+- Fixed concurrent `commitCreate` calls overwriting the shared `.git/COMMIT_EDITMSG` that a `commit-msg` hook reads, so a legacy hook could validate another call's message ([#20626](https://github.com/can1357/oh-my-pi/pull/20626) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.2.1] - 2026-11-25
 

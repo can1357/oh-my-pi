@@ -531,6 +531,40 @@ fn blocking<T: Send + 'static + ToNapiValue + TypeName>(
 		catch_panic(tag, || f(&repo))
 	})
 }
+
+/// Run a commit operation off libuv's shared thread pool so parked hooks and
+/// waiters on `.omp-commit-editmsg.lock` cannot starve unrelated native tasks.
+/// Cancellation propagates into the lock wait via `cancel`.
+fn commit_off_pool<'env, T: ToNapiValue + Send + 'static>(
+	env: &'env Env,
+	tag: &'static str,
+	repo: Arc<omp_vcs::git::GitRepo>,
+	signal: Option<Unknown>,
+	f: impl FnOnce(&omp_vcs::git::GitRepo, Option<&CancellationToken>) -> omp_vcs::Result<T>
+	+ Send
+	+ 'static,
+) -> Result<Object<'env>> {
+	let cancel = cancellation_token(signal);
+	vcs_future(env, tag, async move {
+		if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+			return Err(omp_vcs::Error::Canceled);
+		}
+		let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+		match std::thread::Builder::new()
+			.name("pi-vcs-commit".into())
+			.spawn(move || {
+				let result = crate::crash_handler::blocking_task_panic_scope(|| {
+					catch_panic(tag, || f(&repo, cancel.as_ref()))
+				});
+				let _ = done_tx.send(result);
+			}) {
+			Ok(_) => done_rx
+				.await
+				.map_err(|err| omp_vcs::Error::backend(tag, format!("commit worker failed: {err}")))?,
+			Err(err) => Err(omp_vcs::Error::backend(tag, format!("spawn commit worker: {err}"))),
+		}
+	})
+}
 fn repo_blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	tag: &'static str,
 	repo: omp_vcs::Repo,
@@ -1263,31 +1297,34 @@ impl VcsGitRepo {
 	}
 
 	/// Create commit.
-	#[napi]
-	pub fn commit_create(
+	#[napi(ts_return_type = "Promise<string>")]
+	pub fn commit_create<'e>(
 		&self,
 		message: String,
 		options: VcsCommitOptions,
 		signal: Option<Unknown>,
-	) -> Promise<String> {
+		env: &'e Env,
+	) -> Result<Object<'e>> {
 		let options = options.into();
-		blocking("vcs.commitCreate", self.inner.clone(), signal, move |r| {
-			r.commit_create(&message, &options)
+		commit_off_pool(env, "vcs.commitCreate", self.inner.clone(), signal, move |r, cancel| {
+			r.commit_create_cancellable(&message, &options, cancel)
 		})
 	}
 
 	/// Publish a private-index commit after preparing the shared index.
-	#[napi]
-	pub fn commit_reconciled(
+	#[napi(ts_return_type = "Promise<VcsReconciledCommit>")]
+	pub fn commit_reconciled<'e>(
 		&self,
 		message: String,
 		options: VcsCommitOptions,
 		selection: String,
 		signal: Option<Unknown>,
-	) -> Promise<VcsReconciledCommit> {
+		env: &'e Env,
+	) -> Result<Object<'e>> {
 		let options = options.into();
-		blocking("vcs.commitReconciled", self.inner.clone(), signal, move |r| {
-			let (sha, index_notes) = r.commit_reconciled(&message, &options, &selection)?;
+		commit_off_pool(env, "vcs.commitReconciled", self.inner.clone(), signal, move |r, cancel| {
+			let (sha, index_notes) =
+				r.commit_reconciled_cancellable(&message, &options, &selection, cancel)?;
 			Ok(VcsReconciledCommit { sha, index_notes })
 		})
 	}
