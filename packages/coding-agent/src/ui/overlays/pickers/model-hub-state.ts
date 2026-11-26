@@ -623,7 +623,7 @@ export class ModelHubState {
 			case "scope":
 				return [{ s: chip.scope === "project" ? "accent" : "muted", t: chip.label }];
 			case "thinking": {
-				const level = chip.thinkingLevel === undefined ? "" : thinkingGlyph(chip.thinkingLevel);
+				const level = chip.thinkingLevel === undefined ? "" : thinkingGlyph(chip.thinkingLevel, symbol);
 				return level ? [{ s: "accent", t: level }, { t: ` ${chip.label}` }] : [{ t: chip.label }];
 			}
 			default:

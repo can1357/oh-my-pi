@@ -10,6 +10,15 @@ import { replaceTabs, truncateToWidth } from "./text-width";
 /** A thinking selector configured as a concrete level or automatic selection. */
 export type ConfiguredThinkingLevel = ThinkingLevel | "auto";
 
+/** The glyph of a thinking level: `status.disabled` for off, none for inherit, else the level symbol's first glyph. */
+export function thinkingLevelGlyph(glyph: (key: string) => string, level: string | undefined): string {
+	if (!level || level === "inherit") return "";
+	if (level === "off") return glyph("status.disabled");
+	const symbol = glyph(`thinking.${level === "auto" ? "autoPending" : level}`);
+	const space = symbol.indexOf(" ");
+	return space < 0 ? symbol : symbol.slice(0, space);
+}
+
 /**
  * Normalize stray carriage returns in model-authored display text. Some models
  * (observed with GLM via OpenRouter) degenerate into injecting `\r` runs between

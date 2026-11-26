@@ -15,11 +15,10 @@
  * native trees through the picker helpers ({@link ModelBrowserState.pickerItems},
  * {@link ModelBrowserState.pickerOrder}) or the row facts.
  */
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getFactoryDroidCreditRate } from "@oh-my-pi/pi-catalog/models";
 import { batch, type KeyEvent, type Signal, signal } from "@oh-my-pi/pi-tui";
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { sanitizeText, formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspPickerGroup, TspPickerItem, TspText } from "@oh-my-pi/pi-wire";
 import {
@@ -56,7 +55,7 @@ import {
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
 import { fuzzyHits, fuzzyRank } from "../../../utils/fuzzy";
-import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { thinkingLevelGlyph, type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { editLine, type LineState } from "../settings/line-edit";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
 
@@ -1163,19 +1162,12 @@ export class ModelBrowserState {
 		return isSeparator(this.#visible.peek()[index]) ? null : index;
 	}
 }
-
-const UNICODE_GLYPHS = presetSymbols("unicode");
-
-/** A unicode-preset glyph for native text (`status.enabled` → `●`). */
+/** A theme-resolved glyph for native text (`status.enabled` → `●`). */
 export function glyph(key: string): string {
-	return UNICODE_GLYPHS[key] ?? "";
+	return currentTheme().symbols.symbol(key);
 }
 
 /** The thinking glyph of a role chip: ⦸ for off, the level's own otherwise; none for inherit. */
-export function thinkingGlyph(level: ConfiguredThinkingLevel): string {
-	if (level === ThinkingLevel.Inherit) return "";
-	if (level === ThinkingLevel.Off) return glyph("status.disabled");
-	const symbol = glyph(`thinking.${level === "auto" ? "autoPending" : level}`);
-	const space = symbol.indexOf(" ");
-	return space < 0 ? symbol : symbol.slice(0, space);
+export function thinkingGlyph(level: ConfiguredThinkingLevel, symbol: (key: string) => string = glyph): string {
+	return thinkingLevelGlyph(symbol, level);
 }
