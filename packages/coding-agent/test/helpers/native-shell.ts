@@ -132,6 +132,11 @@ export async function nativeShell(shell = new Shell(), options?: { readonly kind
 		node,
 		surface,
 		page,
+		/** Scroll operations received by the active native surface. */
+		scrolls() {
+			flush();
+			return surfaces()[0]?.[1].scrolls ?? [];
+		},
 		get,
 		tree,
 		children,
