@@ -1529,6 +1529,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			onRenderError: (customType, error) =>
 				logger.warn("Extension message renderer failed", { customType, error: String(error) }),
 			imageLinks: (_message, images) => imageLinksForMessage(images, this.viewSession.sessionManager),
+			showImages: this.#display.showImages,
 			skillPath: name => this.skillCommands.get(`skill:${name}`)?.filePath,
 			actions: () => true,
 			hour12: this.shell.hour12,

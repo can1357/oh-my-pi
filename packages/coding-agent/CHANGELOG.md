@@ -12,6 +12,7 @@
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
 - The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Images you paste into a prompt now show under your sent message in terminals that draw images (Kitty, iTerm2, SIXEL), not only in Tern; `terminal.showImages` hides them ([#9931](https://github.com/can1357/oh-my-pi/issues/9931), [#19185](https://github.com/can1357/oh-my-pi/pull/19185) by [@Skare69](https://github.com/Skare69))
 
 ### Changed
 
