@@ -48,14 +48,14 @@ import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import { resolveInlineByteCapBudget } from "../../tools/output-meta";
-import { truncateTail } from "../../tools/streaming-output";
+import { type InlineByteCapOptions, truncateTail } from "../../tools/streaming-output";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import { sanitizeDisplayLine } from "../inventory/display-text";
-import type { TodoPhase } from "../../tools/details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "../../tools/details/todo";
 import { extensionLinkClicksAvailable } from "./link-clicks";
 import {
 	notifyTranscriptPresentersChanged,
@@ -118,6 +118,7 @@ import type {
 	SessionStopEvent,
 	SessionStopEventResult,
 	ShortcutConflict,
+	TodoBackendChange,
 	TodoBackendDefinition,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -614,6 +615,34 @@ function extensionJobText(text: string): string {
 	return formatAsyncJobLabel(sanitizeDisplayLine(text));
 }
 
+/**
+ * The cap on an extension job's result or failure before the session keeps and delivers it: `bash`'s inline
+ * budget, with the full text saved as a session artifact the cap's `[raw output: …]` footer links.
+ */
+function extensionJobResultCap(settings: Settings | undefined, sessionManager: SessionManager): InlineByteCapOptions {
+	return {
+		maxBytes: resolveInlineByteCapBudget(settings),
+		saveArtifact: full => sessionManager.saveArtifact(full).catch(() => undefined),
+	};
+}
+
+/** Longest a backend gets to answer `apply`; the extension handler timeout caps it further. */
+const TODO_APPLY_TIMEOUT_MS = 10_000;
+
+const NOTHING_SAVED_SUFFIX = "; nothing was saved.";
+const TODO_APPLY_EVENT = "todo_backend_apply";
+
+interface TodoApplyRequest {
+	backend: string;
+	change: TodoBackendChange;
+	current(): TodoPhase[];
+	commit(): void;
+	closing(): boolean;
+	/** The selected todo backend id, or undefined for native. */
+	selected(): string | undefined;
+	signal?: AbortSignal;
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -675,7 +704,6 @@ export class ExtensionRunner {
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
-	#providerChanges = new Map<string, Promise<void>>();
 	/** Latest pending delivery per extension; see {@link #reserveDeliveryTurns}. Absent while idle. */
 	#deliveryTails = new Map<Extension, Promise<void>>();
 	#initialized = false;
@@ -713,6 +741,13 @@ export class ExtensionRunner {
 	#todoClosed = false;
 	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
 	#todoGivenUp = new AbortController();
+	/**
+	 * Holders asked by `apply`, by definition, until their next list goes out: it is sent even when it
+	 * equals the last one they took, since the answer may have written something else.
+	 */
+	#todoUnsynced = new WeakMap<TodoBackendDefinition, Set<Extension>>();
+	/** The `resync` of each asked call not run yet: still deciding, or failed and waiting for its apply to settle. */
+	#todoResyncs = new Set<() => void>();
 	/** The selected `todo.backend` id last reported as unregistered; cleared once a selected id resolves. */
 	#reportedTodoBackend: string | undefined;
 	/** Selected todo backend ids whose shadowed registrations were already reported. */
@@ -1022,14 +1057,12 @@ export class ExtensionRunner {
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
-		this.runtime.registerProvider = (name, config, sourceId) =>
-			this.#changeProvider(name, () => {
-				const register = () => this.modelRegistry.registerProvider(name, config, sourceId);
-				const preparing = this.modelRegistry.prepareProviderAuth([{ name, config }]);
-				return preparing ? preparing.then(register) : register();
-			});
-		this.runtime.unregisterProvider = name =>
-			this.#changeProvider(name, () => this.modelRegistry.unregisterProvider(name));
+		this.runtime.registerProvider = (name, config, sourceId) => {
+			this.modelRegistry.registerProvider(name, config, sourceId);
+		};
+		this.runtime.unregisterProvider = name => {
+			this.modelRegistry.unregisterProvider(name);
+		};
 
 		// Context actions (required)
 		this.#getModel = contextActions.getModel;
@@ -1661,26 +1694,6 @@ export class ExtensionRunner {
 		return allShortcuts;
 	}
 
-	/** Wait for provider registrations initiated by live extension factories. */
-	async settleProviderRegistrations(): Promise<void> {
-		if (this.#providerChanges.size > 0) await Promise.all(this.#providerChanges.values());
-	}
-
-	#changeProvider(name: string, apply: () => void | Promise<void>): void | Promise<void> {
-		const previous = this.#providerChanges.get(name);
-		const change = previous ? previous.then(apply) : apply();
-		if (!change) return;
-		const complete = () => {
-			if (this.#providerChanges.get(name) === settled) this.#providerChanges.delete(name);
-		};
-		const settled = change.then(complete, () => {
-			complete();
-			logger.warn("Extension could not change provider registration", { provider: name });
-		});
-		this.#providerChanges.set(name, settled);
-		return change;
-	}
-
 	onError(listener: ExtensionErrorListener): () => void {
 		this.#errorListeners.add(listener);
 		return () => this.#errorListeners.delete(listener);
@@ -1849,10 +1862,137 @@ export class ExtensionRunner {
 	 * host's process alive long after the session is gone.
 	 */
 	async closeTodoBackend(): Promise<void> {
+		// Calls still deciding, or waiting for a late apply, resync now, before the closed flag drops them: a
+		// late write after this can still land, but the shutdown budget allows no longer wait.
+		const resyncs = [...this.#todoResyncs];
+		this.#todoResyncs.clear();
+		for (const resync of resyncs) resync();
 		this.#todoClosed = true;
 		await this.todoBackendSettled();
 		this.#todoPending = undefined;
 		this.#todoGivenUp.abort();
+	}
+
+	/**
+	 * Ask the backend `todo.backend` selects to accept a `todo` call's change. `request.commit`
+	 * runs in the same synchronous step as the checks of the answer. `apply` is not queued behind
+	 * `replace`. `closing` is read here and again at commit: the dispose wrappers await before
+	 * `closeTodoBackend`.
+	 */
+	applyTodoBackend(request: TodoApplyRequest): TodoApplyOutcome | Promise<TodoApplyOutcome> {
+		const owner = this.#sessionStartEvent ? this.getTodoBackends().get(request.backend) : undefined;
+		if (!owner?.definition.apply) {
+			request.commit();
+			return { kind: "committed" };
+		}
+		// A backend that decides still decides while closing, so the call fails; nothing is resent here.
+		if (this.#todoClosed || request.closing())
+			return {
+				kind: "stale",
+				message: `The session is closing; todo backend "${sanitizeDisplayLine(request.backend)}" was not asked${NOTHING_SAVED_SUFFIX}`,
+			};
+		return this.#askTodoBackend(owner.extension, owner.definition, request);
+	}
+
+	async #askTodoBackend(
+		extension: Extension,
+		definition: TodoBackendDefinition,
+		{ backend, change, current, commit, closing, selected, signal }: TodoApplyRequest,
+	): Promise<TodoApplyOutcome> {
+		const sessionId = this.sessionManager.getSessionId();
+		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
+		const answered = Promise.withResolvers<void>();
+		// Whatever `apply` wrote is undone by the next list its holder takes, even one equal to the last: at
+		// once if it is still selected, else when it is selected again.
+		const resync = () => {
+			const holders = this.#todoUnsynced.get(definition) ?? new Set<Extension>();
+			this.#todoUnsynced.set(definition, holders.add(extension));
+			const now = selected();
+			if (now !== undefined) this.syncTodoBackend(now, current());
+		};
+		let asked = false;
+		const verdict = await this.#runHandlerWithTimeout<
+			{ type: typeof TODO_APPLY_EVENT; change: TodoBackendChange },
+			| { kind: "accepted" }
+			| { kind: "refused"; message: string }
+			| { kind: "failed"; message: string }
+			| { kind: "timeout" }
+		>(
+			async (event, ctx) => {
+				asked = true;
+				this.#todoResyncs.add(resync);
+				// A throw is an extension error, not a refusal (`onFailure` below makes its message text); a non-text reason is dropped.
+				try {
+					const answer = await definition.apply?.(event.change, ctx);
+					if (!answer?.block) return { kind: "accepted" };
+					return { kind: "refused", message: typeof answer.reason === "string" ? answer.reason : "" };
+				} finally {
+					answered.resolve();
+				}
+			},
+			{ type: TODO_APPLY_EVENT, change: structuredClone(change) },
+			this.createContext(),
+			extension,
+			timeoutMs,
+			(kind, failure) => (kind === "timeout" ? { kind: "timeout" } : { kind: "failed", message: String(failure) }),
+			signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
+		);
+		// Why the change can no longer commit, checked in the same synchronous step as the commit.
+		const owner = this.getTodoBackends().get(backend);
+		const staleCause = signal?.aborted
+			? "The call was aborted"
+			: this.#todoClosed || closing()
+				? "The session closed"
+				: this.sessionManager.getSessionId() !== sessionId
+					? "The session changed"
+					: selected() !== backend || owner?.extension !== extension || owner.definition !== definition
+						? "The todo backend changed"
+						: !Bun.deepEquals(current(), change.previous)
+							? "The todo list changed"
+							: undefined;
+		if (verdict?.kind === "accepted" && staleCause === undefined) {
+			this.#todoResyncs.delete(resync);
+			commit();
+			resync();
+			return { kind: "committed" };
+		}
+		const id = sanitizeDisplayLine(backend);
+		let result: { kind: "refused" | "stale"; message: string };
+		switch (verdict?.kind) {
+			case "refused":
+				result = {
+					kind: "refused",
+					message: `Todo backend "${id}" did not accept this change: ${sanitizeDisplayLine(verdict.message) || "no reason given"}`,
+				};
+				break;
+			case "timeout":
+				result = {
+					kind: "stale",
+					message: `Todo backend "${id}" did not answer within ${timeoutMs} ms${NOTHING_SAVED_SUFFIX}`,
+				};
+				break;
+			case "failed":
+				result = {
+					kind: "stale",
+					message: `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${NOTHING_SAVED_SUFFIX}`,
+				};
+				break;
+			default:
+				// No verdict only after an abort of the call or of the session's wait, both named above.
+				result = {
+					kind: "stale",
+					message: `${staleCause ?? "The call was aborted"} while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`,
+				};
+		}
+		// A failed call resyncs once its apply settles, so a late write lands first, and outside the call queue, so
+		// a later commit is not held behind it. One that never answers resyncs when the session closes.
+		if (asked)
+			void answered.promise
+				.then(() => {
+					if (this.#todoResyncs.delete(resync)) resync();
+				})
+				.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
+		return result;
 	}
 
 	#queueTodoBackendCall(): void {
@@ -1884,10 +2024,12 @@ export class ExtensionRunner {
 		const { extension, definition } = owner;
 		this.#reportShadowedTodoBackends(pending.backend, extension);
 		const sent = this.#todoSent;
+		const unsynced = this.#todoUnsynced.get(definition)?.delete(extension) === true;
 		if (
-			sent === "none"
+			!unsynced &&
+			(sent === "none"
 				? pending.phases.length === 0
-				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending)
+				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending))
 		)
 			return;
 		this.#todoSent = undefined;
@@ -2121,7 +2263,7 @@ export class ExtensionRunner {
 												signal,
 												reportProgress: text => reportProgress(truncateTail(text).content),
 											}),
-										resolveInlineByteCapBudget(this.settings),
+										extensionJobResultCap(this.settings, this.sessionManager),
 									),
 								{
 									ownerId: this.agent.id,
@@ -2257,7 +2399,11 @@ export class ExtensionRunner {
 								ctx,
 								this.#uiForOwner(ctx.ui, ext.resolvedPath),
 								handlerSignal,
-								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
+								event.type === "tool_call" ||
+									event.type === TODO_APPLY_EVENT ||
+									SESSION_BEFORE_EVENTS[event.type] === true
+									? budget
+									: undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(event, handlerContext),

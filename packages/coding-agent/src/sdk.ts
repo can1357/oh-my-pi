@@ -69,12 +69,13 @@ import type { EffectiveExtensionRoots } from "./capability/types";
 import { type OAuthAccountPools, SessionAccountPoolScope } from "./config/account-pools";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
-import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
+import { type HydrateStartupModelCaches, isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
 	disabledProviderIds,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ModelMatchPreferences,
+	modelSelectorProviderHint,
 	parseModelPattern,
 	pickDefaultAvailableModel,
 	providerModelHint,
@@ -84,6 +85,7 @@ import {
 	resolveConfiguredModelPatterns,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
+	resolveProviderModelReference,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
@@ -215,7 +217,6 @@ import type { AdvisorToolFactory } from "./session/session-advisors";
 import {
 	createAuthStorageSettingsSync,
 	discoverSessionAuthStorage as discoverAuthStorage,
-	openManagedSessionAuthStorage,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { CostCapError, type CostGateApi, guardStreamFn } from "./session/cost-gate";
@@ -634,7 +635,7 @@ export interface CreateAgentSessionOptions {
 	/** User-authorized model agents inherited from the parent session for nested delegation. */
 	inheritedSessionAgents?: readonly AgentDefinition[];
 
-	/** Credential owner to reuse instead of opening the session's default daemon-backed auth. */
+	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
 	/** Model registry. Default: constructed from <agentDir>/models.yml */
 	modelRegistry?: ModelRegistry;
@@ -682,6 +683,8 @@ export interface CreateAgentSessionOptions {
 	 * so interactive startup keeps it off the first-frame path.
 	 */
 	deferRetryFallbackValidation?: boolean;
+	/** @internal Reuse catalog reads made while preparing this launch. */
+	hydrateStartupModelCaches?: HydrateStartupModelCaches;
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
@@ -1260,16 +1263,6 @@ export async function loadSessionExtensions(
 	return { ...result, deferredPaths: deferred };
 }
 
-async function applyExtensionProviders(
-	runtime: LoadExtensionsResult["runtime"],
-	registry: ModelRegistry,
-): Promise<void> {
-	const registrations = runtime.pendingProviderRegistrations.splice(0);
-	const preparing = registry.prepareProviderAuth(registrations);
-	if (preparing) await preparing;
-	for (const { name, config, sourceId } of registrations) registry.registerProvider(name, config, sourceId);
-}
-
 /**
  * Load discovered/configured extensions and register their providers into
  * `modelRegistry`, then discover the dynamic provider catalogs. One-shot CLIs
@@ -1293,7 +1286,10 @@ export async function loadCliExtensionProviders(
 	const activeSources = extensionsResult.extensions.map(extension => extension.path);
 	modelRegistry.syncExtensionSources(activeSources);
 	modelRegistry.clearSourceRegistrations(new Set(activeSources));
-	await applyExtensionProviders(extensionsResult.runtime, modelRegistry);
+	for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+		modelRegistry.registerProvider(name, config, sourceId);
+	}
+	extensionsResult.runtime.pendingProviderRegistrations = [];
 	if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
 }
 
@@ -2053,38 +2049,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
 	);
 
-	// The registry's credential owner also serves worker and session consumers.
+	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
+	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
+	// / session would silently miss credential_disabled events.
+	let modelRegistry =
+		options.modelRegistry ??
+		new ModelRegistry(
+			options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir, { settings, cwd })),
+			path.join(agentDir, "models.yml"),
+			{
+				settings,
+				cacheDbPath: getModelDbPath(agentDir),
+			},
+		);
+	let prewalk = options.prewalk;
+	let deferredPrewalk = options.deferredPrewalk;
+	// Track whether we internally created the authStorage so we can close it
+	// if construction fails before the session takes ownership.
 	const ownsAuthStorage = !options.authStorage && !options.modelRegistry;
-	const authStorage =
-		options.modelRegistry?.authStorage ??
-		options.authStorage ??
-		(await logger.time("discoverModels", () =>
-			settings.getAgentDir() === path.normalize(agentDir)
-				? openManagedSessionAuthStorage(settings)
-				: discoverAuthStorage(agentDir, { settings, cwd }),
-		));
+	const authStorage = modelRegistry.authStorage;
 	if (options.authStorage && options.authStorage !== authStorage) {
 		throw new Error(
 			"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
 		);
 	}
-	let authClosed = false;
-	let stopAuthSettingsSync: (() => void) | undefined;
-	const closeOwnedAuthStorage = () => {
-		if (!ownsAuthStorage || authClosed) return;
-		authClosed = true;
-		stopAuthSettingsSync?.();
-		authStorage.close();
-	};
-	if (ownsAuthStorage) startupCleanup.defer(closeOwnedAuthStorage);
-	let modelRegistry =
-		options.modelRegistry ??
-		new ModelRegistry(authStorage, path.join(agentDir, "models.yml"), {
-			settings,
-			cacheDbPath: getModelDbPath(agentDir),
-		});
-	let prewalk = options.prewalk;
-	let deferredPrewalk = options.deferredPrewalk;
 	// Subscribe before any getApiKey() call so startup model probes can't fire a
 	// credential_disabled event past us. An embedder's constructor handler makes the
 	// listener set non-empty from construction, which defeats AuthStorage's no-listener
@@ -2106,11 +2094,49 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 	});
 	startupCleanup.defer(unsubscribeCredentialDisabled);
-	// Local-only and never rejects; awaited just before the first catalog read so
-	// its credential/cache I/O overlaps the cwd-scoped discoveries started below.
-	const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
-		modelRegistry.hydrateCredentialScopedModelCaches(),
-	);
+	const deferredModelPatterns = Array.isArray(options.modelPattern)
+		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
+		: options.modelPattern?.trim()
+			? [options.modelPattern.trim()]
+			: [];
+	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
+	const hydrateStartupModelCaches = options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
+	const startStartupModelCacheHydration = (providers?: ReadonlySet<string>) => {
+		const hydration = hydrateStartupModelCaches(providers);
+		// A worker's owner call may reject before we reach the first reader.
+		hydration.catch(() => {});
+		return hydration;
+	};
+	let fullStartupModelCaches: Promise<void> | undefined;
+	const hydrateFullStartupModelCaches = () => (fullStartupModelCaches ??= startStartupModelCacheHydration());
+	const getDefaultSelector = (role: string | undefined) => {
+		const first = resolveConfiguredModelPatterns(role, settings)[0];
+		if (!first) return undefined;
+		const provider = modelSelectorProviderHint(first);
+		return provider ? { provider, id: first.slice(first.indexOf("/") + 1).trim() } : undefined;
+	};
+	// Start local cache I/O while cwd discovery runs, but wait for the journal
+	// before naming resume providers. Unknown or unqualified selectors widen.
+	const startupDefaultRole = settings.getModelRole("default");
+	const startupProvider = options.model
+		? options.hydrateStartupModelCaches && options.model.provider.toLowerCase()
+		: !hasExplicitModel && cfgEnabledModels.get(settings).length === 0
+			? getDefaultSelector(startupDefaultRole)?.provider
+			: undefined;
+	// With a caller-supplied model and no CLI work to reuse, start only the
+	// broad pass. In particular, worker mirrors need one owner RPC, not two.
+	const startupProviderHydration = startupProvider
+		? startStartupModelCacheHydration(new Set([startupProvider]))
+		: undefined;
+	if (
+		!startupProvider &&
+		(hasExplicitModel ||
+			cfgEnabledModels.get(settings).length > 0 ||
+			(startupDefaultRole && startupDefaultRole.trim() !== "default") ||
+			!options.sessionManager?.getLeafId())
+	) {
+		void hydrateFullStartupModelCaches();
+	}
 	// Kick off workspace tree discovery early. The native workspace scan returns
 	// both the rendered-tree input and the AGENTS.md directory-context index, so
 	// startup does not perform a second recursive filesystem search. Subagents
@@ -2267,7 +2293,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// account wins) and cold-miss the child's whole prefix. An explicit parent pin is
 		// the user's choice and still reaches the child.
 		const ownPins = sessionManager.getCredentialPins();
-		await modelRegistry.authStorage.sessions.inherit(
+		modelRegistry.authStorage.sessions.inherit(
 			options.credentialSourceSessionId,
 			providerSessionId,
 			(provider, explicit) => explicit || !ownPins.has(provider),
@@ -2342,47 +2368,57 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
-	const deferredModelPatterns = Array.isArray(options.modelPattern)
-		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
-		: options.modelPattern?.trim()
-			? [options.modelPattern.trim()]
+	// Saved model selectors use exact provider lookup, unlike configured model
+	// patterns, which can also be raw aggregator IDs or resolve through aliases.
+	const sessionModelStrings =
+		!hasExplicitModel && hasExistingSession
+			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
-	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
 	const defaultRoleValue = settings.getModelRole("default");
-	let explicitDefaultProviders: Set<string> | undefined;
-	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
-		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
-		if (patterns && patterns.length > 0) {
-			const providers = new Set<string>();
-			for (const pattern of patterns) {
-				const slash = pattern.indexOf("/");
-				const provider = slash > 0 ? pattern.slice(0, slash).trim() : "";
-				if (!provider || /[*?[\]{}]/.test(provider)) {
-					providers.clear();
-					break;
-				}
-				providers.add(provider);
-			}
-			if (providers.size > 0) explicitDefaultProviders = providers;
+	const hasModelScope = cfgEnabledModels.get(settings).length > 0;
+	const defaultSelector = !hasExplicitModel && !hasModelScope ? getDefaultSelector(defaultRoleValue) : undefined;
+	if (options.model) {
+		if (startupProviderHydration) await startupProviderHydration;
+	} else if (hasModelScope || hasExplicitModel || fullStartupModelCaches) {
+		await hydrateFullStartupModelCaches();
+	} else {
+		const providers = new Set<string>();
+		if (defaultSelector) providers.add(defaultSelector.provider);
+		let needsFullCatalog = false;
+		for (const selector of sessionModelStrings) {
+			const provider = modelSelectorProviderHint(selector);
+			if (provider) providers.add(provider);
+			else needsFullCatalog = true;
+		}
+		if (needsFullCatalog) {
+			await hydrateFullStartupModelCaches();
+		} else {
+			if (startupProvider) providers.delete(startupProvider);
+			await Promise.all([startupProviderHydration, providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined]);
 		}
 	}
-	await credentialScopedCacheHydration;
-	if (!options.modelRegistry) {
-		modelRegistry.refreshInBackground();
-	}
+
 	let defaultRoleSpec: ResolvedModelRoleValue = {
 		model: undefined,
 		thinkingLevel: undefined,
 		explicitThinkingLevel: false,
 		warning: undefined,
 	};
-	if (!hasExplicitModel) {
-		const allowedModels = await logger.time("resolveAllowedModels", () =>
-			explicitDefaultProviders
-				? modelRegistry.getAvailableForProviders(explicitDefaultProviders)
-				: resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
-		);
+	if (!hasExplicitModel && defaultRoleValue && defaultRoleValue.trim() !== "default") {
+		const allowedModels = await logger.time("resolveAllowedModels", async () => {
+			if (defaultSelector) {
+				const available = modelRegistry.getAvailableForProviders(new Set([defaultSelector.provider]));
+				// A direct match on the leading pattern wins before raw aggregator
+				// IDs. Don't strip thinking/routing suffixes for this probe: a
+				// literal with that suffix in another roster can beat the stripped id.
+				if (resolveProviderModelReference(defaultSelector.provider, defaultSelector.id, available)) {
+					return available;
+				}
+			}
+			await hydrateFullStartupModelCaches();
+			return resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+		});
 		defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 			resolveModelRoleValue(defaultRoleValue, allowedModels, {
 				settings,
@@ -2394,15 +2430,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	let modelPatternRetryFallbackRole: string | undefined;
-	// Identify session model strings to restore in fallback order. We do an
-	// initial pass here so model-dependent setup (thinking-level resolution,
-	// host preconnect) can use the restored model; extension-registered
-	// providers aren't visible yet, so we retry the preferred candidates once
-	// extensions register below.
-	const sessionModelStrings =
-		!hasExplicitModel && hasExistingSession
-			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
-			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
@@ -2505,6 +2532,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 	}
 
+	// The tool plan (auto find/judgment, among others) and extension/session
+	// consumers can inspect the entire registry. Fill the remaining providers
+	// while skills and other startup discoveries finish, before those readers.
+	const remainingStartupModelCaches = hydrateFullStartupModelCaches();
+
 	// Re-derives the thinking level whenever startup settles on a different
 	// model than the one (possibly none) the level above was resolved against,
 	// so the settings default is clamped to the model's actual effort ladder.
@@ -2545,8 +2577,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	})();
 	const { ttsrManager, allRules } = discovered;
 	// Mutable so the mid-session prompt rebuild (on /clear and /new) can re-discover
-	// rules from disk, mirroring the context-file refresh below (issue #10940). The
-	// same `ttsrManager` is reused, so restored TTSR injection state survives.
+	// rules from disk, mirroring the context-file refresh below (issue #10940).
+	// Rebuilding alone preserves injection state; a new transcript resets it.
 	let rulebookRules = discovered.rulebookRules;
 	let alwaysApplyRules = discovered.alwaysApplyRules;
 
@@ -2856,6 +2888,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
+			applyTodoChange: (change, commit, signal) => session.applyTodoChange(change, commit, signal),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			getCallContext: (toolCallId, source) => {
@@ -2998,7 +3031,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			parentPrefix: options.parentTaskPrefix,
 		});
+		// Provider, never a stored value: inherited child policy remains linked to
+		// the owning session, while top-level sessions materialize their own live
+		// settings on every discovery call.
+		const buildSessionExtensionRoots =
+			options.extensionRoots ??
+			((): EffectiveExtensionRoots => ({
+				explicit: options.additionalExtensionPaths ?? [],
+				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
+				configured: cfgExtensions.get(settings),
+				configuredLevel: settings.extensionsSourceLevel(),
+			}));
+		// The task tool discovers agents while built-in tools are created.
+		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
 
+		// The built-in tool plan can read the full registry (for example, auto
+		// find considers cross-provider judge candidates).
+		await remainingStartupModelCaches;
+		if (!options.modelRegistry) modelRegistry.refreshInBackground();
 		// Create built-in tools (already wrapped with meta notice formatting)
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 		const initialBrowserPreludeAvailable = shouldFilterBrowserMCPForPrelude({
@@ -3039,17 +3089,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
 			eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 		};
-		// Provider, never a stored value: inherited child policy remains linked to
-		// the owning session, while top-level sessions materialize their own live
-		// settings on every discovery call.
-		const buildSessionExtensionRoots =
-			options.extensionRoots ??
-			((): EffectiveExtensionRoots => ({
-				explicit: options.additionalExtensionPaths ?? [],
-				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: cfgExtensions.get(settings),
-				configuredLevel: settings.extensionsSourceLevel(),
-			}));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			startupTimeoutMs: cfgMcpStartupTimeoutMs.get(settings),
@@ -3075,12 +3114,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					deferredMCPManager.setNotificationsEnabled(true);
 				}
 				startDeferredMCPDiscovery = liveSession => {
+					// Each configured server's first mount, whether discovery or a later `onToolsChanged`
+					// (a slow or retried connect) brings it, is part of this startup, not a change.
+					liveSession.setMCPStartupMounts(toolName => deferredMCPManager.isStartupMount(toolName));
 					const discovery = (async () => {
 						try {
 							const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
 								deferredMCPManager.discoverAndConnect({
 									...mcpDiscoverOptions,
 									enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+									startup: true,
 								}),
 							);
 							// The session can be torn down while servers are still connecting.
@@ -3246,7 +3289,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
-		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
 
 		// Inline source ids must remain stable when caller factories are rebound in
 		// child sessions. Start after any prepared inline sources so SDK-provided
@@ -3324,7 +3366,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry.clearSourceRegistrations(new Set(activeExtensionSources));
 		}
 		if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
-			await applyExtensionProviders(extensionsResult.runtime, modelRegistry);
+			for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+				modelRegistry.registerProvider(name, config, sourceId);
+			}
+			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
 		// Hydrate cached runtime (extension) provider catalogs before model
 		// resolution. Dynamic-only providers have no synchronous registration side
@@ -4523,7 +4568,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
-				? await memoryBackend.buildDeveloperInstructions(agentDir, sessionManager.getCwd(), settings, session)
+				? await memoryBackend.buildDeveloperInstructions(
+						agentDir,
+						sessionManager.getCwd(),
+						settings,
+						session,
+						taskDepth,
+					)
 				: undefined;
 			// Advisors get the same memory block (sharpshooter decisions, mnemopi/
 			// hindsight instructions) wrapped as shared background knowledge; the
@@ -5669,7 +5720,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
-		await session.waitForCredentialPins();
 		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
 		if (options.deferHintCompression !== true) session.startHintCompression();
 		credentialNoticeSession = session;
@@ -5689,9 +5739,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		}
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
-		if (ownsAuthStorage) {
-			stopAuthSettingsSync = createAuthStorageSettingsSync(session, authStorage, modelRegistry).stop;
-		}
+		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage, modelRegistry);
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the
 		// `tools.format` catalog dialect, personality, …), so a bulk change rebuilds once.
 		// Hide Secrets first switches outbound obfuscation on the live obfuscator (earlier
@@ -5994,8 +6042,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						for (const message of formatExtensionLoadNotifications(loaded.errors)) {
 							session.emitNotice("warning", message, "extensions");
 						}
-						await applyExtensionProviders(runtime, modelRegistry);
-						await extensionRunner.settleProviderRegistrations();
+						for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
+							modelRegistry.registerProvider(name, config, sourceId);
+						}
 						for (const prepared of loaded.preparedExtensions ?? []) {
 							forwardablePreparedExtensions.set(prepared.resolvedPath, prepared);
 						}
@@ -6189,11 +6238,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						for (const callback of disposeCallbacks) callback();
 					} finally {
 						disposeCallbacks.clear();
-						try {
-							await releaseDsmReferences(toolSession);
-						} finally {
-							closeOwnedAuthStorage();
-						}
+						await releaseDsmReferences(toolSession);
 					}
 					// Drop refs so the process-global postmortem list doesn't retain
 					// the bridge closure past explicit dispose.
@@ -6543,8 +6588,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					session.emitNotice("warning", message, "extensions");
 				}
 				if (session.isDisposed) return;
-				await applyExtensionProviders(runtime, modelRegistry);
-				await extensionRunner.settleProviderRegistrations();
+				// Providers queue until the runner is initialized; drain them as session creation does.
+				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
+					modelRegistry.registerProvider(name, config, sourceId);
+				}
 				const deferredPrepared = loaded.preparedExtensions ?? [];
 				const deferredPaths = loaded.extensions.map(extension => extension.resolvedPath);
 				forwardedPreparedExtensions.push(...deferredPrepared);
@@ -6584,6 +6631,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await releaseComputerSessionsForOwner(evalKernelOwnerId);
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeVmContextsByOwner(evalKernelOwnerId);
+				if (ownsAuthStorage) authStorage.close();
 			}
 		} catch (cleanupError) {
 			logger.warn("Failed to clean up createAgentSession resources after startup error", {

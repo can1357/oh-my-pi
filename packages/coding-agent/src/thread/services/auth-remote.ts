@@ -70,7 +70,6 @@ import type {
 	SessionsApi,
 	StoredAuthCredential,
 	StoredCredentialBlock,
-	StoredCredentialSummary,
 	StoredOAuthRefreshOptions,
 	StoredOAuthRefreshResult,
 	UsageApi,
@@ -254,9 +253,6 @@ class RemoteCredentials implements CredentialsApi {
 	list(provider?: string): StoredAuthCredential[] {
 		return this.#remote.callSync("credentials.list", provider);
 	}
-	summaries(provider?: string): StoredCredentialSummary[] {
-		return this.#remote.callSync("credentials.summaries", provider);
-	}
 	has(provider: string): boolean {
 		return this.#remote.callSync("credentials.has", provider);
 	}
@@ -428,34 +424,31 @@ interface RemoteLease {
 
 class RemoteSessions implements SessionsApi {
 	readonly #remote: AuthRemote;
+	readonly #availability: RemoteAuthAvailability;
 	readonly #leases = new Map<SessionRestrictionLease, RemoteLease>();
 
-	constructor(remote: AuthRemote) {
+	constructor(remote: AuthRemote, availability: RemoteAuthAvailability) {
 		this.#remote = remote;
+		this.#availability = availability;
 	}
 
-	pin(
-		provider: string,
-		sessionId: string,
-		credentialId: number,
-		options?: { restoredAtMs?: number },
-	): Promise<boolean> {
-		return this.#remote.call("sessions.pin", provider, sessionId, credentialId, options);
+	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean {
+		return this.#remote.callSync("sessions.pin", provider, sessionId, credentialId, options);
 	}
-	async inherit(
+	inherit(
 		sourceSessionId: string,
 		targetSessionId: string,
 		include?: (provider: string, explicit: boolean) => boolean,
-	): Promise<number> {
+	): number {
 		let table: InheritTable | undefined;
 		if (include) {
 			table = {};
-			const providers = await this.#remote.call("sessions.inheritProviders");
-			for (const provider of providers) {
+			// Main consults the table for stored providers only; the availability domain covers them.
+			for (const provider of this.#availability.providers()) {
 				table[provider] = [include(provider, false), include(provider, true)];
 			}
 		}
-		return this.#remote.call("sessions.inherit", sourceSessionId, targetSessionId, table);
+		return this.#remote.callSync("sessions.inherit", sourceSessionId, targetSessionId, table);
 	}
 	restrict(provider: string, sessionId: string, identityKeys: readonly string[]): SessionRestrictionLease {
 		const id = this.#remote.callSync("sessions.restrict", provider, sessionId, identityKeys);
@@ -466,18 +459,15 @@ class RemoteSessions implements SessionsApi {
 	unrestrict(provider: string, sessionId: string, lease: SessionRestrictionLease): void {
 		const entry = this.#leases.get(lease);
 		if (!entry) return;
-		this.#remote.callSync("sessions.unrestrict", provider, sessionId, entry.id);
 		// Mirrors the main side: a call naming another session leaves the lease usable.
 		if (entry.provider === provider && entry.sessionId === sessionId) this.#leases.delete(lease);
+		this.#remote.notify("sessions.unrestrict", provider, sessionId, entry.id);
 	}
-	permits(provider: string, sessionId: string, credentialId: number): Promise<boolean> {
-		return this.#remote.call("sessions.permits", provider, sessionId, credentialId);
+	permits(provider: string, sessionId: string, credentialId: number): boolean {
+		return this.#remote.callSync("sessions.permits", provider, sessionId, credentialId);
 	}
-	release(provider: string, sessionId: string): Promise<boolean> {
-		return this.#remote.call("sessions.release", provider, sessionId);
-	}
-	clear(provider: string, sessionId: string): Promise<void> {
-		return this.#remote.call("sessions.clear", provider, sessionId);
+	release(provider: string, sessionId: string): boolean {
+		return this.#remote.callSync("sessions.release", provider, sessionId);
 	}
 }
 
@@ -505,10 +495,10 @@ class RemoteUsage implements UsageApi {
 		provider: Provider,
 		headers: Record<string, string>,
 		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-	): boolean | Promise<boolean> {
+	): boolean {
 		// Once per response; without a stored OAuth credential main ingests nothing.
 		if (!this.#availability.of(provider).oauth) return false;
-		return this.#remote.call("usage.ingestHeaders", provider, headers, options);
+		return this.#remote.callSync("usage.ingestHeaders", provider, headers, options);
 	}
 	invalidate(provider?: string, signal?: AbortSignal): Promise<void> {
 		return this.#remote.call("usage.invalidate", provider, signal);
@@ -602,8 +592,8 @@ class RemoteLimits implements LimitsApi {
 	markServiceTierUnavailable(provider: string, options: MarkServiceTierUnavailableOptions): Promise<boolean> {
 		return this.#remote.call("limits.markServiceTierUnavailable", provider, options);
 	}
-	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string, sessionId?: string): Promise<void> {
-		return this.#remote.call("limits.rearmServiceTier", provider, serviceTier, modelId, sessionId);
+	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void> {
+		return this.#remote.call("limits.rearmServiceTier", provider, serviceTier, modelId);
 	}
 	invalidateMatching(
 		provider: string,
@@ -685,7 +675,7 @@ export class RemoteAuthStorageBackend implements AuthStorageBackend {
 		this.credentials = new RemoteCredentials(remote);
 		this.keys = new RemoteKeys(remote, availability);
 		this.oauth = new RemoteOAuth(remote, availability);
-		this.sessions = new RemoteSessions(remote);
+		this.sessions = new RemoteSessions(remote, availability);
 		this.usage = new RemoteUsage(remote, availability);
 		this.health = new RemoteHealth(remote, availability);
 		this.limits = new RemoteLimits(remote);

@@ -16,7 +16,6 @@ import type {
 	AuthApiKeyOptions,
 	AuthCredentialSnapshotEntry,
 	OAuthAccess,
-	OAuthAccessFailure,
 	OAuthAccessResolution,
 	OAuthAccountIdentity,
 	OAuthAccountSummary,
@@ -229,28 +228,15 @@ export class OAuthAccounts implements OAuthApi {
 				});
 				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
 				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);
-				if (index === -1) {
-					throw new AIError.MissingApiKeyError(
-						provider,
-						`OAuth credential ${selection.credentialId} was removed during refresh`,
-					);
-				}
+				if (index === -1) throw new Error(`OAuth credential ${selection.credentialId} was removed during refresh`);
 			}
-			let category: OAuthAccessFailure["category"] = "missing-api-key";
 			const resolved = await this.#deps.selector.tryOAuth(
 				provider,
 				{ credential: selection.credential, index },
 				providerKey,
 				undefined,
 				options,
-				{
-					checkUsage: false,
-					allowBlocked: true,
-					allowFallback: false,
-					onTransientRefreshFailure: error => {
-						category = AIError.retriable(AIError.classify(error)) ? "refresh-unavailable" : "selection-failed";
-					},
-				},
+				{ checkUsage: false, allowBlocked: true, allowFallback: false },
 			);
 			if (!resolved) {
 				return {
@@ -262,7 +248,6 @@ export class OAuthAccounts implements OAuthApi {
 					enterpriseUrl: selection.credential.enterpriseUrl,
 					orgId: selection.credential.orgId,
 					orgName: selection.credential.orgName,
-					category,
 					error: "OAuth access unavailable",
 				};
 			}
@@ -291,14 +276,6 @@ export class OAuthAccounts implements OAuthApi {
 				enterpriseUrl: selection.credential.enterpriseUrl,
 				orgId: selection.credential.orgId,
 				orgName: selection.credential.orgName,
-				category:
-					error instanceof AIError.MissingApiKeyError ||
-					AIError.isDefinitiveOAuthFailure(error) ||
-					!this.#deps.pool.entries(provider).some(entry => entry.id === selection.credentialId)
-						? "missing-api-key"
-						: AIError.retriable(AIError.classify(error))
-							? "refresh-unavailable"
-							: "selection-failed",
 				error: error instanceof Error ? error.message : String(error),
 			};
 		}

@@ -9,7 +9,6 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import { invalidateCommandConfig, isCommandConfigValue, resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { localAuthOwner, managedAuth } from "../session/auth-daemon-backend";
 import type { AuthStorage } from "../session/auth-storage";
 import {
 	buildServerSpec,
@@ -43,11 +42,10 @@ import type { HostLinkReattach } from "./link";
 import { setGeneratedHeader } from "./host/header-policy";
 import {
 	lookupMcpOAuthCredential,
-	mcpOAuthCredentialCandidates,
-	mcpOAuthProviderDigest,
+	type MCPOAuthCredentialLookup,
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
-import { mcpOAuthServerUrlFromCredentialId } from "./oauth-flow";
+import type { MCPStoredOAuthCredential } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
@@ -222,6 +220,11 @@ export interface MCPDiscoverOptions {
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 	/** Non-blocking discovery window in milliseconds; environment override wins. */
 	startupTimeoutMs?: number;
+	/**
+	 * The session's startup connect: until a configured server's first tools are mounted (a timed-out
+	 * connect's automatic retry included), {@link MCPManager.isStartupMount} names its tools.
+	 */
+	startup?: boolean;
 }
 
 /** Handles an MCP `WWW-Authenticate` challenge and returns refreshed config. */
@@ -379,6 +382,10 @@ export class MCPManager implements MCPManagerApi {
 	#pendingConnections = new Map<string, Promise<HostedMCPConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#startupUpdates = new Map<string, Promise<void>>();
+	/** Servers still in the session's startup connect, each with the token of the connect that claimed it. */
+	#startupOwned = new Map<string, object>();
+	/** Claimed servers' mounted tools by name, kept until the claim ends: a notice may name a tool removed since. */
+	#startupTools = new Map<string, string>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
 	/** Newest connect/reconnect failure per server, cleared when it connects; explains "not connected". */
@@ -778,7 +785,13 @@ export class MCPManager implements MCPManagerApi {
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
-		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs);
+		const result = await this.connectServers(
+			configs,
+			sources,
+			options?.onStatus,
+			options?.startupTimeoutMs,
+			options?.startup,
+		);
 		result.exaApiKeys = exaApiKeys;
 		return result;
 	}
@@ -898,12 +911,14 @@ export class MCPManager implements MCPManagerApi {
 	 * Each newly resolved server is merged via {@link MCPManager.#replaceServerTools}.
 	 * Interactive enable (`/mcp enable`, `/extensions`) can pass a single
 	 * `{ [name]: config }` without wiping the rest of the registry.
+	 * `startup` claims each connect it starts for the session's startup (see {@link MCPDiscoverOptions.startup}).
 	 */
 	async connectServers(
 		configs: Record<string, MCPServerConfig>,
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
+		startup?: boolean,
 	): Promise<MCPLoadResult> {
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
@@ -1027,6 +1042,13 @@ export class MCPManager implements MCPManagerApi {
 			const tracked = trackPromise(toolsPromise);
 			connectionTasks.push({ name, config, tracked, toolsPromise, connectSignal });
 
+			// Only a connect started here is the startup's: a server already connected or connecting is not.
+			const owned = startup ? {} : undefined;
+			if (owned) this.#startupOwned.set(name, owned);
+			const release = (): void => {
+				if (owned && this.#startupOwned.get(name) === owned) this.#endStartup(name);
+			};
+			let retrying = false;
 			const startupUpdate = toolsPromise
 				.then(async ({ connection, serverTools }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
@@ -1057,12 +1079,21 @@ export class MCPManager implements MCPManagerApi {
 								})
 							: undefined;
 						const retry = this.reconnectServer(name);
+						// The retry fires the owner's refresh without awaiting it: the startup ends once that drains.
+						retrying = true;
+						void retry
+							.then(
+								() => this.#ownerToolsRun?.catch(() => {}),
+								() => {},
+							)
+							.finally(release);
 						if (stopForwarding) void retry.then(stopForwarding, stopForwarding);
 						else void retry;
 					}
 				})
 				.finally(() => {
 					if (this.#startupUpdates.get(name) === startupUpdate) this.#startupUpdates.delete(name);
+					if (!retrying) release();
 				});
 			this.#startupUpdates.set(name, startupUpdate);
 		}
@@ -1126,6 +1157,7 @@ export class MCPManager implements MCPManagerApi {
 	#replaceServerTools(name: string, tools: CustomTool<TSchema, MCPToolDetails>[]): void {
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
 		this.#tools.push(...tools);
+		if (this.#startupOwned.has(name)) for (const tool of tools) this.#startupTools.set(tool.name, name);
 		// Stable sort by name so reconnect order does not perturb the array.
 		// See `sortMCPToolsByName` for the cache-stability rationale.
 		sortMCPToolsByName(this.#tools);
@@ -1296,6 +1328,22 @@ export class MCPManager implements MCPManagerApi {
 			const scopes = this.#scopedTools.get(tool.mcpServerName ?? "")?.get(tool.mcpToolName ?? "");
 			return scopes === undefined || scopes.has(scope);
 		});
+	}
+
+	/**
+	 * Whether `toolName` belongs to a server still in the session's startup connect (see
+	 * {@link MCPDiscoverOptions.startup}): its first mount is no change to announce. Matched by the
+	 * server that mounted the tool, never a name prefix; a tool removed since still names its server.
+	 */
+	isStartupMount(toolName: string): boolean {
+		const server = this.#startupTools.get(toolName);
+		return server !== undefined && this.#startupOwned.has(server);
+	}
+
+	/** End `name`'s startup claim and forget its tools. */
+	#endStartup(name: string): void {
+		this.#startupOwned.delete(name);
+		for (const [tool, server] of this.#startupTools) if (server === name) this.#startupTools.delete(tool);
 	}
 
 	/**
@@ -1536,6 +1584,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#startupServers.delete(name);
 		this.#startupFailures.delete(name);
 		this.#startupUpdates.delete(name);
+		this.#endStartup(name);
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
@@ -1592,6 +1641,8 @@ export class MCPManager implements MCPManagerApi {
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
 		this.#startupUpdates.clear();
+		this.#startupOwned.clear();
+		this.#startupTools.clear();
 		this.#startupServers.clear();
 		this.#startupFailures.clear();
 		this.#pendingReconnections.clear();
@@ -2212,22 +2263,10 @@ export class MCPManager implements MCPManagerApi {
 	 */
 	#authRefreshHook(config: MCPServerConfig): (() => Promise<Record<string, string> | null>) | undefined {
 		if (config.type !== "http" && config.type !== "sse") return undefined;
-		const storage = this.#authStorage;
-		const managed = storage && managedAuth(storage);
-		const hasCommands = commandValues(config).length > 0;
-		// Only look up daemon rows on demand. A possible binding does not justify
-		// an extra IPC round trip when attaching a link that may never return 401.
-		if (
-			!hasCommands &&
-			!(managed ? mcpOAuthCredentialCandidates(config).length > 0 : lookupMcpOAuthCredential(storage, config))
-		) {
-			return undefined;
-		}
+		if (commandValues(config).length === 0 && !lookupMcpOAuthCredential(this.#authStorage, config)) return undefined;
 		return async () => {
 			invalidateCommandValues(config);
-			const accessToken = await this.#resolveOAuthAccessToken(config, { forceRefresh: true });
-			if (managed && !hasCommands && accessToken === undefined) return null;
-			const refreshed = await this.#resolveConfigValues(config, accessToken);
+			const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
 			return refreshed.type === "http" || refreshed.type === "sse" ? (refreshed.headers ?? null) : null;
 		};
 	}
@@ -2241,127 +2280,57 @@ export class MCPManager implements MCPManagerApi {
 		config: MCPServerConfig,
 		opts?: { forceRefresh?: boolean; oauth?: boolean; signal?: AbortSignal },
 	): Promise<MCPServerConfig> {
-		const accessToken = opts?.oauth === false ? undefined : await this.#resolveOAuthAccessToken(config, opts);
-		return this.#resolveConfigValues(config, accessToken, opts?.signal);
-	}
-
-	async #resolveOAuthAccessToken(
-		config: MCPServerConfig,
-		opts?: { forceRefresh?: boolean; signal?: AbortSignal },
-	): Promise<string | undefined> {
-		const storage = this.#authStorage;
-		if (!storage) return undefined;
 		const signal = opts?.signal;
-		let logId: string | number | undefined;
-		try {
-			const managed = managedAuth(storage);
-			if (!managed) {
-				const lookup = lookupMcpOAuthCredential(storage, config);
-				if (!lookup) return undefined;
-				logId = lookup.credentialId;
-				return await this.#refreshLocalOAuthAccess(storage, lookup.credentialId, config, opts);
-			}
+		let resolved: MCPServerConfig = { ...config };
 
-			const candidates = mcpOAuthCredentialCandidates(config);
-			if (candidates.length === 0) return undefined;
-			const selection = await untilAborted(signal, () =>
-				managed.mcpOAuthFind(candidates.map(mcpOAuthProviderDigest)),
-			);
-			if (!selection) return undefined;
-			logId = selection.credentialId;
-			const provider = candidates[selection.candidateIndex];
-			if (!provider) throw new Error("Invalid daemon MCP OAuth selection");
-
-			const serverUrl = config.type === "http" || config.type === "sse" ? config.url : undefined;
-			const storedUrl = serverUrl ? mcpOAuthServerUrlFromCredentialId(provider) : undefined;
-			// A legacy explicit pointer can name a different URL than this server.
-			// Do not send the runtime URL or let the daemon silently substitute its own.
-			if (!selection.requiresLocal && (storedUrl === undefined || storedUrl === serverUrl)) {
-				const result = await untilAborted(signal, () =>
-					managed.mcpOAuthAccess({
-						credentialId: selection.credentialId,
-						storeEpoch: selection.storeEpoch,
+		const auth = config.auth;
+		const lookup: MCPOAuthCredentialLookup | undefined =
+			opts?.oauth !== false ? lookupMcpOAuthCredential(this.#authStorage, config) : undefined;
+		const authStorage = this.#authStorage;
+		if (lookup && authStorage) {
+			const { credentialId } = lookup;
+			try {
+				let credential: MCPStoredOAuthCredential | undefined = lookup.credential;
+				// Stop waiting on abort; a refresh already running finishes so a rotated token is stored, not lost.
+				const refreshResult = await untilAborted(signal, () =>
+					refreshStoredManagedMcpOAuthCredential(authStorage, credentialId, {
+						serverUrl: config.type === "http" || config.type === "sse" ? config.url : undefined,
+						auth,
 						forceRefresh: opts?.forceRefresh,
-						resourceMode: serverUrl ? "from-row-id" : "none",
+						keepCredentialOnRefreshFailure: true,
+						onRefreshFailure: refreshError => {
+							logger.warn("MCP OAuth refresh failed, using existing token", {
+								credentialId,
+								error: refreshError,
+							});
+						},
 					}),
 				);
-				if (result.kind === "access") {
-					if (result.refreshFailed) {
-						logger.warn("MCP OAuth refresh failed, using existing token", { credentialId: logId });
+				if (refreshResult.removed) {
+					logger.warn("MCP OAuth refresh failed definitively; cleared credential", { credentialId });
+				}
+				credential = refreshResult.credential;
+
+				if (credential) {
+					if (resolved.type === "http" || resolved.type === "sse") {
+						// Client-generated authorization wins over any configured header
+						// with the same case-insensitive name (Agent Plugins §7.2.1).
+						const headers = { ...resolved.headers };
+						setGeneratedHeader(headers, "Authorization", `Bearer ${credential.access}`);
+						resolved = { ...resolved, headers };
+					} else {
+						resolved = {
+							...resolved,
+							env: {
+								...resolved.env,
+								OAUTH_ACCESS_TOKEN: credential.access,
+							},
+						};
 					}
-					return result.accessToken;
 				}
-				if (result.kind === "missing") {
-					if (result.removed) {
-						logger.warn("MCP OAuth refresh failed definitively; cleared credential", { credentialId: logId });
-					}
-					return undefined;
-				}
-			}
-
-			const local = await untilAborted(signal, () => localAuthOwner(storage, selection.storeEpoch));
-			await untilAborted(signal, () => local.credentials.poll());
-			return await this.#refreshLocalOAuthAccess(local, provider, config, {
-				...opts,
-				credentialId: selection.credentialId,
-				managedStorage: storage,
-			});
-		} catch (error) {
-			if (signal?.aborted) throw error;
-			logger.warn("Failed to resolve OAuth credential", { credentialId: logId, error });
-			return undefined;
-		}
-	}
-
-	async #refreshLocalOAuthAccess(
-		storage: AuthStorage,
-		provider: string,
-		config: MCPServerConfig,
-		opts?: { forceRefresh?: boolean; signal?: AbortSignal; credentialId?: number; managedStorage?: AuthStorage },
-	): Promise<string | undefined> {
-		const logId = opts?.credentialId ?? provider;
-		// Stop waiting on abort; a refresh already running finishes so a rotated token is stored, not lost.
-		const result = await untilAborted(opts?.signal, async () => {
-			const result = await refreshStoredManagedMcpOAuthCredential(storage, provider, {
-				credentialId: opts?.credentialId,
-				serverUrl: config.type === "http" || config.type === "sse" ? config.url : undefined,
-				auth: config.auth,
-				forceRefresh: opts?.forceRefresh,
-				keepCredentialOnRefreshFailure: true,
-				onRefreshFailure: error => {
-					logger.warn("MCP OAuth refresh failed, using existing token", { credentialId: logId, error });
-				},
-			});
-			if (opts?.managedStorage && (result.refreshed || result.removed)) {
-				try {
-					await opts.managedStorage.credentials.reload();
-				} catch {
-					logger.debug("Could not reload MCP OAuth metadata after a local refresh", { credentialId: logId });
-				}
-			}
-			return result;
-		});
-		if (result.removed) {
-			logger.warn("MCP OAuth refresh failed definitively; cleared credential", { credentialId: logId });
-		}
-		return result.credential?.access;
-	}
-
-	async #resolveConfigValues(
-		config: MCPServerConfig,
-		accessToken: string | undefined,
-		signal?: AbortSignal,
-	): Promise<MCPServerConfig> {
-		let resolved: MCPServerConfig = { ...config };
-		if (accessToken !== undefined) {
-			if (resolved.type === "http" || resolved.type === "sse") {
-				// Client-generated authorization wins over any configured header
-				// with the same case-insensitive name (Agent Plugins §7.2.1).
-				const headers = { ...resolved.headers };
-				setGeneratedHeader(headers, "Authorization", `Bearer ${accessToken}`);
-				resolved = { ...resolved, headers };
-			} else {
-				resolved = { ...resolved, env: { ...resolved.env, OAUTH_ACCESS_TOKEN: accessToken } };
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				logger.warn("Failed to resolve OAuth credential", { credentialId, error });
 			}
 		}
 
@@ -2373,11 +2342,10 @@ export class MCPManager implements MCPManagerApi {
 				// property, not mutate the prototype chain.
 				const nextEnv: Record<string, string> = Object.create(null);
 				const literalKeys = new Set(resolved.envLiteralKeys);
-				for (const key in resolved.env) {
-					if (!Object.hasOwn(resolved.env, key)) continue;
-					const value = resolved.env[key]!;
+				for (const [key, value] of Object.entries(resolved.env)) {
 					// Provider-expanded keys are final package data: keep them
-					// verbatim (including empties), not as a bare env name or !command.
+					// verbatim (including empties) so they are never reinterpreted
+					// as a bare env name or !command.
 					if (literalKeys.has(key)) {
 						nextEnv[key] = value;
 						continue;
@@ -2393,9 +2361,7 @@ export class MCPManager implements MCPManagerApi {
 			// values: no placeholder or environment-variable expansion.
 			if (resolved.headers && resolved.headerPolicy !== "origin-locked") {
 				const nextHeaders: Record<string, string> = {};
-				for (const key in resolved.headers) {
-					if (!Object.hasOwn(resolved.headers, key)) continue;
-					const value = resolved.headers[key]!;
+				for (const [key, value] of Object.entries(resolved.headers)) {
 					const resolvedValue = await untilAborted(signal, () => resolveConfigValue(value));
 					if (resolvedValue) nextHeaders[key] = resolvedValue;
 				}

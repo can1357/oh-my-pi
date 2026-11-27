@@ -9,6 +9,7 @@
 ### Added
 
 - Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it
+- `omp usage` shows Venice USD and DIEM balances, bundled credits when available, and the DIEM epoch reset with a regular API key ([#20701](https://github.com/can1357/oh-my-pi/pull/20701) by [@dagurval](https://github.com/dagurval)).
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
@@ -41,6 +42,7 @@
 - Fixed OpenAI Responses and Codex turns ignoring `input_transformations`: they are now recorded on the message and `prefix_mismatch` reasoning-item removals are logged ([#19721](https://github.com/can1357/oh-my-pi/issues/19721))
 - Fixed `google-vertex` API-key mode ignoring `GOOGLE_CLOUD_PROJECT`: with a project configured, requests now use the `projects/{project}/locations/{location}` path so models published only on `locations/global` no longer 404 in the key's default region ([#18827](https://github.com/can1357/oh-my-pi/issues/18827))
 - Fixed OAuth login failing on Android/Termux when interface enumeration (`getifaddrs`) is denied; the callback server now falls back to IPv4 loopback ([#16127](https://github.com/can1357/oh-my-pi/issues/16127))
+- Fixed Anthropic rate limits sent inside a streaming response carrying no HTTP status: they now report 429 like a rate limit returned as an HTTP response, also after text has streamed, where they were treated as a dropped connection. An overload sent before the response starts now reports 529 ([#20835](https://github.com/can1357/oh-my-pi/pull/20835) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

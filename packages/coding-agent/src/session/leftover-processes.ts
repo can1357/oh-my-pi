@@ -26,9 +26,11 @@ export interface LeftoverProcessHost {
 }
 
 /**
- * Processes the session's bash calls left running (`cmd &`, `(cmd &)`, `nohup cmd &`):
- * a reminder when the main agent yields, and the `&` ones killed at session end.
- * Both gated on `bash.reapBackground` (forced off in RPC mode).
+ * Processes this omp process's bash calls for the session left running (`cmd &`, `(cmd &)`,
+ * `nohup cmd &`): a reminder when the main agent yields, and the `&` ones killed at session
+ * end. Another omp holding the same session id (a render of a live session's copy, a second
+ * resume) never touches them. Both gated on `bash.reapBackground` (forced off in RPC mode
+ * and `omp render`).
  */
 export class LeftoverProcessTracker {
 	readonly #host: LeftoverProcessHost;

@@ -42,17 +42,22 @@ export interface AuthBrokerClientConfig {
 	token: string;
 }
 
-/** Auth values from the persisted global settings layer, before client-side env/command resolution. */
-export interface AuthStoreConfigSnapshot {
+/** Values from one already-loaded main config, before environment and command resolution. */
+export interface PersistedAuthSettings {
 	url?: string;
 	token?: string;
+	accountPolicies?: unknown;
+	usageReservePct?: unknown;
 	encrypt?: boolean;
 }
 
-export interface ResolveAuthBrokerConfigOptions {
+interface AuthSettingsSource {
 	agentDir?: string;
-	/** A supplied snapshot, even `{}`, replaces the main YAML read. */
-	configSnapshot?: AuthStoreConfigSnapshot;
+	/** A supplied snapshot, including an empty one, skips main config discovery. */
+	persistedSettings?: PersistedAuthSettings;
+}
+
+export interface ResolveAuthBrokerConfigOptions extends AuthSettingsSource {
 	configValueResolver?: (config: string) => Promise<string | undefined>;
 }
 
@@ -114,9 +119,11 @@ async function readTokenFile(): Promise<string | null> {
 	}
 }
 
-interface ConfigSnapshot extends AuthStoreConfigSnapshot {
-	accountPolicies?: unknown;
-	usageReservePct?: unknown;
+type ReadAuthSettings = () => Promise<PersistedAuthSettings>;
+
+function authSettingsReader({ agentDir, persistedSettings }: AuthSettingsSource): ReadAuthSettings {
+	let loaded = persistedSettings === undefined ? undefined : Promise.resolve(persistedSettings);
+	return () => (loaded ??= readConfigYaml(agentDir ?? getAgentDir()));
 }
 
 /**
@@ -141,12 +148,14 @@ function readDottedString(record: Record<string, unknown>, dottedKey: string): s
 	return typeof value === "string" ? value : undefined;
 }
 
-/** Extract broker and encryption configuration using the same precedence as standalone discovery. */
-export function readAuthStoreConfigSnapshot(record: Record<string, unknown>): AuthStoreConfigSnapshot {
+/** Extract auth values with main-config precedence, not the effective Settings layer. */
+export function readPersistedAuthSettings(record: Readonly<Record<string, unknown>>): PersistedAuthSettings {
 	const encrypt = readDottedValue(record, "auth.encrypt");
 	return {
 		url: readDottedString(record, "auth.broker.url"),
 		token: readDottedString(record, "auth.broker.token"),
+		accountPolicies: readDottedValue(record, "auth.accountPolicies"),
+		usageReservePct: readDottedValue(record, "retry.usageReservePct"),
 		encrypt: typeof encrypt === "boolean" ? encrypt : undefined,
 	};
 }
@@ -248,7 +257,7 @@ function parseUsageReservePct(value: unknown): number {
 	return reservePct;
 }
 
-async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+async function readConfigYaml(agentDir: string): Promise<PersistedAuthSettings> {
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const configPath = path.join(agentDir, filename);
 		let raw: string;
@@ -270,12 +279,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 		if (typeof parsed !== "object" || Array.isArray(parsed)) {
 			throw new AIError.ConfigurationError(`${configPath} must contain a YAML object`);
 		}
-		const record = parsed as Record<string, unknown>;
-		return {
-			...readAuthStoreConfigSnapshot(record),
-			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
-			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
-		};
+		return readPersistedAuthSettings(parsed as Record<string, unknown>);
 	}
 	return {};
 }
@@ -285,25 +289,30 @@ export interface AuthAccountPolicyConfig {
 	defaultReservePct: number;
 }
 
-export interface LoadAuthAccountPolicyConfigOptions {
-	agentDir?: string;
+export interface LoadAuthAccountPolicyConfigOptions extends AuthSettingsSource {
 	accountPolicies?: unknown;
 	usageReservePct?: unknown;
 }
 
 /** Load and strictly validate account-selection policy configuration, with main-config fallback. */
-export async function loadAuthAccountPolicyConfig(
+export function loadAuthAccountPolicyConfig(
 	options: LoadAuthAccountPolicyConfigOptions = {},
 ): Promise<AuthAccountPolicyConfig> {
-	const agentDir = options.agentDir ?? getAgentDir();
-	const needsMainConfigFallback = options.accountPolicies === undefined || options.usageReservePct === undefined;
-	const snapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
+	return resolveAccountPolicies(authSettingsReader(options), options.accountPolicies, options.usageReservePct);
+}
+
+async function resolveAccountPolicies(
+	readConfig: ReadAuthSettings,
+	accountPolicies: unknown,
+	usageReservePct: unknown,
+): Promise<AuthAccountPolicyConfig> {
+	const snapshot = accountPolicies === undefined || usageReservePct === undefined ? await readConfig() : undefined;
 	return {
 		accountPolicies: parseAuthAccountPolicies(
-			options.accountPolicies === undefined ? snapshot?.accountPolicies : options.accountPolicies,
+			accountPolicies === undefined ? snapshot?.accountPolicies : accountPolicies,
 		),
 		defaultReservePct: parseUsageReservePct(
-			options.usageReservePct === undefined ? snapshot?.usageReservePct : options.usageReservePct,
+			usageReservePct === undefined ? snapshot?.usageReservePct : usageReservePct,
 		),
 	};
 }
@@ -398,7 +407,7 @@ function parseAccountPoolIdentities(provider: string, value: unknown[]): Set<str
 	return identities;
 }
 
-export function resolveAuthBrokerSnapshotTtlMs(): number {
+function resolveSnapshotTtlMs(): number {
 	const raw = process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS;
 	if (raw === undefined) return DEFAULT_SNAPSHOT_CACHE_TTL_MS;
 	const value = raw.trim();
@@ -479,39 +488,36 @@ function initialSnapshotRetriesSpent(lastError: AuthBrokerError): AuthBrokerErro
  * Resolve broker connection configuration using the same precedence as the TUI:
  *
  * 1. `OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN` env vars.
- * 2. `auth.broker.url` / `auth.broker.token` from the supplied snapshot, else main YAML.
+ * 2. `auth.broker.url` / `auth.broker.token` from supplied main config or the main YAML file.
  * 3. `<config-root>/auth-broker.token` file (paired with a URL from env/config).
  *
  * Returns `null` when no broker URL is configured — callers should fall back to
  * the local SQLite store. Throws when a URL is configured but no token is
  * available, matching the TUI behavior.
  */
-export async function resolveAuthBrokerConfig(
+export function resolveAuthBrokerConfig(
 	options: ResolveAuthBrokerConfigOptions = {},
 ): Promise<AuthBrokerClientConfig | null> {
-	const agentDir = options.agentDir ?? getAgentDir();
-	const resolveConfig = options.configValueResolver ?? defaultResolveConfigValue;
+	return resolveBrokerConfig(authSettingsReader(options), options.configValueResolver);
+}
 
-	const envUrl = process.env.OMP_AUTH_BROKER_URL;
-	const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
-
-	let url = envUrl && envUrl.length > 0 ? envUrl : undefined;
-	let configToken: string | undefined;
-	if (!url || !envToken) {
-		const fromConfig = options.configSnapshot ?? (await readConfigYaml(agentDir));
-		if (!url && fromConfig.url) {
-			const resolved = await resolveConfig(fromConfig.url);
-			if (resolved && resolved.length > 0) url = resolved;
-		}
-		if (fromConfig.token) {
-			const resolved = await resolveConfig(fromConfig.token);
-			if (resolved && resolved.length > 0) configToken = resolved;
-		}
+async function resolveBrokerConfig(
+	readConfig: ReadAuthSettings,
+	resolveConfig = defaultResolveConfigValue,
+): Promise<AuthBrokerClientConfig | null> {
+	let url = process.env.OMP_AUTH_BROKER_URL;
+	let token = process.env.OMP_AUTH_BROKER_TOKEN;
+	if (!url) {
+		const { url: configured } = await readConfig();
+		if (configured) url = await resolveConfig(configured);
 	}
 	if (!url) return null;
 
-	const token =
-		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
+	if (!token) {
+		const { token: configured } = await readConfig();
+		if (configured) token = await resolveConfig(configured);
+		if (!token) token = (await readTokenFile()) ?? undefined;
+	}
 	if (!token) {
 		throw new AIError.MissingApiKeyError(
 			undefined,
@@ -522,25 +528,13 @@ export async function resolveAuthBrokerConfig(
 	return { url, token };
 }
 
-interface OpenLocalAuthCredentialStoreOptions {
-	/** Already-resolved path, independent of the opening process's profile and XDG directories. */
-	dbPath?: string;
-	/** Already-resolved encryption mode. Omit to consult env and main YAML. */
-	encrypt?: CredentialEncryption;
-	/** Fail the open if sealed rows or explicit encryption require an unavailable cipher. */
-	requireUnlocked?: boolean;
-}
-
-export interface OpenAuthCredentialStoreOptions extends OpenLocalAuthCredentialStoreOptions {
+export interface OpenAuthCredentialStoreOptions extends AuthSettingsSource {
 	/** Broker to connect to; `null` opens the local SQLite store under `agentDir`. */
 	brokerConfig: AuthBrokerClientConfig | null;
-	agentDir?: string;
 	cachePath?: string;
-	/** Already-resolved cache TTL; zero disables caching. Omit to consult env. */
-	snapshotTtlMs?: number;
 	sourceLabel?: string;
-	/** `null` explicitly selects no filter; omit to consult the environment file. */
-	accountPool?: AuthBrokerAccountPool | null;
+	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
+	accountPool?: AuthBrokerAccountPool;
 	/**
 	 * Without a usable cache, retry a broker that is restarting or briefly
 	 * unreachable for up to 30 s instead of failing on the first try. Startup
@@ -565,21 +559,26 @@ export interface OpenedAuthCredentialStore {
  * store. Also feeds
  * {@link AuthStorage.replaceStore} when broker settings change at runtime.
  */
-export async function openAuthCredentialStore(
+export function openAuthCredentialStore(options: OpenAuthCredentialStoreOptions): Promise<OpenedAuthCredentialStore> {
+	return openCredentialStore(options, options.agentDir ?? getAgentDir(), authSettingsReader(options));
+}
+
+async function openCredentialStore(
 	options: OpenAuthCredentialStoreOptions,
+	agentDir: string,
+	readConfig: ReadAuthSettings,
 ): Promise<OpenedAuthCredentialStore> {
 	const brokerConfig = options.brokerConfig;
 	if (brokerConfig) {
-		const accountPool =
-			options.accountPool === undefined ? await loadAuthBrokerAccountPool() : (options.accountPool ?? undefined);
+		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
-		const ttlMs = options.snapshotTtlMs ?? resolveAuthBrokerSnapshotTtlMs();
-		const cachePath = ttlMs > 0 ? (options.cachePath ?? getAuthBrokerSnapshotCachePath()) : undefined;
+		const cachePath = options.cachePath ?? getAuthBrokerSnapshotCachePath();
+		const ttlMs = resolveSnapshotTtlMs();
 		// Coalesced fire-and-forget: the first snapshot lands immediately (so a
 		// fresh boot seeds the cache), bursts collapse into one trailing write,
 		// and anything pending is flushed on shutdown.
 		const persist =
-			cachePath !== undefined
+			ttlMs > 0
 				? (snapshot: SnapshotResponse): void => {
 						scheduleAuthBrokerSnapshotCacheWrite({
 							path: cachePath,
@@ -591,7 +590,7 @@ export async function openAuthCredentialStore(
 				: undefined;
 
 		let cachedSnapshot: SnapshotResponse | undefined;
-		if (cachePath !== undefined) {
+		if (ttlMs > 0) {
 			cachedSnapshot =
 				(await readAuthBrokerSnapshotCache({
 					path: cachePath,
@@ -609,11 +608,16 @@ export async function openAuthCredentialStore(
 			// No usable cache: block on the broker so a misconfigured/unreachable
 			// broker or revoked token fails startup with an actionable error
 			// (issue #8096) instead of yielding an empty credential store.
-			initialSnapshot = await fetchInitialSnapshot(client, {
-				url: brokerConfig.url,
-				retry: options.retryUnreachableBroker === true,
-				onRetry: options.onBrokerRetry,
-			});
+			try {
+				initialSnapshot = await fetchInitialSnapshot(client, {
+					url: brokerConfig.url,
+					retry: options.retryUnreachableBroker === true,
+					onRetry: options.onBrokerRetry,
+				});
+			} catch (error) {
+				if (!(error instanceof AuthBrokerError)) throw error;
+				throw new AuthBrokerStartupError(brokerConfig.url, error);
+			}
 			persist?.(initialSnapshot);
 		}
 		// Fresh cache: stale-while-revalidate. The store's constructor starts its
@@ -622,7 +626,7 @@ export async function openAuthCredentialStore(
 		// broker round trip. A token revoked since the cache was written surfaces
 		// through that background path exactly like a mid-session revocation.
 		// Opened before the broker store, whose constructor starts background sync that a failed open would leak.
-		const local = await openLocalAuthCredentialStore(options.agentDir, options);
+		const local = await openLocalStore(agentDir, readConfig);
 		const broker = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
@@ -635,38 +639,35 @@ export async function openAuthCredentialStore(
 		};
 	}
 
-	const store = await openLocalAuthCredentialStore(options.agentDir, options);
-	return {
-		store,
-		sourceLabel:
-			options.sourceLabel ?? `local ${options.dbPath ?? getAgentDbPath(options.agentDir ?? getAgentDir())}`,
-	};
+	const store = await openLocalStore(agentDir, readConfig);
+	return { store, sourceLabel: options.sourceLabel ?? `local ${getAgentDbPath(agentDir)}` };
+}
+
+/** Names the broker actually contacted, without resolving its configuration again on failure. */
+export class AuthBrokerStartupError extends AuthBrokerError {
+	constructor(
+		readonly url: string,
+		cause: AuthBrokerError,
+	) {
+		super(cause.message, { status: cause.status, body: cause.body, cause });
+	}
 }
 
 /**
- * Resolve whether new local credentials are sealed under the OS-vault master key.
- * `OMP_AUTH_ENCRYPT` takes precedence over persisted `auth.encrypt`; unset means
- * the store keeps its current mode (see {@link SqliteAuthCredentialStore.unlock}).
+ * This machine's credential store, `<agentDir>/agent.db`. `OMP_AUTH_ENCRYPT`, else
+ * `auth.encrypt` in `<agentDir>/config.yml`, forces sealing new secrets under the
+ * OS-vault master key on or off; unset, the store keeps its current mode (see
+ * {@link SqliteAuthCredentialStore.unlock}). In broker mode only the logins kept
+ * on this machine land here; the broker encrypts its own store.
  */
-export async function resolveLocalAuthEncryption(
-	options: Pick<ResolveAuthBrokerConfigOptions, "agentDir" | "configSnapshot"> = {},
-): Promise<CredentialEncryption> {
-	const env = $env.OMP_AUTH_ENCRYPT;
-	if (env) return parseFlag(env);
-	const snapshot = options.configSnapshot ?? (await readConfigYaml(options.agentDir ?? getAgentDir()));
-	return snapshot.encrypt ?? "auto";
+export function openLocalAuthCredentialStore(agentDir: string = getAgentDir()): Promise<SqliteAuthCredentialStore> {
+	return openLocalStore(agentDir, authSettingsReader({ agentDir }));
 }
 
-/** Open this machine's SQLite store. In broker mode it holds only the logins kept on this machine. */
-export async function openLocalAuthCredentialStore(
-	agentDir: string = getAgentDir(),
-	options: OpenLocalAuthCredentialStoreOptions = {},
-): Promise<SqliteAuthCredentialStore> {
-	const encrypt = options.encrypt ?? (await resolveLocalAuthEncryption({ agentDir }));
-	return SqliteAuthCredentialStore.open(options.dbPath ?? getAgentDbPath(agentDir), {
-		encrypt,
-		requireUnlocked: options.requireUnlocked,
-	});
+async function openLocalStore(agentDir: string, readConfig: ReadAuthSettings): Promise<SqliteAuthCredentialStore> {
+	const env = $env.OMP_AUTH_ENCRYPT;
+	const encrypt: CredentialEncryption = env ? parseFlag(env) : ((await readConfig()).encrypt ?? "auto");
+	return SqliteAuthCredentialStore.open(getAgentDbPath(agentDir), { encrypt });
 }
 
 /**
@@ -675,23 +676,26 @@ export async function openLocalAuthCredentialStore(
  * for the TUI and the catalog generator.
  */
 export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
+	return (await discoverAuthStorageWithConfig(options)).storage;
+}
+
+/** Open the storage and return the resolved broker to callers maintaining live settings. */
+export async function discoverAuthStorageWithConfig(
+	options: DiscoverAuthStorageOptions = {},
+): Promise<{ storage: AuthStorage; brokerConfig: AuthBrokerClientConfig | null }> {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const brokerConfig = await resolveAuthBrokerConfig(options);
-	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
+	const readConfig = authSettingsReader({ agentDir, persistedSettings: options.persistedSettings });
+	const brokerConfig = await resolveBrokerConfig(readConfig, options.configValueResolver);
+	const { accountPolicies, defaultReservePct } = await resolveAccountPolicies(
+		readConfig,
+		options.accountPolicies,
+		options.authStorageOptions?.defaultReservePct,
+	);
+	const { store, sourceLabel } = await openCredentialStore(
+		{ ...options, brokerConfig, retryUnreachableBroker: options.retryUnreachableBroker ?? true },
 		agentDir,
-		accountPolicies: options.accountPolicies,
-		usageReservePct: options.authStorageOptions?.defaultReservePct,
-	});
-	const { store, sourceLabel } = await openAuthCredentialStore({
-		brokerConfig,
-		agentDir,
-		encrypt: options.configSnapshot && (await resolveLocalAuthEncryption(options)),
-		cachePath: options.cachePath,
-		sourceLabel: options.sourceLabel,
-		accountPool: options.accountPool,
-		retryUnreachableBroker: options.retryUnreachableBroker ?? true,
-		onBrokerRetry: options.onBrokerRetry,
-	});
+		readConfig,
+	);
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,
 		configValueResolver: options.configValueResolver,
@@ -700,5 +704,5 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		defaultReservePct,
 	});
 	await storage.credentials.reload();
-	return storage;
+	return { storage, brokerConfig };
 }

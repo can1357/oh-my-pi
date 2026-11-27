@@ -33,9 +33,7 @@
   },
   "devDependencies": {
     "@sinclair/typebox": "^0.34.0",
-    "@types/bun": "catalog:",
-    "arkregex": "0.0.8",
-    "arktype": "2.2.3"
+    "@types/bun": "catalog:"
   },
   "engines": {
     "node": ">=20",

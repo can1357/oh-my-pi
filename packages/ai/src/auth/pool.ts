@@ -5,7 +5,7 @@ import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-cred
 import type { BlockStoreHealth } from "./blocks";
 import type { AccountPolicies } from "./policy";
 import type { AuthCredentialStore } from "./store";
-import { REMOTE_REFRESH_SENTINEL, summarizeStoredCredential } from "./types";
+import { REMOTE_REFRESH_SENTINEL } from "./types";
 import type {
 	ApiKeyCredential,
 	AuthCredential,
@@ -19,7 +19,6 @@ import type {
 	OAuthCredential,
 	SnapshotCredential,
 	StoredAuthCredential,
-	StoredCredentialSummary,
 } from "./types";
 import type { UsageCredential } from "../usage";
 
@@ -654,10 +653,6 @@ export class CredentialPool implements CredentialsApi {
 			}
 		}
 		return rows;
-	}
-
-	summaries(provider?: string): StoredCredentialSummary[] {
-		return this.list(provider).map(summarizeStoredCredential);
 	}
 
 	async upsertOAuth(provider: string, credential: OAuthCredential): Promise<void> {

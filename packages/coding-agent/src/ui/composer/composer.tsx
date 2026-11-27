@@ -53,7 +53,9 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { TspEditorDecoration, TspEffect, TspPickerLevel, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import "../styles/composer";
-import { MENTION_STYLES, type MentionItem, type UnifiedMentionSnapshot } from "../../autocomplete/mentions";
+import type { UnifiedMentionSnapshot } from "../../autocomplete/mentions/engine";
+import { MENTION_STYLES } from "../../autocomplete/mentions/style";
+import type { MentionItem } from "../../autocomplete/mentions/types";
 import {
 	extractAtFilePrefix,
 	isDirectoryCompletionValue,

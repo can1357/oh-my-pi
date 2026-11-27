@@ -224,7 +224,10 @@ describe("ExtensionContext.asyncJobs", () => {
 			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(resolveInlineByteCapBudget(undefined));
 			expect(text).toStartWith("remote output line 0\n");
 			expect(text).toContain("elided");
-			expect(text).toEndWith("remote output line 49999");
+			expect(text).toContain("remote output line 49999");
+			const artifactId = /local:\/\/([^\s\]:]+)\.log/.exec(text)?.[1];
+			const artifactPath = await session!.sessionManager.getArtifactPath(artifactId!);
+			expect(await Bun.file(artifactPath!).text()).toBe(output);
 		}
 	});
 

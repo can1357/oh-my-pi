@@ -13,6 +13,7 @@ import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
 	getStatsDbPath,
+	initializeSqliteConnection,
 	isRecord,
 	logger,
 	openSqliteDatabase,
@@ -22,7 +23,7 @@ import {
 	type SqliteFileIdentity,
 	sqliteFileIdentity,
 } from "@oh-my-pi/pi-utils";
-import type { RawSettings as Settings } from "../config/raw-settings";
+import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
 type SettingsRow = {
@@ -164,19 +165,20 @@ const USAGE_KINDS = ["command", "hint"] as const;
 /** Prepared statements for one `<kind>_usage` table. */
 type UsageStatements = { upsert: Statement; list: Statement };
 
-type StorageConnection = {
+type AgentConnection = {
 	db: Database;
 	identity: SqliteFileIdentity;
+	releaseRegistration: () => void;
 	statements: Statement[];
-	listSettings: Statement;
+	settings: Statement;
 	getCache: Statement;
-	upsertCache: Statement;
+	setCache: Statement;
 	upsertModelUsage: Statement;
 	listModelUsage: Statement;
 	upsertModelPerf: Statement;
 	listModelPerf: Statement;
 	usage: Record<UsageKind, UsageStatements>;
-	unregisterQuarantineRelease: () => void;
+	authStore?: SqliteAuthCredentialStore;
 };
 
 /** Current agent.db schema version; bump when schema changes require migration. */
@@ -214,18 +216,17 @@ export interface AgentStorageApi {
 }
 
 /**
- * SQLite storage for agent settings, usage, and cache. Explicit credential access
- * lazily opens a separate credential connection.
- * Uses singleton pattern per database path; access via AgentStorage.open().
+ * SQLite storage for settings, usage, and cache. Explicit credential reads
+ * lazily unlock a credential store that borrows the same database connection.
  */
 export class AgentStorage implements AgentStorageApi {
 	readonly #dbPath: string;
-	#activeConnection?: StorageConnection;
-	#opening?: Promise<void>;
-	#authStore?: SqliteAuthCredentialStore;
-	#authIdentity: SqliteFileIdentity;
-	#unregisterAuthQuarantineRelease?: () => void;
-	#authOpening?: Promise<SqliteAuthCredentialStore>;
+	#active?: AgentConnection;
+	#attached = false;
+	#opening?: Promise<AgentConnection>;
+	#authOpening?: Promise<AgentConnection>;
+	#authReady?: AgentConnection;
+	#preservedPath?: string;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
 	#autoPerfBackfill: boolean;
@@ -244,38 +245,58 @@ export class AgentStorage implements AgentStorageApi {
 		return this.#connection.db;
 	}
 
-	get #connection(): StorageConnection {
-		if (this.#activeConnection) return this.#activeConnection;
+	get #connection(): AgentConnection {
+		if (this.#active) return this.#active;
 		if (this.#closing) throw new Error("AgentStorage is closed");
-		// A synchronous metadata caller can arrive while auth is reopening after
-		// quarantine. The original file is already detached in that case.
-		return (this.#activeConnection = openSqliteDatabaseSync(this.#dbPath, db => this.#prepareConnection(db)));
+		// Another SQLite opener may have quarantined this file since settings initialized.
+		return openSqliteDatabaseSync(this.#dbPath, this.#attach);
 	}
 
-	#prepareConnection(db: Database): StorageConnection {
+	readonly #recovery = {
+		recoverCorruption: true,
+		onCorruptionPreserved: (preservedPath: string) => {
+			this.#preservedPath = preservedPath;
+		},
+	};
+
+	readonly #attach = (db: Database): AgentConnection => {
+		if (this.#closing) throw new Error("AgentStorage is closed");
+		if (this.#active) {
+			db.close();
+			return this.#active;
+		}
 		this.#initializeSchema(db);
 		this.#hardenPermissions(this.#dbPath);
+
 		const statements: Statement[] = [];
 		const prepare = (sql: string) => {
 			const stmt = db.prepare(sql);
 			statements.push(stmt);
 			return stmt;
 		};
+		let authStore: SqliteAuthCredentialStore | undefined;
 		try {
-			return {
+			const preserved = this.#preservedPath;
+			if (preserved) {
+				// Copy ciphertext and salts before publishing the recovered handle.
+				authStore = new SqliteAuthCredentialStore(db, { borrowConnection: true });
+				authStore.salvageQuarantinedCredentials(preserved);
+			}
+			const connection: AgentConnection = {
 				db,
 				identity: sqliteFileIdentity(this.#dbPath),
 				statements,
-				listSettings: prepare("SELECT key, value FROM settings"),
+				authStore,
+				settings: prepare("SELECT key, value FROM settings"),
 				getCache: prepare(`SELECT value FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH}`),
-				upsertCache: prepare(
+				setCache: prepare(
 					"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
 				),
 				upsertModelUsage: prepare(
 					`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 				),
 				listModelUsage: prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC"),
-				// Fold recency into old aggregates, halving them after MODEL_PERF_DECAY_AT samples.
+				// Halve the aggregates after MODEL_PERF_DECAY_AT samples so old measurements fade.
 				upsertModelPerf: prepare(
 					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, 1, ?2, ?3, ?4, ?5, ${SQLITE_NOW_EPOCH})
@@ -287,7 +308,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_ms = (CASE WHEN model_perf.samples >= ${MODEL_PERF_DECAY_AT} THEN model_perf.ttft_ms * 0.5 ELSE model_perf.ttft_ms END) + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
 				),
-				// `model_key TEXT PRIMARY KEY` still admits NULL in a rowid table.
+				// SQLite rowid tables allow NULL in TEXT PRIMARY KEY columns.
 				listModelPerf: prepare(
 					"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
 				),
@@ -295,15 +316,18 @@ ON CONFLICT(model_key) DO UPDATE SET
 					command: this.#prepareUsageStatements(prepare, "command"),
 					hint: this.#prepareUsageStatements(prepare, "hint"),
 				},
-				unregisterQuarantineRelease: registerSqliteQuarantineRelease(this.#dbPath, () =>
-					this.#closeConnection(false),
-				),
+				releaseRegistration: registerSqliteQuarantineRelease(this.#dbPath, () => this.#detach(false)),
 			};
+			if (preserved) this.#preservedPath = undefined;
+			this.#active = connection;
+			this.#attached = true;
+			return connection;
 		} catch (error) {
 			for (const stmt of statements) stmt.finalize();
+			authStore?.close();
 			throw error;
 		}
-	}
+	};
 
 	#prepareUsageStatements(prepare: (sql: string) => Statement, kind: UsageKind): UsageStatements {
 		const table = `${kind}_usage`;
@@ -318,7 +342,7 @@ ON CONFLICT(name) DO UPDATE SET count = ${table}.count + 1, last_used_at = ${SQL
 
 	/**
 	 * Creates tables if missing and migrates legacy settings.
-	 * SqliteAuthCredentialStore handles auth_credentials and shares the cache table.
+	 * The credential store owns its auth schema and shares the cache table.
 	 */
 	#initializeSchema(db: Database): void {
 		db.run(`
@@ -519,7 +543,7 @@ FROM model_usage_legacy
 			if (storage.#closing) throw new Error("AgentStorage is closed");
 			return storage;
 		} catch (error) {
-			if (instances.get(dbPath) === storage) {
+			if (!storage.#attached && instances.get(dbPath) === storage) {
 				instances.delete(dbPath);
 				storage.#close();
 			}
@@ -528,35 +552,16 @@ FROM model_usage_legacy
 	}
 
 	async #openMetadata(): Promise<void> {
-		if (this.#opening) return this.#opening;
-		const identity = sqliteFileIdentity(this.#dbPath);
-		if (identity !== undefined && identity === this.#activeConnection?.identity) return;
-		this.#closeConnection(false);
-		let preservedPath: string | undefined;
-		const opening = openSqliteDatabase(
-			this.#dbPath,
-			db => {
-				if (this.#closing) throw new Error("AgentStorage is closed");
-				if (preservedPath) {
-					// Keep ciphertext and salt intact, without opening the OS vault or sharing
-					// the metadata handle with a temporary store that will close it.
-					const salvage = openSqliteDatabaseSync(this.#dbPath, authDb => new SqliteAuthCredentialStore(authDb));
-					try {
-						salvage.salvageQuarantinedCredentials(preservedPath);
-					} finally {
-						salvage.close();
-					}
-				}
-				if (this.#activeConnection) db.close();
-				else this.#activeConnection = this.#prepareConnection(db);
-			},
-			{
-				recoverCorruption: true,
-				onCorruptionPreserved: backupPath => {
-					preservedPath = backupPath;
-				},
-			},
-		);
+		if (this.#opening) {
+			await this.#opening;
+			return;
+		}
+		if (this.#active) {
+			const identity = sqliteFileIdentity(this.#dbPath);
+			if (identity === undefined || identity === this.#active.identity) return;
+			this.#detach(false);
+		}
+		const opening = openSqliteDatabase(this.#dbPath, this.#attach, this.#attached ? undefined : this.#recovery);
 		this.#opening = opening;
 		try {
 			await opening;
@@ -581,22 +586,19 @@ FROM model_usage_legacy
 
 	#close(): void {
 		this.#closing = true;
-		// Model-performance batches run synchronously once invoked. Flush before
-		// closing prepared statements, without starting a connection on shutdown.
-		if (this.#activeConnection) void this.#perfDrain.flush();
-		try {
-			this.#closeConnection(true);
-		} finally {
-			this.#closeAuthStore();
-		}
+		if (!this.#active) return;
+		// Model-performance batches commit synchronously before statements finalize.
+		if (sqliteFileIdentity(this.#dbPath) === this.#active.identity) void this.#perfDrain.flush();
+		this.#detach(true);
 	}
 
-	#closeConnection(checkpoint: boolean): void {
-		const connection = this.#activeConnection;
+	#detach(checkpoint: boolean): void {
+		const connection = this.#active;
 		if (!connection) return;
-		this.#activeConnection = undefined;
+		this.#active = undefined;
+		this.#authReady = undefined;
 		this.#modelUsageCache = null;
-		connection.unregisterQuarantineRelease();
+		connection.releaseRegistration();
 		if (checkpoint && sqliteFileIdentity(this.#dbPath) === connection.identity) {
 			try {
 				checkpointWal(connection.db);
@@ -606,18 +608,10 @@ FROM model_usage_legacy
 		}
 		try {
 			for (const stmt of connection.statements) stmt.finalize();
+			connection.authStore?.close();
 		} finally {
 			connection.db.close();
 		}
-	}
-
-	#closeAuthStore(): void {
-		const store = this.#authStore;
-		this.#authStore = undefined;
-		this.#authIdentity = undefined;
-		this.#unregisterAuthQuarantineRelease?.();
-		this.#unregisterAuthQuarantineRelease = undefined;
-		store?.close();
 	}
 
 	/**
@@ -627,7 +621,7 @@ FROM model_usage_legacy
 	 * @returns Settings object, or null if no settings are stored
 	 */
 	getSettings(): Settings | null {
-		const rows = (this.#connection.listSettings.all() as SettingsRow[]) ?? [];
+		const rows = (this.#connection.settings.all() as SettingsRow[]) ?? [];
 		if (rows.length === 0) return null;
 		const settings: Record<string, unknown> = {};
 		for (const row of rows) {
@@ -935,13 +929,14 @@ ON CONFLICT(model_key) DO UPDATE SET
 		}
 	}
 
-	async #getAuthStore(): Promise<SqliteAuthCredentialStore> {
+	async #getAuthConnection(): Promise<AgentConnection> {
 		if (this.#closing) throw new Error("AgentStorage is closed");
 		if (this.#authOpening) return this.#authOpening;
-		const identity = sqliteFileIdentity(this.#dbPath);
-		if (this.#authStore && identity !== undefined && identity === this.#authIdentity) return this.#authStore;
-		this.#closeAuthStore();
-		const opening = this.#openAuthStore();
+		if (this.#authReady) {
+			const identity = sqliteFileIdentity(this.#dbPath);
+			if (identity === undefined || identity === this.#authReady.identity) return this.#authReady;
+		}
+		const opening = this.#openAuthConnection();
 		this.#authOpening = opening;
 		try {
 			return await opening;
@@ -950,43 +945,37 @@ ON CONFLICT(model_key) DO UPDATE SET
 		}
 	}
 
-	async #openAuthStore(): Promise<SqliteAuthCredentialStore> {
-		let preservedPath: string | undefined;
-		try {
-			const store = await openSqliteDatabase(
-				this.#dbPath,
-				async db => {
-					if (this.#closing) throw new Error("AgentStorage is closed");
-					// A BUSY retry may follow a failed unlock after construction.
-					this.#closeAuthStore();
-					const store = new SqliteAuthCredentialStore(db);
-					if (preservedPath) store.salvageQuarantinedCredentials(preservedPath);
-					this.#authStore = store;
-					this.#authIdentity = sqliteFileIdentity(this.#dbPath);
-					this.#unregisterAuthQuarantineRelease = registerSqliteQuarantineRelease(this.#dbPath, () =>
-						this.#closeAuthStore(),
-					);
+	async #openAuthConnection(): Promise<AgentConnection> {
+		await this.#openMetadata();
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const connection = this.#connection;
+			if (this.#authReady === connection) return connection;
+			let opened: AgentConnection | undefined;
+			try {
+				opened = await initializeSqliteConnection(this.#dbPath, connection, async db => {
+					if (this.#active !== connection) return;
+					const store = (connection.authStore ??= new SqliteAuthCredentialStore(db, {
+						borrowConnection: true,
+					}));
 					await store.unlock();
-					return store;
-				},
-				{
-					recoverCorruption: true,
-					onCorruptionPreserved: backupPath => {
-						preservedPath = backupPath;
-					},
-				},
-			);
-			if (this.#closing) throw new Error("AgentStorage is closed");
-			if (!this.#activeConnection || this.#activeConnection.identity !== this.#authIdentity) {
-				await this.#openMetadata();
+					return connection;
+				});
+			} catch (error) {
+				if (this.#active === connection) {
+					connection.authStore?.close();
+					connection.authStore = undefined;
+				}
+				throw error;
 			}
 			if (this.#closing) throw new Error("AgentStorage is closed");
-			if (this.#authStore !== store) throw new Error("AgentStorage credential connection was replaced");
-			return store;
-		} catch (error) {
-			this.#closeAuthStore();
-			throw error;
+			if (opened === connection && this.#active === connection) {
+				this.#authReady = connection;
+				return connection;
+			}
+			if (this.#active === connection) this.#detach(false);
+			await this.#openMetadata();
 		}
+		throw new Error(`Credential database changed during initialization: ${this.#dbPath}`);
 	}
 
 	/**
@@ -997,9 +986,12 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @returns Array of stored credentials with their database IDs
 	 */
 	async listAuthCredentials(provider?: string, includeDisabled = false): Promise<StoredAuthCredential[]> {
-		const store = await this.#getAuthStore();
+		const connection = await this.#getAuthConnection();
 		if (this.#closing) throw new Error("AgentStorage is closed");
-		if (this.#authStore !== store) throw new Error("AgentStorage credential connection was replaced");
+		const store = connection.authStore;
+		if (this.#active !== connection || !store) {
+			throw new Error(`Credential database changed during initialization: ${this.#dbPath}`);
+		}
 		return includeDisabled ? store.listAllAuthCredentials(provider) : store.listAuthCredentials(provider);
 	}
 
@@ -1008,7 +1000,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 */
 	getCache(key: string): string | null {
 		try {
-			const row = this.#connection.getCache.get(key) as { value?: string } | null;
+			const row = this.#connection.getCache.get(key) as { value: string } | null;
 			return row?.value ?? null;
 		} catch {
 			return null;
@@ -1020,9 +1012,9 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 */
 	setCache(key: string, value: string, expiresAtSec: number): void {
 		try {
-			this.#connection.upsertCache.run(key, value, expiresAtSec);
+			this.#connection.setCache.run(key, value, expiresAtSec);
 		} catch {
-			// Ignore cache set failures.
+			// Cache writes are best effort.
 		}
 	}
 

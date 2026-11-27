@@ -194,6 +194,18 @@ export function lexMarkdown(source: string): TokensList {
 }
 
 /**
+ * The reference-link definitions among top-level `tokens`, one per line ("" for none). A run split
+ * out of their document (a chart's prose, a figure's) is prefixed with them so its references still
+ * resolve.
+ */
+export function linkDefinitions(tokens: readonly Token[]): string {
+	return tokens
+		.filter(token => token.type === "def")
+		.map(token => token.raw.trimEnd())
+		.join("\n");
+}
+
+/**
  * Lex top-level blocks one at a time, each resolving reference links only
  * against the definitions before it (and its own): a block's tokens never
  * change when a definition arrives later. Streaming documents lex this way so

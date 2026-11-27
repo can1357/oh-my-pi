@@ -15,6 +15,7 @@ import { resolveUsedFraction } from "../usage";
 import type {
 	ClientUsageReport,
 	ClientUsageSummary,
+	CredentialRankingContext,
 	UsageCredential,
 	UsageFetchParams,
 	UsageHistoryEntry,
@@ -49,7 +50,7 @@ import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi } fr
 import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
-	usageReportingModelIds,
+	scopedUsageLimits,
 	usageReportMetadataValue,
 	usageReportScopeAccountId,
 } from "./usage-report";
@@ -111,8 +112,6 @@ export interface UsageServiceDeps {
 	usageProviders: (provider: Provider) => UsageProvider | undefined;
 	fetch: typeof fetch;
 	requestTimeoutMs: number;
-	/** Store owner: no ambient credentials or API-key rows that may require caller-local resolution. */
-	storedOAuthOnly?: boolean;
 	/** The key inference would send (the auth cascade); `usesRequestKey` adapters probe with it. */
 	requestKey: (provider: Provider) => Promise<string | undefined>;
 	logger: UsageLogger;
@@ -752,7 +751,6 @@ export class UsageService implements UsageApi {
 			if (!providerImpl) continue;
 			const baseUrl = options?.baseUrlResolver?.(provider);
 			if (providerImpl.usesRequestKey === true) {
-				if (this.#deps.storedOAuthOnly) continue;
 				// Probe with exactly the key inference would send, never every stored row.
 				let apiKey: string | undefined;
 				try {
@@ -804,7 +802,7 @@ export class UsageService implements UsageApi {
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
 				}
-				const oauthToken = this.#deps.storedOAuthOnly ? undefined : $pickenv(...oauthTokenEnv);
+				const oauthToken = $pickenv(...oauthTokenEnv);
 				if (!hasUsableStoredOAuthCredential && oauthToken) {
 					const request = usageRequest(provider, { type: "oauth", accessToken: oauthToken }, baseUrl);
 					if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
@@ -813,7 +811,6 @@ export class UsageService implements UsageApi {
 			}
 
 			if (entries.length === 0) {
-				if (this.#deps.storedOAuthOnly) continue;
 				// Probe with the key requests send (KeyCascade): a models.yml apiKey
 				// outranks extension and env keys, and an unresolvable one fails
 				// closed instead of exposing an ambient env key.
@@ -851,7 +848,6 @@ export class UsageService implements UsageApi {
 				const credential = entry.credential;
 				let request: UsageRequestDescriptor;
 				if (credential.type === "api_key") {
-					if (this.#deps.storedOAuthOnly) continue;
 					// Stored keys may be references (env var name, "!command") —
 					// resolve to the actual secret before it reaches a provider
 					// fetcher's Authorization header. Unresolvable references are
@@ -898,7 +894,6 @@ export class UsageService implements UsageApi {
 	): Promise<UsageReport | null> {
 		// A paused provider is never probed, not even through the broker's per-credential hook.
 		if (providerPauseReason(provider) !== undefined) return null;
-		if (this.#deps.storedOAuthOnly && credential.type === "api_key") return null;
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
 		// less-throttled IP, and falling back to the local per-credential fetch
@@ -933,7 +928,24 @@ export class UsageService implements UsageApi {
 	 * Label-only or ambiguous tier limits are excluded rather than guessed.
 	 */
 	reportingModelIds(provider: Provider, modelIds: readonly string[], reports: readonly UsageReport[]): string[] {
-		return usageReportingModelIds(provider, modelIds, reports, this.#deps.strategies(provider));
+		const strategy = this.#deps.strategies(provider);
+		const providerReports = reports.filter(report => report.provider === provider);
+		if (providerReports.length === 0) return [];
+		const seen = new Set<string>();
+		const reporting: string[] = [];
+		for (const modelId of modelIds) {
+			if (seen.has(modelId)) continue;
+			seen.add(modelId);
+			const context: CredentialRankingContext = { modelId };
+			const hasUsage = providerReports.some(report => {
+				const limits = strategy
+					? scopedUsageLimits(strategy, report, context)
+					: report.limits.filter(limit => limit.scope.shared === true || limit.scope.modelId === modelId);
+				return limits.some(limit => isUsageLimitExhausted(limit) || resolveUsedFraction(limit) !== undefined);
+			});
+			if (hasUsage) reporting.push(modelId);
+		}
+		return reporting;
 	}
 
 	/**
