@@ -666,9 +666,9 @@ function scanPrefixState(
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
 		replies.visit(entry);
-		inherited.visit(entry);
+		const inheritedEntry = inherited.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-		else spotlight.visit(entry);
+		else spotlight.visit(entry, inheritedEntry);
 	});
 	return currentServiceTier;
 }
@@ -842,6 +842,8 @@ export async function parseSessionFile(
 				? null
 				: extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
+			// The copied calls are the parent's too, joined to its request rows by entry id.
+			if (inheritedCall) return;
 			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
 				toolCalls.push(call);
 				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);

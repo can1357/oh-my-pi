@@ -305,7 +305,12 @@ describe("stats sync deduplicates forked-session entries", () => {
 	it("leaves a reset fork's copied calls to the parent even when the fork syncs first", async () => {
 		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
 		const userEntry = buildUserEntry("user01ab", ts, "hello");
-		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const plainEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const toolCall = { type: "toolCall", id: "call01ab", name: "read", arguments: { path: "a.ts" } };
+		const assistantEntry = {
+			...plainEntry,
+			message: { ...plainEntry.message, content: [...plainEntry.message.content, toolCall] },
+		};
 		const parentFile = await writeSessionFile(
 			"--tmp--fork-dedup",
 			"01_parent.jsonl",
@@ -334,5 +339,10 @@ describe("stats sync deduplicates forked-session entries", () => {
 		expect(overall.totalRequests).toBe(2);
 		// Without the marker the fork's zeroed copy claims the request and the parent's $0.003 is lost.
 		expect(overall.totalCost).toBeCloseTo(0.006, 8);
+		// The copied tool call stays the parent's, so it still joins the parent's request row.
+		const owners = (await initDb())
+			.query<{ session_file: string }, [string]>("SELECT session_file FROM tool_calls WHERE tool_call_id = ?")
+			.all("call01ab");
+		expect(owners.map(owner => owner.session_file)).toEqual([parentFile]);
 	});
 });

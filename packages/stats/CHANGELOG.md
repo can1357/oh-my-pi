@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed live updates and synchronization in the `omp stats` dashboard when session directories are inaccessible or agents are continuously writing.
-- Fixed `omp stats` dropping a session's cost when a `/tan` clone of it was synced first; the clone's copied requests now always count toward the original session ([#20805](https://github.com/can1357/oh-my-pi/pull/20805) by [@wapenshaw](https://github.com/wapenshaw))
+- Fixed `omp stats` dropping a session's cost when a `/tan` clone of it was synced first; the clone's copied requests, tool calls and Spotlight rows now always count toward the original session ([#20805](https://github.com/can1357/oh-my-pi/pull/20805) by [@wapenshaw](https://github.com/wapenshaw))
 
 ## [19.1.1] - 2026-11-23
 

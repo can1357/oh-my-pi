@@ -54,6 +54,8 @@ export interface SpotlightOpenRead {
 	at?: number;
 	/** `original.url`: the session artifact holding the original text. */
 	url: string | null;
+	/** Opened by a reset fork's copied entry: the parent's read, whose needs this transcript never files. */
+	inherited?: true;
 }
 
 /** Spotlight state a tail parse needs from earlier bytes of the same transcript. */
@@ -869,6 +871,11 @@ export class SpotlightCollector {
 		return this.#record && !this.#inherited;
 	}
 
+	/** Whether this transcript files `read`'s need row: never for a read its parent opened. */
+	#owns(read: SpotlightOpenRead): boolean {
+		return this.#emits && read.inherited !== true;
+	}
+
 	#need(read: SpotlightOpenRead): SpotlightNeedRow {
 		let row = this.#needs.get(read.toolCallId);
 		if (!row) {
@@ -890,7 +897,7 @@ export class SpotlightCollector {
 		const open = (this.state.open ?? []).filter(other => other !== read);
 		this.state.open = open;
 		// A list read collects until none of its windows does.
-		if (this.#emits) this.#need(read).open = open.some(other => other.toolCallId === read.toolCallId);
+		if (this.#owns(read)) this.#need(read).open = open.some(other => other.toolCallId === read.toolCallId);
 	}
 
 	/**
@@ -915,6 +922,7 @@ export class SpotlightCollector {
 				lines: window.lines,
 				at: window.at,
 				url: original.url,
+				...(this.#inherited && { inherited: true as const }),
 			};
 			this.state.open = [...(this.state.open ?? []), read];
 			if (this.#emits) this.#need(read);
@@ -935,7 +943,7 @@ export class SpotlightCollector {
 					this.#close(read);
 					continue;
 				}
-				if (!this.#emits) continue;
+				if (!this.#owns(read)) continue;
 				// Positions in the whole original: the window's own, past the windows before it.
 				const at = read.at ?? 0;
 				const end = read.start + read.lines - 1;
@@ -967,7 +975,7 @@ export class SpotlightCollector {
 		const fallback = typeof args.path === "string" ? args.path : null;
 		for (const read of open) {
 			if (!exact.has(read.file) && !globs.some(glob => glob.match(read.file))) continue;
-			if (this.#emits) {
+			if (this.#owns(read)) {
 				const own = blocks.filter(block => {
 					const file = block.file ?? fallback;
 					return file !== null && resolveReadPath(file, this.state.cwd) === read.file;
