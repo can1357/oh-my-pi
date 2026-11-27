@@ -444,11 +444,11 @@ async function runLspWritethrough(
 	 * Commit the final bytes, then run the caller's `onCommitted` hook on them, once. A budget
 	 * timeout that interrupts the hook leaves the catch path awaiting this same run.
 	 */
-	const commitFinalWrite = async () => {
-		await commitWrite();
-		const onCommitted = runOptions?.onCommitted;
-		if (onCommitted) await (committed ??= onCommitted(finalContent));
-	};
+	const commitFinalWrite = () =>
+		(committed ??= (async () => {
+			await commitWrite();
+			await runOptions?.onCommitted?.(finalContent);
+		})());
 	let writeNotified = false;
 	const notifyWriteCommitted = async (notifySignal: AbortSignal | undefined = signal) => {
 		if (writeNotified) return;
@@ -599,7 +599,13 @@ async function runLspWritethrough(
 		});
 		synced = true;
 	} catch {
-		signal?.throwIfAborted();
+		if (signal?.aborted) {
+			// The LSP race can finish before a claimed write (or its commit
+			// hook). Join only already-submitted work; never start a fallback
+			// write for a cancelled tool call.
+			await (committed ?? submitted?.promise)?.catch(() => {});
+			signal.throwIfAborted();
+		}
 		// The commit (and its hook) precedes the late fetch below, so that fetch
 		// cannot lint the file before the bytes and their metadata are final.
 		await commitFinalWrite();

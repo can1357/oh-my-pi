@@ -179,6 +179,56 @@ describe("LSP diagnostics freshness", () => {
 		expect(format).not.toHaveBeenCalled();
 	});
 
+	it.each(["write tool", "LSP writethrough"])("awaits a claimed write on %s abort", async via => {
+		const filePath = tempDir.join("claimed.ts");
+		const controller = new AbortController();
+		const claimed = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const format = vi.fn(async () => "would overwrite\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", createFormatter(format)]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+		vi.spyOn(fileWriteIo, "writeLocalFile").mockImplementationOnce(async (dst, content, _signal, target) => {
+			// A claimed write ignores abort until its syscall settles.
+			claimed.resolve();
+			await release.promise;
+			await Bun.write(target ?? dst, content);
+		});
+		const tool = new WriteTool({
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			enableLsp: false,
+		});
+		const content = "claimed write\n";
+		const result =
+			via === "write tool"
+				? tool.execute("claimed-write", { path: filePath, content }, controller.signal)
+				: createLspWritethrough(tempDir.path(), { enableFormat: true })(filePath, content, controller.signal);
+		const outcome = result.then(
+			() => ({ cancelled: false }),
+			error => ({ cancelled: true, error }),
+		);
+		try {
+			await Promise.race([
+				claimed.promise,
+				outcome.then(result => {
+					throw "error" in result ? result.error : new Error("write returned without reaching the worker");
+				}),
+			]);
+			controller.abort();
+			expect(await Promise.race([outcome, setImmediate("pending")])).toBe("pending");
+		} finally {
+			release.resolve();
+			await outcome;
+		}
+		expect(await outcome).toMatchObject({ cancelled: true, error: { name: "AbortError" } });
+		expect(await Bun.file(filePath).text()).toBe(content);
+		expect(format).not.toHaveBeenCalled();
+	});
+
 	it("formats an SDK call that passes a BunFile in the fourth argument", async () => {
 		const filePath = tempDir.join("sdk.ts");
 		const formatted = "export const value = 1;\n";
