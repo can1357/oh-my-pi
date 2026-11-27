@@ -24,6 +24,7 @@ import { UserMessage } from "../../src/ui/transcript/messages/user-message";
 import { ReadGroup, ReadGroupBlock } from "../../src/ui/transcript/read-group";
 import { ToolBlock } from "../../src/ui/transcript/tool-block";
 import { type ToolTextInput, toolCall } from "../helpers/tool-text";
+import { withLargeMetadata } from "../helpers/jpeg-metadata";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
@@ -490,10 +491,7 @@ describe("image placeholder OSC 8 links", () => {
 	it("links the sized placeholder of a JPEG whose SOF sits behind large metadata", async () => {
 		const png = Buffer.from(TINY_PNG_BASE64, "base64");
 		const jpeg = Buffer.from(await new Bun.Image(png).resize(1200, 600).jpeg().bytes());
-		const icc = Buffer.alloc(2 + 0xffff);
-		icc.writeUInt16BE(0xffe2, 0);
-		icc.writeUInt16BE(0xffff, 2);
-		const data = Buffer.concat([jpeg.subarray(0, 2), icc, icc, jpeg.subarray(2)]).toString("base64");
+		const data = withLargeMetadata(jpeg).toString("base64");
 		const call = toolCall({
 			name: "custom_tool",
 			args: {},

@@ -24,6 +24,7 @@ import { readPresenter } from "../../../src/ui/tools/read";
 import { ExecRun, ExecRunBlock } from "../../../src/ui/transcript/exec-run";
 import { followInlineImageLimits, ImageNode } from "../../../src/ui/transcript/messages/image";
 import { ToolBlock, ToolCall } from "../../../src/ui/transcript/tool-block";
+import { withLargeMetadata } from "../../helpers/jpeg-metadata";
 
 const RED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 const caps: TerminalCapabilities = {
@@ -144,14 +145,6 @@ test("a read picture draws once beneath the details card and only while images a
 		}
 	});
 });
-
-/** `jpeg` with two max-size APP2 (ICC) segments after SOI, pushing its SOF marker past 128 KiB. */
-function withLargeMetadata(jpeg: Buffer): Buffer {
-	const segment = Buffer.alloc(2 + 0xffff);
-	segment.writeUInt16BE(0xffe2, 0);
-	segment.writeUInt16BE(0xffff, 2);
-	return Buffer.concat([jpeg.subarray(0, 2), segment, segment, jpeg.subarray(2)]);
-}
 
 test.each([
 	["jpeg", "jpeg"],

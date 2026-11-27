@@ -131,7 +131,9 @@ it("colors a wrapped code line and keeps its exact source quote after resize", (
 		expect(plainRows(code.terminal.rows()).filter(row => row.includes("wide wide")).length).toBeGreaterThan(1);
 		const keyword = foreground([code.theme.fg("syntaxKeyword", "const")], "const");
 		expect(foreground(code.terminal.rows(), "const")).toBe(keyword);
-		expect(foreground(prose.terminal.rows(), "const")).not.toBe(keyword);
+		const proseColor = foreground(prose.terminal.rows(), "const");
+		expect(proseColor).toBeDefined();
+		expect(proseColor).not.toBe(keyword);
 		code.terminal.press("down");
 		code.resize(100);
 		code.addNote("text note");

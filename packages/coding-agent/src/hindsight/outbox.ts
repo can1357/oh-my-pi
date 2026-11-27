@@ -375,23 +375,25 @@ async function eventFiles(dir: string): Promise<string[]> {
  * is thrown, since skipping a pending event could place this call before it.
  */
 async function nextSequence(dir: string, names: string[]): Promise<number> {
+	const sequences = await Promise.all(
+		names.map(async name => {
+			let text: string;
+			try {
+				text = await fs.readFile(path.join(dir, name), "utf8");
+			} catch (error) {
+				if (isEnoent(error)) return -1;
+				throw error;
+			}
+			try {
+				const sequence = (JSON.parse(text) as Partial<OutboxEvent> | null)?.sequence;
+				return isSequence(sequence) ? sequence : -1;
+			} catch {
+				return -1;
+			}
+		}),
+	);
 	let next = 0;
-	for (const name of names) {
-		let text: string;
-		try {
-			text = await fs.readFile(path.join(dir, name), "utf8");
-		} catch (error) {
-			if (isEnoent(error)) continue;
-			throw error;
-		}
-		let sequence: unknown;
-		try {
-			sequence = (JSON.parse(text) as Partial<OutboxEvent> | null)?.sequence;
-		} catch {
-			continue;
-		}
-		if (isSequence(sequence) && sequence >= next) next = sequence + 1;
-	}
+	for (const sequence of sequences) if (sequence >= next) next = sequence + 1;
 	return next;
 }
 

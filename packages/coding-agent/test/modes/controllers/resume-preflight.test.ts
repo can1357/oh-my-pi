@@ -131,7 +131,7 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 				"/tmp/some-session.jsonl",
 				expect.objectContaining({ onCwdChange: expect.any(Function) }),
 			);
-			expect(applyCwdChange).toHaveBeenCalledWith(targetCwd, expect.anything());
+			expect(applyCwdChange).toHaveBeenCalledWith(targetCwd, expect.objectContaining({ restore: false }));
 			expect(ctx.showError).not.toHaveBeenCalled();
 			expect(ctx.showStatus).toHaveBeenCalled();
 

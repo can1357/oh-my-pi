@@ -796,16 +796,7 @@ fn until_output(pty: &Pty, text: &str) {
 }
 
 /// A screen that comes after the step's output settled, and stays, is the
-/// step's.
-#[test]
-fn wait_drawn_takes_a_late_screen_that_stays() -> io::Result<()> {
-	let mut pty = scripted("sleep 0.2; printf '\\rtwo'")?;
-	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
-	assert_eq!((miss, recorded(&mut pty, miss).contents()), (None, "two".to_owned()));
-	Ok(())
-}
-
-/// A screen that comes after the step's output settled is held before it
+/// step's, but is held before it
 /// counts, for at least 200 ms. On a loaded machine a program's next drawing
 /// came up to 199.5 ms after the screen before it (beside 64 busy loops on 8
 /// CPUs), so a shorter hold would take a screen that is about to change.
@@ -817,7 +808,7 @@ fn wait_drawn_holds_a_late_screen_for_200_ms() -> io::Result<()> {
 	let start = Instant::now();
 	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
 	let held = start.elapsed();
-	assert_eq!(miss, None);
+	assert_eq!((miss, recorded(&mut pty, miss).contents()), (None, "two".to_owned()));
 	assert!(held >= Duration::from_millis(200), "the step took its screen after {held:?}");
 	Ok(())
 }
@@ -830,6 +821,7 @@ fn wait_drawn_holds_a_screen_that_came_after_the_settle() -> io::Result<()> {
 		scripted(&format!("printf '\\rtwo\\033[6n'; {READ_ANSWER}; sleep 0.02; printf '\\rbad'"))?;
 	until_output(&pty, "two");
 	let miss = wait_drawn_holding(&mut pty, &two(), DRAWN, TIMEOUT)?;
+	assert_eq!(miss, Some(Miss::Changed));
 	assert_eq!(recorded(&mut pty, miss).contents(), "bad");
 	Ok(())
 }

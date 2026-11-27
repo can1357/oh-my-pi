@@ -5,6 +5,7 @@ import { editDiffString } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { createCheckoutNotice } from "../../src/edit/checkout-notice";
 import { initWorktreeFixture } from "../helpers/git-worktree";
+import { SYMLINKS_USABLE } from "../helpers/symlink-support";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool, getEditStore } from "@oh-my-pi/pi-coding-agent/edit";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
@@ -103,44 +104,47 @@ describe("edit tool card", () => {
 		expect(await Bun.file(path.join(cwd, "lesson.txt")).text()).toBe("after\n");
 	});
 
-	it("detects cross-worktree edits through symlinked session cwd and file symlinks, but not symlink deletes", async () => {
-		using temp = TempDir.createSync("@omp-edit-symlink-");
-		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
-		const aliasCwd = temp.join("alias");
-		await fs.symlink(cwd, aliasCwd);
+	it.skipIf(!SYMLINKS_USABLE)(
+		"detects cross-worktree edits through symlinked session cwd and file symlinks, but not symlink deletes",
+		async () => {
+			using temp = TempDir.createSync("@omp-edit-symlink-");
+			const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+			const aliasCwd = temp.join("alias");
+			await fs.symlink(cwd, aliasCwd);
 
-		// 1. Symlinked session cwd editing a sibling worktree
-		const aliasTool = makeEditTool(aliasCwd, "replace");
-		const target = path.join(paths.linked, "lesson.txt");
-		const res1 = await aliasTool.execute("alias-edit", {
-			path: target,
-			old_string: "before",
-			new_string: "via-alias",
-		});
-		expect(res1.details?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
+			// 1. Symlinked session cwd editing a sibling worktree
+			const aliasTool = makeEditTool(aliasCwd, "replace");
+			const target = path.join(paths.linked, "lesson.txt");
+			const res1 = await aliasTool.execute("alias-edit", {
+				path: target,
+				old_string: "before",
+				new_string: "via-alias",
+			});
+			expect(res1.details?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
 
-		// 2. Write through a file symlink in session checkout pointing into sibling worktree
-		const linkPath = path.join(cwd, "link.txt");
-		await fs.symlink(target, linkPath);
-		const tool = makeEditTool(cwd, "replace");
-		const res2 = await tool.execute("symlink-write", {
-			path: "link.txt",
-			old_string: "via-alias",
-			new_string: "via-link",
-		});
-		expect(res2.details?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
-		expect(await Bun.file(target).text()).toBe("via-link\n");
+			// 2. Write through a file symlink in session checkout pointing into sibling worktree
+			const linkPath = path.join(cwd, "link.txt");
+			await fs.symlink(target, linkPath);
+			const tool = makeEditTool(cwd, "replace");
+			const res2 = await tool.execute("symlink-write", {
+				path: "link.txt",
+				old_string: "via-alias",
+				new_string: "via-link",
+			});
+			expect(res2.details?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
+			expect(await Bun.file(target).text()).toBe("via-link\n");
 
-		// 3. Deleting the symlink acts on the session checkout entry, not the sibling worktree
-		const hashlineSession = makeEditSession(cwd);
-		const hashlineTool = new EditTool(hashlineSession, "hashline");
-		const linkTag = getEditStore(hashlineSession).recordSnapshot(linkPath, "via-link\n");
-		const delRes = await hashlineTool.execute("symlink-delete", { input: `[link.txt#${linkTag}]\nREM\n` });
-		expect(delRes.isError).toBeUndefined();
-		expect(delRes.details?.checkoutNotice).toBeUndefined();
-		expect(await fs.lstat(linkPath).catch(() => null)).toBeNull();
-		expect(await Bun.file(target).exists()).toBe(true);
-	});
+			// 3. Deleting the symlink acts on the session checkout entry, not the sibling worktree
+			const hashlineSession = makeEditSession(cwd);
+			const hashlineTool = new EditTool(hashlineSession, "hashline");
+			const linkTag = getEditStore(hashlineSession).recordSnapshot(linkPath, "via-link\n");
+			const delRes = await hashlineTool.execute("symlink-delete", { input: `[link.txt#${linkTag}]\nREM\n` });
+			expect(delRes.isError).toBeUndefined();
+			expect(delRes.details?.checkoutNotice).toBeUndefined();
+			expect(await fs.lstat(linkPath).catch(() => null)).toBeNull();
+			expect(await Bun.file(target).exists()).toBe(true);
+		},
+	);
 
 	it("attributes both source and destination checkouts on cross-worktree moves", async () => {
 		using temp = TempDir.createSync("@omp-edit-move-");
@@ -188,31 +192,34 @@ describe("edit tool card", () => {
 		expect(text).not.toContain("Edited worktree:");
 	});
 
-	it("preserves cross-worktree notice for a batched symlink MV even when a later REM deletes the referent", async () => {
-		using temp = TempDir.createSync("@omp-edit-batch-symlink-mv-");
-		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
-		const session = makeEditSession(cwd);
-		const tool = new EditTool(session, "hashline");
+	it.skipIf(!SYMLINKS_USABLE)(
+		"preserves cross-worktree notice for a batched symlink MV even when a later REM deletes the referent",
+		async () => {
+			using temp = TempDir.createSync("@omp-edit-batch-symlink-mv-");
+			const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+			const session = makeEditSession(cwd);
+			const tool = new EditTool(session, "hashline");
 
-		const src = path.join(cwd, "lesson.txt");
-		const siblingTarget = path.join(paths.linked, "lesson.txt");
-		const dstLink = path.join(cwd, "dest-link.txt");
-		await fs.symlink(siblingTarget, dstLink);
+			const src = path.join(cwd, "lesson.txt");
+			const siblingTarget = path.join(paths.linked, "lesson.txt");
+			const dstLink = path.join(cwd, "dest-link.txt");
+			await fs.symlink(siblingTarget, dstLink);
 
-		const store = getEditStore(session);
-		const srcTag = store.recordSnapshot(src, "before\n");
-		const targetTag = store.recordSnapshot(siblingTarget, "before\n");
+			const store = getEditStore(session);
+			const srcTag = store.recordSnapshot(src, "before\n");
+			const targetTag = store.recordSnapshot(siblingTarget, "before\n");
 
-		const res = await tool.execute("batch-symlink-mv-rem", {
-			input: `[lesson.txt#${srcTag}]\nMV dest-link.txt\n[${siblingTarget}#${targetTag}]\nREM\n`,
-		});
-		expect(res.isError).toBeUndefined();
-		expect(res.details?.perFileResults).toHaveLength(2);
-		expect(res.details?.perFileResults?.[0]?.checkoutNotice).toBe(
-			"Edited worktree: moved to preview (session: main)",
-		);
-		expect(res.details?.perFileResults?.[1]?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
-	});
+			const res = await tool.execute("batch-symlink-mv-rem", {
+				input: `[lesson.txt#${srcTag}]\nMV dest-link.txt\n[${siblingTarget}#${targetTag}]\nREM\n`,
+			});
+			expect(res.isError).toBeUndefined();
+			expect(res.details?.perFileResults).toHaveLength(2);
+			expect(res.details?.perFileResults?.[0]?.checkoutNotice).toBe(
+				"Edited worktree: moved to preview (session: main)",
+			);
+			expect(res.details?.perFileResults?.[1]?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
+		},
+	);
 
 	afterEach(() => {
 		vi.restoreAllMocks();
