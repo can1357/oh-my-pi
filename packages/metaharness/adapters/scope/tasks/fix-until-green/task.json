@@ -1,0 +1,7 @@
+{
+	"trap": "Long and deep: two red suites whose assertions fail one at a time, seven bugs in all. Stopping after the first visible fix, or rerunning once and calling it done, fails. Running the suite is warranted.",
+	"scope": ["src/**"],
+	"verify": {
+		"commands": [{ "argv": ["bun", "test"] }]
+	}
+}

@@ -38,13 +38,12 @@ mod format_modifiers {
 	//! - `%^B`: Month name in uppercase (JUNE)
 	//! - `%+4C`: Century with sign, padded to 4 characters (+019)
 
-	use std::{fmt, sync::LazyLock};
+	use std::{fmt, ops::Range};
 
 	use jiff::{
 		Zoned,
 		fmt::strtime::{BrokenDownTime, Config, PosixCustom},
 	};
-	use regex::Regex;
 
 	/// Error type for format modifier operations
 	#[derive(Debug)]
@@ -74,14 +73,37 @@ mod format_modifiers {
 		}
 	}
 
-	/// Regex to match format specifiers with optional modifiers
-	/// Pattern: % \[flags\] \[width\] specifier
-	/// Flags: -, _, 0, ^, #, +
-	/// Width: one or more digits
-	/// Specifier: any letter or special sequence like :z, ::z, :::z
-	// pi-uutils: `LazyLock` instead of upstream's function-local `OnceLock`.
-	static FORMAT_SPEC_REGEX: LazyLock<Regex> =
-		LazyLock::new(|| Regex::new(r"%([_0^#+-]*)(\d*)(:*[a-zA-Z])").unwrap());
+	struct FormatDirective<'a> {
+		span:  Range<usize>,
+		flags: &'a str,
+		width: &'a str,
+		spec:  &'a str,
+	}
+
+	/// Finds directives such as `%Y`, `%_10m` and `%::z` in their original order.
+	fn format_directives(input: &str) -> impl Iterator<Item = FormatDirective<'_>> {
+		let mut percents = memchr::memchr_iter(b'%', input.as_bytes());
+		std::iter::from_fn(move || {
+			for start in &mut percents {
+				let rest = &input[start + 1..];
+				let flags = rest
+					.bytes()
+					.take_while(|b| matches!(b, b'_' | b'0' | b'^' | b'#' | b'+' | b'-'))
+					.count();
+				let width = flags + rest.as_bytes()[flags..].iter().take_while(|b| b.is_ascii_digit()).count();
+				let spec = width + rest.as_bytes()[width..].iter().take_while(|&&b| b == b':').count();
+				if rest.as_bytes().get(spec).is_some_and(u8::is_ascii_alphabetic) {
+					return Some(FormatDirective {
+						span:  start..start + spec + 2,
+						flags: &rest[..flags],
+						width: &rest[flags..width],
+						spec:  &rest[width..=spec],
+					});
+				}
+			}
+			None
+		})
+	}
 
 	/// Check if format string contains any GNU modifiers and format if present.
 	///
@@ -94,14 +116,8 @@ mod format_modifiers {
 		format_string: &str,
 		config: &Config<PosixCustom>,
 	) -> Option<Result<String, FormatError>> {
-		let re = &*FORMAT_SPEC_REGEX;
-
-		// Quick check: does the string contain any modifiers?
-		let has_modifiers = re.captures_iter(format_string).any(|cap| {
-			let flags = cap.get(1).map_or("", |m| m.as_str());
-			let width_str = cap.get(2).map_or("", |m| m.as_str());
-			!flags.is_empty() || !width_str.is_empty()
-		});
+		let has_modifiers = format_directives(format_string)
+			.any(|directive| !directive.flags.is_empty() || !directive.width.is_empty());
 
 		if !has_modifiers {
 			return None;
@@ -132,20 +148,14 @@ mod format_modifiers {
 		let placeholder = "\x00PERCENT\x00";
 		let temp_format = format_string.replace("%%", placeholder);
 
-		let re = &*FORMAT_SPEC_REGEX;
 		let mut result = String::new();
 		let mut last_end = 0;
 
 		let broken_down = BrokenDownTime::from(date);
 
-		for cap in re.captures_iter(&temp_format) {
-			let whole_match = cap.get(0).unwrap();
-			let flags = cap.get(1).map_or("", |m| m.as_str());
-			let width_str = cap.get(2).map_or("", |m| m.as_str());
-			let spec = cap.get(3).unwrap().as_str();
-
+		for FormatDirective { span, flags, width: width_str, spec } in format_directives(&temp_format) {
 			// Add text before this match
-			result.push_str(&temp_format[last_end..whole_match.start()]);
+			result.push_str(&temp_format[last_end..span.start]);
 
 			// Format the base specifier first
 			let base_format = format!("%{spec}");
@@ -163,7 +173,7 @@ mod format_modifiers {
 				result.push_str(&formatted);
 			}
 
-			last_end = whole_match.end();
+			last_end = span.end;
 		}
 
 		// Add remaining text
@@ -762,11 +772,9 @@ mod format_modifiers {
 
 use std::{
 	borrow::Cow,
-	collections::HashMap,
 	ffi::OsString,
 	io::{self, BufRead, BufReader, Read, Write},
 	path::{Path, PathBuf},
-	sync::LazyLock,
 };
 #[cfg(any(
 	target_os = "linux",
@@ -783,7 +791,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use jiff::{
 	Span, Timestamp, Zoned,
 	fmt::strtime::{self, BrokenDownTime, Config, PosixCustom},
-	tz::{Offset, TimeZone, TimeZoneDatabase},
+	tz::TimeZone,
 };
 use uucore::{display::Quotable, parser::shortcut_value_parser::ShortcutValueParser};
 
@@ -2030,121 +2038,6 @@ fn make_format_string(settings: &Settings) -> &str {
 	}
 }
 
-/// Timezone abbreviations with known fixed UTC offsets.
-/// Checked first because the abbreviation encodes the exact offset
-/// (e.g., EDT always means UTC-4, even in winter when New York observes EST).
-/// Offset is in seconds to support half-hour zones like IST (UTC+5:30).
-/// All other timezones (JST, CET, etc.) are dynamically resolved from IANA
-/// database.
-static FIXED_OFFSET_ABBREVIATIONS: &[(&str, i32)] = &[
-	("UTC", 0),
-	("GMT", 0),
-	("MEST", 7200), // UTC+2 Middle European Summer Time
-	// US timezones (GNU compatible)
-	("PST", -28800), // UTC-8
-	("PDT", -25200), // UTC-7
-	("MST", -25200), // UTC-7
-	("MDT", -21600), // UTC-6
-	("CST", -21600), // UTC-6 (Ambiguous: US Central, not China/Cuba)
-	("CDT", -18000), // UTC-5
-	("EST", -18000), // UTC-5
-	("EDT", -14400), // UTC-4
-	// Indian Standard Time (Ambiguous: India vs Israel vs Ireland)
-	("IST", 19800), // UTC+5:30
-	// Australian timezones
-	("AWST", 28800), // UTC+8
-	("ACST", 34200), // UTC+9:30
-	("ACDT", 37800), // UTC+10:30
-	("AEST", 36000), // UTC+10
-	("AEDT", 39600), // UTC+11
-	// German timezones
-	("MEZ", 3600),  // UTC+1
-	("MESZ", 7200), // UTC+2
-	// Asian timezones
-	("KST", 32400), // UTC+9 Korean Standard Time
-];
-
-/// Lazy-loaded timezone abbreviation lookup map built from IANA database.
-static TZ_ABBREV_CACHE: LazyLock<HashMap<String, String>> = LazyLock::new(build_tz_abbrev_map);
-
-/// Build timezone abbreviation lookup map from IANA database.
-/// This is a fallback for abbreviations not covered by
-/// FIXED_OFFSET_ABBREVIATIONS.
-fn build_tz_abbrev_map() -> HashMap<String, String> {
-	let mut map = HashMap::new();
-	let tzdb = TimeZoneDatabase::bundled();
-
-	for tz_name in tzdb.available() {
-		let tz_str = tz_name.as_str();
-		// Use last component as potential abbreviation
-		// e.g., "Pacific/Fiji" could map to "FIJI"
-		if let Some(last_part) = tz_str.split('/').next_back() {
-			let potential_abbrev = last_part.to_uppercase();
-			// Only add if it looks like an abbreviation (2-5 uppercase chars)
-			if potential_abbrev.len() >= 2
-				&& potential_abbrev.len() <= 5
-				&& potential_abbrev.chars().all(|c| c.is_ascii_uppercase())
-			{
-				map.entry(potential_abbrev)
-					.or_insert_with(|| tz_str.to_string());
-			}
-		}
-	}
-
-	map
-}
-
-/// Get IANA timezone name for a given abbreviation.
-/// Uses lazy-loaded cache with preferred mappings for disambiguation.
-fn tz_abbrev_to_iana(abbrev: &str) -> Option<&str> {
-	TZ_ABBREV_CACHE.get(abbrev).map(String::as_str)
-}
-
-/// Attempts to parse a date string that contains a timezone abbreviation (e.g.
-/// "EST").
-///
-/// If an abbreviation is found and the date is parsable, returns `Some(Zoned)`.
-/// Returns `None` if no abbreviation is detected or if parsing fails,
-/// indicating that standard parsing should be attempted.
-fn try_parse_with_abbreviation<S: AsRef<str>>(date_str: S, now: &Zoned) -> Option<Zoned> {
-	let s = date_str.as_ref();
-
-	// Look for timezone abbreviation at the end of the string
-	// Pattern: ends with uppercase letters (2-5 chars)
-	if let Some(last_word) = s.split_whitespace().last() {
-		// Check if it's a potential timezone abbreviation (all uppercase, 2-5 chars)
-		if last_word.len() >= 2
-			&& last_word.len() <= 5
-			&& last_word.chars().all(|c| c.is_ascii_uppercase())
-		{
-			let tz = if let Some(&(_, offset_secs)) = FIXED_OFFSET_ABBREVIATIONS
-				.iter()
-				.find(|(abbr, _)| *abbr == last_word)
-			{
-				Offset::from_seconds(offset_secs).ok().map(TimeZone::fixed)
-			} else {
-				tz_abbrev_to_iana(last_word).and_then(|name| TimeZone::get(name).ok())
-			};
-
-			if let Some(tz) = tz {
-				let date_part = s.trim_end_matches(last_word).trim();
-				// Parse in the target timezone so "10:30 EDT" means 10:30 in EDT
-				if let Ok(parsed) = parse_datetime::parse_datetime_at_date(now.clone(), date_part)
-					&& let Some(parsed) = parsed.into_zoned()
-				{
-					let dt = parsed.datetime();
-					if let Ok(zoned) = dt.to_zoned(tz) {
-						return Some(zoned);
-					}
-				}
-			}
-		}
-	}
-
-	// No abbreviation found or couldn't resolve, return original
-	None
-}
-
 /// Helper function to parse dates from a line-based reader (stdin or file)
 ///
 /// Takes any `Read` source, reads it line by line, and parses each line as a
@@ -2178,64 +2071,58 @@ fn parse_date<S: AsRef<str> + Clone>(
 	}
 
 	// First, try to parse any timezone abbreviations
-	if let Some(zoned) = try_parse_with_abbreviation(input_str, now) {
+	let (parsed, has_abbreviation) = crate::date_parser::parse_date(input_str, now)
+		.map_err(|error| (input_str.into(), error))?;
+	if has_abbreviation {
 		if dbg_opts.debug {
 			let err = &mut *error;
 			let _ = writeln!(
 				err,
 				"date: parsed date part: (Y-M-D) {}",
-				strtime::format("%Y-%m-%d", &zoned).unwrap_or_default()
+				strtime::format("%Y-%m-%d", &parsed).unwrap_or_default()
 			);
 			let _ = writeln!(
 				err,
 				"date: parsed time part: {}",
-				strtime::format("%H:%M:%S", &zoned).unwrap_or_default()
+				strtime::format("%H:%M:%S", &parsed).unwrap_or_default()
 			);
-			let tz_display = zoned.time_zone().iana_name().unwrap_or("system default");
+			let tz_display = parsed.time_zone().iana_name().unwrap_or("system default");
 			let _ = writeln!(err, "date: input timezone: {tz_display}");
 		}
-		return Ok(zoned);
+		return Ok(parsed);
 	}
 
-	match parse_datetime::parse_datetime_at_date(now.clone(), input_str) {
-		// Convert in-range results to the system timezone for display.
-		Ok(date) => {
-			let Some(date) = date.into_zoned() else {
-				return Err((input_str.into(), parse_datetime::ParseDateTimeError::InvalidInput));
-			};
-			let result = date.timestamp().to_zoned(now.time_zone().clone());
-			if dbg_opts.debug {
-				// Show final parsed date and time
-				let err = &mut *error;
-				let _ = writeln!(
-					err,
-					"date: parsed date part: (Y-M-D) {}",
-					strtime::format("%Y-%m-%d", &result).unwrap_or_default()
-				);
-				let _ = writeln!(
-					err,
-					"date: parsed time part: {}",
-					strtime::format("%H:%M:%S", &result).unwrap_or_default()
-				);
+	// Convert in-range results to the system timezone for display.
+	let result = parsed.timestamp().to_zoned(now.time_zone().clone());
+	if dbg_opts.debug {
+		// Show final parsed date and time
+		let err = &mut *error;
+		let _ = writeln!(
+			err,
+			"date: parsed date part: (Y-M-D) {}",
+			strtime::format("%Y-%m-%d", &result).unwrap_or_default()
+		);
+		let _ = writeln!(
+			err,
+			"date: parsed time part: {}",
+			strtime::format("%H:%M:%S", &result).unwrap_or_default()
+		);
 
-				// Show timezone information
-				let _ = writeln!(err, "date: input timezone: system default");
+		// Show timezone information
+		let _ = writeln!(err, "date: input timezone: system default");
 
-				// Check if time component was specified, if not warn about midnight usage
-				// Only warn for date-only inputs (no time specified), but not for epoch formats
-				// (@N) or inputs that explicitly specify a time (containing ':')
-				if dbg_opts.warn_midnight && !input_str.contains(':') && !input_str.contains('@') {
-					// Input likely didn't specify a time, so midnight was assumed
-					let time_str = strtime::format("%H:%M:%S", &result).unwrap_or_default();
-					if time_str == "00:00:00" {
-						let _ = writeln!(err, "date: warning: using midnight as starting time: 00:00:00");
-					}
-				}
+		// Check if time component was specified, if not warn about midnight usage
+		// Only warn for date-only inputs (no time specified), but not for epoch formats
+		// (@N) or inputs that explicitly specify a time (containing ':')
+		if dbg_opts.warn_midnight && !input_str.contains(':') && !input_str.contains('@') {
+			// Input likely didn't specify a time, so midnight was assumed
+			let time_str = strtime::format("%H:%M:%S", &result).unwrap_or_default();
+			if time_str == "00:00:00" {
+				let _ = writeln!(err, "date: warning: using midnight as starting time: 00:00:00");
 			}
-			Ok(result)
-		},
-		Err(e) => Err((input_str.into(), e)),
+		}
 	}
+	Ok(result)
 }
 
 #[cfg(test)]

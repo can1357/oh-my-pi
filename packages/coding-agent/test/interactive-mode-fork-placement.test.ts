@@ -8,11 +8,12 @@ import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-c
 import { CleanseCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/cleanse-command-controller";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { OmfgController } from "@oh-my-pi/pi-coding-agent/modes/controllers/omfg-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode fork placement bridge", () => {
 	let tempDir: TempDir;
@@ -21,7 +22,7 @@ describe("InteractiveMode fork placement bridge", () => {
 	let mode: InteractiveMode;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 	});
 
 	beforeEach(async () => {
@@ -39,7 +40,15 @@ describe("InteractiveMode fork placement bridge", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {

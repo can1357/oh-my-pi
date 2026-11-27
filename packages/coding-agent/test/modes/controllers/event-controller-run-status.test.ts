@@ -9,8 +9,8 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import * as terminalSession from "@oh-my-pi/pi-tui/driver/session";
+import { initTheme } from "../../../src/ui/theme/service";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(() => {
@@ -20,7 +20,7 @@ beforeAll(() => {
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+	vi.spyOn(terminalSession, "notifyTerminal").mockImplementation(() => {});
 });
 
 afterEach(() => {

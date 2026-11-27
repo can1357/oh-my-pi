@@ -48,7 +48,11 @@ import type {
 import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
-import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+import {
+	hasVisibleAssistantContent,
+	transportExhaustedMessages,
+	withReplaySafeStreamRetry,
+} from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -65,6 +69,7 @@ import {
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
+	normalizeSchemaForGoogle,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForGrammar,
 	toolWireSchema,
@@ -1012,6 +1017,7 @@ const streamOpenAICompletionsOnce = (
 				// The family affinity key rides only an explicit prompt-cache
 				// identity; the sessionId-derived cache-id fallback never does.
 				options?.promptCacheKey ? promptCacheSessionId : undefined,
+				options?.parentSessionId,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			let appliedStrictTools = false;
@@ -2039,6 +2045,9 @@ const streamOpenAICompletionsOnce = (
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
+			if (error instanceof OpenAIHttpError && AIError.isTransientStatus(result.status)) {
+				transportExhaustedMessages.add(output);
+			}
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			// Some providers via OpenRouter include extra details here.
@@ -2091,6 +2100,7 @@ function createRequestSetup(
 	promptCacheSessionId?: string,
 	sessionId?: string,
 	promptCacheAffinityKey?: string,
+	parentSessionId?: string,
 ): OpenAIRequestSetup & { baseUrl: string } {
 	const apiVersion = $env.AZURE_OPENAI_API_VERSION || "2024-10-21";
 	const deploymentName = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(model.id) ?? model.id;
@@ -2101,6 +2111,7 @@ function createRequestSetup(
 		promptCacheSessionId,
 		sessionId,
 		promptCacheAffinityKey,
+		parentSessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
 		// Provider auth/header overlay: Kimi-code hosts require shared client
@@ -3097,6 +3108,39 @@ export function convertMessages(
 	return params;
 }
 
+/**
+ * Rewrites tool parameters into the schema dialect `flavor` names; see
+ * {@link ResolvedOpenAICompat.toolSchemaFlavor}. Called once per tool by
+ * {@link convertTools} after strict adaptation.
+ */
+function applyToolSchemaFlavor(
+	flavor: ResolvedOpenAICompat["toolSchemaFlavor"],
+	parameters: Record<string, unknown>,
+): Record<string, unknown> {
+	switch (flavor) {
+		// Moonshot/Kimi native hosts validate against the stricter MFJS subset
+		// (const→enum, typed enums, no validators) and 400 otherwise.
+		case "moonshot-mfjs": {
+			const normalized = normalizeSchemaForMoonshot(parameters);
+			return isRecord(normalized) ? normalized : parameters;
+		}
+		// Gemini behind an OpenAI-compatible host (GitHub Copilot) takes Google's
+		// dialect: a JSON Schema `type` array 400s the whole request.
+		case "google": {
+			const normalized = normalizeSchemaForGoogle(parameters);
+			return isRecord(normalized) ? normalized : parameters;
+		}
+		// Grammar-constrained local backends (llama.cpp, LM Studio, vLLM)
+		// build a GBNF grammar from the schema and 400 with
+		// `Unrecognized schema: true` on the bare boolean subschema
+		// `toolWireSchema` emits for open fields (issue #5914).
+		case "grammar":
+			return sanitizeSchemaForGrammar(parameters);
+		default:
+			return parameters;
+	}
+}
+
 function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompat,
@@ -3140,18 +3184,7 @@ function convertTools(
 		const includeExplicitFalse =
 			!includeStrict && tool.strict === false && toolStrictMode === "mixed" && compat.supportsStrictMode !== false;
 		const wireParameters = includeStrict ? parameters : baseParameters;
-		// Moonshot/Kimi native hosts validate against the stricter MFJS subset
-		// (const→enum, typed enums, no validators) and 400 otherwise.
-		// Grammar-constrained local backends (llama.cpp, LM Studio, vLLM)
-		// build a GBNF grammar from the schema and 400 with
-		// `Unrecognized schema: true` on the bare boolean subschema
-		// `toolWireSchema` emits for open fields (issue #5914).
-		const emittedParameters =
-			compat.toolSchemaFlavor === "moonshot-mfjs"
-				? (normalizeSchemaForMoonshot(wireParameters) as Record<string, unknown>)
-				: compat.toolSchemaFlavor === "grammar"
-					? sanitizeSchemaForGrammar(wireParameters)
-					: wireParameters;
+		const emittedParameters = applyToolSchemaFlavor(compat.toolSchemaFlavor, wireParameters);
 		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			logger.warn(

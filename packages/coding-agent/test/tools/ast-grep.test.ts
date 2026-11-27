@@ -6,6 +6,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
+import { astGrepPresenter } from "../../src/ui/tools/ast-grep";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function createTestSession(cwd = "/tmp/test", overrides: Partial<ToolSession> = {}): ToolSession {
@@ -151,6 +156,51 @@ describe("ast_grep parse errors", () => {
 			expect(details?.limitReached).toBe(false);
 			expect(text).toContain("z.ts");
 			expect(text).not.toContain("a.ts");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("gives the model and TUI the next page offset after normalizing skip", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-page-"));
+		try {
+			const filePath = path.join(tempDir, "page.ts");
+			await Bun.write(filePath, Array.from({ length: 106 }, () => 'console.log("page");').join("\n"));
+			const tool = (await createTools(createTestSession(tempDir), ["ast_grep"])).find(
+				entry => entry.name === "ast_grep",
+			);
+			if (!tool) throw new Error("ast_grep unavailable");
+
+			const result = await tool.execute("ast-grep-page", {
+				pat: 'console.log("page")',
+				path: filePath,
+				skip: 50.9,
+			});
+			const details = result.details as { nextSkip?: number; limitReached?: boolean } | undefined;
+			const modelText = result.content.find(content => content.type === "text")?.text ?? "";
+			expect(details?.limitReached).toBe(true);
+			expect(details?.nextSkip).toBe(100);
+			expect(modelText).toContain("skip=100");
+
+			const view = astGrepPresenter.result!(
+				result,
+				{ expanded: true, isPartial: false, argsComplete: true, executionStarted: true },
+				{
+					pat: 'console.log("page")',
+					skip: 50.9,
+				},
+			);
+			// The terminal painter reads the same offset from `term` and shares the hint.
+			expect(view?.term).toMatchObject({ nextSkip: 100 });
+			const env = staticEnvironment(loadThemeSync("dark"));
+			const body = createRoot(dispose => {
+				try {
+					return resolveChildren(view?.body)().map(node => describeTree(node, env));
+				} finally {
+					dispose();
+				}
+			});
+			expect(JSON.stringify(body)).toContain("skip=100 for the next page");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

@@ -24,7 +24,7 @@ function createRuntime() {
 		settings,
 		runtime: {
 			ctx: {
-				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				composer: { setText } as unknown as InteractiveModeContext["composer"],
 				settings,
 				session: {
 					scopedModels: [],
@@ -80,6 +80,15 @@ describe("/switch slash command", () => {
 		await executeBuiltinSlashCommand("/switch @smol", harness.runtime);
 
 		expect(harness.switchSessionModel).toHaveBeenCalledWith(MODELS[2], undefined);
+	});
+
+	it("/switch ^provider/id:level resolves a ^ model reference like the bare selector", async () => {
+		const harness = createRuntime();
+
+		await executeBuiltinSlashCommand("/switch ^anthropic/claude-sonnet-4-5:high", harness.runtime);
+
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.switchSessionModel).toHaveBeenCalledWith(MODELS[1], "high");
 	});
 
 	it("/switch unknown surfaces an error without opening the picker or switching", async () => {

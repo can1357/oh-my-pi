@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPProgress } from "@oh-my-pi/pi-coding-agent/tools/mcp-progress";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import {
 	encodeHostError,

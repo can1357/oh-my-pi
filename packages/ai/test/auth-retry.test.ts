@@ -4,6 +4,7 @@ import {
 	AUTH_RETRY_MAX_ATTEMPTS,
 	isApiKeyResolver,
 	isAuthRetryableError,
+	refreshReasonFor,
 	resolveApiKeyOnce,
 	withAuth,
 	withOAuthAccess,
@@ -342,6 +343,32 @@ describe("withAuth", () => {
 		// All-`lastChance` rotation: a 403 is a valid-token denial, so the
 		// refresh-same step (b) is skipped like on usage limits.
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
+	});
+
+	it("refreshes the same login first when a 403 says the OAuth token was revoked", async () => {
+		const revoked = Object.assign(
+			new Error(
+				'403 {"type":"error","error":{"type":"permission_error","message":"OAuth token has been revoked. Please obtain a new token or refresh your existing token."}}',
+			),
+			{ status: 403 },
+		);
+		const contexts: ApiKeyResolveContext[] = [];
+		const result = await withAuth(
+			ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "revoked-key" : "refreshed-key";
+			},
+			async key => {
+				if (key === "revoked-key") throw revoked;
+				return "success";
+			},
+		);
+
+		expect(result).toBe("success");
+		// Step (b) refresh-same, as for a 401 — not the direct rotation other 403s get.
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false]);
+		expect(refreshReasonFor(revoked)).toBe("auth-recovery");
+		expect(refreshReasonFor(authError(403))).toBeUndefined();
 	});
 
 	it("leaves a 403 concurrency cap to the transient retry layer", async () => {

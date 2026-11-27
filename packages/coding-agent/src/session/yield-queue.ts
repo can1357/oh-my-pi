@@ -1,5 +1,10 @@
 import { type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
-import { logger, toError } from "@oh-my-pi/pi-utils";
+import { errorMessage, logger, toError } from "@oh-my-pi/pi-utils";
+
+/** Rejection message for a queued entry whose dispatcher's `isStale` dropped it. */
+export function yieldQueueStaleMessage(kind: string): string {
+	return `Yield queue entry became stale: ${kind}`;
+}
 
 export interface YieldDispatcher<P> {
 	/** Drop entries already delivered through another path. Called per-entry at flush time. */
@@ -34,10 +39,6 @@ interface StoredEntry {
 interface BuiltMessage {
 	message: AgentMessage;
 	entries: StoredEntry[];
-}
-
-function formatError(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 export class YieldQueue {
@@ -151,7 +152,7 @@ export class YieldQueue {
 				} catch (error) {
 					const dispatchError = toError(error);
 					this.#rejectEntries(built.entries, dispatchError);
-					logger.warn("Yield queue streaming dispatch failed", { kind, error: formatError(error) });
+					logger.warn("Yield queue streaming dispatch failed", { kind, error: errorMessage(error) });
 				}
 			} else {
 				idleMessages.push(built);
@@ -171,7 +172,7 @@ export class YieldQueue {
 						ASIDE_MESSAGE_DISCARD
 					]?.(dispatchError);
 				}
-				logger.warn("Yield queue idle dispatch failed", { error: formatError(error) });
+				logger.warn("Yield queue idle dispatch failed", { error: errorMessage(error) });
 			}
 		}
 	}
@@ -229,7 +230,7 @@ export class YieldQueue {
 			});
 		} catch (error) {
 			this.#idleFlushPending = false;
-			logger.warn("Yield queue idle flush scheduling failed", { error: formatError(error) });
+			logger.warn("Yield queue idle flush scheduling failed", { error: errorMessage(error) });
 		}
 	}
 
@@ -250,11 +251,11 @@ export class YieldQueue {
 				} catch (error) {
 					const staleError = toError(error);
 					entry.reject?.(staleError);
-					logger.warn("Yield queue stale check failed", { kind, error: formatError(error) });
+					logger.warn("Yield queue stale check failed", { kind, error: errorMessage(error) });
 					continue;
 				}
 				if (stale) {
-					entry.reject?.(new Error(`Yield queue entry became stale: ${kind}`));
+					entry.reject?.(new Error(yieldQueueStaleMessage(kind)));
 					continue;
 				}
 			}
@@ -271,7 +272,7 @@ export class YieldQueue {
 		} catch (error) {
 			const buildError = toError(error);
 			this.#rejectEntries(survivors, buildError);
-			logger.warn("Yield queue build failed", { kind, error: formatError(error) });
+			logger.warn("Yield queue build failed", { kind, error: errorMessage(error) });
 			return null;
 		}
 	}

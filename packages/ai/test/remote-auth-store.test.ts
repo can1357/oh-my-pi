@@ -80,7 +80,8 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		const rotated = {
 			access: "server-access-rotated",
 			refresh: "server-refresh-rotated",
-			expires: Date.now() + 120_000,
+			// Outside Anthropic's 5-minute renewal window.
+			expires: Date.now() + 3_600_000,
 			accountId: "account-1",
 			email: "a@example.com",
 		};
