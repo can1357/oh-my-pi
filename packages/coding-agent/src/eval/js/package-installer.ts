@@ -173,9 +173,7 @@ export async function installJsPackages(options: InstallJsPackagesOptions): Prom
 			options.signal?.throwIfAborted();
 			return {
 				environment,
-				summary:
-					`Bun reconciled ${environment.description}. Current declared dependencies: ${dependencies}. ` +
-					"Lifecycle scripts were disabled, so packages requiring native builds/postinstall may not work.",
+				summary: `[installed into ${environment.description}; deps: ${dependencies}; lifecycle scripts skipped]`,
 			};
 		},
 		{ signal: options.signal, retries: LOCK_ATTEMPTS, retryDelayMs: LOCK_RETRY_MS },

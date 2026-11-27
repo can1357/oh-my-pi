@@ -4,7 +4,7 @@
  */
 import { adjustHsv, mixHex } from "@oh-my-pi/pi-utils/color";
 import { BG_DEFAULT, type ColorDepth, colorHex, FG_DEFAULT, fgSgr, bgSgr, isLightColor, normalizeHex } from "./color";
-import type { Theme } from "./contract";
+import type { EmojiSupport, Theme } from "./contract";
 import {
 	BACKGROUND_KEYS,
 	type ColorValue,
@@ -23,6 +23,8 @@ export interface ThemeOptions {
 	readonly symbolPreset?: SymbolPreset;
 	/** Shift `toolDiffAdded` from green toward blue (red–green color blindness). */
 	readonly colorBlindMode?: boolean;
+	/** How the terminal draws emoji-capable glyphs; picks their form in the symbol table (default conservative). */
+	readonly emoji?: EmojiSupport;
 }
 
 /** TSP tones → the theme color that draws them. */
@@ -194,6 +196,7 @@ export class ResolvedTheme implements Theme {
 			preset: options.symbolPreset ?? json.symbols?.preset ?? "unicode",
 			overrides: json.symbols?.overrides,
 			spinnerFrames: json.symbols?.spinnerFrames,
+			emoji: options.emoji,
 		});
 	}
 

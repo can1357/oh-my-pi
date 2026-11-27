@@ -12,7 +12,7 @@ describe("shouldInlineToolDescriptors", () => {
 		expect(shouldInlineToolDescriptors("auto", "gemini-3-pro")).toBe(true);
 		expect(shouldInlineToolDescriptors("auto", "gemini-3.1-flash")).toBe(true);
 		// Namespaced/aggregator ids fold onto the gemini lineage too.
-		expect(shouldInlineToolDescriptors("auto", "google-antigravity/gemini-3-pro")).toBe(true);
+		expect(shouldInlineToolDescriptors("auto", "openrouter/google/gemini-3-pro")).toBe(true);
 	});
 
 	test("auto stays off for non-Gemini models and missing model", () => {

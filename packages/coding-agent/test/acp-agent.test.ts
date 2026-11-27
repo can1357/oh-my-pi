@@ -22,7 +22,13 @@ import {
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { sumSubagentTreeCost } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
+import type {
+	AgentCostSnapshot,
+	AgentTreeSpend,
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub-projection";
 import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -218,9 +224,14 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
+	get modelRegistry(): {
+		getApiKey: (model: Model) => Promise<string>;
+		awaitBackgroundRefresh: () => Promise<void>;
+		authStorage?: AuthStorage;
+	} {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			awaitBackgroundRefresh: async () => {},
 			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}
@@ -348,6 +359,21 @@ class FakeAgentSession {
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
 
+	#subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	#subagentHydration: Promise<void> | undefined;
+	hydratePersistedSubagents(): Promise<void> {
+		const rootSessionFile = this.sessionManager.getSessionFile();
+		if (!rootSessionFile || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		this.#subagentHydration ??= registerPersistedSubagents(AgentRegistry.global(), rootSessionFile);
+		return this.#subagentHydration;
+	}
+	getSubagentTreeSpend(): AgentTreeSpend {
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			rootSessionFile: this.sessionManager.getSessionFile(),
+			sessionCosts: this.#subagentSpend,
+		});
+	}
 	getContextUsage(): undefined {
 		return undefined;
 	}
@@ -1399,14 +1425,14 @@ describe("ACP agent", () => {
 				speechSpeed: "speech.speed",
 			},
 			defaults: {
-				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				speechToTextModel: "local/fluid-speech-pro",
 				textToSpeechModel: "local/phonon-31m",
 				voice: "harper",
 				speed: 1,
 			},
 			speechToText: {
 				setting: "modelRoles.dictation",
-				defaultValue: "local/parakeet-tdt-0.6b-v3",
+				defaultValue: "local/fluid-speech-pro",
 			},
 			textToSpeech: {
 				modelSetting: "modelRoles.speech",

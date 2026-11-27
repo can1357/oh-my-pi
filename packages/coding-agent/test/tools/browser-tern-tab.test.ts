@@ -609,6 +609,36 @@ describe("TernTab", () => {
 		expect(() => tab.page.once("console", () => {})).toThrow(/tab\.console\(\)/);
 	});
 
+	it("rejects a non-string selector as one before it reaches the page kit", async () => {
+		const fake = await startPage({ eventBatches: [], kit: {} });
+		const tab = await openTab(fake);
+		const before = fake.requests.length;
+		// Eval passes these through unchecked: `waitFor(1500)`, `waitFor(() => …)`, a selector lost to JSON as null.
+		await expect(tab.waitFor(1500 as never, { timeout: 50 })).rejects.toThrow(
+			/Browser selector must be a string; got a number .*await Bun\.sleep\(ms\)/,
+		);
+		await expect(tab.waitFor((() => true) as never, { timeout: 50 })).rejects.toThrow(
+			/got a function .*page\.waitForFunction\(fn\)/,
+		);
+		await expect(tab.waitForSelector(null as never, { timeout: 50 })).rejects.toThrow(
+			/Browser selector must be a string; got null\./,
+		);
+		expect(fake.requests.length).toBe(before);
+	});
+
+	it("says what replaces page.setExtraHTTPHeaders and accepts clearing them", async () => {
+		const tab = new TernTab({
+			client: new TernSocketClient({ socketPath: "/nonexistent" }),
+			block: 7,
+			name: "main",
+			viewport: { width: 800, height: 600 },
+		});
+		await expect(tab.page.setExtraHTTPHeaders({ Authorization: "Basic x" })).rejects.toThrow(
+			/page\.setExtraHTTPHeaders\(\) is not supported on the Tern browser backend: .*tab\.emulate\(\{ credentials/,
+		);
+		await expect(tab.page.setExtraHTTPHeaders({})).resolves.toBeUndefined();
+	});
+
 	it("names the Tern backend and the reason for helpers it cannot provide", async () => {
 		const fake = await startPage({ eventBatches: [], kit: {} });
 		const tab = await openTab(fake);

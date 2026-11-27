@@ -58,8 +58,6 @@ describe("Gemini 4 Argon list-price schedule", () => {
 			// stencil.so's introductory price, or a list price it already caught up to.
 			argon("google", "google-generative-ai", INTRO),
 			argon("google-vertex", "google-vertex", LIST),
-			// Antigravity discovery reports no price.
-			argon("google-antigravity", "google-gemini-cli", UNPRICED),
 			// Cursor bills Other Models at the model's API price.
 			argon("cursor", "cursor-agent", UNPRICED),
 		];

@@ -1,8 +1,10 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { createRoot, isUiNode, type JSXNode, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
-import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { builtinThemes } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { createTheme, type ResolvedTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { ExtensionRows } from "../../../src/extensibility/extensions/render-types";
 import {
 	extensionOutput,
@@ -24,6 +26,15 @@ function screenOf(output: JSXNode, columns = 20): string[] {
 }
 
 describe("extension render output", () => {
+	// A terminal that draws bare text-default emoji inside one cell (kitty, Ghostty, WezTerm): slots stay bare.
+	let previousTheme: ResolvedTheme;
+	beforeEach(() => {
+		previousTheme = currentTheme();
+		setCurrentTheme(createTheme(builtinThemes().dark!, { emoji: { vs16Wide: true, bareFits: true } }));
+	});
+	afterEach(() => {
+		setCurrentTheme(previousTheme);
+	});
 	it("passes pi-tui nodes through untouched", () => {
 		createRoot(() => {
 			const node = <text text="hello" />;

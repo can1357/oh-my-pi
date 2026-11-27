@@ -973,6 +973,82 @@ describe("Spotlight ingest", () => {
 		expect(stats.sessions).toBe(1);
 	});
 
+	/**
+	 * Write `b`'s transcript as a `/tan` clone of `parentFile`: every entry copied, the copied prefix marked with
+	 * the id of `b`'s entry `inheritedCount` lines in (the header excluded; default: all of them).
+	 */
+	async function writeResetFork(b: SpotlightSessionBuilder, parentFile: string, inheritedCount?: number) {
+		const lines = b.text().trimEnd().split("\n");
+		const through = lines[inheritedCount ?? lines.length - 1];
+		const lastId = (JSON.parse(through ?? "{}") as { id?: string }).id;
+		const forked = lines.map(line => {
+			const entry = JSON.parse(line) as Record<string, unknown>;
+			return entry.type === "session"
+				? JSON.stringify({ ...entry, id: "fork", parentSession: parentFile, inheritedThroughEntryId: lastId })
+				: line;
+		});
+		const forkFile = path.join(getSessionsDir(), "--repo--", "parent-tan.jsonl");
+		await Bun.write(forkFile, `${forked.join("\n")}\n`);
+		return forkFile;
+	}
+
+	it("keeps a parent's requests when its reset fork is ingested first", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		const parentFile = await write("parent.jsonl", b);
+		await syncAllSessions({ workers: 1, files: [await writeResetFork(b, parentFile)] });
+
+		const stats = await dashboard();
+		// The copied request belongs to the parent; claimed by the fork it would join neither file's message row.
+		expect(stats.sessionList.find(session => session.sessionFile === parentFile)?.requests).toBe(1);
+		expect(stats.gross.results).toBe(1);
+	});
+
+	it("hands a parent's Spotlight rows that an older build gave its reset fork back on upgrade", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		const parentFile = await write("parent.jsonl", b);
+		const forkFile = await writeResetFork(b, parentFile);
+		await syncAllSessions({ workers: 1, files: [parentFile, forkFile] });
+		// The state an older build left when the fork synced first: the fork owns the copied request and its
+		// Spotlight row, both cursors are current, and the upgrade's one-shot has not run.
+		const db = await initDb();
+		db.query("UPDATE messages SET session_file = ? WHERE session_file = ?").run(forkFile, parentFile);
+		db.query("UPDATE spotlight_requests SET session_file = ? WHERE session_file = ?").run(forkFile, parentFile);
+		db.query("DELETE FROM meta WHERE key = ?").run("inherited_prefix_replay_v1");
+		closeDb();
+
+		await initDb();
+		await syncAllSessions({ workers: 1, files: [forkFile, parentFile] });
+
+		const owners = (await initDb())
+			.query<{ session_file: string }, []>("SELECT session_file FROM spotlight_requests")
+			.all();
+		expect(owners.map(owner => owner.session_file)).toEqual([parentFile]);
+		expect((await dashboard()).sessionList.find(session => session.sessionFile === parentFile)?.requests).toBe(1);
+	});
+
+	it("leaves an inherited open read's needs to the parent when the fork re-reads the file first", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const read = shortenedRead(b);
+		const parentFile = await write("parent.jsonl", b);
+		const inherited = b.text().trimEnd().split("\n").length - 1;
+		call(b, "read", { path: "src/a.ts:150-160" });
+		await syncAllSessions({ workers: 1, files: [await writeResetFork(b, parentFile, inherited)] });
+		await dashboard();
+
+		const needs = (await initDb())
+			.query<{ session_file: string; reread: string }, [string]>(
+				"SELECT session_file, reread FROM spotlight_needs WHERE tool_call_id = ?",
+			)
+			.all(read);
+		// The fork's re-read is not the parent's need; filed under the fork, it would also displace the parent's row.
+		expect(needs.map(need => [need.session_file, JSON.parse(need.reread)])).toEqual([[parentFile, []]]);
+	});
+
 	it("backfills by re-parsing only transcripts modified since the experiment shipped", async () => {
 		const fresh = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		fresh.user("go");

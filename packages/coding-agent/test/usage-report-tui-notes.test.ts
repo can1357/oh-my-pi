@@ -178,7 +178,7 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 	});
 
 	it("keeps distinct buckets that share a label and window as separate rows (#16790)", () => {
-		// Antigravity's Google counter: a drained Gemini 4 Argon weekly bucket
+		// A drained Gemini Argon weekly bucket
 		// beside a barely-used shared Gemini weekly bucket. Both limits share the
 		// label and window, so label|window-keyed grouping merged them into one
 		// group whose "% free" was the mean (50%), hiding the drained bucket. The
@@ -187,15 +187,15 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		const bucket = (id: string, frac: number) => ({
 			id,
 			label: "Gemini",
-			scope: { provider: "google-antigravity", windowId: "weekly" },
+			scope: { provider: "google", windowId: "weekly" },
 			window: { id: "weekly", label: "Weekly", durationMs: 7 * 24 * HOUR, resetsAt: Date.now() + HOUR },
 			amount: { unit: "percent" as const, usedFraction: frac, remainingFraction: 1 - frac },
 			status: frac >= 1 ? ("exhausted" as const) : ("ok" as const),
 		});
 		const reports: UsageReport[] = [
-			report("google-antigravity", "user@example.test", [
-				bucket("google-antigravity:google:default:gemini-weekly", 0.0),
-				bucket("google-antigravity:google:default:gemini-argon-wtu-weekly", 1.0),
+			report("google", "user@example.test", [
+				bucket("google:google:default:gemini-weekly", 0.0),
+				bucket("google:google:default:gemini-argon-wtu-weekly", 1.0),
 			]),
 		];
 

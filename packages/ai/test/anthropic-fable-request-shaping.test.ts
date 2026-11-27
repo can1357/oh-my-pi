@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { AssistantMessage, Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type { AnthropicCompat, AssistantMessage, Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 
 function makeAnthropicModel(id: string): Model<"anthropic-messages"> {
 	return buildModel({
@@ -51,6 +52,56 @@ function adaptiveModel(id: string): Model<"anthropic-messages"> {
 	} as ModelSpec<"anthropic-messages">);
 }
 
+/**
+ * Custom-provider adaptive model: unlike the built-in Claude ladders, its
+ * effort ladder exposes `minimal`, which the Anthropic Messages wire rejects
+ * as an `output_config.effort` value.
+ */
+function customAdaptiveModel(): Model<"anthropic-messages"> {
+	const base = buildModel({
+		id: "claude-opus-5",
+		name: "claude-opus-5",
+		api: "anthropic-messages",
+		provider: "ccs",
+		baseUrl: "https://ccs.example/anthropic",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	});
+	return buildModel({
+		...base,
+		thinking: {
+			mode: "anthropic-adaptive",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		},
+		compat: base.compatConfig,
+	} as ModelSpec<"anthropic-messages">);
+}
+
+/** Adaptive Opus 4.7 behind a Vertex-style rawPredict proxy URL. */
+function vertexAdaptiveModel(compat?: AnthropicCompat): Model<"anthropic-messages"> {
+	return buildModel({
+		id: "claude-opus-4-7",
+		name: "Claude Opus 4.7",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl:
+			"https://us-east5-aiplatform.googleapis.com/v1/projects/example/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-5:streamRawPredict",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+		thinking: {
+			mode: "anthropic-adaptive",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		},
+		compat,
+	} as ModelSpec<"anthropic-messages">);
+}
+
 const CONTEXT: Context = {
 	systemPrompt: ["Stay concise."],
 	messages: [{ role: "user", content: "weather in paris?", timestamp: Date.now() }],
@@ -85,8 +136,10 @@ function abortedSignal(): AbortSignal {
 type CapturedPayload = {
 	thinking?: {
 		type: string;
+		budget_tokens?: number;
 		block_binding?: { prefix_mismatch_behavior: "drop_block" | "error" };
 	};
+	context_management?: unknown;
 	tool_choice?: { type: string };
 	output_config?: { effort?: string };
 	system?: Array<{ cache_control?: { type: "ephemeral"; ttl?: "1h" | "5m" } }>;
@@ -314,6 +367,59 @@ describe("Anthropic forced tool_choice", () => {
 			});
 			expect(payload.tool_choice?.type).toBe("tool");
 		}
+	});
+
+	// `clear_thinking_20251015` requires thinking enabled or adaptive, so a
+	// forced tool_choice that strips thinking must strip context_management too.
+	it.each([
+		["named", { type: "tool", name: "read" }],
+		["`any`", "any"],
+	] as const)(
+		"strips context_management when a forced %s tool_choice deletes adaptive thinking",
+		async (_label, toolChoice) => {
+			const payload = await capturePayload(
+				adaptiveModel("claude-opus-4-6"),
+				{ thinkingEnabled: true, reasoning: Effort.High, toolChoice },
+				{ ...CONTEXT, tools: [READ_TOOL] },
+			);
+			expect(payload.thinking).toBeUndefined();
+			expect(payload.context_management).toBeUndefined();
+		},
+	);
+});
+
+describe("Anthropic adaptive minimal effort clamp", () => {
+	it("clamps minimal to low in the adaptive effort mapper", () => {
+		const model = customAdaptiveModel();
+		expect(mapEffortToAnthropicAdaptiveEffort(model, Effort.Minimal)).toBe("low");
+		// Higher tiers pass through unchanged.
+		expect(mapEffortToAnthropicAdaptiveEffort(model, Effort.Medium)).toBe("medium");
+	});
+
+	it("never serializes output_config.effort=minimal", async () => {
+		const payload = await capturePayload(customAdaptiveModel(), {
+			thinkingEnabled: true,
+			reasoning: Effort.Minimal,
+		});
+		expect(payload.output_config?.effort).toBe("low");
+	});
+});
+
+describe("Anthropic adaptive thinking compat opt-out", () => {
+	const apiKeyOptions = { apiKey: "sk-ant-api-test", isOAuth: false, thinkingEnabled: true };
+
+	it("preserves adaptive thinking by default", async () => {
+		const payload = await capturePayload(vertexAdaptiveModel(), apiKeyOptions, { ...CONTEXT, tools: [READ_TOOL] });
+		expect(payload.thinking?.type).toBe("adaptive");
+	});
+
+	it("maps adaptive thinking to enabled when compat.disableAdaptiveThinking is set", async () => {
+		const payload = await capturePayload(vertexAdaptiveModel({ disableAdaptiveThinking: true }), apiKeyOptions, {
+			...CONTEXT,
+			tools: [READ_TOOL],
+		});
+		expect(payload.thinking?.type).toBe("enabled");
+		expect(typeof payload.thinking?.budget_tokens).toBe("number");
 	});
 });
 

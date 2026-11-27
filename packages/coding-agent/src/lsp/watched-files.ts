@@ -776,7 +776,7 @@ export class WatchedFilesForwarder {
 			let watcher: fs.FSWatcher;
 			try {
 				watcher = fs.watch(dir, { persistent: false }, (eventType, filename) => {
-					const known = filename !== null && watchers.has(foldCase(path.join(dir, filename.toString())));
+					const known = filename != null && watchers.has(foldCase(path.join(dir, filename.toString())));
 					this.#fsEvent(watch, root, true, dir, eventType, filename, known);
 				});
 			} catch (error) {
@@ -829,7 +829,7 @@ export class WatchedFilesForwarder {
 	): void {
 		if (this.#closed || watch.closed) return;
 		// A missing name means the watcher lost changes.
-		if (filename === null) return this.#lost(watch, root, recursive);
+		if (filename == null) return this.#lost(watch, root, recursive);
 		watch.seenAt = Date.now();
 		const target = path.join(dir, filename.toString());
 		if (eventType === "change") return this.#record(target, true, true);

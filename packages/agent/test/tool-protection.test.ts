@@ -82,8 +82,8 @@ describe("conditional tool-result protection", () => {
 	});
 
 	it("shakes regular read results but excludes skill:// reads", () => {
-		const skillResult = readResult("skill-read", "skill read output that must not be shaken");
-		const fileResult = readResult("file-read", "file read output that is eligible for shake");
+		const skillResult = readResult("skill-read", "skill read output that must not be shaken ".repeat(20));
+		const fileResult = readResult("file-read", "file read output that is eligible for shake ".repeat(20));
 		const entries = [
 			assistantReadCall("skill-read", "skill://session-memory"),
 			skillResult,

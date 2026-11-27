@@ -1,6 +1,7 @@
 import type { OAuthRefreshReason } from "../../auth/types";
 import type { FetchImpl } from "../../types";
 import type { OAuthProviderUnion } from "../registry";
+import type { DpopPrivateJwk } from "./dpop";
 
 export type OAuthCredentials = {
 	refresh: string;
@@ -11,6 +12,12 @@ export type OAuthCredentials = {
 	email?: string;
 	accountId?: string;
 	apiEndpoint?: string;
+	/**
+	 * GitHub Copilot: the account meters usage in AI credits
+	 * (`token_based_billing`), so requests record no premium-request estimate.
+	 * Read at login and from each Copilot quota fetch; absent when unknown.
+	 */
+	tokenBasedBilling?: boolean;
 	/**
 	 * Organization/workspace the token is scoped to (e.g. an Anthropic org
 	 * UUID or canonical Factory org ID). Lets one account email hold
@@ -41,6 +48,13 @@ export type OAuthCredentials = {
 	kiroOidcRegion?: string;
 	/** Kiro profile ARN the login routes by; absent for Builder ID. Embeds the AWS account id, so never displayed. */
 	kiroProfileArn?: string;
+	/**
+	 * DPoP (RFC 9449) private key the refresh token is bound to, generated at
+	 * sign-in. Every refresh signs a proof with it.
+	 */
+	dpopKey?: DpopPrivateJwk;
+	/** Latest `DPoP-Nonce` the token endpoint issued, so the next refresh skips its challenge. */
+	dpopNonce?: string;
 	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an

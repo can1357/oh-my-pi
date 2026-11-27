@@ -36,6 +36,8 @@ Internal URLs are searched in place: the native listing and lexical scan and the
 
 `find.hitThreshold` (a number above 0, up to 1; unset keeps `0.20`) sets τ, the verified-passage probability a file needs before it is reported as a hit, which is also the floor for the line ranges listed. It applies to the tool and to `omp find`. The default suits TypeSafe Jev. Decision models calibrate differently, and a judge whose probabilities run higher on unrelated passages needs a higher τ to keep the same precision.
 
+`find.timeoutMs` (milliseconds, an integer from `1000` to `600000`; default `20000`) is the wall-clock budget of one `find` tool call. A slow or serial judge, such as a self-hosted model answering one request at a time, needs a longer one; `omp find` is not bounded by it.
+
 Use `find` first when the implementing location is unknown. Use `grep` for known literals, regexes, or symbols, and `glob` for names. Scope a known subsystem and batch related questions. Scores below about `0.4` are weak evidence: widen the description or use `grep` before concluding absence. The tool has no hidden-file option; the CLI's `--hidden` is not a tool parameter.
 
 ## Outputs
@@ -74,14 +76,14 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 
 - Candidates judged by name: 128; files read: 20; windows per file: 24; window size: 8 KB; sketch: 384 B; passages verified: 40; sketch cutoff 0.45; hit threshold 0.20, or `find.hitThreshold` (`packages/coding-agent/src/tools/jfind/cascade.ts`).
 - Native lexical scan timeout: 30 s. Native judgments use `NativeJudge` (10 s per attempt, up to three attempts); the tool's 20 s wall budget can abort them earlier.
-- Per-call wall-clock budget: `20_000ms` (`FIND_TIMEOUT_MS` in `packages/coding-agent/src/tools/jfind/index.ts`), so a stalled judge never blocks the turn. Running out during verification returns the hits verified so far, marked partial; running out earlier, or before any hit was verified, raises a timeout error. The `omp find` CLI is not bounded this way.
+- Per-call wall-clock budget: `find.timeoutMs` (default `20000`, an integer from `1000` to `600000`), so a stalled judge never blocks the turn. Running out during verification returns the hits verified so far, marked partial; running out earlier, or before any hit was verified, raises a timeout error. The `omp find` CLI is not bounded this way.
 - Files over 4 MB are scanned by the lexical pass only up to the native grep cap and read only up to 4 MB (trimmed to the last full line).
 
 ## Errors
 
 - `ToolError` for an empty `query`, a `path` that does not exist (`Path not found: …`) or is neither a file nor a directory, a URL `:start-end` selector, or a session without a model registry.
 - Judge failures are not thrown: a failed request leaves its entries unjudged (filename and verification) or routes them onward as unknown (sketch scoring, so an outage never prunes). Failures are listed in the footer; the result becomes an error only when every request failed.
-- ``find timed out after 20.0s at "<phase>", before any hit was verified. Narrow `path` to a smaller tree, or use grep.`` when the `FIND_TIMEOUT_MS` (20 s) wall-clock budget elapses with nothing verified; `<phase>` is the last progress message (`lexical scan`, `filename ranking 64/128`, …). A caller abort is rethrown as-is, not converted.
+- ``find timed out after 20.0s at "<phase>", before any hit was verified. Narrow `path` to a smaller tree, or use grep.`` when the `find.timeoutMs` (default 20 s) wall-clock budget elapses with nothing verified; `<phase>` is the last progress message (`lexical scan`, `filename ranking 64/128`, …). A caller abort is rethrown as-is, not converted.
 
 ## Notes
 

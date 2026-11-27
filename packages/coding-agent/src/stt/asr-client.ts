@@ -42,12 +42,21 @@ export interface SttStreamOptions {
 	onPartial?: (text: string) => void;
 	/** A finalized segment, emitted once when the endpointer commits it. */
 	onSegment?: (text: string, index: number) => void;
+	/** The accelerated device failed to load the model; the worker runs on `fallbackDevice` instead. */
+	onDeviceFallback?: (fallback: SttDeviceFallback) => void;
+}
+
+export interface SttDeviceFallback {
+	device: string;
+	fallbackDevice: string;
+	error: string;
 }
 
 interface StreamState {
 	modelKey: SttModelKey;
 	onPartial: ((text: string) => void) | undefined;
 	onSegment: ((text: string, index: number) => void) | undefined;
+	onDeviceFallback: ((fallback: SttDeviceFallback) => void) | undefined;
 	resolve: (text: string) => void;
 	reject: (error: Error) => void;
 	/** Run `apply` (resolve/reject) once, then unregister the stream. */
@@ -128,6 +137,7 @@ export class SttClient {
 			modelKey,
 			onPartial: options.onPartial,
 			onSegment: options.onSegment,
+			onDeviceFallback: options.onDeviceFallback,
 			resolve,
 			reject,
 			finish,
@@ -166,6 +176,11 @@ export class SttClient {
 	}
 
 	#handleMessage(message: ModelWorkerMessage<SttWorkerOutbound>): void {
+		if (message.type === "device_fallback") {
+			const { device, fallbackDevice, error } = message;
+			this.#streams.get(message.id)?.onDeviceFallback?.({ device, fallbackDevice, error });
+			return;
+		}
 		if (message.type === "partial" || message.type === "segment" || message.type === "stream_done") {
 			const stream = this.#streams.get(message.id);
 			if (!stream) return;

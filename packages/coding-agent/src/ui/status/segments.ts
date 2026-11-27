@@ -104,15 +104,14 @@ export function thinkingWord(facts: StatusFacts): string | undefined {
 	return facts.thinkingLevel ?? "off";
 }
 
-/** Look pieces of the thinking display (`◒ high`, `⦸ off`, `⟳ auto`); empty when hidden. */
+/** Look pieces of the thinking display (`◒ high`, `⦸ off`, `⟳ auto`, `⟳ high`); empty when hidden. */
 function thinkingPieces(facts: StatusFacts, s: string): [] | [IconPiece, ...TextPiece[]] {
 	if (!facts.model?.thinking) return [];
 	if (facts.autoThinking) {
-		const resolved = facts.autoResolvedLevel;
-		if (resolved) return [{ icon: `thinking.${resolved}`, else: resolved, s, space: "none" }];
+		// Keep the auto indicator on a resolved level so it reads differently from a pinned one.
 		return [
 			{ icon: "thinking.autoPending", s },
-			{ t: "auto", s },
+			{ t: facts.autoResolvedLevel ?? "auto", s },
 		];
 	}
 	const level = facts.thinkingLevel ?? "off";
@@ -193,10 +192,20 @@ function modelSeg(input: SegInput): SegView {
 	const showLevel = input.options.model?.showThinkingLevel !== false;
 	const thinking = showLevel ? thinkingPieces(facts, look) : [];
 	const compact = input.compactThinking && thinking.length > 0;
-	const pieces: LookPiece[] = [
-		thinking.length > 0 && compact ? { ...thinking[0], lead: true, space: "after" } : { icon: "model", s: look },
-		{ t: name, s: look },
-	];
+	const pieces: LookPiece[] = [];
+	if (thinking.length > 0 && compact) {
+		const resolved = facts.autoThinking ? facts.autoResolvedLevel : undefined;
+		pieces.push({ ...thinking[0], lead: true, space: resolved ? "none" : "after" });
+		if (resolved) {
+			pieces.push({
+				icon: resolved === "off" ? "status.disabled" : `thinking.${resolved}`,
+				else: `${resolved} `,
+				lead: true,
+				s: look,
+			});
+		}
+	} else pieces.push({ icon: "model", s: look });
+	pieces.push({ t: name, s: look });
 	const spans: TspSpan[] = [span(name, native)];
 	const advisor = facts.advisor;
 	if (advisor) {
@@ -457,18 +466,41 @@ function statSeg(input: SegInput, value: number, icon: string, color: string): S
 	);
 }
 
+/** The session's own spend and its subagent tree's, as the cost segment bills them. */
+function sessionSpend(facts: SegInput["facts"]): { own: number; subagents: number } {
+	return {
+		own: Math.max(0, facts.usage.cost - (facts.usage.subagentCost ?? 0)),
+		subagents: Math.max(facts.subagentTreeCost ?? 0, facts.usage.subagentCost ?? 0),
+	};
+}
+
+/**
+ * Everything the session spent, split by billing: `paid` in dollars, `subscription` on a plan
+ * (the session and its subagents bill as the session does, an advisor as itself). Hosts with
+ * little room (Tern's phone) show one total from these rather than the cost segment's text.
+ */
+export function spendTotals(facts: SegInput["facts"]): { paid: number; subscription: number } {
+	const { own, subagents } = sessionSpend(facts);
+	const totals = { paid: 0, subscription: 0 };
+	totals[facts.usingSubscription ? "subscription" : "paid"] += own + subagents;
+	const advisor = facts.advisorCost;
+	if (advisor) totals[advisor.usingSubscription ? "subscription" : "paid"] += advisor.cost;
+	return totals;
+}
+
 function costSeg(input: SegInput): SegView | null {
 	const { facts, symbols } = input;
-	const own = Math.max(0, facts.usage.cost - (facts.usage.subagentCost ?? 0));
+	const { own, subagents } = sessionSpend(facts);
 	const text = billingSummary(
 		{
 			cost: own,
-			subagentCost: Math.max(facts.subagentTreeCost ?? 0, facts.usage.subagentCost ?? 0),
+			subagentCost: subagents,
 			usingSubscription: facts.usingSubscription,
 			premiumRequests: facts.usage.premiumRequests,
 			digits: 2,
 			pricingPeriod: facts.pricingPeriod,
 			advisor: facts.advisorCost,
+			aiu: facts.usage.aiu,
 		},
 		symbols,
 	);
@@ -731,7 +763,7 @@ export function segmentView(
 			return view(input, [span(text)], [{ icon: "time" }, { t: text }], "time");
 		}
 		case "session": {
-			const text = facts.sessionId?.slice(0, 8) || "new";
+			const text = facts.sessionId?.slice(0, 13) || "new"; // full UUIDv7 timestamp; 8 chars collide for ~65s
 			return view(input, [span(text)], [{ icon: "session" }, { t: text }], "session");
 		}
 		case "hostname": {
