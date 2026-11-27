@@ -1012,7 +1012,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const exitCode = result.exitCode;
 					const outputText =
 						result.cancelled || exitCode === undefined
-							? combinedOutput || result.output || "Command aborted"
+							? combinedOutput || result.output || "[aborted]"
 							: combinedOutput
 								? `${combinedOutput}\n\n${formatExitCodeNotice(exitCode)}`
 								: formatExitCodeNotice(exitCode);

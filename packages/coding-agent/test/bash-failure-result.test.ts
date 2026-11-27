@@ -113,7 +113,7 @@ describe("BashTool execution results", () => {
 		expect(result.isError).toBe(true);
 		expect(result.details?.timedOut).toBe(true);
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
-		expect(text.match(/\[Command timed out after 1 seconds\]/gu)).toHaveLength(1);
+		expect(text.match(/\[timed out after 1s\]/gu)).toHaveLength(1);
 	});
 
 	it("preserves the executor cancellation notice without classifying it as a timeout", async () => {
@@ -132,8 +132,8 @@ describe("BashTool execution results", () => {
 		const error = await execution.catch(error => error);
 		expect(error).toBeInstanceOf(Error);
 		const message = (error as Error).message;
-		expect(message.match(/\[Command cancelled\]/gu)).toHaveLength(1);
-		expect(message).not.toContain("Command aborted");
+		expect(message.match(/\[cancelled\]/gu)).toHaveLength(1);
+		expect(message).not.toContain("[aborted]");
 	});
 
 	it("returns a success result with no exit-code detail for a zero exit", async () => {

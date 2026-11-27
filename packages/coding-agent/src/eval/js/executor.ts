@@ -5,6 +5,7 @@ import {
 	OutputSink,
 } from "../../tools/streaming-output";
 import type { ToolSession } from "../../tools";
+import { formatTimeoutNotice } from "../../tools/details/bash";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -12,7 +13,6 @@ import {
 } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
-import { formatSessionTimeoutAnnotation } from "../kernel-session-registry";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext, hasLiveVmContext } from "./context-manager";
 import { formatCellError } from "./error-text";
@@ -91,7 +91,7 @@ function formatJsTimeoutAnnotation(timeoutMs: number | undefined): string {
 	// Timeout cancellation force-kills the worker (the only way to interrupt
 	// synchronous user code), which discards the persistent VM state. Say so,
 	// or the model will keep referencing variables that no longer exist.
-	return `${formatSessionTimeoutAnnotation(timeoutMs)}; JS worker killed, state gone`;
+	return `${formatTimeoutNotice(timeoutMs)}; JS worker killed, state gone`;
 }
 
 function formatPackageInstallTimeoutAnnotation(installDeadlineReached: boolean): string {

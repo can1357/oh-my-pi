@@ -1,6 +1,7 @@
 import * as path from "node:path";
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatTimeoutNotice } from "../tools/details/bash";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
@@ -117,13 +118,8 @@ export function requireRemainingKernelTimeoutMs(
 	return remainingMs;
 }
 
-export function formatSessionTimeoutAnnotation(timeoutMs?: number): string {
-	if (timeoutMs === undefined) return "timed out";
-	return `timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s`;
-}
-
 export function formatSessionKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKilled: boolean): string {
-	const timedOut = formatSessionTimeoutAnnotation(timeoutMs);
+	const timedOut = formatTimeoutNotice(timeoutMs);
 	return kernelKilled ? `${timedOut}; kernel killed, state gone` : `${timedOut}; kernel interrupted, state kept`;
 }
 

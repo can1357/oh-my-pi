@@ -2790,8 +2790,7 @@ function b() {
 			// backgrounded job hits its timeout in ~0.1s instead of a real
 			// wall-clock second. The auto-background-on-timeout decision path is
 			// unchanged; we assert the timeout-notice prefix rather than the
-			// rounded seconds (it reads "0" here only because the seam
-			// deliberately undercuts the 1s production floor).
+			// seconds (the seam deliberately undercuts the 1s production floor).
 			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
 
 			const result = await autoBackgroundBashTool.execute("test-call-9-auto-timeout-background", {
@@ -2812,7 +2811,7 @@ function b() {
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
 			expect(deliveries).toHaveLength(1);
 			expect(deliveries[0]?.jobId).toBe(jobId);
-			expect(deliveries[0]?.text).toContain("Command timed out after");
+			expect(deliveries[0]?.text).toContain("[timed out after");
 			await asyncJobManager.dispose();
 		});
 

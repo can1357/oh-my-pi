@@ -4,6 +4,7 @@ import {
 	formatWallTimeNotice,
 	formatExitCodeNotice,
 	formatTimeoutClampNotice,
+	formatTimeoutNotice,
 	WALL_TIME_NOTICE_MIN_MS,
 } from "./details/bash";
 import * as fs from "node:fs";
@@ -1390,21 +1391,20 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	): void {
 		const captureNotice = result.artifactError ? `\n\n[${formatArtifactErrorNotice(result.artifactError)}]` : "";
 		if (result.cancelled) {
-			// Local executor output already carries a leading `[Command cancelled]`
+			// Local executor output already carries a leading `[cancelled]`
 			// notice from the sink; PTY/bridge output does not, so annotate only
 			// the latter.
 			const out = normalizeResultOutput(result);
-			const annotated = out.startsWith("[Command cancelled]") ? out : out ? `${out}\n\n[Command aborted]` : out;
-			throw new ToolError(`${annotated || "Command aborted"}${captureNotice}`);
+			const annotated = out.startsWith("[cancelled]") ? out : out ? `${out}\n\n[aborted]` : "[aborted]";
+			throw new ToolError(`${annotated}${captureNotice}`);
 		}
 		if (result.timedOut === true) {
 			const out = normalizeResultOutput(result);
-			const message =
-				timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`;
-			throw new ToolError(`${out ? `${out}\n\n[${message}]` : message}${captureNotice}`);
+			const notice = `[${formatTimeoutNotice(timeoutSec === undefined ? undefined : timeoutSec * 1000)}]`;
+			throw new ToolError(`${out ? `${out}\n\n${notice}` : notice}${captureNotice}`);
 		}
 		if (result.exitCode === undefined) {
-			throw new ToolError(`${outputText}\n\nCommand failed: missing exit status${captureNotice}`);
+			throw new ToolError(`${outputText}\n\n[missing exit status]${captureNotice}`);
 		}
 	}
 
@@ -1499,8 +1499,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		if (isTimeout) {
 			details.timedOut = true;
-			const message =
-				timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`;
+			const message = formatTimeoutNotice(timeoutSec === undefined ? undefined : timeoutSec * 1000);
 			// executeBash has already emitted this leading sink notice. PTY output has not, and output shaped from the
 			// artifact never carries it, so provide the LLM-facing annotation exactly once in the text sent.
 			const lead = outputLines[0];
@@ -2286,7 +2285,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (waitResult.kind === "aborted") {
 				autoBgManager.cancel(job.jobId);
 				autoBgManager.releaseForegroundJob(job.jobId);
-				throw new ToolAbortError(job.getLatestText() || "Command aborted");
+				throw new ToolAbortError(job.getLatestText() || "[aborted]");
 			}
 			job.background();
 			autoBgManager.backgroundJob(job.jobId);
@@ -2349,7 +2348,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			// we need explicit kill-before-read ordering and distinct abort vs
 			// timeout result shapes. Per-route race retained for testability.
 			if (signal?.aborted) {
-				throw new ToolAbortError("Command aborted");
+				throw new ToolAbortError("[aborted]");
 			}
 
 			const bridgeWallTimeStart = performance.now();
@@ -2423,7 +2422,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				]);
 				if (createRaced.kind === "aborted" || signal?.aborted) {
 					cleanupLateCreate(createP);
-					throw new ToolAbortError("Command aborted");
+					throw new ToolAbortError("[aborted]");
 				}
 				if (createRaced.kind === "timeout") {
 					cleanupLateCreate(createP);
@@ -2491,7 +2490,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 					if (outcome?.kind === "aborted" || signal?.aborted) {
 						await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
-						throw new ToolAbortError("Command aborted");
+						throw new ToolAbortError("[aborted]");
 					}
 
 					if (outcome?.kind === "timeout") {
@@ -2714,13 +2713,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			const isTimeout = result.timedOut === true;
 			if (!isTimeout) {
 				const out = normalizeResultOutput(result);
-				// The local executor already prepends `[Command cancelled]`; PTY
+				// The local executor already prepends `[cancelled]`; PTY
 				// output does not, so preserve one cancellation notice in either case.
-				let message = out.startsWith("[Command cancelled]")
-					? out
-					: out
-						? `${out}\n\n[Command aborted]`
-						: "Command aborted";
+				let message = out.startsWith("[cancelled]") ? out : out ? `${out}\n\n[aborted]` : "[aborted]";
 				if (result.artifactError) message += `\n\n[${formatArtifactErrorNotice(result.artifactError)}]`;
 				if (signal?.aborted) {
 					throw new ToolAbortError(message);

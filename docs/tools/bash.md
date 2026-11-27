@@ -308,7 +308,7 @@ Choose the setting by the desired outcome:
   - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable schemes, non-write mutations (`rm`, `mkdir`, …) of handler-owned schemes, and `out://` writes when `out.enabled` is off `EROFS`, appends to replace-only handler URLs and non-UTF-8 handler payloads `EINVAL`, oversize `out://` replies `EFBIG`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
 - Execution:
   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `[exit code <n>]`.
-  - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
+  - missing exit code -> thrown `ToolError` with `[missing exit status]`.
   - timeout -> local, PTY, and client-terminal execution return an `isError` result with `details.timedOut: true` and a timeout notice. Managed background execution records it as a failed job.
   - user abort -> `ToolAbortError` when the caller signal is aborted.
 - Artifact allocation/save failures in `saveBashOriginalArtifact()` do not fail the command. Sink artifact failures also permit execution to continue, but return `artifactError` metadata and an incomplete-capture notice instead of advertising an incomplete artifact as full output.

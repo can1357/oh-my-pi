@@ -85,7 +85,7 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 - Text is stdout/stderr (exactly what `print` and the trailing-expression echo wrote) plus image dimension notes.
 - Image-only success reports `(displayed N image(s); no text output)`; a cell with no visible output reports `(no output)`.
 - A nonzero backend exit appends `[exit code N]`, marks the cell `error`, and sets `details.isError`.
-- Cancellation returns the captured output or `Command aborted`, with `details.isError=true`.
+- Cancellation returns the captured output or `[aborted]`, with `details.isError=true`.
 
 `EvalToolDetails`:
 

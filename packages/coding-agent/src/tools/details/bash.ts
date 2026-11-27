@@ -78,6 +78,15 @@ export function formatWallTimeNotice(wallTimeMs: number): string {
 	return `[took ${formatWallTimeSeconds(wallTimeMs)}s]`;
 }
 
+/**
+ * Body of the timeout notice bash and eval put on a run their deadline ended (`timeoutMs` undefined:
+ * no deadline known); callers bracket it, as `OutputSink.dump` does.
+ */
+export function formatTimeoutNotice(timeoutMs?: number): string {
+	if (timeoutMs === undefined) return "timed out";
+	return `timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s`;
+}
+
 /** Formats the notice bash and eval add when the requested `timeout` was clamped. */
 export function formatTimeoutClampNotice(requestedSec: number, effectiveSec: number): string {
 	return `[timeout clamped: ${requestedSec}s → ${effectiveSec}s]`;
