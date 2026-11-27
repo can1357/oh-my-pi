@@ -389,6 +389,8 @@ export interface UsageCredential {
 	expiresAt?: number;
 	accountId?: string;
 	projectId?: string;
+	/** Provider-reported subscription tier id (see OAuthCredentials.userTier). */
+	userTier?: string;
 	email?: string;
 	/** Organization/workspace the credential is scoped to (see OAuthCredentials.orgId). */
 	orgId?: string;

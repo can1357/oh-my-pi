@@ -7,6 +7,9 @@
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
+- Google Antigravity login now remembers the account's tier across token refreshes, and usage lookups send it ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
+- Google Antigravity requests now send the native client's prompt and trajectory ids ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
+- Google Antigravity honors the native `ANTIGRAVITY_PROJECT_ID` and `ANTIGRAVITY_TRAJECTORY_ID` overrides ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

@@ -3511,13 +3511,13 @@ export class ModelRegistry {
 								"google-antigravity",
 								oauthToken,
 							);
-							return (
-								accounts?.map(account => ({
-									accessToken: account.accessToken,
-									accountKey: oauthAccountKey(account),
-									projectId: account.projectId,
-								})) ?? null
-							);
+							if (!accounts) return null;
+							return accounts.map(account => ({
+								accessToken: account.accessToken,
+								accountKey: oauthAccountKey(account),
+								projectId: account.projectId,
+								userTier: account.userTier,
+							}));
 						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
 						fetch: this.#fetch,

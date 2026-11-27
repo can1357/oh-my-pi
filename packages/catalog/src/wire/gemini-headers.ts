@@ -9,17 +9,20 @@ import type { AntigravityModelWireProfile } from "../types";
  *
  * Format captured from the real 2.26.0 `antigravity/hub` client:
  * `antigravity/hub/2.26.0 (aidev_client; os_type=darwin; arch=arm64; cl=1005016104)`.
+ * The 2.34.0 language server assembles the same header from the format
+ * literals `%s/%s/%s (%s)` and `cl=%d`.
  * The backend gates newer models (e.g. gemini-3.7-flash) on the client version,
  * so the version tracks the latest Antigravity release via the update manifest
- * (see {@link ensureAntigravityVersion}) with `DEFAULT_ANTIGRAVITY_VERSION` as
- * the offline fallback. os_type/arch name the native build for the host OS:
+ * (see {@link ensureAntigravityVersion}) with `DEFAULT_ANTIGRAVITY_VERSION`
+ * (2.34.0, the release whose language server the wire fields are read from)
+ * as the offline fallback. os_type/arch name the native build for the host OS:
  * each 2.26.0 installer ships one language-server build whose Go target is
  * stamped into the header (macOS darwin/arm64, Linux linux/amd64, Windows
  * windows/amd64; no other OS/arch builds exist); see
  * {@link getAntigravityPlatform}. The changelist is identical across those
  * builds. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.26.0";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.34.0";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
@@ -120,7 +123,8 @@ export function getAntigravityUserAgent(): string {
 	const version = getAntigravityVersion();
 	// The backend does not validate `cl` (verified live: stale, zero, and absent
 	// cl all pass model gating on daily-cloudcode-pa; only the version gates).
-	// The update manifest carries no changelist, so the captured value stays.
+	// The update manifest carries no changelist, so the 2.26.0 capture stays:
+	// stale by design, and inert by the note above.
 	const cl = process.env.PI_AI_ANTIGRAVITY_CL || "1005016104";
 	const host = getAntigravityPlatform();
 	const os = process.env.PI_AI_ANTIGRAVITY_OS || host.os;

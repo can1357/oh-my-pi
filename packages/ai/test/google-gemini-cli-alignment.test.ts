@@ -182,12 +182,14 @@ describe("Google Gemini CLI alignment", () => {
 			requestType?: string;
 			userAgent?: string;
 			requestId?: string;
+			userPromptId?: string;
 		};
 
 		expect(payload.request.sessionId).toBeUndefined();
 		expect(payload.requestType).toBeUndefined();
 		expect(payload.userAgent).toBeUndefined();
 		expect(payload.requestId).toBeUndefined();
+		expect(payload.userPromptId).toBeUndefined();
 	});
 	it("keeps every system prompt block in systemInstruction instead of conversation contents", () => {
 		const model = createModel("custom-cca");
@@ -275,6 +277,7 @@ describe("Google Gemini CLI alignment", () => {
 			};
 			userAgent?: string;
 			requestId?: string;
+			userPromptId?: string;
 		};
 
 		expect(payload.request.sessionId).toMatch(/^-[0-9]+$/);
@@ -291,6 +294,8 @@ describe("Google Gemini CLI alignment", () => {
 		expect(labels.cascade_id).toBe(agentId!);
 		expect(labels.root_cascade_id).toBe(agentId!);
 		expect(labels.request_id).toBe(`${labels.trajectory_id}-0`);
+		// The top-level user_prompt_id carries the per-request label value.
+		expect(payload.userPromptId).toBe(labels.request_id!);
 		expect(labels.last_step_index).toBe("0");
 		expect(labels.used_claude).toBe("false");
 		expect(labels.used_claude_conservative).toBe("false");
@@ -563,6 +568,103 @@ describe("Google Gemini CLI alignment", () => {
 		// Go net/http offers gzip only and sends no Accept of its own.
 		expect(requestHeaders!.get("Accept-Encoding")).toBe("gzip");
 		expect(requestHeaders!.get("Accept")).toBeNull();
+	});
+
+	describe("Antigravity request identity headers", () => {
+		/** Captures every generate request (headers + parsed body); manifest lookups fall through. */
+		function captureGenerateRequests() {
+			const captured: Array<{
+				headers: Headers;
+				body: {
+					project?: string;
+					userPromptId?: string;
+					request?: { labels?: Record<string, string> };
+				};
+			}> = [];
+			const fetchMock: FetchImpl = async (url, init) => {
+				if (String(url).includes(":streamGenerateContent")) {
+					captured.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+				}
+				return new Response('{"error":{"message":"bad request"}}', { status: 400 });
+			};
+			return { captured, fetchMock };
+		}
+
+		async function send(
+			provider: "custom-cca" | "google-antigravity",
+			fetchMock: FetchImpl,
+			credential: Record<string, unknown> = {},
+		) {
+			await streamGoogleGeminiCli(createModel(provider), createContext(), {
+				apiKey: JSON.stringify({ token: "token", projectId: "proj-123", ...credential }),
+				fetch: fetchMock,
+			}).result();
+		}
+
+		/** Runs `body` with `env` applied (`undefined` deletes), restoring the previous values after. */
+		async function withEnv(env: Record<string, string | undefined>, body: () => Promise<void>) {
+			const saved = Object.keys(env).map(name => [name, process.env[name]] as const);
+			for (const [name, value] of Object.entries(env)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			try {
+				await body();
+			} finally {
+				for (const [name, value] of saved) {
+					if (value === undefined) delete process.env[name];
+					else process.env[name] = value;
+				}
+			}
+		}
+
+		it("mirrors the body's userPromptId and trajectory_id label as X-Aicode-Prompt-Id and X-Aicode-Trajectory-Id", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			await send("google-antigravity", fetchMock);
+
+			expect(captured).toHaveLength(1);
+			const [{ headers, body }] = captured;
+			const labels = body.request?.labels ?? {};
+			expect(body.userPromptId).toBe(labels.request_id!);
+			expect(headers.get("X-Aicode-Prompt-Id")).toBe(body.userPromptId!);
+			expect(labels.trajectory_id).toMatch(/^[0-9a-f-]{36}$/);
+			expect(headers.get("X-Aicode-Trajectory-Id")).toBe(labels.trajectory_id!);
+		});
+
+		it("lets ANTIGRAVITY_PROJECT_ID override the credential's project per request", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			await withEnv({ ANTIGRAVITY_PROJECT_ID: "env-project" }, async () => {
+				await send("google-antigravity", fetchMock);
+				await send("custom-cca", fetchMock);
+			});
+			await withEnv({ ANTIGRAVITY_PROJECT_ID: undefined }, () => send("google-antigravity", fetchMock));
+
+			expect(captured.map(request => request.body.project)).toEqual(["env-project", "proj-123", "proj-123"]);
+		});
+
+		it("seeds the trajectory from a UUID ANTIGRAVITY_TRAJECTORY_ID and ignores anything else", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			const pinned = "0b8e3c2a-5f1d-4e6b-9a7c-2d4f6e8a0b1c";
+			await withEnv({ ANTIGRAVITY_TRAJECTORY_ID: pinned }, () => send("google-antigravity", fetchMock));
+			await withEnv({ ANTIGRAVITY_TRAJECTORY_ID: "not-a-uuid" }, () => send("google-antigravity", fetchMock));
+
+			expect(captured[0]!.body.request?.labels?.trajectory_id).toBe(pinned);
+			expect(captured[0]!.headers.get("X-Aicode-Trajectory-Id")).toBe(pinned);
+			expect(captured[0]!.body.userPromptId).toBe(`${pinned}-0`);
+			expect(captured[1]!.body.request?.labels?.trajectory_id).not.toBe("not-a-uuid");
+			expect(captured[1]!.body.request?.labels?.trajectory_id).toMatch(/^[0-9a-f-]{36}$/);
+		});
+
+		it("leaves the Cloud Code Assist transport without Antigravity identity headers", async () => {
+			const { captured, fetchMock } = captureGenerateRequests();
+			await send("custom-cca", fetchMock);
+
+			expect(captured).toHaveLength(1);
+			const [{ headers, body }] = captured;
+			expect(headers.get("X-Aicode-Prompt-Id")).toBeNull();
+			expect(headers.get("X-Aicode-Trajectory-Id")).toBeNull();
+			expect(body.userPromptId).toBeUndefined();
+		});
 	});
 
 	it("filters out empty text parts at stream end but preserves terminal thought signatures", async () => {

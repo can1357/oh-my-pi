@@ -92,6 +92,7 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		expiresAt: credential.expires,
 		accountId: credential.accountId,
 		projectId: credential.projectId,
+		userTier: credential.userTier,
 		email: credential.email,
 		orgId: credential.orgId,
 		orgName: credential.orgName,

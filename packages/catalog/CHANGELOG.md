@@ -7,17 +7,21 @@
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
+- Google Antigravity model discovery now sends a request id, plus the account's tier and a configured cloud location, like the native client ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
 - Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Devin's Fast models (`-fast`) are no longer listed separately: each model carries its fast lane, which `/fast` switches on
+- Google Antigravity requests now identify as Antigravity 2.34.0 instead of 2.26.0 when the update manifest cannot be reached ([#20258](https://github.com/can1357/oh-my-pi/pull/20258) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
 - Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Added
+
+
 ### Removed
 
 - Removed unused exports `hasQuotaTierPolicy` (`/compat/behavior`), `hasRoutingVariants` (`/compat/taxonomy`), `toFirepassPublicModelId` (`/fireworks-model-id`), `isAzureDeploymentsUrl` (`/hosts`) and `toPositiveNumberOrNull` (`/utils`) ([#20528](https://github.com/can1357/oh-my-pi/pull/20528))

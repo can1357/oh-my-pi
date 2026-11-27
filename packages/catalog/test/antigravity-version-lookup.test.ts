@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { ensureAntigravityVersion, getAntigravityPlatform } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import {
+	DEFAULT_ANTIGRAVITY_VERSION,
+	ensureAntigravityVersion,
+	getAntigravityPlatform,
+	getAntigravityUserAgent,
+} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 const RETRY_WINDOW_MS = 10 * 60_000;
 // The lookup state is process-wide; every test starts on a fresh clock past any
@@ -77,5 +82,38 @@ describe("getAntigravityPlatform", () => {
 
 	it("falls back to the Linux build on an OS without a native client", () => {
 		expect(getAntigravityPlatform("freebsd")).toEqual({ os: "linux", arch: "amd64" });
+	});
+});
+
+describe("getAntigravityUserAgent", () => {
+	const ENV_NAMES = [
+		"PI_AI_ANTIGRAVITY_VERSION",
+		"PI_AI_ANTIGRAVITY_CL",
+		"PI_AI_ANTIGRAVITY_OS",
+		"PI_AI_ANTIGRAVITY_ARCH",
+	] as const;
+	const saved = ENV_NAMES.map(name => [name, process.env[name]] as const);
+
+	beforeEach(() => {
+		for (const name of ENV_NAMES) delete process.env[name];
+		// Pin the host so the assertion names one real client's UA.
+		process.env.PI_AI_ANTIGRAVITY_OS = "linux";
+		process.env.PI_AI_ANTIGRAVITY_ARCH = "amd64";
+	});
+
+	afterEach(() => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	});
+
+	it("falls back to the pinned hub release when the manifest lookup fails", async () => {
+		// The offline path: no version override and a manifest fetch that fails.
+		const failingFetch = () => Promise.resolve(new Response("unavailable", { status: 503 }));
+		await ensureAntigravityVersion(failingFetch);
+		expect(getAntigravityUserAgent()).toBe(
+			`antigravity/hub/${DEFAULT_ANTIGRAVITY_VERSION} (aidev_client; os_type=linux; arch=amd64; cl=1005016104)`,
+		);
 	});
 });

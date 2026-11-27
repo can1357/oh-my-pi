@@ -450,6 +450,7 @@ interface CloudCodeAssistRequest {
 	requestType?: string;
 	userAgent?: string;
 	requestId?: string;
+	userPromptId?: string;
 }
 
 interface CloudCodeAssistResponseChunk {
@@ -526,7 +527,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 			const isAntigravity = model.provider === "google-antigravity";
 			const parsedCredentials = parseGeminiCliCredentials(apiKeyRaw);
-			const { accessToken, projectId } = parsedCredentials;
+			const { accessToken } = parsedCredentials;
+			// The native client's embedded JS reads `ANTIGRAVITY_PROJECT_ID` at
+			// request time (static analysis of 2.34.0 / agy 1.5.14), so the
+			// override applies per request, not only at login.
+			const projectId = (isAntigravity && process.env.ANTIGRAVITY_PROJECT_ID) || parsedCredentials.projectId;
 			// AuthStorage already refreshed credentials before threading them
 			// here (see {@link oauthRefreshSkewMs}). If the credential lands
 			// expired we bail rather than POSTing a stale token; the next call
@@ -598,7 +603,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			// Multi-account discovery keys per-account request constants by this
 			// credential's identity; see `Model.accountAccess`.
 			const accountKey = isAntigravity
-				? oauthAccountKey({ accountId: parsedCredentials.accountId, email: parsedCredentials.email, projectId })
+				? oauthAccountKey({
+						accountId: parsedCredentials.accountId,
+						email: parsedCredentials.email,
+						projectId: parsedCredentials.projectId,
+					})
 				: undefined;
 			let requestBody = buildRequest(model, requestContext, projectId, options, isAntigravity, accountKey);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
@@ -610,10 +619,20 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
+			// `X-Aicode-Prompt-Id` / `X-Aicode-Trajectory-Id` are request headers
+			// of the 2.34.0 language server and agy 1.5.14 (static analysis); they
+			// mirror the body's `userPromptId` and `trajectory_id` label.
+			const antigravityTrajectoryId = isAntigravity ? requestBody.request?.labels?.trajectory_id : undefined;
 			const requestHeaders = {
 				Authorization: `Bearer ${accessToken}`,
 				"Content-Type": "application/json",
-				...(isAntigravity ? getAntigravityHeaders() : { Accept: "text/event-stream" }),
+				...(isAntigravity
+					? {
+							...getAntigravityHeaders(),
+							...(requestBody.userPromptId ? { "X-Aicode-Prompt-Id": requestBody.userPromptId } : {}),
+							...(antigravityTrajectoryId ? { "X-Aicode-Trajectory-Id": antigravityTrajectoryId } : {}),
+						}
+					: { Accept: "text/event-stream" }),
 				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
 					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
 					: {}),
@@ -1230,6 +1249,23 @@ interface AntigravityRequestEnvelope {
 	sessionId: string;
 	requestId: string;
 	labels: Record<string, string>;
+	/** Top-level `userPromptId`; see {@link buildAntigravityRequestEnvelope}. */
+	userPromptId: string;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Trajectory id for a newly started conversation: the native
+ * `ANTIGRAVITY_TRAJECTORY_ID` override (found by static analysis of the 2.34.0
+ * language server and agy 1.5.14) when it is a UUID, else a fresh one. It is a
+ * debug override: the fixed value pins ONE trajectory across every
+ * conversation and every serving account, so it links those accounts by
+ * construction.
+ */
+function newAntigravityTrajectoryId(): string {
+	const pinned = process.env.ANTIGRAVITY_TRAJECTORY_ID;
+	return pinned && UUID_PATTERN.test(pinned) ? pinned : randomUUID();
 }
 
 /**
@@ -1244,6 +1280,11 @@ interface AntigravityRequestEnvelope {
  * are inserted in alphabetical key order like the real client. The step never
  * moves backwards, so a compacted or resent context still advances it. Without
  * session state (direct callers/tests) it falls back to ephemeral ids.
+ *
+ * `userPromptId` is the top-level `user_prompt_id` the 2.34.0 envelope proto
+ * gained. It takes the `labels.request_id` value (`<trajectoryId>-<n>`), which
+ * matches the field name and is per request like the native id; the exact
+ * value the native client sends is unverified.
  */
 function buildAntigravityRequestEnvelope(
 	model: Model<"google-gemini-cli">,
@@ -1255,14 +1296,14 @@ function buildAntigravityRequestEnvelope(
 	let requestIndex = 0;
 	if (state) {
 		state.agentId ??= randomUUID();
-		state.trajectoryId ??= randomUUID();
+		state.trajectoryId ??= newAntigravityTrajectoryId();
 		state.sessionId ??= randomSignedDecimalSessionId();
 		state.stepIndex = Math.max(contextSteps, (state.stepIndex ?? 0) + 1);
 		requestIndex = state.requestCount ?? 0;
 		state.requestCount = requestIndex + 1;
 	}
 	const agentId = state?.agentId ?? randomUUID();
-	const trajectoryId = state?.trajectoryId ?? randomUUID();
+	const trajectoryId = state?.trajectoryId ?? newAntigravityTrajectoryId();
 	const sessionId = state?.sessionId ?? deriveAntigravitySessionId(context);
 	const step = state?.stepIndex ?? contextSteps;
 	const requestId = `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`;
@@ -1279,7 +1320,7 @@ function buildAntigravityRequestEnvelope(
 	labels.used_claude = usageLabel;
 	labels.used_claude_conservative = usageLabel;
 	labels.used_non_gemini_model = String(model.identity.class !== "gemini");
-	return { sessionId, requestId, labels };
+	return { sessionId, requestId, labels, userPromptId: labels.request_id };
 }
 
 export function buildRequest(
@@ -1448,6 +1489,7 @@ export function buildRequest(
 			request,
 			model: wireModelId,
 			userAgent: "antigravity",
+			userPromptId: envelope.userPromptId,
 		};
 	}
 

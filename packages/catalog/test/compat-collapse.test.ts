@@ -17,6 +17,7 @@ import {
 import { stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
 	ANTIGRAVITY_PRIMARY_ENDPOINT,
+	buildAntigravityFetchModelsBody,
 	fetchAntigravityDiscoveryModels,
 } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -1616,31 +1617,180 @@ describe("antigravity discovery collapsing", () => {
 		});
 	});
 
-	it("sends the Cloud Code Assist project in the discovery body only when known", async () => {
-		const bodies: unknown[] = [];
-		const recordingFetcher = Object.assign(
-			(input: string | URL | Request, init?: RequestInit) => {
-				if (String(input).includes(":fetchAvailableModels")) bodies.push(JSON.parse(String(init?.body)));
-				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
-			},
-			{ preconnect: fetch.preconnect },
-		);
+	describe("discovery request body", () => {
+		const ENV_NAMES = [
+			"ANTIGRAVITY_PROJECT_ID",
+			"PI_AI_ANTIGRAVITY_USER_TIER",
+			"AICODE_USER_TIER",
+			"PI_AI_ANTIGRAVITY_LOCATION",
+			// Deliberately not consulted by the body builder; kept here so the test restores them.
+			"GOOGLE_CLOUD_LOCATION",
+			"GOOGLE_CLOUD_REGION",
+		] as const;
+		const NATIVE_REQUEST_ID = /^agent\/[0-9a-f-]{36}\/\d+\/[0-9a-f-]{36}\/1$/;
 
-		await fetchAntigravityDiscoveryModels({
-			token: "t",
-			endpoint: "https://cca.test",
-			projectId: "p-1",
-			userAgent: "test",
-			fetcher: recordingFetcher,
-		});
-		await fetchAntigravityDiscoveryModels({
-			token: "t",
-			endpoint: "https://cca.test",
-			userAgent: "test",
-			fetcher: recordingFetcher,
+		/** Runs `body` with every discovery env override cleared, then `env` applied; restores them after. */
+		async function withEnv<T>(env: Partial<Record<(typeof ENV_NAMES)[number], string>>, body: () => Promise<T> | T) {
+			const saved = ENV_NAMES.map(name => [name, process.env[name]] as const);
+			for (const name of ENV_NAMES) delete process.env[name];
+			Object.assign(process.env, env);
+			try {
+				return await body();
+			} finally {
+				for (const [name, value] of saved) {
+					if (value === undefined) delete process.env[name];
+					else process.env[name] = value;
+				}
+			}
+		}
+
+		function recordingFetcher() {
+			const requests: { url: string; body: Record<string, unknown> }[] = [];
+			const fetcher = Object.assign(
+				(input: string | URL | Request, init?: RequestInit) => {
+					if (String(input).includes(":fetchAvailableModels"))
+						requests.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+					return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+				},
+				{ preconnect: fetch.preconnect },
+			);
+			return { requests, fetcher };
+		}
+
+		it("sends the Cloud Code Assist project only when known, with a native-shaped request id", async () => {
+			const { requests, fetcher } = recordingFetcher();
+			await withEnv({}, async () => {
+				await fetchAntigravityDiscoveryModels({
+					token: "t",
+					endpoint: "https://cca.test",
+					projectId: "p-1",
+					userAgent: "test",
+					fetcher,
+				});
+				await fetchAntigravityDiscoveryModels({
+					token: "t",
+					endpoint: "https://cca.test",
+					userAgent: "test",
+					fetcher,
+				});
+			});
+
+			expect(requests.map(request => request.body)).toEqual([
+				{ project: "p-1", requestId: expect.stringMatching(NATIVE_REQUEST_ID) },
+				{ requestId: expect.stringMatching(NATIVE_REQUEST_ID) },
+			]);
+			expect(requests[0]!.body.requestId).not.toBe(requests[1]!.body.requestId);
 		});
 
-		expect(bodies).toEqual([{ project: "p-1" }, {}]);
+		it("adds entitlement and location only when a tier or location is known", async () => {
+			await withEnv({}, () => {
+				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" })).toEqual({
+					project: "p-1",
+					requestId: "r",
+				});
+				expect(
+					buildAntigravityFetchModelsBody({
+						projectId: "p-1",
+						userTier: "standard-tier",
+						location: "us-central1",
+						requestId: "r",
+					}),
+				).toEqual({
+					project: "p-1",
+					requestId: "r",
+					entitlement: { userTier: "standard-tier" },
+					location: "us-central1",
+				});
+			});
+		});
+
+		it("resolves tier, location and project through the native env overrides", async () => {
+			await withEnv({ AICODE_USER_TIER: "aicode-tier", PI_AI_ANTIGRAVITY_LOCATION: "europe-west4" }, () => {
+				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" })).toEqual({
+					project: "p-1",
+					requestId: "r",
+					entitlement: { userTier: "aicode-tier" },
+					location: "europe-west4",
+				});
+				// Vertex's GOOGLE_CLOUD_* vars are not consulted on this OAuth path.
+				process.env.GOOGLE_CLOUD_REGION = "gcp-region";
+				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" }).location).toBe("europe-west4");
+				delete process.env.PI_AI_ANTIGRAVITY_LOCATION;
+				expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" })).toEqual({
+					project: "p-1",
+					requestId: "r",
+					entitlement: { userTier: "aicode-tier" },
+				});
+			});
+			await withEnv(
+				{
+					ANTIGRAVITY_PROJECT_ID: "env-project",
+					PI_AI_ANTIGRAVITY_USER_TIER: "pi-tier",
+					AICODE_USER_TIER: "aicode-tier",
+					PI_AI_ANTIGRAVITY_LOCATION: "pi-location",
+				},
+				() => {
+					// The native client reads ANTIGRAVITY_PROJECT_ID per request, so it beats the stored project.
+					expect(buildAntigravityFetchModelsBody({ projectId: "p-1", requestId: "r" })).toEqual({
+						project: "env-project",
+						requestId: "r",
+						entitlement: { userTier: "pi-tier" },
+						location: "pi-location",
+					});
+					// An account's own tier and an explicit location beat the env.
+					expect(
+						buildAntigravityFetchModelsBody({ userTier: "own-tier", location: "own-location", requestId: "r" }),
+					).toEqual({
+						project: "env-project",
+						requestId: "r",
+						entitlement: { userTier: "own-tier" },
+						location: "own-location",
+					});
+				},
+			);
+		});
+
+		it("sends each account's tier with its own roster request", async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-roster-tier-"));
+			const bodies = new Map<string, Record<string, unknown>>();
+			const fetcher = Object.assign(
+				(input: string | URL | Request, init?: RequestInit) => {
+					if (!String(input).includes(":fetchAvailableModels"))
+						return Promise.resolve(new Response("version: 2.19.1\n"));
+					bodies.set(new Headers(init?.headers).get("Authorization")!, JSON.parse(String(init?.body)));
+					return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+				},
+				{ preconnect: fetch.preconnect },
+			);
+			try {
+				await withEnv({}, async () => {
+					const options = googleAntigravityModelManagerOptions({
+						resolveAccounts: async () => [
+							{
+								accessToken: "paid",
+								accountKey: "paid@example.com",
+								projectId: "p-paid",
+								userTier: "standard-tier",
+							},
+							{ accessToken: "unknown", accountKey: "unknown@example.com", projectId: "p-unknown" },
+						],
+						endpoint: "https://cca.test",
+						fetch: fetcher,
+					});
+					await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
+				});
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+			expect(bodies.get("Bearer paid")).toMatchObject({
+				project: "p-paid",
+				entitlement: { userTier: "standard-tier" },
+			});
+			expect(bodies.get("Bearer unknown")).toEqual({
+				project: "p-unknown",
+				requestId: expect.stringMatching(NATIVE_REQUEST_ID),
+			});
+		});
 	});
 
 	it("uses the primary daily endpoint by default", async () => {

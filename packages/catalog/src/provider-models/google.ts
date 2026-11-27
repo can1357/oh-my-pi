@@ -32,6 +32,8 @@ export interface GoogleAntigravityAccount {
 	accountKey?: string;
 	/** Cloud Code Assist project of the credential, sent with roster discovery like the native client. */
 	projectId?: string;
+	/** Provider-reported tier id of the credential, sent as the roster request's `entitlement.userTier`. */
+	userTier?: string;
 }
 
 export interface GoogleAntigravityModelManagerConfig {
@@ -104,6 +106,7 @@ export function googleAntigravityModelManagerOptions(
 									token: account.accessToken,
 									endpoint: config?.endpoint,
 									projectId: account.projectId,
+									userTier: account.userTier,
 									fetcher,
 								}),
 							})),

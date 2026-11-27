@@ -168,10 +168,20 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 	/** Optional endpoint override. Defaults to Antigravity fallback endpoints. */
 	endpoint?: string;
 	/**
-	 * Cloud Code Assist project the account is onboarded to. Sent as the body's
-	 * `project` field like the native client; the body is `{}` when absent.
+	 * Cloud Code Assist project the account is onboarded to, sent as the body's
+	 * `project` like the native client (omitted when absent); the native
+	 * `ANTIGRAVITY_PROJECT_ID` override wins. See {@link buildAntigravityFetchModelsBody}.
 	 */
 	projectId?: string;
+	/**
+	 * Provider-reported tier id of the account (`loadCodeAssist` `currentTier.id`),
+	 * sent as `entitlement.userTier`. See {@link buildAntigravityFetchModelsBody}.
+	 */
+	userTier?: string;
+	/** Cloud location sent as the body's `location`. See {@link buildAntigravityFetchModelsBody}. */
+	location?: string;
+	/** Body `requestId`; a fresh native-shaped id when absent. */
+	requestId?: string;
 	/** Optional user agent override. */
 	userAgent?: string;
 	/** Optional abort signal for request cancellation. */
@@ -299,6 +309,37 @@ type AntigravityDiscoveryResponse =
 	| { payload: AntigravityDiscoveryApiResponse; endpoint: string }
 	| { rejectedStatus: 401 | 403 };
 
+/**
+ * `fetchAvailableModels` request body. The 2.34.0 language server's
+ * `FetchAvailableModelsRequest` carries `project`, `request_id`,
+ * `entitlement { user_tier }` and `location`:
+ * - `project`: the native client reads `ANTIGRAVITY_PROJECT_ID` at request
+ *   time, so that override beats the stored `projectId`; omitted when neither
+ *   is known.
+ * - `requestId`: native ids are `agent/<uuid>/<ms>/<uuid>/<step>`; a roster
+ *   fetch belongs to no trajectory, so both uuids are fresh and the step is 1.
+ * - `entitlement`: sent only when a tier is known (`userTier`, then
+ *   PI_AI_ANTIGRAVITY_USER_TIER, then the native `AICODE_USER_TIER`); no tier
+ *   is ever guessed.
+ * - `location`: sent only when set (`location`, then
+ *   PI_AI_ANTIGRAVITY_LOCATION). The Vertex `GOOGLE_CLOUD_LOCATION` /
+ *   `GOOGLE_CLOUD_REGION` vars are not consulted: reusing another provider's
+ *   configured region would send it on this OAuth path by surprise.
+ */
+export function buildAntigravityFetchModelsBody(
+	options: Pick<FetchAntigravityDiscoveryModelsOptions, "projectId" | "userTier" | "location" | "requestId">,
+): Record<string, unknown> {
+	const project = process.env.ANTIGRAVITY_PROJECT_ID || options.projectId;
+	const userTier = options.userTier || process.env.PI_AI_ANTIGRAVITY_USER_TIER || process.env.AICODE_USER_TIER;
+	const location = options.location || process.env.PI_AI_ANTIGRAVITY_LOCATION;
+	return {
+		...(project ? { project } : {}),
+		requestId: options.requestId ?? `agent/${crypto.randomUUID()}/${Date.now()}/${crypto.randomUUID()}/1`,
+		...(userTier ? { entitlement: { userTier } } : {}),
+		...(location ? { location } : {}),
+	};
+}
+
 async function fetchAntigravityDiscoveryResponse(
 	options: FetchAntigravityDiscoveryModelsOptions,
 ): Promise<AntigravityDiscoveryResponse | null> {
@@ -310,6 +351,7 @@ async function fetchAntigravityDiscoveryResponse(
 	const endpoints = options.endpoint
 		? [trimTrailingSlashes(options.endpoint)]
 		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);
+	const body = JSON.stringify(buildAntigravityFetchModelsBody(options));
 
 	let rejectedStatus: 401 | 403 | undefined;
 	let transientFailure = false;
@@ -323,7 +365,7 @@ async function fetchAntigravityDiscoveryResponse(
 					"Content-Type": "application/json",
 					...getAntigravityHeaders(options.userAgent),
 				},
-				body: JSON.stringify(options.projectId ? { project: options.projectId } : {}),
+				body,
 				signal: options.signal,
 			});
 		} catch {
