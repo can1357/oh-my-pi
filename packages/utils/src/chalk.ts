@@ -5,18 +5,6 @@ import { hexToRgb } from "./color";
 /** ANSI color capability level. */
 export type ColorLevel = 0 | 1 | 2 | 3;
 
-/** Details about a terminal's supported color depth. */
-export interface ColorSupport {
-	/** Highest supported ANSI color level. */
-	level: ColorLevel;
-	/** Whether the terminal supports the basic 16 colors. */
-	hasBasic: boolean;
-	/** Whether the terminal supports the 256-color palette. */
-	has256: boolean;
-	/** Whether the terminal supports 24-bit color. */
-	has16m: boolean;
-}
-
 interface ChalkOptions {
 	level?: ColorLevel;
 }
@@ -27,7 +15,7 @@ interface Style {
 }
 
 interface ChalkContext {
-	level: number;
+	level: ColorLevel | undefined;
 }
 
 /** A callable, chainable ANSI text formatter. */
@@ -174,18 +162,20 @@ const STYLES: Readonly<Record<string, Style>> = {
 	bgWhiteBright: { open: `${ESC}107m`, close: `${ESC}49m` },
 };
 
-function parseForcedLevel(value: string | undefined): ColorLevel | undefined {
-	if (value === undefined) return undefined;
+function parseForcedLevel(value: string): ColorLevel {
 	if (value === "" || value === "true") return 1;
 	if (value === "false") return 0;
 	const parsed = Number.parseInt(value, 10);
-	if (Number.isNaN(parsed)) return 1;
-	return Math.max(0, Math.min(3, parsed)) as ColorLevel;
+	if (parsed <= 0) return 0;
+	if (parsed >= 3) return 3;
+	return parsed === 2 ? 2 : 1;
 }
 
-/** Detect an ANSI color level from terminal environment and TTY state. */
-export function detectColorLevel(environment: NodeJS.ProcessEnv, isTTY: boolean): ColorLevel {
-	return parseForcedLevel(environment.FORCE_COLOR) ?? (isTTY ? ttyColorLevel(environment) : 0);
+/** Detect ANSI color depth for the supplied stream (stdout by default). */
+export function detectColorLevel(environment: NodeJS.ProcessEnv = process.env, isTTY?: boolean): ColorLevel {
+	const forced = environment.FORCE_COLOR;
+	if (forced !== undefined) return parseForcedLevel(forced);
+	return (isTTY ?? process.stdout.isTTY) ? ttyColorLevel(environment) : 0;
 }
 
 function ttyColorLevel(environment: NodeJS.ProcessEnv): ColorLevel {
@@ -216,22 +206,11 @@ function ttyColorLevel(environment: NodeJS.ProcessEnv): ColorLevel {
 	return 1;
 }
 
-function colorSupport(level: ColorLevel): ColorSupport | false {
-	if (level === 0) return false;
-	return { level, hasBasic: true, has256: level >= 2, has16m: level >= 3 };
+let stdoutLevel: ColorLevel | undefined;
+
+function activeLevel(context: ChalkContext): ColorLevel {
+	return (context.level ??= stdoutLevel ??= detectColorLevel());
 }
-
-// Both streams share the terminal environment, but either may be redirected.
-const forcedLevel = parseForcedLevel(process.env.FORCE_COLOR);
-const stdoutTTY = forcedLevel === undefined && process.stdout.isTTY;
-const stderrTTY = forcedLevel === undefined && process.stderr.isTTY;
-const ttyLevel = stdoutTTY || stderrTTY ? ttyColorLevel(process.env) : 0;
-
-/** Color support detected for standard output. */
-export const supportsColor = colorSupport(forcedLevel ?? (stdoutTTY ? ttyLevel : 0));
-
-/** Color support detected for standard error. */
-export const supportsColorStderr = colorSupport(forcedLevel ?? (stderrTTY ? ttyLevel : 0));
 
 function ansi256(r: number, g: number, b: number): number {
 	if (r === g && g === b) {
@@ -304,9 +283,9 @@ function defineStyleGetter(proto: object, name: string, style: Style): void {
 const builderPrototype: object = Object.create(Function.prototype);
 Object.defineProperty(builderPrototype, "level", {
 	get(this: Builder) {
-		return this[BUILDER_CONTEXT].level;
+		return activeLevel(this[BUILDER_CONTEXT]);
 	},
-	set(this: Builder, level: number) {
+	set(this: Builder, level: ColorLevel) {
 		this[BUILDER_CONTEXT].level = level;
 	},
 });
@@ -320,11 +299,12 @@ defineStyleGetter(builderPrototype, "bgGrey", STYLES.bgBlackBright!);
 Object.defineProperty(builderPrototype, "hex", {
 	value(this: Builder, color: string): ChalkInstance {
 		const context = this[BUILDER_CONTEXT];
-		const key = `${context.level}:${color}`;
+		const level = activeLevel(context);
+		const key = `${level}:${color}`;
 		let cache = this[BUILDER_HEX_CACHE];
 		const cached = cache?.get(key);
 		if (cached) return cached;
-		const child = createBuilder(context, [...this[BUILDER_STYLES], hexStyle(color, context.level)]);
+		const child = createBuilder(context, [...this[BUILDER_STYLES], hexStyle(color, level)]);
 		if (!cache) {
 			cache = new Map();
 			this[BUILDER_HEX_CACHE] = cache;
@@ -343,7 +323,7 @@ function createBuilder(context: ChalkContext, styles: readonly Style[]): ChalkIn
 			if (index > 0) text += " ";
 			text += String(values[index]);
 		}
-		if (text.length === 0 || context.level === 0) return text;
+		if (text.length === 0 || styles.length === 0 || activeLevel(context) === 0) return text;
 		return applyStyles(text, styles);
 	}) as Builder;
 	Object.setPrototypeOf(builder, builderPrototype);
@@ -353,8 +333,7 @@ function createBuilder(context: ChalkContext, styles: readonly Style[]): ChalkIn
 }
 
 function ChalkImplementation(this: unknown, options: ChalkOptions = {}): ChalkInstance {
-	const detectedLevel = supportsColor === false ? 0 : supportsColor.level;
-	return createBuilder({ level: options.level ?? detectedLevel }, []);
+	return createBuilder({ level: options.level }, []);
 }
 
 /** Construct an independently configured chalk formatter. */

@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - Removed the unused `getToolsDir()` export; custom tool discovery is unchanged.
+- `@oh-my-pi/pi-utils/chalk` detects color on first use instead of at import. Use `detectColorLevel(process.env, Boolean(stream.isTTY))` in place of the `supportsColor` and `supportsColorStderr` exports.
 
 ### Added
 
