@@ -59,7 +59,26 @@ export function listLeftoverProcesses(
 	const unseen = held.filter(proc => !seen.has(proc.pid)).map(proc => proc.pid);
 	if (unseen.length > 0) procs.push(...processInfo(unseen));
 	const detached = new Set(held.filter(proc => proc.detached).map(proc => proc.pid));
-	return leftoverRoots(procs, new Set(excludedPids), detached);
+	const excluded = new Set(excludedPids);
+	// Real ppids for pids the env scan misses (macOS hides the env of Apple-signed binaries),
+	// resolved in batched snapshots so the walk costs a couple of scans, not one per ancestor.
+	const realPpids = new Map<number, number>();
+	if (excluded.size > 0) {
+		const known = new Map(procs.map(proc => [proc.pid, proc.ppid]));
+		const attempted = new Set<number>();
+		let frontier = new Set<number>(excluded);
+		for (const ppid of known.values()) if (ppid > 1 && !known.has(ppid)) frontier.add(ppid);
+		while (frontier.size > 0) {
+			frontier = new Set([...frontier].filter(pid => !attempted.has(pid)));
+			for (const pid of frontier) attempted.add(pid);
+			for (const proc of processInfo([...frontier])) {
+				known.set(proc.pid, proc.ppid);
+				realPpids.set(proc.pid, proc.ppid);
+				if (proc.ppid > 1 && proc.ppid !== proc.pid && !known.has(proc.ppid)) frontier.add(proc.ppid);
+			}
+		}
+	}
+	return leftoverRoots(procs, excluded, detached, realPpids);
 }
 
 /**
@@ -95,41 +114,50 @@ export function ownedTagged(
 
 /**
  * Tagged roots of `tagged` neither in `excluded` nor descended (within `tagged`) from it; a
- * root is `nohup` when it ignores SIGHUP or is in `detached`.
+ * root is `nohup` when it ignores SIGHUP or is in `detached`. `realPpids` carries ppids for
+ * pids missing from `tagged` (macOS hides the env of Apple-signed binaries); without it the
+ * excluded-ancestor checks only see the tagged chain. Pure: all lookups happen up front.
  */
 export function leftoverRoots(
 	tagged: readonly TaggedProcess[],
 	excluded: ReadonlySet<number>,
 	detached: ReadonlySet<number> = new Set(),
+	realPpids: ReadonlyMap<number, number> = new Map(),
 ): LeftoverProcess[] {
 	const byPid = new Map(tagged.map(proc => [proc.pid, proc]));
-	/** Real ppids for pids missing from `tagged` (macOS hides the env of Apple-signed binaries). */
-	const realPpids = new Map<number, number>();
-	const lookupPpid = (pid: number): number => {
-		if (byPid.has(pid)) return byPid.get(pid)!.ppid;
-		if (!realPpids.has(pid)) realPpids.set(pid, processInfo([pid])[0]?.ppid ?? 0);
-		return realPpids.get(pid)!;
-	};
+	/** Real ppid of `pid`: the tagged entry when present, else the pre-resolved snapshot. */
+	const ppidOf = (pid: number): number => byPid.get(pid)?.ppid ?? realPpids.get(pid) ?? 0;
+	const roots: LeftoverProcess[] = [];
+	if (excluded.size === 0) {
+		for (const proc of tagged) {
+			if (byPid.has(proc.ppid)) continue;
+			roots.push({
+				pid: proc.pid,
+				command: proc.command,
+				startedAt: proc.startedAt,
+				kind: proc.ignoresHangup || detached.has(proc.pid) ? "nohup" : "&",
+			});
+		}
+		return roots;
+	}
 	// The root above an excluded pid owns it: killing that root's family would take it down.
 	const excludedRoots = new Set<number>();
 	for (const pid of excluded) {
 		let top: number | undefined;
-		for (let cur = pid; cur > 1; cur = lookupPpid(cur)) {
+		for (let cur = pid; cur > 1; cur = ppidOf(cur)) {
 			if (byPid.has(cur)) top = cur;
-			if (lookupPpid(cur) === cur) break;
+			if (ppidOf(cur) === cur) break;
 		}
 		if (top !== undefined) excludedRoots.add(top);
 	}
-	const excludedSet = new Set(excluded);
 	/** A tagged process is under an excluded pid when its real parent chain reaches one: the
 	 * env scan misses Apple-signed intermediates (macOS), so the tagged chain alone is not enough. */
 	const underExcluded = (proc: TaggedProcess): boolean => {
-		for (let cur = proc.ppid; cur > 1; cur = lookupPpid(cur)) {
-			if (excludedSet.has(cur) || lookupPpid(cur) === cur) return excludedSet.has(cur);
+		for (let cur = proc.ppid; cur > 1; cur = ppidOf(cur)) {
+			if (excluded.has(cur) || ppidOf(cur) === cur) return excluded.has(cur);
 		}
 		return false;
 	};
-	const roots: LeftoverProcess[] = [];
 	for (const proc of tagged) {
 		if (byPid.has(proc.ppid) || excludedRoots.has(proc.pid) || underExcluded(proc)) continue;
 		roots.push({
