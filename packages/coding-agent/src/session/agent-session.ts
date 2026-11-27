@@ -1570,6 +1570,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	/** Sessions a model switch took out of `#providerSessionState` and has not closed yet, with their keys. */
+	#retiredProviderSessions = new Map<ProviderSessionState, string>();
 	readonly #cacheWarmer: CacheWarmer | undefined;
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
@@ -7529,6 +7531,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#closeAllProviderSessions(reason: string): void {
+		this.#closeRetiredProviderSessions();
 		for (const [providerKey, state] of this.#providerSessionState) {
 			try {
 				state.close();
@@ -14128,8 +14131,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Removes the provider sessions a switch from `currentModel` to `nextModel` invalidates, so later
-	 * requests open fresh ones, and closes them once `closeAfter` settles (at once without it).
+	 * Moves the provider sessions a switch from `currentModel` to `nextModel` invalidates out of
+	 * `#providerSessionState`, so later requests open fresh ones, and closes every retired session once
+	 * `closeAfter` settles (at once without it).
 	 */
 	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model, closeAfter?: Promise<void>): void {
 		const providerKeys = new Set<string>();
@@ -14158,36 +14162,37 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 
-		const retired: Array<[string, ProviderSessionState]> = [];
 		for (const providerKey of providerKeys) {
 			const state = this.#providerSessionState.get(providerKey);
 			if (!state) continue;
-			retired.push([providerKey, state]);
+			this.#retiredProviderSessions.set(state, providerKey);
 			this.#providerSessionState.delete(providerKey);
 		}
 
 		if (completionsPrefixToEvict !== undefined) {
 			for (const [key, state] of this.#providerSessionState) {
 				if (!key.startsWith(completionsPrefixToEvict)) continue;
-				retired.push([key, state]);
+				this.#retiredProviderSessions.set(state, key);
 				this.#providerSessionState.delete(key);
 			}
 		}
 
-		const close = () => {
-			for (const [providerKey, state] of retired) {
-				try {
-					state.close();
-				} catch (error) {
-					logger.warn("Failed to close provider session state during model switch", {
-						providerKey,
-						error: String(error),
-					});
-				}
+		if (closeAfter) void closeAfter.then(() => this.#closeRetiredProviderSessions());
+		else this.#closeRetiredProviderSessions();
+	}
+
+	#closeRetiredProviderSessions(): void {
+		for (const [state, providerKey] of this.#retiredProviderSessions) {
+			try {
+				state.close();
+			} catch (error) {
+				logger.warn("Failed to close provider session state during model switch", {
+					providerKey,
+					error: String(error),
+				});
 			}
-		};
-		if (closeAfter) void closeAfter.then(close);
-		else close();
+		}
+		this.#retiredProviderSessions.clear();
 	}
 
 	// =========================================================================

@@ -46,6 +46,19 @@ function createUsage(): Usage {
 	};
 }
 
+function createReply(model: Model): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: `Reply from ${model.id}` }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: createUsage(),
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
 function createUserHistoryPayload(provider: Model["provider"] = openaiModel.provider): ProviderPayload {
 	return createOpenAIResponsesHistoryPayload(provider, [
 		{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user history" }] },
@@ -332,16 +345,6 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const retired = { close: vi.fn() } satisfies ProviderSessionState;
 		const opened = { close: vi.fn() } satisfies ProviderSessionState;
 		session.providerSessionState.set(stateKey, retired);
-		const reply = (model: Model): AssistantMessage => ({
-			role: "assistant",
-			content: [{ type: "text", text: `Reply from ${model.id}` }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: createUsage(),
-			stopReason: "stop",
-			timestamp: Date.now(),
-		});
 		const firstStream = new AssistantMessageEventStream();
 		const started = Promise.withResolvers<void>();
 		const dispatches: Array<{ model: string; state: ProviderSessionState | undefined }> = [];
@@ -352,7 +355,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 				return firstStream;
 			}
 			const stream = new AssistantMessageEventStream();
-			stream.push({ type: "done", reason: "stop", message: reply(model) });
+			stream.push({ type: "done", reason: "stop", message: createReply(model) });
 			return stream;
 		};
 
@@ -365,7 +368,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 			session.agent.followUp({ role: "user", content: "Follow-up request", timestamp: Date.now() });
 			expect(retired.close).not.toHaveBeenCalled();
 		} finally {
-			firstStream.push({ type: "done", reason: "stop", message: reply(openaiModel) });
+			firstStream.push({ type: "done", reason: "stop", message: createReply(openaiModel) });
 			await run;
 		}
 
@@ -373,6 +376,42 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(dispatches[1]?.state).toBe(opened);
 		expect(retired.close).toHaveBeenCalledTimes(1);
 		expect(opened.close).not.toHaveBeenCalled();
+	});
+
+	it("closes provider sessions a model switch retired when the session is disposed before its run settles", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-switch-dispose-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory());
+		sessions.push(session);
+
+		const retired = { close: vi.fn() } satisfies ProviderSessionState;
+		session.providerSessionState.set(`openai-responses:${openaiModel.provider}`, retired);
+		const firstStream = new AssistantMessageEventStream();
+		const started = Promise.withResolvers<void>();
+		session.agent.streamFn = () => {
+			started.resolve();
+			return firstStream;
+		};
+		// A step that ignores abort (an extension hook, a stuck tool) keeps the run from ever settling.
+		const stalled = Promise.withResolvers<void>();
+		let stall = false;
+		session.agent.addBeforeModelCallHook(() => {
+			if (!stall) return;
+			stalled.resolve();
+			return new Promise<void>(() => {});
+		});
+
+		void session.agent.prompt("First request");
+		await started.promise;
+		await session.setModel(alternateOpenaiModel);
+		stall = true;
+		session.agent.followUp({ role: "user", content: "Follow-up request", timestamp: Date.now() });
+		firstStream.push({ type: "done", reason: "stop", message: createReply(openaiModel) });
+		await stalled.promise;
+
+		await session.dispose({ drainTimeoutMs: 10 });
+
+		expect(retired.close).toHaveBeenCalledTimes(1);
 	});
 
 	it("sanitizes stale assistant replay metadata during startup resume while preserving user payloads", async () => {
