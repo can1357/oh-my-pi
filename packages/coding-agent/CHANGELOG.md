@@ -195,6 +195,8 @@
 - Fixed Gemini planning behavior so long tool-free reasoning is not repeatedly interrupted.
 - Fixed ACP and RPC `/mcp` commands to honor project-server precedence, enable/disable overrides, and the session working directory.
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
+- Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
 
 ## [19.2.1] - 2026-11-25
 

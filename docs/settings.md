@@ -1130,6 +1130,8 @@ capability gating, model/request vetoes, hooks, chaining and recovery tradeoffs.
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
+If sleep or another delay leaves less than ten seconds before the prompt cache entry expires, `providers.cacheWarming` stops without sending the scheduled refresh.
+
 #### Saved reset auto-consumption
 
 `codexResets.autoRedeem5h` / `autoRedeemWeekly` and `claudeResets.autoRedeem5h` / `autoRedeemWeekly` / `autoRedeemFable` control saved-reset spending per window: `yes` spends automatically, `no` never spends, and `unset` asks first and never spends without a prompt (a session with no prompt UI, such as `omp -p`, only shows a notice pointing at `/usage reset`). Each spend is governed by one window: a restore by the weekly key when any blocked window is weekly (for Claude, any covered limit other than `anthropic:5h`), otherwise by the 5h key; a salvage by the fullest window it restores. A Codex block known only from a 429 wait of 6 hours or less could be either window, so it needs both Codex keys. When several accounts could be restored, one whose key is `yes` goes before one that needs a prompt. A prompt answer is saved to the governing keys that are still `unset`. An older single `autoRedeem` migrates into the 5h and weekly keys; Fable starts `unset`.
