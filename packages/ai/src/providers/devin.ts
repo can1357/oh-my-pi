@@ -262,7 +262,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 							isResponsesFamilyApi(source.api) ? responsesCallComponent(id) : id,
 							DEVIN_TOOL_CALL_ID_MAX_LENGTH,
 						),
-					DEVIN_TOOL_CALL_ID_MAX_LENGTH,
+					{ maxNormalizedToolCallIdLength: DEVIN_TOOL_CALL_ID_MAX_LENGTH },
 				),
 			};
 			// Router models (`adaptive`) are not valid chat model uids: the server

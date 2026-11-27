@@ -11,6 +11,7 @@ import type {
 	KnownApi,
 	Message,
 	Model,
+	Tool,
 	ToolCall,
 	ToolResultMessage,
 	UserMessage,
@@ -391,8 +392,31 @@ function isMalformedToolCallId(id: string | undefined): boolean {
 	return !id || id.trim().length === 0;
 }
 
-function isMalformedToolCall(block: { id: string; name: string }, allowedName: RegExp, maxLength: number): boolean {
-	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name, allowedName, maxLength);
+/**
+ * Collect the non-empty tool names declared in `tools` so replay sanitization
+ * keeps history for tools the current request explicitly declares on the wire
+ * (for example, dotted names like `power.state` on OpenAI-compatible servers).
+ */
+export function collectDeclaredToolNames(tools?: readonly Pick<Tool, "name">[]): ReadonlySet<string> | undefined {
+	if (!tools || tools.length === 0) return undefined;
+	const names = new Set<string>();
+	for (const tool of tools) {
+		if (typeof tool.name === "string" && tool.name.trim().length > 0) {
+			names.add(tool.name);
+		}
+	}
+	return names.size > 0 ? names : undefined;
+}
+
+function isMalformedToolCall(
+	block: { id: string; name: string },
+	allowedName: RegExp,
+	maxLength: number,
+	declaredToolNames?: ReadonlySet<string>,
+): boolean {
+	if (isMalformedToolCallId(block.id)) return true;
+	if (declaredToolNames?.has(block.name)) return false;
+	return isMalformedToolCallName(block.name, allowedName, maxLength);
 }
 
 /**
@@ -415,18 +439,27 @@ function isMalformedToolCall(block: { id: string; name: string }, allowedName: R
  * from GLM-5.3); OpenAI Responses rejects any replayed `input[N].name` over
  * 128 characters with `string_above_max_length`.
  *
+ * When `declaredToolNames` is provided, calls whose non-empty `name` is
+ * explicitly declared for the outgoing request survive even if the name uses
+ * characters outside the target's strict default regex (such as dotted names
+ * accepted by OpenAI-compatible servers).
+ *
  * Run before any other transform so the rest of the pipeline never sees a
  * malformed call. Idempotent for the same target: a re-run on an already-sanitized
  * list returns the input untouched.
  */
-function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[] {
+function sanitizeMalformedToolCalls(
+	messages: Message[],
+	model: Model,
+	declaredToolNames?: ReadonlySet<string>,
+): Message[] {
 	const { allowedName, maxLength } = toolCallNameLimits(model);
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
 	outer: for (const msg of messages) {
 		if (msg.role !== "assistant") continue;
 		for (const block of msg.content) {
-			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName, maxLength)) {
+			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName, maxLength, declaredToolNames)) {
 				hasMalformed = true;
 				break outer;
 			}
@@ -452,7 +485,7 @@ function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[
 			const filtered: AssistantMessage["content"] = [];
 			for (const block of msg.content) {
 				if (block.type === "toolCall") {
-					const malformed = isMalformedToolCall(block, allowedName, maxLength);
+					const malformed = isMalformedToolCall(block, allowedName, maxLength, declaredToolNames);
 					const queue = dropQueues.get(block.id);
 					if (queue) queue.push(malformed);
 					else dropQueues.set(block.id, [malformed]);
@@ -497,13 +530,17 @@ export function shouldDropTruncatedThinkingOnlyAssistant(msg: AssistantMessage):
  * is `!shouldDropTruncatedThinkingOnlyAssistant(msg)`. Pass the target `model`
  * to apply its tool-name limits; without one, any provider-declarable name survives.
  */
-export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): boolean {
+export function isSurvivingAssistant(
+	msg: AssistantMessage,
+	model?: Model,
+	declaredToolNames?: ReadonlySet<string>,
+): boolean {
 	const isTruncatedStop = msg.stopReason === "length" || msg.stopReason === "error" || msg.stopReason === "aborted";
 	if (msg.content.length === 0) return !isTruncatedStop;
 	const { allowedName, maxLength } = toolCallNameLimits(model);
 	return msg.content.some(block =>
 		block.type === "toolCall"
-			? !isMalformedToolCall(block, allowedName, maxLength)
+			? !isMalformedToolCall(block, allowedName, maxLength, declaredToolNames)
 			: !isTruncatedStop || block.type === "text",
 	);
 }
@@ -526,10 +563,14 @@ export function isReplayTurnBoundary(msg: Message): boolean {
 	return msg.content.some(block => (block.type === "text" && block.text.trim().length > 0) || block.type === "image");
 }
 
-function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
+function getLatestSurvivingAssistantIndex(
+	messages: readonly Message[],
+	model: Model,
+	declaredToolNames?: ReadonlySet<string>,
+): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
-		if (msg.role === "assistant" && isSurvivingAssistant(msg, model)) {
+		if (msg.role === "assistant" && isSurvivingAssistant(msg, model, declaredToolNames)) {
 			return index;
 		}
 	}
@@ -903,15 +944,27 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 	});
 }
 
+export interface TransformMessagesOptions<TApi extends Api = Api> {
+	maxNormalizedToolCallIdLength?: number;
+	duplicateToolCallIdSuffixPrefix?: string;
+	targetCompat?: Model<TApi>["compat"];
+	targetCredentialId?: number;
+	declaredToolNames?: ReadonlySet<string>;
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
-	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
-	duplicateToolCallIdSuffixPrefix = "_dup",
-	targetCompat: Model<TApi>["compat"] = model.compat,
-	targetCredentialId?: number,
+	options?: TransformMessagesOptions<TApi>,
 ): Message[] {
+	const {
+		maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
+		duplicateToolCallIdSuffixPrefix = "_dup",
+		targetCompat = model.compat,
+		targetCredentialId,
+		declaredToolNames,
+	} = options ?? {};
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
 	// block errors from LLM providers (e.g. invalid_prompt).
@@ -920,7 +973,7 @@ export function transformMessages<TApi extends Api>(
 	// Drop assistant `toolCall` blocks whose id or name the target cannot replay
 	// (and their matched `toolResult` messages) before anything else looks at
 	// the history. Replaying them would 400 the target provider.
-	messages = sanitizeMalformedToolCalls(messages, model);
+	messages = sanitizeMalformedToolCalls(messages, model, declaredToolNames);
 
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
@@ -931,7 +984,7 @@ export function transformMessages<TApi extends Api>(
 	// Completions ids pair by raw equality and must never be canonicalized).
 	const responsesCompositeIdMap = new Map<string, string>();
 
-	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages, model);
+	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages, model, declaredToolNames);
 	const invalidBoundThinkingAssistantIndexes = new Set<number>();
 	if (model.thinking?.prefixBinding) {
 		let latestRewriteAt: number | undefined;

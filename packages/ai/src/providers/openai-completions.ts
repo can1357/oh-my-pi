@@ -138,7 +138,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
+import { collectDeclaredToolNames, completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2427,7 +2427,12 @@ function buildParams(
 		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
 	});
 	const compat = finalPolicy.compat as ResolvedOpenAICompat;
-	const messages = convertMessages(model, context, compat);
+	const emittedTools = Array.isArray(params.tools)
+		? params.tools
+				.filter((tool): tool is Extract<ChatCompletionTool, { type: "function" }> => tool.type === "function")
+				.map(tool => tool.function)
+		: [];
+	const messages = convertMessages(model, context, compat, emittedTools);
 	maybeAddAnthropicCacheControl(compat, messages);
 	params.messages = messages;
 	const outputToken = resolveOpenAIOutputTokenParam({
@@ -2606,6 +2611,7 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompat,
+	declaredTools: readonly Pick<Tool, "name">[] | undefined = context.tools,
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -2635,13 +2641,17 @@ export function convertMessages(
 			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
 		return id;
 	};
+	const declaredToolNames = collectDeclaredToolNames(declaredTools);
 	const transformedMessages = transformMessages(
 		context.messages,
 		model,
 		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
-		maxNormalizedToolCallIdLength,
-		duplicateToolCallIdSuffixPrefix,
-		compat,
+		{
+			maxNormalizedToolCallIdLength,
+			duplicateToolCallIdSuffixPrefix,
+			targetCompat: compat,
+			declaredToolNames,
+		},
 	);
 
 	const remappedToolCallIds = new Map<string, string[]>();
