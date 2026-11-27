@@ -20,7 +20,7 @@ import { batch, signal, type Signal } from "../reactive";
 import { createSurface, type Surface, type SurfaceTemplate } from "../surface";
 import { TermBackend, type TermBackendOptions } from "../term/backend";
 import { stripEscapes } from "../text/ansi";
-import type { Theme } from "../theme/contract";
+import { CONSERVATIVE_EMOJI, type Theme } from "../theme/contract";
 import { PLAIN_THEME } from "../theme/plain";
 
 /** Configuration of {@link createTestTerminal}. */
@@ -85,6 +85,7 @@ const BASE_CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: CONSERVATIVE_EMOJI,
 };
 
 /** Printable text of a bare key id (`a`, `space`, `shift+a`), if it produces any. */

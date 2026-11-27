@@ -33,6 +33,10 @@ import {
 	collectUnreportedAccounts,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-accounts";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
+import { builtinThemes } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { createTheme, type ResolvedTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const HOUR = 3_600_000;
@@ -697,6 +701,15 @@ describe("usage JSON policy", () => {
 });
 
 describe("formatUsageBreakdown", () => {
+	// A terminal of unknown emoji support (CI): the one-cell `status.warning` slot draws its `▲` fallback.
+	let previousTheme: ResolvedTheme;
+	beforeEach(() => {
+		previousTheme = currentTheme();
+		setCurrentTheme(createTheme(builtinThemes().dark!, { emoji: CONSERVATIVE_EMOJI }));
+	});
+	afterEach(() => {
+		setCurrentTheme(previousTheme);
+	});
 	const reports = [
 		makeReport("anthropic", "dummy.primary@example.test", [
 			makeLimit({ id: "Claude 5 Hour", usedFraction: 0.84, durationMs: FIVE_HOURS, windowId: "5h" }),
@@ -1218,9 +1231,9 @@ describe("formatUsageBreakdown", () => {
 		// 10d-old grant: no countdown noise.
 		expect(text).not.toContain("fresh@example.test — re-login");
 		// 27d-old grant: 3 days left.
-		expect(text).toContain("⚠ closing@example.test — re-login within 3d");
+		expect(text).toContain("▲ closing@example.test — re-login within 3d");
 		// Past the lifetime: hard warning.
-		expect(text).toContain("⚠ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
+		expect(text).toContain("▲ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
 	});
 
 	it("times the warning by the server-stated grant end over the ~30d estimate", () => {
@@ -1242,7 +1255,7 @@ describe("formatUsageBreakdown", () => {
 				now,
 			),
 		);
-		expect(text).toContain("⚠ stated@example.test — re-login within 2d (refresh token expires)");
+		expect(text).toContain("▲ stated@example.test — re-login within 2d (refresh token expires)");
 	});
 
 	it("times a long-lived Anthropic login by its token expiry, not the ~30d grant", () => {
@@ -1263,8 +1276,8 @@ describe("formatUsageBreakdown", () => {
 			),
 		);
 		// Past the grant lifetime, months of token left: no warning.
-		expect(text).not.toContain("⚠ year@example.test");
-		expect(text).toContain("⚠ ending@example.test — re-login within 3d (access token expires)");
+		expect(text).not.toContain("▲ year@example.test");
+		expect(text).toContain("▲ ending@example.test — re-login within 3d (access token expires)");
 	});
 
 	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {
