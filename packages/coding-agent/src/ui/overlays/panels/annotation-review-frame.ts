@@ -8,6 +8,8 @@
 import { padTo, replaceTabs, sliceColumns, truncate, visibleWidth, wrap, wrapChars } from "@oh-my-pi/pi-tui/text/width";
 import { renderSpans } from "@oh-my-pi/pi-tui/text/highlight";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { BG_DEFAULT, bgSgr } from "@oh-my-pi/pi-tui/theme/color";
+import { mixHex } from "@oh-my-pi/pi-utils/color";
 import type { ReviewDiffFile } from "../../../extensibility/custom-commands/bundled/annotate/annotation-types";
 import { keyGlyph } from "../../styles/panels/common";
 import {
@@ -21,6 +23,7 @@ import {
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Keybinding } from "../../../config/keybindings/app-keybindings";
 import { actionKeyId } from "../../keys/hints";
+import { canvasHex, withBg } from "../../styles/apps/git/colors";
 
 /** The face at one width. */
 export interface AnnotationFrame {
@@ -118,6 +121,18 @@ function diffBody(model: AnnotationReviewModel, width: number, cursor: number, t
 		return { lines, rowBySource };
 	}
 	const syntax = model.sourceSyntax();
+	const rowBackgrounds = new Map<string, string>();
+	const diffBackground = (kind: "added" | "removed", selected: boolean): string => {
+		const key = `${kind}:${selected}`;
+		let background = rowBackgrounds.get(key);
+		if (background === undefined) {
+			const color = theme.hex(kind === "added" ? "toolDiffAdded" : "toolDiffRemoved");
+			const base = selected ? theme.hex("selectedBg") : canvasHex(theme);
+			background = bgSgr(mixHex(base, color, theme.dark ? 0.18 : 0.24), theme.depth);
+			rowBackgrounds.set(key, background);
+		}
+		return background;
+	};
 	const nav = theme.symbols.symbol("nav.cursor");
 	let sourceIndex = 0;
 	for (const row of file.rows) {
@@ -152,7 +167,9 @@ function diffBody(model: AnnotationReviewModel, width: number, cursor: number, t
 			const gutter = selected && i === 0 ? fit(`${nav} `, GUTTER) : " ".repeat(GUTTER);
 			const lead = i === 0 ? theme.fg(color, prefix) : " ".repeat(prefix.length);
 			const line = `${gutter}${lead}${highlighted === undefined ? theme.fg(color, piece) : piece}`;
-			lines.push(truncate(selected ? theme.bg("selectedBg", fit(line, width)) : line, width, "…"));
+			if (highlighted !== undefined && (row.kind === "added" || row.kind === "removed"))
+				lines.push(`${withBg(fit(line, width), diffBackground(row.kind, selected))}${BG_DEFAULT}`);
+			else lines.push(truncate(selected ? theme.bg("selectedBg", fit(line, width)) : line, width, "…"));
 		});
 		sourceIndex++;
 	}

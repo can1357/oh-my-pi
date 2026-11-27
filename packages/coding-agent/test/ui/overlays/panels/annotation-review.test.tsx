@@ -104,7 +104,12 @@ function mountReview(input: AnnotationReviewInput, initialColumns: number) {
 }
 
 function foreground(rows: readonly string[], text: string): string | undefined {
-	for (const row of cellGrid(rows)) {
+	return cellFor(rows, text)?.cell.fg;
+}
+
+function cellFor(rows: readonly string[], text: string) {
+	const grid = cellGrid(rows);
+	for (const [rowIndex, row] of grid.entries()) {
 		const index = row.findIndex(
 			(_, i) =>
 				row
@@ -112,7 +117,7 @@ function foreground(rows: readonly string[], text: string): string | undefined {
 					.map(cell => cell.ch)
 					.join("") === text,
 		);
-		if (index !== -1) return row[index]!.fg;
+		if (index !== -1) return { row, rowIndex, cell: row[index]! };
 	}
 	return undefined;
 }
@@ -137,24 +142,62 @@ it("colors a wrapped code line and keeps its exact source quote after resize", (
 	}
 });
 
-it("colors each side independently and preserves old/new patch anchors", () => {
+it("keeps syntax colors and diff tint on wrapped, selected patch lines and preserves anchors", () => {
 	const path = "src/value.ts";
-	const hunkHeader = "@@ -40 +40 @@";
-	const removed = "/* old comment starts here";
-	const added = "const newValue = 42;";
+	const hunkHeader = "@@ -40,2 +40,2 @@";
+	const removed = `/* old comment starts ${"removed wrap ".repeat(8)}removedWrapEnd */`;
+	const added = `const newValue = makeValue("${"added wrap ".repeat(6)}addedWrapEnd");`;
 	const file = diffFile(path, hunkHeader, [
 		{ kind: "removed", raw: `-${removed}`, content: removed, oldLine: 40, hunkHeader },
 		{ kind: "added", raw: `+${added}`, content: added, newLine: 40, hunkHeader },
+		{
+			kind: "context",
+			raw: " const contextValue = 0;",
+			content: "const contextValue = 0;",
+			oldLine: 41,
+			newLine: 41,
+			hunkHeader,
+		},
 	]);
 	const review = mountReview({ kind: "diff", files: [file], mode: "Reviewing changes" }, 76);
 	try {
-		expect(foreground(review.terminal.rows(), "old comment")).toBe(
-			foreground([review.theme.fg("syntaxComment", "old comment")], "old comment"),
-		);
-		expect(foreground(review.terminal.rows(), "const")).toBe(
-			foreground([review.theme.fg("syntaxKeyword", "const")], "const"),
-		);
+		const initialRows = review.terminal.rows();
+		const oldStart = cellFor(initialRows, "old comment")!;
+		const oldEnd = cellFor(initialRows, "removedWrapEnd")!;
+		const addedStart = cellFor(initialRows, "const newValue")!;
+		const addedEnd = cellFor(initialRows, "addedWrapEnd")!;
+		const context = cellFor(initialRows, "contextValue")!;
+		const selectedBg = cellGrid([review.theme.bg("selectedBg", "x")])[0]![0]!.bg;
+
+		const keyword = foreground([review.theme.fg("syntaxKeyword", "const")], "const")!;
+		const comment = foreground([review.theme.fg("syntaxComment", "x")], "x")!;
+		const string = foreground([review.theme.fg("syntaxString", "x")], "x")!;
+		expect(oldStart.cell.fg).toBe(comment);
+		expect(addedStart.cell.fg).toBe(keyword);
+		for (const [start, end, fg] of [
+			[oldStart, oldEnd, comment],
+			[addedStart, addedEnd, string],
+		] as const) {
+			expect(end.rowIndex).toBeGreaterThan(start.rowIndex);
+			expect(start.cell.bg).not.toBe("");
+			expect(end.cell).toMatchObject({ bg: start.cell.bg, fg });
+		}
+		expect(oldStart.cell.bg).not.toBe(addedStart.cell.bg);
+		expect(context.cell.bg).toBe("");
+
 		review.terminal.press("enter");
+		review.terminal.press("down");
+		const selectedRows = review.terminal.rows();
+		const selectedAdded = cellFor(selectedRows, "const newValue")!;
+		const selectedAddedEnd = cellFor(selectedRows, "addedWrapEnd")!;
+		expect(selectedAdded.row.some(cell => cell.ch === review.theme.symbols.symbol("nav.cursor"))).toBe(true);
+		expect(selectedAdded.cell.bg).not.toBe("");
+		expect(selectedAdded.cell.bg).not.toBe(selectedBg);
+		expect(selectedAdded.cell.bg).not.toBe(oldStart.cell.bg);
+		expect(selectedAdded.cell.fg).toBe(keyword);
+		expect(selectedAddedEnd.cell).toMatchObject({ bg: selectedAdded.cell.bg, fg: string });
+
+		review.terminal.press("up");
 		review.addNote("old-side note");
 		review.resize(100);
 		review.terminal.press("down");
