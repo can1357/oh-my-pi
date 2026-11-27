@@ -244,13 +244,13 @@ Four fields let an extension replace parts of an existing provider without redef
 - `generateImage(model, request, options)`: handles image generation for the provider's image models.
 - `webSearch(params)`: runs the grounded search request for the provider's models. Availability checks and labels still come from the model's grounding backend.
 - `discoverModels({ accounts, baseUrl, fetch })`: fetches the provider's model list in place of its built-in discovery request. It runs once with all signed-in accounts (a configured key counts as one account). Return `null` to keep the cached catalog. The built-in discovery still caches the rows, merges them, and applies policy.
-- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "prompt-perturbation": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
+- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "requires-native-tools": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
 
 ```ts
 pi.registerProvider("google-generative-ai", {
 	stream: myGeminiStream,
 	generateImage: myImageGenerator,
-	rules: { "prompt-perturbation": true },
+	rules: { "requires-native-tools": true },
 });
 ```
 

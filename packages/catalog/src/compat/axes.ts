@@ -358,8 +358,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["freeform", "function"],
 	},
-	/** Paraphrase model-visible prompt prose per install (`perturbContext` in pi-ai). */
-	"prompt-perturbation": { key: "promptPerturbation", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
 	"tool-schemas-in-context": { key: "toolSchemasInContext", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-tool-free-history-for-tool-opt-out": {
@@ -826,7 +824,7 @@ function directiveValue(name: string, axis: AxisDef, value: unknown): unknown {
 
 /**
  * Compiles directive → value assignments, the JSON form of a KDL rule block's
- * axis lines (`{ "prompt-perturbation": true }`), into resolved axes with the
+ * axis lines (`{ "requires-native-tools": true }`), into resolved axes with the
  * same validation as the KDL compiler. Object payloads use kebab-case keys.
  *
  * @throws Error naming an unknown directive, a value of the wrong shape, a

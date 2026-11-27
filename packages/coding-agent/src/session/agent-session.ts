@@ -87,7 +87,6 @@ import { type Effort, SERVICE_TIER_UNAVAILABLE_FEATURE, serviceTierFamily, strea
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAnthropicFastModeFallback } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
-import { isPromptPerturbationEnabled, perturbPromptText } from "@oh-my-pi/pi-ai/prompts/perturbation";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -16902,16 +16901,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #formatLlmRequestJson(messages: AgentMessage[]): Promise<string> {
 		const llmMessages = await this.convertMessagesToLlm(messages);
 		const model = this.agent.state.model;
-		// Mirror `streamDispatch`: show the prose the model receives, not the bundled wording.
-		const perturb = model && isPromptPerturbationEnabled(model) ? perturbPromptText : (text: string) => text;
 		const payload = {
 			model: model ?? null,
 			thinkingLevel: this.thinkingLevel ?? null,
 			serviceTier: this.#models.serviceTierEntry(),
-			systemPrompt: this.agent.state.systemPrompt.map(perturb),
+			systemPrompt: this.agent.state.systemPrompt,
 			tools: this.agent.state.tools.map(tool => ({
 				name: tool.name,
-				description: perturb(tool.description),
+				description: tool.description,
 				parameters: toolWireSchema(tool),
 				...(tool.strict !== undefined ? { strict: tool.strict } : {}),
 				...(tool.customWireName ? { customWireName: tool.customWireName } : {}),

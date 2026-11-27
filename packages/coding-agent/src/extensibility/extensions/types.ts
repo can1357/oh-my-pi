@@ -2345,7 +2345,7 @@ export interface ExtensionAPI {
 	 * // Own an existing provider's wire requests and flip a KDL rule for its models
 	 * pi.registerProvider("google-generative-ai", {
 	 *   stream: myGeminiStream,
-	 *   rules: { "prompt-perturbation": true },
+	 *   rules: { "requires-native-tools": true },
 	 * });
 	 *
 	 * @example

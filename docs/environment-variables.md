@@ -344,13 +344,6 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route                                                                                                                                                          |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly                                                                                                                                                            |
 
-
-### Prompt perturbation
-
-| Variable                  | Default / behavior                                                                                                                                                                     |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OMP_PROMPT_PERTURBATION` | Unset: models whose KDL rules set `prompt-perturbation #true` get the pooled lines rewritten with the wording chosen for this installation; others get the bundled wording. `1` perturbs every model; `0` none. |
-
 ### Anthropic OAuth
 
 | Variable                           | Default / behavior                                                                                                          |

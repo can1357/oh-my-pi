@@ -5410,7 +5410,7 @@ export interface ProviderConfigInput {
 	discoverModels?(context: ProviderDiscoveryContext): Promise<readonly ModelSpec<Api>[] | null>;
 	/** Runs grounded web searches for this provider's models in place of their grounding backend's request. */
 	webSearch?(params: SearchParams): Promise<SearchResponse>;
-	/** Rule directives for every model of this provider, as a KDL `provider` block sets them (`{ "prompt-perturbation": true }`). */
+	/** Rule directives for every model of this provider, as a KDL `provider` block sets them (`{ "requires-native-tools": true }`). */
 	rules?: Readonly<Record<string, unknown>>;
 	oauth?: {
 		name: string;
