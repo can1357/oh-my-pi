@@ -30,6 +30,17 @@ export function formatEstimatedCost(value: number, unpricedRequests: number, dig
 	return value === 0 && unpricedRequests > 0 ? "N/A" : formatCost(value, digits);
 }
 
+/** Server-reported AI credits from nano-AIU (1 AIU = 1 credit); null means no request reported any, which is unknown rather than 0. */
+export function formatAiCredits(nano: number | null | undefined): string {
+	if (nano === null || nano === undefined) return "unknown";
+	return (nano / 1e9).toLocaleString(NUMBER_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** Premium-request count of legacy request-billed traffic; a provider that never reports any reads as a dash, not a count. */
+export function formatPremiumRequests(value: number | undefined): string {
+	return value === undefined || value <= 0 ? "—" : formatInteger(Math.round(value * 100) / 100);
+}
+
 /**
  * Whether one request's zero cost means unknown spend rather than free usage.
  * Mirrors the server's `unpricedRequestSql`: `xai-oauth` is billed through a

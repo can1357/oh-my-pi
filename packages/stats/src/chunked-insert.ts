@@ -47,17 +47,21 @@ export class ChunkedInsert {
 		this.#claimed = `SELECT 1 FROM ${spec.table} WHERE ${spec.identity.map(column => `${column} = ?`).join(" AND ")} AND session_file <> ? LIMIT 1`;
 	}
 
-	/** Buffer one row unless another transcript already owns `identity`. */
-	add(sessionFile: string, identity: readonly SQLQueryBindings[], values: readonly SQLQueryBindings[]): void {
+	/**
+	 * Buffer one row unless another transcript already owns `identity`. Returns false when the row was
+	 * skipped because another transcript owns it, so the caller can fold in data only this copy carries.
+	 */
+	add(sessionFile: string, identity: readonly SQLQueryBindings[], values: readonly SQLQueryBindings[]): boolean {
 		const key = identity.join("\0");
 		const owner = this.#buffered.get(key);
 		if (owner !== sessionFile) {
 			if (owner !== undefined) this.#flush();
-			if (this.#database.query(this.#claimed).get(...identity, sessionFile)) return;
+			if (this.#database.query(this.#claimed).get(...identity, sessionFile)) return false;
 			this.#buffered.set(key, sessionFile);
 		}
 		for (const value of values) this.#params.push(value);
 		if (++this.#rows === this.#chunkRows) this.#flush();
+		return true;
 	}
 
 	/** Write the remaining rows; returns how many stored rows the writer inserted or updated. */

@@ -5,12 +5,14 @@ import { getModelDashboardStats } from "../api";
 import { type ChartSeries, Legend, Sparkline, TimeChart, useHiddenSeries } from "../charts";
 import { buildModelColorLookup, modelKey, OTHER_COLOR } from "../data/colors";
 import {
+	formatAiCredits,
 	formatCompact,
 	formatDurationMs,
 	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatPercent,
+	formatPremiumRequests,
 	formatRelativeTime,
 	formatTokensPerSecond,
 } from "../data/formatters";
@@ -503,8 +505,9 @@ function ModelDetail({
 							{
 								key: "premium",
 								label: "Premium requests",
-								value: formatInteger(Math.round(model.totalPremiumRequests * 100) / 100),
+								value: formatPremiumRequests(model.totalPremiumRequests),
 							},
+							{ key: "aiu", label: "AI credits", value: formatAiCredits(model.totalAiuNano) },
 						]}
 					/>
 				</div>

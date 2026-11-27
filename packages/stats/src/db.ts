@@ -239,6 +239,7 @@ export async function initDb(): Promise<Database> {
 			cache_write_tokens INTEGER NOT NULL,
 			total_tokens INTEGER NOT NULL,
 			premium_requests REAL NOT NULL,
+			aiu_nano REAL,
 			cost_input REAL NOT NULL,
 			cost_output REAL NOT NULL,
 			cost_cache_read REAL NOT NULL,
@@ -500,6 +501,10 @@ export async function initDb(): Promise<Database> {
 	const messageColumns = db.query("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+	}
+	// Server-reported Copilot AI credits (nano-AIU). NULL means unknown, never zero.
+	if (!messageColumns.some(column => column.name === "aiu_nano")) {
+		db.run("ALTER TABLE messages ADD COLUMN aiu_nano REAL");
 	}
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
@@ -1020,6 +1025,10 @@ function* parsedRows<T>(
 	for (const result of results) yield* select(result);
 }
 
+function isValidAiuNano(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 /**
  * Commit distinct transcripts' rows, reconciliation state, and cursors together; failure rolls back the batch.
  * `changes` counts stored rows inserted, updated or deleted (cursor bookkeeping excluded), so callers can
@@ -1045,8 +1054,8 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			let rows = result;
 			if (result.reset || rebuild || replay) {
 				const messages = database
-					.query<{ entry_id: string; timestamp: number }, [string]>(
-						"SELECT entry_id, timestamp FROM messages WHERE session_file = ?",
+					.query<{ entry_id: string; timestamp: number; aiu_nano: number | null }, [string]>(
+						"SELECT entry_id, timestamp, aiu_nano FROM messages WHERE session_file = ?",
 					)
 					.all(sessionFile);
 				const users = database
@@ -1062,6 +1071,22 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					.all(sessionFile);
 				const replace = result.reset || rebuild;
 				if (replace) {
+					const retainedAiu = new Map<string, number>();
+					for (const row of messages) {
+						if (row.aiu_nano !== null) {
+							retainedAiu.set(JSON.stringify([row.entry_id, row.timestamp]), row.aiu_nano);
+						}
+					}
+					if (retainedAiu.size > 0) {
+						rows = {
+							...result,
+							stats: result.stats.map(row => {
+								const aiuNano = retainedAiu.get(JSON.stringify([row.entryId, row.timestamp]));
+								if (aiuNano === undefined || isValidAiuNano(row.usage.aiu?.nano)) return row;
+								return { ...row, usage: { ...row.usage, aiu: { nano: aiuNano } } };
+							}),
+						};
+					}
 					// Only removed owners require another full replay, not an identity-only file replacement.
 					if (!reconcile && (messages.length > 0 || users.length > 0 || tools.length > 0)) {
 						const retainedMessages = new Set(
@@ -1283,6 +1308,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"cache_write_tokens",
 			"total_tokens",
 			"premium_requests",
+			"aiu_nano",
 			"cost_input",
 			"cost_output",
 			"cost_cache_read",
@@ -1300,6 +1326,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			ttft = excluded.ttft,
 			purpose = excluded.purpose,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
+			aiu_nano = COALESCE(excluded.aiu_nano, messages.aiu_nano),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
 			cost_cache_read = excluded.cost_cache_read,
@@ -1309,11 +1336,20 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_unpriced = excluded.cost_unpriced,
 			service_tier = excluded.service_tier`,
 	});
+	// A fork copies its parent's turns with the billing stripped. When the fork was ingested first it owns the
+	// turn, and the parent's copy (the one carrying the charge) is skipped: hand the charge to the owner.
+	const attachCharge = db.query(
+		`UPDATE messages SET aiu_nano = ?
+		 WHERE entry_id = ? AND timestamp = ? AND session_file <> ? AND aiu_nano IS NULL`,
+	);
 	return atomically(db, () => {
+		let chargeChanges = 0;
 		for (const s of stats) {
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
-			writer.add(
+			const reportedNano = s.usage.aiu?.nano;
+			const aiuNano = isValidAiuNano(reportedNano) ? reportedNano : null;
+			const stored = writer.add(
 				s.sessionFile,
 				[s.entryId, s.timestamp],
 				[
@@ -1334,6 +1370,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.usage.cacheWrite,
 					s.usage.totalTokens,
 					s.usage.premiumRequests ?? 0,
+					aiuNano,
 					cost.input,
 					cost.output,
 					cost.cacheRead,
@@ -1346,8 +1383,11 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.purpose ?? null,
 				],
 			);
+			if (!stored && aiuNano !== null) {
+				chargeChanges += attachCharge.run(aiuNano, s.entryId, s.timestamp, s.sessionFile).changes;
+			}
 		}
-		return writer.finish();
+		return writer.finish() + chargeChanges;
 	});
 }
 
@@ -1392,6 +1432,7 @@ function rowToMessageStats(row: any): MessageStats {
 			cacheWrite: row.cache_write_tokens,
 			totalTokens: row.total_tokens,
 			premiumRequests: row.premium_requests ?? 0,
+			...(row.aiu_nano !== null && row.aiu_nano !== undefined ? { aiu: { nano: row.aiu_nano as number } } : {}),
 			cost: {
 				input: row.cost_input,
 				output: row.cost_output,
