@@ -138,6 +138,7 @@
 - The bash tool's builtin `grep` honors `--line-buffered`, leaves redirected input just after the last selected line for `-m`, and reports binary input as `binary file matches` on stderr instead of sending raw bytes down the pipe
 - The bash tool's builtin `sed` reads only up to the current line with `-u` (so `ps | { sed -u 1q; sort; }` keeps the header idiom working), leaves redirected input after the last line read on `q`/`Q`, and splits records on NUL with `-z`
 - The bash tool's builtin `awk` keeps the `\r` of CRLF lines instead of silently converting them to LF
+- The bash tool's builtin `grep` rejects malformed basic regexes (`\(`, `[`, `a\{1`, `[z-a]`, a trailing `\`, …) with GNU's error and exit status 2 instead of silently reporting no match
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))

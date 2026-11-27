@@ -730,8 +730,9 @@ fn normalize_context_args(argv: Vec<OsString>) -> Vec<OsString> {
 	normalized
 }
 
-/// Build a matcher, falling back to a literal match for any pattern the engine
-/// refuses.
+/// Build a matcher, falling back to a literal match for a pattern whose
+/// back-reference the engine cannot run. Any other refusal is an error: the
+/// BRE translation has already rejected malformed patterns.
 ///
 /// `fallbacks` supplies the text to escape when the corresponding entry of
 /// `patterns` will not compile. The two differ for a BRE, where `patterns`
@@ -755,16 +756,27 @@ fn build_default_matcher<P: AsRef<str>, F: AsRef<str>>(
 		.zip(fallbacks.iter())
 		.map(|(pattern, fallback)| {
 			let pattern = pattern.as_ref();
-			if builder.build(pattern).is_ok() {
-				pattern.to_owned()
-			} else {
-				regex::escape(fallback.as_ref())
+			match builder.build(pattern) {
+				Ok(_) => Ok(pattern.to_owned()),
+				Err(_) if has_backreference(pattern) => Ok(regex::escape(fallback.as_ref())),
+				Err(error) => Err(engine_error_message(&error)),
 			}
 		})
-		.collect();
+		.collect::<Result<_, _>>()?;
 	builder
 		.build_many(&sanitized)
 		.map_err(|_| engine_error_message(&error))
+}
+
+/// Whether a translated pattern holds a `\1`-`\9` back-reference.
+fn has_backreference(pattern: &str) -> bool {
+	let mut chars = pattern.chars();
+	while let Some(c) = chars.next() {
+		if c == '\\' && chars.next().is_some_and(|next| matches!(next, '1'..='9')) {
+			return true;
+		}
+	}
+	false
 }
 
 /// One line for an error the regex engine raised after translation: GNU's
@@ -3022,15 +3034,37 @@ mod tests {
 			assert_eq!(out, want, "{pattern}");
 		}
 
-		// An unterminated bracket expression is not silently swallowed as an
-		// empty class: the engine refuses it. In `grep` it then reaches the
-		// pre-existing literal fallback - the same path back-references take -
-		// so it matches the typed text rather than erroring the way real grep
-		// does. That divergence predates this change and is unchanged by it;
-		// `sed`, which has no such fallback, reports the error.
+		// An unterminated bracket expression is an error, as in GNU grep, not
+		// a literal match of the typed text.
 		let (code, out, err) = run(&["-c", "a[d"], "a[d\nplain\n").await;
-		assert_eq!(code, 0, "{err}");
-		assert_eq!(out, "1\n", "falls back to the literal text the user typed");
+		assert_eq!((code, out.as_str(), err.as_str()), (2, "", "grep: Unmatched [, [^, [:, [., or [=\n"));
+	}
+
+	/// Failure: malformed BREs such as `\(` or `[` exited 1 silently, so a
+	/// `grep -q` caller read the error as "no match". Messages are GNU 3.11's.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn malformed_bre_is_a_gnu_error() {
+		for (pattern, want) in [
+			(r"\(", r"Unmatched ( or \("),
+			(r"a\)", r"Unmatched ) or \)"),
+			("[", "Invalid regular expression"),
+			("[^", "Invalid regular expression"),
+			("[a", "Unmatched [, [^, [:, [., or [="),
+			(r"a\{1", r"Unmatched \{"),
+			(r"a\{1,x\}", r"Invalid content of \{\}"),
+			(r"a\{2,1\}", r"Invalid content of \{\}"),
+			(r"a\", "Trailing backslash"),
+			(r"\(a\)\2", "Invalid back reference"),
+			(r"\(a\1\)", "Invalid back reference"),
+			("[z-a]", "Invalid range end"),
+		] {
+			let (code, out, err) = run(&["-q", pattern], "aa(a)\n").await;
+			assert_eq!((code, out.as_str()), (2, ""), "{pattern}");
+			assert_eq!(err, format!("grep: {want}\n"), "{pattern}");
+		}
+		// Valid intervals still match.
+		let (code, out, err) = run(&["-c", r"a\{,2\}"], "aa(a)\n").await;
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "1\n", ""));
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

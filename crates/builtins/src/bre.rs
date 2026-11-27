@@ -37,8 +37,12 @@ pub(crate) enum BreError {
 	/// A `[.x.]` or `[=x=]` that is not a single character.
 	InvalidCollation,
 	InvalidCharacterRange,
-	/// An ERE `(` that is never closed.
+	/// A `(` (ERE) or `\(` (BRE) that is never closed.
 	UnmatchedParen,
+	/// A BRE `\)` that closes no group.
+	UnmatchedCloseParen,
+	/// A BRE `\{` with no closing `\}`.
+	UnmatchedBrace,
 	/// An ERE interval `{}` or `{n,m}` with `n > m`.
 	InvalidInterval,
 	/// An ERE interval bound above glibc's `RE_DUP_MAX` (32767).
@@ -77,6 +81,8 @@ impl BreError {
 			Self::InvalidCollation => "Invalid collation character",
 			Self::InvalidCharacterRange => "Invalid range end",
 			Self::UnmatchedParen => r"Unmatched ( or \(",
+			Self::UnmatchedCloseParen => r"Unmatched ) or \)",
+			Self::UnmatchedBrace => r"Unmatched \{",
 			Self::InvalidInterval => r"Invalid content of \{\}",
 			Self::IntervalTooBig => "Regular expression too big",
 			Self::TrailingBackslash => "Trailing backslash",
@@ -98,9 +104,18 @@ impl BreError {
 /// This matters because the target engines accept `^+` and compile it as
 /// `(?:^)+`, which matches the empty string at every line start - so a pattern
 /// meant to find a few lines silently matches all of them.
+///
+/// Malformed patterns are refused with glibc's error, as GNU grep and sed do:
+/// unbalanced `\(`/`\)`, an unclosed or malformed `\{…\}`, a back-reference
+/// to a group not yet closed, a trailing `\`, and bad bracket expressions.
 pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, BreError> {
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
+	// Numbers of the groups still open, how many were opened, and a bit per
+	// closed group `\1`-`\9` may name.
+	let mut open_groups = Vec::new();
+	let mut groups = 0u32;
+	let mut closed_groups = 0u16;
 
 	// Whether something repeatable precedes the current position. False at the
 	// start of the pattern and directly after `\(` or `\|`, which are exactly
@@ -119,11 +134,17 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 				Some('(') => {
 					chars.next();
 					result.push('('); // Group start
+					groups += 1;
+					open_groups.push(groups);
 					has_atom = false;
 					anchored = false;
 				},
 				Some(')') => {
 					chars.next();
+					let group = open_groups.pop().ok_or(BreError::UnmatchedCloseParen)?;
+					if group <= 9 {
+						closed_groups |= 1 << group;
+					}
 					result.push(')'); // Group end
 					has_atom = true;
 				},
@@ -168,11 +189,12 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 					if !has_atom {
 						return Err(BreError::RepetitionOperandMissing);
 					}
-					result.push('{'); // Brace quantifier start
+					push_bre_interval(&mut result, &mut chars)?;
 				},
 				Some('}') => {
+					// Closes no interval: an ordinary brace.
 					chars.next();
-					result.push('}'); // Brace quantifier end
+					result.push_str(r"\}");
 					has_atom = true;
 				},
 				Some(v) if v.is_ascii_digit() => {
@@ -184,6 +206,11 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 					// by '1', not group 11.
 					let v = *v;
 					chars.next();
+					if let Some(group @ 1..=9) = v.to_digit(10)
+						&& closed_groups & (1 << group) == 0
+					{
+						return Err(BreError::InvalidBackReference);
+					}
 					match backrefs {
 						Backrefs::Supported => result.push_str(&format!(r"(?:\{v})")),
 						Backrefs::Unsupported => {
@@ -200,11 +227,7 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 					result.push(next);
 					has_atom = true;
 				},
-				None => {
-					// Trailing backslash; keep it.
-					result.push('\\');
-					has_atom = true;
-				},
+				None => return Err(BreError::TrailingBackslash),
 			}
 		} else {
 			match c {
@@ -268,8 +291,63 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 		}
 	}
 
+	if !open_groups.is_empty() {
+		return Err(BreError::UnmatchedParen);
+	}
 	Ok(result)
 }
+
+/// Append a BRE interval as an ERE `{min,max}`; the `\{` is already consumed.
+/// Content runs to the first `\}`: glibc reports a missing `\}` as unmatched
+/// and anything but `n`, `n,`, `,m` or `n,m` (with `n <= m`) as invalid.
+fn push_bre_interval(result: &mut String, chars: &mut Peekable<Chars<'_>>) -> Result<(), BreError> {
+	let mut content = String::new();
+	loop {
+		match chars.next() {
+			None => return Err(BreError::UnmatchedBrace),
+			Some('\\') if chars.peek() == Some(&'}') => {
+				chars.next();
+				break;
+			},
+			Some(c) => content.push(c),
+		}
+	}
+	let (min, max) = match content.split_once(',') {
+		Some((min, max)) => (min, Some(max)),
+		None => (content.as_str(), None),
+	};
+	let bound = |text: &str| -> Result<Option<u32>, BreError> {
+		if text.is_empty() {
+			return Ok(None);
+		}
+		if !text.bytes().all(|b| b.is_ascii_digit()) {
+			return Err(BreError::InvalidInterval);
+		}
+		let value = text.parse::<u32>().unwrap_or(u32::MAX);
+		if value > DUP_MAX { Err(BreError::IntervalTooBig) } else { Ok(Some(value)) }
+	};
+	let low = bound(min)?;
+	let high = match max {
+		Some(max) => bound(max)?,
+		None if low.is_none() => return Err(BreError::InvalidInterval),
+		None => low,
+	};
+	if let (Some(low), Some(high)) = (low, high)
+		&& low > high
+	{
+		return Err(BreError::InvalidInterval);
+	}
+	let low = low.unwrap_or(0);
+	match (max, high) {
+		(None, _) => result.push_str(&format!("{{{low}}}")),
+		(Some(_), None) => result.push_str(&format!("{{{low},}}")),
+		(Some(_), Some(high)) => result.push_str(&format!("{{{low},{high}}}")),
+	}
+	Ok(())
+}
+
+/// glibc's largest interval bound, `RE_DUP_MAX`.
+const DUP_MAX: u32 = 0x7fff;
 
 /// Whether the rest of the pattern ends the current branch.
 ///
@@ -291,7 +369,7 @@ fn ends_branch(chars: &Peekable<Chars<'_>>) -> bool {
 }
 
 /// Append one POSIX bracket expression. The opening `[` is already consumed.
-/// As before, an unterminated outer bracket is left for the engine to reject.
+/// An unterminated bracket is refused with glibc's error.
 fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>) -> Result<(), BreError> {
 	let mut probe = chars.clone();
 	let start = result.len();
@@ -307,7 +385,11 @@ fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>)
 	let mut first = !leading_close;
 	let mut endpoint = leading_close;
 	let mut in_range = false;
+	// The last element that can start a range, to reject `[z-a]`.
+	let mut range_from = leading_close.then_some(']');
+	let mut any = leading_close;
 	while let Some(c) = probe.next() {
+		any = true;
 		if c == ']' {
 			result.push(c);
 			*chars = probe;
@@ -344,7 +426,7 @@ fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>)
 					return Err(BreError::InvalidClassName);
 				}
 				result.push_str(":]");
-				false
+				None
 			} else {
 				// In the default byte-order collation, a single character is
 				// its own collating symbol/equivalence class. Do not hand
@@ -356,22 +438,29 @@ fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>)
 				}
 				result.truncate(body_start);
 				push_class_literal(result, symbol);
-				marker == '.'
+				(marker == '.').then_some(symbol)
 			}
 		} else {
 			push_class_literal(result, c);
-			true
+			Some(c)
 		};
-		if in_range && !range_eligible {
-			return Err(BreError::InvalidCharacterRange);
+		if in_range {
+			match (range_from, range_eligible) {
+				(Some(from), Some(to)) if from > to => return Err(BreError::InvalidCharacterRange),
+				(_, None) => return Err(BreError::InvalidCharacterRange),
+				_ => {},
+			}
 		}
-		endpoint = range_eligible && !in_range;
+		endpoint = range_eligible.is_some() && !in_range;
+		range_from = range_eligible;
 		in_range = false;
 		first = false;
 	}
 
-	result.truncate(start + 1);
-	Ok(())
+	result.truncate(start);
+	// glibc: a `[` or `[^` that ends the pattern is malformed; any other
+	// unclosed bracket is unmatched.
+	Err(if any { BreError::UnmatchedBracket } else { BreError::BracketAtEnd })
 }
 
 fn push_class_literal(result: &mut String, c: char) {
@@ -422,16 +511,6 @@ pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, Bre
 			},
 			'[' => {
 				push_bracket_expression(&mut result, &mut chars)?;
-				// An unterminated bracket leaves only its `[` behind.
-				if grep && result.ends_with('[') {
-					let mut rest = chars.clone();
-					rest.next_if_eq(&'^');
-					return Err(if rest.peek().is_none() {
-						BreError::BracketAtEnd
-					} else {
-						BreError::UnmatchedBracket
-					});
-				}
 				has_atom = true;
 				continue;
 			},
@@ -496,7 +575,6 @@ enum Brace {
 /// bounds clamped just above `RE_DUP_MAX` as glibc clamps them.
 #[cfg(any(feature = "util.grep", feature = "util.sed"))]
 fn classify_brace(mut chars: Peekable<Chars<'_>>) -> Brace {
-	const DUP_MAX: u32 = 0x7fff;
 	let number = |chars: &mut Peekable<Chars<'_>>| {
 		let mut value = None;
 		while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
@@ -602,8 +680,8 @@ mod tests {
 	}
 
 	#[test]
-	fn test_trailing_backslash_is_preserved() {
-		assert_eq!(ere(r"abc\"), r"abc\");
+	fn test_trailing_backslash_is_an_error() {
+		assert_eq!(ere_err(r"abc\"), Some(BreError::TrailingBackslash));
 	}
 
 	#[test]
