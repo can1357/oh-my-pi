@@ -402,7 +402,7 @@ describe("TodoTool operations", () => {
 		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
 		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
 		// than error out and drop the user's edits (issue #9188).
-		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "+ \\[/\\] third"].join("\n");
+		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "  ", "  + \\[/\\] third"].join("\n");
 		const { phases, errors } = markdownToPhases(md);
 		expect(errors).toEqual([]);
 		const tasks = phases[0]?.tasks ?? [];
