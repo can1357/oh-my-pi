@@ -182,18 +182,32 @@ is left as it was.
   a fullscreen layer replaces it as it does inline.
 - The window follows the tail, or is anchored to a `main` node and a row of its
   entry (its separator rows first). Output below an anchored window never moves
-  it; its last row then reads `↓ N lines below`. An anchor whose rows from
+  it. The scrollbar shows the position without taking a transcript row.
+  With the scrollbar off, its last row reads `↓ N lines below` if room allows.
+  Leading blank dock padding yields to transcript rows. An anchor whose rows from
   there on fit (scrolled to the end, a taller screen, the blocks below
   removed) follows the tail again; an anchor row past a block that shrank is
   clamped; an anchor node that left `main` follows the tail.
 - `TermBackend.scroll(by)` (`Host.scroll`) moves it by a page (the window less
   one row), a row count, to `start`, or to `end` (following). It returns false
   when no window is on screen (inline, a fullscreen layer up, Tern) so the
-  caller's key goes elsewhere. A wheel report no hit target took scrolls three
-  rows unless a modal sheet owns the pointer.
+  caller's key goes elsewhere. Line, half-page and semantic user-prompt actions
+  use the same window. Wheel reports use automatic or fixed steps; modal
+  sheets keep their own input. The right-edge scrollbar tracks the viewport.
+- Fullscreen requests SGR button-motion and focus reports. Drag selects
+  transcript cells, double-click selects words, triple-click selects rows,
+  and holding at an edge extends the selection beyond the screen. Copy runs
+  through the app's clipboard sink (OSC 52 and local platform helpers).
+- `Host.openSearch()` opens incremental transcript find without putting query
+  text in the editor. Matches are highlighted; Enter and Shift+Enter cycle
+  them, Escape restores the reading position and draft. Inline and native
+  hosts decline transcript actions.
 - Nothing reaches history until the shutdown flush, which composes the usual
   inline frame: the writer leaves the alternate screen and writes every block
-  after the commit frontier below where the session started.
+  after the commit frontier below where the session started. With
+  `tui.exitTranscript: false`, fullscreen exits without this flush. Emergency
+  restoration never invokes application painters: the crash reporter prints a
+  resume command after cleanup when the session reached durable storage.
 - The commit frontier survives switching modes at runtime: blocks committed
   inline stay committed, a fullscreen stretch commits nothing, and the next
   inline frame retires from the frontier on, so every block reaches history
@@ -413,6 +427,12 @@ recent images; demotion deletes image pixels by id and repaints the affected
 viewport rows with the height-preserving text fallback. It does not replay
 history. An image already retained in terminal history may lose its pixels when
 demoted because historical rows are immutable.
+
+In a fullscreen transcript the viewport clips Kitty placements and SIXEL bands.
+OSC 1337 has no source rectangle: a clipped iTerm2 image keeps its space and
+reappears when fully visible. A sheet must not be punched through by a
+non-cell graphic underneath. Buffer switches invalidate alternate placements;
+the graceful transcript flush recreates eligible images on the normal screen.
 
 Never retransmit full base64 image data on every frame. Kitty Unicode
 placeholders remain capability-gated and can be overridden with the existing

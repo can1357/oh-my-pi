@@ -255,6 +255,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 Opted in: Muse Code `muse-spark-1.3`, `muse-spark-1.3-contributor`, and the four Wonder variants over `openai-responses` (Meta documents shared-prefix `prompt_cache_key` routing; sibling reuse measured on Spark 1.3 Contributor). OpenCode Go `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`, `gpt-5.6-luna`, `gpt-6-luna`, and `grok-4.6` over `openai-responses`, and `deepseek-v4-pro` and `omen-alpha` over `openai-completions`. A Go lane qualifies only when a cold / different-family / same-family probe warms on the repeated key and stays cold under the different key; [`providers/opencode-go.kdl`](providers/opencode-go.kdl) records the per-lane tallies and the lanes that warmed under any key (and so gain nothing). The standard Go `muse-spark-1.3`/`1.2` ids stay off: the gateway answers "Model is unavailable". Custom providers opt in only by declaring a matching `providerType`.
 
+`kimi-code-endpoint #true` marks a Kimi Code managed `/coding/v1` deployment (declared at the provider root of [`providers/kimi-code.kdl`](providers/kimi-code.kdl) and [`providers/kimi-code-global.kdl`](providers/kimi-code-global.kdl)). The AI runtime reads it through `isKimiCodeEndpoint` and routes these streams through the dedicated Kimi stream dispatcher, prepends the shared Kimi CLI client headers on the OpenAI-completions transport, and sends the shared prompt-cache affinity identity on the Anthropic transport so both transports warm one cache. The provider's regional base URL and its override env name come from the same files' `base-url` node via `providerBaseUrl` / `providerBaseUrlEnv`; consumers keep env override resolution and any gateway/proxy-specific behavior in code. Unassigned keeps generic dispatch.
+
 `image-max-edge` is the longest image edge, in pixels, a host passes to the model; it downscales larger images to fit first (Cursor: 1024 for Claude and GPT). Snapcompact reads it through `resolveImageMaxEdge` and renders frames no wider, so their glyphs reach the model at the size they were drawn; unassigned means the host keeps the image's size.
 
 `snapcompact-image-reads #true` opts a reader in to getting a fresh `read` result as snapcompact frames when `snapcompact.toolResults` is on. Frames collapse whitespace, so snapcompact draws each row's leading indentation as a count bracket (`[»2]`, `[·4]`) and keeps the `[path#TAG]` header as text beside them. On 3–4 frame reads Opus 5.5 then made exact first edits from frames within one of text (38 vs 39 of 40), so Opus 5.5+ opts in ([`classes/anthropic.kdl`](classes/anthropic.kdl)); Sonnet 5.5 (37 vs 40) and Haiku 5.5 (35 vs 40) still miscounted deep tab indents. Unassigned: `read` results stay text; other tools' results are imaged either way.
@@ -411,7 +413,7 @@ auth "anthropic" {
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
     device-bound #true                           // logins need a key only this machine holds: kept out of the auth broker
-    sign-out hook="name"                          // runs when a login is removed: forgets local secrets and revokes the grant upstream
+    sign-out hook="name"                          // runs when a login is removed: revokes the grant upstream
     api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
@@ -455,6 +457,9 @@ The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entr
 provider "sakana" {
     default-model "fugu"                          // required for a catalog entry
     env "SAKANA_API_KEY" "FUGU_API_KEY"           // runtime API-key env fallback, in order
+    base-url "https://api.sakana.ai/v1" {         // optional managed deployment URL (chat,
+        env "SAKANA_BASE_URL"                     // discovery, usages, search); optional override env
+    }
     dynamic-models-authoritative #true            // discovery replaces bundled rows
     allow-unauthenticated #true                   // runtime manager without a key
     skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere

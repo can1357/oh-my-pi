@@ -132,7 +132,7 @@ Core methods:
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
-- `setModel`, `getThinkingLevel`, `setThinkingLevel`
+- `setModel`, `getThinkingLevel`, `setThinkingLevel` (`getThinkingLevel()` returns `undefined` when no concrete effort applies, e.g. a model limited to off/auto with `auto` selected — not only before the session is initialized)
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`

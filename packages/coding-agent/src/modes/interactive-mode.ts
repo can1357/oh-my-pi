@@ -184,14 +184,8 @@ import {
 	setProgramStatusSupported,
 	settleStartupRun,
 } from "../utils/run-status";
-import {
-	buildResumeArgv,
-	clearProgramResume,
-	disposeProgramResume,
-	getProgramResumeToken,
-	initProgramResume,
-	OSC_7577_TOKEN_ENV,
-} from "../utils/program-resume";
+import { buildResumeArgv, clearProgramResume, disposeProgramResume, initProgramResume } from "../utils/program-resume";
+import { getProgramResumeToken, OSC_7577_TOKEN_ENV } from "../utils/program-resume-token";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
@@ -343,6 +337,11 @@ import {
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiScreen,
+	cfgTuiCopyOnSelect,
+	cfgTuiWheelLines,
+	cfgTuiScrollbar,
+	cfgTuiExitTranscript,
+	cfgTuiFullscreenMouse,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -511,6 +510,11 @@ const cfgLiveUiSettings = combine({
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.screen": cfgTuiScreen,
+	"tui.copyOnSelect": cfgTuiCopyOnSelect,
+	"tui.wheelLines": cfgTuiWheelLines,
+	"tui.scrollbar": cfgTuiScrollbar,
+	"tui.exitTranscript": cfgTuiExitTranscript,
+	"tui.fullscreenMouse": cfgTuiFullscreenMouse,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
 	motion: cfgMotionResolved,
@@ -1260,9 +1264,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
+		/** A submitted plan awaits the user's answer: idle work must not summarize its exploration away. */
+		isReviewingPlan: boolean;
 		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
-	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
+	} = {
+		target: undefined,
+		ready: false,
+		isComposing: false,
+		isReviewingPlan: false,
+		scheduledTurn: undefined,
+		presentRecap: undefined,
+	};
 
 	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
@@ -1271,6 +1284,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			activity.target = undefined;
 			activity.ready = false;
 			activity.isComposing = false;
+			activity.isReviewingPlan = false;
 			activity.scheduledTurn = undefined;
 			activity.presentRecap = undefined;
 			previous?.refreshIdleMaintenance();
@@ -1279,8 +1293,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!activity.scheduledTurn) return;
 		activity.target = target;
 		activity.isComposing = untrack(this.composer.text).trim() !== "";
+		activity.isReviewingPlan = this.#planReviewPick !== undefined;
 		target.enableIdleMaintenance({
-			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			isBlocked: () =>
+				!activity.ready || activity.target !== target || activity.isComposing || activity.isReviewingPlan,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
 			// Delivered only while unblocked, so `target` is the session on screen.
 			onRecap: recap => activity.presentRecap?.(recap),
@@ -1788,6 +1804,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	#syncFrameSettings(): void {
 		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
 		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
+		this.#frame.copyOnSelect.set(cfgTuiCopyOnSelect.get(this.settings));
+		this.#frame.wheelLines.set(cfgTuiWheelLines.get(this.settings));
+		this.#frame.scrollbar.set(cfgTuiScrollbar.get(this.settings));
+		this.#frame.exitTranscript.set(cfgTuiExitTranscript.get(this.settings));
+		this.#frame.fullscreenMouse.set(cfgTuiFullscreenMouse.get(this.settings));
 		const hyperlinks = cfgTuiHyperlinks.get(this.settings);
 		this.#frame.hyperlinks.set(hyperlinks === "off" ? false : hyperlinks === "always" ? true : undefined);
 		this.#frame.textSizing.set(cfgTuiTextSizing.get(this.settings));
@@ -3663,7 +3684,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncFrameSettings();
 			resetDisplay = true;
 		}
-		if (any("tui.screen")) this.#syncFrameSettings();
+		if (
+			any(
+				"tui.screen",
+				"tui.copyOnSelect",
+				"tui.wheelLines",
+				"tui.scrollbar",
+				"tui.exitTranscript",
+				"tui.fullscreenMouse",
+			)
+		)
+			this.#syncFrameSettings();
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
@@ -5140,6 +5171,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#planReviewPick = undefined;
 			}
 			if (pending && this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
+			this.syncIdleMaintenanceView();
 			resolve(choice);
 		};
 		this.#planReviewOwner = owner;
@@ -5180,6 +5212,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewOverlayHandle = showSheet(this.shell, planReviewSheet(model), () => jsx(PlanReview, { model }), {
 			mouse: "any",
 		});
+		this.syncIdleMaintenanceView();
 		return promise;
 	}
 

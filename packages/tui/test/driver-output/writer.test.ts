@@ -346,6 +346,15 @@ describe("display reset", () => {
 });
 
 describe("shutdown", () => {
+	it("does not dump a held inline transcript when an emergency interrupts fullscreen", () => {
+		const vt = new Vt({ shell: ["shell output"] });
+		vt.present({ viewport: [], fullscreen: ["alternate"], cursor: null });
+		vt.writer.hold({ history: { id: 1, rows: ["private transcript"] }, viewport: ["draft"], cursor: null });
+		vt.writer.stop(true);
+		expect(vt.term.isMainScreen).toBe(true);
+		expect(vt.transcript()).toEqual(["shell output"]);
+	});
+
 	it("leaves the alternate screen and puts the cursor after the content", () => {
 		const vt = new Vt({ rows: 6 });
 		vt.present({ viewport: ["a", "b", "", ""], cursor: { row: 0, col: 1 } });

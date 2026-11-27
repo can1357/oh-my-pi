@@ -5,13 +5,12 @@ import {
 	disposeProgramResume,
 	formatResumeClear,
 	formatResumeReport,
-	getProgramResumeToken,
 	initProgramResume,
-	OSC_7577_TOKEN_ENV,
 	reportProgramResume,
 	resendProgramResume,
 	resetProgramResumeForTests,
 } from "@oh-my-pi/pi-coding-agent/utils/program-resume";
+import { getProgramResumeToken, OSC_7577_TOKEN_ENV } from "@oh-my-pi/pi-coding-agent/utils/program-resume-token";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
 const SPEC_TOKEN = "dummy-token-replace-me";

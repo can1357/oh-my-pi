@@ -2268,7 +2268,11 @@ export interface ExtensionAPI {
 	/** Set the current model. Returns false if no API key available. */
 	setModel(model: Model): Promise<boolean>;
 
-	/** Get current thinking level. */
+	/**
+	 * Get current thinking level.
+	 * Returns `undefined` when the active model has no concrete effort to report
+	 * (e.g. a model limited to off/auto with `auto` selected), or before a session model is initialized.
+	 */
 	getThinkingLevel(): ThinkingLevel | undefined;
 
 	/** Set thinking level for the current session. */

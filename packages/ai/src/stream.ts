@@ -17,6 +17,7 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
+import { isKimiCodeEndpoint } from "@oh-my-pi/pi-catalog/compat/kimi-code";
 import { $env, logger } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
@@ -1118,8 +1119,9 @@ function streamSimpleDispatch<TApi extends Api>(
 		});
 	}
 
-	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
-	if (model.provider === "kimi-code") {
+	// Kimi Code managed endpoint (`kimi-code-endpoint` axis) - route to the
+	// dedicated handler that wraps OpenAI or Anthropic API.
+	if (isKimiCodeEndpoint(model)) {
 		// streamKimi handles openai/anthropic format mapping internally, but the
 		// mandatory-reasoning clamp is a request-shaping concern owned here: K3's
 		// `supports_thinking_type: "only"` endpoint rejects disabled/omitted

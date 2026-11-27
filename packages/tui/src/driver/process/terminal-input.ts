@@ -228,6 +228,7 @@ export class ProcessTerminalInput implements TerminalInput {
 	#colorSchemeReports = false;
 	#restoreModes: number[] = [];
 	#mouse: MouseTracking = "off";
+	#reportFocus = false;
 	#titlePushed = false;
 	/** Re-assert bracketed paste before input and output: some hosts reset it (iTerm2's state toggle, tmux panes). */
 	#rearmPaste = false;
@@ -512,6 +513,7 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#colorSchemeReports = false;
 		this.#restoreModes = [];
 		this.#mouse = "off";
+		this.#reportFocus = false;
 		this.#titlePushed = false;
 		this.#sixelAdvertised = false;
 		this.#sixelGeometry = false;
@@ -538,8 +540,13 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#port.write(`${out}\x1b]0;${clean}\x07`);
 	}
 
-	setMouse(tracking: MouseTracking): void {
-		if (!this.#started || tracking === this.#mouse) return;
+	setMouse(tracking: MouseTracking, reportFocus = false): void {
+		if (!this.#started) return;
+		if (this.#reportFocus !== reportFocus) {
+			this.#reportFocus = reportFocus;
+			this.#port.write(reportFocus ? "\x1b[?1004h" : "\x1b[?1004l");
+		}
+		if (tracking === this.#mouse) return;
 		let out = this.#mouse === "off" ? "" : `\x1b[?${MOUSE_MODES[this.#mouse]}l`;
 		out += tracking === "off" ? "\x1b[?1006l" : `\x1b[?${MOUSE_MODES[tracking]}h\x1b[?1006h`;
 		this.#mouse = tracking;
@@ -644,6 +651,7 @@ export class ProcessTerminalInput implements TerminalInput {
 
 	#restoreSequence(): string {
 		let out = this.#progress ? PROGRESS_CLEAR : "";
+		if (this.#reportFocus) out += "\x1b[?1004l";
 		if (this.#mouse !== "off") out += `\x1b[?${MOUSE_MODES[this.#mouse]}l\x1b[?1006l`;
 		if (this.#kittyFlags !== null) out += "\x1b[<u";
 		if (this.#modifyOtherKeys) out += "\x1b[>4;0m";

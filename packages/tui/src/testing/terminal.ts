@@ -36,6 +36,10 @@ export interface TestTerminalOptions {
 	readonly intercept?: TermBackendOptions["intercept"];
 	readonly textSizing?: TermBackendOptions["textSizing"];
 	readonly screen?: TermBackendOptions["screen"];
+	readonly copySelection?: TermBackendOptions["copySelection"];
+	readonly copyOnSelect?: TermBackendOptions["copyOnSelect"];
+	readonly wheelLines?: TermBackendOptions["wheelLines"];
+	readonly scrollbar?: TermBackendOptions["scrollbar"];
 	/** Drive this surface (an app shell's) instead of one built from the template. */
 	readonly surface?: Surface;
 }
@@ -175,6 +179,10 @@ export function createTestTerminal(template: () => SurfaceTemplate, options: Tes
 		...(options.intercept ? { intercept: options.intercept } : {}),
 		...(options.textSizing ? { textSizing: options.textSizing } : {}),
 		...(options.screen ? { screen: options.screen } : {}),
+		...(options.copySelection ? { copySelection: options.copySelection } : {}),
+		...(options.copyOnSelect ? { copyOnSelect: options.copyOnSelect } : {}),
+		...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
+		...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
 	});
 	backend.start();
 	const input = (event: InputEvent): void => {
