@@ -3,7 +3,7 @@
  * tool first; a later session there under other extension roots gets a task tool that neither offers that agent nor
  * spawns it, as created and without a discovery being published.
  */
-import { afterAll, beforeAll, describe, expect, it, type Mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
 import * as os from "node:os";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -97,10 +97,11 @@ describe("a session's task tool after another session in its directory discovere
 		}
 	}
 
-	beforeAll(async () => {
+	beforeEach(async () => {
 		tempDir = await TempDir.create("@task-tool-extension-roots-");
 		cwd = tempDir.join("project");
-		// User-level discovery reads the process-global agent dir and home: point both at the fixture.
+		// User-level discovery reads the process-global agent dir and home: point both at this test's fixture,
+		// and restore them when the test ends.
 		setAgentDir(tempDir.join("home/.omp/agent"));
 		homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir.join("home"));
 		await Promise.all([
@@ -122,19 +123,24 @@ describe("a session's task tool after another session in its directory discovere
 		firstView = await view(first, false);
 	}, 60_000);
 
-	afterAll(async () => {
+	afterEach(async () => {
 		try {
 			await Promise.allSettled(sessions.splice(0).map(session => session.dispose()));
 			authStorage?.close();
+			authStorage = undefined;
 			closeModelCache();
 		} finally {
 			homedirSpy?.mockRestore();
+			homedirSpy = undefined;
 			for (const key of ENV_KEYS) {
 				if (originalEnv[key] === undefined) delete process.env[key];
 				else process.env[key] = originalEnv[key];
 			}
 			__resetDirsFromEnvForTests();
 			if (tempDir) await tempDir.remove();
+			tempDir = undefined;
+			first = undefined;
+			firstView = undefined;
 		}
 	});
 
