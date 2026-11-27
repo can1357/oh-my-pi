@@ -28,6 +28,7 @@ import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import type { AgentProgress, AgentStreaming } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 const TAIL_BYTES = 8 * 1024;
@@ -490,8 +491,6 @@ describe("clock-only progress", () => {
 		const steps: Array<{ label: string; advance: number; event: AgentSessionEvent }> = [
 			{ label: "first thinking", advance: 200, event: thinking },
 			{ label: "thinking again", advance: 200, event: thinking },
-			{ label: "thinking again", advance: 200, event: thinking },
-			{ label: "thinking again", advance: 200, event: thinking },
 			{ label: "prose", advance: 200, event: deltaEvent("hello") },
 			{ label: "empty delta", advance: 200, event: deltaEvent("") },
 			{ label: "heartbeat", advance: 5_000, event: deltaEvent("") },
@@ -500,13 +499,16 @@ describe("clock-only progress", () => {
 		];
 		const durations: number[] = [];
 		let busFrames = 0;
-		const emitted: Array<{ label: string; count: number }> = [];
+		const emitted: Array<{ label: string; count: number; durationMs?: number }> = [];
 		const { session } = createScriptedSession(async emit => {
 			for (const step of steps) {
 				clock += step.advance;
 				const before = durations.length;
 				emit(step.event);
-				emitted.push({ label: step.label, count: durations.length - before });
+				const count = durations.length - before;
+				emitted.push(
+					count > 0 ? { label: step.label, count, durationMs: durations.at(-1) } : { label: step.label, count },
+				);
 			}
 			for (const event of yieldEvents()) emit(event);
 		});
@@ -532,21 +534,83 @@ describe("clock-only progress", () => {
 			},
 		});
 
+		// The run starts at the initial clock; each emitted snapshot, the heartbeat included, carries the time of its step.
 		expect(emitted).toEqual([
-			{ label: "first thinking", count: 1 },
+			{ label: "first thinking", count: 1, durationMs: 200 },
 			{ label: "thinking again", count: 0 },
-			{ label: "thinking again", count: 0 },
-			{ label: "thinking again", count: 0 },
-			{ label: "prose", count: 1 },
+			{ label: "prose", count: 1, durationMs: 600 },
 			{ label: "empty delta", count: 0 },
-			{ label: "heartbeat", count: 1 },
-			{ label: "pause", count: 1 },
-			{ label: "unchanged flush", count: 1 },
+			{ label: "heartbeat", count: 1, durationMs: 5_800 },
+			{ label: "pause", count: 1, durationMs: 6_000 },
+			{ label: "unchanged flush", count: 1, durationMs: 6_200 },
 		]);
 		// The progress channel carries exactly the snapshots onProgress sees.
 		expect(busFrames).toBe(durations.length);
-		// The clock still advances across emitted snapshots, the final one included.
-		for (let i = 1; i < durations.length; i++) expect(durations[i]).toBeGreaterThanOrEqual(durations[i - 1]);
+	});
+
+	it("keeps the agent registry's last activity current while clock-only snapshots are dropped", async () => {
+		let clock = 10_000;
+		vi.spyOn(Date, "now").mockImplementation(() => clock);
+		const id = `liveness-${Math.random().toString(36).slice(2)}`;
+		const partial = () => ({ role: "assistant", content: [] }) as unknown as AssistantMessage;
+		const thinking: AgentSessionEvent = {
+			type: "message_update",
+			message: partial(),
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "hmm", partial: partial() },
+		} as AgentSessionEvent;
+		const tool = [
+			{ type: "tool_execution_start", toolCallId: "t-1", toolName: "read", args: {}, intent: "Reading the config" },
+			{
+				type: "tool_execution_end",
+				toolCallId: "t-1",
+				toolName: "read",
+				result: { content: [{ type: "text", text: "ok" }] },
+				isError: false,
+			},
+		] as AgentSessionEvent[];
+		const seen: Array<{ emitted: boolean; lastActivity: number | undefined; at: number }> = [];
+		let emits = 0;
+		const { session } = createScriptedSession(async emit => {
+			for (const event of tool) emit(event);
+			// Each thinking delta lands past the coalescing window and well inside the heartbeat.
+			for (let step = 0; step < 3; step++) {
+				clock += 1_000;
+				const before = emits;
+				emit(thinking);
+				seen.push({
+					emitted: emits > before,
+					lastActivity: AgentRegistry.global().get(id)?.lastActivity,
+					at: clock,
+				});
+			}
+			for (const event of yieldEvents()) emit(event);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as CreateAgentSessionResult);
+		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session });
+
+		try {
+			await runSubprocess({
+				cwd: "/tmp",
+				agent,
+				task: "liveness scenario",
+				description: "registry liveness",
+				index: 0,
+				id,
+				settings: Settings.isolated(),
+				modelRegistry: { refresh: async () => {} } as ModelRegistry,
+				enableLsp: false,
+				eventBus: new EventBus(),
+				onProgress: () => {
+					emits++;
+				},
+			});
+		} finally {
+			AgentRegistry.global().unregister(id);
+		}
+
+		// The first thinking delta starts the stream (a real change); the rest only advance the clock.
+		expect(seen.map(step => step.emitted)).toEqual([true, false, false]);
+		for (const step of seen) expect(step.lastActivity).toBe(step.at);
 	});
 
 	it("leaves an emitted snapshot's recent tools unchanged when a later tool ends", async () => {
