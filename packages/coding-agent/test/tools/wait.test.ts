@@ -19,8 +19,8 @@ import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
+import type { CoordinationDetails } from "@oh-my-pi/pi-coding-agent/tools/details/wait";
 
 function session(
 	manager?: AsyncJobManager,
@@ -102,6 +102,39 @@ describe("wait", () => {
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "build complete" });
 		expect(manager.isJobResultConsumed(id)).toBe(true);
 		expect(manager.isDeliverySuppressed(id)).toBe(true);
+	});
+
+	test("live wait updates only on changes to watched jobs, coalescing progress and preserving elapsed clocks", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		let progress!: (stage: string) => Promise<void>;
+		const id = manager.register(
+			"task",
+			"build",
+			async ctx => {
+				progress = stage => ctx.reportProgress("", { progress: [{ id: ctx.jobId, stage }] });
+				return build.promise;
+			},
+			{ ownerId: "Main" },
+		);
+		const updates: CoordinationDetails[] = [];
+		const waiting = new WaitTool(session(manager)).execute("wait", {}, undefined, update => {
+			if (update.details) updates.push(update.details);
+		});
+		manager.publishCompleted("bash", "unrelated", { text: "done" }, { ownerId: "Other" });
+		vi.advanceTimersByTime(2_000);
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.jobs?.[0]).toMatchObject({ id, startedAtMs: manager.getJob(id)?.startTime });
+		await progress("building");
+		await progress("testing");
+		vi.advanceTimersByTime(500);
+		expect(updates).toHaveLength(2);
+		expect(updates[1]?.jobs?.[0]?.stage).toBe("testing");
+		build.resolve("ok");
+		expect((await waiting).details?.jobs?.[0]).toMatchObject({ status: "completed", resultText: "ok" });
+		vi.advanceTimersByTime(2_000);
+		expect(updates).toHaveLength(2);
 	});
 
 	// Fake timers freeze the settle window: a wait that ends without the clock advancing added no delay.

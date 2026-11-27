@@ -1,9 +1,6 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
-import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	AggregationTemporality,
 	type DataPoint,
@@ -20,10 +17,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/composer-prediction-controller";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-
-beforeAll(async () => {
-	await initTheme(false);
-});
+import { createRoot, effect } from "@oh-my-pi/pi-tui";
+import { Composer } from "../src/ui/composer/composer";
 
 describe("parseComposerPrediction", () => {
 	it("normalizes a reply to the single line the composer shows", () => {
@@ -112,10 +107,7 @@ function harness(options: HarnessOptions = {}) {
 			return promise;
 		},
 	};
-	let renders = 0;
-	// The composer, wired to the controller the way interactive mode wires it.
-	const editor = new CustomEditor(getEditorTheme());
-	editor.setText(options.draft ?? "");
+	const editor = new Composer({ text: options.draft ?? "" });
 	const ctx = {
 		settings: Settings.isolated({
 			"composer.predictions": options.enabled ?? true,
@@ -123,16 +115,20 @@ function harness(options: HarnessOptions = {}) {
 		}),
 		viewSession: session,
 		focusedAgentId: options.focusedAgentId,
-		editor,
-		ui: { requestRender: () => renders++ },
+		composer: editor,
 	} as unknown as ConstructorParameters<typeof ComposerPredictionController>[0];
 	const controller = new ComposerPredictionController(ctx, {
 		deadlineMs: options.deadlineMs,
 		meterProvider: options.meterProvider,
 	});
-	editor.predictions = () => controller.choices;
-	editor.onPredictionAccepted = index => controller.accepted(index);
-	editor.onPredictionShown = () => controller.shown();
+	// The composer's ghost reads `choices` reactively: count the changes it would repaint on.
+	let renders = -1;
+	createRoot(() =>
+		effect(() => {
+			void controller.choices;
+			renders++;
+		}),
+	);
 	const reply = async (index: number, replyText: string) => {
 		const turn = turns[index]!;
 		const assistantMessage = {
@@ -164,8 +160,14 @@ function harness(options: HarnessOptions = {}) {
 		fail,
 		/** The user replaces the composer draft. */
 		type: (text: string) => editor.setText(text),
-		/** Paint one composer frame. */
-		paint: () => editor.render(80).join("\n"),
+		/** The composer painted the ghost (its first painted frame counts the prediction as shown). */
+		paint: () => controller.shown(),
+		/** The user inserted the alternative at `rank` (Tab or Right). */
+		accept: (rank: number) => {
+			const choice = controller.choices?.[rank];
+			if (choice !== undefined) editor.setText(choice);
+			controller.accepted(rank);
+		},
 		renders: () => renders,
 		usageEntries: () => sessionManager.getEntries().filter(entry => entry.type === "model_usage"),
 		/** A new message lands on the journal and in the live history. */
@@ -338,15 +340,6 @@ describe("ComposerPredictionController", () => {
 	});
 });
 
-/** A native host that supports every node kind. */
-const NATIVE_CONTEXT: DescribeContext = {
-	cols: 100,
-	reduceMotion: false,
-	dark: true,
-	supports: () => true,
-	feature: () => true,
-};
-
 describe("ComposerPredictionController metrics", () => {
 	/** A test-local meter provider, so this suite never touches the global one. */
 	function sink() {
@@ -458,38 +451,15 @@ describe("ComposerPredictionController metrics", () => {
 		painted.paint();
 		painted.paint();
 
-		// A native host carries the ghost on the editor node and draws it itself.
-		const native = harness({ meterProvider });
-		native.controller.request();
-		await native.reply(0, "now run the tests");
-		native.editor.describe(NATIVE_CONTEXT);
-
-		// The editor shows only a strict prefix: a draft that is already the whole prediction has no ghost.
-		const complete = harness({ meterProvider });
-		complete.controller.request();
-		complete.type("now run the tests");
-		await complete.reply(0, "now run the tests");
-		complete.paint();
-
-		// The IME-safe boxed layout keeps the end-of-input row empty, ghost included.
-		const imeSafe = harness({ meterProvider });
-		imeSafe.editor.setBorderStyle("box");
-		imeSafe.editor.focused = true;
-		imeSafe.editor.setUseTerminalCursor(true);
-		imeSafe.editor.setImeSafeCursorLayout(true);
-		imeSafe.controller.request();
-		await imeSafe.reply(0, "now run the tests");
-		expect(imeSafe.paint()).not.toContain("run the tests");
-
-		// An unfocused hardware-cursor row draws no ghost.
-		const unfocused = harness({ meterProvider });
-		unfocused.editor.setUseTerminalCursor(true);
-		unfocused.controller.request();
-		await unfocused.reply(0, "now run the tests");
-		expect(unfocused.paint()).not.toContain("run the tests");
+		// A frame painted after the conversation moved on shows nothing current.
+		const stale = harness({ meterProvider });
+		stale.controller.request();
+		await stale.reply(0, "now run the tests");
+		stale.advance("something else");
+		stale.paint();
 
 		expect(await metrics.counts("omp.composer.prediction.shown", "omp.composer.prediction.model")).toEqual({
-			"anthropic/claude-sonnet-4-5": 2,
+			"anthropic/claude-sonnet-4-5": 1,
 		});
 		await metrics.shutdown();
 	});
@@ -502,8 +472,8 @@ describe("ComposerPredictionController metrics", () => {
 		tab.controller.request();
 		await tab.reply(0, "now run the tests");
 		tab.paint();
-		tab.editor.handleInput("\t");
-		expect(tab.editor.getText()).toBe("now run the tests");
+		tab.accept(0);
+		expect(tab.editor.text()).toBe("now run the tests");
 		// The submitted message ends the turn; the next request retires the accepted prediction.
 		tab.controller.request();
 
@@ -511,8 +481,8 @@ describe("ComposerPredictionController metrics", () => {
 		right.controller.request();
 		await right.reply(0, "now run the tests");
 		right.paint();
-		right.editor.handleInput("\x1b[C");
-		expect(right.editor.getText()).toBe("now run the tests");
+		right.accept(0);
+		expect(right.editor.text()).toBe("now run the tests");
 		right.controller.request();
 
 		const ignored = harness({ meterProvider });
@@ -526,16 +496,15 @@ describe("ComposerPredictionController metrics", () => {
 		neverShown.controller.request();
 		neverShown.type("deploy");
 		await neverShown.reply(0, "now run the tests");
-		neverShown.paint();
 		neverShown.controller.cancel();
 
 		// Inserted before any frame painted it: outside the shown population, so not accepted either.
 		const unseen = harness({ meterProvider });
 		unseen.controller.request();
 		await unseen.reply(0, "now run the tests");
-		unseen.editor.handleInput("\t");
-		expect(unseen.editor.getText()).toBe("now run the tests");
-		unseen.paint();
+		unseen.accept(0);
+		expect(unseen.editor.text()).toBe("now run the tests");
+		// The draft is the whole prediction now: no ghost to paint.
 		unseen.controller.cancel();
 
 		// Hidden at first, painted once the user clears the draft.
@@ -544,7 +513,7 @@ describe("ComposerPredictionController metrics", () => {
 		shownLater.type("deploy");
 		await shownLater.reply(0, "now run the tests");
 		shownLater.type("");
-		expect(shownLater.paint()).toContain("now run the tests");
+		shownLater.paint();
 		shownLater.controller.cancel();
 
 		const outdated = harness({ meterProvider });
@@ -579,11 +548,8 @@ describe("ComposerPredictionController metrics", () => {
 		swapped.controller.request();
 		await swapped.reply(0, "run the tests\nship it\nshow the diff");
 		swapped.paint();
-		swapped.editor.handleInput("\t");
-		swapped.editor.handleInput("\t");
-		swapped.editor.handleInput("\x1b[B");
-		swapped.editor.handleInput("\r");
-		expect(swapped.editor.getText()).toBe("ship it");
+		swapped.accept(1);
+		expect(swapped.editor.text()).toBe("ship it");
 		swapped.controller.request();
 
 		// The ghost follows the first alternative the draft is a prefix of.
@@ -592,8 +558,8 @@ describe("ComposerPredictionController metrics", () => {
 		await typed.reply(0, "run the tests\nship it");
 		typed.type("sh");
 		typed.paint();
-		typed.editor.handleInput("\t");
-		expect(typed.editor.getText()).toBe("ship it");
+		typed.accept(1);
+		expect(typed.editor.text()).toBe("ship it");
 		typed.controller.cancel();
 
 		const ignored = harness({ alternatives: true, meterProvider });

@@ -7,7 +7,10 @@ use serde::{
 	de::{Error, Visitor},
 };
 
-use crate::bash::{syntax::NodeId, trace::State};
+use crate::bash::{
+	syntax::NodeId,
+	trace::{Runner, State},
+};
 
 /// Opaque renderer identity preserving the engine's unit and canonical node
 /// IDs.
@@ -30,6 +33,11 @@ impl NodeKey {
 	/// Identify a canonical node within a native syntax source.
 	pub const fn nested(unit: u32, source: u32, node: NodeId) -> Self {
 		Self { unit, source, node }
+	}
+}
+impl From<Runner> for NodeKey {
+	fn from(runner: Runner) -> Self {
+		Self::engine(runner.unit, NodeId(runner.node))
 	}
 }
 impl fmt::Display for NodeKey {

@@ -2,7 +2,7 @@
  * Protocol handler for `attachment://<N>` URLs: image attachments of the
  * calling session, backed by their content-addressed source files.
  */
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
 
 /** Canonical `attachment://<N>` form (no query/hash) as listed by `getImageAttachments`. */

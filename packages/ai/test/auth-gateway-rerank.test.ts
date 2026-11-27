@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { parseRequest, RerankWireError } from "@oh-my-pi/pi-ai/providers/rerank-server";
 import { rerankOpenRouter } from "@oh-my-pi/pi-ai/rerank";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -228,6 +229,34 @@ describe("auth-gateway POST /v1/rerank", () => {
 		expect(response.status).toBe(413);
 		expect(await response.json()).toMatchObject({ error: { code: 413, type: "invalid_request_error" } });
 		expect(harness.upstream).toHaveLength(0);
+	});
+
+	it("stops reading a streamed body with no Content-Length once its chunks pass the limit", async () => {
+		const chunk = new Uint8Array(3 * 1024 * 1024).fill(0x20);
+		let pulled = 0;
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulled++;
+				controller.enqueue(chunk);
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const req = new Request("http://gateway.test/v1/rerank", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body,
+		});
+		expect(req.headers.get("content-length")).toBeNull();
+
+		const failure = await parseRequest(req).catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(RerankWireError);
+		expect(failure).toMatchObject({ status: 413 });
+		// Each 3 MiB chunk fits; the third crosses 8 MiB and must end the read.
+		expect(cancelled).toBe(true);
+		expect(pulled).toBeLessThan(6);
 	});
 });
 

@@ -47,14 +47,17 @@ function makeEntry(installPath: string, scope: InstalledPluginEntry["scope"] = "
 
 describe("resolveActiveProjectRegistryPath", () => {
 	let tmpDir: string;
+	let originalConfigDir: string | undefined;
 
 	beforeEach(() => {
+		originalConfigDir = process.env.PI_CONFIG_DIR;
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-proj-scope-"));
 	});
 
 	afterEach(() => {
 		clearClaudePluginRootsCache();
 		vi.restoreAllMocks();
+		restoreEnvValue("PI_CONFIG_DIR", originalConfigDir);
 		removeSyncWithRetries(tmpDir);
 	});
 
@@ -332,22 +335,56 @@ describe("resolveActiveProjectRegistryPath", () => {
 		}
 	});
 
-	it("does not use an aliased user config as a project registry even at a git root", async () => {
+	it("does not use an aliased relocated user config as a project registry even at a git root", async () => {
 		const home = path.join(tmpDir, "home");
 		const project = path.join(home, "work");
-		fs.mkdirSync(path.join(home, ".omp"), { recursive: true });
+		const userConfigDir = path.join(".config", "omp");
+		restoreEnvValue("PI_CONFIG_DIR", userConfigDir);
+		fs.mkdirSync(path.join(home, userConfigDir), { recursive: true });
 		fs.mkdirSync(path.join(project, ".git"), { recursive: true });
-		fs.symlinkSync(path.join(home, ".omp"), path.join(project, ".omp"), "dir");
+		fs.symlinkSync(path.join(home, userConfigDir), path.join(project, ".omp"), "dir");
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 
 		expect(await resolveActiveProjectRegistryPath(project)).toBeNull();
 		expect(await resolveOrDefaultProjectRegistryPath(project)).toBeUndefined();
 	});
 
+	it("defaults a fresh directory's project registry to .omp with a relocated user root", async () => {
+		const cwd = path.join(tmpDir, "fresh");
+		fs.mkdirSync(cwd, { recursive: true });
+		restoreEnvValue("PI_CONFIG_DIR", path.join(".config", "omp"));
+		vi.spyOn(os, "tmpdir").mockReturnValue(tmpDir);
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(tmpDir, "isolated-home"));
+
+		expect(await resolveActiveProjectRegistryPath(cwd)).toBeNull();
+		expect(await resolveOrDefaultProjectRegistryPath(cwd)).toBe(
+			path.join(cwd, ".omp", "plugins", "installed_plugins.json"),
+		);
+	});
+
+	it("keeps reading a registry an older build wrote under the relocated config dir until .omp has one", async () => {
+		const project = path.join(tmpDir, "legacy-project");
+		const userConfigDir = path.join(".config", "omp");
+		fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+		restoreEnvValue("PI_CONFIG_DIR", userConfigDir);
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(tmpDir, "isolated-home"));
+		const legacy = path.join(project, userConfigDir, "plugins", "installed_plugins.json");
+		const current = path.join(project, ".omp", "plugins", "installed_plugins.json");
+		await writeInstalledPluginsRegistry(legacy, { version: 2, plugins: {} });
+
+		expect(await resolveActiveProjectRegistryPath(project)).toBe(legacy);
+		expect(await resolveOrDefaultProjectRegistryPath(project)).toBe(legacy);
+
+		await writeInstalledPluginsRegistry(current, { version: 2, plugins: {} });
+		expect(await resolveActiveProjectRegistryPath(project)).toBe(current);
+	});
+
 	it("keeps a custom-home plugin in user scope during discovery", async () => {
 		const home = path.join(tmpDir, "sdk-home");
 		const cwd = path.join(home, "work");
-		const registryPath = path.join(home, ".omp", "plugins", "installed_plugins.json");
+		const userConfigDir = path.join(".config", "omp");
+		restoreEnvValue("PI_CONFIG_DIR", userConfigDir);
+		const registryPath = path.join(home, userConfigDir, "plugins", "installed_plugins.json");
 		fs.mkdirSync(cwd, { recursive: true });
 		await writeInstalledPluginsRegistry(registryPath, {
 			version: 2,

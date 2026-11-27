@@ -15,8 +15,8 @@ use crate::bash::CpuTimes;
 use crate::{
 	bash::{
 		ControlHandle, Deadline, Event, ExitStatus, ExtProc, File, Fs, IntrinsicId, Invocation,
-		ModeId, NativeRef, ProcEvent, ResolveCtx, Resolved, Rlimit, SpawnFuture, SpawnSpec, StdFd,
-		SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict, Vpid,
+		ModeId, NativeRef, ProcEvent, ProcUsage, ResolveCtx, Resolved, Rlimit, SpawnFuture,
+		SpawnSpec, StdFd, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict, Vpid,
 	},
 	process::{pending_fs::PendingFs, signals::Signals, timer::Timers},
 	sys::{Exits, NativeSpawner, Sessions, SpawnConfig, StdFs, std_stream},
@@ -543,6 +543,10 @@ impl ExtProc for SignalsOnExit {
 
 	fn cont(&mut self) -> io::Result<()> {
 		self.child.cont()
+	}
+
+	fn usage(&mut self) -> Option<ProcUsage> {
+		self.child.usage()
 	}
 }
 

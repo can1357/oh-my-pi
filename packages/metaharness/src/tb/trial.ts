@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import { installAgent } from "./agent";
 import type { AgentBinaries, AgentConfig, GatewayConfig, TbTask, TrialResult, TrialUsage, VmonConfig } from "./types";
 import { TrialVm } from "./vmon";
@@ -26,10 +27,6 @@ const SERVICE_GRACE_ENV: Record<string, string> = { OMP_DAEMON_IDLE_GRACE_MS: St
 
 function elapsedMs(startedAt: number): number {
 	return Math.round(performance.now() - startedAt);
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 async function ensureHostDir(dir: string): Promise<void> {

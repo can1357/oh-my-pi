@@ -26,7 +26,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";

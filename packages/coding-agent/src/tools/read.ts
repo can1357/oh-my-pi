@@ -1,4 +1,4 @@
-import { isReadableUrlPath, type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath, type ReadToolDetails } from "./details/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -38,7 +38,7 @@ import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
 import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import { isMarkdownPath } from "../utils/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -51,7 +51,7 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 	truncateLine,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+} from "./streaming-output";
 import {
 	buildLineEntriesWithBlockContext,
 	lineEntriesToPlainText,
@@ -72,7 +72,7 @@ import {
 	InvalidImageDataError,
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
-} from "@oh-my-pi/pi-tui/chat/image-loading";
+} from "../utils/image-input";
 import { askImageQuestion, resolveImageQuestionModel } from "../utils/image-question";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
@@ -106,8 +106,8 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
-import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { type LineRange } from "./line-ranges";
+import { splitPathAndSel } from "./details/read";
 import { readArchive, resolveArchiveReadPath } from "./read-archive";
 import {
 	appendReadNotice,
@@ -161,7 +161,7 @@ import {
 	type VideoMetadata,
 	type VideoPng,
 } from "../utils/video";
-import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { isVideoPath } from "../utils/video-preview";
 import {
 	isMultiRange,
 	isRawSelector,
@@ -171,8 +171,8 @@ import {
 	resolveTailSelector,
 	selToOffsetLimit,
 } from "./read-selector";
-import { splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import { formatSingleLine } from "@oh-my-pi/pi-tui/tools/read";
+import { splitAddressableFileLines } from "./hashline-format";
+import { formatSingleLine } from "./details/read";
 import {
 	nativeShapingOff,
 	type ShapePart,
@@ -195,10 +195,11 @@ import {
 	trySummarize,
 } from "./read-summary";
 import { isSqliteFile, parseSqlitePathCandidates } from "./sqlite-reader";
-import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { getToolConversationState, ToolConversationState } from "./tool-state";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 import {
@@ -3593,18 +3594,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return toolResult(details).text(resource.content).sourceInternal(url).done();
 		}
 
-		// A remote file `edit` can patch is tagged through its local mirror, under its URL.
-		const mirror =
+		// A remote file `edit` can patch is tagged through its local mirror, under its canonical
+		// URL, so every spelling of the file shares one mirror and one tag.
+		const remote =
 			isRemoteTextWritable(spec) && !resource.isDirectory && resource.immutable !== true
-				? await writeRemoteMirror(url, resource.content)
+				? InternalUrlRouter.instance().remoteEdit(url)
 				: undefined;
-		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
+		const location = remote
+			? await remote.hooks.locate(remote.url, sessionResolveContext(this.session, { signal }))
+			: undefined;
+		const canonical = location?.url;
+		const mirror = location === undefined ? undefined : await writeRemoteMirror(location, resource.content);
+		// A remote notebook reads as the cell projection `edit` patches, like a local one; `:raw` keeps the JSON.
+		const notebook =
+			canonical !== undefined &&
+			new URL(canonical).pathname.toLowerCase().endsWith(".ipynb") &&
+			!isRawSelector(parsedSel);
+		const text = notebook ? notebookToEditableText(resource.content, canonical) : resource.content;
+		return buildInMemorySelectorResult(this.session, text, parsedSel, {
 			details,
 			sourcePath: mirror ?? resource.sourcePath,
-			hashlinePath: mirror ? url : undefined,
+			hashlinePath: canonical,
 			sourceStartLine: resource.sourceStartLine,
 			sourceInternal: url,
-			entityLabel: "resource",
+			entityLabel: notebook ? "notebook" : "resource",
 			ignoreResultLimits:
 				(resource.unbounded ?? spec.unbounded === true) || (programmatic && isRawSelector(parsedSel)),
 			immutable: resource.immutable,

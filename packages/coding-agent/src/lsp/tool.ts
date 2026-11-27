@@ -9,14 +9,14 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my-pi/pi-utils";
-import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
-import { replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs } from "../utils/text-width";
+import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
@@ -99,12 +99,11 @@ import {
 	type TextEdit,
 	type WorkspaceEdit,
 } from "./types";
-import { type LspParams, type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type LspParams, type LspToolDetails } from "../tools/details/lsp";
 import {
 	applyCodeAction,
 	dedupeWorkspaceSymbols,
 	extractHoverText,
-	fileToUri,
 	filterWorkspaceSymbols,
 	findSymbolInFile,
 	formatCodeAction,
@@ -122,18 +121,17 @@ import {
 	resolveSymbolColumn,
 	sortDiagnostics,
 	symbolKindToIcon,
-	uriToFile,
 } from "./utils";
-import { formatGroupedDiagnosticMessages } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatGroupedDiagnosticMessages } from "../tools/output-meta-format";
+import { fileToUri, uriToFile } from "./uri";
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
 import { cfgToolsMaxTimeout } from "../tools/settings";
 import { cfgLspRequestTimeout } from "./settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { type Theme } from "@oh-my-pi/pi-tui/theme/contract";
 
 const MAX_RENAME_PAIRS = 1000;
-
-/** File actions whose answer can draw on other open documents; those are synced from disk first. */
-const CROSS_FILE_ACTIONS: ReadonlySet<string> = new Set([...PROJECT_INDEXED_ACTIONS, "code_actions"]);
 
 interface FileRenamePair {
 	oldUri: string;
@@ -193,15 +191,9 @@ function formatRenameStatError(error: unknown): string {
 /**
  * LSP tool for language server protocol operations.
  */
-const PLAIN_STATUS_SYMBOLS = { success: "✓", warning: "⚠", error: "✗" } as const;
-
-/**
- * Status glyph for result text. `theme` is only assigned once the TUI loads it,
- * so headless and eval runs fall back to plain glyphs.
- */
-function statusSymbol(kind: keyof typeof PLAIN_STATUS_SYMBOLS): string {
-	const loaded: Theme | undefined = theme;
-	return loaded ? loaded.status[kind] : PLAIN_STATUS_SYMBOLS[kind];
+/** Status glyph for result text. */
+function statusSymbol(kind: "success" | "warning" | "error"): string {
+	return currentTheme().symbols.symbol(`status.${kind}`);
 }
 
 /** The server capability and request method each single-server action needs. */
@@ -384,6 +376,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const rethrowAbort = (err: unknown, serverName?: string): void => {
 			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
 			if (timeoutSignal.aborted && !callerSignal?.aborted) {
+				if (err instanceof ToolError) throw err;
 				const server = serverName ? ` on ${serverName}` : "";
 				throw new ToolError(
 					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,
@@ -1447,8 +1440,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			unsupportedNotes = selected.skipped;
 			const targetFile = resolvedFile;
 			const isRustAnalyzerServer = isRustAnalyzerClient(client) || serverName === "rust-analyzer";
-			const needsProjectIndex =
-				targetFile !== null && PROJECT_INDEXED_ACTIONS.has(action) && isProjectAwareLspServer(serverConfig);
+			const isProjectIndexed = PROJECT_INDEXED_ACTIONS.has(action);
+			const isCrossFile = isProjectIndexed || action === "code_actions";
+			const needsProjectIndex = targetFile !== null && isProjectIndexed && isProjectAwareLspServer(serverConfig);
 			const rustWorkspaceWait =
 				needsProjectIndex && isRustAnalyzerServer && targetFile !== null && hasRustWorkspaceAncestor(targetFile);
 
@@ -1506,7 +1500,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// writes its edits onto them. Sync them all after the waits, right
 			// before the request. An action that writes edits fails on an open file
 			// it cannot read; a read-only query closes that file and goes on.
-			if (CROSS_FILE_ACTIONS.has(action)) {
+			if (isCrossFile) {
 				const writesEdits = action === "rename" || (action === "code_actions" && apply === true);
 				await reconcileOpenFilesFromDisk(client, signal, undefined, writesEdits ? "throw" : "close");
 			}
@@ -1909,10 +1903,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			if (located) output = `${symbol} at line ${located.line}:\n${output}`;
-			if (CROSS_FILE_ACTIONS.has(action) && client.activeProgressTokens.size > 0) {
+			if (isCrossFile && client.activeProgressTokens.size > 0) {
 				output += `\nnote: ${serverName} is still indexing; results may be incomplete`;
 			}
-			if (targetFile && CROSS_FILE_ACTIONS.has(action)) {
+			if (targetFile && isCrossFile) {
 				const checkout = await unservedCheckout(client, targetFile);
 				if (checkout) {
 					output += `\nnote: ${serverName} indexes ${client.cwd} only and cannot load the checkout ${checkout}; these results may describe ${client.cwd}'s copy of the code`;

@@ -1,0 +1,14 @@
+# Perl corpus: loading. Format and regeneration: crates/builtins/src/perl/tests.rs.
+begin-use	use lib "."; BEGIN { open my $f,">","Generated.pm" or die $!; print {$f} q{package Generated; sub value {91} 1;}; close $f or die $!; } use Generated (); print Generated::value(),"\n";	91␊
+do-relative	my $v=do "./value.pl"; print "$v\n";	19␊	file:value.pl=19;␊
+do-reloads	do "./value.pl"; do "./value.pl"; print "$main::hits\n";	2␊	file:value.pl=++$main::hits;␊
+require-caches	use lib "."; require CorpusLocal; require CorpusLocal; print "$CorpusLocal::loads\n";	1␊	file:CorpusLocal.pm=package CorpusLocal; our $VERSION="1.25"; our $loads++; sub value {42} 1;␊
+require-false	eval {require "./False.pm"}; print $@;	./False.pm did not return a true value at require-false.pl line 1.␊	file:False.pm=0;␊
+require-filename	require "./CorpusLocal.pm"; print CorpusLocal::value(),"\n";	42␊	file:CorpusLocal.pm=package CorpusLocal; our $VERSION="1.25"; our $loads++; sub value {42} 1;␊
+require-inc	use lib "."; require CorpusLocal; print exists $INC{"CorpusLocal.pm"} ? 1:0,"\n";	1␊	file:CorpusLocal.pm=package CorpusLocal; our $VERSION="1.25"; our $loads++; sub value {42} 1;␊
+require-name	use lib "."; require CorpusLocal; print CorpusLocal::value(),"\n";	42␊	file:CorpusLocal.pm=package CorpusLocal; our $VERSION="1.25"; our $loads++; sub value {42} 1;␊
+use-export-default	use lib "."; use CorpusExport; print defaulted(),"\n";	17␊	file:CorpusExport.pm=package CorpusExport; use Exporter "import"; our @EXPORT=qw(defaulted); our @EXPORT_OK=qw(optional); sub defaulted {17} sub optional {23} 1;␊
+use-export-explicit	use lib "."; use CorpusExport qw(optional); print optional(),"\n";	23␊	file:CorpusExport.pm=package CorpusExport; use Exporter "import"; our @EXPORT=qw(defaulted); our @EXPORT_OK=qw(optional); sub defaulted {17} sub optional {23} 1;␊
+use-no-default	use lib "."; use CorpusExport (); print defined(&defaulted)?1:0,"\n";	0␊	file:CorpusExport.pm=package CorpusExport; use Exporter "import"; our @EXPORT=qw(defaulted); our @EXPORT_OK=qw(optional); sub defaulted {17} sub optional {23} 1;␊
+use-no-import	use lib "."; use CorpusLocal (); print CorpusLocal::value(),"\n";	42␊	file:CorpusLocal.pm=package CorpusLocal; our $VERSION="1.25"; our $loads++; sub value {42} 1;␊
+use-version	use lib "."; use CorpusLocal 1.0; print "$CorpusLocal::VERSION\n";	1.25␊	file:CorpusLocal.pm=package CorpusLocal; our $VERSION="1.25"; our $loads++; sub value {42} 1;␊

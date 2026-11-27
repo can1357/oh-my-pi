@@ -2,7 +2,7 @@
  * Remote-object protocols of the main-owned agent singletons, as spoken by a
  * worker's proxies to the main thread's instances (see `./agents`).
  */
-import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/irc-types";
 import type { IrcWaitFilter, UnansweredSend } from "../../irc/bus";
 import type { AwaitHoldOptions, AwaitWaiter } from "../../registry/agent-awaits";
 import type { AdoptOptions, AgentReleaseOptions } from "../../registry/agent-lifecycle";

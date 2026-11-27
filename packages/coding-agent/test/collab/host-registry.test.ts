@@ -116,10 +116,8 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 			setCollabStatus: (status: unknown) => {
 				if (status === null) state.tornDown.resolve();
 			},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: (message: string) => {
 			state.showStatus.push(message);
 		},

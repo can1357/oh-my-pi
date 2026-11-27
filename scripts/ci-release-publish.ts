@@ -330,6 +330,8 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/version-sentinel.d.ts",
 		"native/loader-state.js",
 		"native/loader-state.d.ts",
+		"native/file-poll.js",
+		"native/file-poll.d.ts",
 		"native/path.js",
 		"native/path.d.ts",
 		"native/sqlite-locks.js",

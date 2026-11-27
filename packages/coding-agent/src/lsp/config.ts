@@ -481,9 +481,27 @@ function selectTypescriptServer(servers: Record<string, ServerConfig>, cwd: stri
 	if (!native?.resolvedCommand) return;
 	if (typescriptSpeaksLsp(native.resolvedCommand, cwd)) {
 		delete servers["typescript-language-server"];
-	} else {
-		delete servers["typescript-native"];
+		return;
 	}
+	delete servers["typescript-native"];
+	const server = servers["typescript-language-server"];
+	const packageDir = typescriptPackageDir(native.resolvedCommand);
+	if (!server || packageDir === null) return;
+	// The choice above inspected the package behind `tsc`, but typescript-language-server
+	// loads `node_modules/typescript`. Alias layouts split the two (`typescript` →
+	// `@typescript/typescript6`, an API-only package without tsserver.js, while `.bin/tsc`
+	// links `@typescript/old`), and the server then exits at initialize. `fallbackPath`
+	// applies only when the workspace TypeScript is unusable, so regular layouts keep it.
+	const tsserver = server.initOptions?.tsserver;
+	const tsserverOptions = isRecord(tsserver) ? tsserver : {};
+	if (tsserverOptions.fallbackPath !== undefined) return;
+	servers["typescript-language-server"] = {
+		...server,
+		initOptions: {
+			...server.initOptions,
+			tsserver: { ...tsserverOptions, fallbackPath: path.join(packageDir, "lib", "tsserver.js") },
+		},
+	};
 }
 
 function readMarketplaceLspConfig(root: ClaudePluginRoot): NormalizedConfig | null {
