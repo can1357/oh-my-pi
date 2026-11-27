@@ -354,7 +354,11 @@ describe("stats sync deduplicates forked-session entries", () => {
 		expect(prompts).toEqual([{ session_file: parentFile, model: "gpt-5.4" }]);
 	});
 
-	it("leaves a legacy /tan clone's copies to the parent by its fork boundary", async () => {
+	it.each([
+		{ name: "a legacy /tan clone", boundaryData: "fork0000" },
+		// An ordinary fork of such a clone keeps the clone's boundary and id under its own header.
+		{ name: "a file derived from a legacy /tan clone", boundaryData: "tanclone" },
+	])("leaves $name's copies to the parent by its fork boundary", async ({ boundaryData }) => {
 		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
 		const userEntry = buildUserEntry("user01ab", ts, "hello");
 		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
@@ -364,8 +368,8 @@ describe("stats sync deduplicates forked-session entries", () => {
 			{ id: "parent00", cwd: "/tmp/project" },
 			[userEntry, assistantEntry],
 		);
-		// A clone written before `inheritedThroughEntryId`: no header marker, only the boundary entry
-		// (carrying the clone's own session id) right after the copied entries.
+		// Written before `inheritedThroughEntryId`: no header marker, only the boundary entry right
+		// after the copied entries.
 		const copied = structuredClone(assistantEntry);
 		copied.message.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 		const boundary = {
@@ -374,7 +378,7 @@ describe("stats sync deduplicates forked-session entries", () => {
 			parentId: "asst01ab",
 			timestamp: ts,
 			customType: "tan-fork-boundary",
-			data: "fork0000",
+			data: boundaryData,
 		};
 		const ownTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
 		const forkFile = await writeSessionFile(

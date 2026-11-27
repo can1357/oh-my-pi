@@ -679,31 +679,24 @@ const TAN_FORK_BOUNDARY_BYTES = new TextEncoder().encode(TAN_FORK_BOUNDARY);
 
 /**
  * The inherited prefix of a `/tan` clone written before `SessionHeader.inheritedThroughEntryId`: such a
- * clone appends a `tan-fork-boundary` entry carrying its own session id right after the entries it copied,
- * so the prefix ends at the entry before that boundary. Undefined for any other transcript.
+ * clone appends a `tan-fork-boundary` entry right after the entries it copied, so the prefix ends at the
+ * entry before that boundary. The last boundary counts whatever session id it carries: a file derived
+ * from such a clone (an ordinary fork or copy) keeps the clone's boundary and id under a new header, and
+ * everything before it is still an ancestor's copied prefix. Undefined for any other transcript.
  */
 function legacyTanBoundary(bytes: Uint8Array): string | undefined {
 	if (Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).indexOf(TAN_FORK_BOUNDARY_BYTES) < 0) {
 		return undefined;
 	}
-	let sessionId: string | undefined;
 	let previous: string | undefined;
 	let through: string | undefined;
-	let found = false;
 	visitSessionEntriesLenient(bytes, entry => {
-		if (found) return;
-		const id = "id" in entry && typeof entry.id === "string" ? entry.id : undefined;
-		if (entry.type === "session") {
-			sessionId = id;
-			return;
-		}
-		const data: unknown = "data" in entry ? entry.data : undefined;
-		if ("customType" in entry && entry.customType === TAN_FORK_BOUNDARY && data === sessionId) {
+		if (entry.type === "session") return;
+		if ("customType" in entry && entry.customType === TAN_FORK_BOUNDARY) {
 			through = previous;
-			found = true;
 			return;
 		}
-		if (id !== undefined) previous = id;
+		if ("id" in entry && typeof entry.id === "string") previous = entry.id;
 	});
 	return through;
 }
