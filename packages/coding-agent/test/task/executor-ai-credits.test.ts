@@ -192,6 +192,55 @@ describe("subagent AI credit roll-up", () => {
 		expect(result.aiuUnreportedTurns).toBe(4);
 	});
 
+	it("adds the credits of background jobs the subagent consumed through wait, cancel or an async-result delivery", async () => {
+		const job = (nano: number, aiuUnreportedTurns?: number) => ({
+			jobId: `job-${nano}`,
+			type: "task",
+			status: "completed",
+			usage: usage(nano),
+			...(aiuUnreportedTurns ? { aiuUnreportedTurns } : {}),
+		});
+		const result = await run(
+			createSession([], emit => {
+				emit(copilotTurn(100));
+				// A snapshot that took one job over, beside a running row that carries nothing.
+				emit({
+					type: "message_end",
+					message: {
+						role: "toolResult",
+						toolName: "wait",
+						content: [],
+						details: { op: "wait", jobs: [job(40, 1), { jobId: "running", type: "task", status: "running" }] },
+					},
+				} as unknown as AgentSessionEvent);
+				emit({
+					type: "message_end",
+					message: {
+						role: "toolResult",
+						toolName: "write",
+						content: [],
+						details: { op: "cancel", jobs: [job(5)] },
+					},
+				} as unknown as AgentSessionEvent);
+				// A job delivered as a follow-up instead.
+				emit({
+					type: "message_end",
+					message: { role: "custom", customType: "async-result", content: "done", details: { jobs: [job(7, 2)] } },
+				} as unknown as AgentSessionEvent);
+				// Not billing carriers: a listing-style result with usage-shaped rows never counts.
+				emit({
+					type: "message_end",
+					message: { role: "toolResult", toolName: "read", content: [], details: { jobs: [job(1000)] } },
+				} as unknown as AgentSessionEvent);
+				emitYield(emit);
+			}),
+		);
+
+		// 100 (own turn) + 40 (wait) + 5 (cancel) + 7 (delivery); the `read` result is no billing carrier.
+		expect(result.usage?.aiu).toEqual({ nano: 152 });
+		expect(result.aiuUnreportedTurns).toBe(3);
+	});
+
 	it("does not count zero-token errors as missing billing frames", async () => {
 		const result = await run(
 			createSession([], emit => {

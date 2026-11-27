@@ -90,7 +90,12 @@ import { isLocalAgentSession } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
 import { type ArtifactManagerApi, writeArtifact } from "../session/artifacts";
 import { isMissingAiuBillingFrame } from "../session/aiu-billing";
-import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-result";
+import {
+	ASYNC_RESULT_MESSAGE_TYPE,
+	forEachAsyncResultAiu,
+	forEachJobControlAiu,
+	jobControlJobs,
+} from "../session/async-result";
 import type { AuthStorage } from "../session/auth-storage";
 import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
@@ -1008,6 +1013,27 @@ function nestedTaskCredits(details: unknown): { nano: number | undefined; unrepo
 	const nano =
 		isRecord(details.usage) && isRecord(details.usage.aiu) ? getNumberField(details.usage.aiu, "nano") : undefined;
 	return { nano, unreported: sumAiuUnreportedTurns(details.results) };
+}
+
+/**
+ * Credits of background jobs a delivered `async-result` or a `wait`/`cancel` snapshot hands this
+ * run, plus those jobs' turns that sent no billing frame. Each job reaches a session through exactly
+ * one of the two, so nothing here repeats a nested `task` result.
+ */
+function consumedJobCredits(message: AgentMessage): { nano: number | undefined; unreported: number } {
+	let nano: number | undefined;
+	const add = (value: number): void => {
+		nano = (nano ?? 0) + value;
+	};
+	let rows: unknown;
+	if (message.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE) {
+		forEachAsyncResultAiu(message.details, add);
+		rows = isRecord(message.details) ? message.details.jobs : undefined;
+	} else if (message.role === "toolResult") {
+		forEachJobControlAiu(message.details, add);
+		rows = jobControlJobs(message.details);
+	}
+	return { nano, unreported: sumAiuUnreportedTurns(rows) };
 }
 
 /** Credits side requests written during one monitored turn, including unknown declared frames. */
@@ -2367,6 +2393,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						accumulatedUsage.aiu = { nano: (accumulatedUsage.aiu?.nano ?? 0) + nested.nano };
 					}
 					aiuUnreportedTurns += nested.unreported;
+				}
+				if (endedMessage) {
+					const consumed = consumedJobCredits(endedMessage);
+					if (consumed.nano !== undefined) {
+						accumulatedUsage.aiu = { nano: (accumulatedUsage.aiu?.nano ?? 0) + consumed.nano };
+					}
+					aiuUnreportedTurns += consumed.unreported;
 				}
 				if (role === "assistant") {
 					assistantStreaming = false;
