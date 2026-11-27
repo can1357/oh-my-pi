@@ -844,8 +844,8 @@ export interface ExtensionAsyncJobs {
 	 * The job appears in `wait`, `proc://`, and the job list like a native background job,
 	 * cancelling it aborts `signal`, and the string `run` resolves to is delivered to the agent
 	 * as the job's result. A rejection fails the job with its message. `label` and `options.intent`
-	 * are each collapsed to one line and cut to 120 characters. Throws when the session's
-	 * running-job limit is reached.
+	 * are each stripped of terminal escapes, collapsed to one line, and cut to 120 characters.
+	 * Throws when the session's running-job limit is reached.
 	 */
 	register(
 		label: string,

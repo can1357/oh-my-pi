@@ -602,6 +602,14 @@ interface TodoBackendList {
 	phases: TodoPhase[];
 }
 
+/**
+ * Extension-supplied job label or intent as one bounded display line: job views render it as text
+ * and every `wait` report repeats it, so escapes and extra rows are stripped and the length capped.
+ */
+function extensionJobText(text: string): string {
+	return formatAsyncJobLabel(sanitizeDisplayLine(text));
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -2067,13 +2075,12 @@ export class ExtensionRunner {
 						register: (label, run, options) =>
 							asyncJobManager.register(
 								"extension",
-								// Every `wait` report repeats the label and intent: keep extension text to one bounded line.
-								formatAsyncJobLabel(label),
+								extensionJobText(label),
 								({ jobId, signal, reportProgress }) =>
 									run({ jobId, signal, reportProgress: text => reportProgress(text) }),
 								{
 									ownerId: this.agent.id,
-									intent: options?.intent ? formatAsyncJobLabel(options.intent) : undefined,
+									intent: options?.intent ? extensionJobText(options.intent) : undefined,
 								},
 							),
 					}
