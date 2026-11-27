@@ -16,6 +16,8 @@
 - Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added the `gitlab` tool (`gitlab.enabled`, default off) covering project/file/issue reads, MR creation/updating/worktree checkout/push, discussions/notes/resolution, project/group/global search, and CI pipeline/job watching and logs, and expanded `mr://` URLs to support MR listings (`mr://`, `mr://<host>/<group>/<project>`) and cached MR overviews (`mr://<iid>`) alongside existing `/diff` slices ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
 - Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
+- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19903](https://github.com/can1357/oh-my-pi/pull/19903) by [@Xytronix](https://github.com/Xytronix))
+- On Linux the tool guard also refuses heavy work started while the host is strained ([#19903](https://github.com/can1357/oh-my-pi/pull/19903) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

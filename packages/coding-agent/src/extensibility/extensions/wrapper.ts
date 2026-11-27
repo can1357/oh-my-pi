@@ -530,6 +530,23 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
+		// 3. The tool guard screens calls the approval gate let through on its own. A call the user just
+		// approved in a prompt was asked for and skips it; a tool command run inside `bash` passes its own
+		// approval above, so only its own prompt counts.
+		if (!approvalCheck.required) {
+			let refusal: string | undefined;
+			try {
+				refusal = await this.runner.runToolGuard?.(this.tool, resolvedArgs, resolved.tier, signal);
+			} catch (err) {
+				cancelPreflight();
+				throw err;
+			}
+			if (refusal !== undefined) {
+				cancelPreflight();
+				throw new Error(refusal);
+			}
+		}
+
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
