@@ -2,6 +2,65 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline rendering or `Reader` for URL reads; interactive terminal browsing is no longer provided.
+
+### Added
+
+- Added `renderHtml` for Markdown and plain-text rendering. Both `renderHtml` and `Reader` default to reader content selection (`mode: "auto"`), support `mode: "full"` to keep all visible content, and share hidden-content options.
+- Added `Reader` for step-by-step URL reading with host-provided HTTP and browser I/O.
+- Added `analyzeBashApproval(command, dialect?)`: synchronous Bash 5.3 / Zsh 5.9 AST analyzer for `bash` tool approval ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
+
+### Fixed
+
+- `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave ([#20597](https://github.com/can1357/oh-my-pi/pull/20597) by [@daandden](https://github.com/daandden))
+- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
+- Preserved source-code indentation and linked content cards in URL reads.
+- The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Shell.heldProcesses()` to inspect all live external processes held by a shell session, including background and `nohup` jobs, with their `nohup` status.
+- Added process utilities for finding processes by inherited environment variables, inspecting process details and output files, and terminating process families while preserving `nohup` processes when requested.
+- Added an in-process Perl 5.34 shell builtin with core language and regex support, common command-line options and modules, and shell-integrated file and command I/O, including support for `scheme://` paths and other shell builtins.
+
+### Fixed
+
+- Fixed timed-out, cancelled, or terminated shell and PTY commands leaving descendant processes running, including descendants in separate process groups or sessions.
+- Fixed cancelled filesystem searches continuing in the background and consuming CPU or blocking subsequent filesystem operations when multiple searches ran concurrently.
+
+## [19.2.0] - 2026-11-25
+
+### Breaking Changes
+
+- Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.
+
+### Added
+
+- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)` for detecting file metadata changes, including atomic saves and symlink retargets.
+- Added `truncateToTokens(input, maxTokens)` for safely truncating text to a token budget without splitting UTF-16 surrogate pairs.
+- Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
+- Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
+- Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
+
+### Changed
+
+- OAuth callback handling now polls for callbacks at regular intervals instead of relying on directory watching.
+- Improved `tail -f` reliability for moved files, symlinks, network drives, and file-watcher failures by combining event-driven updates with polling fallback.
+- Persistent shell sessions no longer carry `set -e` into subsequent commands; other shell options continue to persist.
+- `ShellRunResult` now reports whether a command changed the working directory (`movedCwd`) or left errexit enabled (`errexit`).
+
+### Fixed
+
+- Fixed PTY sessions and child-process cleanup consuming native blocking-pool threads, which could prevent new terminals and other blocking operations from starting after enough terminals were open.
+- Fixed the Linux shell `open` command creating an excessive D-Bus thread pool on first use.
+- Fixed Windows Chromium and Electron captures and accessibility trees incorrectly reporting fully covered windows as current when covered by popup, tool, or click-through windows.
+- Fixed standalone binaries failing to start when the natives directory was read-only or owned by another user despite already containing the extracted addon.
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

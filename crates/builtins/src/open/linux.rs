@@ -13,6 +13,8 @@
 use std::{
 	collections::HashMap,
 	fs::{File, OpenOptions},
+	future::Future,
+	io,
 	os::{
 		fd::AsFd as _,
 		unix::{fs::PermissionsExt as _, process::CommandExt as _},
@@ -23,7 +25,8 @@ use std::{
 };
 
 use zbus::{
-	blocking::{Connection, connection::Builder},
+	Connection,
+	connection::Builder,
 	names::WellKnownName,
 	zvariant::{Fd, Value},
 };
@@ -150,6 +153,214 @@ mod tests {
 		// A file is nothing a URL forwarder can show.
 		assert_eq!(run_open(&["/"], &[("PATH", "/usr/bin:/bin"), ("BROWSER", "true")], &dir).0, 3);
 	}
+
+	/// Regression for `zbus::blocking` panicking inside Tokio contexts
+	/// (including `tokio::task::spawn_blocking` and `Runtime::block_on`) and
+	/// spawning a private `nproc`-worker Tokio runtime when `zbus/tokio` is
+	/// active. Exercises the observable `open` path with a `DBusActivatable=true`
+	/// desktop entry against a live local Unix socket so async `zbus` I/O and
+	/// timeout drivers both run before reporting no session bus.
+	#[test]
+	fn dbus_activatable_open_works_outside_and_inside_tokio_runtimes() {
+		use std::{
+			os::unix::net::UnixListener,
+			sync::{
+				Arc,
+				atomic::{AtomicBool, Ordering},
+			},
+			time::{Duration, Instant},
+		};
+
+		let dir = tempfile::tempdir().expect("tempdir");
+		let dir = dir.path().canonicalize().expect("canonical tempdir");
+		let config = dir.join("config");
+		let data = dir.join("data");
+		fs::create_dir_all(data.join("applications")).expect("applications");
+		fs::create_dir_all(&config).expect("config");
+		fs::write(
+			data.join("applications/org.example.Activatable.desktop"),
+			"[Desktop Entry]\nType=Application\nName=Activatable\nDBusActivatable=true\n",
+		)
+		.expect("desktop entry");
+		fs::write(
+			config.join("mimeapps.list"),
+			"[Default Applications]\ntext/plain=org.example.Activatable.desktop\n",
+		)
+		.expect("mimeapps.list");
+		fs::write(dir.join("note"), "plain text\n").expect("note");
+
+		let sock_path = dir.join("bus.sock");
+		let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
+		listener.set_nonblocking(true).expect("nonblocking listener");
+		let done = Arc::new(AtomicBool::new(false));
+		let accept_thread = std::thread::spawn({
+			let done = Arc::clone(&done);
+			move || {
+				// Accept and close each connection (plain thread, mt block_on, mt
+				// spawn_blocking, ct block_on) so async zbus performs real socket I/O
+				// and handshake through Tokio's io + time drivers. Counting instead of
+				// blocking on a fixed number of accepts turns a case that never
+				// connects into an assertion failure rather than a hung join.
+				let deadline = Instant::now() + Duration::from_secs(30);
+				let mut accepted = 0;
+				while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+					match listener.accept() {
+						Ok((stream, _)) => {
+							accepted += 1;
+							drop(stream);
+						},
+						Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+							std::thread::sleep(Duration::from_millis(5));
+						},
+						Err(err) => panic!("accept: {err}"),
+					}
+				}
+				accepted
+			}
+		});
+
+		let bus_addr = format!("unix:path={}", sock_path.display());
+		let config_str = config.to_str().expect("utf-8 path").to_owned();
+		let data_str = data.to_str().expect("utf-8 path").to_owned();
+		let run_case = |dir: &Path, bus_addr: &str, config_str: &str, data_str: &str| {
+			let (code, err) = run_open(
+				&["note"],
+				&[
+					("DISPLAY", ":0"),
+					("PATH", "/usr/bin:/bin"),
+					("DBUS_SESSION_BUS_ADDRESS", bus_addr),
+					("XDG_CONFIG_HOME", config_str),
+					("XDG_CONFIG_DIRS", "/nonexistent/etc"),
+					("XDG_DATA_HOME", data_str),
+					("XDG_DATA_DIRS", "/nonexistent/share"),
+				],
+				dir,
+			);
+			assert_eq!(
+				(code, err.as_str()),
+				(4, "open: org.example.Activatable is started over D-Bus, and there is no session bus\n")
+			);
+		};
+
+		// 1. Plain thread.
+		run_case(&dir, &bus_addr, &config_str, &data_str);
+
+		// 2. Multi-thread Runtime::block_on + spawn_blocking.
+		let mt = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("mt runtime");
+		mt.block_on(async { run_case(&dir, &bus_addr, &config_str, &data_str) });
+		{
+			let dir = dir.clone();
+			let bus_addr = bus_addr.clone();
+			let config_str = config_str.clone();
+			let data_str = data_str.clone();
+			mt.block_on(async move {
+				tokio::task::spawn_blocking(move || run_case(&dir, &bus_addr, &config_str, &data_str))
+					.await
+					.expect("join spawn_blocking");
+			});
+		}
+
+		// 3. Single-thread current_thread Runtime::block_on.
+		let ct = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("ct runtime");
+		ct.block_on(async { run_case(&dir, &bus_addr, &config_str, &data_str) });
+
+		done.store(true, Ordering::Release);
+		let accepted = accept_thread.join().expect("accept thread");
+		assert_eq!(accepted, 4, "every case must reach the bus socket");
+	}
+
+	#[test]
+	fn block_on_bus_reuses_multi_thread_runtime_without_spawning_helper_thread() {
+		let mt = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(2)
+			.enable_all()
+			.build()
+			.expect("mt runtime");
+		let caller_tid = std::thread::current().id();
+		let ran_tid = mt.block_on(async {
+			super::block_on_bus(async { std::thread::current().id() }).expect("mt block_on")
+		});
+		assert_eq!(ran_tid, caller_tid, "MultiThread block_on must reuse caller runtime");
+
+		let (blocking_tid, reused_tid) = mt.block_on(async {
+			tokio::task::spawn_blocking(|| {
+				let tid = std::thread::current().id();
+				let inner = super::block_on_bus(async { std::thread::current().id() })
+					.expect("mt spawn_blocking");
+				(tid, inner)
+			})
+			.await
+			.expect("join spawn_blocking")
+		});
+		assert_eq!(reused_tid, blocking_tid, "MultiThread spawn_blocking must reuse caller runtime");
+	}
+}
+
+/// Runs a one-shot async D-Bus operation without invoking `zbus::blocking`
+/// (whose internal `zbus::utils::block_on` creates a private `nproc`-worker
+/// Tokio runtime and panics when called from inside Tokio contexts).
+///
+/// Reuses the caller's Tokio runtime via `block_in_place` when running inside a
+/// `MultiThread` runtime (including `omp-shell`'s `spawn_blocking` utilities),
+/// escapes via a bounded scoped thread only on `CurrentThread` runtimes where
+/// `block_in_place` panics, and uses a local `current_thread` runtime outside
+/// Tokio.
+///
+/// A `MultiThread` caller runtime must have its IO and time drivers enabled
+/// (`enable_all()`): `future` drives zbus's Tokio socket and
+/// `tokio::time::timeout` there, and panics on a runtime built without them.
+fn block_on_bus<F, T>(future: F) -> io::Result<T>
+where
+	F: Future<Output = T> + Send,
+	T: Send,
+{
+	if let Ok(handle) = tokio::runtime::Handle::try_current() {
+		if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+			return Ok(tokio::task::block_in_place(|| handle.block_on(future)));
+		}
+		return std::thread::scope(|scope| {
+			std::thread::Builder::new()
+				.name("pi-open-dbus".into())
+				.stack_size(512 * 1024)
+				.spawn_scoped(scope, move || {
+					let runtime = tokio::runtime::Builder::new_current_thread()
+						.enable_io()
+						.enable_time()
+						.build()?;
+					Ok(runtime.block_on(future))
+				})?
+				.join()
+				.map_err(|_| io::Error::other("D-Bus helper thread panicked"))?
+		});
+	}
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_io()
+		.enable_time()
+		.build()?;
+	Ok(runtime.block_on(future))
+}
+
+/// Connects to the shell environment's session bus with [`BUS_TIMEOUT`].
+async fn connect_bus(bus_address: Option<&str>) -> zbus::Result<Connection> {
+	let builder = match bus_address {
+		Some(address) => Builder::address(address)?,
+		None => Builder::session()?,
+	};
+	tokio::time::timeout(BUS_TIMEOUT, builder.method_timeout(BUS_TIMEOUT).build())
+		.await
+		.map_err(|_| {
+			zbus::Error::InputOutput(std::sync::Arc::new(io::Error::new(
+				io::ErrorKind::TimedOut,
+				"timed out connecting to D-Bus session bus",
+			)))
+		})?
 }
 
 /// Why a request could not be carried out.
@@ -356,26 +567,41 @@ impl<'a> Desktop<'a> {
 		if WellKnownName::try_from(id.as_str()).is_err() {
 			return Ok(false);
 		}
-		let Ok(bus) = self.bus() else {
-			return if entry.has_exec() {
+		let object = format!("/{}", id.replace('.', "/").replace('-', "_"));
+		let uris: Vec<String> = targets.iter().map(Target::to_url).collect();
+		let bus_address = self.bus_address.as_deref();
+		let has_exec = entry.has_exec();
+		let no_bus = || {
+			if has_exec {
 				Ok(false)
 			} else {
 				Err(format!("{id} is started over D-Bus, and there is no session bus"))
-			};
+			}
 		};
-		let object = format!("/{}", id.replace('.', "/").replace('-', "_"));
-		let platform: HashMap<&str, Value<'_>> = HashMap::new();
-		let interface = Some("org.freedesktop.Application");
-		let reply = if targets.is_empty() {
-			bus.call_method(Some(id.as_str()), object.as_str(), interface, "Activate", &(platform,))
-		} else {
-			let uris: Vec<String> = targets.iter().map(Target::to_url).collect();
-			bus.call_method(Some(id.as_str()), object.as_str(), interface, "Open", &(uris, platform))
+		let Ok(outcome) = block_on_bus(async {
+			let Ok(bus) = connect_bus(bus_address).await else {
+				return None;
+			};
+			let platform: HashMap<&str, Value<'_>> = HashMap::new();
+			let interface = Some("org.freedesktop.Application");
+			let reply = if uris.is_empty() {
+				bus.call_method(Some(id.as_str()), object.as_str(), interface, "Activate", &(platform,))
+					.await
+			} else {
+				bus.call_method(Some(id.as_str()), object.as_str(), interface, "Open", &(uris, platform))
+					.await
+			};
+			Some(reply)
+		}) else {
+			return no_bus();
+		};
+		let Some(reply) = outcome else {
+			return no_bus();
 		};
 		match reply {
 			Ok(_) => Ok(true),
 			Err(zbus::Error::MethodError(error, ..))
-				if entry.has_exec()
+				if has_exec
 					&& matches!(
 						error.as_str(),
 						"org.freedesktop.DBus.Error.ServiceUnknown"
@@ -393,53 +619,67 @@ impl<'a> Desktop<'a> {
 		}
 	}
 
-	/// The session bus of the shell's environment.
-	fn bus(&self) -> zbus::Result<Connection> {
-		let builder = match &self.bus_address {
-			Some(address) => Builder::address(address.as_str())?,
-			None => Builder::session()?,
-		};
-		builder.method_timeout(BUS_TIMEOUT).build()
-	}
-
 	/// Hands `target` to the desktop portal, which picks the application.
 	fn portal(&self, target: &Target) -> Result<(), String> {
-		let bus = self.bus().map_err(|err| err.to_string())?;
-		let options: HashMap<&str, Value<'_>> = HashMap::new();
-		let interface = Some(PORTAL_OPEN_URI);
-		let reply = match target {
-			Target::Url(url) => {
-				bus.call_method(Some(PORTAL), PORTAL_PATH, interface, "OpenURI", &("", url.as_str(), options))
-			},
-			Target::File(path) => {
-				let file = File::open(path).map_err(|err| err.to_string())?;
-				bus.call_method(
-					Some(PORTAL),
-					PORTAL_PATH,
-					interface,
-					"OpenFile",
-					&("", Fd::from(file.as_fd()), options),
-				)
-			},
+		enum PortalArg<'a> {
+			Url(&'a str),
+			File(File),
+		}
+		let arg = match target {
+			Target::Url(url) => PortalArg::Url(url),
+			Target::File(path) => PortalArg::File(File::open(path).map_err(|err| err.to_string())?),
 		};
-		reply.map(drop).map_err(|err| err.to_string())
+		let bus_address = self.bus_address.as_deref();
+		block_on_bus(async {
+			let bus = connect_bus(bus_address).await?;
+			let options: HashMap<&str, Value<'_>> = HashMap::new();
+			let interface = Some(PORTAL_OPEN_URI);
+			let reply = match arg {
+				PortalArg::Url(url) => {
+					bus.call_method(
+						Some(PORTAL),
+						PORTAL_PATH,
+						interface,
+						"OpenURI",
+						&("", url, options),
+					)
+					.await
+				},
+				PortalArg::File(file) => {
+					bus.call_method(
+						Some(PORTAL),
+						PORTAL_PATH,
+						interface,
+						"OpenFile",
+						&("", Fd::from(file.as_fd()), options),
+					)
+					.await
+				},
+			};
+			reply.map(drop)
+		})
+		.map_err(|err| err.to_string())?
+		.map_err(|err| err.to_string())
 	}
 
 	/// `-R`: has the file manager show `targets` selected; with none on the
 	/// bus, opens their folders.
 	fn reveal(&mut self, targets: &[Target]) -> Result<(), Failure> {
 		let uris: Vec<String> = targets.iter().map(Target::to_url).collect();
-		if let Ok(bus) = self.bus()
-			&& bus
-				.call_method(
-					Some(FILE_MANAGER),
-					FILE_MANAGER_PATH,
-					Some(FILE_MANAGER),
-					"ShowItems",
-					&(uris, ""),
-				)
-				.is_ok()
-		{
+		let bus_address = self.bus_address.as_deref();
+		let shown = block_on_bus(async {
+			let bus = connect_bus(bus_address).await?;
+			bus.call_method(
+				Some(FILE_MANAGER),
+				FILE_MANAGER_PATH,
+				Some(FILE_MANAGER),
+				"ShowItems",
+				&(uris, ""),
+			)
+			.await
+		})
+		.is_ok_and(|reply| reply.is_ok());
+		if shown {
 			return Ok(());
 		}
 		let mut folders: Vec<&Path> = targets

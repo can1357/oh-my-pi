@@ -85,7 +85,7 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | `rejectRootObjectUnion`              | First-party xAI                                                                                                                | Flattens representable root object unions and quarantines strict schemas that still violate the endpoint's root-union constraint |
 | `retryWithoutStrictOnGrammarError`   | OpenRouter Anthropic                                                                                                           | Allows a non-strict retry on compiled-grammar-too-large errors                                                                   |
 | `supportsStrictMode`                 | `true` for OpenAI, OpenRouter, Cerebras, Together, Copilot, Zenmux, Azure, DeepSeek                                            | When `false`, `strict: true` is never set on tool definitions                                                                    |
-| `toolSchemaFlavor`                   | `"moonshot-mfjs"` for Kimi/Moonshot, `"grammar"` for local backends                                                            | Extra schema normalization: `normalizeSchemaForMoonshot` or `sanitizeSchemaForGrammar` (`utils/schema/normalize.ts`)             |
+| `toolSchemaFlavor`                   | `"moonshot-mfjs"` for Kimi/Moonshot, `"grammar"` for local backends, `"google"` for GitHub Copilot Gemini (KDL)               | Extra schema normalization: `normalizeSchemaForMoonshot`, `sanitizeSchemaForGrammar`, or `normalizeSchemaForGoogle` (`utils/schema/normalize.ts`) |
 
 #### Sampling, tokens, caching, routing
 

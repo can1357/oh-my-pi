@@ -2,8 +2,9 @@
 
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
-import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { OPENAI_HEADERS } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getOpenCodeUserAgent, toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
+import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { usesOpenCodeClientIdentity } from "./opencode-free";
 
 /** Options controlling provider and protocol inference headers. */
@@ -23,8 +24,6 @@ export interface InferenceHeaderOptions {
 	 */
 	providerType?: string;
 	protocol: "anthropic" | "google" | "openai";
-	/** Resolved model compat; carries the free Zen client-identity opt-in. */
-	compat?: object;
 	sessionId?: string;
 	/**
 	 * Shared prompt-cache affinity key (see {@link resolveOpenCodeGoCacheAffinity}).
@@ -32,6 +31,32 @@ export interface InferenceHeaderOptions {
 	 * protocol-native session headers and every other backend keep `sessionId`.
 	 */
 	cacheAffinity?: string;
+	/**
+	 * Conversation a side request branches from (`parentSessionId`). OpenCode's
+	 * `x-opencode-session` routes by it so the side request lands on the
+	 * worker holding the parent's prompt cache; every other session header
+	 * keeps {@link sessionId}. {@link cacheAffinity} still wins on Go. The
+	 * generic `x-session-id` fallback routes by it too, for the same reason.
+	 */
+	parentSessionId?: string;
+	/**
+	 * Model compat. A session header it declares (KDL `session-header` or
+	 * `prompt-cache-session-header`) is the host's own affinity header, so the
+	 * generic `x-session-id` fallback stays off. It also carries the free Zen
+	 * client-identity opt-in.
+	 */
+	compat?: object;
+}
+
+/** Session header most gateways and proxies route on (bifrost, llmgateway, agentgateway, …). */
+const GENERIC_SESSION_HEADER = "x-session-id";
+
+function declaresSessionHeader(compat: object | undefined): boolean {
+	if (!compat) return false;
+	return (
+		("sessionHeader" in compat && compat.sessionHeader !== undefined) ||
+		("promptCacheSessionHeader" in compat && compat.promptCacheSessionHeader !== undefined)
+	);
 }
 
 /**
@@ -119,11 +144,27 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	if (!sessionId && !options.cacheAffinity && !clientIdentity) return;
 
 	if (sessionId) {
+		// A host with its own session header gets only that. Every other OpenAI-
+		// or Anthropic-protocol host also gets `x-session-id`, which most
+		// gateways and proxies route on; a caller-set value wins.
+		let hostHeader = isOpenCode || declaresSessionHeader(options.compat);
 		if (options.protocol === "anthropic") {
 			setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
+			// Official Anthropic keeps Claude Code's exact header set.
+			hostHeader ||= backend === "anthropic";
 		} else if (options.protocol === "openai" && backend === "openai") {
-			setHeader(headers, "session_id", sessionId);
+			// codex-rs `build_session_headers` sends hyphenated ids on every auth
+			// path, API key included; a root thread's session and thread ids coincide.
+			setHeader(headers, OPENAI_HEADERS.SESSION_ID, sessionId);
+			setHeader(headers, OPENAI_HEADERS.THREAD_ID, sessionId);
 			setHeader(headers, "x-client-request-id", sessionId);
+			hostHeader = true;
+		} else if (backend === "openai-codex") {
+			// The Codex transport sets codex-rs's session headers itself.
+			hostHeader = true;
+		}
+		if (!hostHeader && options.protocol !== "google") {
+			setHeaderIfAbsent(headers, GENERIC_SESSION_HEADER, options.parentSessionId ?? sessionId);
 		}
 	}
 
@@ -134,8 +175,10 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		setHeaderIfAbsent(headers, "User-Agent", clientIdentity ? getOpenCodeUserAgent() : USER_AGENT);
 		// Go's session header doubles as the gateway's cache-affinity handle:
 		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
-		// task cache key there; every other lane keeps the conversation id.
-		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
+		// task cache key there; side requests ride their parent conversation's
+		// id; every other lane keeps the conversation id.
+		const conversation = options.parentSessionId ?? sessionId;
+		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? conversation) : conversation;
 		// A gated lane with no conversation id cannot be cached, so a fresh
 		// token per request is the honest answer rather than a missing header.
 		if (clientIdentity)

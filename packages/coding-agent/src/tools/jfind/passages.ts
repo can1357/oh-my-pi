@@ -4,7 +4,7 @@
  * windows are selected, sketched for routing, and finally judged verbatim.
  * Every reported range maps back to real line coordinates.
  */
-import type { FindRange } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindRange } from "../details/find";
 import { clipBytes, countOccurrences, lines } from "./text";
 
 /** A contiguous run of tagged source lines (`L<n>| text`), 1-based inclusive. */

@@ -1,0 +1,38 @@
+# Perl corpus: strings. Format and regeneration: crates/builtins/src/perl/tests.rs.
+bit-bytes	print join("|", unpack("H*", "a" ^ "b")), "\n";	03␊
+chomp-count	my @s = ("a\n","b\n","c"); print chomp(@s), '|', join(',',@s),"\n";	2|a,b,c␊
+chomp-custom	local $/='END'; my $s='aEND'; print chomp($s),"|$s\n";	3|a␊
+chop-array	my @s = ('xy','ab'); print chop(@s), '|', join(',',@s),"\n";	b|x,a␊
+chop-scalar	my $s = 'abc'; print chop($s), "|$s\n";	c|ab␊
+chr-byte	print join("|", unpack("H*",chr(255))), "\n";	ff␊
+concatenation	print join("|", "foo" . 'bar' . 42), "\n";	foobar42␊
+index-empty	print join("|", index("red", "", 2)), "\n";	2␊
+index-first	print join("|", index("red red", "red")), "\n";	0␊
+index-missing	print join("|", index("red red", "blue")), "\n";	-1␊
+index-offset	print join("|", index("red red", "red", 1)), "\n";	4␊
+join-empty	print join("|", join(",", ())), "\n";	␊
+join-undef	print join("|", join(",", "a", undef, "b")), "\n";	a,,b␊
+length-null	print join("|", length("a\0bc")), "\n";	4␊
+length-zero	print join("|", length("")), "\n";	0␊
+lower-first	print join("|", lcfirst("HELLO")), "\n";	hELLO␊
+lower	print join("|", lc("MIXed")), "\n";	mixed␊
+ord-empty	print join("|", ord("")), "\n";	0␊
+ord-first	print join("|", ord("ABC")), "\n";	65␊
+quotemeta	print join("|", quotemeta("ab(2)[x] ")), "\n";	ab\(2\)\[x\]\ ␊
+repeat-negative	print join("|", '['.('xy' x -3).']'), "\n";	[]␊
+repeat-zero	print join("|", '['.('xy' x 0).']'), "\n";	[]␊
+repetition	print join("|", 'xy' x 3), "\n";	xyxyxy␊
+reverse-characters	print join("|", scalar reverse "abc", "def"), "\n";	fedcba␊
+reverse-list	print join("|", reverse qw(abc def ghi)), "\n";	ghi|def|abc␊
+rindex-bound	print join("|", rindex("red red", "red", 2)), "\n";	0␊
+rindex	print join("|", rindex("red red", "red")), "\n";	4␊
+single-quote	print join("|", 'can\'t\\touch\n'), "\n";	can't\touch\n␊
+substr-alias	my $s = "abcdef"; my $r = \substr($s,-3); $$r="XYZ"; print "$s\n";	abcXYZ␊
+substr-lvalue	my $s = "abcd"; substr($s,1,2)="XY"; print "$s\n";	aXYd␊
+substr-middle	print join("|", substr("abcdef", 1, 3)), "\n";	bcd␊
+substr-negative-length	print join("|", substr("abcdef", 1, -2)), "\n";	bcd␊
+substr-outside	print join("|", defined(substr("abc", 4)) ? 'defined' : 'undef'), "\n";	undef␊
+substr-replace	my $s = "abcd"; my $old = substr($s,1,2,"XYZ"); print "$old|$s\n";	bc|aXYZd␊
+substr-tail	print join("|", substr("abcdef", -3)), "\n";	def␊
+upper-first	print join("|", ucfirst("hELLO")), "\n";	HELLO␊
+upper	print join("|", uc("abc Def_02")), "\n";	ABC DEF_02␊

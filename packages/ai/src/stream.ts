@@ -1,7 +1,4 @@
 import * as crypto from "node:crypto";
-import * as fsSync from "node:fs";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
@@ -19,16 +16,18 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, logger } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
+	type ApiKeyResolution,
 	createAuthRetryKeyState,
 	isApiKeyResolver,
 	preferAuthRetryError,
 	resolvedApiKeyBearer,
 	resolveNextAuthRetryKey,
+	SERVICE_TIER_UNAVAILABLE_FEATURE,
+	withRequestServiceTier,
 } from "./auth-retry";
-import type { OAuthRequestIdentity } from "./auth/types";
 import { withProbedThinking } from "./thinking-probe";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -116,46 +115,39 @@ function healLeakedThinking(model: Model<Api>, inner: AssistantMessageEventStrea
 	return reachesOfficialEndpoint(model) ? inner : wrapLeakedThinkingStream(inner);
 }
 
-type ProviderInFlightLease = {
-	path: string;
-	stopHeartbeat: () => Promise<void>;
-};
+/**
+ * Admits a request to a provider against the requests of other processes
+ * that share its limit (`maxInFlightRequests`). pi-ai bounds each process on
+ * its own; a host running several processes installs one with
+ * {@link configureProviderSlotBroker} (coding-agent: through its daemon).
+ */
+export interface ProviderSlotBroker {
+	/**
+	 * Resolve with the slot's release once fewer than `limit` requests to
+	 * `provider` run across processes. Rejects with the abort reason when
+	 * `signal` aborts first. The release never throws.
+	 */
+	acquire(provider: string, limit: number, signal?: AbortSignal): Promise<() => void>;
+}
 
-type ProviderInFlightLeaseInfo = {
-	pid: number;
-	timestamp: number;
-	token: string;
-};
-type ProviderInFlightStaleLock = { token: string } | { mtimeMs: number };
-type ProviderInFlightLockIdentity = { dev: number; ino: number; birthtimeMs: number };
-
-const PROVIDER_INFLIGHT_LOCK_STALE_MS = 10_000;
-const PROVIDER_INFLIGHT_LEASE_STALE_MS = 30_000;
-const PROVIDER_INFLIGHT_HEARTBEAT_MS = 5_000;
-const PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS = 250;
-const PROVIDER_INFLIGHT_HEARTBEAT_FLUSH_TIMEOUT_MS = 1_000;
-const PROVIDER_INFLIGHT_RELEASE_TIMEOUT_MS = 5_000;
-const PROVIDER_INFLIGHT_LOCK_RETRY_INITIAL_MS = 25;
-const PROVIDER_INFLIGHT_LOCK_RETRY_MAX_MS = 250;
-const PROVIDER_INFLIGHT_LOCK_RETRY_BUDGET_MS = 3_000;
+/** One provider's requests in this process: how many run, and who waits, in arrival order. */
+interface LocalSlots {
+	running: number;
+	waiting: { limit: number; grant: () => void }[];
+}
 
 let configuredProviderMaxInFlightRequests: Record<string, number> = {};
-let providerInFlightRootOverride: string | undefined;
-let providerInFlightHeartbeatMsOverride: number | undefined;
-let providerInFlightHeartbeatFlushTimeoutMsOverride: number | undefined;
-let providerInFlightHeartbeatWriterOverride:
-	| ((writeProviderInFlightInfo: () => Promise<void>) => Promise<void>)
-	| undefined;
-let providerInFlightLeaseRemoverOverride: ((leasePath: string) => Promise<void>) | undefined;
-let providerInFlightWaitObserverOverride: ((provider: string) => void) | undefined;
-let providerInFlightLockCreatedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
-let providerInFlightLockIdentifiedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
-let providerInFlightLockMkdirOverride: ((lockDir: string) => Promise<void>) | undefined;
-let providerInFlightLockPlatformOverride: NodeJS.Platform | undefined;
-let providerInFlightLockRetryTimings: { budgetMs?: number; initialDelayMs?: number; maxDelayMs?: number } | undefined;
+let providerSlotBroker: ProviderSlotBroker | undefined;
+let providerInFlightWaitObserver: ((provider: string) => void) | undefined;
+const localSlots = new Map<string, LocalSlots>();
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
+}
+
+/** Share in-flight limits across processes through `broker`; `undefined` keeps them per process. */
+export function configureProviderSlotBroker(broker: ProviderSlotBroker | undefined): void {
+	providerSlotBroker = broker;
 }
 
 function resolveProviderInFlightLimit(
@@ -168,514 +160,88 @@ function resolveProviderInFlightLimit(
 	return Math.max(1, Math.floor(value));
 }
 
-function providerInFlightRoot(): string {
-	if (providerInFlightRootOverride) return providerInFlightRootOverride;
-	return getProviderInFlightRoot();
-}
-
-function providerInFlightSegment(provider: string): string {
-	return Bun.SHA256.hash(provider, "base64url");
-}
-
-function providerInFlightDir(provider: string): string {
-	return path.join(providerInFlightRoot(), providerInFlightSegment(provider));
-}
-
-function providerInFlightSignalPath(provider: string): string {
-	return path.join(providerInFlightDir(provider), ".wakeup");
-}
-
-function providerInFlightLockDir(provider: string): string {
-	return `${providerInFlightDir(provider)}.lock`;
-}
-
-async function readProviderInFlightInfo(infoPath: string): Promise<ProviderInFlightLeaseInfo | null> {
-	try {
-		const content = await fs.readFile(infoPath, "utf-8");
-		const parsed = JSON.parse(content) as Partial<ProviderInFlightLeaseInfo>;
-		if (typeof parsed.pid !== "number" || typeof parsed.timestamp !== "number" || typeof parsed.token !== "string") {
-			return null;
-		}
-		return { pid: parsed.pid, timestamp: parsed.timestamp, token: parsed.token };
-	} catch {
-		return null;
+/**
+ * Take one of this process's slots for `provider`, waiting in arrival order
+ * while `limit` of its requests run; a waiter with a higher limit passes one
+ * with a lower. Rejects with the abort reason when `signal` aborts first.
+ */
+function acquireLocalSlot(provider: string, limit: number, signal?: AbortSignal): Promise<() => void> {
+	let slots = localSlots.get(provider);
+	if (!slots) {
+		slots = { running: 0, waiting: [] };
+		localSlots.set(provider, slots);
 	}
-}
-
-async function writeProviderInFlightInfo(dir: string, token: string): Promise<void> {
-	const info: ProviderInFlightLeaseInfo = { pid: process.pid, timestamp: Date.now(), token };
-	const infoPath = path.join(dir, "info.json");
-	const tempPath = path.join(dir, `.info-${process.pid}-${crypto.randomUUID()}.tmp`);
-	try {
-		// Unlike Bun.write, fs.writeFile does not recreate a lease directory that
-		// was removed while a timed-out heartbeat was still pending.
-		await fs.writeFile(tempPath, JSON.stringify(info), "utf8");
-		await fs.rename(tempPath, infoPath);
-	} catch (error) {
-		await fs.rm(tempPath, { force: true }).catch(() => {});
-		throw error;
+	const owned = slots;
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		owned.running--;
+		grantLocalSlots(provider, owned);
+	};
+	if (owned.running < limit) {
+		owned.running++;
+		return Promise.resolve(release);
 	}
-}
-
-async function isProviderInFlightDirStale(dir: string, staleMs: number): Promise<boolean> {
-	const info = await readProviderInFlightInfo(path.join(dir, "info.json"));
-	if (info) {
-		if (!isPidAlive(info.pid)) return true;
-		return Date.now() - info.timestamp > staleMs;
-	}
-
-	try {
-		const stat = await fs.stat(path.join(dir, "info.json"));
-		return Date.now() - stat.mtimeMs > staleMs;
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-	}
-
-	try {
-		const stat = await fs.stat(dir);
-		return Date.now() - stat.mtimeMs > staleMs;
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		throw error;
-	}
-}
-
-async function readProviderInFlightStaleLock(lockDir: string): Promise<ProviderInFlightStaleLock | null> {
-	const infoPath = path.join(lockDir, "info.json");
-	const info = await readProviderInFlightInfo(infoPath);
-	if (info) return isPidAlive(info.pid) ? null : { token: info.token };
-
-	try {
-		const stat = await fs.stat(lockDir);
-		return Date.now() - stat.mtimeMs > PROVIDER_INFLIGHT_LOCK_STALE_MS ? { mtimeMs: stat.mtimeMs } : null;
-	} catch (error) {
-		if (isEnoent(error)) return null;
-		throw error;
-	}
-}
-
-async function readProviderInFlightLockIdentity(lockDir: string): Promise<ProviderInFlightLockIdentity> {
-	const stat = await fs.stat(lockDir);
-	return { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs };
-}
-
-function isSameProviderInFlightLock(
-	current: ProviderInFlightLockIdentity,
-	expected: ProviderInFlightLockIdentity,
-): boolean {
-	if (current.dev !== expected.dev) return false;
-	if (current.ino !== 0 || expected.ino !== 0) return current.ino === expected.ino;
-	return current.birthtimeMs === expected.birthtimeMs;
-}
-
-async function releaseProviderInFlightStaleLock(lockDir: string, stale: ProviderInFlightStaleLock): Promise<void> {
-	if ("token" in stale) {
-		await releaseProviderInFlightLock(lockDir, stale.token);
-		return;
-	}
-
-	const infoPath = path.join(lockDir, "info.json");
-	if (await readProviderInFlightInfo(infoPath)) return;
-	try {
-		const stat = await fs.stat(lockDir);
-		if (stat.mtimeMs !== stale.mtimeMs || Date.now() - stat.mtimeMs <= PROVIDER_INFLIGHT_LOCK_STALE_MS) return;
-		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch (error) {
-		// A concurrent reclaimer removing the stale dir first is expected, not a failure.
-		if (isEnoent(error)) return;
-		logger.warn("ai: failed to remove stale provider in-flight lock", {
-			lockDir,
-			error: error instanceof Error ? error.message : String(error),
-		});
-	}
-}
-
-// Best-effort token-checked release. A token mismatch means another process has
-// already replaced the lock, so the fresh lock must be left intact.
-async function releaseProviderInFlightLock(lockDir: string, token: string): Promise<void> {
-	try {
-		const info = await readProviderInFlightInfo(path.join(lockDir, "info.json"));
-		if (!info || info.token !== token) return;
-		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch (error) {
-		logger.warn("ai: failed to release provider in-flight lock", {
-			lockDir,
-			error: error instanceof Error ? error.message : String(error),
-		});
-	}
-}
-
-async function releaseProviderInFlightLockDirIfSame(
-	lockDir: string,
-	identity: ProviderInFlightLockIdentity,
-): Promise<void> {
-	try {
-		if (await readProviderInFlightInfo(path.join(lockDir, "info.json"))) return;
-		const current = await readProviderInFlightLockIdentity(lockDir);
-		if (!isSameProviderInFlightLock(current, identity)) return;
-		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch (error) {
-		// Normal contention: another process removed the lock dir between our write
-		// and this cleanup, which the caller already handles by retrying.
-		if (isEnoent(error)) return;
-		logger.warn("ai: failed to release provider in-flight lock dir", {
-			lockDir,
-			error: error instanceof Error ? error.message : String(error),
-		});
-	}
-}
-
-// On Windows, mkdir on a lock directory another process is concurrently deleting
-// (delete-pending while a watcher, antivirus, or indexer still holds it) fails
-// with ERROR_ACCESS_DENIED — mapped to EPERM/EACCES — instead of EEXIST, so
-// ordinary contention looks like a permission error. On win32 only, back off and
-// retry briefly; if the failure persists past the budget, rethrow the original
-// error so a real permission problem still surfaces. Every other outcome
-// (success, EEXIST, any other code) exits immediately, keeping non-win32 and
-// non-transient behavior unchanged.
-function isTransientProviderInFlightLockMkdirError(error: NodeJS.ErrnoException): boolean {
-	if ((providerInFlightLockPlatformOverride ?? process.platform) !== "win32") return false;
-	return error.code === "EPERM" || error.code === "EACCES";
-}
-
-async function mkdirProviderInFlightLockDir(lockDir: string, signal?: AbortSignal): Promise<void> {
-	const mkdir = providerInFlightLockMkdirOverride ?? ((dir: string) => fs.mkdir(dir));
-	let failures = 0;
-	let since = Date.now();
-	while (true) {
-		try {
-			await mkdir(lockDir);
-			return;
-		} catch (error) {
-			if (!isTransientProviderInFlightLockMkdirError(error as NodeJS.ErrnoException)) throw error;
-			const now = Date.now();
-			if (failures === 0) since = now;
-			const budgetMs = providerInFlightLockRetryTimings?.budgetMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_BUDGET_MS;
-			if (now - since >= budgetMs) throw error;
-			const initialMs = providerInFlightLockRetryTimings?.initialDelayMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_INITIAL_MS;
-			const maxMs = providerInFlightLockRetryTimings?.maxDelayMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_MAX_MS;
-			const delayMs = Math.min(maxMs, initialMs * 2 ** failures);
-			failures++;
-			await untilAborted(signal, Bun.sleep(delayMs));
-		}
-	}
-}
-
-async function acquireProviderInFlightLock(provider: string, signal?: AbortSignal): Promise<() => Promise<void>> {
-	const lockDir = providerInFlightLockDir(provider);
-	await fs.mkdir(path.dirname(lockDir), { recursive: true });
-
-	while (true) {
-		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
-		try {
-			await mkdirProviderInFlightLockDir(lockDir, signal);
-			await providerInFlightLockCreatedObserverOverride?.(lockDir);
-			let lockIdentity: ProviderInFlightLockIdentity;
-			try {
-				lockIdentity = await readProviderInFlightLockIdentity(lockDir);
-			} catch (error) {
-				if (isEnoent(error)) continue;
-				throw error;
-			}
-			const token = crypto.randomUUID();
-			try {
-				await providerInFlightLockIdentifiedObserverOverride?.(lockDir);
-				await writeProviderInFlightInfo(lockDir, token);
-			} catch (error) {
-				await releaseProviderInFlightLockDirIfSame(lockDir, lockIdentity);
-				if (isEnoent(error)) continue;
-				throw error;
-			}
-			return async () => {
-				await releaseProviderInFlightLock(lockDir, token);
-			};
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		}
-
-		const staleLock = await readProviderInFlightStaleLock(lockDir);
-		if (staleLock) {
-			await releaseProviderInFlightStaleLock(lockDir, staleLock);
-			await signalProviderInFlightWaiters(provider);
-			continue;
-		}
-
-		await waitForProviderInFlightSignal(provider, signal);
-	}
-}
-
-async function cleanupProviderInFlightLeases(providerDir: string): Promise<number> {
-	let active = 0;
-	let entries: string[];
-	try {
-		entries = await fs.readdir(providerDir);
-	} catch (error) {
-		if (isEnoent(error)) return 0;
-		throw error;
-	}
-
-	for (const entry of entries) {
-		const leaseDir = path.join(providerDir, entry);
-		let isDirectory = false;
-		try {
-			isDirectory = (await fs.stat(leaseDir)).isDirectory();
-		} catch (error) {
-			if (isEnoent(error)) continue;
-			throw error;
-		}
-		if (!isDirectory) continue;
-		if (await isProviderInFlightDirStale(leaseDir, PROVIDER_INFLIGHT_LEASE_STALE_MS)) {
-			await fs.rm(leaseDir, { recursive: true, force: true });
-			continue;
-		}
-		active++;
-	}
-	return active;
-}
-
-async function tryAcquireProviderInFlightLease(
-	provider: string,
-	limit: number,
-	signal?: AbortSignal,
-): Promise<ProviderInFlightLease | null> {
-	const releaseLock = await acquireProviderInFlightLock(provider, signal);
-	try {
-		const dir = providerInFlightDir(provider);
-		await fs.mkdir(dir, { recursive: true });
-		const active = await cleanupProviderInFlightLeases(dir);
-		if (active >= limit) return null;
-
-		const leaseDir = path.join(dir, `${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
-		const token = crypto.randomUUID();
-		try {
-			await fs.mkdir(leaseDir);
-			await writeProviderInFlightInfo(leaseDir, token);
-		} catch (error) {
-			await removeProviderInFlightLeaseDir(leaseDir).catch(() => {});
-			throw error;
-		}
-		let heartbeatActive = true;
-		let heartbeatFlush = Promise.resolve();
-		const touchHeartbeat = () => {
-			if (!heartbeatActive) return;
-			heartbeatFlush = heartbeatFlush
-				.then(async () => {
-					if (!heartbeatActive) return;
-					const write = () => {
-						if (!heartbeatActive) return Promise.resolve();
-						return writeProviderInFlightInfo(leaseDir, token);
-					};
-					if (providerInFlightHeartbeatWriterOverride) {
-						await providerInFlightHeartbeatWriterOverride(write);
-					} else {
-						await write();
-					}
-				})
-				.catch(() => {});
-		};
-		const heartbeat = setInterval(
-			touchHeartbeat,
-			providerInFlightHeartbeatMsOverride ?? PROVIDER_INFLIGHT_HEARTBEAT_MS,
-		);
-		heartbeat.unref?.();
-		return {
-			path: leaseDir,
-			stopHeartbeat: () => {
-				heartbeatActive = false;
-				clearInterval(heartbeat);
-				return heartbeatFlush;
-			},
-		};
-	} finally {
-		await releaseLock();
-	}
-}
-
-async function signalProviderInFlightWaitersInDir(dir: string): Promise<void> {
-	try {
-		await fs.mkdir(dir, { recursive: true });
-		await Bun.write(path.join(dir, ".wakeup"), String(Date.now()));
-	} catch (error) {
-		logger.warn("ai: failed to signal provider in-flight waiters", {
-			dir,
-			error: error instanceof Error ? error.message : String(error),
-		});
-	}
-}
-
-async function signalProviderInFlightWaiters(provider: string): Promise<void> {
-	await signalProviderInFlightWaitersInDir(providerInFlightDir(provider));
-}
-
-function waitForProviderInFlightSignal(provider: string, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted)
 		return Promise.reject(signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch"));
-	const signalPath = providerInFlightSignalPath(provider);
-	providerInFlightWaitObserverOverride?.(provider);
-	const waitStarted = Date.now();
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	let settled = false;
-	let watcher: fsSync.FSWatcher | undefined;
-	const timer = setTimeout(() => finish(resolve), PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS);
-	const finish = (settle: () => void) => {
-		if (settled) return;
-		settled = true;
-		clearTimeout(timer);
-		watcher?.close();
-		signal?.removeEventListener("abort", onAbort);
-		settle();
+	providerInFlightWaitObserver?.(provider);
+	logger.debug("Provider in-flight limit blocked request", { provider, limit });
+	const { promise, resolve, reject } = Promise.withResolvers<() => void>();
+	const waiter = {
+		limit,
+		grant: () => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve(release);
+		},
 	};
 	const onAbort = () => {
-		finish(() => reject(signal?.reason ?? new AIError.AbortError("Provider request aborted before dispatch")));
+		owned.waiting.splice(owned.waiting.indexOf(waiter), 1);
+		reject(signal?.reason ?? new AIError.AbortError("Provider request aborted before dispatch"));
 	};
+	owned.waiting.push(waiter);
 	signal?.addEventListener("abort", onAbort, { once: true });
-	try {
-		watcher = fsSync.watch(providerInFlightDir(provider), (_event, filename) => {
-			if (filename === ".wakeup" || filename === null) {
-				finish(resolve);
-			}
-		});
-		void fs.stat(signalPath).then(
-			stat => {
-				if (stat.mtimeMs >= waitStarted) finish(resolve);
-			},
-			error => {
-				if (!isEnoent(error)) finish(resolve);
-			},
-		);
-	} catch {
-		// Filesystem notifications are best-effort across platforms; the fallback
-		// timer keeps stale-lock/lease cleanup progressing if an event is dropped.
-	}
 	return promise;
 }
 
-async function removeProviderInFlightLeaseDir(leasePath: string): Promise<void> {
-	for (let attempt = 0; attempt < 3; attempt++) {
-		try {
-			await fs.rm(leasePath, { recursive: true, force: true });
-			return;
-		} catch (error) {
-			if (isEnoent(error)) return;
-			const code = (error as NodeJS.ErrnoException).code;
-			if (attempt < 2 && (code === "EBUSY" || code === "ENOTEMPTY" || code === "EPERM")) {
-				await Bun.sleep(25);
-				continue;
-			}
-			throw error;
+/** Start every waiting request of `provider` that fits under its own limit, in arrival order. */
+function grantLocalSlots(provider: string, slots: LocalSlots): void {
+	const waiting: LocalSlots["waiting"] = [];
+	for (const waiter of slots.waiting) {
+		if (slots.running < waiter.limit) {
+			slots.running++;
+			waiter.grant();
+		} else {
+			waiting.push(waiter);
 		}
 	}
+	slots.waiting = waiting;
+	if (slots.running === 0 && waiting.length === 0) localSlots.delete(provider);
 }
 
-// Signal into the lease's OWN provider directory (derived from `lease.path`)
-// rather than recomputing it from the current root. A release that lands after
-// the in-flight root has been repointed (only the test seam does that) must not
-// write `.wakeup` into an unrelated provider directory.
-async function releaseProviderInFlightLease(lease: ProviderInFlightLease): Promise<void> {
-	const heartbeatFlush = lease.stopHeartbeat();
-	const flushTimeout = Promise.withResolvers<"timeout">();
-	const flushTimer = setTimeout(
-		() => flushTimeout.resolve("timeout"),
-		providerInFlightHeartbeatFlushTimeoutMsOverride ?? PROVIDER_INFLIGHT_HEARTBEAT_FLUSH_TIMEOUT_MS,
-	);
-	flushTimer.unref?.();
+/**
+ * Take a slot for a request to `provider`: one of this process's, then the
+ * broker's when one is installed. Resolves with the release of both.
+ */
+async function acquireProviderSlot(provider: string, limit: number, signal?: AbortSignal): Promise<() => void> {
+	const releaseLocal = await acquireLocalSlot(provider, limit, signal);
+	if (!providerSlotBroker) return releaseLocal;
 	try {
-		const outcome = await Promise.race([heartbeatFlush.then(() => "flushed" as const), flushTimeout.promise]);
-		if (outcome === "timeout") {
-			logger.warn("Provider in-flight heartbeat flush timed out; forcing lease cleanup", { path: lease.path });
-		}
-	} finally {
-		clearTimeout(flushTimer);
-	}
-
-	const releaseTimeout = Promise.withResolvers<never>();
-	const releaseTimer = setTimeout(
-		() => releaseTimeout.reject(new Error("Provider in-flight lease cleanup timed out")),
-		PROVIDER_INFLIGHT_RELEASE_TIMEOUT_MS,
-	);
-	releaseTimer.unref?.();
-	try {
-		const removeLease = providerInFlightLeaseRemoverOverride ?? removeProviderInFlightLeaseDir;
-		await Promise.race([removeLease(lease.path), releaseTimeout.promise]);
-	} finally {
-		clearTimeout(releaseTimer);
-	}
-	// Wake-up is an optimization: waiters also poll every 250 ms. Do not let a
-	// notification-file stall keep a completed provider request open.
-	void signalProviderInFlightWaitersInDir(path.dirname(lease.path));
-}
-
-async function acquireProviderInFlightSlot(
-	provider: string,
-	limit: number | undefined,
-	signal?: AbortSignal,
-): Promise<() => Promise<void>> {
-	if (limit === undefined) return async () => {};
-	let loggedWait = false;
-	while (true) {
-		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
-		const lease = await tryAcquireProviderInFlightLease(provider, limit, signal);
-		if (lease) return () => releaseProviderInFlightLease(lease);
-		if (!loggedWait) {
-			loggedWait = true;
-			logger.debug("Provider in-flight limit blocked request", { provider, limit });
-		}
-		await waitForProviderInFlightSignal(provider, signal);
+		const releaseShared = await providerSlotBroker.acquire(provider, limit, signal);
+		return () => {
+			releaseShared();
+			releaseLocal();
+		};
+	} catch (error) {
+		releaseLocal();
+		throw error;
 	}
 }
 
 export const __providerInFlightForTesting = {
-	setRoot(root: string | undefined): void {
-		providerInFlightRootOverride = root;
-	},
-	setHeartbeatTimings(timings: { heartbeatMs?: number; heartbeatFlushTimeoutMs?: number } | undefined): void {
-		providerInFlightHeartbeatMsOverride = timings?.heartbeatMs;
-		providerInFlightHeartbeatFlushTimeoutMsOverride = timings?.heartbeatFlushTimeoutMs;
-	},
-	setHeartbeatWriter(writer: ((writeProviderInFlightInfo: () => Promise<void>) => Promise<void>) | undefined): void {
-		providerInFlightHeartbeatWriterOverride = writer;
-	},
-	setLeaseRemover(remover: ((leasePath: string) => Promise<void>) | undefined): void {
-		providerInFlightLeaseRemoverOverride = remover;
-	},
+	/** Observe each request that has to wait for one of this process's slots. */
 	setWaitObserver(observer: ((provider: string) => void) | undefined): void {
-		providerInFlightWaitObserverOverride = observer;
-	},
-	setLockCreatedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
-		providerInFlightLockCreatedObserverOverride = observer;
-	},
-	setLockIdentifiedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
-		providerInFlightLockIdentifiedObserverOverride = observer;
-	},
-	setLockMkdirOverride(mkdir: ((lockDir: string) => Promise<void>) | undefined): void {
-		providerInFlightLockMkdirOverride = mkdir;
-	},
-	setLockPlatformOverride(platform: NodeJS.Platform | undefined): void {
-		providerInFlightLockPlatformOverride = platform;
-	},
-	setLockRetryTimings(timings: { budgetMs?: number; initialDelayMs?: number; maxDelayMs?: number } | undefined): void {
-		providerInFlightLockRetryTimings = timings;
-	},
-	providerDir(provider: string): string {
-		return providerInFlightDir(provider);
-	},
-	lockDir(provider: string): string {
-		return providerInFlightLockDir(provider);
-	},
-	async captureStaleLockRelease(provider: string): Promise<(() => Promise<void>) | null> {
-		const lockDir = providerInFlightLockDir(provider);
-		const stale = await readProviderInFlightStaleLock(lockDir);
-		if (!stale) return null;
-		return () => releaseProviderInFlightStaleLock(lockDir, stale);
-	},
-	async captureLockDirRelease(provider: string): Promise<(() => Promise<void>) | null> {
-		const lockDir = providerInFlightLockDir(provider);
-		try {
-			const identity = await readProviderInFlightLockIdentity(lockDir);
-			return () => releaseProviderInFlightLockDirIfSame(lockDir, identity);
-		} catch {
-			return null;
-		}
+		providerInFlightWaitObserver = observer;
 	},
 };
 
@@ -698,34 +264,13 @@ function withProviderInFlightLimit<
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
-		let release: (() => Promise<void>) | undefined;
-		let releasePromise: Promise<void> | undefined;
+		let release: (() => void) | undefined;
 		const releaseOnce = () => {
-			if (!release) return Promise.resolve();
-			releasePromise ??= release();
-			return releasePromise;
-		};
-		const releaseBestEffort = async () => {
-			try {
-				await releaseOnce();
-			} catch (releaseError) {
-				// The lease has stopped heartbeating and stale cleanup will reap it
-				// within PROVIDER_INFLIGHT_LEASE_STALE_MS. Until then, its slot may
-				// remain unavailable and waiters rely on the fallback poll.
-				// Never replace a completed response or the provider's original error
-				// with a coordination-directory cleanup failure.
-				logger.warn("Provider in-flight permit release failed", {
-					provider: model.provider,
-					error: String(releaseError),
-				});
-			}
+			release?.();
+			release = undefined;
 		};
 		try {
-			const startedWaitingAt = Date.now();
-			release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
-			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
-				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
-			}
+			release = await acquireProviderSlot(model.provider, limit, options?.signal);
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
@@ -739,21 +284,21 @@ function withProviderInFlightLimit<
 				}
 				outer.push(event);
 				if (outer.done) {
-					await releaseBestEffort();
+					releaseOnce();
 					return;
 				}
 			}
 			const result = await inner.result();
-			// Releasing the permit is part of request completion. Publishing the
-			// result first lets an immediate follow-up turn contend with its own
-			// still-live lease, which is particularly costly on Windows.
-			await releaseBestEffort();
+			// Releasing the slot is part of request completion: publishing the
+			// result first would let an immediate follow-up turn queue behind
+			// its own finished request.
+			releaseOnce();
 			if (!outer.done) {
 				if (terminalEvent) outer.push(terminalEvent);
 				else outer.end(result);
 			}
 		} catch (error) {
-			await releaseBestEffort();
+			releaseOnce();
 			if (!outer.done) outer.fail(error);
 		}
 	})();
@@ -1159,8 +704,9 @@ function isRetryableUpstreamError(
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
 	// `cyber_policy` are likewise rotatable. A denial of only the requested
-	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404)
-	// is rotatable when its provider and requested model match.
+	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404,
+	// agy `Unknown model ID`) is rotatable when its provider and requested model
+	// match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
@@ -1296,27 +842,41 @@ function streamSimpleRequest<TApi extends Api>(
 		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
 	);
 
-	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
+	// Every resolve carries the tier the request will ask for, so the credential is chosen for it.
+	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey)
+		? withRequestServiceTier(requestOptions.apiKey, requestOptions.serviceTier)
+		: undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (
-			apiKey?: string,
-			credentialId?: number,
-			oauthIdentity?: OAuthRequestIdentity,
-		): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (resolved?: ApiKeyResolution): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
 				emitBufferedEvents(outer, bufferedEvents);
 				bufferedEvents.length = 0;
 			};
+			const credential = typeof resolved === "object" ? resolved : undefined;
+			const credentialId = credential?.credentialId;
+			// A credential known not to offer the requested tier serves at standard
+			// speed; sending the tier anyway would only buy a rejected round trip.
+			const withheldTier = credential?.serviceTierUnavailable === true && requestOptions.serviceTier !== undefined;
+			const tagWithheldTier = (message: AssistantMessage): void => {
+				if (!withheldTier || message.disabledFeatures?.includes(SERVICE_TIER_UNAVAILABLE_FEATURE)) return;
+				message.disabledFeatures = [...(message.disabledFeatures ?? []), SERVICE_TIER_UNAVAILABLE_FEATURE];
+			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				const attemptOptions = {
+					...requestOptions,
+					apiKey: resolvedApiKeyBearer(resolved),
+					credentialId,
+					oauthIdentity: credential?.oauthIdentity,
+					...(withheldTier ? { serviceTier: undefined } : {}),
+				};
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
@@ -1324,6 +884,7 @@ function streamSimpleRequest<TApi extends Api>(
 						else if (event.type === "done") event.message.credentialId = credentialId;
 						else event.error.credentialId = credentialId;
 					}
+					if (event.type === "done") tagWithheldTier(event.message);
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
 						continue;
@@ -1353,6 +914,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (!outer.done) {
 					const result = await inner.result();
 					if (credentialId !== undefined) result.credentialId = credentialId;
+					tagWithheldTier(result);
 					outer.end(result);
 				}
 			} catch (error) {
@@ -1383,13 +945,10 @@ function streamSimpleRequest<TApi extends Api>(
 
 		void (async () => {
 			let lastKey: string | undefined;
-			let credentialId: number | undefined;
-			let oauthIdentity: OAuthRequestIdentity | undefined;
+			let initial: ApiKeyResolution;
 			try {
-				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
-				lastKey = resolvedApiKeyBearer(resolved);
-				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				initial = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				lastKey = resolvedApiKeyBearer(initial);
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1411,27 +970,25 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(initial);
 			if (!failure) return;
 			let reportedFailure = failure;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				let nextCredentialId: number | undefined;
-				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				let nextResolved: ApiKeyResolution;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
 					failure.error,
 					signal,
 					resolved => {
-						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+						nextResolved = resolved;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextResolved);
 				if (!next) return;
 				reportedFailure =
 					preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error
@@ -2461,6 +2018,7 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"devin-agent">({
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
+				serviceTier: options?.serviceTier,
 			});
 		}
 		case "antigravity-acp": {

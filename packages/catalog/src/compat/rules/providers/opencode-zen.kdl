@@ -135,7 +135,8 @@ provider "opencode-zen" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "effort"
 	}
-	// Zen serves Jev over System One, not chat completions.
+	// Zen serves its decision models over System One, not chat completions;
+	// prices from the `/v1/models` listing (GPT-6 Luna Decision's ≤272K tier).
 	seed api="typesafe" bundle="always" base-url="https://opencode.ai/zen" {
 		model "jev-1.13" name="Jev 1.13" {
 			reasoning #false
@@ -151,8 +152,29 @@ provider "opencode-zen" {
 			limits
 			supports-tools #false
 		}
+		model "jev-1.14" name="Jev 1.14" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "gemini-decision-1" name="Gemini Decision 1" {
+			reasoning #false
+			input "text"
+			cost input=0.1 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "gpt-6-luna-decision" name="GPT-6 Luna Decision" {
+			reasoning #false
+			input "text"
+			cost input=0.1 output=0 cache-read=0.01 cache-write=0.125
+			limits
+			supports-tools #false
+		}
 	}
-	models "jev-1.13" "jev-1.13-free" {
+	models "jev-1.13" "jev-1.13-free" "jev-1.14" "gemini-decision-1" "gpt-6-luna-decision" {
 		kind "judge"
 	}
 }

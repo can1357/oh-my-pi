@@ -6,7 +6,7 @@ import { JsRuntime } from "../../../eval/js/shared/runtime";
 import { readImageHeaderDimensions, resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
 import { throwIfAborted } from "../../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import {
 	type BrowserCaptureResult,
 	type BrowserConsoleEntry,
