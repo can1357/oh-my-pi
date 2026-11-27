@@ -28,7 +28,7 @@ import { TSP_OPENERS } from "./tsp";
 export interface TokenSink {
 	/** One complete sequence: a single character, an escape sequence, or an unterminated head flushed on timeout. */
 	sequence(seq: string): void;
-	paste(text: string): void;
+	paste(text: string, bracketed?: true): void;
 }
 
 export interface TokenizerOptions {
@@ -825,7 +825,7 @@ export class InputTokenizer {
 		this.#paste = null;
 		this.#cancelPasteWatchdog?.();
 		this.#cancelPasteWatchdog = null;
-		this.#sink.paste(paste.chunks.join(""));
+		this.#sink.paste(paste.chunks.join(""), true);
 		// An unfinished TSP message stays on the report path; a partial end marker is dropped.
 		const pending = TSP_OPENERS.some(prefix => paste.pending.startsWith(prefix)) ? paste.pending : "";
 		const after = pending + rest;

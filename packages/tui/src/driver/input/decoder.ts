@@ -9,7 +9,7 @@ import { decodeMouse } from "./mouse";
 import { parseReply, type TerminalReply } from "./replies";
 import { InputTokenizer, type TokenizerOptions, type TokenSink } from "./tokenizer";
 import { parseTspMessage } from "./tsp";
-import { isWin32Record, Win32RecordDecoder } from "./win32";
+import { decodeWin32Paste, isWin32Record, Win32RecordDecoder } from "./win32";
 
 export interface DecoderSink {
 	input(event: InputEvent): void;
@@ -47,9 +47,9 @@ export class InputDecoder {
 		};
 		const tokens: TokenSink = {
 			sequence: seq => this.#classify(seq, true),
-			paste: text => {
+			paste: (text, bracketed) => {
 				this.#flushRecords();
-				paste(text);
+				paste(this.win32 && bracketed ? decodeWin32Paste(text) : text);
 			},
 		};
 		const relayed: TokenSink = {

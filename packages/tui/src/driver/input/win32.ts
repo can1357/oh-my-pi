@@ -57,6 +57,14 @@ export function isWin32Record(seq: string): boolean {
 	return RECORD.test(seq);
 }
 
+// ConPTY can report line breaks inside a bracketed paste as key record pairs.
+const CONPTY_PASTE_CR = "\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_";
+const CONPTY_PASTE_LF = "\x1b[17;29;0;1;8;1_\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_\x1b[17;29;0;0;0;1_";
+
+export function decodeWin32Paste(content: string): string {
+	return content.replaceAll(CONPTY_PASTE_CR, "\r").replaceAll(CONPTY_PASTE_LF, "\n");
+}
+
 export class Win32RecordDecoder {
 	#highSurrogate = "";
 
