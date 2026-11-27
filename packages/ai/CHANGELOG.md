@@ -14,6 +14,7 @@
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
 
 ### Fixed
+- Fixed OAuth logins failing with `getifaddrs returned an error` on Android/Termux before the browser callback started ([#16127](https://github.com/can1357/oh-my-pi/issues/16127), [#19972](https://github.com/can1357/oh-my-pi/pull/19972) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 - Fixed authentication-gateway requests so configured authorization headers are honored regardless of capitalization, with API-key fallback when the header is missing or empty.
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
