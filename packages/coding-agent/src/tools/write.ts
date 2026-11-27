@@ -1,6 +1,5 @@
 import type { WriteToolDetails } from "./details/write";
 import { Database } from "bun:sqlite";
-import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -36,7 +35,7 @@ import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/nor
 
 import { InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
 import { readSnapshot } from "../commit/selective/journal";
-import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
+import { createLspWritethrough, type WritethroughCallback, type WritethroughResult, writethroughNoop } from "../lsp";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getLspBatchRequest } from "../lsp/batch";
@@ -49,6 +48,8 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
+import { withTrackedFileWrites } from "./file-write-fallback";
+import { assertLocalFileNotHeldOpen } from "./file-write-io";
 
 import { isReadTruncationNotice } from "./hashline-format";
 import { hasColumnTruncationClause, isColumnTruncationNotice } from "./output-meta-format";
@@ -906,7 +907,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			policy?.scope === "coordination" ||
 			policy?.scope === "reply" ||
 			(target !== undefined && policy?.cancels?.(target.url) === true);
-		return untilAborted(signal, async () => {
+		let localWrite: Promise<WritethroughResult> | undefined;
+		let handlerWrites: Set<Promise<void>> | undefined;
+		return untilAborted<AgentToolResult<WriteToolDetails>>(signal, async () => {
 			// Text payloads get hashline display prefixes ([PATH#HASH] + LINE:) stripped if the model
 			// copied them from read output. Verbatim payloads (messages, process stdin, setting
 			// values, conflict directives) reach their handler exactly as the model wrote them.
@@ -939,13 +942,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 					}
 					emitWriteProgress(onUpdate, cleanBytes, path);
-					const handlerResult = await router.write(
-						path,
-						cleanContent,
-						sessionWriteContext(this.session, {
-							signal,
-							toolCall: { id: _toolCallId, onUpdate, context },
-						}),
+					const handlerResult = await withTrackedFileWrites((handlerWrites = new Set()), () =>
+						router.write(
+							path,
+							cleanContent,
+							sessionWriteContext(this.session, {
+								signal,
+								toolCall: { id: _toolCallId, onUpdate, context },
+							}),
+						),
 					);
 					// The flag tells the prewalk gate this write was not implementation work.
 					const fileFreeDetails: WriteToolDetails = touchesNoFiles ? { touchesNoFiles: true } : {};
@@ -1041,7 +1046,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
 			if (existing) {
 				try {
-					assertNotHeldOpen(absolutePath);
+					await assertLocalFileNotHeldOpen(absolutePath, signal);
 				} catch (error) {
 					throw new ToolError(`Cannot write '${path}': ${(error as Error).message}`);
 				}
@@ -1118,7 +1123,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// Linters read a shebang's execute bits (Ruff's EXE001), so they are set once the final
 			// bytes land, before the writethrough collects diagnostics for them.
 			let madeExecutable = false;
-			const diagnostics = await writethrough(
+			localWrite = writethrough(
 				absolutePath,
 				writeContent,
 				signal,
@@ -1129,6 +1134,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					madeExecutable = await maybeMarkExecutableForShebang(absolutePath, committed);
 				},
 			);
+			const diagnostics = await localWrite;
 			if (!deferred || batchRequest?.flush === false) {
 				this.session.bumpFileMutationVersion?.(absolutePath);
 			}
@@ -1169,6 +1175,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						.get(),
 				},
 			};
+		}).finally(async () => {
+			// Keep preflight cancellable, but do not report abort while a local
+			// commit can still land. Queued writes reject promptly on the signal.
+			if (!signal?.aborted) return;
+			if (localWrite) await localWrite.catch(() => {});
+			else if (handlerWrites?.size) await Promise.allSettled(handlerWrites);
 		});
 	}
 }

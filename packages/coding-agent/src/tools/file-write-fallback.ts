@@ -17,9 +17,8 @@
  * ## What is routed
  *
  * The byte-write that `write`, `edit` and `apply_patch` perform on an ordinary
- * file path goes through the same two-line primitive
- * (`file ? file.write(content) : Bun.write(dst, content)`). It has four call
- * sites, and all of them route here:
+ * file path runs on a worker thread so a stalled mount can't block the TUI.
+ * All four call sites route here:
  *
  * - `writethroughNoop` and `runLspWritethrough`'s `writeContent` (`lsp/writethrough.ts`),
  *   the `WritethroughCallback` that `write` and `edit` both write through.
@@ -67,9 +66,8 @@
  * case where Bun hides such a denial behind an `ENOENT` (see
  * {@link classifyWriteFailure}). Every other error rethrows untouched.
  *
- * With no handler registered this module is inert: the primitive runs exactly as
- * it did before, a failure rethrows from the same place, and no extra syscalls
- * are performed.
+ * With no handler registered, a write failure rethrows without extra
+ * filesystem probes.
  *
  * ## The path a handler is given
  *
@@ -129,9 +127,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
-import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import type { BunFile } from "bun";
 import type { ExtensionContext } from "../extensibility/extensions/types";
+import { writeLocalFile } from "./file-write-io";
 import { resolveSyscallTarget } from "./path-utils";
 
 /** A denied write, captured for a registered fallback to retry through a privileged channel. */
@@ -400,21 +398,43 @@ async function classifyWriteFailure(dst: string, error: unknown): Promise<WriteF
 	return { kind: "retry" };
 }
 
-export async function writeFileWithFallback(dst: string, content: string, file?: BunFile): Promise<void> {
-	// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
-	assertNotHeldOpen(dst);
+const trackedFileWrites = new AsyncLocalStorage<Set<Promise<void>>>();
+
+/** Track disk mutations made by a handler without waiting for unrelated handler work on abort. */
+export function withTrackedFileWrites<T>(pending: Set<Promise<void>>, run: () => T): T {
+	return trackedFileWrites.run(pending, run);
+}
+
+export function writeFileWithFallback(
+	dst: string,
+	content: string,
+	file?: BunFile,
+	signal?: AbortSignal,
+): Promise<void> {
+	const write = performFileWrite(dst, content, file, signal);
+	const pending = trackedFileWrites.getStore();
+	if (!pending) return write;
+	pending.add(write);
+	return write.finally(() => {
+		pending.delete(write);
+	});
+}
+
+async function performFileWrite(
+	dst: string,
+	content: string,
+	file: BunFile | undefined,
+	signal: AbortSignal | undefined,
+): Promise<void> {
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,
 	// which bounds the loop at two writes.
 	for (let attempt = 0; ; attempt++) {
 		try {
-			if (file) {
-				await file.write(content);
-			} else {
-				await Bun.write(dst, content);
-			}
+			await writeLocalFile(dst, content, signal, file ?? dst);
 			return;
 		} catch (error) {
+			signal?.throwIfAborted();
 			if (fallbackHandlers.length === 0) throw error;
 			// On the second attempt a `retry` verdict can no longer change the
 			// outcome, so skip the probe and let the error stand unless it is a
@@ -445,6 +465,7 @@ export async function writeFileWithFallback(dst: string, content: string, file?:
 					// session, so the request names the one that issued it.
 					const sessionId = mutationSessionStorage.getStore();
 					for (const handler of Array.from(fallbackHandlers)) {
+						signal?.throwIfAborted();
 						try {
 							if (await handler({ dst: target, content, cause: failure.cause, sessionId })) return;
 						} catch (handlerError) {

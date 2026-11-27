@@ -1,12 +1,14 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import * as fileWriteIo from "../../src/tools/file-write-io";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -409,6 +411,50 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(after).toBe("line 1\nnewApi(x);\nline N\n");
 		// History is invalidated after resolve so the id no longer works.
 		expect(session.state?.conflictHistory?.get(1)).toBeUndefined();
+	});
+
+	it.each(["conflict://1", "conflict://*"])("waits for a claimed %s write on abort", async uri => {
+		const first = path.join(tempDir, "first.ts");
+		const second = path.join(tempDir, "second.ts");
+		await Bun.write(first, TWO_WAY);
+		await Bun.write(second, TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+		await read.execute("read-first", { path: first });
+		await read.execute("read-second", { path: second });
+		const controller = new AbortController();
+		const claimed = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let physicalWrite: Promise<void> | undefined;
+		const io = spyOn(fileWriteIo, "writeLocalFile").mockImplementationOnce((dst, content, _signal, target) => {
+			claimed.resolve();
+			physicalWrite = release.promise.then(async () => {
+				await Bun.write(target ?? dst, content);
+			});
+			return physicalWrite;
+		});
+		const outcome = write.execute("resolve", { path: uri, content: "@ours" }, controller.signal).then(
+			() => null,
+			error => error,
+		);
+		try {
+			await Promise.race([
+				claimed.promise,
+				outcome.then(error => {
+					throw error ?? new Error("conflict resolution returned without writing");
+				}),
+			]);
+			controller.abort();
+			expect(await Promise.race([outcome, setImmediate("pending")])).toBe("pending");
+		} finally {
+			release.resolve();
+			await Promise.allSettled([outcome, physicalWrite]);
+			io.mockRestore();
+		}
+		expect(await outcome).toMatchObject({ message: expect.stringContaining("Aborted") });
+		expect(await Bun.file(first).text()).toBe("line 1\noldApi(x)\nline N\n");
+		expect(await Bun.file(second).text()).toBe(TWO_WAY);
 	});
 
 	it("drops trailing lines that echo the context below the region and notes the repair", async () => {

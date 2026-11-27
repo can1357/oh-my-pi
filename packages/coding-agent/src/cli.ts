@@ -41,6 +41,7 @@ import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
 	AUTO_UPDATE_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
+	FILE_WRITE_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
@@ -192,6 +193,7 @@ async function runSmokeTest(): Promise<void> {
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	const { smokeTestFileWriteWorker } = await import("./tools/file-write-io");
 	// Every smoke that reaches the daemon must start this build's own, never the user's live one.
 	const cleanupDaemon = await isolateDaemonForSmokeTest();
 	try {
@@ -199,6 +201,7 @@ async function runSmokeTest(): Promise<void> {
 		await smokeTestSpotlightWorker();
 		await smokeTestStatsActivityWorker();
 		await smokeTestTranscriptIndexWorker();
+		await smokeTestFileWriteWorker();
 
 		const statsServer = await startServer(0);
 		try {
@@ -329,6 +332,13 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
 		await import("./stats/activity-worker");
+		return true;
+	}
+	if (arg === FILE_WRITE_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		// The worker must attach its message handler only in its own thread.
+		await import("./tools/file-write-worker");
 		return true;
 	}
 	if (arg === TRANSCRIPT_INDEX_WORKER_ARG) {

@@ -14,6 +14,7 @@ import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-
 import { addFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as fileWriteIo from "../../src/tools/file-write-io";
 
 function createFormatter(format: (filePath: string, content: string) => Promise<string>): ServerConfig {
 	return {
@@ -183,7 +184,7 @@ describe("createLspWritethrough batching", () => {
 			id: batchId,
 			flush: false,
 		});
-		vi.spyOn(Bun, "write").mockRejectedValueOnce(new Error("ENOSPC"));
+		vi.spyOn(fileWriteIo, "writeLocalFile").mockRejectedValueOnce(new Error("ENOSPC"));
 
 		await expect(
 			writethrough(fileB, "const failed = true;\n", undefined, undefined, {

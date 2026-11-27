@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,8 @@ import {
 	withFileMutationSession,
 	writeFileWithFallback,
 } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import * as fileWriteIo from "../../src/tools/file-write-io";
 
 /** Mimics a Node/Bun filesystem error with a structured `code`, without touching a real fs. */
 function fsError(code: string, message = `${code}: simulated`): NodeJS.ErrnoException {
@@ -56,13 +58,22 @@ describe("writeFileWithFallback", () => {
 		for (const dispose of disposers.splice(0)) dispose();
 	});
 
-	/** A `BunFile`-shaped stub whose `.write()` always fails with `error`. */
-	function denyingFile(error: unknown): { write: (content: string) => Promise<number> } {
-		return {
-			write: async () => {
-				throw error;
-			},
-		};
+	it("does not overwrite a user save when an aborted write leaves the worker inbox", async () => {
+		await using dir = await TempDir.create("@omp-queued-write-");
+		const proc = Bun.spawn({
+			cmd: [process.execPath, path.resolve(import.meta.dir, "../fixtures/queued-file-write.ts"), dir.path()],
+			stdout: "ignore",
+			stderr: "pipe",
+			timeout: 4_000,
+			killSignal: "SIGKILL",
+		});
+		const [status, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+		expect(status, stderr).toBe(0);
+	});
+
+	function denyWrite(error: unknown): void {
+		const write = spyOn(fileWriteIo, "writeLocalFile").mockRejectedValue(error);
+		disposers.push(() => write.mockRestore());
 	}
 
 	it("diverts a permission-denied write to a registered handler", async () => {
@@ -76,7 +87,8 @@ describe("writeFileWithFallback", () => {
 
 		// The seam brokers the resolved path (Windows grafts the cwd's drive on).
 		const dst = path.resolve("/denied/path.txt");
-		await writeFileWithFallback(dst, "payload", denyingFile(fsError("EACCES")) as never);
+		denyWrite(fsError("EACCES"));
+		await writeFileWithFallback(dst, "payload");
 
 		expect(seen).toEqual([{ dst, content: "payload" }]);
 	});
@@ -94,12 +106,11 @@ describe("writeFileWithFallback", () => {
 			}),
 		);
 
-		await withFileMutationSession("session-a", () =>
-			writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never),
-		);
+		denyWrite(fsError("EACCES"));
+		await withFileMutationSession("session-a", () => writeFileWithFallback("/denied/path.txt", "payload"));
 		// No scope: an external `applyPatch` caller is not attributable to a session,
 		// and inventing one would be worse than saying so.
-		await writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never);
+		await writeFileWithFallback("/denied/path.txt", "payload");
 
 		expect(seen).toEqual(["session-a", undefined]);
 	});
@@ -113,9 +124,8 @@ describe("writeFileWithFallback", () => {
 			}),
 		);
 
-		await expect(
-			writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EISDIR")) as never),
-		).rejects.toMatchObject({ code: "EISDIR" });
+		denyWrite(fsError("EISDIR"));
+		await expect(writeFileWithFallback("/denied/path.txt", "payload")).rejects.toMatchObject({ code: "EISDIR" });
 		expect(called).toBe(false);
 	});
 
@@ -132,16 +142,15 @@ describe("writeFileWithFallback", () => {
 				return true;
 			}),
 		);
-		const file = {
-			write: async () => {
-				attempts += 1;
-				throw fsError("ENOENT");
-			},
-		};
+		const write = spyOn(fileWriteIo, "writeLocalFile").mockImplementation(async () => {
+			attempts += 1;
+			throw fsError("ENOENT");
+		});
+		disposers.push(() => write.mockRestore());
 
-		await expect(
-			writeFileWithFallback(path.join(root, "fresh", "path.txt"), "payload", file as never),
-		).rejects.toMatchObject({ code: "ENOENT" });
+		await expect(writeFileWithFallback(path.join(root, "fresh", "path.txt"), "payload")).rejects.toMatchObject({
+			code: "ENOENT",
+		});
 		expect(attempts).toBe(2);
 		expect(handlerCalled).toBe(false);
 		// The repair is the reason the retry happened, so it must be observable.
@@ -154,9 +163,8 @@ describe("writeFileWithFallback", () => {
 		const cause = fsError("EACCES");
 		disposers.push(addFileWriteFallback(async () => false));
 
-		await expect(writeFileWithFallback("/denied/path.txt", "payload", denyingFile(cause) as never)).rejects.toBe(
-			cause,
-		);
+		denyWrite(cause);
+		await expect(writeFileWithFallback("/denied/path.txt", "payload")).rejects.toBe(cause);
 	});
 
 	it("rethrows the ORIGINAL error when every handler throws", async () => {
@@ -167,9 +175,8 @@ describe("writeFileWithFallback", () => {
 			}),
 		);
 
-		await expect(writeFileWithFallback("/denied/path.txt", "payload", denyingFile(cause) as never)).rejects.toBe(
-			cause,
-		);
+		denyWrite(cause);
+		await expect(writeFileWithFallback("/denied/path.txt", "payload")).rejects.toBe(cause);
 	});
 
 	it("falls through a throwing handler to the next registered handler", async () => {
@@ -186,7 +193,8 @@ describe("writeFileWithFallback", () => {
 			}),
 		);
 
-		await writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never);
+		denyWrite(fsError("EACCES"));
+		await writeFileWithFallback("/denied/path.txt", "payload");
 
 		expect(secondCalled).toBe(true);
 	});
@@ -212,7 +220,8 @@ describe("writeFileWithFallback", () => {
 			}),
 		);
 
-		await writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never);
+		denyWrite(fsError("EACCES"));
+		await writeFileWithFallback("/denied/path.txt", "payload");
 
 		expect(order).toEqual(["first", "second"]);
 	});
@@ -228,14 +237,13 @@ describe("writeFileWithFallback", () => {
 		});
 		disposers.push(dispose);
 
-		await writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never);
+		denyWrite(fsError("EACCES"));
+		await writeFileWithFallback("/denied/path.txt", "payload");
 		expect(calls).toBe(1);
 
 		dispose();
 
-		await expect(
-			writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never),
-		).rejects.toMatchObject({ code: "EACCES" });
+		await expect(writeFileWithFallback("/denied/path.txt", "payload")).rejects.toMatchObject({ code: "EACCES" });
 		expect(calls).toBe(1);
 	});
 

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { open, rename } from "node:fs/promises";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
 import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
@@ -22,6 +24,7 @@ import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type ptree, TempDir } from "@oh-my-pi/pi-utils";
+import * as fileWriteIo from "../../src/tools/file-write-io";
 
 const TEST_SERVER: ServerConfig = {
 	command: "test-lsp",
@@ -142,6 +145,140 @@ describe("LSP diagnostics freshness", () => {
 		vi.restoreAllMocks();
 		tempDir.removeSync();
 	});
+
+	it("joins the pending disk write when the LSP budget expires without replaying it", async () => {
+		const filePath = tempDir.join("slow.ts");
+		const budget = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(AbortSignal, "timeout").mockReturnValue(budget.signal);
+		const format = vi.fn(async () => "formatted\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", createFormatter(format)]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+		const write = fileWriteIo.writeLocalFile;
+		const writes = vi
+			.spyOn(fileWriteIo, "writeLocalFile")
+			.mockImplementationOnce(async (dst, content, signal, target) => {
+				started.resolve();
+				await release.promise;
+				await write(dst, content, signal, target);
+			});
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true });
+		const output = writethrough(filePath, "committed\n");
+		await started.promise;
+		try {
+			budget.abort();
+			await setImmediate();
+			expect(writes).toHaveBeenCalledTimes(1);
+		} finally {
+			release.resolve();
+			await output;
+		}
+		expect(await Bun.file(filePath).text()).toBe("committed\n");
+		expect(format).not.toHaveBeenCalled();
+	});
+
+	it.each(["write tool", "LSP writethrough"])("awaits a claimed write on %s abort", async via => {
+		const filePath = tempDir.join("claimed.ts");
+		const controller = new AbortController();
+		const claimed = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const format = vi.fn(async () => "would overwrite\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", createFormatter(format)]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+		vi.spyOn(fileWriteIo, "writeLocalFile").mockImplementationOnce(async (dst, content, _signal, target) => {
+			// A claimed write ignores abort until its syscall settles.
+			claimed.resolve();
+			await release.promise;
+			await Bun.write(target ?? dst, content);
+		});
+		const tool = new WriteTool({
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			enableLsp: false,
+		});
+		const content = "claimed write\n";
+		const result =
+			via === "write tool"
+				? tool.execute("claimed-write", { path: filePath, content }, controller.signal)
+				: createLspWritethrough(tempDir.path(), { enableFormat: true })(filePath, content, controller.signal);
+		const outcome = result.then(
+			() => ({ cancelled: false }),
+			error => ({ cancelled: true, error }),
+		);
+		try {
+			await Promise.race([
+				claimed.promise,
+				outcome.then(result => {
+					throw "error" in result ? result.error : new Error("write returned without reaching the worker");
+				}),
+			]);
+			controller.abort();
+			expect(await Promise.race([outcome, setImmediate("pending")])).toBe("pending");
+		} finally {
+			release.resolve();
+			await outcome;
+		}
+		expect(await outcome).toMatchObject({ cancelled: true, error: { name: "AbortError" } });
+		expect(await Bun.file(filePath).text()).toBe(content);
+		expect(format).not.toHaveBeenCalled();
+	});
+
+	it("formats an SDK call that passes a BunFile in the fourth argument", async () => {
+		const filePath = tempDir.join("sdk.ts");
+		const formatted = "export const value = 1;\n";
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", createFormatter(async () => formatted)]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true });
+
+		const result = await writethrough(filePath, "export const value=1;\n", undefined, Bun.file(filePath));
+
+		expect(result.finalContent).toBe(formatted);
+		expect(await Bun.file(filePath).text()).toBe(formatted);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"keeps writing to the SDK descriptor after its path is replaced",
+		async () => {
+			const dst = tempDir.join("sdk.ts");
+			const renamed = tempDir.join("renamed.ts");
+			const next = tempDir.join("next.ts");
+			await Bun.write(dst, "original");
+			const descriptor = await open(dst, "r+");
+			try {
+				await rename(dst, renamed);
+				await Bun.write(dst, "user save");
+				const file = Bun.file(descriptor.fd);
+				const formatted = "fmt data";
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+				vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([
+					["formatter", createFormatter(async () => formatted)],
+				]);
+				vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+				const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true });
+
+				await writethrough(dst, "raw data", undefined, file);
+				// The descriptor's position advances across the raw and formatted writes.
+				expect(await Bun.file(renamed).text()).toBe("raw datafmt data");
+				expect(await Bun.file(dst).text()).toBe("user save");
+
+				const id = "sdk-descriptor";
+				await writethrough(dst, "raw data", undefined, file, { id, flush: false });
+				expect(await Bun.file(renamed).text()).toBe("raw datafmt dataraw data");
+				await writethrough(next, "another file", undefined, undefined, { id, flush: true });
+				expect(await Bun.file(renamed).text()).toBe("raw datafmt dataraw datafmt data");
+				expect(await Bun.file(dst).text()).toBe("user save");
+			} finally {
+				await descriptor.close();
+			}
+		},
+	);
 
 	it("announces watched-file creates even when no server owns the file type", async () => {
 		const filePath = path.join(tempDir.path(), "probe.module.scss");
