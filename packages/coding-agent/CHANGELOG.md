@@ -178,6 +178,7 @@
 - Fixed an LSP watched-files crash when a file watcher reports an event without a filename; the watcher now rescans instead of throwing ([#20372](https://github.com/can1357/oh-my-pi/issues/20372))
 - `bash.patterns` `deny`/`prompt` rules and critical-command patterns no longer refuse or prompt a bash line made only of tool commands because a tool's argument text contains the rule's words; each tool is still approved by its own `tools.approval` policy ([#20317](https://github.com/can1357/oh-my-pi/issues/20317))
 - Idle auto-compaction no longer summarizes the conversation while a submitted plan awaits your answer in Plan Review; the idle timer restarts once the review is answered or dismissed ([#20662](https://github.com/can1357/oh-my-pi/issues/20662))
+- Fixed `todo` `init` and `append` accepting non-string task entries (such as phase objects passed in flat `items`) and storing their JSON text as task labels; the call now fails with an error pointing at `list: [{phase, items}]` ([#20669](https://github.com/can1357/oh-my-pi/issues/20669))
 
 ### Removed
 
