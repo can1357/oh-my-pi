@@ -1,5 +1,3 @@
-# Changelog
-
 ## [Unreleased]
 
 ### Breaking Changes
@@ -10,25 +8,6 @@
 ### Added
 
 - Combined goal mode with vibe mode: `/goal` and `/vibe` compose in either order, keeping the `goal` tool in the director's set while workers drive the objective. Worker-result delivery owns director wake-ups (goal continuation fires only when every worker is idle), goal state rides in the vibe `mode_change` journal entry so one record rehydrates both on resume, exiting vibe pauses an active goal, and a goal's `token_budget` now covers director plus worker spend through record-level usage accounting that survives worker park/revive and process restarts.
-- Added the `tui.showLinkUrl` setting to hide the URL drawn after named Markdown links where the label is a clickable terminal hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
-- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
-- `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
-- The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Added the `gitlab` tool (`gitlab.enabled`, default off) covering project/file/issue reads, MR creation/updating/worktree checkout/push, discussions/notes/resolution, project/group/global search, and CI pipeline/job watching and logs, and expanded `mr://` URLs to support MR listings (`mr://`, `mr://<host>/<group>/<project>`) and cached MR overviews (`mr://<iid>`) alongside existing `/diff` slices ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
-- Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
-
-### Changed
-
-- Goal budget accounting uses a persistent last-flushed usage baseline instead of a per-turn snapshot, so token spend accruing between turns (for example vibe worker turns settling while the main agent is idle) is charged to the goal instead of being absorbed into the next turn's baseline.
-- Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
-- URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
-- URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
-- Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
-- Ask form table cells, field labels and option rows keep their `<strong>`, `<em>`, `<code>` and `<mark>` styling in the terminal instead of showing plain text ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
-- When `bash.patterns` allow rules can skip an approval prompt, the bash tool's description tells the agent which shell syntax (unquoted operators, `$`/backtick expansions) disqualifies them ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
 - Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
 - Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
 - Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.
@@ -42,6 +21,7 @@
 
 ### Changed
 
+- Goal budget accounting uses a persistent last-flushed usage baseline instead of a per-turn snapshot, so token spend accruing between turns (for example vibe worker turns settling while the main agent is idle) is charged to the goal instead of being absorbed into the next turn's baseline.
 - Redesigned the `/live` call panel in Tern: your voice as a moving wave in the call's color, the transcript as a caption, and the call's status beside Mute and End call.
 - Redesigned the composer's dictation control in Tern: while recording it shows a live wave of your voice and the time recorded beside a stop button.
 - Bash can now load approved `.envrc` files and opt-in `.env` files without requiring `direnv`, using the exact approved file contents.
