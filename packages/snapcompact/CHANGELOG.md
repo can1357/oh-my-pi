@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Snapcompact uses one installed font for the entire transcript and falls back to text when no single font covers it. The `silver16-bw` shape is now `cjk16-bw`.
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

@@ -4123,25 +4123,8 @@ export interface RenderHtmlOptions {
 export declare function renderMermaidAscii(text: string, options?: MermaidRenderOptions | undefined | null): string
 
 /**
- * Render one snapcompact frame on a libuv worker: print pre-normalized text
- * onto a `size`-wide bitmap and encode it as PNG.
- *
- * The bitmap height hugs the rows the text occupies
- * (`usedRows * lineRepeat * cellHeight`), with a 64px floor for vision
- * processors that reject smaller dimensions. The glyph grid holds
- * `floor(size/cellWidth) * floor(size/cellHeight/lineRepeat)` characters;
- * input beyond that is ignored.
- * Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
- * shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
- * directly from grayscale coverage.
- * `stretch: false` pins bitmap fonts to the indexed path, printing
- * natural-size glyphs on the requested cell box; `columns: 2` flows
- * pre-wrapped newline-separated lines down two newspaper columns.
- * `U+000E`/`U+000F` in `text` toggle dim-gray ink spans without occupying a
- * cell.
- * Returns a promise for the PNG encoded as base64, created as a one-byte
- * (Latin-1) JS string straight from native code — no `Uint8Array` hop or
- * JS-side re-encode.
+ * Render pre-normalized text on a worker and return its RGB PNG as base64.
+ * Height hugs used rows with a 64px floor. Overlong input clips to the grid.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
@@ -4154,6 +4137,12 @@ export declare function renderSnapcompactPng(text: string, options: SnapcompactR
  * through it.
  */
 export declare function repairHeredocContinuations(script: string): string | null
+
+/**
+ * Select one installed face covering every supplied printable character. The
+ * caller supplies distinct scalars, without synthetic markers or controls.
+ */
+export declare function resolveSnapcompactFont(chars: string): number | null
 
 /**
  * Put back a stdin console mode `enableConsoleVtInput` returned. False when
@@ -4837,57 +4826,22 @@ export declare function sliceWithWidth(line: string, startCol: number, length: n
 
 /** Shape options for one snapcompact frame. */
 export interface SnapcompactRenderOptions {
-  /**
-   * Frame width in pixels; also bounds the grid rows
-   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the used rows
-   * with a 64px floor, rather than padding every frame to a square.
-   */
+  /** Frame width in pixels; also bounds grid rows before the 64px height floor. */
   size: number
-  /**
-   * Bundled font: `"5x8"`, `"6x12"`, `"8x13"` (X.org BDF), `"8x8"`
-   * (unscii-8), or `"silver"` (embedded TrueType). Default `"5x8"`.
-   */
-  font?: string
-  /**
-   * Target cell advance in pixels. Differing from the font's natural cell
-   * triggers the Lanczos stretch path. Default: font natural width.
-   */
-  cellWidth?: number
-  /** Target cell pitch in pixels. Default: font natural height. */
-  cellHeight?: number
-  /**
-   * Ink variant: `"sent"` (six-hue sentence cycling) or `"bw"` (black).
-   * Default `"sent"`.
-   */
+  /** Process-local face returned by `resolveSnapcompactFont`. */
+  fontId: number
+  /** Fixed cell advance and pitch in pixels. */
+  cellWidth: number
+  cellHeight: number
+  /** Use two cells for East Asian wide glyphs (default true). */
+  wideCells?: boolean
+  /** Ink variant: `"sent"` (default, six-hue sentence cycling) or `"bw"` (black). */
   variant?: string
-  /**
-   * Print each text line this many times; copies after the first sit on a
-   * pale highlight band. Default 1.
-   */
+  /** Copies of each line; copies after the first have a highlight band (default 1). */
   lineRepeat?: number
-  /**
-   * Stretch behavior. Unset: auto — Lanczos-stretch whenever the target
-   * cell differs from the font's natural cell. `false`: never stretch —
-   * render indexed with glyphs at natural size on the requested cell box
-   * (e.g. 8x13 glyphs on an 8x16 pitch, the "8on16" shapes). `true`: force
-   * the stretch path (identical to auto; natural cells render indexed).
-   */
-  stretch?: boolean
-  /**
-   * Layout columns: `1` (default) row-major grid; `2` two newspaper "doc"
-   * columns of pre-wrapped newline-separated lines.
-   */
+  /** `1` (default) row-major grid, `2` two columns of pre-wrapped lines. */
   columns?: number
 }
-
-/**
- * Return the subset of `chars` that the named snapcompact font can render.
- *
- * The TypeScript normalizer uses this to keep Unicode text intact only when
- * the selected native font has a glyph for it; renderer control codes are
- * considered renderable because they are interpreted outside font lookup.
- */
-export declare function snapcompactSupportedChars(font: string, chars: string): string
 
 /**
  * Start a detached Windows process outside this process's job objects.

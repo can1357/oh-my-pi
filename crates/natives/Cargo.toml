@@ -21,6 +21,7 @@ async-trait.workspace = true
 arboard.workspace = true
 base64.workspace = true
 fontdue.workspace = true
+ttf-parser.workspace = true
 grep-matcher.workspace = true
 futures.workspace = true
 html-escape.workspace = true

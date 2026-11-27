@@ -327,6 +327,7 @@ clap = { version = "4", features = ["derive", "env"] }
 pdf-inspector = "1"
 regex = "1"
 fontdue = { version = "0.9", default-features = false }
+ttf-parser = { version = "0.25", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data Structures - Collections
@@ -418,7 +419,8 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ] }
-resvg = "0.48"
+# Read installed font files instead of mapping user-writable paths.
+resvg = { version = "0.48", default-features = false, features = ["svgz", "text", "system-fonts", "raster-images"] }
 # Not used directly: activates zune-jpeg's non-default `log` feature so image's
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.

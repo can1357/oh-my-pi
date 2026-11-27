@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Snapcompact renders with one installed font per transcript instead of shipping bitmap and Silver fonts.
 - Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline HTML rendering or `Reader` for URL reads; interactive terminal browsing is no longer available.
 
 ### Added

@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Snapcompact uses one installed font for the whole transcript. If no installed font covers it, automatic and default manual compaction try the next configured method, and inline content stays as text. The `silver16-bw` frame layout is now `cjk16-bw`.
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
 - Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
 - The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
