@@ -352,10 +352,10 @@ export function realizesPriorityServiceTier(
  * Premium-request weight contributed by a request a provider bills above
  * standard. Priority (Fast mode) counts 1 on every provider that realizes it;
  * `ultrafast` counts 1 on the OpenAI family, where it is a premium serving tier
- * (its cost premium is recorded separately in `usage.cost`). Mirrors GitHub
- * Copilot's `premiumRequests` accounting so the "premium requests" stat
- * aggregates premium traffic across the OpenAI family, direct Anthropic fast
- * mode, and Google priority.
+ * (its cost premium is recorded separately in `usage.cost`). The "premium
+ * requests" stat aggregates premium traffic across the OpenAI family, direct
+ * Anthropic fast mode, and Google priority. GitHub Copilot bills per token and
+ * reports `usage.aiu` instead.
  *
  * Returns 1 only when the tier is actually realized on the wire for `model`
  * (see {@link realizesPriorityServiceTier} and {@link shouldSendServiceTier})

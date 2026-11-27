@@ -237,7 +237,7 @@ export interface Usage {
 		/** Orchestration output tokens. */
 		output?: number;
 	};
-	/** Copilot premium-request counter, when applicable. */
+	/** Premium-request weight of a request billed per request (service-tier traffic; also stored on historical Copilot sessions). */
 	premiumRequests?: number;
 	/**
 	 * Reasoning/thinking tokens included in `output`, when the provider reports them
@@ -272,6 +272,23 @@ export interface Usage {
 		committedCost?: number;
 		/** Final committed ACU cost, when reported. */
 		acuCost?: number;
+	};
+	/**
+	 * GitHub Copilot server-reported AI-credit meter (`copilot_usage` frame).
+	 * Absent when the server sent no billing frame; absent means unknown, NOT zero.
+	 * Kept apart from `cost` (a local dollar estimate) and `premiumRequests` (legacy
+	 * request billing). 1 AIU = 1 AI credit = $0.01.
+	 */
+	aiu?: {
+		/** Server-reported `total_nano_aiu` (1 AIU = 1e9 nano-AIU). Authoritative per-request charge. */
+		nano: number;
+		/** Per-token-type share of `nano`, derived from the frame's `token_details`; only the types the server listed. */
+		nanoByType?: {
+			input?: number;
+			cacheRead?: number;
+			cacheWrite?: number;
+			output?: number;
+		};
 	};
 	cost: {
 		input: number;

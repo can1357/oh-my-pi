@@ -24,6 +24,7 @@ import {
 	removeBlankCoreWeaveProjectHeaders,
 } from "@oh-my-pi/pi-catalog/wire/coreweave";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	$env,
 	classifyJsonPrefix,
@@ -67,6 +68,7 @@ import {
 	type Usage,
 } from "../types";
 import { mergeHeaders } from "./anthropic-headers";
+import { applyCopilotUsageFrame } from "./github-copilot-billing";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
 import { resolveXaiBaseUrl } from "./xai-base-url";
 
@@ -170,7 +172,6 @@ export interface OpenAIStrictToolsState {
  */
 export interface OpenAIRequestSetupModel extends OpenAIModelIdentity, CatalogPolicyInputs {
 	headers?: Record<string, string>;
-	premiumMultiplier?: number;
 	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader" | "sessionHeader">;
 }
 
@@ -209,7 +210,6 @@ export interface OpenAIRequestSetupOptions {
 }
 
 export interface OpenAIRequestSetup {
-	copilotPremiumRequests: number | undefined;
 	baseUrl: string | undefined;
 	headers: Record<string, string>;
 	query: Record<string, string> | undefined;
@@ -273,7 +273,6 @@ export function resolveOpenAIRequestSetup(
 		headers = { ...options.prependHeaders(), ...headers };
 	}
 
-	let copilotPremiumRequests: number | undefined;
 	let copilotCacheKey: string | undefined;
 	let copilotCacheSnapshot: string | null | undefined;
 	let baseUrl = model.baseUrl;
@@ -306,7 +305,6 @@ export function resolveOpenAIRequestSetup(
 		const copilot = buildCopilotDynamicHeaders({
 			messages: options.messages,
 			hasImages: hasCopilotVisionInput(options.messages),
-			premiumMultiplier: model.premiumMultiplier,
 			headers,
 			initiatorOverride: options.initiatorOverride,
 			enterpriseUrl: copilotApiKey.enterpriseUrl,
@@ -314,7 +312,6 @@ export function resolveOpenAIRequestSetup(
 			cachedIntegrationId: copilotCached,
 		});
 		Object.assign(headers, copilot.headers);
-		copilotPremiumRequests = copilot.premiumRequests;
 		baseUrl = copilotBaseUrl;
 		copilotCacheSnapshot = copilotCached ?? null;
 	}
@@ -397,7 +394,7 @@ export function resolveOpenAIRequestSetup(
 	if (apiKey !== NO_AUTH_SENTINEL) {
 		headers.Authorization ??= `Bearer ${apiKey}`;
 	}
-	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders, copilotCacheKey, copilotCacheSnapshot };
+	return { baseUrl, headers, query, requestHeaders, copilotCacheKey, copilotCacheSnapshot };
 }
 
 export function applyOpenAIServiceTier(
@@ -4084,6 +4081,11 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
+			if (resolveCatalogPolicy(model).reportsAiu === true) {
+				// Copilot bills per token and reports the charge as a top-level
+				// `copilot_usage` field of the terminal event, a sibling of `response`.
+				applyCopilotUsageFrame(output.usage, terminalEvent);
+			}
 			calculateCost(model, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
 			output.serviceTier = applyOpenAIResponsesServiceTierCost(
@@ -4337,7 +4339,10 @@ export function resolveReasoningSummaryOption(
 	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
 	options: { reasoning?: string; reasoningSummary?: "auto" | "detailed" | "concise" | null } | undefined,
 ): "auto" | "detailed" | "concise" | null | undefined {
-	if (model.compat.supportsReasoningSummary) return options?.reasoningSummary;
+	if (model.compat.supportsReasoningSummary) {
+		if (options?.reasoningSummary !== undefined) return options.reasoningSummary;
+		return options?.reasoning === undefined ? undefined : model.compat.reasoningSummaryDefault;
+	}
 	return options?.reasoning === undefined ? undefined : null;
 }
 

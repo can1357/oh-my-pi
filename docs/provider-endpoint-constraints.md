@@ -133,7 +133,7 @@ routing, model ids, or usage accounting.
 
 - The API key is parsed into an access token.
 - Dynamic Copilot headers depend on messages/images.
-- `premiumRequests` must survive usage population and replacement.
+- Copilot's server-reported `copilot_usage` charge is independent of `cost` and legacy `premiumRequests`; record it on `usage.aiu` and leave it absent when no valid frame arrived.
 - Base URL may be resolved from the raw key.
 
 ### OpenRouter
@@ -465,8 +465,10 @@ deltas, then emit one final concat-safe JSON delta.
   subtract it from input tokens and emit it as cache-write usage.
 - DeepSeek native `prompt_cache_miss_tokens` is the billed input portion, not a
   separate cache-write charge. Do not double-count it.
-- GitHub Copilot `premiumRequests` must survive when usage is populated or
-  replaced.
+- GitHub Copilot bills per token: the server-reported `copilot_usage` frame is
+  recorded on `usage.aiu` for models the catalog marks `reports-aiu` (Messages
+  and Responses), absent (never 0) when the response carried none.
+  Copilot no longer sets `premiumRequests`.
 - OpenRouter and ClinePass `usage.cost` is authoritative when reported; preserve
   it rather than replacing it with catalog estimates.
 - Service-tier pricing uses the served tier echoed by the response, falling back
@@ -511,4 +513,4 @@ Before adding a branch or compat field, answer these in order:
 6. Can retry happen before visible text/tool calls only?
 7. Does usage accounting still preserve cache reads/writes, billed input, service
    tier multipliers, and provider-specific counters such as Copilot
-   `premiumRequests`?
+   `usage.aiu`?

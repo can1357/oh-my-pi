@@ -792,20 +792,18 @@ const streamOpenAIResponsesOnce = (
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const { headers, copilotPremiumRequests, baseUrl, copilotCacheKey, copilotCacheSnapshot } =
-				resolveOpenAIRequestSetup(model, {
-					apiKey,
-					extraHeaders: options?.headers,
-					initiatorOverride: options?.initiatorOverride,
-					messages: context.messages,
-					sessionId: options?.sessionId ?? routingSessionId,
-					promptCacheSessionId,
-					// The family affinity key rides only an explicit prompt-cache
-					// identity; the sessionId-derived cache-id fallback never does.
-					promptCacheAffinityKey: options?.promptCacheKey ? promptCacheSessionId : undefined,
-					parentSessionId: options?.parentSessionId,
-				});
-			const premiumRequestsTotal = copilotPremiumRequests;
+			const { headers, baseUrl, copilotCacheKey, copilotCacheSnapshot } = resolveOpenAIRequestSetup(model, {
+				apiKey,
+				extraHeaders: options?.headers,
+				initiatorOverride: options?.initiatorOverride,
+				messages: context.messages,
+				sessionId: options?.sessionId ?? routingSessionId,
+				promptCacheSessionId,
+				// The family affinity key rides only an explicit prompt-cache
+				// identity; the sessionId-derived cache-id fallback never does.
+				promptCacheAffinityKey: options?.promptCacheKey ? promptCacheSessionId : undefined,
+				parentSessionId: options?.parentSessionId,
+			});
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const requestUrl = `${resolvedBaseUrl}/responses`;
@@ -1233,7 +1231,6 @@ const streamOpenAIResponsesOnce = (
 				return openaiStream;
 			};
 			let openaiStream = await openResponsesStreamWithFallbacks();
-			if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;
 			stream.push({ type: "start", partial: output });
 
 			const nativeOutputItems: Array<Record<string, unknown>> = [];
@@ -1498,7 +1495,6 @@ const streamOpenAIResponsesOnce = (
 					output.stopDetails = undefined;
 					output.providerPayload = undefined;
 					output.usage = retryOutput.usage;
-					if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;
 					output.stopReason = "stop";
 					output.duration = undefined;
 					output.ttft = undefined;

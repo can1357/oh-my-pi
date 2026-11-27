@@ -998,15 +998,7 @@ const streamOpenAICompletionsOnce = (
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
-			const {
-				copilotPremiumRequests,
-				baseUrl,
-				headers,
-				query,
-				requestHeaders,
-				copilotCacheKey,
-				copilotCacheSnapshot,
-			} = createRequestSetup(
+			const { baseUrl, headers, query, requestHeaders, copilotCacheKey, copilotCacheSnapshot } = createRequestSetup(
 				model,
 				context,
 				apiKey,
@@ -1019,7 +1011,6 @@ const streamOpenAICompletionsOnce = (
 				options?.promptCacheKey ? promptCacheSessionId : undefined,
 				options?.parentSessionId,
 			);
-			const premiumRequestsTotal = copilotPremiumRequests;
 			let appliedStrictTools = false;
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
 			const attemptedReasoningEffortFallbacks = new Set<string>();
@@ -1174,9 +1165,6 @@ const streamOpenAICompletionsOnce = (
 					disableStrictTools = true;
 					openaiStream = await createCompletionsStream("none");
 				}
-			}
-			if (premiumRequestsTotal !== undefined) {
-				output.usage.premiumRequests = premiumRequestsTotal;
 			}
 			stream.push({ type: "start", partial: output });
 
@@ -1488,7 +1476,6 @@ const streamOpenAICompletionsOnce = (
 				output.usage = parseChunkUsage(
 					rawUsage,
 					model,
-					premiumRequestsTotal,
 					output.timestamp,
 					parseFireworksCachedPromptTokens(responseHeaders),
 				);
@@ -2468,7 +2455,6 @@ function parseFireworksCachedPromptTokens(headers: Headers | undefined): number 
 export function parseChunkUsage(
 	rawUsage: object,
 	model: Model<"openai-completions">,
-	premiumRequests: number | undefined,
 	timestamp?: number,
 	cachedTokensHeader?: number,
 ): AssistantMessage["usage"] {
@@ -2525,7 +2511,6 @@ export function parseChunkUsage(
 	const usage: AssistantMessage["usage"] = {
 		...accounting,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};
 	calculateCost(model, usage, timestamp);
 	applyProviderReportedCost(model, usage, rawUsage);

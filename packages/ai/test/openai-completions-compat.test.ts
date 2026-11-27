@@ -914,7 +914,7 @@ describe("openai-completions compatibility", () => {
 		];
 
 		for (const testCase of cases) {
-			const usage = parseChunkUsage(testCase.usage, model, undefined);
+			const usage = parseChunkUsage(testCase.usage, model);
 			expect(usage.cacheRead).toBe(testCase.expectedCacheRead);
 			expect(usage.input).toBe(
 				(testCase.usage as { prompt_tokens: number }).prompt_tokens - testCase.expectedCacheRead,

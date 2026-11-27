@@ -12,6 +12,7 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	$env,
 	$flag,
@@ -142,6 +143,7 @@ import {
 	claudeToolPrefix,
 	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
+import { applyCopilotUsageFrame } from "./github-copilot-billing";
 import {
 	buildCopilotDynamicHeaders,
 	getCachedCopilotIntegrationId,
@@ -153,7 +155,7 @@ import {
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
-import { applyInferenceHeaders } from "./inference-headers";
+import { applyInferenceHeaders, applySessionHeader } from "./inference-headers";
 import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
@@ -1371,14 +1373,13 @@ function fallbackCreditRequestBody(
 	return body;
 }
 
-function createEmptyUsage(premiumRequests?: number): Usage {
+function createEmptyUsage(): Usage {
 	return {
 		input: 0,
 		output: 0,
 		cacheRead: 0,
 		cacheWrite: 0,
 		totalTokens: 0,
-		...(premiumRequests === undefined ? {} : { premiumRequests }),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
@@ -2001,7 +2002,6 @@ const streamAnthropicOnce = (
 				? buildCopilotDynamicHeaders({
 						messages: context.messages,
 						hasImages: hasCopilotVisionInput(context.messages),
-						premiumMultiplier: model.premiumMultiplier,
 						headers: { ...model.headers, ...options?.headers },
 						integrationId: resolveCopilotRequestIdentity(options?.headers),
 						initiatorOverride: options?.initiatorOverride,
@@ -2009,9 +2009,6 @@ const streamAnthropicOnce = (
 						cachedIntegrationId: copilotCached,
 					})
 				: undefined;
-			if (copilotDynamicHeaders?.premiumRequests !== undefined) {
-				output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
-			}
 			const baseUrl = copilotBaseUrl ?? resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			// A caller-owned client decides the endpoint itself (its `baseURL`, or an
@@ -2592,7 +2589,7 @@ const streamAnthropicOnce = (
 				output.stopDetails = undefined;
 				output.inputTransformations = undefined;
 				output.providerPayload = undefined;
-				output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+				output.usage = createEmptyUsage();
 				output.stopReason = "stop";
 				firstTokenTime = undefined;
 			};
@@ -3263,6 +3260,11 @@ const streamAnthropicOnce = (
 								reportAnthropicEnvelopeAnomaly("received message_delta after terminal stop signal");
 								continue;
 							}
+							if (resolveCatalogPolicy(model).reportsAiu === true) {
+								// Copilot reports the per-request charge as a top-level
+								// `copilot_usage` field of `message_delta`, next to `delta` and `usage`.
+								applyCopilotUsageFrame(output.usage, event);
+							}
 							const delta = event.delta;
 							applyReportedInputTransformations(
 								output,
@@ -3525,7 +3527,7 @@ const streamAnthropicOnce = (
 						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
-						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.usage = createEmptyUsage();
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
@@ -3554,7 +3556,7 @@ const streamAnthropicOnce = (
 						output.errorMessage = undefined;
 						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
-						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.usage = createEmptyUsage();
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
@@ -3597,7 +3599,7 @@ const streamAnthropicOnce = (
 							output.errorMessage = undefined;
 							output.inputTransformations = undefined;
 							output.providerPayload = undefined;
-							output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+							output.usage = createEmptyUsage();
 							output.stopReason = "stop";
 							firstTokenTime = undefined;
 							continue;
@@ -3631,7 +3633,7 @@ const streamAnthropicOnce = (
 						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
-						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.usage = createEmptyUsage();
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
@@ -3673,7 +3675,7 @@ const streamAnthropicOnce = (
 						output.errorMessage = undefined;
 						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
-						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.usage = createEmptyUsage();
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
@@ -3700,7 +3702,7 @@ const streamAnthropicOnce = (
 						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
-						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.usage = createEmptyUsage();
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
@@ -3740,7 +3742,7 @@ const streamAnthropicOnce = (
 						output.responseId = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
-						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.usage = createEmptyUsage();
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
@@ -3804,7 +3806,7 @@ const streamAnthropicOnce = (
 						output.responseId = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
-						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.usage = createEmptyUsage();
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
@@ -3858,7 +3860,7 @@ const streamAnthropicOnce = (
 					output.errorMessage = undefined;
 					output.stopDetails = undefined;
 					output.providerPayload = undefined;
-					output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+					output.usage = createEmptyUsage();
 					output.stopReason = "stop";
 					firstTokenTime = undefined;
 				}
@@ -4223,6 +4225,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			sessionId,
 			parentSessionId,
 		});
+		// The Copilot host's own session header (KDL `session-header`). Applied
+		// after the generic identity headers so `x-session-id` keeps being sent.
+		applySessionHeader(defaultHeaders, model.compat, sessionId);
 
 		return {
 			isOAuthToken: false,
@@ -4297,6 +4302,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		sessionId,
 		parentSessionId,
 	});
+	// The host's own session header (KDL `session-header`), applied after the
+	// generic identity headers so `x-session-id` keeps being sent.
+	applySessionHeader(defaultHeaders, model.compat, sessionId);
 
 	if (model.provider === "cloudflare-ai-gateway") {
 		return {

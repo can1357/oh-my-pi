@@ -236,6 +236,63 @@ describe("Anthropic Copilot auth config", () => {
 		expect(requestedInitiators[0]).toBe("agent");
 	});
 
+	it.each([
+		{ name: "uses the conversation ID", sessionId: "conversation", headers: undefined, expected: "conversation" },
+		{
+			name: "preserves a caller override regardless of casing",
+			sessionId: "conversation",
+			headers: { "x-client-session-id": "caller-conversation" },
+			expected: "caller-conversation",
+		},
+		{ name: "omits the header without a session", sessionId: undefined, headers: undefined, expected: null },
+	])("$name on Copilot Messages requests", async ({ sessionId, headers, expected }) => {
+		const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+			Response.json({ error: { type: "authentication_error", message: "Unauthorized" } }, { status: 401 }),
+		);
+		await streamAnthropic(makeCopilotClaudeModel(), testContext, {
+			apiKey: "ghu_test_copilot_token",
+			fetch: fetchMock as unknown as typeof fetch,
+			sessionId,
+			headers,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [input, init] = fetchMock.mock.calls[0]!;
+		expect(getRequestHeader(input, init, "X-Client-Session-Id")).toBe(expected);
+		// The host's own header must not displace the generic gateway fallback.
+		expect(getRequestHeader(input, init, "x-session-id")).toBe(sessionId ?? null);
+	});
+
+	it("sends a KDL-declared session header on the generic Anthropic path, not only on Copilot", async () => {
+		const base = buildModel({
+			id: "claude-proxy",
+			name: "Claude via proxy",
+			api: "anthropic-messages",
+			provider: "custom-anthropic-proxy",
+			baseUrl: "https://proxy.example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8_000,
+		});
+		const model: Model<"anthropic-messages"> = {
+			...base,
+			compat: { ...base.compat, sessionHeader: "x-client-session-id" },
+		};
+		const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+			Response.json({ error: { type: "authentication_error", message: "Unauthorized" } }, { status: 401 }),
+		);
+		await streamAnthropic(model, testContext, {
+			apiKey: "sk-test",
+			fetch: fetchMock as unknown as typeof fetch,
+			sessionId: "conversation",
+		}).result();
+
+		const [input, init] = fetchMock.mock.calls[0]!;
+		expect(getRequestHeader(input, init, "X-Client-Session-Id")).toBe("conversation");
+	});
+
 	it("keeps the CLI identity on Enterprise message requests", async () => {
 		const requestedUrls: string[] = [];
 		const requestedIntegrationIds: Array<string | null> = [];
