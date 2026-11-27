@@ -195,10 +195,12 @@ describe("AgentSession manual retry", () => {
 		await session.waitForIdle();
 		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
 		expect(session.agent.state.messages.map(message => message.role)).toEqual(["user"]);
+		expect(session.hasAbortedToolCallTail).toBe(true);
 
 		await session.prompt("next prompt");
 		await session.waitForIdle();
 		expect(mock.calls[1].context.messages.map(message => message.role)).toEqual(["user", "user"]);
+		expect(session.hasAbortedToolCallTail).toBe(false);
 	});
 
 	it("returns false when the trailing assistant turn succeeded", async () => {

@@ -3682,8 +3682,15 @@ export class TurnRecovery {
 	 * tool execution). Drives the TUI's idle "F5 to Retry" status row;
 	 * {@link retry} is the matching action.
 	 */
-	get hasAbortedToolCallTail(): boolean {
+	hasAbortedToolCallTail(prunedTerminalFailure?: AssistantMessage): boolean {
 		const active = this.#host.agent.state.messages;
+		if (prunedTerminalFailure) {
+			if (prunedTerminalFailure.stopReason !== "error" && prunedTerminalFailure.stopReason !== "aborted")
+				return false;
+			if (prunedTerminalFailure.content.some(block => block.type === "toolCall")) return true;
+			const tail = active[conversationEnd(active) - 1];
+			return tail?.role === "toolResult" && tail.isError && !isSkippedToolResult(tail);
+		}
 		if (abortedToolCallTail(active)) return true;
 		// A trailing assistant message is authoritative for a live session: a
 		// settled successful turn leaves nothing to retry.
