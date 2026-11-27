@@ -13,11 +13,9 @@ import type { FetchImpl, Message } from "../types";
  * Accepts `unknown[]` because providers may pass pre-converted message shapes.
  */
 export type CopilotInitiator = "user" | "agent";
-export type CopilotPremiumRequests = number;
 export type CopilotDynamicHeaders = {
 	headers: Record<string, string>;
 	initiator: CopilotInitiator;
-	premiumRequests: CopilotPremiumRequests;
 };
 export function resolveGitHubCopilotBaseUrl(
 	baseUrl: string | undefined,
@@ -318,29 +316,6 @@ export function getCopilotInitiatorOverride(headers: Record<string, string> | un
 	return override;
 }
 
-export type CopilotPlanTier = "free" | "paid";
-
-function normalizeCopilotPlanTier(planTier: string | undefined): CopilotPlanTier {
-	if (planTier === "paid") return "paid";
-	return "free";
-}
-export function getCopilotPremiumMultiplier(premiumMultiplier: number | undefined, planTier?: string): number {
-	const normalizedMultiplier = premiumMultiplier ?? 1;
-	if (normalizeCopilotPlanTier(planTier) === "free" && normalizedMultiplier === 0) {
-		return 1;
-	}
-	return normalizedMultiplier;
-}
-
-export function getCopilotPremiumRequests(params: {
-	initiator: CopilotInitiator;
-	premiumMultiplier?: number;
-	planTier?: string;
-}): CopilotPremiumRequests {
-	if (params.initiator === "agent") return 0;
-	return getCopilotPremiumMultiplier(params.premiumMultiplier, params.planTier);
-}
-
 /**
  * Build dynamic Copilot headers that vary per-request.
  * Static headers (User-Agent, Editor-Version, etc.) come from model.headers.
@@ -348,10 +323,8 @@ export function getCopilotPremiumRequests(params: {
 export function buildCopilotDynamicHeaders(params: {
 	messages: unknown[];
 	hasImages: boolean;
-	premiumMultiplier?: number;
 	headers?: Record<string, string>;
 	initiatorOverride?: CopilotInitiator;
-	planTier?: string;
 	/** Enterprise login domain; Enterprise keeps the CLI identity that its private endpoint accepts. */
 	enterpriseUrl?: string;
 	/** Raw explicit identity; validated here, chat default when absent/invalid. */
@@ -375,13 +348,5 @@ export function buildCopilotDynamicHeaders(params: {
 		headers["Copilot-Vision-Request"] = "true";
 	}
 
-	return {
-		headers,
-		initiator,
-		premiumRequests: getCopilotPremiumRequests({
-			initiator,
-			premiumMultiplier: params.premiumMultiplier,
-			planTier: params.planTier,
-		}),
-	};
+	return { headers, initiator };
 }
