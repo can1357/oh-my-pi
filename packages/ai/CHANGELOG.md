@@ -19,7 +19,7 @@
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.
 - Corrected Claude usage reporting to label Team premium seats as “Team 5x” rather than “Max 5x”.
-- Claude requests no longer include another model's thinking, including another Claude model's signed thinking; that model's answers, tool calls and tool results still reach Claude. This also covers a Devin model router and Antigravity CLI, which now starts a new filtered conversation when its retained one holds such thinking
+- Claude requests no longer include another model's thinking, including another Claude model's signed thinking; that model's answers, tool calls and tool results still reach Claude. This also covers a Devin model router and Antigravity CLI, which now starts a new filtered conversation when its retained one holds such thinking ([#20745](https://github.com/can1357/oh-my-pi/pull/20745) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.2.1] - 2026-11-25
 
