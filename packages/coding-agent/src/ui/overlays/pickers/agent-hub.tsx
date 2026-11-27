@@ -1246,6 +1246,7 @@ export function AgentHub<T extends AgentRecordLike>(
 			status: ref.status,
 			parent: viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID ? ref.parentId : undefined,
 			readOnly: ref.kind === "advisor",
+			execution: ref.execution,
 			unread: props.irc.unreadCount(ref.id),
 			role: role && props.getRoleInfo ? roleBadge(role, props.getRoleInfo(role)) : undefined,
 			model: hubModel(ref, session),
@@ -1305,6 +1306,7 @@ export function AgentHub<T extends AgentRecordLike>(
 			children: (childrenByParent.get(ref.id) ?? []).map(child => child.id),
 			registered: localDateTime(ref.createdAt),
 			readOnly: ref.kind === "advisor" || ref.history?.readOnly === true,
+			execution: ref.execution,
 			artifacts: [
 				...(artifacts?.outputPath ? [`Output ${shortenPath(artifacts.outputPath)}`] : []),
 				...(artifacts?.patchPath ? [`Patch ${shortenPath(artifacts.patchPath)}`] : []),
