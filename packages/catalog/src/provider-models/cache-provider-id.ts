@@ -13,6 +13,7 @@ import {
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
 import { OTARI_US_BASE_URL } from "../wire/otari";
+import { STRAITLY_API_BASE_URL, normalizeStraitlyBaseUrl } from "../wire/straitly";
 
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
@@ -85,6 +86,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 	switch (providerId) {
 		case "charm-hyper":
 			return CHARM_HYPER_API_BASE_URL;
+		case "straitly":
+			return STRAITLY_API_BASE_URL;
 		case "meta":
 		case "muse-code":
 			return "https://api.meta.ai/v1";
@@ -201,6 +204,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// raw configured value while `charmHyperModelManagerOptions` passes a
 			// `/v1`-suffixed one; both must land on one namespace.
 			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
+		}
+		case "straitly": {
+			// Discovery is authoritative for Straitly and `/v1/models` is public, so
+			// the cache namespace follows the normalized endpoint only.
+			return `straitly:models-v1:${Bun.hash(normalizeStraitlyBaseUrl(options.baseUrl)).toString(36)}`;
 		}
 		case "kimi-code":
 		case "kimi-code-global": {

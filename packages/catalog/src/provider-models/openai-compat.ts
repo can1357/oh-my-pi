@@ -49,6 +49,7 @@ import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, t
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { parseOtariCredential } from "../wire/otari";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
+import { normalizeStraitlyBaseUrl } from "../wire/straitly";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
@@ -9076,5 +9077,74 @@ export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): Mod
 					fetch: config?.fetch,
 				}),
 		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Straitly
+// ---------------------------------------------------------------------------
+
+function mapStraitlyModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+	const catalogMeta = isRecord(entry.catalog) ? entry.catalog : undefined;
+	const params = Array.isArray(entry.supported_parameters)
+		? entry.supported_parameters.filter((item): item is string => typeof item === "string")
+		: undefined;
+	const input = Array.isArray(architecture?.input_modalities)
+		? toInputCapabilities(architecture.input_modalities)
+		: catalogMeta?.vision === true
+			? (["text", "image"] as ("text" | "image")[])
+			: (["text"] as ("text" | "image")[]);
+	const reasoning =
+		(params !== undefined && (params.includes("reasoning") || params.includes("reasoning_effort"))) ||
+		isRecord(entry.reasoning) ||
+		catalogMeta?.reasoning === true;
+	const supportsTools = params !== undefined ? params.includes("tools") : undefined;
+	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		reasoning,
+		input,
+		cost: perTokenPricingCost(entry.pricing),
+		contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+		maxTokens: toPositiveNumber(
+			topProvider?.max_completion_tokens,
+			toPositiveNumber(catalogMeta?.max_output_tokens, defaults.maxTokens),
+		),
+		...(supportsTools === false && { supportsTools: false }),
+		...(!supportsToolChoice && {
+			compat: { ...defaults.compat, supportsToolChoice: false },
+		}),
+	};
+}
+
+/**
+ * Straitly model manager: `/v1/models` is public and returns the live catalog
+ * (context window, output cap, modalities, pricing, tool support, and reasoning
+ * metadata), so nothing is frozen into the bundled catalog.
+ */
+export function straitlyModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = normalizeStraitlyBaseUrl(config?.baseUrl);
+	return {
+		providerId: "straitly",
+		cacheProviderId: resolveModelCacheProviderId("straitly", { baseUrl }),
+		dynamicCostAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "straitly",
+				baseUrl,
+				apiKey: config?.apiKey,
+				mapModel: mapStraitlyModel,
+				fetch: config?.fetch,
+			}),
 	};
 }

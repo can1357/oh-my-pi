@@ -1,0 +1,20 @@
+// Straitly OpenAI-compatible gateway deployment contract.
+//
+// Capability data is discovered live from `GET https://api.straitly.ai/v1/models`
+// via `straitlyModelManagerOptions` (context window, output cap, modalities,
+// pricing, tool support, and reasoning metadata). No `discovery` node is
+// declared so `generate-models.ts` does not freeze a static snapshot into
+// `models.json`, matching `compat-conformance.test.ts` runtime-only providers.
+provider "straitly" {
+	default-model "claude-sonnet-5-5"
+	env "STRAITLY_API_KEY"
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+
+	supports-developer-role #false
+	supports-store #false
+	max-tokens-field "max_tokens"
+	thinking-format "openai"
+	reasoning-disable-mode "cline-enabled-false"
+}

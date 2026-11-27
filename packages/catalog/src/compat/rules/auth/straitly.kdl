@@ -1,0 +1,15 @@
+// Validation targets `/v1/key`, not `/v1/models`: `/v1/models` is public and
+// answers 200 with no credentials or an invalid key, whereas `/v1/key` is an
+// authenticated, non-billable GET that returns 200 for valid keys and 401
+// otherwise.
+auth "straitly" {
+	name "Straitly"
+	env "STRAITLY_API_KEY"
+	login "api-key" {
+		auth-url "https://straitly.ai/console/keys"
+		instructions "Create or copy an API key from the Straitly console"
+		prompt "Paste your Straitly API key" placeholder="sk-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="Straitly" url="https://api.straitly.ai/v1/key"
+	}
+}
