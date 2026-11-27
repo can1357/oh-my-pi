@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import { MemoizedRuntime } from "../src/subprocess/worker-runtime";
 import type { SttTransport, SttWorkerInbound, SttWorkerOutbound } from "../src/stt/asr-protocol";
 import { startSttWorker } from "../src/stt/asr-worker";
+import type { DetectedSpeech, SpeechDetector } from "../src/stt/endpointer";
 import * as registry from "../src/stt/models";
 import * as runtime from "../src/stt/sherpa-runtime";
 
@@ -82,12 +83,55 @@ const offlineRecognizer = {
 		text: Array.from(stream.samples, sample => vocabulary[sample] ?? "").join(" "),
 	}),
 };
+// Speech is any chunk with a nonzero sample; an all-zero chunk ends the utterance.
+class Vad implements SpeechDetector {
+	#position = 0;
+	#start = -1;
+	#ready: DetectedSpeech[] = [];
+
+	acceptWaveform(samples: Float32Array): void {
+		if (samples.some(sample => sample !== 0)) {
+			if (this.#start < 0) this.#start = this.#position;
+		} else {
+			this.#finish(this.#position);
+		}
+		this.#position += samples.length;
+	}
+
+	isEmpty(): boolean {
+		return this.#ready.length === 0;
+	}
+
+	isDetected(): boolean {
+		return this.#start >= 0;
+	}
+
+	front(): DetectedSpeech {
+		return this.#ready[0]!;
+	}
+
+	pop(): void {
+		this.#ready.shift();
+	}
+
+	flush(): void {
+		this.#finish(this.#position);
+	}
+
+	#finish(end: number): void {
+		if (this.#start < 0) return;
+		this.#ready.push({ start: this.#start, samples: new Float32Array(end - this.#start) });
+		this.#start = -1;
+	}
+}
+
 const nativeRuntime: runtime.SherpaRuntime = {
 	OnlineRecognizer,
 	OfflineRecognizer: { createAsync: async () => offlineRecognizer },
+	Vad,
 };
 const onlineSpec = registry.getSttModelSpec("nemotron-streaming-en-0.6b")!;
-const offlineSpec = registry.getSttModelSpec("parakeet-tdt-0.6b-v3")!;
+const offlineSpec = registry.getSttModelSpec("fluid-speech-pro")!;
 let nextKey = 0;
 let key: registry.SttModelKey;
 let offlineKey: registry.SttModelKey;
