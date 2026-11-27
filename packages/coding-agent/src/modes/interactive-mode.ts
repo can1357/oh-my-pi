@@ -1601,7 +1601,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.queue.onEdit = () => this.handleDequeue();
 
 		this.#display.hideToolActivity.set(cfgDisplayHideToolActivity.get(settings));
-		this.#hideThinkingBlock = cfgHideThinkingBlock.get(settings);
 		this.#display.proseOnlyThinking.set(cfgProseOnlyThinking.get(settings));
 		this.#display.expandThinkingBlocks.set(cfgExpandThinkingBlocks.get(settings));
 		this.#syncTranscriptDisplaySettings();
@@ -1663,6 +1662,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController = new LiveCommandController(this);
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
+		// Through the setter: the blocks read the synced signal, and its effective value needs the view session.
+		this.hideThinkingBlock = cfgHideThinkingBlock.get(settings);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
