@@ -117,6 +117,8 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 					"TERM=xterm-256color",
 					"TERM_PROGRAM=tern",
 					"OMP_SKIP_SETUP=1",
+					// Test runtime: keeps omp off the OS keychain.
+					"PI_TEST_RUNTIME=1",
 					process.execPath,
 					path.resolve(import.meta.dir, "../src/cli.ts"),
 					"--no-extensions",

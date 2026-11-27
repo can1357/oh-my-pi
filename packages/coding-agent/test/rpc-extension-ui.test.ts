@@ -28,6 +28,21 @@ function respond(pendingRequests: Map<string, PendingExtensionRequest>, id: stri
 	request.resolve({ type: "extension_ui_response", id, ...payload } as RpcExtensionUIResponse);
 }
 
+/** An isolated, headless child env under `temp`, marked as a test runtime so the child never reaches the OS keychain. */
+function childEnv(temp: TempDir): Record<string, string | undefined> {
+	return {
+		PATH: Bun.env.PATH,
+		HOME: temp.join("home"),
+		PI_CODING_AGENT_DIR: temp.join("agent"),
+		XDG_CONFIG_HOME: temp.join("config"),
+		XDG_DATA_HOME: temp.join("data"),
+		XDG_CACHE_HOME: temp.join("cache"),
+		CI: "true",
+		PI_NO_TITLE: "1",
+		PI_TEST_RUNTIME: "1",
+	};
+}
+
 const dbQuestion: ExtensionAskDialogQuestion = {
 	id: "db",
 	question: "Which database?",
@@ -131,16 +146,7 @@ await runRpcMode(session, {
 		);
 		const child = Bun.spawn([process.execPath, fixturePath], {
 			cwd: temp.path(),
-			env: {
-				PATH: Bun.env.PATH,
-				HOME: temp.join("home"),
-				PI_CODING_AGENT_DIR: temp.join("agent"),
-				XDG_CONFIG_HOME: temp.join("config"),
-				XDG_DATA_HOME: temp.join("data"),
-				XDG_CACHE_HOME: temp.join("cache"),
-				CI: "true",
-				PI_NO_TITLE: "1",
-			},
+			env: childEnv(temp),
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -210,16 +216,7 @@ await runRpcMode(session);
 		);
 		return Bun.spawn([process.execPath, fixturePath], {
 			cwd: temp.path(),
-			env: {
-				PATH: Bun.env.PATH,
-				HOME: temp.join("home"),
-				PI_CODING_AGENT_DIR: temp.join("agent"),
-				XDG_CONFIG_HOME: temp.join("config"),
-				XDG_DATA_HOME: temp.join("data"),
-				XDG_CACHE_HOME: temp.join("cache"),
-				CI: "true",
-				PI_NO_TITLE: "1",
-			},
+			env: childEnv(temp),
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -481,16 +478,7 @@ export default function(pi) {
 			],
 			{
 				cwd: temp.path(),
-				env: {
-					PATH: Bun.env.PATH,
-					HOME: temp.join("home"),
-					PI_CODING_AGENT_DIR: temp.join("agent"),
-					XDG_CONFIG_HOME: temp.join("config"),
-					XDG_DATA_HOME: temp.join("data"),
-					XDG_CACHE_HOME: temp.join("cache"),
-					CI: "true",
-					PI_NO_TITLE: "1",
-				},
+				env: childEnv(temp),
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",
@@ -1022,16 +1010,7 @@ describe("RPC ask dialog", () => {
 			],
 			{
 				cwd: temp.path(),
-				env: {
-					PATH: Bun.env.PATH,
-					HOME: temp.join("home"),
-					PI_CODING_AGENT_DIR: temp.join("agent"),
-					XDG_CONFIG_HOME: temp.join("config"),
-					XDG_DATA_HOME: temp.join("data"),
-					XDG_CACHE_HOME: temp.join("cache"),
-					CI: "true",
-					PI_NO_TITLE: "1",
-				},
+				env: childEnv(temp),
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",
