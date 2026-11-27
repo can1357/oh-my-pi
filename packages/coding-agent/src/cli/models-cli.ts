@@ -16,7 +16,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
-import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+import { formatNumber, getProjectDir, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
@@ -137,13 +137,18 @@ function toModelJson(model: Model<Api>): ModelJson {
 
 /** `extraBody` may carry credentials, so only its keys are reported. */
 function compatOverridesJson(config: object | undefined): Record<string, unknown> | null {
-	if (!config) return null;
+	if (!config || !Object.keys(config).length) return null;
+	const out = redactCompatBody(config);
+	if (isRecord(out.whenThinking)) out.whenThinking = redactCompatBody(out.whenThinking);
+	return out;
+}
+
+function redactCompatBody(config: object): Record<string, unknown> {
 	const out: Record<string, unknown> = { ...config };
-	const extraBody = out.extraBody;
-	if (extraBody && typeof extraBody === "object") {
-		out.extraBody = Object.fromEntries(Object.keys(extraBody).map(key => [key, "[redacted]"]));
+	if (isRecord(out.extraBody)) {
+		out.extraBody = Object.fromEntries(Object.keys(out.extraBody).map(key => [key, "[redacted]"]));
 	}
-	return Object.keys(out).length > 0 ? out : null;
+	return out;
 }
 
 type ColumnAlign = "left" | "right";
