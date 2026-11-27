@@ -30,6 +30,8 @@ type CopilotQuotaDetail = {
 	quota_remaining: number;
 	remaining: number;
 	unlimited: boolean;
+	/** Usage-based (AI credit) metering; false on legacy request-billed plans and when the server omits it. */
+	token_based_billing: boolean;
 };
 
 type CopilotQuotaSnapshots = {
@@ -42,6 +44,8 @@ type CopilotUsageResponse = {
 	copilot_plan: string;
 	quota_reset_date: string;
 	quota_snapshots: CopilotQuotaSnapshots;
+	/** Account-level usage-based billing flag, mirrored on each quota snapshot. */
+	token_based_billing?: boolean;
 };
 
 type BillingUsageItem = {
@@ -137,6 +141,7 @@ function parseQuotaDetail(value: unknown): CopilotQuotaDetail | null {
 		quota_id: quotaId,
 		quota_remaining: quotaRemaining,
 		remaining,
+		token_based_billing: toBoolean(value.token_based_billing) ?? false,
 		unlimited,
 	};
 }
@@ -217,23 +222,24 @@ async function fetchBillingUsage(
 
 function buildLimitFromQuota(
 	key: string,
-	label: string,
+	labels: { requests: string; credits: string },
 	quota: CopilotQuotaDetail,
+	credits: boolean,
 	plan: string,
 	window: UsageWindow | undefined,
 	accountId?: string,
 ): UsageLimit {
 	const used = quota.unlimited ? undefined : Math.max(0, quota.entitlement - quota.remaining);
 	const limit = quota.unlimited ? undefined : quota.entitlement;
-	const amount = buildAmount(used, limit, "requests");
+	const amount = buildAmount(used, limit, credits ? "credits" : "requests");
 	const notes: string[] = [];
 	if (quota.unlimited) notes.push("Unlimited");
 	if (quota.overage_count > 0) {
-		notes.push(`Overage requests: ${quota.overage_count}`);
+		notes.push(`Overage ${credits ? "credits" : "requests"}: ${quota.overage_count}`);
 	}
 	return {
 		id: `copilot:${key}`,
-		label,
+		label: credits ? labels.credits : labels.requests,
 		scope: {
 			provider: "github-copilot",
 			accountId,
@@ -254,17 +260,49 @@ function normalizeQuotaSnapshots(
 	const window = buildWindow(data.quota_reset_date);
 	const snapshots = data.quota_snapshots ?? {};
 	const limits: UsageLimit[] = [];
+	// GitHub flags usage-based metering on the account and on each snapshot. The account-level flag was observed
+	// to apply to premium interactions; chat and completions follow only their own snapshot flag.
 	const premium = parseQuotaDetail(snapshots.premium_interactions);
 	if (premium) {
-		limits.push(buildLimitFromQuota("premium", "Premium Requests", premium, data.copilot_plan, window, accountId));
+		limits.push(
+			buildLimitFromQuota(
+				"premium",
+				{ requests: "Premium Requests", credits: "AI Credits" },
+				premium,
+				premium.token_based_billing || data.token_based_billing === true,
+				data.copilot_plan,
+				window,
+				accountId,
+			),
+		);
 	}
 	const chat = parseQuotaDetail(snapshots.chat);
 	if (chat && !chat.unlimited) {
-		limits.push(buildLimitFromQuota("chat", "Chat Requests", chat, data.copilot_plan, window, accountId));
+		limits.push(
+			buildLimitFromQuota(
+				"chat",
+				{ requests: "Chat Requests", credits: "Chat AI Credits" },
+				chat,
+				chat.token_based_billing,
+				data.copilot_plan,
+				window,
+				accountId,
+			),
+		);
 	}
 	const completions = parseQuotaDetail(snapshots.completions);
 	if (completions && !completions.unlimited) {
-		limits.push(buildLimitFromQuota("completions", "Completions", completions, data.copilot_plan, window, accountId));
+		limits.push(
+			buildLimitFromQuota(
+				"completions",
+				{ requests: "Completions", credits: "Completion AI Credits" },
+				completions,
+				completions.token_based_billing,
+				data.copilot_plan,
+				window,
+				accountId,
+			),
+		);
 	}
 	return { limits, window };
 }
