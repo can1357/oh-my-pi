@@ -14016,13 +14016,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !routedModelsAreEqual(currentModel, model);
-		if (currentModel && (isChanging || currentModel.api !== model.api || currentModel.baseUrl !== model.baseUrl)) {
-			// The request already using this transport gets to finish. Retire its state
-			// before the new model sends a request, not when the new selection is published.
+		if (currentModel) {
+			// A response already streaming over these sessions gets to finish: retire them once it settles.
 			this.agent.runAfterModelCall(() => this.#closeProviderSessionsForModelSwitch(currentModel, model));
-		}
-		if (currentModel && isChanging) {
-			this.#clearInheritedProviderPromptCacheKey();
+			if (isChanging) {
+				this.#clearInheritedProviderPromptCacheKey();
+			}
 		}
 		this.agent.setModel(model);
 		// Model mutations driven through ModelControls (explicit /model, prewalk

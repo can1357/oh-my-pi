@@ -2170,10 +2170,10 @@ export class Agent {
 				modelCallActive = active;
 				if (active) {
 					this.#activeModelCalls++;
-				} else if (--this.#activeModelCalls === 0) {
+				} else if (--this.#activeModelCalls === 0 && this.#afterModelCall) {
 					const callbacks = this.#afterModelCall;
 					this.#afterModelCall = undefined;
-					if (callbacks) for (const callback of callbacks) callback();
+					for (const callback of callbacks) callback();
 				}
 			},
 			getReasoning: () => this.#state.thinkingLevel,

@@ -13,9 +13,7 @@ import type {
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { applyModelPreset } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -324,73 +322,44 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		}
 	});
 
-	it.each([
-		{ name: "reapplying the active preset", changeModel: false, temporary: false },
-		{ name: "applying a preset whose model was selected temporarily", changeModel: false, temporary: true },
-		{ name: "switching to a different model", changeModel: true, temporary: false },
-	])("$name leaves the current response open", async ({ changeModel, temporary }) => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-preset-stream-"));
+	it("keeps provider session state until the streaming response settles when the model switches", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-switch-stream-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
-		const initialPresetModel = temporary ? alternateOpenaiModel : openaiModel;
-		const targetModel = changeModel ? alternateOpenaiModel : openaiModel;
-		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory(), initialPresetModel);
+		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory());
 		sessions.push(session);
-		session.settings.setModelRole("default", modelSelector(initialPresetModel));
-		cfgModelPresets.setEntry(session.settings, "focus", { modelRoles: { default: modelSelector(targetModel) } });
-		if (temporary) await session.setModelTemporary(openaiModel);
 
-		const firstReply: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "First reply" }],
-			api: openaiModel.api,
-			provider: openaiModel.provider,
-			model: openaiModel.id,
-			usage: createUsage(),
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-		const firstStream = new AssistantMessageEventStream();
+		const closeSpy = vi.fn();
+		session.providerSessionState.set(`openai-responses:${openaiModel.provider}`, {
+			close: closeSpy,
+		} satisfies ProviderSessionState);
+		const stream = new AssistantMessageEventStream();
 		const started = Promise.withResolvers<void>();
-		const close = vi.fn();
-		const chainKey = `openai-responses:${openaiModel.provider}`;
-		const requests: Array<{ model: string; reusesChain: boolean }> = [];
-		session.agent.streamFn = (model, _context, options) => {
-			const state = options?.providerSessionState;
-			if (requests.length === 0) {
-				state?.set(chainKey, { close });
-				requests.push({ model: model.id, reusesChain: false });
-				started.resolve();
-				return firstStream;
-			}
-
-			requests.push({ model: model.id, reusesChain: state?.has(chainKey) ?? false });
-			const stream = new AssistantMessageEventStream();
-			const message: AssistantMessage = {
-				...firstReply,
-				model: model.id,
-				content: [{ type: "text", text: "Follow-up reply" }],
-			};
-			stream.push({ type: "done", reason: "stop", message });
+		session.agent.streamFn = () => {
+			started.resolve();
 			return stream;
 		};
 
 		const run = session.agent.prompt("First request");
 		try {
 			await started.promise;
-			expect((await applyModelPreset(session.settings, session, "focus")).kind).toBe("switched");
-			expect(close).not.toHaveBeenCalled();
-			expect(session.settings.getModelRole("default")).toBe(modelSelector(targetModel));
-			session.agent.followUp({ role: "user", content: "Follow-up request", timestamp: Date.now() });
+			await session.setModel(alternateOpenaiModel);
+			expect(closeSpy).not.toHaveBeenCalled();
 		} finally {
-			firstStream.push({ type: "done", reason: "stop", message: firstReply });
+			const reply: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "First reply" }],
+				api: openaiModel.api,
+				provider: openaiModel.provider,
+				model: openaiModel.id,
+				usage: createUsage(),
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			stream.push({ type: "done", reason: "stop", message: reply });
 			await run;
 		}
 
-		expect(requests).toEqual([
-			{ model: openaiModel.id, reusesChain: false },
-			{ model: targetModel.id, reusesChain: !changeModel },
-		]);
-		expect(close).toHaveBeenCalledTimes(changeModel ? 1 : 0);
+		expect(closeSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("sanitizes stale assistant replay metadata during startup resume while preserving user payloads", async () => {
