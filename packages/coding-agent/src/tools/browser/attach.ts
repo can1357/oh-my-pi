@@ -463,6 +463,17 @@ export async function findReusableCdp(
 		const port = findCdpPortInArgs(args);
 		if (port === null) continue;
 		if (await probeCdpAt(port, options.signal)) {
+			const running = new Set(args.slice(1));
+			const missing = (options.appArgs ?? []).filter(
+				arg =>
+					!running.has(arg) && !arg.startsWith("--user-data-dir") && !arg.startsWith("--remote-debugging-port"),
+			);
+			if (missing.length > 0) {
+				const name = path.basename(exe);
+				throw new ToolError(
+					`${name} (pid ${process.pid}) is already running on this profile without the requested args ${missing.join(" ")}; Chromium cannot apply new args to a running process. Quit it and open again, or pass a different --user-data-dir.`,
+				);
+			}
 			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
 		}
 	}
