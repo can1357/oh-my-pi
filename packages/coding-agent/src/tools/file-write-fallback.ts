@@ -398,11 +398,33 @@ async function classifyWriteFailure(dst: string, error: unknown): Promise<WriteF
 	return { kind: "retry" };
 }
 
-export async function writeFileWithFallback(
+const trackedFileWrites = new AsyncLocalStorage<Set<Promise<void>>>();
+
+/** Track disk mutations made by a handler without waiting for unrelated handler work on abort. */
+export function withTrackedFileWrites<T>(pending: Set<Promise<void>>, run: () => T): T {
+	return trackedFileWrites.run(pending, run);
+}
+
+export function writeFileWithFallback(
 	dst: string,
 	content: string,
 	file?: BunFile,
 	signal?: AbortSignal,
+): Promise<void> {
+	const write = performFileWrite(dst, content, file, signal);
+	const pending = trackedFileWrites.getStore();
+	if (!pending) return write;
+	pending.add(write);
+	return write.finally(() => {
+		pending.delete(write);
+	});
+}
+
+async function performFileWrite(
+	dst: string,
+	content: string,
+	file: BunFile | undefined,
+	signal: AbortSignal | undefined,
 ): Promise<void> {
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,

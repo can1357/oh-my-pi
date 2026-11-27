@@ -363,6 +363,7 @@ async function resolveAllConflicts(
 	let totalEchoTrimmed = 0;
 
 	for (const [absolutePath, fileEntries] of byFile) {
+		signal?.throwIfAborted();
 		const sample = fileEntries[0]!;
 		if (!(await fs.exists(absolutePath))) {
 			failedFiles.push({

@@ -48,6 +48,7 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
+import { withTrackedFileWrites } from "./file-write-fallback";
 import { assertLocalFileNotHeldOpen } from "./file-write-io";
 
 import { isReadTruncationNotice } from "./hashline-format";
@@ -907,6 +908,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			policy?.scope === "reply" ||
 			(target !== undefined && policy?.cancels?.(target.url) === true);
 		let localWrite: Promise<WritethroughResult> | undefined;
+		let handlerWrites: Set<Promise<void>> | undefined;
 		return untilAborted<AgentToolResult<WriteToolDetails>>(signal, async () => {
 			// Text payloads get hashline display prefixes ([PATH#HASH] + LINE:) stripped if the model
 			// copied them from read output. Verbatim payloads (messages, process stdin, setting
@@ -940,13 +942,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 					}
 					emitWriteProgress(onUpdate, cleanBytes, path);
-					const handlerResult = await router.write(
-						path,
-						cleanContent,
-						sessionWriteContext(this.session, {
-							signal,
-							toolCall: { id: _toolCallId, onUpdate, context },
-						}),
+					const handlerResult = await withTrackedFileWrites((handlerWrites = new Set()), () =>
+						router.write(
+							path,
+							cleanContent,
+							sessionWriteContext(this.session, {
+								signal,
+								toolCall: { id: _toolCallId, onUpdate, context },
+							}),
+						),
 					);
 					// The flag tells the prewalk gate this write was not implementation work.
 					const fileFreeDetails: WriteToolDetails = touchesNoFiles ? { touchesNoFiles: true } : {};
@@ -1174,7 +1178,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		}).finally(async () => {
 			// Keep preflight cancellable, but do not report abort while a local
 			// commit can still land. Queued writes reject promptly on the signal.
-			if (signal?.aborted) await localWrite?.catch(() => {});
+			if (!signal?.aborted) return;
+			if (localWrite) await localWrite.catch(() => {});
+			else if (handlerWrites?.size) await Promise.allSettled(handlerWrites);
 		});
 	}
 }
