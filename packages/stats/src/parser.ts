@@ -676,58 +676,63 @@ function scanPrefixState(
 /** `TAN_FORK_BOUNDARY_CUSTOM_TYPE` of coding-agent's session entries: a `/tan` clone's end-of-copy marker. */
 const TAN_FORK_BOUNDARY = "tan-fork-boundary";
 const TAN_FORK_BOUNDARY_BYTES = new TextEncoder().encode(TAN_FORK_BOUNDARY);
+const INHERITED_THROUGH_BYTES = new TextEncoder().encode("inheritedThroughEntryId");
 
 /**
- * The inherited prefix of a `/tan` clone written before `SessionHeader.inheritedThroughEntryId`: such a
- * clone appends a `tan-fork-boundary` entry right after the entries it copied, so the prefix ends at the
- * entry before that boundary. The last boundary counts whatever session id it carries: a file derived
- * from such a clone (an ordinary fork or copy) keeps the clone's boundary and id under a new header, and
- * everything before it is still an ancestor's copied prefix. Undefined for any other transcript.
+ * The last entry of a reset fork's inherited prefix: the header's `SessionHeader.inheritedThroughEntryId`,
+ * else, for a `/tan` clone written before that marker, the entry before its last `tan-fork-boundary` (the
+ * clone appends the boundary right after the entries it copied). The last boundary counts whatever session
+ * id it carries: a file derived from such a clone (an ordinary fork or copy) keeps the clone's boundary and
+ * id under a new header, and everything before it is still an ancestor's copied prefix.
+ *
+ * Undefined for any other transcript, and for a header marker naming an entry the file does not hold: the
+ * prefix then fails open, as coding-agent's `inheritedMarkerWithin` does, instead of suppressing every row
+ * of the session. Session files are written atomically, so a full read holds the marked entry if it exists.
  */
-function legacyTanBoundary(bytes: Uint8Array): string | undefined {
-	if (Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).indexOf(TAN_FORK_BOUNDARY_BYTES) < 0) {
-		return undefined;
-	}
+function inheritedPrefixEnd(bytes: Uint8Array): string | undefined {
+	const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (text.indexOf(INHERITED_THROUGH_BYTES) < 0 && text.indexOf(TAN_FORK_BOUNDARY_BYTES) < 0) return undefined;
+	let marker: string | undefined;
+	let markerFound = false;
 	let previous: string | undefined;
-	let through: string | undefined;
+	let legacy: string | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
-		if (entry.type === "session") return;
-		if ("customType" in entry && entry.customType === TAN_FORK_BOUNDARY) {
-			through = previous;
+		if (entry.type === "session") {
+			const through = "inheritedThroughEntryId" in entry ? entry.inheritedThroughEntryId : undefined;
+			if (typeof through === "string") marker = through;
 			return;
 		}
-		if ("id" in entry && typeof entry.id === "string") previous = entry.id;
+		if (entry.type === "custom" && "customType" in entry && entry.customType === TAN_FORK_BOUNDARY) {
+			legacy = previous;
+			return;
+		}
+		if ("id" in entry && typeof entry.id === "string") {
+			previous = entry.id;
+			if (entry.id === marker) markerFound = true;
+		}
 	});
-	return through;
+	if (marker === undefined) return legacy;
+	return markerFound ? marker : undefined;
 }
 
 /**
- * Tracks a reset fork's inherited prefix (`SessionHeader.inheritedThroughEntryId`, else a legacy clone's
- * {@link legacyTanBoundary}): the model calls the fork copied from its parent. They are the parent's
- * calls, so they become no request rows here. Fork copies keep their entry ids, so the parent's own
- * rows win regardless of which file syncs first.
+ * Tracks a reset fork's inherited prefix ({@link inheritedPrefixEnd}): the model calls the fork copied
+ * from its parent. They are the parent's calls, so they become no request rows here. Fork copies keep
+ * their entry ids, so the parent's own rows win regardless of which file syncs first. A tail read never
+ * has one: the fork writes its whole prefix when it creates the file, so the full read before it passed
+ * the prefix's end.
  */
 class InheritedPrefix {
 	#through: string | undefined;
-	readonly #legacyThrough: string | undefined;
 
-	constructor(through?: string, legacyThrough?: string) {
+	/** `through`: the {@link inheritedPrefixEnd} of the transcript, read from its first byte. */
+	constructor(through?: string) {
 		this.#through = through;
-		this.#legacyThrough = legacyThrough;
-	}
-
-	get state(): string | undefined {
-		return this.#through;
 	}
 
 	/** Whether `entry` lies at or before the end of the inherited prefix. */
 	visit(entry: SessionEntry): boolean {
-		if (entry.type === "session") {
-			const through = "inheritedThroughEntryId" in entry ? entry.inheritedThroughEntryId : undefined;
-			this.#through = typeof through === "string" ? through : this.#legacyThrough;
-			return false;
-		}
-		if (this.#through === undefined) return false;
+		if (this.#through === undefined || entry.type === "session") return false;
 		if ("id" in entry && entry.id === this.#through) this.#through = undefined;
 		return true;
 	}
@@ -745,8 +750,6 @@ export interface SessionParserState {
 	spotlight?: SpotlightParserState;
 	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
 	pendingReplies?: Record<string, string>;
-	/** Set while the read stopped inside a reset fork's inherited prefix: the entry id that ends it. */
-	inheritedThrough?: string;
 }
 
 export interface ParseSessionResult {
@@ -923,10 +926,9 @@ export async function parseSessionFile(
 				currentServiceTier = state?.serviceTier ?? undefined;
 				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
 				replies = new ReplyTracker(state?.pendingReplies);
-				inherited = new InheritedPrefix(state?.inheritedThrough);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
-				inherited = new InheritedPrefix(undefined, legacyTanBoundary(bytes));
+				inherited = new InheritedPrefix(inheritedPrefixEnd(bytes));
 				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies, inherited);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
@@ -981,7 +983,6 @@ export async function parseSessionFile(
 			serviceTier: currentServiceTier ?? null,
 			spotlight: spotlight.state,
 			pendingReplies: replies.state,
-			...(inherited.state === undefined ? {} : { inheritedThrough: inherited.state }),
 		},
 	};
 }

@@ -372,6 +372,31 @@ describe("stats sync deduplicates forked-session entries", () => {
 		expect(approvals.map(approval => approval.session_file)).toEqual([parentFile]);
 	});
 
+	it("counts every call of a session whose header marks an entry its file does not hold", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const laterTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+		const sessionFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_session.jsonl",
+			{ id: "session0", cwd: "/tmp/project", inheritedThroughEntryId: "gone0000" },
+			[
+				buildUserEntry("user01ab", ts, "hello"),
+				buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts }),
+				buildUserEntry("user02cd", laterTs, "again"),
+				buildAssistantEntry({ entryId: "asst02cd", parentId: "user02cd", timestamp: laterTs }),
+			],
+		);
+
+		await syncAllSessions({ workers: 1, files: [sessionFile] });
+
+		const overall = getOverallStats();
+		expect(overall.totalRequests).toBe(2);
+		expect(overall.totalCost).toBeCloseTo(0.006, 8);
+		const db = await initDb();
+		const prompts = db.query<{ entry_id: string }, []>("SELECT entry_id FROM user_messages ORDER BY entry_id").all();
+		expect(prompts.map(prompt => prompt.entry_id)).toEqual(["user01ab", "user02cd"]);
+	});
+
 	it.each([
 		{ name: "a legacy /tan clone", boundaryData: "fork0000" },
 		// An ordinary fork of such a clone keeps the clone's boundary and id under its own header.
