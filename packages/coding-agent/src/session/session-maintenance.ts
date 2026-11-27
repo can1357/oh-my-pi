@@ -2257,7 +2257,7 @@ export class SessionMaintenance {
 					await this.#host.sessionManager.rewriteEntries();
 				}
 				this.#host.emitNotice("warning", warning, "compaction");
-				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				return { ...COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION, historyRewritten: true };
 			}
 			if (willRetry) {
 				this.#host.scheduleAgentContinue({
@@ -2265,16 +2265,17 @@ export class SessionMaintenance {
 					delayMs: 100,
 					generation,
 				});
-				return COMPACTION_CHECK_CONTINUATION;
+				return { continuationScheduled: true, historyRewritten: true };
 			}
-			return this.#host.scheduleCompactionContinuation({
-				generation,
-				autoContinue: shouldAutoContinue,
-				terminalTextAnswer,
-				suppressContinuation,
-			})
-				? COMPACTION_CHECK_CONTINUATION
-				: COMPACTION_CHECK_NONE;
+			return {
+				continuationScheduled: this.#host.scheduleCompactionContinuation({
+					generation,
+					autoContinue: shouldAutoContinue,
+					terminalTextAnswer,
+					suppressContinuation,
+				}),
+				historyRewritten: true,
+			};
 		} catch (error) {
 			await this.#emitLifecycleEvent(
 				{
@@ -3380,9 +3381,9 @@ export class SessionMaintenance {
 			? "vetoed"
 			: result.automaticContinuationBlocked
 				? "dead_end"
-				: activeMessages.length === messagesBefore && !result.historyRewritten
-					? "unchanged"
-					: "committed";
+				: result.historyRewritten
+					? "committed"
+					: "unchanged";
 		logger.debug("Mid-run compaction attempted between provider calls", {
 			outcome,
 			contextTokens,
@@ -6913,8 +6914,11 @@ export class SessionMaintenance {
 		if (deadEndWarning) {
 			this.#host.emitNotice("warning", deadEndWarning, "compaction");
 		}
-		if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
-		return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+		return {
+			continuationScheduled,
+			...(noProgressDeadEnd && !continuationScheduled ? { automaticContinuationBlocked: true } : {}),
+			historyRewritten: true,
+		};
 	}
 
 	/**
