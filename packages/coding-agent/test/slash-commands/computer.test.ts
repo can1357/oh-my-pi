@@ -64,9 +64,7 @@ describe("/computer slash command", () => {
 		});
 		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/session info", h.runtime]);
 		expect(cfgComputerEnabled.get(h.settings)).toBe(true);
-		expect(h.output).toHaveBeenCalledWith(
-			expect.stringContaining("Computer use: enabled\nComputer prelude: active"),
-		);
+		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("Computer use: enabled\nComputer prelude: active"));
 		expect(h.output).toHaveBeenCalledWith(
 			expect.stringContaining("display=display-2, maxWidth=1600, maxHeight=900, takeover=refuse"),
 		);
