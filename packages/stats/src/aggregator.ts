@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, isRecord, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getStatsDbPath, isRecord, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
@@ -162,7 +162,7 @@ function spawnWorker(): WorkerHandle {
 		if (!resolve || !reject) return;
 		const data = event.data;
 		if (!data.ok) {
-			reject(new Error(data.error));
+			reject(Object.assign(new Error(data.error), { code: data.code }));
 			return;
 		}
 		if (data.kind === "pong") {
@@ -217,7 +217,7 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
 	worker.onmessage = (event: MessageEvent<SyncWorkerResponse>) => {
 		const data = event.data;
 		if (!data.ok) {
-			reject(new Error(data.error));
+			reject(Object.assign(new Error(data.error), { code: data.code }));
 			return;
 		}
 		if (data.kind !== "pong") {
@@ -397,7 +397,19 @@ async function syncAllSessionsLocked(
 		const sessionFile = files[index];
 		const unknownIdentity = stored !== undefined && !stored.parserState;
 		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
-		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
+		let result: ParseSessionResult;
+		try {
+			result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
+		} catch (error) {
+			// One transcript the OS refuses to read (antivirus lock, permissions) must not fail the whole history.
+			if (!(error instanceof Error && "code" in error && typeof error.code === "string")) throw error;
+			logger.warn("Skipping unreadable session file in stats sync", {
+				sessionFile,
+				code: error.code,
+				error: error.message,
+			});
+			return null;
+		}
 		if (unknownIdentity && result.parserState) result.reset = true;
 		return {
 			sessionFile,
