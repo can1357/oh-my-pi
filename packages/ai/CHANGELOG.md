@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Removed the `KnownProvider` and `OAuthProvider` types; provider ids are plain strings (`Provider`, `OAuthProviderId`)
 - Renamed the OpenAI `promptCache.breakpoint` value `latest-stable-message` to `message-boundaries`; explicit mode now marks every boundary a later request repeats instead of a single block
 
 ### Added

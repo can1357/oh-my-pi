@@ -2,7 +2,6 @@ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-p
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
-import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type JSXNode, type KeyEvent, signal, type UiNode, untrack } from "@oh-my-pi/pi-tui";
@@ -2367,7 +2366,7 @@ export class SelectorController {
 		);
 		const handle = this.ctx.showEditorAreaDialog(() => LoginDialog({ state: dialog }));
 		try {
-			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId as OAuthProvider, {
+			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId, {
 				signal: dialog.signal,
 				onBrowserSession: captureBrowserSession,
 				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {

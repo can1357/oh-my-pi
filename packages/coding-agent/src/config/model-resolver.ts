@@ -24,7 +24,7 @@ import {
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
-import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import type { Api, Effort, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
@@ -68,10 +68,6 @@ import type { Settings } from "./settings";
 
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./model-settings";
 import { cfgRetryFallbackChains } from "../session/settings";
-
-function isKnownProvider(provider: string): provider is KnownProvider {
-	return provider in DEFAULT_MODEL_PER_PROVIDER;
-}
 
 /**
  * Pick the first auto-selectable provider-default model in availability order.
@@ -118,7 +114,7 @@ export function pickDefaultAvailableModel(
 	const isDefaultForProvider = (model: Model<Api>): boolean =>
 		accountDefaultProviders.has(model.provider)
 			? model.isProviderDefault === true
-			: isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id;
+			: DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id;
 	const firstDefault = models.find(isDefaultForProvider);
 	if (!firstDefault) return models[0];
 

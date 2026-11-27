@@ -5,7 +5,6 @@ import type { DatedCostCard } from "./pricing";
 // Re-exported from @oh-my-pi/pi-utils so the whole workspace shares one
 // `fetch`-compatible signature (tls-fetch's wrappers produce/accept it).
 export type { FetchImpl } from "@oh-my-pi/pi-utils";
-export type { KnownProvider } from "./provider-models/descriptors";
 
 export type KnownApi =
 	| "openai-completions"
@@ -212,8 +211,7 @@ export interface ThinkingConfig {
 	unverified?: boolean;
 }
 
-// `Provider` is any provider-id string; `KnownProvider` (re-exported above) enumerates
-// the built-in model providers from the catalog descriptor table.
+/** Provider id; built-in ids are data in the compiled KDL rules, not a type-level union. */
 export type Provider = string;
 
 /** Token budgets for each thinking level (token-based providers only) */
