@@ -1,7 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { type AiuTotals, addCallAiu, callAiu } from "../session/aiu-billing";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import {
 	ADVISOR_TRANSCRIPT_FILENAME,
@@ -29,8 +28,6 @@ export interface LoadAdvisorTranscriptCostsOptions {
 	 * scan (#10129).
 	 */
 	providersBySlug?: Map<string, Set<string>>;
-	/** When provided, receives each advisor slug's AI credits (only slugs that reported or missed a charge). */
-	aiuBySlug?: Map<string, AiuTotals>;
 }
 
 interface AdvisorTranscriptCostFileSnapshot {
@@ -82,7 +79,6 @@ export async function loadAdvisorTranscriptCosts(
 	const costs = new Map<string, number>();
 	for (const snapshot of snapshots) {
 		let total = 0;
-		const aiu: AiuTotals = { nano: 0, unknownCalls: 0 };
 		const providers = new Set<string>();
 		let validHeader: boolean | undefined;
 		try {
@@ -100,7 +96,6 @@ export async function loadAdvisorTranscriptCosts(
 					if (!validHeader || !isObject || entry.type !== "message") return;
 					const message = entry.message;
 					if (!message || typeof message !== "object" || message.role !== "assistant") return;
-					addCallAiu(aiu, callAiu(message));
 					// One malformed usage block must cost that entry only, not the
 					// whole transcript's total.
 					const total_ = message.usage?.cost?.total;
@@ -121,7 +116,6 @@ export async function loadAdvisorTranscriptCosts(
 			costs.set(snapshot.slug, total);
 			if (options.providersBySlug && providers.size > 0) options.providersBySlug.set(snapshot.slug, providers);
 		}
-		if (aiu.nano > 0 || aiu.unknownCalls > 0) options.aiuBySlug?.set(snapshot.slug, aiu);
 	}
 	return costs;
 }

@@ -35,7 +35,7 @@ export function addCallAiu(totals: AiuTotals, aiu: number | "unknown" | undefine
 	else if (aiu !== undefined) totals.nano += aiu;
 }
 
-/** Credits summed over lanes (own calls, subagent tree, advisors); undefined while no call reported or missed one. */
+/** Credits summed over parts (own calls, subagent tree); undefined while no call reported or missed one. */
 export function sessionAiu(...parts: readonly (AiuTotals | undefined)[]): AiuTotals | undefined {
 	let nano = 0;
 	let unknownCalls = 0;

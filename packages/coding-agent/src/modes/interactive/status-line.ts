@@ -74,8 +74,6 @@ interface StatusSessionExtras {
 		configured: boolean;
 		advisors: readonly { status: string; yielded: boolean }[];
 	};
-	/** AI credits of the session's own advisors, which bill beside `getAdvisorCost`. */
-	getAdvisorAiu?(): AiuTotals | undefined;
 }
 
 type StatusSession = AgentViewSession & StatusSessionExtras;
@@ -598,11 +596,10 @@ export class SessionStatusLine implements StatusLineModel {
 		const advisorOverview = session.getAdvisorStatusOverview?.();
 		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
 		const advisorCost = session.getAdvisorCost();
-		// Own calls, the subagent tree (pushed with its dollars) and the advisors: one credit meter.
+		// Own calls plus the subagent tree, pushed with its dollars so the tree is summed once.
 		const aiu = sessionAiu(
 			{ nano: stats.aiuNano ?? 0, unknownCalls: stats.aiuUnknownCalls ?? 0 },
 			this.#focusedAgentId === undefined ? modes.subagentTreeAiu : undefined,
-			session.getAdvisorAiu?.(),
 		);
 		const vcsFacts = this.#vcsFacts(segments);
 		const goal = modes.goal ? session.getGoalModeState()?.goal : undefined;

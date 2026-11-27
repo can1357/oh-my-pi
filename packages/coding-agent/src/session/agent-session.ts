@@ -490,7 +490,6 @@ import {
 import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
-	type AdvisorAiuRestore,
 	type AdvisorCatchupOptions,
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
@@ -15054,9 +15053,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// of restarting at zero.
 			if (switchingToDifferentSession) {
 				const providersBySlug = new Map<string, Set<string>>();
-				const aiuBySlug = new Map<string, AiuTotals>();
-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug, aiuBySlug });
-				this.#advisors.restoreCost(costs, providersBySlug, aiuBySlug);
+				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
+				this.#advisors.restoreCost(costs, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// Keep the old reservations during rollback; the target is committed now,
@@ -17114,11 +17112,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#advisors.getAdvisorCost();
 	}
 
-	/** Return the AI credits recorded for the current session's advisor activity, beside {@link getAdvisorCost}. */
-	getAdvisorAiu(): AiuTotals | undefined {
-		return this.#advisors.getAdvisorAiu();
-	}
-
 	/**
 	 * Begin backfilling advisor spend recorded before this resume, off the
 	 * critical path. A large transcript would otherwise block startup while
@@ -17132,20 +17125,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		const snapshot = this.#advisors.beginCostRestoreSnapshot();
 		const providersBySlug = new Map<string, Set<string>>();
-		const aiuBySlug = new Map<string, AiuTotals>();
 		this.#advisorCostRestore = loadAdvisorTranscriptCosts(this.sessionFile, {
 			beforeSnapshot: snapshot.ready,
 			onSnapshot: snapshot.release,
 			shouldContinue: () => !stale && !this.isDisposed,
 			providersBySlug,
-			aiuBySlug,
 		})
 			.then(costs => {
 				if (stale || this.isDisposed) return;
-				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot, providersBySlug, {
-					bySlug: aiuBySlug,
-					atSnapshot: snapshot.aiuAtSnapshot,
-				});
+				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot, providersBySlug);
 				this.#emit({ type: "advisor_cost_changed" });
 			})
 			.catch(err => logger.debug("advisor cost restore failed", { err: String(err) }))
@@ -17170,9 +17158,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		costs: ReadonlyMap<string, number>,
 		costsAtSnapshot: ReadonlyMap<string, number> = new Map(),
 		providersBySlug?: ReadonlyMap<string, ReadonlySet<string>>,
-		aiu?: AdvisorAiuRestore,
 	): void {
-		this.#advisors.restoreInitialCost(costs, costsAtSnapshot, providersBySlug, aiu);
+		this.#advisors.restoreInitialCost(costs, costsAtSnapshot, providersBySlug);
 	}
 	/** Return whether any active or configured advisor is running on an OAuth/subscription model. */
 	isAdvisorUsingSubscription(): boolean {
