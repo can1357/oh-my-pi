@@ -22,7 +22,7 @@ Worktree: cwd; working branch ready for commits if classification calls for code
 
 1. **Triage first.** Read body and comments via `read` / `fetch_issue_thread`. Open every plausible match above with `fetch_issue_thread(number=N)` and compare symptoms and cause, NEVER titles alone; then `gh_search_issues` for further duplicates and already-merged fixes — reporter may use an older release than worktree; then call `classify_issue(primary=..., priority=..., functional=[...], rationale=...)`.
 
-   Before `bug`, system-prompt merit gate: ALL pass — broken contract, demonstrated impact, deliberate-tradeoff check, upstream vs this-repo cause, premise verification. NEVER comment, push, or open a PR before classification.
+   Before `bug`, system-prompt merit gate: ALL pass — broken contract, demonstrated impact, deliberate-tradeoff check, upstream vs this-repo cause, premise verification, not user-caused. NEVER comment, push, or open a PR before classification.
 
 2. Follow classification workflow; system prompt defines full per-type behavior:
    - `bug` / `documentation` → ack comment → reproduce → fix → PR.
