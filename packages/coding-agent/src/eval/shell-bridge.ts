@@ -6,8 +6,7 @@
  * exits: no auto-backgrounding, async jobs, output minimizing, or model-facing
  * notices. The cell's deadline and abort signal bound the run. Commands share
  * one persistent shell per agent session (separate from the `bash` tool's):
- * variables and functions carry over, but each command starts in the session
- * cwd or its own `cwd`.
+ * variables and functions carry over, but each command starts in the session cwd.
  * The session's tool commands run in it too, each reported as a status event
  * under its tool name.
  */
@@ -22,7 +21,6 @@ import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
 import { owningSessionId } from "../tools/session-id";
-import { resolveToCwd } from "../tools/path-utils";
 import { sessionShellSpeech } from "../tts/shell-speech";
 import type { JsStatusEvent } from "./js/shared/types";
 
@@ -57,8 +55,7 @@ export interface EvalShellResult {
  */
 export async function runEvalShell(args: unknown, options: EvalShellBridgeOptions): Promise<EvalShellResult> {
 	if (!isRecord(args) || typeof args.command !== "string") throw new ToolError("sh() expects a command string");
-	const { command, cwd, timeout } = args;
-	if (cwd !== undefined && typeof cwd !== "string") throw new ToolError("sh() cwd must be a string");
+	const { command, timeout } = args;
 	if (timeout !== undefined && (typeof timeout !== "number" || !(timeout >= 0))) {
 		throw new ToolError("sh() timeout must be a non-negative number of seconds");
 	}
@@ -94,7 +91,7 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 					}),
 				};
 	const result = await executeBash(command, {
-		cwd: cwd ? resolveToCwd(cwd, session.cwd) : session.cwd,
+		cwd: session.cwd,
 		env: sessionShellEnv({ id: owningSessionId(session), file: session.getSessionFile() }),
 		// 0 disables the executor deadline: the cell's own deadline governs.
 		timeout: timeout === undefined ? 0 : timeout * 1000,
