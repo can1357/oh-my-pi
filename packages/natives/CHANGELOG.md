@@ -19,6 +19,7 @@
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
 - Fixed Wayland screen capture crashing with a segmentation fault when the portal shares frame buffers without read access (xdg-desktop-portal-wlr 0.8.1 with PipeWire 1.6); capture now fails with an error instead ([#19647](https://github.com/can1357/oh-my-pi/issues/19647))
+- Fixed `Shell.abort()` sometimes doing nothing to a `Shell.run` that was queued behind another run on the same shell, leaving the command and its child processes running ([#17105](https://github.com/can1357/oh-my-pi/issues/17105))
 
 ## [19.2.1] - 2026-11-25
 
