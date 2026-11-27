@@ -103,16 +103,35 @@ export function leftoverRoots(
 	detached: ReadonlySet<number> = new Set(),
 ): LeftoverProcess[] {
 	const byPid = new Map(tagged.map(proc => [proc.pid, proc]));
+	/** Real ppids for pids missing from `tagged` (macOS hides the env of Apple-signed binaries). */
+	const realPpids = new Map<number, number>();
+	const lookupPpid = (pid: number): number => {
+		if (byPid.has(pid)) return byPid.get(pid)!.ppid;
+		if (!realPpids.has(pid)) realPpids.set(pid, processInfo([pid])[0]?.ppid ?? 0);
+		return realPpids.get(pid)!;
+	};
 	// The root above an excluded pid owns it: killing that root's family would take it down.
 	const excludedRoots = new Set<number>();
 	for (const pid of excluded) {
-		let proc = byPid.get(pid);
-		for (let parent = proc && byPid.get(proc.ppid); parent; parent = byPid.get(parent.ppid)) proc = parent;
-		if (proc) excludedRoots.add(proc.pid);
+		let top: number | undefined;
+		for (let cur = pid; cur > 1; cur = lookupPpid(cur)) {
+			if (byPid.has(cur)) top = cur;
+			if (lookupPpid(cur) === cur) break;
+		}
+		if (top !== undefined) excludedRoots.add(top);
 	}
+	const excludedSet = new Set(excluded);
+	/** A tagged process is under an excluded pid when its real parent chain reaches one: the
+	 * env scan misses Apple-signed intermediates (macOS), so the tagged chain alone is not enough. */
+	const underExcluded = (proc: TaggedProcess): boolean => {
+		for (let cur = proc.ppid; cur > 1; cur = lookupPpid(cur)) {
+			if (excludedSet.has(cur) || lookupPpid(cur) === cur) return excludedSet.has(cur);
+		}
+		return false;
+	};
 	const roots: LeftoverProcess[] = [];
 	for (const proc of tagged) {
-		if (byPid.has(proc.ppid) || excludedRoots.has(proc.pid)) continue;
+		if (byPid.has(proc.ppid) || excludedRoots.has(proc.pid) || underExcluded(proc)) continue;
 		roots.push({
 			pid: proc.pid,
 			command: proc.command,
