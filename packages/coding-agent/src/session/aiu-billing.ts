@@ -43,10 +43,14 @@ export function addCallAiu(totals: AiuTotals, aiu: number | "unknown" | undefine
 	else if (aiu !== undefined) totals.nano += aiu;
 }
 
-/** A session's credits: its own calls plus its subagent tree's; undefined while no call reported or missed one. */
-export function sessionAiu(direct: AiuTotals, tree: AiuTotals | undefined): AiuTotals | undefined {
-	const nano = direct.nano + (tree?.nano ?? 0);
-	const unknownCalls = direct.unknownCalls + (tree?.unknownCalls ?? 0);
+/** Credits summed over lanes (own calls, subagent tree, advisors); undefined while no call reported or missed one. */
+export function sessionAiu(...parts: readonly (AiuTotals | undefined)[]): AiuTotals | undefined {
+	let nano = 0;
+	let unknownCalls = 0;
+	for (const part of parts) {
+		nano += part?.nano ?? 0;
+		unknownCalls += part?.unknownCalls ?? 0;
+	}
 	return nano > 0 || unknownCalls > 0 ? { nano, unknownCalls } : undefined;
 }
 

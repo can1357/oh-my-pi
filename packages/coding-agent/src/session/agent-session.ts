@@ -490,6 +490,7 @@ import {
 import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
+	type AdvisorAiuRestore,
 	type AdvisorCatchupOptions,
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
@@ -546,7 +547,9 @@ import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./ses
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { type AiuTotals, sessionAiu } from "./aiu-billing";
 import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
-import type { AgentCostSnapshot } from "../modes/view-model/overlays/agent-hub-projection";
+import type { AgentCostSnapshot, AgentTreeSpend } from "../modes/view-model/overlays/agent-hub-projection";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
+import type { SessionObserverRegistry } from "../task/session-observer-registry";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -1230,8 +1233,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
-	/** Per-subagent spend reads the credit roll-up reuses between calls; see {@link getSessionAiu}. */
+	/** Per-subagent spend reads the tree roll-up reuses between calls; see {@link getSubagentTreeSpend}. */
 	readonly #subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	/** Persisted-subagent registration per root transcript; see {@link hydratePersistedSubagents}. */
+	readonly #subagentHydrations = new Map<string, Promise<void>>();
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -15049,8 +15054,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// of restarting at zero.
 			if (switchingToDifferentSession) {
 				const providersBySlug = new Map<string, Set<string>>();
-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
-				this.#advisors.restoreCost(costs, providersBySlug);
+				const aiuBySlug = new Map<string, AiuTotals>();
+				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug, aiuBySlug });
+				this.#advisors.restoreCost(costs, providersBySlug, aiuBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// Keep the old reservations during rollback; the target is committed now,
@@ -15983,20 +15989,48 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * The session's server-reported AI credits: its own recorded calls (assistant messages and
-	 * `model_usage`, from the usage index) plus its subagent tree's, rolled up through the same
-	 * pipeline as the tree's dollars. Undefined until a call reported a charge or missed its frame.
+	 * `model_usage`, from the usage index) plus its subagent tree's (see {@link getSubagentTreeSpend}).
+	 * Advisors bill apart, as their dollars do. Undefined until a call reported a charge or missed its frame.
 	 */
 	getSessionAiu(): AiuTotals | undefined {
 		const usage = this.sessionManager.getUsageStatistics();
+		return sessionAiu({ nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls }, this.getSubagentTreeSpend().aiu);
+	}
+
+	/**
+	 * Spend (dollars and AI credits) of this session's subagent tree, descendants included and its own
+	 * advisors excluded: the one sum the status line, ACP and RPC report. Subagents an earlier process
+	 * persisted count once {@link hydratePersistedSubagents} (started here) settles. `observers` adds the
+	 * file-less subagents a host tracks live.
+	 */
+	getSubagentTreeSpend(observers?: SessionObserverRegistry): AgentTreeSpend {
+		void this.hydratePersistedSubagents();
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			observers,
+			rootSessionFile: this.sessionFile,
+			sessionCosts: this.#subagentSpend,
+		});
+	}
+
+	/**
+	 * Register the subagent and advisor transcripts persisted under this session's file (with their usage
+	 * history) as parked registry refs, once per on-disk root, so a resumed tree's spend counts before
+	 * anything opens the Agent Hub. Never rejects.
+	 */
+	hydratePersistedSubagents(): Promise<void> {
 		const rootSessionFile = this.sessionFile;
-		const tree = rootSessionFile
-			? sumSubagentTreeCost({
-					refs: AgentRegistry.global().list(),
-					rootSessionFile,
-					sessionCosts: this.#subagentSpend,
-				}).aiu
-			: undefined;
-		return sessionAiu({ nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls }, tree);
+		if (!rootSessionFile || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		let hydration = this.#subagentHydrations.get(rootSessionFile);
+		if (!hydration) {
+			hydration = registerPersistedSubagents(AgentRegistry.global(), rootSessionFile, {
+				shouldContinue: () => this.sessionFile === rootSessionFile,
+			}).catch(error => {
+				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
+			});
+			this.#subagentHydrations.set(rootSessionFile, hydration);
+		}
+		return hydration;
 	}
 
 	#goalUsage(): GoalTokenUsage {
@@ -17080,6 +17114,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#advisors.getAdvisorCost();
 	}
 
+	/** Return the AI credits recorded for the current session's advisor activity, beside {@link getAdvisorCost}. */
+	getAdvisorAiu(): AiuTotals | undefined {
+		return this.#advisors.getAdvisorAiu();
+	}
+
 	/**
 	 * Begin backfilling advisor spend recorded before this resume, off the
 	 * critical path. A large transcript would otherwise block startup while
@@ -17093,15 +17132,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		const snapshot = this.#advisors.beginCostRestoreSnapshot();
 		const providersBySlug = new Map<string, Set<string>>();
+		const aiuBySlug = new Map<string, AiuTotals>();
 		this.#advisorCostRestore = loadAdvisorTranscriptCosts(this.sessionFile, {
 			beforeSnapshot: snapshot.ready,
 			onSnapshot: snapshot.release,
 			shouldContinue: () => !stale && !this.isDisposed,
 			providersBySlug,
+			aiuBySlug,
 		})
 			.then(costs => {
 				if (stale || this.isDisposed) return;
-				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot, providersBySlug);
+				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot, providersBySlug, {
+					bySlug: aiuBySlug,
+					atSnapshot: snapshot.aiuAtSnapshot,
+				});
 				this.#emit({ type: "advisor_cost_changed" });
 			})
 			.catch(err => logger.debug("advisor cost restore failed", { err: String(err) }))
@@ -17126,8 +17170,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		costs: ReadonlyMap<string, number>,
 		costsAtSnapshot: ReadonlyMap<string, number> = new Map(),
 		providersBySlug?: ReadonlyMap<string, ReadonlySet<string>>,
+		aiu?: AdvisorAiuRestore,
 	): void {
-		this.#advisors.restoreInitialCost(costs, costsAtSnapshot, providersBySlug);
+		this.#advisors.restoreInitialCost(costs, costsAtSnapshot, providersBySlug, aiu);
 	}
 	/** Return whether any active or configured advisor is running on an OAuth/subscription model. */
 	isAdvisorUsingSubscription(): boolean {

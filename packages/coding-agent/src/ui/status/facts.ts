@@ -44,7 +44,7 @@ export interface StatusUsage {
 	readonly cost: number;
 	/** Part of `cost` carried by completed subagent task results. */
 	readonly subagentCost?: number;
-	/** Server-reported AI credits of the session and its subagent tree; undefined while no call reported or missed one. */
+	/** Server-reported AI credits of the session, its subagent tree and its advisors; undefined while no call reported or missed one. */
 	readonly aiu?: AiuTotals;
 }
 

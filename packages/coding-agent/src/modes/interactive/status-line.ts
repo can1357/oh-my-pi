@@ -28,7 +28,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { AgentViewSession } from "../../session/agent-session-handle";
-import type { AiuTotals } from "../../session/aiu-billing";
+import { type AiuTotals, sessionAiu } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
 import type { CollabStatus, StatusLineModel } from "../types";
@@ -74,8 +74,8 @@ interface StatusSessionExtras {
 		configured: boolean;
 		advisors: readonly { status: string; yielded: boolean }[];
 	};
-	/** Server-reported AI credits of the session and its subagent tree; see `AgentSession.getSessionAiu`. */
-	getSessionAiu?(): AiuTotals | undefined;
+	/** AI credits of the session's own advisors, which bill beside `getAdvisorCost`. */
+	getAdvisorAiu?(): AiuTotals | undefined;
 }
 
 type StatusSession = AgentViewSession & StatusSessionExtras;
@@ -106,6 +106,8 @@ export interface StatusModes {
 	recording?: boolean;
 	pinned?: boolean;
 	subagentTreeCost?: number;
+	/** AI credits of the subagent tree, from the same roll-up as {@link subagentTreeCost}. */
+	subagentTreeAiu?: AiuTotals;
 	vibeWorkerTokenRate?: () => number | null;
 }
 
@@ -596,7 +598,12 @@ export class SessionStatusLine implements StatusLineModel {
 		const advisorOverview = session.getAdvisorStatusOverview?.();
 		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
 		const advisorCost = session.getAdvisorCost();
-		const aiu = session.getSessionAiu?.();
+		// Own calls, the subagent tree (pushed with its dollars) and the advisors: one credit meter.
+		const aiu = sessionAiu(
+			{ nano: stats.aiuNano ?? 0, unknownCalls: stats.aiuUnknownCalls ?? 0 },
+			this.#focusedAgentId === undefined ? modes.subagentTreeAiu : undefined,
+			session.getAdvisorAiu?.(),
+		);
 		const vcsFacts = this.#vcsFacts(segments);
 		const goal = modes.goal ? session.getGoalModeState()?.goal : undefined;
 		const thinkingLevel = session.state.thinkingLevel;

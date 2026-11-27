@@ -109,6 +109,7 @@ import {
 	automaticThinkingLevel,
 } from "../thinking/levels";
 import type { AgentSessionEvent } from "./agent-session-events";
+import { type AiuTotals, addCallAiu, callAiu, sessionAiu } from "./aiu-billing";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
 import { type CustomMessage, type CustomMessagePayload, isUserAuthoredMessage, isUserTurnInitiator } from "./messages";
@@ -583,6 +584,20 @@ export interface SessionAdvisorsHost {
 	agentKind?(): "main" | "sub";
 }
 
+/** Persisted advisor credits for {@link SessionAdvisors.restoreInitialCost}, beside the dollar ledger. */
+export interface AdvisorAiuRestore {
+	/** Credits read from the advisor transcripts, by slug. */
+	bySlug: ReadonlyMap<string, AiuTotals>;
+	/** The live ledger when the transcripts' byte lengths were captured. */
+	atSnapshot: ReadonlyMap<string, AiuTotals>;
+}
+
+function copyAiuLedger(ledger: ReadonlyMap<string, AiuTotals> | undefined): Map<string, AiuTotals> {
+	const copy = new Map<string, AiuTotals>();
+	for (const [slug, totals] of ledger ?? []) copy.set(slug, { ...totals });
+	return copy;
+}
+
 /**
  * One advisor's status-line slice: runtime status, whether it has finished
  * reviewing the current yield, its queued or in-flight review backlog, and
@@ -619,6 +634,8 @@ export class SessionAdvisors {
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
+	/** Per-advisor AI credits beside {@link #advisorCosts}, cleared and restored with it. */
+	#advisorAiu = new Map<string, AiuTotals>();
 	/**
 	 * Slugs whose recorded spend ran on a subscription model. Kept in
 	 * lockstep with {@link #advisorCosts} so {@link isUsingSubscription} can
@@ -874,6 +891,7 @@ export class SessionAdvisors {
 	/** Drop the recorded spend once a conversation boundary has committed. */
 	clearCost(): void {
 		this.#advisorCosts.clear();
+		this.#advisorAiu.clear();
 		this.#advisorSubscriptionSlugs.clear();
 	}
 
@@ -882,8 +900,13 @@ export class SessionAdvisors {
 	 * `providersBySlug` (from {@link loadAdvisorTranscriptCosts}) re-derives the
 	 * subscription attribution the torn-down runtime can no longer report.
 	 */
-	restoreCost(costs: ReadonlyMap<string, number>, providersBySlug?: ReadonlyMap<string, ReadonlySet<string>>): void {
+	restoreCost(
+		costs: ReadonlyMap<string, number>,
+		providersBySlug?: ReadonlyMap<string, ReadonlySet<string>>,
+		aiuBySlug?: ReadonlyMap<string, AiuTotals>,
+	): void {
 		this.#advisorCosts = new Map(costs);
+		this.#advisorAiu = copyAiuLedger(aiuBySlug);
 		this.#advisorSubscriptionSlugs = this.#deriveSubscriptionSlugs(costs, providersBySlug);
 	}
 
@@ -921,16 +944,19 @@ export class SessionAdvisors {
 	 */
 	beginCostRestoreSnapshot(): {
 		costsAtSnapshot: ReadonlyMap<string, number>;
+		aiuAtSnapshot: ReadonlyMap<string, AiuTotals>;
 		ready: Promise<unknown>;
 		release: () => void;
 	} {
 		const costsAtSnapshot = this.costSnapshot();
+		const aiuAtSnapshot = copyAiuLedger(this.#advisorAiu);
 		const gate = Promise.withResolvers<void>();
 		this.#advisorCostSnapshotBarrier = gate.promise;
 		const ready = Promise.all(this.#advisors.map(advisor => advisor.recorder.blockWritesUntil(gate.promise)));
 		let released = false;
 		return {
 			costsAtSnapshot,
+			aiuAtSnapshot,
 			ready,
 			release: () => {
 				if (released) return;
@@ -951,7 +977,20 @@ export class SessionAdvisors {
 		costs: ReadonlyMap<string, number>,
 		costsAtSnapshot: ReadonlyMap<string, number>,
 		providersBySlug?: ReadonlyMap<string, ReadonlySet<string>>,
+		aiu?: AdvisorAiuRestore,
 	): void {
+		const restoredAiu = copyAiuLedger(aiu?.bySlug);
+		for (const [slug, current] of this.#advisorAiu) {
+			const atSnapshot = aiu?.atSnapshot.get(slug);
+			const nano = current.nano - (atSnapshot?.nano ?? 0);
+			const unknownCalls = current.unknownCalls - (atSnapshot?.unknownCalls ?? 0);
+			if (nano <= 0 && unknownCalls <= 0) continue;
+			const totals = restoredAiu.get(slug) ?? { nano: 0, unknownCalls: 0 };
+			totals.nano += Math.max(0, nano);
+			totals.unknownCalls += Math.max(0, unknownCalls);
+			restoredAiu.set(slug, totals);
+		}
+		this.#advisorAiu = restoredAiu;
 		const restored = new Map(costs);
 		const subscription = this.#deriveSubscriptionSlugs(costs, providersBySlug);
 		for (const [slug, current] of this.#advisorCosts) {
@@ -1119,10 +1158,7 @@ export class SessionAdvisors {
 	 * so none of them inject into the new conversation.
 	 */
 	#resetAdvisorSessionState(preserveCost: boolean): void {
-		if (!preserveCost) {
-			this.#advisorCosts.clear();
-			this.#advisorSubscriptionSlugs.clear();
-		}
+		if (!preserveCost) this.clearCost();
 		// Mute the recorder across the re-prime: AdvisorRuntime.reset() aborts the advisor
 		// loop, and that abort can emit an `aborted` message_end we must not attribute to
 		// either session's transcript. Detach, reset, then re-attach the live agent's feed.
@@ -1507,6 +1543,9 @@ export class SessionAdvisors {
 					...streamOptions,
 					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(requestModel),
 				};
+				// The advisor bills its own lane, whose ledger counts delivered replies only: an attempt
+				// a retry discards stays out of it rather than landing in the primary session's journal.
+				options.onDiscardedAttempt ??= () => {};
 				if (requestModel.api === "openai-codex-responses") {
 					return baseAdvisorStreamFn(requestModel, context, {
 						...options,
@@ -2048,6 +2087,12 @@ export class SessionAdvisors {
 	#recordAdvisorCost(advisor: ActiveAdvisor, message: AssistantMessage): void {
 		const cost = message.usage.cost.total;
 		this.#advisorCosts.set(advisor.slug, (this.#advisorCosts.get(advisor.slug) ?? 0) + cost);
+		const aiu = callAiu(message);
+		if (aiu !== undefined) {
+			const totals = this.#advisorAiu.get(advisor.slug) ?? { nano: 0, unknownCalls: 0 };
+			addCallAiu(totals, aiu);
+			this.#advisorAiu.set(advisor.slug, totals);
+		}
 		// Capture credential attribution now so subscription spend survives
 		// the advisor runtime being torn down (#10131).
 		if (cost > 0 && Number.isFinite(cost) && this.#host.modelRegistry.isUsingSubscription(advisor.model)) {
@@ -3064,6 +3109,11 @@ export class SessionAdvisors {
 		let cost = 0;
 		for (const advisorCost of this.#advisorCosts.values()) cost += advisorCost;
 		return cost;
+	}
+
+	/** Cumulative advisor AI credits recorded for the current session; undefined while none reported or missed one. */
+	getAdvisorAiu(): AiuTotals | undefined {
+		return sessionAiu(...this.#advisorAiu.values());
 	}
 	/**
 	 * Whether advisor spend should be attributed to a subscription plan.

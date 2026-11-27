@@ -143,8 +143,8 @@ export interface StatusLineSession {
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;
-	/** Server-reported AI credits of the session and its subagent tree; see `AgentSession.getSessionAiu`. */
-	getSessionAiu?(): AiuTotals | undefined;
+	/** AI credits of the session's own advisors, which bill beside `getAdvisorCost`. */
+	getAdvisorAiu?(): AiuTotals | undefined;
 	isAdvisorUsingSubscription?(): boolean;
 	/**
 	 * What the next request finds in the prompt cache at `nowMs`; undefined when there is nothing to reason about.
