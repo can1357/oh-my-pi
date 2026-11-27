@@ -7,6 +7,7 @@
 - Added xAI speech-to-text support, including use through the authentication gateway.
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
+- Model usage health now names why an account is depleted (`depletedBy`: `usage`, `account-policy` or `auth`) ([#19682](https://github.com/can1357/oh-my-pi/pull/19682) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

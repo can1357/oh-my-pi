@@ -13,7 +13,7 @@ import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
 import { credentialBlockScopesForRequest, providerTypeKey } from "./blocks";
-import type { CredentialBlocks } from "./blocks";
+import type { CredentialBlockDeadlines, CredentialBlocks } from "./blocks";
 import type { KeyCascade, KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool, StoredCredential } from "./pool";
@@ -25,6 +25,7 @@ import type {
 	CredentialHealthResult,
 	HealthApi,
 	ModelUsageAccountHealth,
+	ModelUsageDepletionCause,
 	ModelUsageHealth,
 	ModelUsageHealthOptions,
 } from "./types";
@@ -34,6 +35,26 @@ import { REMOTE_REFRESH_SENTINEL } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
 import type { UsageRequestDescriptor } from "./usage-cache";
 import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } from "./usage-report";
+
+/** Deadline and cause of the blocks that hold one account `depleted`. */
+interface BlockDepletion {
+	resetsAt: number;
+	depletedBy: ModelUsageDepletionCause;
+}
+
+/**
+ * The latest deadline across every cause, which is what
+ * {@link CredentialBlocks.blockedUntil} reads, named by the highest-priority
+ * cause present: usage, then account-policy, then auth.
+ */
+function blockDepletion({ usage, accountPolicy, auth }: CredentialBlockDeadlines): BlockDepletion | undefined {
+	let depletedBy: ModelUsageDepletionCause;
+	if (usage !== undefined) depletedBy = "usage";
+	else if (accountPolicy !== undefined) depletedBy = "account-policy";
+	else if (auth !== undefined) depletedBy = "auth";
+	else return undefined;
+	return { resetsAt: Math.max(usage ?? -Infinity, accountPolicy ?? -Infinity, auth ?? -Infinity), depletedBy };
+}
 
 /** Dependencies for model pool health and stored credential probes. */
 export interface CredentialHealthDeps {
@@ -148,17 +169,25 @@ export class CredentialHealth implements HealthApi {
 			pool.map(async ({ entry, index }): Promise<ModelUsageAccountHealth> => {
 				const credentialType = entry.credential.type;
 				const providerKey = providerTypeKey(provider, credentialType);
-				let blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, index, blockScopes);
+				let block = blockDepletion(
+					this.#deps.blocks.blockedUntilByCause(provider, providerKey, index, blockScopes),
+				);
 				// A block under a scope the strategy can vouch for must still fetch
 				// a probe report, or it outlives the recovery that report would
 				// prove: no report means no reconciliation, so the credential idles
 				// until the clock runs out even after quota is restored.
-				if (blockedUntil !== undefined && !this.#deps.blocks.canHeal(provider, providerKey, index, blockScopes)) {
+				if (block !== undefined && !this.#deps.blocks.canHeal(provider, providerKey, index, blockScopes)) {
+					// An account held by an account-policy or auth block is read here,
+					// before any report is fetched (a protected block makes canHeal
+					// false), so an exhausted window that no usage block records yet
+					// reads "account-policy" or "auth" while that block lasts; its
+					// usage-limit answer then writes the usage block the next read sees.
 					return {
 						credentialId: entry.id,
 						credentialType,
 						state: "depleted",
-						resetsAt: blockedUntil,
+						resetsAt: block.resetsAt,
+						depletedBy: block.depletedBy,
 					};
 				}
 
@@ -182,14 +211,15 @@ export class CredentialHealth implements HealthApi {
 				}
 
 				if (this.#deps.blocks.supportsHealing(provider)) {
-					blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, index, blockScopes);
+					block = blockDepletion(this.#deps.blocks.blockedUntilByCause(provider, providerKey, index, blockScopes));
 				}
-				if (blockedUntil !== undefined) {
+				if (block !== undefined) {
 					return {
 						credentialId: entry.id,
 						credentialType,
 						state: "depleted",
-						resetsAt: blockedUntil,
+						resetsAt: block.resetsAt,
+						depletedBy: block.depletedBy,
 					};
 				}
 				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
@@ -214,6 +244,7 @@ export class CredentialHealth implements HealthApi {
 						credentialType,
 						state: "depleted",
 						resetsAt: futureResets.length > 0 ? Math.min(...futureResets) : undefined,
+						depletedBy: "usage",
 					};
 				}
 

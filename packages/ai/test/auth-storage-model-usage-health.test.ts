@@ -5,9 +5,11 @@ import {
 	type AuthCredentialStore,
 	AuthStorage,
 	type AuthStorageOptions,
+	type ModelUsageAccountHealth,
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -836,5 +838,168 @@ describe("AuthStorage Claude tier reserve health", () => {
 		});
 		expect(health.state).toBe("depleted");
 		expect(health.accounts[0]?.resetsAt).toBeGreaterThan(Date.now());
+	});
+});
+
+describe("AuthStorage model usage health depletion cause", () => {
+	const storages: AuthStorage[] = [];
+	afterEach(() => {
+		for (const storage of storages) storage.close();
+		storages.length = 0;
+	});
+
+	const CODEX_DENIED_MODEL = "gpt-daybreak-blue-latest";
+
+	async function createStorage(
+		rows: StoredAuthCredential[],
+		reports: Record<string, UsageReport | null>,
+		rankingStrategy: CredentialRankingStrategy = strategy,
+	): Promise<AuthStorage> {
+		const storage = new AuthStorage(makeStore(rows), {
+			usageProviderResolver: provider => (provider === "anthropic" ? makeUsageProvider(reports) : undefined),
+			rankingStrategyResolver: () => rankingStrategy,
+			configValueResolver: async value => value,
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		return storage;
+	}
+
+	/** An account-wide policy denial: rotation blocks the account under the `account-policy` scope. */
+	async function denyAccountPolicy(storage: AuthStorage): Promise<void> {
+		await storage.limits.rotate("anthropic", undefined, {
+			credentialId: 1,
+			error: new Error(
+				"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+			),
+		});
+	}
+
+	/** A 401: rotation blocks the account under the `auth` scope. */
+	async function rejectAuth(storage: AuthStorage): Promise<void> {
+		await storage.limits.rotate("anthropic", undefined, {
+			credentialId: 1,
+			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+		});
+	}
+
+	/** A usage-limit answer: the account is blocked under the request's `model:claude` usage scope. */
+	async function reachUsageLimit(storage: AuthStorage, retryAfterMs?: number): Promise<void> {
+		await storage.limits.markReached("anthropic", undefined, { credentialId: 1, modelId: "claude", retryAfterMs });
+	}
+
+	async function claudeAccount(storage: AuthStorage): Promise<ModelUsageAccountHealth | undefined> {
+		const health = await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0.1 });
+		return health.accounts[0];
+	}
+
+	it("reads an account held only by an account-policy block as depleted by account-policy", async () => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": null });
+		await denyAccountPolicy(storage);
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "account-policy" });
+	});
+
+	it("reads an account held only by a model-policy block as depleted by account-policy", async () => {
+		const storage = await createStorage([{ ...oauthRow(1), provider: "openai-codex" }], {});
+		await storage.limits.rotate("openai-codex", undefined, {
+			credentialId: 1,
+			modelId: CODEX_DENIED_MODEL,
+			error: new ProviderHttpError(
+				`The '${CODEX_DENIED_MODEL}' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)`,
+				400,
+				{ code: "invalid_request_error" },
+			),
+		});
+		const health = await storage.health.model("openai-codex", {
+			modelId: CODEX_DENIED_MODEL,
+			reserveFraction: 0.1,
+		});
+		expect(health.accounts[0]).toMatchObject({ state: "depleted", depletedBy: "account-policy" });
+	});
+
+	it("reads an account held only by an auth block as depleted by auth", async () => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": null });
+		await rejectAuth(storage);
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "auth" });
+	});
+
+	it("reads an account held only by an OAuth refresh-failure block as depleted by auth", async () => {
+		const { credential } = oauthRow(1);
+		if (credential.type !== "oauth") throw new Error("expected OAuth credential");
+		const expired = { ...oauthRow(1), credential: { ...credential, expires: Date.now() - 60_000 } };
+		const storage = new AuthStorage(makeStore([expired]), {
+			async refreshOAuthCredential() {
+				throw new Error("getaddrinfo ENOTFOUND api.anthropic.com");
+			},
+			usageProviderResolver: () => makeUsageProvider({ "account-1": null }),
+			rankingStrategyResolver: () => strategy,
+			configValueResolver: async value => value,
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		// The failed refresh blocks the account under the `oauth-refresh-failure` scope.
+		expect(await storage.keys.get("anthropic", "session-1", { modelId: "claude" })).toBeUndefined();
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "auth" });
+	});
+
+	it("reads an account held only by an OAuth organization denial as depleted by account-policy", async () => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": null });
+		// The denial blocks the account under the `oauth-org-policy` scope.
+		await storage.limits.rotate("anthropic", undefined, {
+			credentialId: 1,
+			error: new ProviderHttpError("OAuth authentication is currently not allowed for this organization.", 403, {
+				code: "oauth_not_allowed_for_organization",
+			}),
+		});
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "account-policy" });
+	});
+
+	it("reads account-policy over auth when no usage block holds the account", async () => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": null });
+		await denyAccountPolicy(storage);
+		await rejectAuth(storage);
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "account-policy" });
+	});
+
+	it("reads a usage-limit block as depleted by usage", async () => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": null });
+		await reachUsageLimit(storage);
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "usage" });
+	});
+
+	it("reads a usage block that a fresh report does not clear as depleted by usage", async () => {
+		const storage = await createStorage(
+			[oauthRow(1)],
+			{ "account-1": report("account-1", [limit("short", 0.2)]) },
+			{ ...strategy, healableBlockScopes: () => [] },
+		);
+		await reachUsageLimit(storage);
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "usage" });
+	});
+
+	it("reads an exhausted usage window with no block as depleted by usage", async () => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": report("account-1", [limit("short", 1)]) });
+		expect(await claudeAccount(storage)).toMatchObject({ state: "depleted", depletedBy: "usage" });
+	});
+
+	it("reads usage over account-policy and keeps the later deadline of the two", async () => {
+		const storage = await createStorage([oauthRow(1)], { "account-1": null });
+		await reachUsageLimit(storage, 20_000);
+		await denyAccountPolicy(storage);
+		const account = await claudeAccount(storage);
+		expect(account).toMatchObject({ state: "depleted", depletedBy: "usage" });
+		// The 60 s account-policy block outlasts the 20 s usage block, so it sets resetsAt.
+		expect(account?.resetsAt).toBeGreaterThan(Date.now() + 30_000);
+	});
+
+	it("leaves healthy, reserve and unknown accounts without a cause", async () => {
+		const storage = await createStorage([oauthRow(1), oauthRow(2), oauthRow(3)], {
+			"account-1": report("account-1", [limit("short", 0.2)]),
+			"account-2": report("account-2", [limit("short", 0.95)]),
+			"account-3": null,
+		});
+		const health = await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0.1 });
+		expect(health.accounts.map(account => account.state)).toEqual(["healthy", "reserve", "unknown"]);
+		for (const account of health.accounts) expect(account.depletedBy).toBeUndefined();
 	});
 });
