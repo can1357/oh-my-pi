@@ -2140,15 +2140,19 @@ export class SelectorController {
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
-		// Shown after the re-render below, which would clear it; a switch that does not
-		// commit renders nothing more, so a rollback's warning shows at once.
+		// The warning of the last cwd application, which names where the session ends up. Shown after the
+		// re-render below, which would clear it; a switch that does not commit renders nothing more, so a
+		// rollback's warning shows at once.
 		let memoryWarning: string | undefined;
 		let switched = false;
 		try {
 			switched = await this.ctx.session.switchSession(target.sessionPath, {
 				onCwdChange: async (newCwd, sourceCwd) => {
+					memoryWarning = undefined;
 					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
 					return this.ctx.applyCwdChange(newCwd, {
+						// The switch calls back with the directory this resume started in only to roll back to it.
+						restore: normalizePathForComparison(newCwd) === normalizePathForComparison(previousCwd),
 						onWarning: warning => {
 							memoryWarning = warning;
 						},

@@ -257,14 +257,16 @@ export async function memoryBeforeCwdMove(session: AgentSession): Promise<Memory
  * bank scope derives from the cwd itself: a move between projects with
  * identical settings changes no setting, yet must still re-route the bank.
  *
- * When Mnemopi does not start in the destination, the move fails only if
- * memory ran before it (`before`, read by {@link memoryBeforeCwdMove}).
+ * When Mnemopi does not start in the destination, a forward move fails only
+ * if memory ran before it (`before`, read by {@link memoryBeforeCwdMove}).
+ * A return to the directory a failed move left passes no `before` and never
+ * fails over Mnemopi: the memory running then belongs to the rejected destination.
  * Otherwise the move commits without memory, as startup does, and the
  * returned warning tells the user memory is off.
  */
 export async function rebindMemoryBackendForCwd(
 	session: AgentSession,
-	before: MemoryBeforeCwdMove,
+	before: MemoryBeforeCwdMove | undefined,
 ): Promise<string | undefined> {
 	if (!session.memoryEnabled) return undefined;
 	await session.settleMemoryBackend();
@@ -281,9 +283,9 @@ export async function rebindMemoryBackendForCwd(
 	await awaitPrimaryStateRebuild(session);
 
 	if (cfgMemoryBackend.get(session.settings) !== "mnemopi" || session.getMnemopiSessionState()) return undefined;
-	// Startup is best-effort, but a move must not take away memory that ran.
-	if (before.memoryRan) throw new Error("Mnemopi backend failed to initialise for the destination cwd.");
-	// Memory was already off, so the move makes nothing worse.
+	// Startup is best-effort, but a forward move must not take away memory that ran.
+	if (before?.memoryRan) throw new Error("Mnemopi backend failed to initialise for the destination cwd.");
+	// Memory was already off, or this returns to where the session was: the move makes nothing worse.
 	return `Memory is off: Mnemopi did not start in ${shortenPath(session.sessionManager.getCwd())}. The omp log has the cause.`;
 }
 

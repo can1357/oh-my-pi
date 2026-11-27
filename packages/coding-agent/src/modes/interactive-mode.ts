@@ -268,6 +268,7 @@ import type {
 	WorkingKind,
 	CompactionQueuedMessage,
 	ComposerOwner,
+	CwdChangeOptions,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
@@ -2592,12 +2593,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * a session from another project). The SessionManager's cwd MUST already
 	 * reflect `newCwd` before this is called.
 	 *
-	 * A move that commits without memory reports it through `onWarning`, shown
-	 * at once when absent; a host that re-renders the transcript afterwards
-	 * passes it to show the warning after the re-render.
+	 * `options.restore` marks a return to the directory a failed move left;
+	 * the internal rollback below is one too. A return never fails over memory.
+	 * The memory warning for the directory this call leaves the session in goes
+	 * to `options.onWarning`; at most one rescope per call completes, so the
+	 * callback runs at most once.
 	 */
-	async applyCwdChange(newCwd: string, options?: { onWarning?: (warning: string) => void }): Promise<boolean> {
-		const onWarning = options?.onWarning ?? ((warning: string) => this.showWarning(warning));
+	async applyCwdChange(newCwd: string, options: CwdChangeOptions): Promise<boolean> {
 		const previousCwd = getProjectDir();
 		try {
 			setProjectDir(newCwd);
@@ -2611,12 +2613,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// fails, undo the chdir so `false` reliably means "nothing committed";
 		// callers roll back their own session/manager state on false.
 		const scopedSettings = isSettingsInitialized() ? settings : undefined;
-		const rescope = async (cwd: string): Promise<void> => {
-			const warning = await rescopeSessionToCwd(this.session, scopedSettings, cwd);
-			if (warning) onWarning(warning);
+		const rescope = async (cwd: string, restore: boolean): Promise<void> => {
+			const warning = await rescopeSessionToCwd(this.session, scopedSettings, cwd, { restore });
+			if (warning) options.onWarning(warning);
 		};
 		try {
-			await rescope(newCwd);
+			await rescope(newCwd, options.restore === true);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived state (memory, plugin roots, agents, extensions, custom
@@ -2625,12 +2627,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				await rescope(previousCwd);
+				await rescope(previousCwd, true);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
-					await rescope(actual);
+					await rescope(actual, true);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,

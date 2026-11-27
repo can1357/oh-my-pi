@@ -670,8 +670,59 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getMnemopiSessionState()).toBeUndefined();
 	});
 
-	// The refused move already stopped the source's Mnemopi, so the rollback reads its own state: no memory ran. It
-	// takes the session back to its directory with memory off, even when the source's Mnemopi cannot start again.
+	// The warning is reported once the move settled, so a client that rejects that update cannot roll the move back.
+	it("headless /move keeps a committed move when the client rejects its memory warning", async () => {
+		const sourceCwd = tempDir.path();
+		const destinationCwd = path.join(sourceCwd, "destination");
+		// An existing directory is not a SQLite database, so Mnemopi fails in both projects.
+		const config = Bun.YAML.stringify({
+			memory: { backend: "mnemopi" },
+			mnemopi: { scoping: "global", autoRetain: false, noEmbeddings: true, llmMode: "none", dbPath: sourceCwd },
+		});
+		await Promise.all(
+			[sourceCwd, destinationCwd].map(cwd => Bun.write(path.join(getProjectAgentDir(cwd), "config.yml"), config)),
+		);
+		settings = await Settings.loadIsolated({ cwd: sourceCwd, agentDir: path.join(sourceCwd, "agent") });
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		const output: string[] = [];
+		let rejectedUpdate: string | undefined;
+		const originalProjectDir = getProjectDir();
+		let outcome: string;
+		try {
+			outcome = await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
+				session: current,
+				sessionManager: current.sessionManager,
+				settings,
+				cwd: sourceCwd,
+				output: async text => {
+					if (rejectedUpdate === undefined) {
+						rejectedUpdate = text;
+						throw new Error("session update rejected");
+					}
+					output.push(text);
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			}).then(
+				() => "resolved",
+				(error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		} finally {
+			setProjectDir(originalProjectDir);
+		}
+		expect(rejectedUpdate).toContain("Mnemopi");
+		expect({ cwd: current.sessionManager.getCwd(), disposed: current.isDisposed }).toEqual({
+			cwd: destinationCwd,
+			disposed: false,
+		});
+		expect(output.join("\n")).not.toContain("Move failed");
+		// The rejected update fails the command; the move it reports on stands.
+		expect(outcome).toBe("threw: session update rejected");
+	});
+
+	// A return to the source never refuses over memory: it takes the session back to its directory with memory off,
+	// even when the source's Mnemopi cannot start again.
 	it("headless /move keeps the session in its directory with one warning when the rollback cannot restart Mnemopi", async () => {
 		const sourceCwd = tempDir.path();
 		const destinationCwd = path.join(sourceCwd, "destination");
@@ -714,9 +765,64 @@ describe("AgentSession memory backend lifecycle", () => {
 			disposed: false,
 		});
 		expect(output).toContainEqual(expect.stringMatching(/Move failed:.*Mnemopi backend failed to initialise/));
-		expect(output.filter(line => line.includes("Memory is off"))).toEqual([
-			`Memory is off: Mnemopi did not start in ${shortenPath(sourceCwd)}. The omp log has the cause.`,
+		// Besides the refusal, one warning: it names Mnemopi and the directory the session is back in.
+		const warnings = output.filter(line => !line.startsWith("Move failed"));
+		expect(warnings).toEqual([expect.stringContaining("Mnemopi")]);
+		expect(warnings[0]).toContain(shortenPath(sourceCwd));
+		expect(warnings[0]).not.toContain(shortenPath(destinationCwd));
+		expect(current.getMnemopiSessionState()).toBeUndefined();
+	});
+
+	// The destination's Mnemopi runs when the rollback returns to the source; that return must not be refused over it.
+	it("headless /move returns to the source when the destination started Mnemopi and the move then failed", async () => {
+		const sourceCwd = tempDir.path();
+		const destinationCwd = path.join(sourceCwd, "destination");
+		const mnemopi = { scoping: "global", autoRetain: false, noEmbeddings: true, llmMode: "none" };
+		// An existing directory is not a SQLite database, so Mnemopi fails in the source.
+		await Bun.write(
+			path.join(getProjectAgentDir(sourceCwd), "config.yml"),
+			Bun.YAML.stringify({ memory: { backend: "mnemopi" }, mnemopi: { ...mnemopi, dbPath: sourceCwd } }),
+		);
+		await Bun.write(
+			path.join(getProjectAgentDir(destinationCwd), "config.yml"),
+			Bun.YAML.stringify({
+				memory: { backend: "mnemopi" },
+				mnemopi: { ...mnemopi, dbPath: path.join(sourceCwd, "destination.db") },
+			}),
+		);
+		settings = await Settings.loadIsolated({ cwd: sourceCwd, agentDir: path.join(sourceCwd, "agent") });
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getMnemopiSessionState()).toBeUndefined();
+		spyOn(current, "refreshProjectScope").mockRejectedValueOnce(new Error("destination project scope failed"));
+		const output: string[] = [];
+		const originalProjectDir = getProjectDir();
+		try {
+			await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
+				session: current,
+				sessionManager: current.sessionManager,
+				settings,
+				cwd: sourceCwd,
+				output: text => {
+					output.push(text);
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			});
+		} finally {
+			setProjectDir(originalProjectDir);
+		}
+		expect({ cwd: current.sessionManager.getCwd(), disposed: current.isDisposed }).toEqual({
+			cwd: sourceCwd,
+			disposed: false,
+		});
+		// The one failure reported is the destination's; the rollback itself succeeded.
+		expect(output.filter(line => line.startsWith("Move failed"))).toEqual([
+			expect.stringContaining("destination project scope failed"),
 		]);
+		const warnings = output.filter(line => !line.startsWith("Move failed"));
+		expect(warnings).toEqual([expect.stringContaining("Mnemopi")]);
+		expect(warnings[0]).not.toContain(shortenPath(destinationCwd));
 		expect(current.getMnemopiSessionState()).toBeUndefined();
 	});
 

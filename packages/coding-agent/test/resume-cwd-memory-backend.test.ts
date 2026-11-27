@@ -16,10 +16,13 @@ import { shortenPath } from "../src/utils/render-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { createModeTerminal } from "./helpers/mode-terminal";
 
-// The TUI /resume of a session recorded in another directory moves the process there and
-// rebinds memory. A Mnemopi start failure is best-effort at startup; the move must not end
-// the session over it unless Mnemopi was running before the move.
-describe("/resume into another directory with Mnemopi memory", () => {
+/** What memory does in a directory: Mnemopi starts there, Mnemopi fails to start there, or memory is off. */
+type MemoryInDirectory = "Mnemopi starts" | "Mnemopi fails" | "memory off";
+
+// A TUI /resume of a session recorded in another directory, and a TUI /move, move the process there and
+// rebind memory. A Mnemopi start failure is best-effort at startup; a move must not end the session over it
+// unless Mnemopi was running before the move, and a return to the source must not end it either.
+describe("TUI /resume and /move into another directory with Mnemopi memory", () => {
 	let root: TempDir;
 	let originalProjectDir: string;
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -41,42 +44,43 @@ describe("/resume into another directory with Mnemopi memory", () => {
 	});
 
 	/**
-	 * A TUI on a session in `source`, with Mnemopi selected in the agent config, and a saved
-	 * session recorded in `destination`. An existing directory is not a SQLite database: as
-	 * Mnemopi's database it fails every start, in the agent config, or only in the destination
-	 * through that project's config.
+	 * A TUI on a session in `source`, and a saved session recorded in `destination`. The agent config sets the
+	 * source's memory and the destination's project config overrides it. An existing directory is not a SQLite
+	 * database: as Mnemopi's database it fails every start. `targetModel` is the saved session's model.
 	 */
-	async function resumeFixture(mnemopiFails: "everywhere" | "in the destination") {
+	async function tuiFixture(
+		memory: { source: MemoryInDirectory; destination: MemoryInDirectory },
+		targetModel?: string,
+	) {
 		const sourceCwd = path.join(root.path(), "source");
 		const destinationCwd = path.join(root.path(), "destination");
 		const agentDir = path.join(root.path(), "agent");
 		const sourceDbPath = path.join(root.path(), "memory.db");
+		const destinationDbPath = path.join(root.path(), "destination-memory.db");
 		fs.mkdirSync(sourceCwd, { recursive: true });
 		fs.mkdirSync(destinationCwd, { recursive: true });
+		const memoryConfig = (inDirectory: MemoryInDirectory, dbPath: string) => ({
+			memory: { backend: inDirectory === "memory off" ? "off" : "mnemopi" },
+			mnemopi: { dbPath: inDirectory === "Mnemopi fails" ? root.path() : dbPath },
+		});
+		const source = memoryConfig(memory.source, sourceDbPath);
 		await Bun.write(
 			path.join(agentDir, "config.yml"),
 			Bun.YAML.stringify({
-				memory: { backend: "mnemopi" },
-				mnemopi: {
-					scoping: "global",
-					autoRetain: false,
-					noEmbeddings: true,
-					llmMode: "none",
-					dbPath: mnemopiFails === "everywhere" ? root.path() : sourceDbPath,
-				},
+				...source,
+				mnemopi: { scoping: "global", autoRetain: false, noEmbeddings: true, llmMode: "none", ...source.mnemopi },
 			}),
 		);
-		if (mnemopiFails === "in the destination") {
-			await Bun.write(
-				path.join(getProjectAgentDir(destinationCwd), "config.yml"),
-				Bun.YAML.stringify({ mnemopi: { dbPath: root.path() } }),
-			);
-		}
+		await Bun.write(
+			path.join(getProjectAgentDir(destinationCwd), "config.yml"),
+			Bun.YAML.stringify(memoryConfig(memory.destination, destinationDbPath)),
+		);
 
 		const target = SessionManager.create(
 			destinationCwd,
 			SessionManager.getDefaultSessionDir(destinationCwd, agentDir),
 		);
+		if (targetModel) target.appendModelChange(targetModel, "default");
 		target.appendMessage({ role: "user", content: "Destination session", timestamp: Date.now() });
 		await target.ensureOnDisk();
 		const targetFile = target.getSessionFile()!;
@@ -92,7 +96,7 @@ describe("/resume into another directory with Mnemopi memory", () => {
 		const authStorage = createInMemoryAuthStorage();
 		cleanups.push(() => authStorage.close());
 		authStorage.keys.setRuntime("openai", "test-key");
-		// The SDK starts memory in the background; a user's /resume comes after that start settled.
+		// The SDK starts memory in the background; a user's /resume or /move comes after that start settled.
 		const memoryStart = Promise.withResolvers<void>();
 		const start = mnemopiBackend.start;
 		const startSpy = vi.spyOn(mnemopiBackend, "start").mockImplementation(options => {
@@ -121,7 +125,7 @@ describe("/resume into another directory with Mnemopi memory", () => {
 			preloadedCustomToolPaths: [],
 		});
 		cleanups.push(() => session.dispose());
-		await memoryStart.promise;
+		if (memory.source !== "memory off") await memoryStart.promise;
 		startSpy.mockRestore();
 
 		// The mode's shell runs on an in-memory terminal, not the process terminal.
@@ -147,10 +151,30 @@ describe("/resume into another directory with Mnemopi memory", () => {
 		vi.spyOn(mode, "showError").mockImplementation(message => {
 			screen.push(`error: ${message}`);
 		});
+		/** The warnings on screen, in order. */
+		const warnings = () => screen.filter(line => line.startsWith("warning: "));
+		/** The kind of each line on screen, in order: `transcript`, `warning` or `error`. */
+		const kinds = () => screen.map(line => line.split(":")[0]);
+		/**
+		 * Watch the next TUI command's cwd applications: `settled` turns true once the first one, a forward move with
+		 * its own return to the source, has finished.
+		 */
+		const firstCwdApplication = () => {
+			const application = { settled: false };
+			const apply = mode.applyCwdChange.bind(mode);
+			vi.spyOn(mode, "applyCwdChange").mockImplementation(async (...args) => {
+				try {
+					return await apply(...args);
+				} finally {
+					application.settled = true;
+				}
+			});
+			return application;
+		};
 
-		/** Resume the destination session through the TUI and report what the user is left with. */
-		const resume = async () => {
-			const outcome = await mode.handleResumeSession(targetFile).then(
+		/** What the user is left with after a TUI command settled. */
+		const settle = async (command: Promise<unknown>) => {
+			const outcome = await command.then(
 				() => "resolved",
 				(error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -162,11 +186,32 @@ describe("/resume into another directory with Mnemopi memory", () => {
 				processCwd: getProjectDir(),
 			};
 		};
-		return { session, resume, screen, sourceCwd, destinationCwd, sourceFile, targetFile, sourceDbPath };
+		/** Resume the destination session through the TUI. */
+		const resume = () => settle(mode.handleResumeSession(targetFile));
+		/** `/move` the session to the destination through the TUI. */
+		const move = () => settle(mode.handleMoveCommand(destinationCwd));
+		return {
+			mode,
+			session,
+			resume,
+			move,
+			screen,
+			warnings,
+			kinds,
+			firstCwdApplication,
+			sourceCwd,
+			destinationCwd,
+			sourceFile,
+			targetFile,
+			sourceDbPath,
+		};
 	}
 
 	it("opens the session in its own directory with memory off and a warning when Mnemopi had not started", async () => {
-		const { session, resume, screen, destinationCwd, targetFile } = await resumeFixture("everywhere");
+		const { session, resume, screen, destinationCwd, targetFile } = await tuiFixture({
+			source: "Mnemopi fails",
+			destination: "Mnemopi fails",
+		});
 		// Startup is best-effort: the session runs without memory.
 		expect(session.getMnemopiSessionState()).toBeUndefined();
 
@@ -182,8 +227,10 @@ describe("/resume into another directory with Mnemopi memory", () => {
 	});
 
 	it("refuses the move and keeps the session in its directory when Mnemopi ran there", async () => {
-		const { session, resume, screen, sourceCwd, sourceFile, sourceDbPath } =
-			await resumeFixture("in the destination");
+		const { session, resume, screen, sourceCwd, sourceFile, sourceDbPath } = await tuiFixture({
+			source: "Mnemopi starts",
+			destination: "Mnemopi fails",
+		});
 		expect(session.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
 
 		expect(await resume()).toEqual({
@@ -198,13 +245,15 @@ describe("/resume into another directory with Mnemopi memory", () => {
 		expect(screen).toEqual([expect.stringMatching(/^error: .*Mnemopi backend failed to initialise/)]);
 	});
 
-	// The refused move already stopped the source's Mnemopi, so the rollback reads its own state: no memory ran. It
-	// takes the session back to its directory with memory off, even when the source's Mnemopi cannot start again.
+	// The refused move already stopped the source's Mnemopi. The return to the source takes the session back to its
+	// directory with memory off, even when the source's Mnemopi cannot start again.
 	it("keeps the session in its directory, with the error and then a warning, when the rollback cannot restart Mnemopi", async () => {
-		const { session, resume, screen, sourceCwd, sourceFile, sourceDbPath } =
-			await resumeFixture("in the destination");
+		const { session, resume, kinds, warnings, sourceCwd, sourceFile, sourceDbPath } = await tuiFixture({
+			source: "Mnemopi starts",
+			destination: "Mnemopi fails",
+		});
 		expect(session.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
-		// From here no Mnemopi start installs a state: neither the destination's nor the source's in the rollback.
+		// From here no Mnemopi start installs a state, as a failed start does.
 		vi.spyOn(mnemopiBackend, "start").mockImplementation(async () => {});
 
 		expect(await resume()).toEqual({
@@ -215,10 +264,144 @@ describe("/resume into another directory with Mnemopi memory", () => {
 			processCwd: sourceCwd,
 		});
 		expect(session.getMnemopiSessionState()).toBeUndefined();
-		// The switch does not commit, so nothing re-renders the transcript: the rollback's warning shows at once.
-		expect(screen).toEqual([
-			expect.stringMatching(/^error: .*Mnemopi backend failed to initialise/),
-			`warning: Memory is off: Mnemopi did not start in ${shortenPath(sourceCwd)}. The omp log has the cause.`,
-		]);
+		// The switch does not commit, so nothing re-renders the transcript: the warning shows at once, after the error.
+		expect(kinds()).toEqual(["error", "warning"]);
+		expect(warnings()).toEqual([expect.stringContaining("Mnemopi")]);
+		expect(warnings()[0]).toContain(shortenPath(sourceCwd));
+	});
+
+	// The destination's Mnemopi runs when the resume rolls back; it is not memory the source had, so the return to
+	// the source must not be refused over it.
+	it("returns to the source with memory off when the destination started Mnemopi and the resume then failed", async () => {
+		const { session, resume, warnings, sourceCwd, sourceFile } = await tuiFixture(
+			{ source: "Mnemopi fails", destination: "Mnemopi starts" },
+			"missing-provider/missing-model",
+		);
+		expect(session.getMnemopiSessionState()).toBeUndefined();
+
+		expect(await resume()).toEqual({
+			outcome: expect.stringMatching(/^threw: .*missing-provider\/missing-model/),
+			disposed: false,
+			sessionFile: sourceFile,
+			cwd: sourceCwd,
+			processCwd: sourceCwd,
+		});
+		expect(session.getMnemopiSessionState()).toBeUndefined();
+		expect(warnings()).toEqual([expect.stringContaining("Mnemopi")]);
+		expect(warnings()[0]).toContain(shortenPath(sourceCwd));
+	});
+
+	it("shows no warning for the abandoned destination when the resume rolls back to a source without memory", async () => {
+		const { session, resume, warnings, sourceCwd, sourceFile } = await tuiFixture(
+			{ source: "memory off", destination: "Mnemopi fails" },
+			"missing-provider/missing-model",
+		);
+
+		expect(await resume()).toEqual({
+			outcome: expect.stringMatching(/^threw: .*missing-provider\/missing-model/),
+			disposed: false,
+			sessionFile: sourceFile,
+			cwd: sourceCwd,
+			processCwd: sourceCwd,
+		});
+		expect(session.getMnemopiSessionState()).toBeUndefined();
+		expect(warnings()).toEqual([]);
+	});
+
+	// `/move` rolls the session file back and then applies the source directory a second time.
+	it("/move shows one warning, after the error, when its rollback cannot restart Mnemopi", async () => {
+		const { session, move, kinds, warnings, sourceCwd, sourceDbPath } = await tuiFixture({
+			source: "Mnemopi starts",
+			destination: "Mnemopi fails",
+		});
+		expect(session.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
+		// From here no Mnemopi start installs a state, as a failed start does.
+		vi.spyOn(mnemopiBackend, "start").mockImplementation(async () => {});
+
+		expect(await move()).toMatchObject({
+			outcome: "resolved",
+			disposed: false,
+			cwd: sourceCwd,
+			processCwd: sourceCwd,
+		});
+		expect(session.getMnemopiSessionState()).toBeUndefined();
+		expect(kinds()).toEqual(["error", "warning"]);
+		expect(warnings()).toEqual([expect.stringContaining("Mnemopi")]);
+		expect(warnings()[0]).toContain(shortenPath(sourceCwd));
+	});
+
+	it("/move shows no warning when the second application of the source restarts Mnemopi", async () => {
+		const { session, move, warnings, firstCwdApplication, sourceCwd, sourceDbPath } = await tuiFixture({
+			source: "Mnemopi starts",
+			destination: "Mnemopi fails",
+		});
+		expect(session.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
+		// Mnemopi fails to start until the first cwd application, the refused destination and its own return to the
+		// source, has settled; it starts again for the second.
+		const application = firstCwdApplication();
+		const start = mnemopiBackend.start;
+		vi.spyOn(mnemopiBackend, "start").mockImplementation(async options => {
+			if (application.settled) await start.call(mnemopiBackend, options);
+		});
+
+		expect(await move()).toMatchObject({
+			outcome: "resolved",
+			disposed: false,
+			cwd: sourceCwd,
+			processCwd: sourceCwd,
+		});
+		expect(session.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
+		expect(warnings()).toEqual([]);
+	});
+
+	// The destination's Mnemopi runs when the move's own return to the source starts; that return must not be
+	// refused over it.
+	it("/move returns to the source at once when the destination started Mnemopi and the move then failed", async () => {
+		const { session, move, screen, kinds, warnings, sourceCwd } = await tuiFixture({
+			source: "Mnemopi fails",
+			destination: "Mnemopi starts",
+		});
+		expect(session.getMnemopiSessionState()).toBeUndefined();
+		vi.spyOn(session, "refreshProjectScope").mockRejectedValueOnce(new Error("destination project scope failed"));
+
+		expect(await move()).toMatchObject({
+			outcome: "resolved",
+			disposed: false,
+			cwd: sourceCwd,
+			processCwd: sourceCwd,
+		});
+		expect(session.getMnemopiSessionState()).toBeUndefined();
+		// One error, the destination's, then the warning for the source the session is back in.
+		expect(kinds()).toEqual(["error", "warning"]);
+		expect(screen[0]).toContain("destination project scope failed");
+		expect(warnings()[0]).toContain(shortenPath(sourceCwd));
+	});
+
+	// The move's own return restarted the source's Mnemopi; the rollback applies the source again and must not be
+	// refused when Mnemopi does not start that time.
+	it("/move returns to the source when the second application of the source cannot restart Mnemopi", async () => {
+		const { session, move, screen, kinds, warnings, firstCwdApplication, sourceCwd, sourceDbPath } = await tuiFixture(
+			{ source: "Mnemopi starts", destination: "Mnemopi starts" },
+		);
+		expect(session.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
+		vi.spyOn(session, "refreshProjectScope").mockRejectedValueOnce(new Error("destination project scope failed"));
+		// Mnemopi starts until the first cwd application, the destination and its own return to the source, has
+		// settled; it fails for the second.
+		const application = firstCwdApplication();
+		const start = mnemopiBackend.start;
+		vi.spyOn(mnemopiBackend, "start").mockImplementation(async options => {
+			if (!application.settled) await start.call(mnemopiBackend, options);
+		});
+
+		expect(await move()).toMatchObject({
+			outcome: "resolved",
+			disposed: false,
+			cwd: sourceCwd,
+			processCwd: sourceCwd,
+		});
+		expect(session.getMnemopiSessionState()).toBeUndefined();
+		expect(kinds()).toEqual(["error", "warning"]);
+		expect(screen[0]).toContain("destination project scope failed");
+		expect(warnings()[0]).toContain(shortenPath(sourceCwd));
 	});
 });
