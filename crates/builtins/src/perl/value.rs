@@ -15,6 +15,12 @@ use rustc_hash::FxBuildHasher;
 
 pub(in crate::perl) use super::code::{CodeBody, Cv};
 
+/// Counts non-continuation bytes in a Perl UTF-8 span without validating it.
+pub(in crate::perl) fn count_utf8_starts(bytes: &[u8]) -> usize {
+	const CONTINUATIONS: xutf::UnitSet = xutf::UnitSet::from_ranges(&[0x80..=0xbf]);
+	bytes.len() - CONTINUATIONS.count::<xutf::Utf8>(bytes)
+}
+
 /// A string with Perl's separate byte/UTF-8 representation flag.
 #[derive(Clone, Default, Debug)]
 pub(in crate::perl) struct PStr {

@@ -918,25 +918,22 @@ impl Sanitized {
 		let mut spans = Vec::new();
 		let mut at = 0;
 		while at < original.len() {
-			match std::str::from_utf8(&original[at..]) {
-				Ok(_) => { bytes.extend_from_slice(&original[at..]); break; }
-				Err(error) => {
-					let good = error.valid_up_to();
-					bytes.extend_from_slice(&original[at..at + good]);
-					at += good;
-					// One perl character: the lead byte's length (perl's
-					// extended UTF-8 allows up to 13 bytes) while continuation
-					// bytes follow, else the single bad byte.
-					let lead = original[at];
-					let width = match lead.leading_ones() { 0 | 1 => 1, 7 | 8 => if lead == 0xFF { 13 } else { 7 }, n => n as usize };
-					let mut end = at + 1;
-					while end < at + width && original.get(end).is_some_and(|b| b & 0xC0 == 0x80) { end += 1; }
-					let copy = bytes.len();
-					bytes.extend_from_slice(REPLACEMENT);
-					spans.push((at, end, copy, bytes.len()));
-					at = end;
-				}
+			let valid = xutf::valid_prefix(&original[at..]);
+			bytes.extend_from_slice(valid.as_bytes());
+			at += valid.len();
+			if at == original.len() {
+				break;
 			}
+			// One Perl character: the lead byte's length (up to 13 bytes)
+			// while continuation bytes follow, else the single bad byte.
+			let lead = original[at];
+			let width = match lead.leading_ones() { 0 | 1 => 1, 7 | 8 => if lead == 0xFF { 13 } else { 7 }, n => n as usize };
+			let mut end = at + 1;
+			while end < at + width && original.get(end).is_some_and(|b| b & 0xC0 == 0x80) { end += 1; }
+			let copy = bytes.len();
+			bytes.extend_from_slice(REPLACEMENT);
+			spans.push((at, end, copy, bytes.len()));
+			at = end;
 		}
 		Self { bytes, spans }
 	}
