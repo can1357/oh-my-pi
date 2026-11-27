@@ -143,15 +143,20 @@ describe("ExtensionContext.asyncJobs", () => {
 		gate.resolve("unused");
 	});
 
-	it("stores an extension-supplied label as one bounded line", async () => {
+	it("stores an extension-supplied label and intent as one bounded line each", async () => {
 		const ctx = await extensionContext();
 		const gate = Promise.withResolvers<string>();
-		const jobId = ctx.asyncJobs!.register(`build\n\ttarget ${"x".repeat(300)}`, () => gate.promise);
+		const jobId = ctx.asyncJobs!.register(`build\n\ttarget ${"x".repeat(300)}`, () => gate.promise, {
+			intent: `ship\n\nrelease ${"y".repeat(300)}`,
+		});
 
-		const label = session!.getAsyncJobSnapshot()!.running.find(job => job.id === jobId)!.label;
-		expect(label).toStartWith("build target xxx");
-		expect(label).not.toContain("\n");
-		expect(label.length).toBeLessThanOrEqual(ASYNC_JOB_LABEL_MAX_CHARS);
+		const job = session!.getAsyncJobSnapshot()!.running.find(row => row.id === jobId)!;
+		expect(job.label).toStartWith("build target xxx");
+		expect(job.intent).toStartWith("ship release yyy");
+		for (const text of [job.label, job.intent!]) {
+			expect(text).not.toContain("\n");
+			expect(text.length).toBeLessThanOrEqual(ASYNC_JOB_LABEL_MAX_CHARS);
+		}
 		gate.resolve("unused");
 	});
 

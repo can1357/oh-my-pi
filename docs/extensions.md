@@ -564,7 +564,7 @@ pi.registerTool({
 });
 ```
 
-The label is collapsed to one line and cut to 120 characters, since every `wait` report repeats it. `options.intent` is the one-line purpose job views show next to the label; `reportProgress(text)` replaces the job's latest progress text, which job views show as its output while it runs. `register` throws when the session's running-job limit is reached.
+`options.intent` is the one-line purpose job views show next to the label. The label and intent are each collapsed to one line and cut to 120 characters, since every `wait` report repeats them; `reportProgress(text)` replaces the job's latest progress text, which job views show as its output while it runs. `register` throws when the session's running-job limit is reached.
 
 ### Model selection (`ctx.models`)
 

@@ -2067,11 +2067,14 @@ export class ExtensionRunner {
 						register: (label, run, options) =>
 							asyncJobManager.register(
 								"extension",
-								// Every `wait` report repeats the label: keep extension-supplied text to one bounded line.
+								// Every `wait` report repeats the label and intent: keep extension text to one bounded line.
 								formatAsyncJobLabel(label),
 								({ jobId, signal, reportProgress }) =>
 									run({ jobId, signal, reportProgress: text => reportProgress(text) }),
-								{ ownerId: this.agent.id, intent: options?.intent },
+								{
+									ownerId: this.agent.id,
+									intent: options?.intent ? formatAsyncJobLabel(options.intent) : undefined,
+								},
 							),
 					}
 				: undefined,
