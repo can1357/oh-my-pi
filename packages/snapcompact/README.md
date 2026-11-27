@@ -24,7 +24,7 @@ Frame shapes are provider-aware, chosen by SQuAD recall evals (see `research/`) 
 
 `resolveShape({ api, id })` matches the model id, not just the wire API — a Claude routed through Vertex or OpenRouter keeps its Claude shape. Frames are priced by the reading model's lineage: its catalog `image-tokenization` rule (so that Claude is billed as Claude, and Opus 4.6 under the standard 1,568-token tier), falling back to the catalog rule for the wire API carrying the request when the lineage has none. A reader with neither costs `FRAME_TOKEN_ESTIMATE` per frame. Archive sizing (`plannedFrameTokens`) charges each frame its own price when the rule is `verified` against provider billing, and at least `FRAME_TOKEN_ESTIMATE` otherwise.
 
-Narrow grids give wide CJK glyphs two cells. Auto uses `cjk16-bw` (one 16×16 cell per glyph) for CJK-heavy text. All pages use the same face; no glyph is borrowed from a second font.
+Narrow grids give wide CJK glyphs two cells. Auto uses `cjk16-bw` for CJK-heavy text: one 16×22 cell per glyph, with extra spacing between rows. All pages use the same face; no glyph is borrowed from a second font.
 
 A host that downscales images before the model reads them (catalog `image-max-edge`; Cursor fits Claude and GPT images into 1024×1024) gets frames rendered at that edge, forced variants included, so the glyphs reach the model at the size they were drawn.
 

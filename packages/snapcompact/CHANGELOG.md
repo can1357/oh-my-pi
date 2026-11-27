@@ -6,6 +6,10 @@
 
 - Snapcompact uses one installed font for the entire transcript and falls back to text when no single font covers it. The `silver16-bw` shape is now `cjk16-bw`.
 
+### Changed
+
+- Increased row spacing in CJK frames so vision models can distinguish horizontal lines.
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

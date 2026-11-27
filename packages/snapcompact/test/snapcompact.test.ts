@@ -574,10 +574,11 @@ describe("shape resolution", () => {
 		expect(snapcompact.isShape({ ...snapcompact.SHAPES.openai, imageDetail: "original" })).toBe(true);
 	});
 
-	it("picks the square grid for CJK-heavy text", () => {
+	it("gives CJK-heavy text more room between rows in auto mode", () => {
 		const text = "こんにちは 你好 안녕 世界 한국어";
 		const model = { api: "anthropic-messages" } satisfies snapcompact.ShapeTarget;
-		expect(snapcompact.resolveShapeForText(text, model)).toEqual(snapcompact.resolveShape(model, "cjk16-bw"));
+		const shape = snapcompact.resolveShapeForText(text, model);
+		expect(snapcompact.geometry(shape, 1568)).toEqual({ cols: 98, rows: 71, capacity: 6958 });
 		const configured = { ...model, snapcompactShape: { variant: "8on22-bw", frameSize: 1024 } };
 		expect(snapcompact.resolveShapeForText(text, configured)).toMatchObject({ cellWidth: 8, frameSize: 1024 });
 	});
@@ -757,7 +758,7 @@ describe("renderMany", () => {
 	});
 
 	it.skipIf(!snapcompact.scanRenderability("你").isSafe)(
-		"counts wide CJK as two cells on a narrow grid and one on a square grid",
+		"counts wide CJK as two cells on a narrow grid and one on a full-width grid",
 		() => {
 			const bitmap = snapcompact.resolveShape(undefined, "8on16-bw"); // cols 8 (even) at 64px
 			const cap = snapcompact.geometry(bitmap, 64).capacity;
@@ -766,10 +767,10 @@ describe("renderMany", () => {
 			expect(snapcompact.frames("你".repeat(cap / 2 + 1), { shape: bitmap, frameSize: 64 })).toBe(2);
 			// ASCII stays one cell per char on the same shape.
 			expect(snapcompact.frames("a".repeat(cap), { shape: bitmap, frameSize: 64 })).toBe(1);
-			// The square CJK grid draws CJK one cell each (no doubling).
-			const square = snapcompact.resolveShape(undefined, "cjk16-bw");
-			const squareCap = snapcompact.geometry(square, 64).capacity;
-			expect(snapcompact.frames("你".repeat(squareCap), { shape: square, frameSize: 64 })).toBe(1);
+			const spaced = snapcompact.resolveShape(undefined, "cjk16-bw");
+			const spacedCap = snapcompact.geometry(spaced, 64).capacity;
+			expect(snapcompact.frames("你".repeat(spacedCap), { shape: spaced, frameSize: 64 })).toBe(1);
+			expect(snapcompact.frames("你".repeat(spacedCap + 1), { shape: spaced, frameSize: 64 })).toBe(2);
 		},
 	);
 

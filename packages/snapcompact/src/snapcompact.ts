@@ -83,7 +83,7 @@ export interface Shape {
 	cellWidth: number;
 	/** Target cell pitch in pixels. */
 	cellHeight: number;
-	/** Square CJK grids use one cell per glyph; narrower grids use two for wide glyphs. */
+	/** CJK grids use one cell per glyph; narrower grids use two for wide glyphs. */
 	wideCells?: false;
 	/** Ink: `sent` cycles six hues at sentence boundaries; `bw` is black. */
 	variant: "sent" | "bw";
@@ -151,7 +151,8 @@ export const SHAPE_VARIANTS = {
 	"cjk16-bw": {
 		wideCells: false,
 		cellWidth: 16,
-		cellHeight: 16,
+		// Extra leading makes the row direction unambiguous to vision readers.
+		cellHeight: 22,
 		variant: "bw",
 		lineRepeat: 1,
 		frameSize: 1568,
@@ -466,7 +467,7 @@ function isCjkHeavyText(text: string): boolean {
 	return wideChars >= CJK_HEAVY_MIN_WIDE_CHARS && wideChars / graphicChars >= CJK_HEAVY_WIDE_RATIO;
 }
 
-/** Pick the reader's grid, using square cells for CJK-heavy text in auto mode. */
+/** Pick the reader's grid, using wider cells with extra leading for CJK-heavy text in auto mode. */
 export function resolveShapeForText(text: string, model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
 	const shape = resolveShape(model, variant);
 	if ((variant === undefined || variant === "auto") && !configuredShape(model) && isCjkHeavyText(text)) {
@@ -1435,7 +1436,7 @@ function charCells(ch: string, wideCells: boolean): number {
 	return wideCells && cp !== undefined && isWideCodePoint(cp) ? 2 : 1;
 }
 
-/** Wide code points span two cells unless the grid already uses square CJK cells. */
+/** Wide code points span two cells unless the grid already uses full-width CJK cells. */
 function usesWideCells(shape: Pick<Shape, "wideCells">): boolean {
 	return shape.wideCells !== false;
 }
@@ -2031,7 +2032,7 @@ export function capFrameDataBytes(
 
 /** Denser companion of `high` for the foveated archive middle: same family and
  *  frame size (identical per-frame bill) but a tighter cell. Returns `high`
- *  unchanged for doc layouts, square CJK grids, or when no denser
+ *  unchanged for doc layouts, CJK grids, or when no denser
  *  variant exists (foveation off). */
 function denseCompanion(high: Shape, api: Api | undefined): Shape {
 	if (high.columns === 2 || high.wideCells === false) return high;

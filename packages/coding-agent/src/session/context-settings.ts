@@ -616,8 +616,8 @@ export const cfgSnapcompactShape = register({
 			},
 			{
 				value: "cjk16-bw",
-				label: "CJK 16, Black",
-				description: "16px square cells, with each wide character using one cell.",
+				label: "CJK 16x22, black",
+				description: "16px-wide cells with extra row spacing. Each wide character uses one cell.",
 			},
 			{
 				value: "doc-8on16-bw",
