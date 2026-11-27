@@ -326,7 +326,6 @@ export class KeyCascade implements KeysApi {
 					token: oauthSelection.credential.access,
 					enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 					apiEndpoint: oauthSelection.credential.apiEndpoint,
-					tokenBasedBilling: oauthSelection.credential.tokenBasedBilling,
 				});
 			}
 			if (getApiKey) return this.#encodeOAuthKey(getApiKey, oauthSelection.credential);
