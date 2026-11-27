@@ -1760,8 +1760,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		return resolveSignalAbortReason();
 	};
 	const PROGRESS_COALESCE_MS = 150;
+	// A snapshot whose only change is the clock still goes out this often, so
+	// displays that draw elapsed time straight from `durationMs` keep advancing.
+	const PROGRESS_HEARTBEAT_MS = 5_000;
 	let lastProgressEmitMs = 0;
 	let progressTimeoutId: NodeJS.Timeout | null = null;
+	// Shallow copy of the last emitted progress: a snapshot that differs from it only in `durationMs` is dropped.
+	let lastEmittedProgress: AgentProgress | undefined;
 
 	// Recompute progress.recentOutput from the capped tail. Deferred: text_delta
 	// appends only extend the tail and mark it dirty; the (up to 8KB) split/filter
@@ -1816,10 +1821,49 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		return extractToolArgsPreview(args, toolName, editMode);
 	};
 
-	const emitProgressNow = () => {
+	/**
+	 * Whether progress differs from the last emitted snapshot in anything but `durationMs`.
+	 * Fields compare by identity, as updates replace a field's value. Two exceptions: the
+	 * emit-time rebuilds of `recentOutput` and `streaming` compare by value, and
+	 * `recentTools` and `extractedToolData` change in place only on `tool_execution_end`,
+	 * which always flushes.
+	 */
+	const progressChangedSinceEmit = (): boolean => {
+		const last = lastEmittedProgress;
+		if (!last) return true;
+		let keys = 0;
+		for (const key in progress) {
+			keys++;
+			if (key === "durationMs" || key === "recentOutput" || key === "streaming") continue;
+			if (progress[key as keyof AgentProgress] !== last[key as keyof AgentProgress]) return true;
+		}
+		if (keys !== Object.keys(last).length) return true;
+		const output = progress.recentOutput;
+		const lastOutput = last.recentOutput;
+		if (output !== lastOutput) {
+			if (output.length !== lastOutput.length) return true;
+			for (let i = 0; i < output.length; i++) if (output[i] !== lastOutput[i]) return true;
+		}
+		const streaming = progress.streaming;
+		const lastStreaming = last.streaming;
+		if (streaming === lastStreaming) return false;
+		if (streaming?.kind !== "call" || lastStreaming?.kind !== "call") return true;
+		return (
+			streaming.tool !== lastStreaming.tool ||
+			streaming.args !== lastStreaming.args ||
+			streaming.argsKey !== lastStreaming.argsKey ||
+			streaming.intent !== lastStreaming.intent
+		);
+	};
+
+	/** Publishes progress; unless forced, skips a snapshot whose only change is the clock until the heartbeat is due. */
+	const emitProgressNow = (force = false) => {
 		refreshRecentOutput();
 		refreshStreamingCall();
-		progress.durationMs = Date.now() - startTime;
+		const now = Date.now();
+		if (!force && now - lastProgressEmitMs < PROGRESS_HEARTBEAT_MS && !progressChangedSinceEmit()) return;
+		progress.durationMs = now - startTime;
+		lastEmittedProgress = { ...progress };
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
@@ -1845,7 +1889,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				clearTimeout(progressTimeoutId);
 				progressTimeoutId = null;
 			}
-			emitProgressNow();
+			emitProgressNow(true);
 			return;
 		}
 		const now = Date.now();
