@@ -14,6 +14,7 @@ import { factoryDroidRegistry, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-ca
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { writeThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
@@ -950,6 +951,7 @@ describe("ModelRegistry", () => {
 						api: "openai-responses",
 						compat: {
 							supportsConfigurationUpdate: false,
+							supportsPromptCacheBreakpoints: true,
 						},
 						models: [
 							{
@@ -1096,6 +1098,11 @@ describe("ModelRegistry", () => {
 			expect(getOpenAICompat(model)?.supportsConfigurationUpdate).toBe(false);
 			// …and beats the gpt-6-astra class rule on the resolved view the driver reads.
 			expect(getSupportsConfigurationUpdate(model)).toBe(false);
+		});
+
+		test("custom Responses providers can declare explicit prompt-cache breakpoints", () => {
+			const model = customAstraProxyCompat.find("astra-proxy", "gpt-6-astra");
+			expect(getOpenAICompat(model)?.supportsPromptCacheBreakpoints).toBe(true);
 		});
 
 		test("custom Responses providers preserve compaction config", () => {
@@ -4072,6 +4079,43 @@ describe("ModelRegistry", () => {
 			expect(models[0]?.thinking?.effortRouting?.off).toBe("[Kiro] claude-opus-4-7");
 			// Saved selectors for the consumed twin resolve via the grammar alias.
 			expect(kiroTwins.find("newapi", "[Kiro] claude-opus-4-7-thinking")?.id).toBe("[Kiro] claude-opus-4-7");
+		});
+
+		test("a gateway model id with an @upstream prefix keeps its full wire id at every effort", () => {
+			const modelsPath = path.join(tempDir, "models.yml");
+			fs.writeFileSync(
+				modelsPath,
+				`providers:
+  gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: test
+    authHeader: true
+    headers:
+      x-portkey-api-key: test
+    models:
+      - id: "@modal/GLM-5-2-FP8"
+        name: glm-5p2 (modal)
+        reasoning: true
+        input: [text]
+        contextWindow: 1048576
+        maxTokens: 131072
+        compat:
+          thinkingFormat: openai
+          supportsReasoningEffort: true
+          reasoningEffortMap:
+            minimal: none
+            low: low
+            medium: medium
+            high: high
+            xhigh: max
+`,
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const model = registry.find("gateway", "@modal/GLM-5-2-FP8");
+			expect(model).toBeDefined();
+			expect(resolveWireModelId(model!, Effort.High)).toBe("@modal/GLM-5-2-FP8");
+			expect(resolveWireModelId(model!, undefined)).toBe("@modal/GLM-5-2-FP8");
 		});
 	});
 });

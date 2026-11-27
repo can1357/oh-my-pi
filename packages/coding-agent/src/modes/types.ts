@@ -39,6 +39,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { AgentViewSession } from "../session/agent-session-handle";
 import type { DroppedPrompt } from "../session/agent-session-types";
 import type { CompactMode } from "../session/compact-modes";
+import type { ToolActivityMode } from "./settings";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
@@ -304,6 +305,8 @@ export interface ToolCallSpec {
 	readonly id: string;
 	/** Directory the call's relative paths resolve against. */
 	readonly cwd: string;
+	/** Wall-clock ms the model made the call (a replayed call's message time); defaults to now. */
+	readonly timestamp?: number;
 }
 
 /**
@@ -318,8 +321,8 @@ export interface PendingTool {
 	readonly call?: ToolCall;
 	readonly group?: ReadGroup;
 	readonly reply?: AssistantView;
-	/** Streamed (or final) args. */
-	updateArgs(args: unknown, toolCallId: string): void;
+	/** Streamed (or final) args; `timestamp` dates a read joining a group (wall-clock ms, default now). */
+	updateArgs(args: unknown, toolCallId: string, timestamp?: number): void;
 	/** The edit preview a streaming edit-like call pushes. */
 	updateStreamPreview(preview: unknown): void;
 	/** A progress frame (`partial`) or the final result. */
@@ -607,14 +610,14 @@ export interface InteractiveModeContext {
 	isBashMode: boolean;
 	/**
 	 * Ctrl+O: tool output, read groups, `!`/`$` runs and expandable messages show in full.
-	 * Reactive like every display flag below ({@link hideToolActivity}, {@link hideThinkingBlock},
+	 * Reactive like every display flag below ({@link toolActivity}, {@link hideThinkingBlock},
 	 * {@link proseOnlyThinking}, {@link expandThinkingBlocks}): assigning it repaints every live
 	 * block that reads it; blocks already in terminal scrollback keep their rows until the
 	 * scrollback is rebuilt (`shell.host?.replayHistory()`). No walking blocks to push it.
 	 */
 	toolOutputExpanded: boolean;
-	/** Tool activity hidden (reactive, see {@link toolOutputExpanded}). */
-	hideToolActivity: boolean;
+	/** How tool activity shows: `display.toolActivity` (reactive, see {@link toolOutputExpanded}). */
+	toolActivity: ToolActivityMode;
 	todoExpanded: boolean;
 	planModeEnabled: boolean;
 	vibeModeEnabled: boolean;
@@ -779,6 +782,8 @@ export interface InteractiveModeContext {
 	showSessionInfo(info: string, context?: ContextUsage): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
+	/** Hide the deferred command output preview; the output still mounts at the settle. False when none is shown (Esc falls through). */
+	dismissDeferredCommandOutput(): boolean;
 	/**
 	 * Remove every transcript block (disposing their roots, so timers and subscriptions stop) and
 	 * forget the block maps. Used before a full rebuild.

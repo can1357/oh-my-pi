@@ -61,7 +61,7 @@ export type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hook
 export interface MessageFaceEnv {
 	/** The transcript-wide expansion (`ctrl+o`). */
 	readonly expanded: Accessor<boolean>;
-	/** Tool activity shown (`display.hideToolActivity` off). */
+	/** Tool activity shown (`display.toolActivity` other than `hidden`). */
 	readonly activityVisible: Accessor<boolean>;
 	/** Most note rows a collapsed advisor card shows (`display.advisorCollapsedLines`; 0: no cap). */
 	readonly advisorCollapsedLines: Accessor<number>;
@@ -294,6 +294,7 @@ function promptFace(
 					reaction,
 					actions: env.actions,
 					promptZones: env.promptZones,
+					promptZoneKey: message,
 					magicKeywords: env.magicKeywords,
 					onAction: act => env.onUserAction(act, text, message.timestamp),
 				}}

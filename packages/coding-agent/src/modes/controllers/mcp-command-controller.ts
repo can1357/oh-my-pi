@@ -953,7 +953,7 @@ export class MCPCommandController {
 				lines.push("");
 			}
 
-			// Show discovered servers (from .claude.json, .cursor/mcp.json, .vscode/mcp.json, etc.)
+			// Show discovered servers (from .claude/.mcp.json, .codex/config.toml, opencode.json, etc.)
 			if (discoveredServers.length > 0) {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
 					lines.push(currentTheme().fg("accent", providerName) + currentTheme().fg("muted", ` (${shortPath}):`));

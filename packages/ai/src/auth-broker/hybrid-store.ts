@@ -35,7 +35,7 @@ import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
 import { AuthBrokerUnservedProviderError, type RemoteAuthCredentialStore } from "./remote-store";
 
-/** Providers whose logins never reach the broker: it could not refresh them without this machine's key. */
+/** Providers whose logins never reach the broker: their refresh token is bound to a key that stays on this machine. */
 const DEVICE_BOUND_PROVIDERS: readonly string[] = authProviders()
 	.filter(policy => policy.deviceBound)
 	.map(policy => policy.id);

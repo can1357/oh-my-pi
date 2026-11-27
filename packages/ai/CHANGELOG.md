@@ -4,15 +4,36 @@
 
 ### Added
 
+- Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it
+- Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+- Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
+- `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added Kimi Code global-region support: `kimi-code-global` models stream with Kimi client headers and report quota from `api.kimi.ai` ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
+
+### Removed
+
+- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
+- Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+- Speech synthesis rejects a 2xx response with a JSON body as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added xAI speech-to-text support, including use through the authentication gateway.
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
 - Added a `sign-out` provider hook and `OAuthApi.signOut`: removing a login runs the hook, which deletes the account's secrets kept outside the credential store and revokes the grant at the provider
+- Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` / `KIMI_CODE_GLOBAL_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
+- Logging in again to an MCP OAuth server now clears the disabled credential left by its earlier refresh failure ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
+- Fixed GitHub Copilot Claude text replies arriving as a `msg_blocked` placeholder prefixed with "cached data for request … not found": Copilot Anthropic Messages requests now send the conversation id as `X-Client-Session-Id` ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
 
 ### Changed
 
+- OpenAI prompt-cache breakpoints now cover stable assistant, tool, and function-output boundaries, with nested gateway markers rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - Expanded xAI text-to-speech support with configurable playback speed, PCM output, and inputs up to 60,000 characters.
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
+- The tool-call loop guard now also detects consecutive tool calls whose arguments drift only in numbers, such as `echo merge-live-3` after `echo merge-live-2`, when the assistant's text repeats. Progress-bearing arguments (`grep`'s `skip`, `offset`, cursor keys) and digits inside path-like tokens of command strings keep their values. Legitimate pagination and sweeps over distinct files are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))
 
 ### Fixed
 
@@ -23,10 +44,6 @@
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.
 - Corrected Claude usage reporting to label Team premium seats as “Team 5x” rather than “Max 5x”.
-
-### Removed
-
-- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
 
 ## [19.2.1] - 2026-11-25
 

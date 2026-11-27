@@ -31,12 +31,12 @@ function fingerprintOAuthBearer(bearer: string): string {
 }
 /**
  * Strip broker-invisible secrets before a credential crosses the wire: the
- * refresh token becomes the sentinel and the Kiro OIDC client secret is
- * dropped. Every broker-bound path (snapshot, upsert, refresh reply) uses this.
+ * refresh token becomes the sentinel and the Kiro OIDC client secret and DPoP
+ * key are dropped. Every broker-bound path (snapshot, upsert, refresh reply) uses this.
  */
 export function redactCredentialForWire(credential: AuthCredential): SnapshotCredential {
 	if (credential.type === "api_key") return credential;
-	const { kiroClientSecret: _kiroClientSecret, ...withoutSecrets } = credential;
+	const { kiroClientSecret: _kiroClientSecret, dpopKey: _dpopKey, ...withoutSecrets } = credential;
 	return { ...withoutSecrets, refresh: REMOTE_REFRESH_SENTINEL };
 }
 

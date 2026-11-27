@@ -14,7 +14,7 @@
  */
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { isSpeechApi, synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
+import { isSpeechApi, speechModelSupportsFormat, synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import {
 	type ShellSpeech,
 	ShellSpeechOp,
@@ -150,7 +150,7 @@ export class ShellSpeechHost {
 				if (offline && model.provider !== sessionProvider) continue;
 				if (model.api === "local-inference") {
 					if (isTtsLocalModelKey(model.id)) backends.push({ kind: "local", modelKey: model.id });
-				} else if (isSpeechApi(model.api)) {
+				} else if (isSpeechApi(model.api) && speechModelSupportsFormat(model, "wav")) {
 					backends.push({ kind: "cloud", model, registry: modelRegistry });
 				}
 			}

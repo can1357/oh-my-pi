@@ -9,6 +9,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
+import { submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -156,13 +157,18 @@ describe("turn states", () => {
 
 	it("sends the todo reminder as a checklist of its own in main, hidden with tool activity", async () => {
 		mode.present(() =>
-			todoReminderBlock([{ content: "Add tests", status: "in_progress" }], 1, 3, () => !mode.hideToolActivity),
+			todoReminderBlock(
+				[{ content: "Add tests", status: "in_progress" }],
+				1,
+				3,
+				() => mode.toolActivity !== "hidden",
+			),
 		);
 		await using ui = await nativeShell(mode.shell);
 		const checklist = ui.node("checklist");
 		expect(parentOf(checklist).endsWith("main")).toBe(true);
 		expect(checklist.p).toMatchObject({ mode: "reminder", note: "reminder 1/3", role: "omp.notice.todo" });
-		mode.hideToolActivity = true;
+		mode.toolActivity = "hidden";
 		expect(ui.node("checklist").p.hidden).toBe(true);
 	});
 
@@ -190,6 +196,21 @@ describe("turn states", () => {
 		mode.finishPendingSubmission(input);
 		expect(ui.node("kbd", "send").p.role).toBe("omp.composer.send");
 		expect(() => ui.node("text", "stop")).toThrow();
+	});
+
+	it("clears the optimistic loading animation when prompt returns without a model turn", async () => {
+		vi.spyOn(session, "prompt").mockResolvedValue(true);
+		vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
+		const input = mode.startPendingSubmission({ text: "/extension-no-turn" });
+		expect(mode.working).toBe("turn");
+		expect(mode.optimisticUserMessageSignature).toBe("/extension-no-turn\u00000");
+
+		await submitInteractiveInput(mode, session, input);
+
+		expect(mode.working).toBeUndefined();
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+		expect(mode.locallySubmittedUserSignatures.has("/extension-no-turn\u00000")).toBe(false);
+		expect(mode.hud.status.row()).toBeUndefined();
 	});
 
 	it("names a `?` draft’s mode on the composer and leads it with the btw chip", async () => {

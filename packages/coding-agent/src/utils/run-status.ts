@@ -128,7 +128,7 @@ const promptZones = signal(true);
 /**
  * Whether user messages mark OSC 133 prompt zones (reactive; the transcript's
  * user-message models read it). Off while a confirmed OSC 7501 receiver holds a
- * `working` or `blocked` record: a mark drops it on every redraw (#17307).
+ * `working` or `blocked` record: emitting a mark drops it (#17307).
  * Unknown terminals keep their prompt navigation.
  */
 export const promptZonesEnabled: Accessor<boolean> = () => promptZones();

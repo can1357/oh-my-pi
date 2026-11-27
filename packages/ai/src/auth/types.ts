@@ -279,10 +279,11 @@ export const REMOTE_REFRESH_SENTINEL = "__remote__" as const;
 /** Opaque marker for OAuth refresh tokens retained by a broker. */
 export type RemoteRefreshSentinel = typeof REMOTE_REFRESH_SENTINEL;
 
-/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable client secrets removed. */
-export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret"> & {
+/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable secrets removed. */
+export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret" | "dpopKey"> & {
 	refresh: RemoteRefreshSentinel;
 	kiroClientSecret?: never;
+	dpopKey?: never;
 };
 
 /** Discriminated credential payload as published by the broker. */
@@ -1166,9 +1167,8 @@ export interface OAuthApi {
 	 */
 	login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined>;
 	/**
-	 * Remove one stored login. The provider's `sign-out` hook first forgets the
-	 * account's secrets kept outside the credential store and revokes the grant
-	 * at the provider. The login is removed even when the hook fails;
+	 * Remove one stored login. The provider's `sign-out` hook first revokes the
+	 * grant at the provider. The login is removed even when the hook fails;
 	 * {@link OAuthSignOutResult.signOutError} says why.
 	 */
 	signOut(provider: string, credentialId: number, options?: OAuthSignOutOptions): Promise<OAuthSignOutResult>;

@@ -8,7 +8,7 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `disabledProviders`, `modelProviderOrder`, `cycleOrder`)
 - `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/config/models-config.ts` and `models-config-schema-bundle.ts` — custom provider/model validation
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; credential precedence is implemented in `packages/ai/src/auth/cascade.ts`
@@ -115,6 +115,21 @@ models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay 
 `.../api/alpha/decisions`.
 
 `omitMaxOutputTokens` omits the model-derived output cap.
+
+Speech (`openai-speech`/`xai-tts`) models take `voice`, sent when the `tts` tool or the vocalizer names none (some OpenAI-compatible gateways, such as Bifrost, answer a voiceless speech request with 400 `voice is required`), and `speechFormats`, the only containers the endpoint returns (`mp3`, `wav`, `pcm`, `opus`, `aac`, `flac`; absent means any). A WAV-only model asked for MP3 is asked for WAV instead and the `tts` tool writes the sibling `.wav`:
+
+```yaml
+providers:
+  my-gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: GATEWAY_API_KEY
+    models:
+      - id: gemini/gemini-2.5-flash-preview-tts
+        api: openai-speech
+        voice: kore
+        speechFormats: [wav]
+```
 
 `compat.base64SkipThoughtSignature` (Google APIs, default `false`): sends the unsigned-tool-call bypass sentinel base64-encoded. Set it on a `google-generative-ai` model behind a gateway that decodes `thoughtSignature` as base64 and answers the raw `skip_thought_signature_validator` literal with a 400, for example when Gemini replays another model's tool-call history:
 
@@ -457,7 +472,7 @@ Provider defaults vs per-model overrides:
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
-  `imageInputDecoder`, `imageCountBudget`, `snapcompactShape`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
+  `imageInputDecoder`, `imageCountBudget`, `snapcompactShape`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `voice`, `speechFormats`, `contextWindow`,
   `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
   `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
@@ -794,8 +809,7 @@ When `OMP_AUTH_BROKER_URL` (or `auth.broker.url`) is set, the local SQLite crede
 - Availability excludes `disabledProviders` and requires a keyless provider or configured credential source. It does not execute secret commands or refresh OAuth tokens.
 
 A model can exist in the registry without being available, and a configured credential can still
-fail when resolved for a request. `enabledProviders` controls foreign configuration-source discovery,
-not an allowlist of model transports.
+fail when resolved for a request.
 
 ## Runtime model resolution
 
@@ -888,6 +902,8 @@ A model preset is a named snapshot of every role assignment plus `defaultThinkin
 /modelpreset list | delete <name>
 ```
 
+Start a session on a preset without switching scopes with `omp --preset <name>`. The preset's roles and `defaultThinkingLevel` apply as runtime overrides for that run, nothing is written to config, and `--model`, `--smol`, `--slow` and `--plan` still win for the roles they name. An explicit `--thinking` or selector level outranks the preset's `defaultThinkingLevel`; so does the saved model and effort of a resumed session, which `--preset` does not re-apply. On a fresh session the preset's `defaultThinkingLevel` outranks the model's own default, matching `/modelpreset switch`. A preset defined by a project config routes the run but never widens the per-call model grants only the operator can grant. `--preset` is a reserved built-in flag name, so an extension flag of the same name no longer takes effect. A missing or malformed preset stops the launch with an error, and a bare `--preset` is a usage error.
+
 In `/models`, press `s` in the Roles view to save the current setup under a name. Presets live under `modelPresets` in `config.yml`:
 
 ```yaml
@@ -920,7 +936,7 @@ accept exact selectors, globs, and fuzzy matches. The resulting scope restricts 
 (Ctrl+P cycling, the startup model, chat roles in `/model`); judge, search, image, and speech
 models stay available for their roles, so entries naming them are accepted but have no effect.
 
-`enabledModels`, `enabledProviders`, and `disabledProviders` entries may also be scoped to a path prefix:
+`enabledModels` and `disabledProviders` entries may also be scoped to a path prefix:
 
 ```yaml
 enabledModels:

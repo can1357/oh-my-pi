@@ -14,7 +14,7 @@ import {
 } from "../../src/providers/openai-shared";
 import * as kimiOauth from "../../src/registry/oauth/kimi";
 import { streamSimple } from "../../src/stream";
-import type { Context, Model } from "../../src/types";
+import type { Context, FetchImpl, Model } from "../../src/types";
 
 const BASE_CHAT_COMPLETIONS_PARAMS: OpenAICompletionsParams = { messages: [], model: "unused", stream: true };
 const KIMI_HEADERS = Object.freeze({
@@ -236,6 +236,62 @@ describe("Kimi Code prompt cache affinity", () => {
 
 		expect(openaiPayload).not.toHaveProperty("prompt_cache_key");
 		expect(anthropicPayload).not.toHaveProperty("metadata");
+	});
+
+	it("dispatches regional KDL models through Kimi headers and shared cache affinity", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+		const requests: Array<{ url: string; headers: Headers; payload: Record<string, unknown> }> = [];
+		const fetch: FetchImpl = async (input, init) => {
+			const request = input instanceof Request ? input : undefined;
+			const headers = new Headers(request?.headers);
+			new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+			const body = init?.body ?? (request ? await request.clone().text() : undefined);
+			requests.push({
+				url: request?.url ?? String(input),
+				headers,
+				payload: JSON.parse(String(body)) as Record<string, unknown>,
+			});
+			return new Response(
+				JSON.stringify({ error: { type: "authentication_error", message: "stop after capture" } }),
+				{
+					status: 401,
+					headers: { "content-type": "application/json" },
+				},
+			);
+		};
+		const mainlandModel = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");
+		const regionalModels = [
+			{ model: mainlandModel, url: "https://api.kimi.com/coding/v1/messages" },
+			{
+				model: {
+					...mainlandModel,
+					provider: "kimi-code-global",
+					baseUrl: "https://api.kimi.ai/coding/v1",
+				},
+				url: "https://api.kimi.ai/coding/v1/messages",
+			},
+		] as const;
+
+		for (const { model } of regionalModels) {
+			const stream = streamSimple(
+				model,
+				{
+					systemPrompt: [],
+					messages: [{ role: "user", content: "Reply OK", timestamp: 0 }],
+					tools: [],
+				},
+				{ apiKey: "test-key", promptCacheKey: "shared-regional-cache-key", fetch },
+			);
+			await stream.result();
+		}
+
+		expect(requests.map(request => request.url)).toEqual(regionalModels.map(({ url }) => url));
+		for (const request of requests) {
+			expect(request.payload.metadata).toEqual({ user_id: "shared-regional-cache-key" });
+			for (const [name, value] of Object.entries(KIMI_HEADERS)) {
+				expect(request.headers.get(name)).toBe(value);
+			}
+		}
 	});
 });
 
