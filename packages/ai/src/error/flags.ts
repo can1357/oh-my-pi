@@ -256,7 +256,7 @@ const MALFORMED_RESPONSE_FINISH_PATTERN = /\bfinish reason:\s*MALFORMED_RESPONSE
 // context too, and only `content_filter` and `content_filtered` stop codes are
 // accepted bare.
 const CONTENT_FILTER_PATTERN =
-	/\b(?:incomplete:\s*)?content_filter(?:ed)?\b|\b(?:blocked|filtered)[^\n.]{0,80}\bcontent filters?\b|\bblocked by content filtering\b/i;
+	/\b(?:incomplete:\s*)?content_filter(?:ed)?\b|\b(?:blocked|filtered)[^\n.]{0,80}\bcontent filters?\b|\bblocked by content filtering\b|\bblocked by content_filtering\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
 /**
  * Gemini's per-user quota endpoint refusing an account whose subscription does

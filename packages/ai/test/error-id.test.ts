@@ -242,6 +242,15 @@ describe("error-id classification", () => {
 		expect(AIError.retriable(id)).toBe(false);
 	});
 
+	it("classifies the snake-case content_filtering policy block as a content block", () => {
+		const assistant = message({
+			errorMessage: "Output blocked by content_filtering policy",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	it("classifies Anthropic content filtering policy blocks as content blocks", () => {
 		const assistant = message({
 			errorMessage: "Output blocked by content filtering policy",

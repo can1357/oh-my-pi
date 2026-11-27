@@ -378,8 +378,6 @@
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
-- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
-- omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
 
 ## [19.2.1] - 2026-11-25
 
