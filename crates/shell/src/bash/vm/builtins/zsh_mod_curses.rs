@@ -936,6 +936,8 @@ impl Reader {
 			nchars: Some(1),
 			part: self.part,
 			timeout_ns,
+			squeeze_nul: false,
+			span_parts: false,
 		};
 		self.part += 1;
 		Ok(match ctx.probe(p)? {

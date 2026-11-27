@@ -1065,12 +1065,14 @@ impl Reader {
 			return Ok(Line::Abort);
 		}
 		let input = Probe::Input {
-			fd:         0,
-			delim:      Some(b'\n'),
-			lines:      1,
-			nchars:     None,
-			part:       0,
-			timeout_ns: None,
+			fd:          0,
+			delim:       Some(b'\n'),
+			lines:       1,
+			nchars:      None,
+			part:        0,
+			timeout_ns:  None,
+			squeeze_nul: false,
+			span_parts:  false,
 		};
 		let answer = probe::perform(k, cx, vp, &mut self.sc, &input)?;
 		self.sc.recycle();

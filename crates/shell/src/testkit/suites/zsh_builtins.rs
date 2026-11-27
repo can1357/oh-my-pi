@@ -42,6 +42,19 @@ fn read_keys_come_from_the_terminal() {
 	assert_eq!(out, "st=1 c=\nst=1\nst=0 c=xy\n");
 }
 
+/// `read -t` without a number polls: input that is there is read, and
+/// with none the read fails at once instead of waiting for it.
+#[test]
+fn read_zero_timeout_polls() {
+	let (out, err, _) = zsh_in(
+		"zmodload zsh/zselect; read -t c; print st=$? c=$c; read -t d < <(zselect -t 100; print \
+		 late); print st=$? d=$d",
+		b"x\n",
+	);
+	assert_eq!(err, "");
+	assert_eq!(out, "st=0 c=x\nst=1 d=\n");
+}
+
 /// A float keeps every digit (zsh keeps the `double`): arithmetic sees
 /// them all, a string read shows the parameter's style and precision.
 /// Stored as shown, `s=$EPOCHREALTIME` lost the fraction of a second.

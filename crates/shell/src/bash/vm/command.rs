@@ -3915,6 +3915,11 @@ pub fn call_record(
 	matches!(push_call(k, vp, cx, callee, call), Flow::Call)
 }
 
+/// Input parts one step of a builtin answers before it gives the turn
+/// back, so a read whose parts never wait (`read -n 1 x < /dev/zero`)
+/// still reaches the engine's safepoint.
+const INPUT_PARTS_PER_STEP: u32 = 16;
+
 /// Run a builtin, answering its probes; queue its output.
 fn run_builtin(
 	k: &mut Kernel,
@@ -3966,6 +3971,7 @@ fn run_builtin(
 	if id == IntrinsicId::Exec {
 		return exec_builtin(k, vp, cx, line);
 	}
+	let mut parts = 0;
 	loop {
 		let mut sc = exec::take_scratch(vp);
 		// A substitution the builtin started is done: its output joins the
@@ -4003,6 +4009,13 @@ fn run_builtin(
 				vp.frames.last_mut().expect("frame").scratch = Some(sc);
 				if let Err(key) = r {
 					return Some(Flow::Block(key));
+				}
+				if let Probe::Input { fd, .. } = p {
+					parts += 1;
+					if parts == INPUT_PARTS_PER_STEP {
+						k.waker.wake_by_ref();
+						return Some(Flow::Block(WaitKey::Read { fd }));
+					}
 				}
 			},
 			Err(Need::Store(err)) => {
