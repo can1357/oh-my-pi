@@ -201,7 +201,11 @@ const { session } = await createAgentSession({
       handler: async (_args, ctx) => ctx.ui.notify("askDialog:" + typeof ctx.ui.askDialog),
     });
     pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.notify(JSON.stringify((await ctx.ui.formDialog("<form><input name='trust'></form>", { timeout: ${JSON.stringify(timeout)} }))?.data));
+      const result = await ctx.ui.formDialog("<form><input name='trust'></form>", {
+        timeout: ${JSON.stringify(timeout)},
+        onTimeoutReset: () => ctx.ui.notify("timeout reset"),
+      });
+      ctx.ui.notify(JSON.stringify(result?.data));
     });
   }],
 });
@@ -273,6 +277,7 @@ await runRpcMode(session);
 		const stderr = new Response(child.stderr).text();
 		let originalDeadline = 0,
 			extendedDeadline = 0,
+			resetNotifications = 0,
 			notified: unknown,
 			finishedAt = 0;
 		for await (const frame of readJsonl<unknown>(child.stdout)) {
@@ -289,14 +294,19 @@ await runRpcMode(session);
 			} else if (frame.type === "extension_ui_state") {
 				extendedDeadline = Number(frame.expiresAt);
 			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
-				notified = frame.message;
-				finishedAt = Date.now();
+				if (frame.message === "timeout reset") {
+					resetNotifications++;
+				} else {
+					notified = frame.message;
+					finishedAt = Date.now();
+				}
 			} else if (frame.type === "response" && frame.id === "state") {
 				child.stdin.end();
 			}
 		}
 		expect(await child.exited, await stderr).toBe(0);
 		expect(extendedDeadline).toBeGreaterThan(originalDeadline + 250);
+		expect(resetNotifications).toBe(1);
 		expect(finishedAt).toBeGreaterThanOrEqual(extendedDeadline - 25);
 		expect(notified).toBe('{"trust":"latest draft"}');
 	}, 30_000);

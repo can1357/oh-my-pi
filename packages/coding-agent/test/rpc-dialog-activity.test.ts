@@ -7,10 +7,13 @@ afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
-function form() {
+function form(onTimeoutReset?: () => void) {
 	const pending = new RpcPendingExtensionRequests();
 	const frames: object[] = [];
-	const result = requestRpcFormDialog(pending, frame => frames.push(frame), 1048575, html, { timeout: 1000 });
+	const result = requestRpcFormDialog(pending, frame => frames.push(frame), 1048575, html, {
+		timeout: 1000,
+		onTimeoutReset,
+	});
 	const id = [...pending.keys()][0]!;
 	return { pending, frames, result, id };
 }
@@ -55,6 +58,27 @@ test("restore does not prolong the deadline and malformed activity cannot cancel
 	expect(a.frames.some(f => (f as { type: string }).type === "extension_ui_state")).toBe(false);
 	vi.advanceTimersByTime(100);
 	expect(await a.result).toEqual({ data: { code: "restored", env: "prod" }, timedOut: true });
+});
+test("only accepted activity that extends the deadline invokes the reset callback", async () => {
+	vi.useFakeTimers();
+	const onTimeoutReset = vi.fn();
+	const a = form(onTimeoutReset);
+	const activity = a.pending.get(a.id)!.activity!;
+	expect(onTimeoutReset).not.toHaveBeenCalled();
+	vi.advanceTimersByTime(100);
+	activity({ type: "extension_ui_activity", id: a.id, reset: false, data: { code: "restored" } });
+	activity({ type: "extension_ui_activity", id: a.id, data: { env: "old" } });
+	expect(onTimeoutReset).not.toHaveBeenCalled();
+
+	activity({ type: "extension_ui_activity", id: a.id });
+	expect(onTimeoutReset).toHaveBeenCalledTimes(1);
+	activity({ type: "extension_ui_activity", id: a.id, reset: true });
+	expect(onTimeoutReset).toHaveBeenCalledTimes(2);
+
+	vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1001);
+	activity({ type: "extension_ui_activity", id: a.id, reset: true });
+	expect(await a.result).toEqual({ data: { code: "restored" }, timedOut: true });
+	expect(onTimeoutReset).toHaveBeenCalledTimes(2);
 });
 test("an already disconnected map cannot revive a timer or emit a dialog", async () => {
 	vi.useFakeTimers();

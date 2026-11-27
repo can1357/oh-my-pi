@@ -1537,7 +1537,10 @@ export function requestRpcDialog<T>(
 		clearTimeout(timeoutId);
 		expiresAt = Date.now() + timeout;
 		timeoutId = setTimeout(expire, timeout);
-		if (announce) output({ type: "extension_ui_state", id, expiresAt });
+		if (announce) {
+			output({ type: "extension_ui_state", id, expiresAt });
+			if (!settled) opts?.onTimeoutReset?.();
+		}
 	};
 	const activity = (frame: RpcExtensionUIActivity) => {
 		if (settled) return;
