@@ -390,6 +390,7 @@ describe("interactive /usage account visibility", () => {
 				modelRegistry: { authStorage },
 				fetchUsageReports,
 				getUsageReportingModelSelectors: () => [],
+				getSessionStats: () => ({}),
 			},
 			shell,
 			showWarning: (message: string) => {

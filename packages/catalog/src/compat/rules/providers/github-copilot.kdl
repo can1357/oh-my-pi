@@ -5,6 +5,13 @@ provider "github-copilot" {
 	env "COPILOT_GITHUB_TOKEN"
 	// The authenticated `/models` roster is the account's own list: a bundled model it omits is not offered.
 	dynamic-models-authoritative #true
+	// Terminal usage events carry a separate server-reported AI-credit charge.
+	// Observed on `/v1/messages` (`message_delta`) and `/responses`
+	// (`response.completed`); `/chat/completions` was never captured on this
+	// account, so it stays unmarked and is neither parsed nor counted as missing.
+	on-api "anthropic-messages" "openai-responses" {
+		reports-aiu #true
+	}
 
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true

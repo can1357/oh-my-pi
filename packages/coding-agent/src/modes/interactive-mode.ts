@@ -100,9 +100,8 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { isSessionTreeRef, registerPersistedSubagents } from "../registry/persisted-agents";
-import type { AgentCostSnapshot } from "./view-model/overlays/agent-hub-projection";
-import { sumSubagentTreeCost } from "./agent-hub-runtime";
+import { isSessionTreeRef } from "../registry/persisted-agents";
+import type { AgentTreeSpend } from "./view-model/overlays/agent-hub-projection";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -111,6 +110,7 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { AgentSessionHandle, AgentViewSession } from "../session/agent-session-handle";
+import { type AiuTotals, sessionAiu } from "../session/aiu-billing";
 import type { TranscriptEntryLike } from "../session/transcript/transcript-entry";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../session/transcript/messages";
 import type { CompactMode } from "../session/compact-modes";
@@ -1428,8 +1428,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
-	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
-	#subagentCostHydratedRoot?: string;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
@@ -1695,6 +1693,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.session.attachSubagentObservers(this.#observerRegistry);
 		// The composer hint follows the ask above, running agents and the conversation's start.
 		this.#effect(() => this.composer.setPlaceholder(this.#composerHint()));
 		this.#effect(() => this.composer.setNativePlaceholder(this.#nativeComposerPlaceholder()));
@@ -3970,6 +3969,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * a collab guest's registry mirrors host transcripts outside this root).
 	 */
 	#subagentTreeCost = 0;
+	#subagentTreeAiu: AiuTotals | undefined;
 
 	syncRunningSubagentBadge(): boolean {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
@@ -3991,39 +3991,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
 		this.#inspectableSubagentCount = inspectable;
 		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
-		let treeCost = 0;
+		let tree: AgentTreeSpend | undefined;
 		if (!this.collabGuest) {
-			const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
-			this.#hydratePersistedSubagentCosts(rootSessionFile);
-			treeCost = sumSubagentTreeCost({
-				refs: AgentRegistry.global().list(),
-				observers: this.#observerRegistry,
-				rootSessionFile,
-				sessionCosts: this.#subagentSessionCosts,
-			});
+			// Registers a resumed root's persisted subagents once per stay; the registry changes it makes re-sync this.
+			void this.session.hydratePersistedSubagents();
+			tree = this.session.getSubagentTreeSpend();
 		}
+		const treeCost = tree?.cost ?? 0;
+		const treeAiu = tree ? sessionAiu(tree.aiu) : undefined;
 		const costChanged = this.#subagentTreeCost !== treeCost;
+		const aiuChanged =
+			this.#subagentTreeAiu?.nano !== treeAiu?.nano || this.#subagentTreeAiu?.unknownCalls !== treeAiu?.unknownCalls;
 		this.#subagentTreeCost = treeCost;
-		if (costChanged) this.statusLine.setModes({ subagentTreeCost: treeCost });
-		const changed = agentsChanged || costChanged || inspectableChanged;
+		this.#subagentTreeAiu = treeAiu;
+		if (costChanged || aiuChanged) this.statusLine.setModes({ subagentTreeCost: treeCost, subagentTreeAiu: treeAiu });
+		const changed = agentsChanged || costChanged || aiuChanged || inspectableChanged;
 		if (changed) this.#syncHudPills();
 		return changed;
-	}
-
-	/**
-	 * Register a resumed session's persisted subagent transcripts (with usage
-	 * history) so the status line's tree cost matches the Agent Hub without it
-	 * being opened first. Once per on-disk root; registry changes re-sync the cost.
-	 */
-	#hydratePersistedSubagentCosts(rootSessionFile: string | undefined): void {
-		if (!rootSessionFile || this.#subagentCostHydratedRoot === rootSessionFile) return;
-		if (!this.sessionManager.isSessionOnDisk()) return;
-		this.#subagentCostHydratedRoot = rootSessionFile;
-		registerPersistedSubagents(AgentRegistry.global(), rootSessionFile, {
-			shouldContinue: () => this.sessionManager.getSessionFile() === rootSessionFile,
-		}).catch(error => {
-			logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
-		});
 	}
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
@@ -8268,8 +8252,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSettingsSelector();
 	}
 
-	showUsageDashboard(reports: UsageReport[]): void {
-		this.#selectorController.showUsageDashboard(reports);
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void {
+		this.#selectorController.showUsageDashboard(reports, sessionAiu);
 	}
 
 	showAdvisorConfigure(): void {

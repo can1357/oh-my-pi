@@ -523,4 +523,8 @@ export interface UsageStatistics {
 	cost: number;
 	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
 	subagentCost: number;
+	/** Server-reported AI credits (nano-AIU) of this session's own calls: assistant messages and `model_usage`. */
+	aiuNano: number;
+	/** Own calls whose model declares a billing frame that never arrived; positive makes `aiuNano` a lower bound. */
+	aiuUnknownCalls: number;
 }

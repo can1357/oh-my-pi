@@ -544,6 +544,11 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
+import { type AiuTotals, sessionAiu } from "./aiu-billing";
+import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
+import type { AgentCostSnapshot, AgentTreeSpend } from "../modes/view-model/overlays/agent-hub-projection";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
+import type { SessionObserverRegistry } from "../task/session-observer-registry";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -1227,6 +1232,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
+	/** Per-subagent spend reads the tree roll-up reuses between calls; see {@link getSubagentTreeSpend}. */
+	readonly #subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	/** The current root's persisted-subagent registration; see {@link hydratePersistedSubagents}. */
+	#subagentHydration: { root: string; promise: Promise<void> } | undefined;
+	/** Live subagent observers of the host; see {@link attachSubagentObservers}. */
+	#subagentObservers: SessionObserverRegistry | undefined;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -15971,7 +15982,65 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Get session statistics.
 	 */
 	getSessionStats(): SessionStats {
-		return this.#stats.getSessionStats();
+		const stats = this.#stats.getSessionStats();
+		const aiu = this.getSessionAiu();
+		return aiu ? { ...stats, aiu } : stats;
+	}
+
+	/**
+	 * The session's server-reported AI credits: its own recorded calls (assistant messages and
+	 * `model_usage`, from the usage index) plus its subagent tree's (see {@link getSubagentTreeSpend}).
+	 * Advisors bill apart, as their dollars do. Undefined until a call reported a charge or missed its frame.
+	 */
+	getSessionAiu(): AiuTotals | undefined {
+		const usage = this.sessionManager.getUsageStatistics();
+		return sessionAiu({ nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls }, this.getSubagentTreeSpend().aiu);
+	}
+
+	/**
+	 * Spend (dollars and AI credits) of this session's subagent tree, descendants included and its own
+	 * advisors excluded: the one sum the status line, `/session`, ACP and RPC report. Reads the registry
+	 * only; a host that needs subagents persisted by an earlier process awaits
+	 * {@link hydratePersistedSubagents} first. File-less subagents count while the observers attached by
+	 * {@link attachSubagentObservers} track them.
+	 */
+	getSubagentTreeSpend(): AgentTreeSpend {
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			observers: this.#subagentObservers,
+			rootSessionFile: this.sessionFile,
+			sessionCosts: this.#subagentSpend,
+		});
+	}
+
+	/** Count the file-less subagents `observers` tracks live (a `--no-session` root's) in the tree spend. */
+	attachSubagentObservers(observers: SessionObserverRegistry): void {
+		this.#subagentObservers = observers;
+	}
+
+	/**
+	 * Register the subagent and advisor transcripts persisted under this session's file (with their usage
+	 * history) as parked registry refs, so a resumed tree's spend counts before anything opens the Agent
+	 * Hub. Scans once per stay on a root: switching away and back scans again (another root's scan may have
+	 * re-targeted shared ids), and a scan cut short by the switch is not kept as done. Never rejects.
+	 */
+	hydratePersistedSubagents(): Promise<void> {
+		const root = this.sessionFile;
+		if (!root || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		if (this.#subagentHydration?.root === root) return this.#subagentHydration.promise;
+		const promise: Promise<void> = registerPersistedSubagents(AgentRegistry.global(), root, {
+			shouldContinue: () => this.sessionFile === root,
+		})
+			.catch(error => {
+				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile: root, error: String(error) });
+			})
+			.then(() => {
+				if (this.sessionFile !== root && this.#subagentHydration?.promise === promise) {
+					this.#subagentHydration = undefined;
+				}
+			});
+		this.#subagentHydration = { root, promise };
+		return promise;
 	}
 
 	#goalUsage(): GoalTokenUsage {

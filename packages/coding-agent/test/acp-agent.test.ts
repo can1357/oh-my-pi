@@ -22,7 +22,13 @@ import {
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { sumSubagentTreeCost } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
+import type {
+	AgentCostSnapshot,
+	AgentTreeSpend,
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub-projection";
 import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -348,6 +354,21 @@ class FakeAgentSession {
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
 
+	#subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	#subagentHydration: Promise<void> | undefined;
+	hydratePersistedSubagents(): Promise<void> {
+		const rootSessionFile = this.sessionManager.getSessionFile();
+		if (!rootSessionFile || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		this.#subagentHydration ??= registerPersistedSubagents(AgentRegistry.global(), rootSessionFile);
+		return this.#subagentHydration;
+	}
+	getSubagentTreeSpend(): AgentTreeSpend {
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			rootSessionFile: this.sessionManager.getSessionFile(),
+			sessionCosts: this.#subagentSpend,
+		});
+	}
 	getContextUsage(): undefined {
 		return undefined;
 	}

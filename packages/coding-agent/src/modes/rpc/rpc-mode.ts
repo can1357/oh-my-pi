@@ -2893,6 +2893,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "get_session_stats": {
+				// A resumed session's persisted subagents count toward its credits from the first call.
+				await session.hydratePersistedSubagents();
 				const stats = session.getSessionStats();
 				return success(id, "get_session_stats", stats);
 			}

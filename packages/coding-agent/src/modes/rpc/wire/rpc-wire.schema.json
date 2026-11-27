@@ -1191,6 +1191,15 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"aiu": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
+				},
+				"aiuMissing": {
+					"type": "boolean",
+					"description": "The model reports AI credits and this call's billing frame never arrived."
 				}
 			},
 			"required": [
@@ -3342,6 +3351,23 @@
 				"acuCost"
 			]
 		},
+		"SessionAiu": {
+			"type": "object",
+			"properties": {
+				"nano": {
+					"type": "number",
+					"description": "Reported charge in nano-AIU (1e9 = 1 AI credit)."
+				},
+				"unknownCalls": {
+					"type": "integer",
+					"description": "Calls whose billing frame never arrived; positive makes `nano` a lower bound."
+				}
+			},
+			"required": [
+				"nano",
+				"unknownCalls"
+			]
+		},
 		"SessionStats": {
 			"type": "object",
 			"properties": {
@@ -3377,6 +3403,10 @@
 				},
 				"credits": {
 					"$ref": "#/$defs/SessionCredits"
+				},
+				"aiu": {
+					"$ref": "#/$defs/SessionAiu",
+					"description": "Server-reported AI credits of the session and its subagent tree."
 				},
 				"routedModels": {
 					"type": "object",

@@ -280,6 +280,9 @@ class Usage(TypedDict):
     cttl: NotRequired[JsonObject]
     server: NotRequired[JsonObject]
     credits: NotRequired[JsonObject]
+    aiu: NotRequired[JsonObject]
+    aiuMissing: NotRequired[bool]
+    """The model reports AI credits and this call's billing frame never arrived."""
 
 
 ParentIrc = TypedDict("ParentIrc", {"from": "str", "body": "str"})
@@ -896,6 +899,14 @@ class SessionCredits:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class SessionAiu:
+    nano: float
+    """Reported charge in nano-AIU (1e9 = 1 AI credit)."""
+    unknown_calls: int
+    """Calls whose billing frame never arrived; positive makes `nano` a lower bound."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class SessionStats:
     session_id: str
     user_messages: int
@@ -908,6 +919,8 @@ class SessionStats:
     cost: float
     session_file: str | None = None
     credits: SessionCredits | None = None
+    aiu: SessionAiu | None = None
+    """Server-reported AI credits of the session and its subagent tree."""
     routed_models: dict[str, float] | None = None
     edit_rejections: dict[str, float] | None = None
     """Failed edits by the engine's `errorKind`."""
@@ -2374,6 +2387,14 @@ def parse_session_credits(value: object, path: str = "SessionCredits") -> Sessio
     )
 
 
+def parse_session_aiu(value: object, path: str = "SessionAiu") -> SessionAiu:
+    payload = expect_object(value, path)
+    return SessionAiu(
+        nano=required(payload, "nano", decode_float, path),
+        unknown_calls=required(payload, "unknownCalls", decode_int, path),
+    )
+
+
 def parse_session_stats(value: object, path: str = "SessionStats") -> SessionStats:
     payload = expect_object(value, path)
     return SessionStats(
@@ -2388,6 +2409,7 @@ def parse_session_stats(value: object, path: str = "SessionStats") -> SessionSta
         cost=required(payload, "cost", decode_float, path),
         session_file=optional(payload, "sessionFile", decode_str, path),
         credits=optional(payload, "credits", parse_session_credits, path),
+        aiu=optional(payload, "aiu", parse_session_aiu, path),
         routed_models=optional(payload, "routedModels", record(decode_float), path),
         edit_rejections=optional(payload, "editRejections", record(decode_float), path),
         context_usage=optional(payload, "contextUsage", parse_context_usage, path),
@@ -4343,6 +4365,7 @@ __all__ = [
     "RpcNotification",
     "SelectOptionDetail",
     "SelectUiRequest",
+    "SessionAiu",
     "SessionCredits",
     "SessionEntries",
     "SessionInfoUpdateEvent",
@@ -4529,6 +4552,7 @@ __all__ = [
     "parse_rpc_frame_error_event",
     "parse_select_option_detail",
     "parse_select_ui_request",
+    "parse_session_aiu",
     "parse_session_credits",
     "parse_session_entries",
     "parse_session_info_update_event",

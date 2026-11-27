@@ -28,6 +28,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { AgentViewSession } from "../../session/agent-session-handle";
+import { type AiuTotals, sessionAiu } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
 import type { CollabStatus, StatusLineModel } from "../types";
@@ -103,6 +104,8 @@ export interface StatusModes {
 	recording?: boolean;
 	pinned?: boolean;
 	subagentTreeCost?: number;
+	/** AI credits of the subagent tree, from the same roll-up as {@link subagentTreeCost}. */
+	subagentTreeAiu?: AiuTotals;
 	vibeWorkerTokenRate?: () => number | null;
 }
 
@@ -593,6 +596,11 @@ export class SessionStatusLine implements StatusLineModel {
 		const advisorOverview = session.getAdvisorStatusOverview?.();
 		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
 		const advisorCost = session.getAdvisorCost();
+		// Own calls plus the subagent tree, pushed with its dollars so the tree is summed once.
+		const aiu = sessionAiu(
+			{ nano: stats.aiuNano ?? 0, unknownCalls: stats.aiuUnknownCalls ?? 0 },
+			this.#focusedAgentId === undefined ? modes.subagentTreeAiu : undefined,
+		);
 		const vcsFacts = this.#vcsFacts(segments);
 		const goal = modes.goal ? session.getGoalModeState()?.goal : undefined;
 		const thinkingLevel = session.state.thinkingLevel;
@@ -649,6 +657,7 @@ export class SessionStatusLine implements StatusLineModel {
 				premiumRequests: stats.premiumRequests,
 				cost: stats.cost,
 				subagentCost: stats.subagentCost,
+				...(aiu ? { aiu } : {}),
 			},
 			usingSubscription: model ? session.modelRegistry.isUsingSubscription(model) : false,
 			...(this.#focusedAgentId === undefined && modes.subagentTreeCost

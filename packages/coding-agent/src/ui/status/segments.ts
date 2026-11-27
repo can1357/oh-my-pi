@@ -485,6 +485,7 @@ function costSeg(input: SegInput): SegView | null {
 			digits: 2,
 			pricingPeriod: facts.pricingPeriod,
 			advisor: facts.advisorCost,
+			aiu: facts.usage.aiu,
 		},
 		symbols,
 	);

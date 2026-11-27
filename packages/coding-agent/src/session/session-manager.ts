@@ -31,6 +31,7 @@ import {
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import { isUserRequestEntry } from "./transcript/transcript-entry";
+import { type AiuCall, callAiu } from "./aiu-billing";
 import type { SessionTreePosition } from "../modes/view-model/status-line/host";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
@@ -429,6 +430,8 @@ function emptyUsageStatistics(): UsageStatistics {
 		premiumRequests: 0,
 		cost: 0,
 		subagentCost: 0,
+		aiuNano: 0,
+		aiuUnknownCalls: 0,
 	};
 }
 
@@ -483,6 +486,8 @@ function resetUsageCost(usage: Usage | undefined): void {
 	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 	usage.credits = undefined;
 	usage.premiumRequests = undefined;
+	usage.aiu = undefined;
+	usage.aiuMissing = undefined;
 }
 
 /** Clear child billing kept in task results without discarding their token counts. */
@@ -716,6 +721,16 @@ export class SessionEntryIndex {
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
 		}
+		// Credits count only where calls are recorded; a reset fork's copies had theirs cleared.
+		const call: AiuCall | undefined =
+			entry.type === "model_usage"
+				? entry
+				: entry.type === "message" && entry.message.role === "assistant"
+					? entry.message
+					: undefined;
+		const aiu = call ? callAiu(call) : undefined;
+		if (aiu === "unknown") this.#usage.aiuUnknownCalls++;
+		else if (aiu !== undefined) this.#usage.aiuNano += aiu;
 	}
 
 	has(id: string): boolean {

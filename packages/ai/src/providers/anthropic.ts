@@ -13,6 +13,7 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	$env,
 	$flag,
@@ -143,6 +144,7 @@ import {
 	claudeToolPrefix,
 	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
+import { applyCopilotUsageFrame, markMissingCopilotUsageFrame } from "./github-copilot-billing";
 import {
 	buildCopilotDynamicHeaders,
 	getCachedCopilotIntegrationId,
@@ -3264,6 +3266,11 @@ const streamAnthropicOnce = (
 								reportAnthropicEnvelopeAnomaly("received message_delta after terminal stop signal");
 								continue;
 							}
+							if (resolveCatalogPolicy(model).reportsAiu === true) {
+								// Copilot reports the per-request charge as a top-level
+								// `copilot_usage` field of `message_delta`, next to `delta` and `usage`.
+								applyCopilotUsageFrame(output.usage, event);
+							}
 							const delta = event.delta;
 							applyReportedInputTransformations(
 								output,
@@ -3925,6 +3932,7 @@ const streamAnthropicOnce = (
 					providerSessionState.cacheControlOptionsUnsupported = true;
 				}
 			}
+			markMissingCopilotUsageFrame(model, output);
 			stream.push({
 				type: "done",
 				reason: output.stopReason,
@@ -3948,6 +3956,7 @@ const streamAnthropicOnce = (
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			markMissingCopilotUsageFrame(model, output);
 			stream.push({
 				type: "error",
 				reason: output.stopReason,

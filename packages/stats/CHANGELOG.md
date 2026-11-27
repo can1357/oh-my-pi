@@ -5,6 +5,7 @@
 ### Added
 
 - Added queryable tracking of tool approval requests and outcomes across sessions in the stats database.
+- `omp stats` shows server-reported GitHub Copilot AI credits in the overview, models, providers, request details and `--summary` output; a range where no request reported any shows a dash rather than 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Fixed
 

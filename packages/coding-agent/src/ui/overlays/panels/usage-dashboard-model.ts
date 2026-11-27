@@ -19,6 +19,7 @@ import {
 	summarizeUsageResetCredits,
 	type UsageResetSummary,
 } from "../../../session/usage-display";
+import type { AiuTotals } from "../../../session/aiu-billing";
 import { listKeyId } from "../../../config/keybindings/matchers";
 
 export type { UnavailableUsageAccount };
@@ -430,6 +431,7 @@ export type UsageView = "overview" | "detail";
 
 export interface UsageDashboardOptions {
 	readonly reports: UsageReport[];
+	readonly sessionAiu?: AiuTotals;
 	readonly unavailableAccounts?: readonly UnavailableUsageAccount[];
 	/** The full `/usage` report of `reports` for Details, per content width. */
 	readonly renderDetail: (width: number, reports: UsageReport[]) => string;

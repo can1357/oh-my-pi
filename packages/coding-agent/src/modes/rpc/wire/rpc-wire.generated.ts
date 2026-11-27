@@ -89,6 +89,9 @@ export interface Usage {
 	cttl?: Record<string, unknown>;
 	server?: Record<string, unknown>;
 	credits?: Record<string, unknown>;
+	aiu?: Record<string, unknown>;
+	/** The model reports AI credits and this call's billing frame never arrived. */
+	aiuMissing?: boolean;
 }
 
 /** Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope. */
@@ -716,6 +719,13 @@ export interface SessionCredits {
 	acuCost: number;
 }
 
+export interface SessionAiu {
+	/** Reported charge in nano-AIU (1e9 = 1 AI credit). */
+	nano: number;
+	/** Calls whose billing frame never arrived; positive makes `nano` a lower bound. */
+	unknownCalls: number;
+}
+
 export interface SessionStats {
 	sessionId: string;
 	userMessages: number;
@@ -728,6 +738,8 @@ export interface SessionStats {
 	cost: number;
 	sessionFile?: string;
 	credits?: SessionCredits;
+	/** Server-reported AI credits of the session and its subagent tree. */
+	aiu?: SessionAiu;
 	routedModels?: Record<string, number>;
 	/** Failed edits by the engine's `errorKind`. */
 	editRejections?: Record<string, number>;
