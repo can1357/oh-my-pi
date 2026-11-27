@@ -1,6 +1,7 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { expect, test } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { fullscreenMenuView } from "../../../../src/modes/controllers/selector-views";
 import { reportSheetView } from "../../../../src/modes/controllers/command-views";
 import { nativeShell } from "../../../helpers/native-shell";
@@ -119,6 +120,34 @@ test("arrow and page keys scroll an open entry's full content natively", async (
 	const scrolls = ui.scrolls();
 	expect(scrolls.map(([, by]) => by)).toEqual(["line-down", "line-down", "page-down", "line-up", "page-up"]);
 	expect(new Set(scrolls.map(([id]) => id)).size).toBe(1);
+});
+
+test("arrow and page keys scroll an open entry's full content in a terminal", () => {
+	const model = new ContextViewerModel(
+		fixture() as ContextViewData,
+		() => 24,
+		() => {},
+	);
+	const term = createTestTerminal(() => ({ layer: <ContextViewer model={model} /> }), {
+		columns: 80,
+		rows: 24,
+		onKey: key => model.key(key.id),
+	});
+	model.overviewKey = "tool-output";
+	model.activate();
+	model.entryId = "result/0";
+	model.activate();
+	model.touch();
+	term.backend.renderNow();
+	expect(model.state).toBe("entry");
+	const top = term.screen();
+	term.press("down");
+	const down = term.screen();
+	expect(down).not.toEqual(top);
+	term.press("up");
+	expect(term.screen()).toEqual(top);
+	term.press("pageDown");
+	expect(term.screen()).not.toEqual(top);
 });
 
 const DOWN = "\x1b[B";

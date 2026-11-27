@@ -548,6 +548,7 @@ export class ContextViewerModel {
 				return false;
 		}
 		// Scrolling an entry leaves the tree alone: a rebuild would replace the scrolled node and drop its request.
+		// An entry-local key that changes what the tree shows without leaving `entry` must touch() itself.
 		if (from !== "entry" || this.state !== "entry") this.touch();
 		return true;
 	}
