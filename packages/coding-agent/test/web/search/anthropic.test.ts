@@ -140,6 +140,46 @@ describe("Anthropic search request body", () => {
 		}
 	});
 
+	it("labels a Copilot-hosted Claude search with the conversation id and leaves other hosts unlabeled", async () => {
+		const search = async (provider: string, sessionId: string | undefined) => {
+			const authStorage = createInMemoryAuthStorage();
+			authStorage.keys.setRuntime(provider, "runtime-key");
+			const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+			const model = buildModel({
+				id: "claude-sonnet-5.5",
+				name: "Claude Sonnet 5.5",
+				api: "anthropic-messages",
+				provider,
+				baseUrl: "https://api.business.githubcopilot.com",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 16_384,
+			});
+			try {
+				const cap = makeCaptureFetch();
+				await searchAnthropic({
+					query: "copilot session header",
+					systemPrompt: "Use web search.",
+					sessionId,
+					authStorage,
+					modelRegistry,
+					model,
+					fetch: cap.fetch,
+				});
+				return cap.headers()?.get("x-client-session-id");
+			} finally {
+				authStorage.close();
+			}
+		};
+
+		// Without the header Copilot Business answers Claude with a blocked, billing-free message.
+		expect(await search("github-copilot", "session-2295")).toBe("session-2295");
+		expect(await search("github-copilot", undefined)).toBeNull();
+		expect(await search("anthropic", "session-2295")).toBeNull();
+	});
+
 	it("maps site: to allowed_domains and keeps the query text intact for the model", async () => {
 		const fixture = createFixture();
 		try {
