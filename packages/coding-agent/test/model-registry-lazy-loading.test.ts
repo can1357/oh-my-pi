@@ -186,9 +186,9 @@ describe("ModelRegistry lazy bundled composition", () => {
 	test("leaves native-judge API overrides and unreadable cache contents to the full resolver", async () => {
 		const overridden = await startupJudgeFixture({ nativeOverride: true });
 		expect(await overridden.registry.canRuleOutNativeJudgeAtStartup(isJudgmentApi)).toBe(false);
-		expect(
-			overridden.registry.getAvailable("all").find(model => model.provider === overridden.provider)?.api,
-		).toBe("typesafe");
+		expect(overridden.registry.getAvailable("all").find(model => model.provider === overridden.provider)?.api).toBe(
+			"typesafe",
+		);
 
 		const unreadable = await startupJudgeFixture({ unreadableCache: true });
 		expect(await unreadable.registry.canRuleOutNativeJudgeAtStartup(isJudgmentApi)).toBe(false);
@@ -308,7 +308,10 @@ describe("ModelRegistry lazy bundled composition", () => {
 			JSON.stringify({
 				providers: {
 					[provider]: config,
-					[competitor]: { ...config, models: [{ id: reason === "literal-id" ? pattern : "other", name: "Other" }] },
+					[competitor]: {
+						...config,
+						models: [{ id: reason === "literal-id" ? pattern : "other", name: "Other" }],
+					},
 				},
 			}),
 		);
@@ -324,6 +327,17 @@ describe("ModelRegistry lazy bundled composition", () => {
 		expect(timing).toHaveBeenCalledWith(`resolveDefaultModelRole:scope:${label}:${competitor}`);
 		const pool = registry.getAvailableForProviders(new Set([provider, competitor]));
 		expect(parseModelPattern(pattern, pool).model?.provider).toBe(reason === "literal-id" ? competitor : provider);
+	});
+
+	test("resolves a configured effort with a synthesized competitor roster that cannot shadow it", async () => {
+		const { authStorage, provider, registry } = await startupJudgeFixture();
+		authStorage.keys.setRuntime("cursor", "test-key");
+		const pattern = `${provider}/fixture-chat:high`;
+		const result = await tryResolveStartupModelRole({ provider, pattern }, registry, undefined, async () => {});
+		const full = parseModelPattern(pattern, registry.getAvailable());
+		expect(result?.model?.id).toBe("fixture-chat");
+		expect(result?.model?.provider).toBe(full.model?.provider);
+		expect(result?.thinkingLevel).toBe(full.thinkingLevel);
 	});
 
 	test("scoped snapshots retain live availability and cannot be mutated through returned arrays", async () => {

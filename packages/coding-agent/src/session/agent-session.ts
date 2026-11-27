@@ -1453,7 +1453,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * bounded, so its system prompt already carries the MCP routes and instructions;
 	 * otherwise the prompt changes on the next turn and the provider prompt cache misses.
 	 */
-	#pendingMCPDiscovery: Promise<void> | undefined;
+	#pendingMCPDiscovery: Promise<void> | (() => Promise<void>) | undefined;
 	/** Whether a tool name belongs to an MCP server still in its startup connect (its mount is no change). */
 	#mcpStartupMount: ((toolName: string) => boolean) | undefined;
 	/**
@@ -8290,13 +8290,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#setMcpServerInstructionsSource?.(source);
 	}
 
-	/** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */
-	setPendingMCPDiscovery(discovery: Promise<void>): void {
+	/** Makes turns start or join MCP discovery, with a bounded wait before building their system prompt. */
+	setPendingMCPDiscovery(discovery: Promise<void> | (() => Promise<void>)): void {
+		if (typeof discovery === "function") this.#pendingMCPDiscovery = discovery;
+		else this.#trackMCPDiscovery(discovery);
+	}
+
+	/** Start deferred MCP discovery, or join the current connection pass. */
+	startPendingMCPDiscovery(): Promise<void> | undefined {
+		const pending = this.#pendingMCPDiscovery;
+		return typeof pending === "function" ? this.#trackMCPDiscovery(Promise.resolve().then(pending)) : pending;
+	}
+
+	#trackMCPDiscovery(discovery: Promise<void>): Promise<void> {
 		const settled = () => {
 			if (this.#pendingMCPDiscovery === pending) this.#pendingMCPDiscovery = undefined;
 		};
 		const pending = discovery.then(settled, settled);
 		this.#pendingMCPDiscovery = pending;
+		return pending;
 	}
 
 	/** Names the tools of MCP servers still in their startup connect: their mounts are not announced as changes. */
@@ -9965,7 +9977,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const laps = new Laps();
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		laps.lap("extensionsMs");
-		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
+		const pendingMCPDiscovery = this.startPendingMCPDiscovery();
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
 			// Abort ends the wait at once.

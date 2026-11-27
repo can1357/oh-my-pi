@@ -542,6 +542,8 @@ const cfgLiveUiSettings = combine({
 type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
+const STARTUP_BACKGROUND_QUIET_MS = 150;
+const STARTUP_BACKGROUND_MAX_DELAY_MS = 1_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
 /** A transcript action naming an agent to view (a live task card's agent row). */
 const SUBAGENT_FOCUS_ACT = "subagents.focus=";
@@ -1262,6 +1264,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * then deny instead of prompting onto a torn-down UI. Refreshed by `init`.
 	 */
 	#dialogLifetime = new AbortController();
+	#cancelStartupBackground: (() => void) | undefined;
 	readonly #inputController: InputController;
 	readonly #selectorController: SelectorController;
 	readonly #focusController: SessionFocusController;
@@ -1518,7 +1521,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		setExtensionLinkClicksProvider(() => this.#extensionLinkClicksAvailable());
 
-		this.statusLine = new SessionStatusLine(session);
+		this.statusLine = new SessionStatusLine(session, { deferStartupReads: true });
 		this.statusLine.onPullRequest = pr => setTerminalTitlePullRequest(pr?.number);
 		this.statusLine.onResetExpiryNotice = notice => this.showWarning(notice);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
@@ -1726,7 +1729,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Both read the viewed session through the focus controller: after every controller exists.
 		// A started frame (the startup frame's predicted bar) redraws the bar's slots at once.
 		this.#attachStatusLine();
-		this.#predictStatusForNextLaunch();
 		// The composer's dictation control shows while speech-to-text is on.
 		const syncDictation = (enabled: boolean): void =>
 			this.#frame.dictation.set(enabled ? (this.#sttController?.state ?? "idle") : undefined);
@@ -2279,25 +2281,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 		}
 
-		// Prewarm the local tiny-title worker off the submit hot path: spawn it
-		// now, idle and unref'd, so the first submit reuses a live subprocess
-		// instead of paying spawn latency ahead of the first frame (issue #6462).
-		// No-ops for the online default and for already-named sessions that will
-		// not be titled. Deferred via setImmediate so it runs AFTER the render
-		// callback requestRender(true) queued above (immediates are FIFO) — the
-		// spawn syscall never lands in the same loop turn ahead of the first paint.
-		setImmediate(() => {
-			// Resumed sessions paint their restored transcript (code blocks, diffs)
-			// right after init; warm the native syntax set (~60ms, ~24 MiB) off-thread
-			// so that paint does not build it on the JS thread. Fresh sessions skip it
-			// and pay the cost lazily on the first highlight, if any.
-			// Open the model API connection while the user reads the first frame.
-			this.session.prewarmModelConnection();
-			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
-				this.#inputController.prewarmTinyTitleModel();
-			}
-		});
-
 		// Host the session before extension hooks run: a dialog raised from a
 		// `session_start` hook is then retained for the first writer that joins.
 		// The relay connection proceeds in the background and never blocks init.
@@ -2463,10 +2446,46 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#idleMaintenanceActivity.ready = true;
 		if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.syncIdleMaintenanceView();
-		// The first alt+p then opens as fast as a reopen.
-		this.#selectorController
-			.warmModelPicker(this.#dialogLifetime.signal)
-			.catch(error => logger.warn("Model picker prewarm failed", { error: String(error) }));
+		this.#scheduleStartupBackground(options.startupBackgroundWork);
+	}
+
+	#scheduleStartupBackground(work: (() => void) | undefined): void {
+		this.#cancelStartupBackground?.();
+		let lastInput = performance.now();
+		const deadline = lastInput + STARTUP_BACKGROUND_MAX_DELAY_MS;
+		const releaseInput = this.interceptInput(event => {
+			if (event.type === "paste" || (event.type === "key" && event.key.kind !== "release")) {
+				lastInput = performance.now();
+			}
+			return false;
+		});
+		let timer: NodeJS.Timeout;
+		const cancel = () => {
+			clearTimeout(timer);
+			releaseInput();
+			this.#cancelStartupBackground = undefined;
+		};
+		const run = (): void => {
+			// Give pending input and its redraw priority, without starving discovery while typing.
+			const remaining = Math.min(lastInput + STARTUP_BACKGROUND_QUIET_MS, deadline) - performance.now();
+			if (remaining > 1) {
+				timer = setTimeout(run, remaining).unref();
+				return;
+			}
+			cancel();
+			if (this.session.isDisposed) return;
+			this.statusLine.finishStartup();
+			this.#predictStatusForNextLaunch();
+			work?.();
+			this.composer.warmAutocomplete();
+			this.session.prewarmModelConnection();
+			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) this.#inputController.prewarmTinyTitleModel();
+			this.#selectorController
+				.warmModelPicker(this.#dialogLifetime.signal)
+				.catch(error => logger.warn("Model picker prewarm failed", { error: String(error) }));
+		};
+		this.#cancelStartupBackground = cancel;
+		timer = setTimeout(run, STARTUP_BACKGROUND_QUIET_MS).unref();
 	}
 
 	/**
@@ -6931,6 +6950,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#cancelStartupBackground?.();
 		this.#frame.releaseStartupKeys();
 		this.#closeAttempt?.abort();
 		this.syncIdleMaintenanceView(null);

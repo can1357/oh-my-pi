@@ -2629,13 +2629,16 @@ export async function tryResolveStartupModelRole(
 			// Only an intact, known provider prefix forbids cross-provider
 			// fuzzy matches (including matches against display names).
 			if (!id.startsWith(`${provider}/`)) return rejectStartupRoleScope("conservative:unqualified-spelling");
-			const alias = resolveBareVariantSelector(id);
-			if (alias) return rejectStartupRoleScope(`collision:registered-alias:${alias.providers.join(",")}`);
 			if (stripThinkingVariantSuffix(id)) return rejectStartupRoleScope("conservative:thinking-variant");
 			if (BEDROCK_INFERENCE_PROFILE_ARN.test(id)) return rejectStartupRoleScope("conservative:bedrock-profile");
 		}
 		const blocker = registry.hydratedStartupRoleBlocker(provider, shadowSelectors);
 		if (blocker) return rejectStartupRoleScope(blocker);
+		// Projecting a competing provider may have registered aliases not present in its raw rows.
+		for (const id of shadowSelectors) {
+			const alias = resolveBareVariantSelector(id);
+			if (alias) return rejectStartupRoleScope(`collision:registered-alias:${alias.providers.join(",")}`);
+		}
 	}
 	logger.time("resolveDefaultModelRole:scope:suffix-or-route");
 	return toResolvedRoleValue(parsed.model, parsed, 0);

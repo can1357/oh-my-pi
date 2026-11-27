@@ -788,6 +788,16 @@ export async function listSessionsForPicker(
 	return pickerListing(files, storage, pinnedIds, () => collectSessionsFromFiles(files, storage, true));
 }
 
+/** Warm session mentions from indexed titles without recovering backups or opening transcripts. */
+export async function listIndexedSessions(sessionDir: string): Promise<SessionInfo[]> {
+	const titles = listSessionTitles();
+	if (titles.size === 0) return [];
+	const files = await Array.fromAsync(
+		new Bun.Glob("*.jsonl").scan({ cwd: sessionDir, absolute: true, followSymlinks: true }),
+	);
+	return indexedSessions(files, titles);
+}
+
 /** {@link listSessionsForPicker} across every project directory under `sessionsRoot`. */
 export async function listAllSessionsForPicker(
 	storage: SessionStorage,
