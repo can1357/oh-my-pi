@@ -2,9 +2,9 @@
 import { expect, test } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import { setLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
+import { clearCopiedCode, markCodeCopied, setCodeCopyEnabled, setLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
-import { renderMarkdown } from "../../src/text/markdown";
+import { CODE_COPY_ACT_PREFIX, codeBlockHash, renderMarkdown } from "../../src/text/markdown";
 import { loadThemeSync } from "../../src/theme";
 
 const theme = loadThemeSync("dark");
@@ -37,5 +37,31 @@ test("md draws registered link schemes as labels whose cells are hits carrying t
 		]);
 	} finally {
 		setLinkSchemes([]);
+	}
+});
+
+test("md draws clickable code-copy buttons with action hits and reactive [Copied] feedback", () => {
+	const env = staticEnvironment(theme);
+	const code = "const x = 1;  ";
+	const tree = <md text={`\`\`\`ts\n${code}\n\`\`\``} />;
+	setCodeCopyEnabled(true);
+	try {
+		const hash = codeBlockHash(code);
+		const block = renderBlock(tree as never, 40, { env });
+		expect(block.rows[0]).not.toContain("\x1b]8;");
+		expect(block.rows[0]!.replace(/\x1b\[[\d;:]*m/g, "").trimEnd()).toBe(`\`\`\`ts${" ".repeat(29)}[Copy]`);
+		expect(block.hits?.map(({ row, col, width, act }) => ({ row, col, width, act }))).toEqual([
+			{ row: 0, col: 34, width: 6, act: `${CODE_COPY_ACT_PREFIX}${hash}` },
+		]);
+
+		markCodeCopied(hash, 0);
+		const copied = renderBlock(tree as never, 40, { env });
+		expect(copied.rows[0]!.replace(/\x1b\[[\d;:]*m/g, "").trimEnd()).toBe(`\`\`\`ts${" ".repeat(27)}[Copied]`);
+		expect(copied.hits?.map(({ row, col, width, act }) => ({ row, col, width, act }))).toEqual([
+			{ row: 0, col: 32, width: 8, act: `${CODE_COPY_ACT_PREFIX}${hash}` },
+		]);
+	} finally {
+		clearCopiedCode();
+		setCodeCopyEnabled(false);
 	}
 });
