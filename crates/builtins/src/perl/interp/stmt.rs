@@ -206,8 +206,10 @@ impl Interp<'_> {
 
 	fn finish_main(&mut self, status: i32) -> i32 {
 		self.sv("main::?").replace(Value::Int(i64::from(status)));
+		// A program a signal killed (`killed`) stops here: no END block,
+		// destructor or exit hook runs, and nothing more is flushed.
 		self.phase = "END";
-		while let Some(end) = self.ends.pop() {
+		while !self.killed && let Some(end) = self.ends.pop() {
 			if let Err(flow) = self.run_phase_block(end) {
 				let status = self.flow_status(flow);
 				self.sv("main::?").replace(Value::Int(i64::from(status)));
@@ -218,10 +220,16 @@ impl Interp<'_> {
 			let status = self.flow_status(flow);
 			self.sv("main::?").replace(Value::Int(i64::from(status)));
 		}
-		while !self.exit_hooks.is_empty() {
+		while !self.killed && !self.exit_hooks.is_empty() {
 			for hook in std::mem::take(&mut self.exit_hooks) { hook(self); }
 		}
-		self.flush_outputs();
+		// Output still buffered goes out now; with no reader left, SIGPIPE's
+		// default action ends the program, as it ends perl's own exit flush.
+		if !self.killed && self.flush_outputs()
+			&& let Err(Flow::Exit(status)) = self.raise_signal("PIPE", super::runtime::SIGPIPE)
+		{
+			self.sv("main::?").replace(Value::Int(i64::from(status)));
+		}
 		for io in self.handles.iter().rev().filter_map(std::rc::Weak::upgrade) {
 			if let Ok(mut handle) = io.try_borrow_mut() && handle.is_open() { let _ = handle.close(); }
 		}

@@ -77,7 +77,10 @@
 
 ### Changed
 
+- OTLP export runs on OpenTelemetry JS SDK 3; `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*` and the span limit variables are no longer read (the documented `OTEL_*` variables work as before)
+- On public sites, browser `tab.console()` and `tab.errors()` record from the first call on a tab (the result's `captureStartedAt` marks when), so pages cannot detect the capture; local and dev pages still record from load
 - Interactive startup loads fewer modules, and reading settings or caches no longer unlocks stored credentials.
+- Startup loads the selected or saved model’s provider first when possible and reuses matching local catalog entries between launch and session setup.
 - Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@p2p:` includes local agents and peers from every project, labeled with their folder when different, while plain `@` searches only this folder's peers
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
 - The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
@@ -121,6 +124,8 @@
 
 ### Fixed
 
+- Restored automatic discovery of the Windows Chrome relay from WSL2 with mirrored networking ([#20809](https://github.com/can1357/oh-my-pi/pull/20809) by [@taibenvenuti](https://github.com/taibenvenuti)).
+- Managed Chromium browser tabs no longer look automated to bot detectors: no patched native functions on machines whose GPU matches the presented platform, the same user agent and hardware in every kind of worker, and no DevTools console serialization on public pages
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))

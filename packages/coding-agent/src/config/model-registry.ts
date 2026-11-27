@@ -242,6 +242,58 @@ interface CustomModelsResult {
 	found: boolean;
 }
 
+/** Hydrate every eligible credential-scoped provider, or only the named providers for this startup. */
+export type HydrateStartupModelCaches = (providers?: ReadonlySet<string>) => Promise<void>;
+
+interface StartupModelCacheHit {
+	state: ProviderDiscoveryState;
+	input: string;
+	revision: string;
+	runtimeManager: ModelManagerOptions<Api> | undefined;
+	fresh: boolean;
+}
+
+interface StartupModelCacheLaunch {
+	hits: Map<string, StartupModelCacheHit>;
+	inFlight: Map<string, Promise<void>>;
+}
+
+interface StartupModelCachePass {
+	launch: StartupModelCacheLaunch;
+	revision: string;
+	hits: StartupModelCacheHit[];
+}
+
+interface CredentialScopedCacheDiscovery {
+	startup?: StartupModelCachePass;
+}
+
+type ModelManagerDiscoveryResult = BuiltInDiscoveryResult & { cachedState?: ProviderDiscoveryState };
+
+/** The manager namespace covers the credential and route; no fetch closure or bearer is retained. */
+function startupModelCacheInput(options: ModelManagerOptions<Api>): string {
+	return JSON.stringify([
+		options.cacheProviderId ?? options.providerId,
+		options.staticModels === undefined ? undefined : fingerprintStaticModels(options.staticModels),
+		options.cacheTtlMs,
+		options.dynamicModelsAuthoritative,
+		options.dynamicInputAuthoritative,
+		options.dynamicReasoningAuthoritative,
+		options.dynamicCostAuthoritative,
+		options.keepStaticNames,
+		options.dropCachedModelIdsOnStaticMismatch,
+		options.restorableHeaderFallback && Bun.hash(JSON.stringify(options.restorableHeaderFallback)).toString(36),
+		options.modelsDev?.additiveOnly,
+		options.modelsDev !== undefined,
+		options.fetchDynamicModels !== undefined,
+	]);
+}
+
+function startupModelCacheFresh(state: ProviderDiscoveryState, options: ModelManagerOptions<Api>): boolean {
+	const age = (options.now?.() ?? Date.now()) - (state.fetchedAt ?? Number.NEGATIVE_INFINITY);
+	return age >= 0 && age <= (options.cacheTtlMs ?? BUILT_IN_DISCOVERY_CACHE_TTL_MS);
+}
+
 interface ConfiguredModelDiscoveryResult {
 	models: Model<Api>[];
 	replaceRuntimeModels: boolean;
@@ -575,14 +627,10 @@ export class ModelRegistry {
 	#initialRefreshSettled = false;
 	/** Waiter armed before the initial background refresh starts (CLI kicks it off after the session is built, #10048). */
 	#initialRefreshWaiters = new Set<() => void>();
-	#credentialScopedCacheHydration?: Promise<void>;
-	/**
-	 * Last hydrated offline credential signature per credential-scoped provider, so
-	 * repeated startup hydration calls (e.g. CLI then createAgentSession) skip
-	 * re-reading and re-merging unchanged cache rows while still hydrating
-	 * immediately if credentials or config change.
-	 */
-	#hydratedCredentialSignatures = new Map<string, string>();
+	readonly #credentialScopedCacheHydrations = new Map<string, Promise<void>>();
+	readonly #landedStartupCacheStates = new WeakSet<ProviderDiscoveryState>();
+	#startupCacheResetEpoch = 0;
+	#credentialScopedCacheAuthPoll?: Promise<void>;
 	#configuredDiscoveryInFlight: Map<
 		DiscoveryProviderConfig,
 		Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>
@@ -1088,78 +1136,91 @@ export class ModelRegistry {
 	 *
 	 * The synchronous constructor cannot resolve credentials, so session startup
 	 * awaits this local-only, best-effort pass before validating model selectors.
+	 * An omitted scope loads every eligible provider; an empty scope does no work.
+	 * Only in-flight reads are shared: a later call must see cache rows written
+	 * by other registries or processes even when its auth/config hasn't changed.
 	 */
-	async hydrateCredentialScopedModelCaches(): Promise<void> {
-		if (this.#owner) return this.#owner.hydrateCredentialScopedModelCaches();
-		if (!this.#credentialScopedCacheHydration) {
-			this.#credentialScopedCacheHydration = this.#runCredentialScopedCacheHydration().catch(error => {
-				logger.debug("credential-scoped model cache hydration failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
-		}
-		const hydration = this.#credentialScopedCacheHydration;
-		try {
-			await hydration;
-		} finally {
-			if (this.#credentialScopedCacheHydration === hydration) {
-				this.#credentialScopedCacheHydration = undefined;
-			}
-		}
+	hydrateCredentialScopedModelCaches(providers?: ReadonlySet<string>): Promise<void> {
+		return this.#hydrateCredentialScopedModelCaches(providers);
 	}
 
-	async #runCredentialScopedCacheHydration(): Promise<void> {
+	/**
+	 * Share successful offline cache reads within one launch, re-resolving the
+	 * current credential and manager options on every call. Do not retain this
+	 * callback for later sessions or explicitly requested refreshes.
+	 */
+	createStartupModelCacheHydrator(): HydrateStartupModelCaches {
+		const launch: StartupModelCacheLaunch = { hits: new Map(), inFlight: new Map() };
+		return providers => this.#hydrateCredentialScopedModelCaches(providers, launch);
+	}
+
+	async #hydrateCredentialScopedModelCaches(
+		providers?: ReadonlySet<string>,
+		launch?: StartupModelCacheLaunch,
+	): Promise<void> {
+		if (providers?.size === 0) return;
+		if (this.#owner) {
+			const owner = this.#owner;
+			return launch
+				? logger.time("hydrateCredentialScopedModelCaches", () => owner.hydrateCredentialScopedModelCaches(providers))
+				: owner.hydrateCredentialScopedModelCaches(providers);
+		}
+		const filter = providers && new Set(Array.from(providers, provider => provider.toLowerCase()));
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
-		const candidates: string[] = [];
+		const pending = new Set<string>();
+		const hydrations = new Set<Promise<void>>();
+		// A plain call must not join a launch pass that may skip a model-cache read.
+		const inFlight = launch?.inFlight ?? this.#credentialScopedCacheHydrations;
 		for (const providerId of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
+			if (filter && !filter.has(providerId)) continue;
 			if (!isCredentialScopedModelCacheProvider(providerId)) continue;
-			if (disabledProviders.has(providerId)) continue;
-			if (configuredDiscoveryProviders.has(providerId)) continue;
 			if (
+				disabledProviders.has(providerId) ||
+				configuredDiscoveryProviders.has(providerId) ||
 				(this.#runtimeProviderOverrides.get(providerId)?.transport ??
 					this.#providerOverrides.get(providerId)?.transport) === "pi-native"
 			) {
+				launch?.hits.delete(providerId);
 				continue;
 			}
-			candidates.push(providerId);
+			const hydration = inFlight.get(providerId);
+			if (hydration) hydrations.add(hydration);
+			else pending.add(providerId);
 		}
-		if (candidates.length === 0) return;
-
-		const pendingProviders = new Set<string>();
-		const nextSignatures = new Map<string, string>();
-		// Only resolve offline credentials for providers that have any auth/keyless source;
-		// unauthenticated providers have no credential-scoped cache key unless a descriptor
-		// explicitly allows unauthenticated discovery or a shared catalog applies.
-		const keys = await Promise.all(
-			candidates.map(providerId => {
-				if (
-					!this.#keylessProviders.has(providerId) &&
-					this.authStorage.keys.source(providerId) === undefined &&
-					!this.authStorage.keys.keyless(providerId) &&
-					getOAuthCredentialsForProvider(this.authStorage, providerId).length === 0
-				) {
-					return Promise.resolve<string | undefined>(undefined);
-				}
-				return this.#resolveBuiltInDiscoveryApiKey(providerId, "offline", undefined, false);
-			}),
-		);
-		for (let i = 0; i < candidates.length; i++) {
-			const providerId = candidates[i];
-			const apiKey = keys[i];
-			const baseUrl = this.#descriptorBaseUrl(providerId) ?? "";
-			const hasRuntimeOverride = this.#runtimeModelManagers.has(providerId) ? "1" : "0";
-			const signature = `${apiKey ?? ""}\u0000${baseUrl}\u0000${hasRuntimeOverride}`;
-			if (this.#hydratedCredentialSignatures.get(providerId) !== signature) {
-				pendingProviders.add(providerId);
-				nextSignatures.set(providerId, signature);
-			}
+		if (pending.size > 0) {
+			// `peek` normally adopts external logins before selecting a key. The
+			// cheap source guard below can skip peek, so adopt them once before
+			// testing the in-memory pool, shared by concurrent scopes.
+			const authPoll = (this.#credentialScopedCacheAuthPoll ??= Promise.resolve()
+				.then(async () => {
+					await this.authStorage.credentials.poll();
+				})
+				.catch(error => {
+					logger.debug("External credential poll failed", { error: String(error) });
+				})
+				.finally(() => {
+					this.#credentialScopedCacheAuthPoll = undefined;
+				}));
+			const refresh = () =>
+				authPoll.then(() =>
+					this.#refreshRuntimeDiscoveries("offline", pending, {
+						startup: launch && { launch, revision: this.#startupCacheRevision(), hits: [] },
+					}),
+				);
+			const hydration = (launch ? logger.time("hydrateCredentialScopedModelCaches", refresh) : refresh())
+				.catch(error => {
+					logger.debug("credential-scoped model cache hydration failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				})
+				.finally(() => {
+					for (const providerId of pending) inFlight.delete(providerId);
+				});
+			for (const providerId of pending) inFlight.set(providerId, hydration);
+			hydrations.add(hydration);
 		}
-		if (pendingProviders.size === 0) return;
-		await this.#refreshRuntimeDiscoveries("offline", pendingProviders);
-		for (const [providerId, signature] of nextSignatures) {
-			this.#hydratedCredentialSignatures.set(providerId, signature);
-		}
+		if (hydrations.size > 0) await Promise.all(hydrations);
 	}
 
 	/**
@@ -1765,7 +1826,7 @@ export class ModelRegistry {
 		this.#runtimeDiscoveredModels = [];
 		this.#runtimeAuthoritativeProviders.clear();
 		this.#commandConfigsByProvider.clear();
-		this.#hydratedCredentialSignatures.clear();
+		this.#startupCacheResetEpoch++;
 	}
 
 	#knownStaticProviders(): string[] {
@@ -2873,16 +2934,21 @@ export class ModelRegistry {
 	async #refreshRuntimeDiscoveries(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
+		credentialScoped?: CredentialScopedCacheDiscovery,
 	): Promise<void> {
 		try {
-			await this.#runRuntimeDiscoveries(strategy, providerFilter);
+			await this.#runRuntimeDiscoveries(strategy, providerFilter, credentialScoped);
 		} finally {
 			// Mirrors follow every discovery-layer change the pass made, including failure states.
 			this.#scheduleMirrorFlush();
 		}
 	}
 
-	async #runRuntimeDiscoveries(strategy: ModelRefreshStrategy, providerFilter?: ReadonlySet<string>): Promise<void> {
+	async #runRuntimeDiscoveries(
+		strategy: ModelRefreshStrategy,
+		providerFilter: ReadonlySet<string> | undefined,
+		credentialScoped: CredentialScopedCacheDiscovery | undefined,
+	): Promise<void> {
 		// Credential-scoped hydration composes a separate runtime layer. It may
 		// precede getAll(), but cannot replace a synchronous standard-cache input.
 		if (!providerFilter || this.#startupCatalog?.providers.some(provider => providerFilter.has(provider))) {
@@ -2906,10 +2972,20 @@ export class ModelRegistry {
 							...(await this.#discoverProviderModelsCoalesced(provider, strategy)),
 						})),
 					);
+		const startup = credentialScoped?.startup;
 		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
 			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			this.#discoverBuiltInProviderModels(strategy, providerFilter, credentialScoped),
 		]);
+		if (
+			startup &&
+			configuredDiscoveryResults.length === 0 &&
+			builtInDiscovery.models.length === 0 &&
+			builtInDiscovery.authoritativeProviders.size === 0 &&
+			builtInDiscovery.replaceRuntimeProviders.size === 0
+		) {
+			return;
+		}
 		// A pass whose fetch finished while an earlier one still prepares lands after it,
 		// preserving the land order of fetch completion.
 		const precedingLanding = this.#discoveryLandingTail;
@@ -2918,7 +2994,7 @@ export class ModelRegistry {
 			? undefined
 			: this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery, references);
 		if (!precedingLanding && !preparing) {
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references);
+			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references, startup);
 			return;
 		}
 		const { promise: landing, resolve: landed } = Promise.withResolvers<void>();
@@ -2930,7 +3006,7 @@ export class ModelRegistry {
 			} else {
 				await preparing;
 			}
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references);
+			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references, startup);
 		} finally {
 			if (this.#discoveryLandingTail === landing) this.#discoveryLandingTail = undefined;
 			landed();
@@ -3031,6 +3107,7 @@ export class ModelRegistry {
 		builtInDiscovery: BuiltInDiscoveryResult,
 		providerFilter: ReadonlySet<string> | undefined,
 		references: PreparedDiscoveryReferences,
+		startup: StartupModelCachePass | undefined,
 	): void {
 		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
 		const { discovered, replacedConfiguredProviders, touchedProviders } = this.#runtimeDiscoveryLanding(
@@ -3090,6 +3167,10 @@ export class ModelRegistry {
 		);
 		this.#runtimeDiscoveredModels.push(...discoveredModels);
 		for (const provider of touchedProviders) {
+			// An older pass can land after a newer pass recorded its discovery
+			// state. Invalidate the state's landing witness even in that order.
+			const state = this.#providerDiscoveryStates.get(provider);
+			if (state) this.#landedStartupCacheStates.delete(state);
 			if (authoritativeProviders.has(provider)) {
 				this.#runtimeAuthoritativeProviders.add(provider);
 			} else {
@@ -3097,7 +3178,10 @@ export class ModelRegistry {
 			}
 			this.#invalidateProviderModelCache(provider);
 		}
-		if (!this.#hasFullSnapshot) return;
+		if (!this.#hasFullSnapshot) {
+			this.#rememberStartupCacheHits(startup);
+			return;
+		}
 
 		let baseModels = this.#baseModels;
 		if (replacedProviderSet.size > 0) {
@@ -3112,6 +3196,26 @@ export class ModelRegistry {
 		this.#baseModels = this.#mergeResolvedModels(baseModels, discoveredModels);
 		this.#unprojectedModels = this.#projectBaseModels(this.#baseModels);
 		this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
+		this.#rememberStartupCacheHits(startup);
+	}
+
+	#startupCacheRevision(): string {
+		return JSON.stringify([
+			this.#startupCacheResetEpoch,
+			this.#mirrorSeq,
+			cascadeRulesRevision(),
+			isExtendedContextEnabledFromSettings(this.#settings),
+			getModelCompactionPointsFromSettings(this.#settings),
+		]);
+	}
+
+	#rememberStartupCacheHits(startup: StartupModelCachePass | undefined): void {
+		if (!startup?.hits.length || startup.revision !== this.#startupCacheRevision()) return;
+		for (const hit of startup.hits) {
+			if (this.#providerDiscoveryStates.get(hit.state.provider) !== hit.state) continue;
+			this.#landedStartupCacheStates.add(hit.state);
+			startup.launch.hits.set(hit.state.provider, hit);
+		}
 	}
 
 	/**
@@ -3383,7 +3487,8 @@ export class ModelRegistry {
 
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
-		providerFilter?: ReadonlySet<string>,
+		providerFilter: ReadonlySet<string> | undefined,
+		credentialScoped: CredentialScopedCacheDiscovery | undefined,
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
@@ -3391,13 +3496,31 @@ export class ModelRegistry {
 			strategy,
 			providerFilter,
 			configuredDiscoveryProviders,
+			credentialScoped,
 		);
 		if (managerOptions.length === 0) {
 			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
 		}
 		const writesBefore = getModelCacheWriteStats();
+		// A provider with multiple managers (e.g. special discovery plus an
+		// extension override) lands a composite; no single cache hit proves it.
+		const startup = credentialScoped?.startup;
+		const launchPass = startup && startup.revision === this.#startupCacheRevision() ? startup : undefined;
+		const managerCounts = launchPass ? new Map<string, number>() : undefined;
+		if (managerCounts) {
+			for (const { providerId } of managerOptions) {
+				managerCounts.set(providerId, (managerCounts.get(providerId) ?? 0) + 1);
+			}
+		}
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managerOptions.map(options =>
+				launchPass &&
+				options.cacheProviderId &&
+				managerCounts?.get(options.providerId) === 1 &&
+				!options.restoreCachedHeaders
+					? this.#discoverStartupModelCache(options, launchPass)
+					: this.#discoverWithModelManager(options, strategy),
+			),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -3416,6 +3539,7 @@ export class ModelRegistry {
 		const replaceRuntimeProviders = new Set<string>();
 		const models: Model<Api>[] = [];
 		for (const discovery of discoveries) {
+			if (!discovery) continue;
 			models.push(...discovery.models);
 			for (const provider of discovery.authoritativeProviders) {
 				authoritativeProviders.add(provider);
@@ -3491,6 +3615,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
 		configuredDiscoveryProviders: ReadonlySet<string>,
+		credentialScoped: CredentialScopedCacheDiscovery | undefined,
 	): Promise<ModelManagerOptions<Api>[]> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
@@ -3563,24 +3688,32 @@ export class ModelRegistry {
 		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor =>
 			discoverable(descriptor.providerId),
 		);
+		const resolveKey = (provider: string, cacheProviderId: string | undefined, authoritative: boolean) => {
+			// No credential-scoped key to look up. Still let unauthenticated
+			// descriptors and shared/runtime catalogs build their offline options.
+			if (
+				credentialScoped &&
+				!this.#keylessProviders.has(provider) &&
+				this.authStorage.keys.source(provider, { env: "aliases" }) === undefined &&
+				!this.authStorage.keys.keyless(provider) &&
+				!this.authStorage.credentials.hasOAuth(provider)
+			) {
+				return undefined;
+			}
+			return this.#resolveBuiltInDiscoveryApiKey(provider, strategy, cacheProviderId, authoritative);
+		};
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
 					? undefined
 					: this.#resolveStartupModelCacheProviderId(descriptor.providerId);
-				return this.#resolveBuiltInDiscoveryApiKey(
-					descriptor.providerId,
-					strategy,
-					cacheProviderId,
-					descriptor.dynamicModelsAuthoritative ?? false,
-				);
+				return resolveKey(descriptor.providerId, cacheProviderId, descriptor.dynamicModelsAuthoritative ?? false);
 			}),
 		);
 		const specialKeys = await Promise.all(
 			enabledSpecialProviderDescriptors.map(descriptor =>
-				this.#resolveBuiltInDiscoveryApiKey(
+				resolveKey(
 					descriptor.providerId,
-					strategy,
 					isCredentialScopedModelCacheProvider(descriptor.providerId) ? undefined : descriptor.providerId,
 					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
@@ -3716,10 +3849,43 @@ export class ModelRegistry {
 		};
 	}
 
+	#discoverStartupModelCache(
+		options: ModelManagerOptions<Api>,
+		startup: StartupModelCachePass,
+	): Promise<ModelManagerDiscoveryResult> | undefined {
+		const { providerId } = options;
+		const runtimeManager = this.#runtimeModelManagers.get(providerId)?.options;
+		const previous = startup.launch.hits.get(providerId);
+		if (
+			previous &&
+			previous.revision === startup.revision &&
+			previous.runtimeManager === runtimeManager &&
+			this.#providerDiscoveryStates.get(providerId) === previous.state &&
+			this.#landedStartupCacheStates.has(previous.state) &&
+			previous.fresh === startupModelCacheFresh(previous.state, options) &&
+			previous.input === startupModelCacheInput(options)
+		) {
+			return undefined;
+		}
+		startup.launch.hits.delete(providerId);
+		return this.#discoverWithModelManager(options, "offline").then(result => {
+			if (result.cachedState) {
+				startup.hits.push({
+					state: result.cachedState,
+					input: startupModelCacheInput(options),
+					revision: startup.revision,
+					runtimeManager,
+					fresh: startupModelCacheFresh(result.cachedState, options),
+				});
+			}
+			return result;
+		});
+	}
+
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
-	): Promise<BuiltInDiscoveryResult> {
+	): Promise<ModelManagerDiscoveryResult> {
 		let failure: string | undefined;
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
@@ -3743,7 +3909,7 @@ export class ModelRegistry {
 								: "empty";
 			// A throwing fetcher still resolves (cache or bundled), but the failure must reach the state and the log.
 			failure = result.fetchError;
-			this.#providerDiscoveryStates.set(options.providerId, {
+			const state: ProviderDiscoveryState = {
 				provider: options.providerId,
 				status,
 				optional: false,
@@ -3752,7 +3918,8 @@ export class ModelRegistry {
 				source: result.source,
 				models: models.map(model => model.id),
 				...(failure !== undefined ? { error: failure } : {}),
-			});
+			};
+			this.#providerDiscoveryStates.set(options.providerId, state);
 			const authoritativeProviders = new Set<string>();
 			if (options.dynamicModelsAuthoritative && !result.stale) {
 				authoritativeProviders.add(options.providerId);
@@ -3761,7 +3928,12 @@ export class ModelRegistry {
 			if (result.source === "provider") {
 				replaceRuntimeProviders.add(options.providerId);
 			}
-			return { models, authoritativeProviders, replaceRuntimeProviders };
+			return {
+				models,
+				authoritativeProviders,
+				replaceRuntimeProviders,
+				cachedState: result.source === "cache" && failure === undefined ? state : undefined,
+			};
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
@@ -5270,7 +5442,7 @@ export interface ModelRegistryOwner {
 	/** {@link ModelRegistry.refreshRuntimeProviders} on the owner. */
 	refreshRuntimeProviders(strategy: ModelRefreshStrategy): Promise<void>;
 	/** {@link ModelRegistry.hydrateCredentialScopedModelCaches} on the owner. */
-	hydrateCredentialScopedModelCaches(): Promise<void>;
+	hydrateCredentialScopedModelCaches(providers?: ReadonlySet<string>): Promise<void>;
 	/** {@link ModelRegistry.reapplyModelPolicies} on the owner. */
 	reapplyModelPolicies(): Promise<void>;
 	/** {@link ModelRegistry.refreshInBackground} on the owner. */

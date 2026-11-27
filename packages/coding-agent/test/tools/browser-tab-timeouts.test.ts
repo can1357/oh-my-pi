@@ -7,7 +7,10 @@ import { resolveOpTimeouts, resolveWaitTimeout } from "@oh-my-pi/pi-coding-agent
 import { parseRoleSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/query-handlers";
 import { dispatchScroll, normalizeSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import { resolvePredicateTimeout } from "@oh-my-pi/pi-coding-agent/tools/run-scope";
-import { Connection, type ConnectionTransport } from "puppeteer-core";
+import type { ConnectionTransport, Logger } from "puppeteer-core";
+import { Connection } from "puppeteer-core/lib/puppeteer/cdp/Connection.js";
+
+const silentLogger: Logger = () => undefined;
 
 // Regression coverage for the "weird timeouts" failure mode: interactive `tab.*` helpers
 // used to run with the full cell budget as their internal puppeteer timeout, so a stalled
@@ -18,7 +21,15 @@ import { Connection, type ConnectionTransport } from "puppeteer-core";
 describe("browser per-op fail-fast ceilings", () => {
 	it("bounds unanswered browser management requests independently of long page evaluations", async () => {
 		vi.useFakeTimers();
-		const connection = new Connection("", { send: () => {}, close: () => {} }, 0, BROWSER_PROTOCOL_TIMEOUT_MS);
+		const connection = new Connection(
+			"",
+			{ send: () => {}, close: () => {} },
+			0,
+			BROWSER_PROTOCOL_TIMEOUT_MS,
+			undefined,
+			undefined,
+			silentLogger,
+		);
 		try {
 			const outcome = connection.send("Browser.getVersion").catch(error => error);
 			vi.advanceTimersByTime(60_000);
@@ -38,7 +49,15 @@ describe("browser per-op fail-fast ceilings", () => {
 			},
 			close: () => {},
 		};
-		const connection = new Connection("", transport, 0, BROWSER_PAGE_PROTOCOL_TIMEOUT_MS);
+		const connection = new Connection(
+			"",
+			transport,
+			0,
+			BROWSER_PAGE_PROTOCOL_TIMEOUT_MS,
+			undefined,
+			undefined,
+			silentLogger,
+		);
 		try {
 			const pending = connection.send("Runtime.evaluate", { expression: "42", awaitPromise: true });
 			const outcome = pending.then(
