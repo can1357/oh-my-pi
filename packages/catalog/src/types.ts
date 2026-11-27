@@ -1238,6 +1238,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 */
 	toolNamePrefix?: string;
 	/**
+	 * `reasoning.summary` level sent when reasoning is engaged and the caller did
+	 * not choose one. Rule-owned: hosts whose `"auto"` summaries come back mostly
+	 * empty (GitHub Copilot GPT models). Unset keeps `"auto"`. Ignored while
+	 * `supportsReasoningSummary` is false.
+	 */
+	reasoningSummaryDefault?: "auto" | "detailed" | "concise";
+	/**
 	 * Whether the host binds native history items (`encrypted_content`, item
 	 * ids) to the connection that issued them, so a new process must rebuild
 	 * prior turns from message content until its first successful response.
