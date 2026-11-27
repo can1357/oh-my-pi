@@ -485,7 +485,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				);
 			}
 
-			for (const target of targets) {
+			for (const [index, target] of targets.entries()) {
+				if (detailed && timeoutSignal.aborted && !callerSignal?.aborted) {
+					results.push(
+						`${statusSymbol("warning")} Deadline reached; unverified: ${targets.slice(index).join(", ")}`,
+					);
+					break;
+				}
 				throwIfAborted(signal);
 				const resolved = resolveToCwd(target, this.session.cwd);
 				const servers = getServersForFile(config, resolved);
@@ -504,7 +510,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const unreportedServers: string[] = [];
 
 				// Query all applicable servers for this file
-				for (const [serverName, serverConfig] of servers) {
+				for (const [index, [serverName, serverConfig]] of servers.entries()) {
 					allServerNames.add(serverName);
 					totalServerAttempts++;
 					try {
@@ -574,6 +580,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						succeededServers++;
 						reportedServers.push(serverName);
 					} catch (err) {
+						if (detailed && timeoutSignal.aborted && !callerSignal?.aborted) {
+							unreportedServers.push(...servers.slice(index).map(([name]) => name));
+							break;
+						}
 						rethrowAbort(err, serverName);
 						// Server failed; record it so a total failure is not reported as clean.
 						failedServers.push(serverName);

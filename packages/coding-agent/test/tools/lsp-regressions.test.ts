@@ -2941,6 +2941,50 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("keeps completed diagnostics and identifies unverified targets when the batch deadline expires", async () => {
+		const temp = TempDir.createSync("@omp-lsp-partial-");
+		const cwd = temp.path();
+		const deadline = new AbortController();
+		const config: ServerConfig = {
+			command: "test-linter",
+			fileTypes: ["ts"],
+			rootMarkers: [],
+			createClient: () => ({
+				format: async (_file, text) => text,
+				lint: async file => {
+					if (path.basename(file) !== "first.ts") {
+						deadline.abort();
+						throw new ToolAbortError();
+					}
+					return [
+						{
+							severity: 1,
+							message: "Unresolved reference",
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+						},
+					];
+				},
+			}),
+		};
+		try {
+			await initTheme();
+			configCache.set(cwd, { servers: { lint: config } });
+			vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(deadline.signal);
+			const result = await new LspTool(makeLspSession(cwd)).execute("batch-deadline", {
+				action: "diagnostics",
+				file: "first.ts;waiting.ts;untouched.ts",
+			});
+			const output = textResult(result);
+			expect(output).toContain("Unresolved reference");
+			expect(output).toContain("waiting.ts: no diagnostics report");
+			expect(output).toContain("unverified: untouched.ts");
+		} finally {
+			vi.restoreAllMocks();
+			configCache.delete(cwd);
+			temp.removeSync();
+		}
+	});
+
 	it("reports failure when every applicable diagnostics server fails (#8377)", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-all-servers-fail-");
 		try {
