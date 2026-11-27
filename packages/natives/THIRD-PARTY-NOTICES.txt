@@ -185,430 +185,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-Silver font — crates/natives/src/fonts/Silver.ttf
-
-Silver — a pixel font for games
-
-Source:  https://poppyworks.itch.io/silver
-Author:  Poppy Works, Wolfgang Wozniak
-Major contributors:
-  - Itou Hiro (PixelMPlus)
-  - leedheo (DOSGothic)
-  - ぶち (Buchidot)
-
-License: Creative Commons Attribution 4.0 International (CC BY 4.0)
-         https://creativecommons.org/licenses/by/4.0/
-
-This license allows the work and adaptations of it to be shared and used
-commercially, as long as it is attributed to Poppy Works. The font is bundled
-here (crates/natives/src/fonts/Silver.ttf) as a CJK/Unicode bitmap fallback.
-
-Creative Commons Attribution 4.0 International full legal text:
-
-Attribution 4.0 International
-
-=======================================================================
-
-Creative Commons Corporation ("Creative Commons") is not a law firm and
-does not provide legal services or legal advice. Distribution of
-Creative Commons public licenses does not create a lawyer-client or
-other relationship. Creative Commons makes its licenses and related
-information available on an "as-is" basis. Creative Commons gives no
-warranties regarding its licenses, any material licensed under their
-terms and conditions, or any related information. Creative Commons
-disclaims all liability for damages resulting from their use to the
-fullest extent possible.
-
-Using Creative Commons Public Licenses
-
-Creative Commons public licenses provide a standard set of terms and
-conditions that creators and other rights holders may use to share
-original works of authorship and other material subject to copyright
-and certain other rights specified in the public license below. The
-following considerations are for informational purposes only, are not
-exhaustive, and do not form part of our licenses.
-
-     Considerations for licensors: Our public licenses are
-     intended for use by those authorized to give the public
-     permission to use material in ways otherwise restricted by
-     copyright and certain other rights. Our licenses are
-     irrevocable. Licensors should read and understand the terms
-     and conditions of the license they choose before applying it.
-     Licensors should also secure all rights necessary before
-     applying our licenses so that the public can reuse the
-     material as expected. Licensors should clearly mark any
-     material not subject to the license. This includes other CC-
-     licensed material, or material used under an exception or
-     limitation to copyright. More considerations for licensors:
-	wiki.creativecommons.org/Considerations_for_licensors
-
-     Considerations for the public: By using one of our public
-     licenses, a licensor grants the public permission to use the
-     licensed material under specified terms and conditions. If
-     the licensor's permission is not necessary for any reason--for
-     example, because of any applicable exception or limitation to
-     copyright--then that use is not regulated by the license. Our
-     licenses grant only permissions under copyright and certain
-     other rights that a licensor has authority to grant. Use of
-     the licensed material may still be restricted for other
-     reasons, including because others have copyright or other
-     rights in the material. A licensor may make special requests,
-     such as asking that all changes be marked or described.
-     Although not required by our licenses, you are encouraged to
-     respect those requests where reasonable. More_considerations
-     for the public: 
-	wiki.creativecommons.org/Considerations_for_licensees
-
-=======================================================================
-
-Creative Commons Attribution 4.0 International Public License
-
-By exercising the Licensed Rights (defined below), You accept and agree
-to be bound by the terms and conditions of this Creative Commons
-Attribution 4.0 International Public License ("Public License"). To the
-extent this Public License may be interpreted as a contract, You are
-granted the Licensed Rights in consideration of Your acceptance of
-these terms and conditions, and the Licensor grants You such rights in
-consideration of benefits the Licensor receives from making the
-Licensed Material available under these terms and conditions.
-
-
-Section 1 -- Definitions.
-
-  a. Adapted Material means material subject to Copyright and Similar
-     Rights that is derived from or based upon the Licensed Material
-     and in which the Licensed Material is translated, altered,
-     arranged, transformed, or otherwise modified in a manner requiring
-     permission under the Copyright and Similar Rights held by the
-     Licensor. For purposes of this Public License, where the Licensed
-     Material is a musical work, performance, or sound recording,
-     Adapted Material is always produced where the Licensed Material is
-     synched in timed relation with a moving image.
-
-  b. Adapter's License means the license You apply to Your Copyright
-     and Similar Rights in Your contributions to Adapted Material in
-     accordance with the terms and conditions of this Public License.
-
-  c. Copyright and Similar Rights means copyright and/or similar rights
-     closely related to copyright including, without limitation,
-     performance, broadcast, sound recording, and Sui Generis Database
-     Rights, without regard to how the rights are labeled or
-     categorized. For purposes of this Public License, the rights
-     specified in Section 2(b)(1)-(2) are not Copyright and Similar
-     Rights.
-
-  d. Effective Technological Measures means those measures that, in the
-     absence of proper authority, may not be circumvented under laws
-     fulfilling obligations under Article 11 of the WIPO Copyright
-     Treaty adopted on December 20, 1996, and/or similar international
-     agreements.
-
-  e. Exceptions and Limitations means fair use, fair dealing, and/or
-     any other exception or limitation to Copyright and Similar Rights
-     that applies to Your use of the Licensed Material.
-
-  f. Licensed Material means the artistic or literary work, database,
-     or other material to which the Licensor applied this Public
-     License.
-
-  g. Licensed Rights means the rights granted to You subject to the
-     terms and conditions of this Public License, which are limited to
-     all Copyright and Similar Rights that apply to Your use of the
-     Licensed Material and that the Licensor has authority to license.
-
-  h. Licensor means the individual(s) or entity(ies) granting rights
-     under this Public License.
-
-  i. Share means to provide material to the public by any means or
-     process that requires permission under the Licensed Rights, such
-     as reproduction, public display, public performance, distribution,
-     dissemination, communication, or importation, and to make material
-     available to the public including in ways that members of the
-     public may access the material from a place and at a time
-     individually chosen by them.
-
-  j. Sui Generis Database Rights means rights other than copyright
-     resulting from Directive 96/9/EC of the European Parliament and of
-     the Council of 11 March 1996 on the legal protection of databases,
-     as amended and/or succeeded, as well as other essentially
-     equivalent rights anywhere in the world.
-
-  k. You means the individual or entity exercising the Licensed Rights
-     under this Public License. Your has a corresponding meaning.
-
-
-Section 2 -- Scope.
-
-  a. License grant.
-
-       1. Subject to the terms and conditions of this Public License,
-          the Licensor hereby grants You a worldwide, royalty-free,
-          non-sublicensable, non-exclusive, irrevocable license to
-          exercise the Licensed Rights in the Licensed Material to:
-
-            a. reproduce and Share the Licensed Material, in whole or
-               in part; and
-
-            b. produce, reproduce, and Share Adapted Material.
-
-       2. Exceptions and Limitations. For the avoidance of doubt, where
-          Exceptions and Limitations apply to Your use, this Public
-          License does not apply, and You do not need to comply with
-          its terms and conditions.
-
-       3. Term. The term of this Public License is specified in Section
-          6(a).
-
-       4. Media and formats; technical modifications allowed. The
-          Licensor authorizes You to exercise the Licensed Rights in
-          all media and formats whether now known or hereafter created,
-          and to make technical modifications necessary to do so. The
-          Licensor waives and/or agrees not to assert any right or
-          authority to forbid You from making technical modifications
-          necessary to exercise the Licensed Rights, including
-          technical modifications necessary to circumvent Effective
-          Technological Measures. For purposes of this Public License,
-          simply making modifications authorized by this Section 2(a)
-          (4) never produces Adapted Material.
-
-       5. Downstream recipients.
-
-            a. Offer from the Licensor -- Licensed Material. Every
-               recipient of the Licensed Material automatically
-               receives an offer from the Licensor to exercise the
-               Licensed Rights under the terms and conditions of this
-               Public License.
-
-            b. No downstream restrictions. You may not offer or impose
-               any additional or different terms or conditions on, or
-               apply any Effective Technological Measures to, the
-               Licensed Material if doing so restricts exercise of the
-               Licensed Rights by any recipient of the Licensed
-               Material.
-
-       6. No endorsement. Nothing in this Public License constitutes or
-          may be construed as permission to assert or imply that You
-          are, or that Your use of the Licensed Material is, connected
-          with, or sponsored, endorsed, or granted official status by,
-          the Licensor or others designated to receive attribution as
-          provided in Section 3(a)(1)(A)(i).
-
-  b. Other rights.
-
-       1. Moral rights, such as the right of integrity, are not
-          licensed under this Public License, nor are publicity,
-          privacy, and/or other similar personality rights; however, to
-          the extent possible, the Licensor waives and/or agrees not to
-          assert any such rights held by the Licensor to the limited
-          extent necessary to allow You to exercise the Licensed
-          Rights, but not otherwise.
-
-       2. Patent and trademark rights are not licensed under this
-          Public License.
-
-       3. To the extent possible, the Licensor waives any right to
-          collect royalties from You for the exercise of the Licensed
-          Rights, whether directly or through a collecting society
-          under any voluntary or waivable statutory or compulsory
-          licensing scheme. In all other cases the Licensor expressly
-          reserves any right to collect such royalties.
-
-
-Section 3 -- License Conditions.
-
-Your exercise of the Licensed Rights is expressly made subject to the
-following conditions.
-
-  a. Attribution.
-
-       1. If You Share the Licensed Material (including in modified
-          form), You must:
-
-            a. retain the following if it is supplied by the Licensor
-               with the Licensed Material:
-
-                 i. identification of the creator(s) of the Licensed
-                    Material and any others designated to receive
-                    attribution, in any reasonable manner requested by
-                    the Licensor (including by pseudonym if
-                    designated);
-
-                ii. a copyright notice;
-
-               iii. a notice that refers to this Public License;
-
-                iv. a notice that refers to the disclaimer of
-                    warranties;
-
-                 v. a URI or hyperlink to the Licensed Material to the
-                    extent reasonably practicable;
-
-            b. indicate if You modified the Licensed Material and
-               retain an indication of any previous modifications; and
-
-            c. indicate the Licensed Material is licensed under this
-               Public License, and include the text of, or the URI or
-               hyperlink to, this Public License.
-
-       2. You may satisfy the conditions in Section 3(a)(1) in any
-          reasonable manner based on the medium, means, and context in
-          which You Share the Licensed Material. For example, it may be
-          reasonable to satisfy the conditions by providing a URI or
-          hyperlink to a resource that includes the required
-          information.
-
-       3. If requested by the Licensor, You must remove any of the
-          information required by Section 3(a)(1)(A) to the extent
-          reasonably practicable.
-
-       4. If You Share Adapted Material You produce, the Adapter's
-          License You apply must not prevent recipients of the Adapted
-          Material from complying with this Public License.
-
-
-Section 4 -- Sui Generis Database Rights.
-
-Where the Licensed Rights include Sui Generis Database Rights that
-apply to Your use of the Licensed Material:
-
-  a. for the avoidance of doubt, Section 2(a)(1) grants You the right
-     to extract, reuse, reproduce, and Share all or a substantial
-     portion of the contents of the database;
-
-  b. if You include all or a substantial portion of the database
-     contents in a database in which You have Sui Generis Database
-     Rights, then the database in which You have Sui Generis Database
-     Rights (but not its individual contents) is Adapted Material; and
-
-  c. You must comply with the conditions in Section 3(a) if You Share
-     all or a substantial portion of the contents of the database.
-
-For the avoidance of doubt, this Section 4 supplements and does not
-replace Your obligations under this Public License where the Licensed
-Rights include other Copyright and Similar Rights.
-
-
-Section 5 -- Disclaimer of Warranties and Limitation of Liability.
-
-  a. UNLESS OTHERWISE SEPARATELY UNDERTAKEN BY THE LICENSOR, TO THE
-     EXTENT POSSIBLE, THE LICENSOR OFFERS THE LICENSED MATERIAL AS-IS
-     AND AS-AVAILABLE, AND MAKES NO REPRESENTATIONS OR WARRANTIES OF
-     ANY KIND CONCERNING THE LICENSED MATERIAL, WHETHER EXPRESS,
-     IMPLIED, STATUTORY, OR OTHER. THIS INCLUDES, WITHOUT LIMITATION,
-     WARRANTIES OF TITLE, MERCHANTABILITY, FITNESS FOR A PARTICULAR
-     PURPOSE, NON-INFRINGEMENT, ABSENCE OF LATENT OR OTHER DEFECTS,
-     ACCURACY, OR THE PRESENCE OR ABSENCE OF ERRORS, WHETHER OR NOT
-     KNOWN OR DISCOVERABLE. WHERE DISCLAIMERS OF WARRANTIES ARE NOT
-     ALLOWED IN FULL OR IN PART, THIS DISCLAIMER MAY NOT APPLY TO YOU.
-
-  b. TO THE EXTENT POSSIBLE, IN NO EVENT WILL THE LICENSOR BE LIABLE
-     TO YOU ON ANY LEGAL THEORY (INCLUDING, WITHOUT LIMITATION,
-     NEGLIGENCE) OR OTHERWISE FOR ANY DIRECT, SPECIAL, INDIRECT,
-     INCIDENTAL, CONSEQUENTIAL, PUNITIVE, EXEMPLARY, OR OTHER LOSSES,
-     COSTS, EXPENSES, OR DAMAGES ARISING OUT OF THIS PUBLIC LICENSE OR
-     USE OF THE LICENSED MATERIAL, EVEN IF THE LICENSOR HAS BEEN
-     ADVISED OF THE POSSIBILITY OF SUCH LOSSES, COSTS, EXPENSES, OR
-     DAMAGES. WHERE A LIMITATION OF LIABILITY IS NOT ALLOWED IN FULL OR
-     IN PART, THIS LIMITATION MAY NOT APPLY TO YOU.
-
-  c. The disclaimer of warranties and limitation of liability provided
-     above shall be interpreted in a manner that, to the extent
-     possible, most closely approximates an absolute disclaimer and
-     waiver of all liability.
-
-
-Section 6 -- Term and Termination.
-
-  a. This Public License applies for the term of the Copyright and
-     Similar Rights licensed here. However, if You fail to comply with
-     this Public License, then Your rights under this Public License
-     terminate automatically.
-
-  b. Where Your right to use the Licensed Material has terminated under
-     Section 6(a), it reinstates:
-
-       1. automatically as of the date the violation is cured, provided
-          it is cured within 30 days of Your discovery of the
-          violation; or
-
-       2. upon express reinstatement by the Licensor.
-
-     For the avoidance of doubt, this Section 6(b) does not affect any
-     right the Licensor may have to seek remedies for Your violations
-     of this Public License.
-
-  c. For the avoidance of doubt, the Licensor may also offer the
-     Licensed Material under separate terms or conditions or stop
-     distributing the Licensed Material at any time; however, doing so
-     will not terminate this Public License.
-
-  d. Sections 1, 5, 6, 7, and 8 survive termination of this Public
-     License.
-
-
-Section 7 -- Other Terms and Conditions.
-
-  a. The Licensor shall not be bound by any additional or different
-     terms or conditions communicated by You unless expressly agreed.
-
-  b. Any arrangements, understandings, or agreements regarding the
-     Licensed Material not stated herein are separate from and
-     independent of the terms and conditions of this Public License.
-
-
-Section 8 -- Interpretation.
-
-  a. For the avoidance of doubt, this Public License does not, and
-     shall not be interpreted to, reduce, limit, restrict, or impose
-     conditions on any use of the Licensed Material that could lawfully
-     be made without permission under this Public License.
-
-  b. To the extent possible, if any provision of this Public License is
-     deemed unenforceable, it shall be automatically reformed to the
-     minimum extent necessary to make it enforceable. If the provision
-     cannot be reformed, it shall be severed from this Public License
-     without affecting the enforceability of the remaining terms and
-     conditions.
-
-  c. No term or condition of this Public License will be waived and no
-     failure to comply consented to unless expressly agreed to by the
-     Licensor.
-
-  d. Nothing in this Public License constitutes or may be interpreted
-     as a limitation upon, or waiver of, any privileges and immunities
-     that apply to the Licensor or You, including from the legal
-     processes of any jurisdiction or authority.
-
-
-=======================================================================
-
-Creative Commons is not a party to its public
-licenses. Notwithstanding, Creative Commons may elect to apply one of
-its public licenses to material it publishes and in those instances
-will be considered the “Licensor.” The text of the Creative Commons
-public licenses is dedicated to the public domain under the CC0 Public
-Domain Dedication. Except for the limited purpose of indicating that
-material is shared under a Creative Commons public license or as
-otherwise permitted by the Creative Commons policies published at
-creativecommons.org/policies, Creative Commons does not authorize the
-use of the trademark "Creative Commons" or any other trademark or logo
-of Creative Commons without its prior written consent including,
-without limitation, in connection with any unauthorized modifications
-to any of its public licenses or any other arrangements,
-understandings, or agreements concerning use of licensed material. For
-the avoidance of doubt, this paragraph does not form part of the
-public licenses.
-
-Creative Commons may be contacted at creativecommons.org.
-
-BUNDLED C LIBRARIES
-===================
-
-These libraries are compiled from the source bundled in their -sys crates.
-Opus, built by opusic-sys, carries the same license text as that crate, listed
-under RUST CRATE LICENSES.
-
--------------------------------------------------------------------------------
 Oniguruma 6.9.10 — via onig_sys 69.9.3
 
 Oniguruma LICENSE
@@ -704,9 +280,10 @@ ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF S
 RUST CRATE LICENSES
 ===================
 
-Generated by cargo-about 0.8.2 from Cargo.lock for every target and feature,
-excluding dev-dependencies, under the license policy in about.toml. Each block
-lists the crates that share one license text, followed by that text.
+Generated by cargo-about 0.8.2 from Cargo.lock for every feature and each
+target the addon ships for, excluding dev-dependencies, under the license
+policy in about.toml. Each block lists the crates that share one license text,
+followed by that text.
 
 uluru 3.1.0 (MPL-2.0) is used unmodified. Its source code is available from
 crates.io (https://crates.io/crates/uluru/3.1.0) and upstream
@@ -2873,7 +2450,6 @@ Used by:
 - gl_generator 0.14.0 (https://github.com/brendanzab/gl-rs/)
 - khronos_api 3.1.0 (https://github.com/brendanzab/gl-rs/)
 - ryu 1.0.23 (https://github.com/dtolnay/ryu)
-- serial2 0.2.38 (https://github.com/de-vri-es/serial2-rs)
 - uiautomation 0.25.1 (https://github.com/leexgone/uiautomation-rs)
 - uiautomation_derive 0.7.9 (https://github.com/leexgone/uiautomation-rs)
 - wasmtime-asm-macros 29.0.1 (https://github.com/bytecodealliance/wasmtime)
@@ -3597,39 +3173,6 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- peg-runtime 0.8.6 (https://github.com/kevinmehall/rust-peg)
-
-Full license text:
-
-Copyright (C) 2013 Kevin Mehall
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - sha3 0.10.9 (https://github.com/RustCrypto/hashes)
 
 Full license text:
@@ -3767,9 +3310,6 @@ THE SOFTWARE.
 License: MIT License (MIT)
 Used by:
 - core-foundation-sys 0.8.7 (https://github.com/servo/core-foundation-rs)
-- core-foundation 0.10.1 (https://github.com/servo/core-foundation-rs)
-- core-graphics-types 0.2.0 (https://github.com/servo/core-foundation-rs)
-- core-graphics 0.25.0 (https://github.com/servo/core-foundation-rs)
 - string_cache 0.11.0 (https://github.com/servo/string-cache)
 - string_cache_codegen 0.11.2 (https://github.com/servo/string-cache)
 
@@ -3941,16 +3481,11 @@ Used by:
 - filetime 0.2.29 (https://github.com/alexcrichton/filetime)
 - find-msvc-tools 0.1.12 (https://github.com/rust-lang/cc-rs)
 - jobserver 0.1.35 (https://github.com/rust-lang/jobserver-rs)
-- js-sys 0.3.106 (https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys)
 - pkg-config 0.3.34 (https://github.com/rust-lang/pkg-config-rs)
 - scoped-tls 1.0.1 (https://github.com/alexcrichton/scoped-tls)
 - socket2 0.5.10 (https://github.com/rust-lang/socket2)
 - socket2 0.6.5 (https://github.com/rust-lang/socket2)
 - stacker 0.1.25 (https://github.com/rust-lang/stacker)
-- wasm-bindgen-macro-support 0.2.129 (https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support)
-- wasm-bindgen-macro 0.2.129 (https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro)
-- wasm-bindgen-shared 0.2.129 (https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared)
-- wasm-bindgen 0.2.129 (https://github.com/wasm-bindgen/wasm-bindgen)
 
 Full license text:
 
@@ -4478,7 +4013,6 @@ THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- winreg 0.10.1 (https://github.com/gentoo90/winreg-rs)
 - winreg 0.56.0 (https://github.com/gentoo90/winreg-rs)
 
 Full license text:
@@ -5238,39 +4772,6 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- xkbcommon 0.9.0 (https://github.com/rust-x-bindings/xkbcommon-rs)
-
-Full license text:
-
-Copyright (c) 2016 Remi Thebault <remi.thebault@gmail.com>
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - streaming-iterator 0.1.9 (https://github.com/sfackler/streaming-iterator)
 
 Full license text:
@@ -5828,69 +5329,6 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- shared_library 0.1.9 (https://github.com/tomaka/shared_library/)
-
-Full license text:
-
-Copyright (c) 2017 Pierre Krieger
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- redox_syscall 0.5.18 (https://gitlab.redox-os.org/redox-os/syscall)
-
-Full license text:
-
-Copyright (c) 2017 Redox OS Developers
-
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - stable_deref_trait 1.2.1 (https://github.com/storyyeller/stable_deref_trait)
 
 Full license text:
@@ -5920,35 +5358,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- foreign-types-macros 0.2.4 (https://github.com/sfackler/foreign-types)
-- foreign-types-shared 0.3.1 (https://github.com/sfackler/foreign-types)
-- foreign-types 0.5.0 (https://github.com/sfackler/foreign-types)
-
-Full license text:
-
-Copyright (c) 2017 The foreign-types Developers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
@@ -7494,7 +6903,6 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- iana-time-zone-haiku 0.1.2 (https://github.com/strawlab/iana-time-zone)
 - iana-time-zone 0.1.65 (https://github.com/strawlab/iana-time-zone)
 
 Full license text:
@@ -9480,38 +8888,6 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- dns-lookup 3.0.1 (https://github.com/keeperofdakeys/dns-lookup/)
-
-Full license text:
-
-Copyright for portions of the project dns-lookup are held by The Rust Project Developers
-as part of The Rust Project. All other copyright for project dns-lookup are held by keeperofdakeys.
-
-The MIT License (MIT)
-
-Copyright (c) 2016 keeperofdakeys
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - psm 0.1.32 (https://github.com/rust-lang/stacker/)
 
 Full license text:
@@ -9814,35 +9190,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- enigo 0.6.1 (https://github.com/enigo-rs/enigo)
-
-Full license text:
-
-MIT License
-
-Copyright (c) 2017 pythoneer
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - uutils_term_grid 0.8.0 (https://github.com/uutils/uutils-term-grid)
 
 Full license text:
@@ -9966,36 +9313,6 @@ Full license text:
 MIT License
 
 Copyright (c) 2018 The typed-arena developers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- filedescriptor 0.8.3 (https://github.com/wezterm/wezterm)
-- portable-pty 0.9.0 (https://github.com/wezterm/wezterm)
-
-Full license text:
-
-MIT License
-
-Copyright (c) 2018 Wez Furlong
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -10213,7 +9530,6 @@ SOFTWARE.
 License: MIT License (MIT)
 Used by:
 - arbitrary 1.4.2 (https://github.com/rust-fuzz/arbitrary/)
-- triomphe 0.1.17 (https://github.com/Manishearth/triomphe)
 
 Full license text:
 
@@ -10337,7 +9653,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- cfg_aliases 0.1.1 (https://github.com/katharostech/cfg_aliases)
 - cfg_aliases 0.2.2 (https://github.com/katharostech/cfg_aliases)
 
 Full license text:
@@ -10702,35 +10017,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- web-time 1.1.0 (https://github.com/daxpedda/web-time)
-
-Full license text:
-
-MIT License
-
-Copyright (c) 2023 dAxpeDDa
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - ansi-width 0.1.1 (https://github.com/uutils/ansi-width)
 
 Full license text:
@@ -10825,36 +10111,6 @@ Full license text:
 MIT License
 
 Copyright (c) 2024 Robert Bastian
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- archery 1.2.3 (https://github.com/orium/archery)
-- rpds 1.2.1 (https://github.com/orium/rpds)
-
-Full license text:
-
-MIT License
-
-Copyright (c) 2025 Diogo Sousa
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11044,8 +10300,6 @@ Used by:
 - objc2-quartz-core 0.3.2 (https://github.com/madsmtm/objc2)
 - objc2 0.6.4 (https://github.com/madsmtm/objc2)
 - pulp-wasm-simd-flag 0.1.1 (https://github.com/sarah-quinones/pulp/)
-- r-efi 5.3.0 (https://github.com/r-efi/r-efi)
-- r-efi 6.0.0 (https://github.com/r-efi/r-efi)
 - rcgen 0.13.2 (https://github.com/rustls/rcgen)
 - sptr 0.3.2 (https://github.com/Gankra/sptr)
 - tree-sitter-cpp 0.23.4 (https://github.com/tree-sitter/tree-sitter-cpp)
@@ -11063,23 +10317,14 @@ Used by:
 - wasmparser 0.221.3 (https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser)
 - wasmprinter 0.221.3 (https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmprinter)
 - webrtc 0.17.2 (https://github.com/webrtc-rs/webrtc)
-- winapi-i686-pc-windows-gnu 0.4.0 (https://github.com/retep998/winapi-rs)
-- winapi-x86_64-pc-windows-gnu 0.4.0 (https://github.com/retep998/winapi-rs)
-- windows-collections 0.2.0 (https://github.com/microsoft/windows-rs)
 - windows-collections 0.3.2 (https://github.com/microsoft/windows-rs)
-- windows-core 0.61.2 (https://github.com/microsoft/windows-rs)
 - windows-core 0.62.2 (https://github.com/microsoft/windows-rs)
-- windows-future 0.2.1 (https://github.com/microsoft/windows-rs)
 - windows-future 0.3.2 (https://github.com/microsoft/windows-rs)
 - windows-implement 0.60.2 (https://github.com/microsoft/windows-rs)
 - windows-interface 0.59.3 (https://github.com/microsoft/windows-rs)
-- windows-link 0.1.3 (https://github.com/microsoft/windows-rs)
 - windows-link 0.2.1 (https://github.com/microsoft/windows-rs)
-- windows-numerics 0.2.0 (https://github.com/microsoft/windows-rs)
 - windows-numerics 0.3.1 (https://github.com/microsoft/windows-rs)
-- windows-result 0.3.4 (https://github.com/microsoft/windows-rs)
 - windows-result 0.4.1 (https://github.com/microsoft/windows-rs)
-- windows-strings 0.4.2 (https://github.com/microsoft/windows-rs)
 - windows-strings 0.5.1 (https://github.com/microsoft/windows-rs)
 - windows-sys 0.52.0 (https://github.com/microsoft/windows-rs)
 - windows-sys 0.59.0 (https://github.com/microsoft/windows-rs)
@@ -11087,24 +10332,12 @@ Used by:
 - windows-sys 0.61.2 (https://github.com/microsoft/windows-rs)
 - windows-targets 0.52.6 (https://github.com/microsoft/windows-rs)
 - windows-targets 0.53.5 (https://github.com/microsoft/windows-rs)
-- windows-threading 0.1.0 (https://github.com/microsoft/windows-rs)
 - windows-threading 0.2.1 (https://github.com/microsoft/windows-rs)
-- windows 0.61.3 (https://github.com/microsoft/windows-rs)
 - windows 0.62.2 (https://github.com/microsoft/windows-rs)
-- windows_aarch64_gnullvm 0.52.6 (https://github.com/microsoft/windows-rs)
-- windows_aarch64_gnullvm 0.53.1 (https://github.com/microsoft/windows-rs)
 - windows_aarch64_msvc 0.52.6 (https://github.com/microsoft/windows-rs)
 - windows_aarch64_msvc 0.53.1 (https://github.com/microsoft/windows-rs)
-- windows_i686_gnu 0.52.6 (https://github.com/microsoft/windows-rs)
-- windows_i686_gnu 0.53.1 (https://github.com/microsoft/windows-rs)
-- windows_i686_gnullvm 0.52.6 (https://github.com/microsoft/windows-rs)
-- windows_i686_gnullvm 0.53.1 (https://github.com/microsoft/windows-rs)
-- windows_i686_msvc 0.52.6 (https://github.com/microsoft/windows-rs)
-- windows_i686_msvc 0.53.1 (https://github.com/microsoft/windows-rs)
 - windows_x86_64_gnu 0.52.6 (https://github.com/microsoft/windows-rs)
 - windows_x86_64_gnu 0.53.1 (https://github.com/microsoft/windows-rs)
-- windows_x86_64_gnullvm 0.52.6 (https://github.com/microsoft/windows-rs)
-- windows_x86_64_gnullvm 0.53.1 (https://github.com/microsoft/windows-rs)
 - windows_x86_64_msvc 0.52.6 (https://github.com/microsoft/windows-rs)
 - windows_x86_64_msvc 0.53.1 (https://github.com/microsoft/windows-rs)
 - xn 0.2.14 (https://github.com/LaurentMazare/xn)
@@ -11478,7 +10711,6 @@ Used by:
 - fastrand 2.5.0 (https://github.com/smol-rs/fastrand)
 - futures-lite 2.6.1 (https://github.com/smol-rs/futures-lite)
 - group 0.13.0 (https://github.com/zkcrypto/group)
-- hermit-abi 0.5.3 (https://github.com/hermit-os/hermit-rs)
 - itoa 1.0.18 (https://github.com/dtolnay/itoa)
 - khronos-egl 6.0.0 (https://github.com/timothee-haudebourg/khronos-egl)
 - linux-raw-sys 0.12.1 (https://github.com/sunfishcode/linux-raw-sys)
@@ -11499,7 +10731,6 @@ Used by:
 - pin-project-lite 0.2.17 (https://github.com/taiki-e/pin-project-lite)
 - piper 0.2.5 (https://github.com/smol-rs/piper)
 - polling 3.11.0 (https://github.com/smol-rs/polling)
-- portable-atomic-util 0.2.8 (https://github.com/taiki-e/portable-atomic-util)
 - portable-atomic 1.15.0 (https://github.com/taiki-e/portable-atomic)
 - proc-macro-crate 3.5.0 (https://github.com/bkchr/proc-macro-crate)
 - proc-macro2 1.0.107 (https://github.com/dtolnay/proc-macro2)
@@ -11534,9 +10765,6 @@ Used by:
 - unic-langid 0.9.6 (https://github.com/zbraniecki/unic-locale)
 - unicode-ident 1.0.26 (https://github.com/dtolnay/unicode-ident)
 - unsafe-libyaml 0.2.11 (https://github.com/dtolnay/unsafe-libyaml)
-- wasi 0.11.1+wasi-snapshot-preview1 (https://github.com/bytecodealliance/wasi)
-- wasip2 1.0.4+wasi-0.2.12 (https://github.com/bytecodealliance/wasi-rs)
-- wit-bindgen 0.57.1 (https://github.com/bytecodealliance/wit-bindgen)
 - zbus-lockstep-macros 0.5.2 (https://github.com/luukvanderduim/zbus-lockstep)
 - zbus-lockstep 0.5.2 (https://github.com/luukvanderduim/zbus-lockstep)
 - zmij 1.0.23 (https://github.com/dtolnay/zmij)
@@ -11653,7 +10881,6 @@ SOFTWARE
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- argmax 0.4.0 (https://github.com/sharkdp/argmax)
 - gix-actor 0.41.2 (https://github.com/GitoxideLabs/gitoxide)
 - gix-attributes 0.33.2 (https://github.com/GitoxideLabs/gitoxide)
 - gix-bitmap 0.3.3 (https://github.com/GitoxideLabs/gitoxide)
@@ -11780,34 +11007,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- android_system_properties 0.1.6 (https://github.com/nical/android_system_properties)
-
-Full license text:
-
-The MIT License (MIT)
-
-Copyright (c) 2013 Nicolas Silva
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
@@ -12080,7 +11279,6 @@ THE SOFTWARE.
 License: MIT License (MIT)
 Used by:
 - nix 0.26.4 (https://github.com/nix-rust/nix)
-- nix 0.28.0 (https://github.com/nix-rust/nix)
 - nix 0.30.1 (https://github.com/nix-rust/nix)
 - nix 0.31.3 (https://github.com/nix-rust/nix)
 
@@ -12298,35 +11496,6 @@ The MIT License (MIT)
 
 Copyright (c) 2015-2020 Julien Cretin
 Copyright (c) 2017-2020 Google Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- fiat-crypto 0.2.9 (https://github.com/mit-plv/fiat-crypto)
-
-Full license text:
-
-The MIT License (MIT)
-
-Copyright (c) 2015-2020 the fiat-crypto authors (see the AUTHORS file).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -13013,35 +12182,6 @@ Full license text:
 The MIT License (MIT)
 
 Copyright (c) HeroicKatora 2020
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- crunchy 0.2.4 (https://github.com/eira-fransham/crunchy)
-
-Full license text:
-
-The MIT License (MIT)
-
-Copyright 2017-2023 Eira Fransham.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

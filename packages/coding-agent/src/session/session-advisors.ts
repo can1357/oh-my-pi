@@ -2377,7 +2377,8 @@ export class SessionAdvisors {
 	 */
 	#spendCredentialSwitch(advisor: ActiveAdvisor, provider: string): boolean {
 		const spent = advisor.credentialSwitches?.provider === provider ? advisor.credentialSwitches.count : 0;
-		if (spent >= this.#host.modelRegistry.authStorage.credentials.list(provider).length - 1) return false;
+		const active = this.#host.modelRegistry.authStorage.credentials.summaries(provider).filter(row => !row.disabled);
+		if (spent >= active.length - 1) return false;
 		advisor.credentialSwitches = { provider, count: spent + 1 };
 		return true;
 	}

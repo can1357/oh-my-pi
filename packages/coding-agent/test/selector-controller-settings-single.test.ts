@@ -277,9 +277,7 @@ describe("single-instance menus", () => {
 				modelRegistry: {
 					authStorage: {
 						credentials: {
-							snapshot: () => ({
-								credentials: [{ id: 9, provider: "opencode-go", credential: { type: "api_key", key: "test" } }],
-							}),
+							summaries: () => [{ id: 9, provider: "opencode-go", type: "api_key", disabled: false }],
 						},
 						usage: {
 							providerFor: () => ({}),
@@ -311,7 +309,7 @@ describe("single-instance menus", () => {
 				fetchUsageReports: async () => null,
 				modelRegistry: {
 					authStorage: {
-						credentials: { snapshot: () => ({ credentials: [] }) },
+						credentials: { summaries: () => [] },
 						usage: { providerFor: () => undefined },
 						oauth: { identity: () => undefined },
 					},

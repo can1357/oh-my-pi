@@ -17,7 +17,6 @@ members = [
    "crates/voice",
    "crates/web",
    "crates/xfs",
-   "crates/vendor/cfg_aliases",
    "crates/vendor/grep-searcher",
    "crates/vendor/jaq-core",
    "crates/vendor/jaq-json",
@@ -37,9 +36,6 @@ homepage = "https://omp.sh/"
 repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
-# portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
-# future-incompatible trailing semicolons.
-cfg_aliases = { path = "crates/vendor/cfg_aliases" }
 # grep-searcher 0.1.17 (latest release) searches either a blocking `io::Read`
 # or a whole slice; the vendored copy adds the chunk-fed `search_push` (see its
 # README.md).
@@ -327,12 +323,12 @@ clap = { version = "4", features = ["derive", "env"] }
 pdf-inspector = "1"
 regex = "1"
 fontdue = { version = "0.9", default-features = false }
+ttf-parser = { version = "0.25", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data Structures - Collections
 # ──────────────────────────────────────────────────────────────────────────────
 phf = { version = "0.14", features = ["macros"] }
-rpds = { version = "1.2", features = ["serde"] }
 smallvec = { version = "1.16.1", features = [
    "serde",
    "write",
@@ -396,7 +392,6 @@ napi-derive = "3"
 # ──────────────────────────────────────────────────────────────────────────────
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 clipboard-win = "5.4"
-portable-pty = "0.9"
 shlex = "2"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -419,14 +414,12 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ] }
-resvg = "0.48"
+# Read installed font files instead of mapping user-writable paths.
+resvg = { version = "0.48", default-features = false, features = ["svgz", "text", "system-fonts", "raster-images"] }
 # Not used directly: activates zune-jpeg's non-default `log` feature so image's
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.
 zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
-# Not used directly: pins tinyvec to fixed 1.13.3 because 1.13.0 was published broken
-# (cannot find macro `vec` in alloc-only context).
-tinyvec = "=1.13.3"
 png = "0.18"
 # Oniguruma, not fancy-regex: onig is already linked (omp-builtins), and its
 # compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB

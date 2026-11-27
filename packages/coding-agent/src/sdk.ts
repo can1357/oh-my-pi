@@ -215,6 +215,7 @@ import type { AdvisorToolFactory } from "./session/session-advisors";
 import {
 	createAuthStorageSettingsSync,
 	discoverSessionAuthStorage as discoverAuthStorage,
+	openManagedSessionAuthStorage,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { CostCapError, type CostGateApi, guardStreamFn } from "./session/cost-gate";
@@ -633,7 +634,7 @@ export interface CreateAgentSessionOptions {
 	/** User-authorized model agents inherited from the parent session for nested delegation. */
 	inheritedSessionAgents?: readonly AgentDefinition[];
 
-	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
+	/** Credential owner to reuse instead of opening the session's default daemon-backed auth. */
 	authStorage?: AuthStorage;
 	/** Model registry. Default: constructed from <agentDir>/models.yml */
 	modelRegistry?: ModelRegistry;
@@ -1259,6 +1260,16 @@ export async function loadSessionExtensions(
 	return { ...result, deferredPaths: deferred };
 }
 
+async function applyExtensionProviders(
+	runtime: LoadExtensionsResult["runtime"],
+	registry: ModelRegistry,
+): Promise<void> {
+	const registrations = runtime.pendingProviderRegistrations.splice(0);
+	const preparing = registry.prepareProviderAuth(registrations);
+	if (preparing) await preparing;
+	for (const { name, config, sourceId } of registrations) registry.registerProvider(name, config, sourceId);
+}
+
 /**
  * Load discovered/configured extensions and register their providers into
  * `modelRegistry`, then discover the dynamic provider catalogs. One-shot CLIs
@@ -1282,10 +1293,7 @@ export async function loadCliExtensionProviders(
 	const activeSources = extensionsResult.extensions.map(extension => extension.path);
 	modelRegistry.syncExtensionSources(activeSources);
 	modelRegistry.clearSourceRegistrations(new Set(activeSources));
-	for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-		modelRegistry.registerProvider(name, config, sourceId);
-	}
-	extensionsResult.runtime.pendingProviderRegistrations = [];
+	await applyExtensionProviders(extensionsResult.runtime, modelRegistry);
 	if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
 }
 
@@ -2045,30 +2053,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
 	);
 
-	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
-	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
-	// / session would silently miss credential_disabled events.
-	let modelRegistry =
-		options.modelRegistry ??
-		new ModelRegistry(
-			options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir, { settings, cwd })),
-			path.join(agentDir, "models.yml"),
-			{
-				settings,
-				cacheDbPath: getModelDbPath(agentDir),
-			},
-		);
-	let prewalk = options.prewalk;
-	let deferredPrewalk = options.deferredPrewalk;
-	// Track whether we internally created the authStorage so we can close it
-	// if construction fails before the session takes ownership.
+	// The registry's credential owner also serves worker and session consumers.
 	const ownsAuthStorage = !options.authStorage && !options.modelRegistry;
-	const authStorage = modelRegistry.authStorage;
+	const authStorage =
+		options.modelRegistry?.authStorage ??
+		options.authStorage ??
+		(await logger.time("discoverModels", () =>
+			settings.getAgentDir() === path.normalize(agentDir)
+				? openManagedSessionAuthStorage(settings)
+				: discoverAuthStorage(agentDir, { settings, cwd }),
+		));
 	if (options.authStorage && options.authStorage !== authStorage) {
 		throw new Error(
 			"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
 		);
 	}
+	let authClosed = false;
+	let stopAuthSettingsSync: (() => void) | undefined;
+	const closeOwnedAuthStorage = () => {
+		if (!ownsAuthStorage || authClosed) return;
+		authClosed = true;
+		stopAuthSettingsSync?.();
+		authStorage.close();
+	};
+	if (ownsAuthStorage) startupCleanup.defer(closeOwnedAuthStorage);
+	let modelRegistry =
+		options.modelRegistry ??
+		new ModelRegistry(authStorage, path.join(agentDir, "models.yml"), {
+			settings,
+			cacheDbPath: getModelDbPath(agentDir),
+		});
+	let prewalk = options.prewalk;
+	let deferredPrewalk = options.deferredPrewalk;
 	// Subscribe before any getApiKey() call so startup model probes can't fire a
 	// credential_disabled event past us. An embedder's constructor handler makes the
 	// listener set non-empty from construction, which defeats AuthStorage's no-listener
@@ -2251,7 +2267,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// account wins) and cold-miss the child's whole prefix. An explicit parent pin is
 		// the user's choice and still reaches the child.
 		const ownPins = sessionManager.getCredentialPins();
-		modelRegistry.authStorage.sessions.inherit(
+		await modelRegistry.authStorage.sessions.inherit(
 			options.credentialSourceSessionId,
 			providerSessionId,
 			(provider, explicit) => explicit || !ownPins.has(provider),
@@ -3308,10 +3324,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry.clearSourceRegistrations(new Set(activeExtensionSources));
 		}
 		if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
-			for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-				modelRegistry.registerProvider(name, config, sourceId);
-			}
-			extensionsResult.runtime.pendingProviderRegistrations = [];
+			await applyExtensionProviders(extensionsResult.runtime, modelRegistry);
 		}
 		// Hydrate cached runtime (extension) provider catalogs before model
 		// resolution. Dynamic-only providers have no synchronous registration side
@@ -5136,10 +5149,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			return result;
 		};
 		// Live-bound speculation config: the Agent captures this object once at
-		// construction but reads `enabled` per turn (and `maxInFlight` per drain)
-		// through getters, so mid-session settings UI toggles take effect without
-		// a session recreate. The single shared host keeps its evidence across
-		// toggles; per-turn coordinator close never touches it.
+		// construction but reads `enabled` per turn through a getter, so
+		// mid-session settings UI toggles take effect without a session recreate.
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
 		let mainRequestProvider: string | undefined;
 
@@ -5658,6 +5669,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
+		await session.waitForCredentialPins();
 		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
 		if (options.deferHintCompression !== true) session.startHintCompression();
 		credentialNoticeSession = session;
@@ -5677,7 +5689,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		}
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
-		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage, modelRegistry);
+		if (ownsAuthStorage) {
+			stopAuthSettingsSync = createAuthStorageSettingsSync(session, authStorage, modelRegistry).stop;
+		}
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the
 		// `tools.format` catalog dialect, personality, …), so a bulk change rebuilds once.
 		// Hide Secrets first switches outbound obfuscation on the live obfuscator (earlier
@@ -5980,9 +5994,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						for (const message of formatExtensionLoadNotifications(loaded.errors)) {
 							session.emitNotice("warning", message, "extensions");
 						}
-						for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
-							modelRegistry.registerProvider(name, config, sourceId);
-						}
+						await applyExtensionProviders(runtime, modelRegistry);
+						await extensionRunner.settleProviderRegistrations();
 						for (const prepared of loaded.preparedExtensions ?? []) {
 							forwardablePreparedExtensions.set(prepared.resolvedPath, prepared);
 						}
@@ -6176,7 +6189,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						for (const callback of disposeCallbacks) callback();
 					} finally {
 						disposeCallbacks.clear();
-						await releaseDsmReferences(toolSession);
+						try {
+							await releaseDsmReferences(toolSession);
+						} finally {
+							closeOwnedAuthStorage();
+						}
 					}
 					// Drop refs so the process-global postmortem list doesn't retain
 					// the bridge closure past explicit dispose.
@@ -6526,10 +6543,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					session.emitNotice("warning", message, "extensions");
 				}
 				if (session.isDisposed) return;
-				// Providers queue until the runner is initialized; drain them as session creation does.
-				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
-					modelRegistry.registerProvider(name, config, sourceId);
-				}
+				await applyExtensionProviders(runtime, modelRegistry);
+				await extensionRunner.settleProviderRegistrations();
 				const deferredPrepared = loaded.preparedExtensions ?? [];
 				const deferredPaths = loaded.extensions.map(extension => extension.resolvedPath);
 				forwardedPreparedExtensions.push(...deferredPrepared);
@@ -6569,7 +6584,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await releaseComputerSessionsForOwner(evalKernelOwnerId);
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeVmContextsByOwner(evalKernelOwnerId);
-				if (ownsAuthStorage) authStorage.close();
 			}
 		} catch (cleanupError) {
 			logger.warn("Failed to clean up createAgentSession resources after startup error", {

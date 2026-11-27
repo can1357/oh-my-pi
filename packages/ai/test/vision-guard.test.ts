@@ -66,6 +66,7 @@ const compat: ResolvedOpenAICompat = {
 	toolStrictMode: "none",
 	wireModelIdMode: "raw",
 	stripDeepseekSpecialTokens: false,
+	neutralizeDeepseekSpecialTokens: false,
 	reasoningDeltasMayBeCumulative: false,
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,

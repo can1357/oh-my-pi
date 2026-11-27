@@ -914,9 +914,11 @@ export class ModelControls {
 	 * upgraded).
 	 */
 	#rearmServiceTier(model: Model, tier: ServiceTier): void {
-		void this.#host.modelRegistry.authStorage.limits.rearmServiceTier(model.provider, tier, model.id).catch(error => {
-			logger.debug("Service tier re-arm failed", { provider: model.provider, tier, error: String(error) });
-		});
+		void this.#host.modelRegistry.authStorage.limits
+			.rearmServiceTier(model.provider, tier, model.id, this.#host.sessionId())
+			.catch(error => {
+				logger.debug("Service tier re-arm failed", { provider: model.provider, tier, error: String(error) });
+			});
 	}
 
 	/** Set one family's tier (or clear it with `undefined`); persists the change. */
