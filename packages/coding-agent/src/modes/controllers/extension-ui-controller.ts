@@ -35,6 +35,8 @@ import type { ExtensionUiHost } from "../../extensibility/extensions/render-type
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import type { ComposerOwner, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { runHeadlessBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
+import { tuiSlashCommandHost } from "../../slash-commands/builtin-registry";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
 import {
@@ -1766,14 +1768,21 @@ export class ExtensionUiController {
 			});
 	};
 
-	/** Every `sendUserMessage` form prompts or queues a user turn (see `AgentSession.sendUserMessage`). */
+	/** Runs expanded extension input as a built-in with the hooks typed input gives it here. */
+	#runBuiltin = (text: string) =>
+		runHeadlessBuiltinSlashCommand(this.ctx.session, text, tuiSlashCommandHost(this.ctx));
+
+	/**
+	 * Every `sendUserMessage` form prompts or queues a user turn (see `AgentSession.sendUserMessage`).
+	 * A built-in that expanded input runs reports where a typed one does: the TUI status line.
+	 */
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
 		if (this.#rejectGuestExtensionTurn()) {
 			const denied = Promise.reject(new Error("Extension-initiated turns are host-only during a collab session"));
 			denied.catch(() => {});
 			return denied;
 		}
-		const task = this.ctx.session.sendUserMessage(content, options);
+		const task = this.ctx.session.sendUserMessage(content, options, { runBuiltinSlashCommand: this.#runBuiltin });
 		task.catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});

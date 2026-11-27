@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
@@ -23,12 +23,17 @@ import type {
 	InputEventResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { runHeadlessBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import type { SlashCommandHost } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { isRecord, readJsonl, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 interface Harness {
 	api: ExtensionAPI;
@@ -40,6 +45,10 @@ interface Harness {
 	deployRuns: string[];
 	/** Each turn-ownership task `initializeExtensions` reported, in order. */
 	invoking: Promise<unknown>[];
+	/** Every line a built-in slash command printed through the host's `output` hook. */
+	commandOutput: string[];
+	/** Status lines the interactive host showed (`host: "interactive"` only). */
+	statuses: string[];
 }
 
 function messageText(message: AgentMessage): string {
@@ -82,12 +91,20 @@ describe("pi.sendUserMessage with expand", () => {
 		promptTemplates?: PromptTemplate[];
 		/** An `input` handler the bridge extension registers. */
 		onInput?: (event: InputEvent) => InputEventResult | undefined;
+		/** The model's scripted replies, one per turn. */
+		responses?: MockResponse[];
+		/** Which host wires the extension actions: `initializeExtensions` (default) or the TUI's controller. */
+		host?: "runtime-init" | "interactive";
+		/** False leaves the host lending no built-in runner, as print mode and subagents do. */
+		builtins?: boolean;
 	}): Promise<Harness> {
 		const manager = SessionManager.inMemory();
 		const runtime = new ExtensionRuntime();
 		const started: AgentMessage[] = [];
 		const deployRuns: string[] = [];
 		const invoking: Promise<unknown>[] = [];
+		const commandOutput: string[] = [];
+		const statuses: string[] = [];
 		let api: ExtensionAPI | undefined;
 		const extension = await loadExtensionFromFactory(
 			pi => {
@@ -116,7 +133,11 @@ describe("pi.sendUserMessage with expand", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: createMockModel({
-				responses: [{ content: ["First reply"] }, { content: ["Second reply"] }, { content: ["Third reply"] }],
+				responses: options?.responses ?? [
+					{ content: ["First reply"] },
+					{ content: ["Second reply"] },
+					{ content: ["Third reply"] },
+				],
 			}).stream,
 		});
 		const created = new AgentSession({
@@ -130,18 +151,48 @@ describe("pi.sendUserMessage with expand", () => {
 			promptTemplates: options?.promptTemplates,
 		});
 		session = created;
-		await initializeExtensions(created, {
-			reportSendError: (_action, error) => {
-				throw error;
-			},
-			reportRuntimeError: error => {
-				throw new Error(error.error);
-			},
-			trackAgentInvokingMessage: task => {
-				invoking.push(task);
-			},
-		});
-		return { api, session: created, manager, started, deployRuns, invoking };
+		if (options?.host === "interactive") {
+			const ctx = {
+				session: created,
+				sessionManager: manager,
+				settings: created.settings,
+				showStatus: (text: string) => {
+					statuses.push(text);
+				},
+				showError: (text: string) => {
+					throw new Error(text);
+				},
+				setToolUIContext: () => {},
+				syncComposerShape: () => {},
+				syncExtensionLinks: () => {},
+			} as unknown as InteractiveModeContext;
+			await new ExtensionUiController(ctx).initHooksAndCustomTools();
+		} else {
+			// What RPC lends expanded input: its own typed-input hooks, here recording what they are given.
+			const slashCommandHost: SlashCommandHost = {
+				output: text => {
+					commandOutput.push(text);
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			};
+			await initializeExtensions(created, {
+				reportSendError: (_action, error) => {
+					throw error;
+				},
+				reportRuntimeError: error => {
+					throw new Error(error.error);
+				},
+				trackAgentInvokingMessage: task => {
+					invoking.push(task);
+				},
+				runBuiltinSlashCommand:
+					options?.builtins === false
+						? undefined
+						: text => runHeadlessBuiltinSlashCommand(created, text, slashCommandHost),
+			});
+		}
+		return { api, session: created, manager, started, deployRuns, invoking, commandOutput, statuses };
 	}
 
 	async function writeReviewerSkill(): Promise<Skill> {
@@ -291,4 +342,113 @@ describe("pi.sendUserMessage with expand", () => {
 		expect(userTurns(started).map(messageText)).toEqual(inputs);
 		expect(session.messages.filter(message => message.role === "assistant")).toHaveLength(2);
 	});
+
+	it("runs a host built-in, reports through the host's hooks, submits nothing and claims no turn", async () => {
+		const { api, session, started, commandOutput, invoking } = await start();
+
+		const result = await api.sendUserMessage("/jobs", { expand: true, tag: "msg-5" });
+		await session.waitForIdle();
+
+		expect(result.handled).toBe("command");
+		expect(result.output).toContain("No background jobs running.");
+		// The client hears it where a typed `/jobs` is heard: the host's own output hook.
+		expect(commandOutput).toEqual([result.output!]);
+		expect(userTurns(started)).toHaveLength(0);
+		expect(session.messages.some(message => message.role === "assistant")).toBe(false);
+		await expect(invoking[0]).rejects.toThrow("send did not invoke the agent");
+	});
+
+	it("sends a built-in's name to the model where the host lends no runner, as print mode and subagents do", async () => {
+		const { api, session, started, commandOutput } = await start({ builtins: false });
+
+		expect(await api.sendUserMessage("/jobs", { expand: true })).toEqual({ handled: "prompt" });
+		await session.waitForIdle();
+
+		expect(commandOutput).toEqual([]);
+		expect(userTurns(started).map(messageText)).toEqual(["/jobs"]);
+	});
+
+	it("claims the turn a built-in starts without submitting a message, as /retry does", async () => {
+		const { api, session, invoking } = await start({
+			responses: [{ throw: "first attempt fails" }, { content: ["Recovered"] }],
+		});
+		await session.prompt("fail once");
+		await session.waitForIdle();
+
+		const result = await api.sendUserMessage("/retry", { expand: true });
+		await session.waitForIdle();
+
+		expect(result).toEqual({ handled: "command", agentInvoked: true, output: "Retrying the last failed turn." });
+		// RPC waits on this task for the retried turn's agent events, so it must resolve.
+		expect(invoking).toHaveLength(1);
+		await expect(invoking[0]).resolves.toBeUndefined();
+		expect(messageText(session.messages.at(-1)!)).toBe("Recovered");
+	});
+
+	it.each(["/new", "/debug"])("answers terminal-only for %s and runs nothing", async text => {
+		const { api, session, started, commandOutput, invoking } = await start();
+		const { sessionId } = session;
+
+		expect(await api.sendUserMessage(text, { expand: true })).toEqual({ handled: "terminal-only" });
+		await session.waitForIdle();
+
+		expect(commandOutput).toEqual([]);
+		expect(userTurns(started)).toHaveLength(0);
+		expect(session.sessionId).toBe(sessionId);
+		await expect(invoking[0]).rejects.toThrow("send did not invoke the agent");
+	});
+
+	it("shows a built-in's output on the interactive status line, where a typed one shows it", async () => {
+		const { api, statuses } = await start({ host: "interactive" });
+
+		const result = await api.sendUserMessage("/jobs", { expand: true });
+
+		expect(result.handled).toBe("command");
+		expect(statuses).toEqual([result.output!]);
+		expect(result.output).toContain("No background jobs running.");
+	});
+});
+
+describe("expanded extension input in RPC mode", () => {
+	it("runs a built-in with the hooks RPC gives typed input, so its client hears the output", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-send-user-input-rpc-"));
+		const child = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "fixtures", "send-user-input-rpc-agent.ts")],
+			{
+				cwd: directory,
+				env: { ...process.env, PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const stderr = new Response(child.stderr).text();
+		const frames: Record<string, unknown>[] = [];
+		let reported: Record<string, unknown> | undefined;
+		try {
+			child.stdin.write(`${JSON.stringify({ type: "prompt", id: "p0", message: "/bridge /jobs" })}\n`);
+			await child.stdin.flush();
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (!isRecord(frame)) continue;
+				frames.push(frame);
+				if (frame.type !== "extension_ui_request" || frame.method !== "notify") continue;
+				const parsed: unknown = JSON.parse(String(frame.message));
+				if (!isRecord(parsed)) throw new Error(`the bridge reported no object: ${String(frame.message)}`);
+				reported = parsed;
+				break;
+			}
+		} finally {
+			child.stdin.end();
+			await child.exited;
+			await removeWithRetries(directory);
+		}
+		if (reported === undefined) throw new Error(`the RPC bridge ended early: ${await stderr}`);
+
+		expect(reported).toMatchObject({ handled: "command" });
+		expect(String(reported.output)).toContain("No background jobs running.");
+		// The same line reached the client as the frame a typed `/jobs` produces.
+		expect(
+			frames.filter(frame => frame.type === "command_output" && String(frame.text).includes("No background jobs")),
+		).toHaveLength(1);
+	}, 60_000);
 });

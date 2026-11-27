@@ -361,6 +361,7 @@ import type {
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SendUserMessageOptions,
+	SendUserMessageHost,
 	SendUserMessageResult,
 	SessionOAuthAccountList,
 	SessionStats,
@@ -11708,7 +11709,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *
 	 * With `expand`, the text runs as typed input instead (see {@link #sendExpandedUserInput}),
 	 * and `deliverAs` becomes the submitted prompt's streaming behavior, as for typed input.
-	 * `tag` rides onto whichever message the call submits.
+	 * `tag` rides onto whichever message the call submits. `host` lends expanded input the host's
+	 * built-in slash commands (see {@link SendUserMessageHost}); the session imports none itself.
 	 *
 	 * A message the session drops before the agent sees it (an abort, a session switch or
 	 * disposal, a usage-preflight denial or the cost cap) rejects with {@link PromptDroppedError}.
@@ -11717,6 +11719,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: SendUserMessageOptions,
+		host?: SendUserMessageHost,
 	): Promise<SendUserMessageResult> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -11738,7 +11741,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		if (options?.expand) return this.#sendExpandedUserInput(text, images, options);
+		if (options?.expand) return this.#sendExpandedUserInput(text, images, options, host);
 
 		const queueMode = options?.deliverAs;
 		if (queueMode === "followUp" || queueMode === "steer" || (queueMode === "aside" && this.isStreaming)) {
@@ -11782,7 +11785,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *   1. extension `input` handlers, with `source: "extension"`: one can consume the text, or
 	 *      rewrite it and add images, as for interactive Enter and an RPC `prompt`;
 	 *   2. `/skill:<name>`, submitted as the user's skill prompt message;
-	 *   3. everything else through {@link prompt}, which runs extension and custom commands,
+	 *   3. the host's built-in slash commands, when it lends a runner: one with a text-mode handler
+	 *      runs with the hooks the host gives its own typed input; a TUI-only one answers
+	 *      `terminal-only`;
+	 *   4. everything else through {@link prompt}, which runs extension and custom commands,
 	 *      expands file slash commands and prompt templates, and submits any other text, slash
 	 *      text that names no command (`/nosuch`, a path like `/var/log/app.log`) included.
 	 */
@@ -11790,6 +11796,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		options: SendUserMessageOptions,
+		host: SendUserMessageHost | undefined,
 	): Promise<SendUserMessageResult> {
 		const streamingBehavior = options.deliverAs ?? "steer";
 		const { attribution, tag } = options;
@@ -11821,10 +11828,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return { handled: "skill" };
 		}
 
+		const builtin = await host?.runBuiltinSlashCommand?.(text);
+		if (builtin?.kind === "terminal-only") return { handled: "terminal-only" };
+		const output = builtin?.output === undefined ? undefined : { output: builtin.output };
+		const result = builtin?.result;
+		if (builtin && !(result && "prompt" in result)) {
+			// `/retry` and the like start a turn without submitting a message; hosts must not treat
+			// that as handled locally.
+			return { handled: "command", ...(result?.agentInvoked === true && { agentInvoked: true }), ...output };
+		}
+
 		// prompt() answers `false` only when an extension or custom command handled the text locally;
-		// a drop rejects with PromptDroppedError.
-		const submitted = await this.prompt(text, { attribution, images, streamingBehavior, tag, throwOnDrop: true });
-		return { handled: submitted ? "prompt" : "command" };
+		// a drop rejects with PromptDroppedError. A built-in that hands back prompt text submits it here.
+		const submitted = await this.prompt(result && "prompt" in result ? result.prompt : text, {
+			attribution,
+			images,
+			streamingBehavior,
+			tag,
+			throwOnDrop: true,
+		});
+		return { handled: submitted ? "prompt" : "command", ...output };
 	}
 
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).

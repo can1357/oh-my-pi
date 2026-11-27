@@ -22,6 +22,7 @@
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
 - Extensions can run text as if the user typed it: `pi.sendUserMessage(text, { expand: true })` goes through `input` handlers, `/skill:<name>`, extension and custom commands, file slash commands and prompt templates, and resolves with whether a prompt, a command or a skill handled it ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
 - `pi.sendUserMessage` takes a `tag` that is recorded on the message it submits and in the session file; queued tagged input is never handed back as editor text by Esc, Alt+Up or RPC `remove_queued_message`, so it is delivered or recorded with its tag ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
+- In the TUI, RPC and ACP, text an extension runs with `expand` also runs the headless built-in slash commands (`/jobs`, `/compact`, `/retry`, …) with the hooks the host gives typed input, and returns what they print as `output`; a built-in only the terminal runs answers `terminal-only` ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

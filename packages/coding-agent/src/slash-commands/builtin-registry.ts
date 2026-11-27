@@ -25,6 +25,7 @@ import { parseSlashCommand } from "./helpers/parse";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
+	SlashCommandHost,
 	SlashCommandResult,
 	SlashCommandRuntime,
 	SlashCommandSpec,
@@ -187,15 +188,7 @@ export async function executeBuiltinSlashCommand(
 			sessionManager: ctx.sessionManager,
 			settings: ctx.settings,
 			cwd: ctx.sessionManager.getCwd(),
-			output: (text: string) => {
-				ctx.showStatus(text);
-			},
-			report: (title: string, text: string) => {
-				ctx.showCommandReport({ title, body: () => reportTextView(text.trim()) });
-			},
-			refreshCommands: () => ctx.refreshSlashCommandState(),
-			reloadPlugins: () => reloadTuiPluginState(ctx),
-			notifySessionPinChanged: (sessionId: string, pinned: boolean) => ctx.applySessionPin(sessionId, pinned),
+			...tuiSlashCommandHost(ctx),
 		};
 		const result = await command.handle(parsed, adapted);
 		clearSubmittedText(runtime);
@@ -203,6 +196,25 @@ export async function executeBuiltinSlashCommand(
 		return true;
 	}
 	return false;
+}
+
+/**
+ * The interactive TUI's {@link SlashCommandHost}: output as a status line, listings as a command
+ * report, the TUI's own command refresh and plugin reload. Used by a typed built-in that has no
+ * `handleTui`, and by expanded extension input.
+ */
+export function tuiSlashCommandHost(ctx: TuiSlashCommandRuntime["ctx"]): SlashCommandHost {
+	return {
+		output: (text: string) => {
+			ctx.showStatus(text);
+		},
+		report: (title: string, text: string) => {
+			ctx.showCommandReport({ title, body: () => reportTextView(text.trim()) });
+		},
+		refreshCommands: () => ctx.refreshSlashCommandState(),
+		reloadPlugins: () => reloadTuiPluginState(ctx),
+		notifySessionPinChanged: (sessionId: string, pinned: boolean) => ctx.applySessionPin(sessionId, pinned),
+	};
 }
 
 /** Look up a unified spec by name or alias. Used by the ACP dispatcher. */

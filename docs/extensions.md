@@ -418,6 +418,14 @@ a turn either way. In order:
   steps below dispatch;
 - `/skill:<name>` is submitted as the skill prompt, attributed as `attribution` says
   (default `"user"`);
+- in the interactive TUI, RPC and ACP, a built-in slash command with a headless handler
+  (the set RPC and ACP run, e.g. `/jobs`, `/compact`, `/retry`) runs with the hooks the
+  host gives its own typed input, so what it prints shows where typed output does (the
+  TUI status line, an RPC `command_output` frame, an ACP message) and a rename or model
+  change reaches an RPC or ACP client; its printed text comes back as `output`, and one
+  that returns prompt text submits it. A built-in only the interactive terminal runs
+  answers `terminal-only` and runs nothing. Print mode and subagents run no built-ins
+  for an extension: there a built-in name goes through the prompt flow below;
 - anything else goes through the prompt flow: extension and custom commands run
   locally; plain text, templates, file slash commands and slash text that names no
   command (such as `/nosuch` or a path like `/var/log/app.log`) submit a user message,
@@ -431,6 +439,10 @@ person's text can tell a command from a submitted prompt:
 | `"prompt"` | Submitted as a user message; it carries the caller's `tag`. |
 | `"command"` | Handled locally and submitted nothing: a command ran, an `input` handler consumed the text, or no text was left. |
 | `"skill"` | `/skill:<name>` was submitted as the skill prompt message, carrying the `tag`. |
+| `"terminal-only"` | A built-in only the interactive terminal runs; nothing was sent. |
+
+A built-in that ran also answers `output` (what it printed) and `agentInvoked: true`
+when it started a turn without submitting a message, as `/retry` does.
 
 A message the session drops before the agent sees it still rejects with
 `PromptDroppedError`, whichever form sent it; nothing was submitted or persisted, so

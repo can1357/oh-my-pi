@@ -41,6 +41,7 @@ import type { ExtensionRunner, PreparedExtension } from "../extensibility/extens
 import type { MCPLoadResult } from "../mcp";
 import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
+import type { BuiltinSlashCommandRunner } from "../slash-commands/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import type { Skill, SkillWarning } from "../extensibility/skills";
@@ -605,9 +606,22 @@ export interface SendUserMessageOptions {
  * - `command`: handled locally and submitted nothing itself: an extension or custom command ran, an
  *   extension `input` handler consumed the text, or no text was left to send.
  * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the `tag`.
+ * - `terminal-only`: a built-in slash command only the interactive terminal runs; nothing ran.
  */
 export interface SendUserMessageResult {
-	handled: "prompt" | "command" | "skill";
+	handled: "prompt" | "command" | "skill" | "terminal-only";
+	/** Text a built-in slash command printed, when it printed any. */
+	output?: string;
+	/** True when a `command` started an agent turn without submitting a message, as `/retry` does. */
+	agentInvoked?: boolean;
+}
+
+/** What a host lends {@link AgentSession.sendUserMessage} for expanded input. */
+export interface SendUserMessageHost {
+	/** Runs the text as one of the host's built-in slash commands, reporting where its typed ones
+	 *  report. Without it (subagents, print mode, an SDK embedder that passes none) built-in names go
+	 *  through the prompt flow, as `prompt()` sends them. */
+	runBuiltinSlashCommand?: BuiltinSlashCommandRunner;
 }
 
 /** Result from cycleModel(). */

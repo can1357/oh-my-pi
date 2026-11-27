@@ -150,6 +150,37 @@ export interface SlashCommandRuntime {
 }
 
 /**
+ * The host side of {@link SlashCommandRuntime}: where a built-in's output goes, how the host's
+ * client hears about command-list, plugin, title and config changes, and the host's live MCP
+ * manager. A host passes the same hooks to its own typed-input dispatch and to expanded extension
+ * input (`pi.sendUserMessage(…, { expand: true })`), so a built-in reaches the same client from
+ * either. Hooks scoped to one host request (`signal`, `keepTurnOpenUntilIdle`,
+ * `runCommandInBackground`) stay with that request.
+ */
+export type SlashCommandHost = Pick<
+	SlashCommandRuntime,
+	| "output"
+	| "report"
+	| "refreshCommands"
+	| "reloadPlugins"
+	| "notifyTitleChanged"
+	| "notifySessionPinChanged"
+	| "notifyConfigChanged"
+	| "mcpManager"
+	| "reconnectMcpServer"
+>;
+
+/** What running expanded input as a built-in slash command did (see `runHeadlessBuiltinSlashCommand`). */
+export type BuiltinSlashCommandOutcome =
+	/** A built-in only the interactive terminal runs; nothing ran. */
+	| { kind: "terminal-only" }
+	/** The built-in's text-mode `handle` ran; `output` joins the lines it printed. */
+	| { kind: "ran"; result: SlashCommandResult | void; output?: string };
+
+/** Runs text as a host's built-in slash command; undefined when the text names no built-in. */
+export type BuiltinSlashCommandRunner = (text: string) => Promise<BuiltinSlashCommandOutcome | undefined>;
+
+/**
  * Runtime visible to TUI-only handlers (`handleTui`). Carries the interactive
  * mode context. Intentionally narrower than `SlashCommandRuntime` so existing
  * callers can keep building it from just `{ ctx }`; when the TUI dispatcher

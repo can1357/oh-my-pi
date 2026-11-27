@@ -1,7 +1,13 @@
 import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
+import type { AgentSession } from "../session/agent-session";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "./builtin-registry";
 import { parseSlashCommand } from "./helpers/parse";
-import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "./types";
+import type {
+	AcpBuiltinSlashCommandResult,
+	BuiltinSlashCommandOutcome,
+	SlashCommandHost,
+	SlashCommandRuntime,
+} from "./types";
 
 export type { AcpBuiltinSlashCommandResult } from "./types";
 
@@ -67,4 +73,34 @@ export async function executeAcpBuiltinSlashCommand(
 	const result = await command.handle(parsed, runtime);
 	if (result === undefined) return { consumed: true };
 	return result;
+}
+
+/**
+ * Run `text` as a built-in slash command for expanded extension input
+ * (`pi.sendUserMessage(…, { expand: true })`): the text-mode `handle` RPC and ACP run, reporting
+ * through `host`, the hooks the host's own typed input gives built-ins. Returns undefined when the
+ * text names no built-in, and `terminal-only` for one only the interactive TUI runs.
+ */
+export async function runHeadlessBuiltinSlashCommand(
+	session: AgentSession,
+	text: string,
+	host: SlashCommandHost,
+): Promise<BuiltinSlashCommandOutcome | undefined> {
+	const parsed = parseSlashCommand(text);
+	const command = parsed ? lookupBuiltinSlashCommand(parsed.name) : undefined;
+	if (!parsed || !command) return undefined;
+	if (!command.handle) return { kind: "terminal-only" };
+	const printed: string[] = [];
+	const result = await command.handle(parsed, {
+		session,
+		sessionManager: session.sessionManager,
+		settings: session.settings,
+		cwd: session.sessionManager.getCwd(),
+		...host,
+		output: line => {
+			printed.push(line);
+			return host.output(line);
+		},
+	});
+	return { kind: "ran", result, output: printed.length > 0 ? printed.join("\n") : undefined };
 }

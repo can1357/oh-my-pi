@@ -72,8 +72,9 @@ import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
-import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
+import { executeAcpBuiltinSlashCommand, runHeadlessBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
+import type { SlashCommandHost } from "../../slash-commands/types";
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { sumSubagentTreeCost } from "../agent-hub-runtime";
@@ -1407,22 +1408,25 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
-		const promptTurn = record.promptTurn;
-		const skillResult = await this.#tryRunSkillCommand(record, text, images);
-		if (skillResult || promptTurn?.cancelRequested) {
-			return;
-		}
-
-		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
-			session: record.session,
-			sessionManager: record.session.sessionManager,
-			settings: record.session.settings,
-			cwd: record.session.sessionManager.getCwd(),
-			signal: promptTurn?.abortController.signal,
-			output: output => this.#emitCommandOutput(record, output),
-			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
-			reloadPlugins: () => this.#reloadPluginState(record),
+	/**
+	 * What a built-in reports to the ACP client and the MCP manager `/mcp` works on, for a prompted
+	 * command and for expanded extension input alike; a prompt turn adds its own `signal` and
+	 * `keepTurnOpenUntilIdle`. `clientHasSession` gates every notification: an extension can send
+	 * input from `session_start`, inside `newSession` before the client has the session id, so for
+	 * its input the host reports nothing until lifetime updates are ready, as lifetime events wait.
+	 */
+	#slashCommandHost(record: ManagedSessionRecord, clientHasSession: () => boolean = () => true): SlashCommandHost {
+		return {
+			output: async output => {
+				if (clientHasSession()) await this.#emitCommandOutput(record, output);
+			},
+			refreshCommands: async () => {
+				if (clientHasSession()) await this.#emitAvailableCommandsUpdate(record);
+			},
+			reloadPlugins: async () => {
+				if (clientHasSession()) await this.#reloadPluginState(record);
+				else await record.session.refreshSkillsAndCommands();
+			},
 			// `/mcp reauth` writes config-file credentials: reconnect the live
 			// manager's entry (with its client-supplied auth surface cleared, a
 			// pending automatic attempt superseded, and a name-collision with a
@@ -1442,17 +1446,8 @@ export class AcpAgent implements Agent {
 			// ACP-declared servers (`session/new` `mcpServers`) live in this
 			// manager, in no writable config file; `/mcp` lookups must consult it.
 			mcpManager: record.mcpManager,
-			keepTurnOpenUntilIdle: async () => {
-				await record.session.waitForIdle();
-				// `AgentSession.#emit()` does not await listeners, so the retried
-				// turn's `agent_end` handler — which emits the trailing chunks and
-				// end-of-turn updates — can still be in flight once the session is
-				// idle. Drain the tracked handlers too, or the prompt response can
-				// overtake its own updates. Same pairing as the `!agentInvoked`
-				// path below.
-				await this.#waitForPromptEventHandlers(record);
-			},
 			notifyTitleChanged: async () => {
+				if (!clientHasSession()) return;
 				await this.#connection.sessionUpdate({
 					sessionId: record.protocolSessionId,
 					update: {
@@ -1463,6 +1458,7 @@ export class AcpAgent implements Agent {
 				});
 			},
 			notifyConfigChanged: async options => {
+				if (!clientHasSession()) return;
 				// Once lifetime delivery is ready, model/thinking events already
 				// push the config update. Keep the pre-bootstrap explicit path.
 				if (options?.handledBySessionEvent && record.lifetimeUpdatesReady) {
@@ -1470,6 +1466,33 @@ export class AcpAgent implements Agent {
 					return;
 				}
 				await this.#pushConfigOptionUpdate(record);
+			},
+		};
+	}
+
+	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
+		const promptTurn = record.promptTurn;
+		const skillResult = await this.#tryRunSkillCommand(record, text, images);
+		if (skillResult || promptTurn?.cancelRequested) {
+			return;
+		}
+
+		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+			session: record.session,
+			sessionManager: record.session.sessionManager,
+			settings: record.session.settings,
+			cwd: record.session.sessionManager.getCwd(),
+			signal: promptTurn?.abortController.signal,
+			...this.#slashCommandHost(record),
+			keepTurnOpenUntilIdle: async () => {
+				await record.session.waitForIdle();
+				// `AgentSession.#emit()` does not await listeners, so the retried
+				// turn's `agent_end` handler — which emits the trailing chunks and
+				// end-of-turn updates — can still be in flight once the session is
+				// idle. Drain the tracked handlers too, or the prompt response can
+				// overtake its own updates. Same pairing as the `!agentInvoked`
+				// path below.
+				await this.#waitForPromptEventHandlers(record);
 			},
 		});
 		if (promptTurn?.cancelRequested) return;
@@ -3316,6 +3339,11 @@ export class AcpAgent implements Agent {
 			record.extensionsConfigured = true;
 			return;
 		}
+		// Expanded extension input runs built-ins with the hooks a prompted command gets, gated on the
+		// client having the session (see #slashCommandHost).
+		const slashCommandHost = this.#slashCommandHost(record, () => record.lifetimeUpdatesReady);
+		const runBuiltinSlashCommand = (text: string) =>
+			runHeadlessBuiltinSlashCommand(record.session, text, slashCommandHost);
 
 		extensionRunner.initialize(
 			{
@@ -3325,7 +3353,7 @@ export class AcpAgent implements Agent {
 					});
 				},
 				sendUserMessage: (content, options) => {
-					const task = record.session.sendUserMessage(content, options);
+					const task = record.session.sendUserMessage(content, options, { runBuiltinSlashCommand });
 					this.#trackExtensionUserMessage(record, task);
 					return task;
 				},

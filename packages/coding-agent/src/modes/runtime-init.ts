@@ -11,6 +11,7 @@ import { runExtensionCompact, runExtensionSetModel } from "../extensibility/exte
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
+import type { BuiltinSlashCommandRunner } from "../slash-commands/types";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 /** Action name for an extension-originated send failure. */
@@ -46,6 +47,12 @@ export interface InitializeExtensionsOptions {
 		change: () => Promise<T>,
 		options: { detachesRun: boolean },
 	) => Promise<T>;
+	/**
+	 * Runs expanded extension input (`pi.sendUserMessage(…, { expand: true })`) as one of the host's
+	 * built-in slash commands, with the hooks its own typed input gives them (RPC). Omitted (print
+	 * mode, subagents), built-in names go through the prompt flow.
+	 */
+	runBuiltinSlashCommand?: BuiltinSlashCommandRunner;
 }
 
 /**
@@ -69,6 +76,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		trackExtensionSend,
 		filterActiveTools,
 		wrapSessionChange = change => change(),
+		runBuiltinSlashCommand,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
@@ -113,11 +121,15 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				});
 			},
 			sendUserMessage: (content, sendOptions) => {
-				const sendTask = session.sendUserMessage(content, sendOptions);
+				const sendTask = session.sendUserMessage(content, sendOptions, { runBuiltinSlashCommand });
 				trackExtensionSend?.(sendTask);
-				// Expanded input can be handled locally without submitting anything (a command ran,
-				// an `input` handler consumed the text); a drop rejects.
-				claimTurnWhen(sendTask, result => result.handled !== "command");
+				// Expanded input can be handled locally without submitting anything (a command ran, an
+				// `input` handler consumed the text, a TUI-only built-in was named); a drop rejects. Only
+				// a submitted message, or a command that started a turn itself (`/retry`), owns a turn.
+				claimTurnWhen(
+					sendTask,
+					result => result.handled === "prompt" || result.handled === "skill" || result.agentInvoked === true,
+				);
 				sendTask.catch(e => {
 					reportSendError("extension_send_user", toError(e));
 				});
