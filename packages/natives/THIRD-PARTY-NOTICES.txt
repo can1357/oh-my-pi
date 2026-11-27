@@ -2449,7 +2449,6 @@ Used by:
 - gl_generator 0.14.0 (https://github.com/brendanzab/gl-rs/)
 - khronos_api 3.1.0 (https://github.com/brendanzab/gl-rs/)
 - ryu 1.0.23 (https://github.com/dtolnay/ryu)
-- serial2 0.2.38 (https://github.com/de-vri-es/serial2-rs)
 - uiautomation 0.25.1 (https://github.com/leexgone/uiautomation-rs)
 - uiautomation_derive 0.7.9 (https://github.com/leexgone/uiautomation-rs)
 - wasmtime-asm-macros 29.0.1 (https://github.com/bytecodealliance/wasmtime)
@@ -4054,7 +4053,6 @@ THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- winreg 0.10.1 (https://github.com/gentoo90/winreg-rs)
 - winreg 0.56.0 (https://github.com/gentoo90/winreg-rs)
 
 Full license text:
@@ -5376,39 +5374,6 @@ Used by:
 Full license text:
 
 Copyright (c) 2017 Pierre Chifflier
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
-- shared_library 0.1.9 (https://github.com/tomaka/shared_library/)
-
-Full license text:
-
-Copyright (c) 2017 Pierre Krieger
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -9564,36 +9529,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- filedescriptor 0.8.3 (https://github.com/wezterm/wezterm)
-- portable-pty 0.9.0 (https://github.com/wezterm/wezterm)
-
-Full license text:
-
-MIT License
-
-Copyright (c) 2018 Wez Furlong
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - dashmap 6.2.1 (https://github.com/xacrimon/dashmap)
 
 Full license text:
@@ -9912,7 +9847,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- cfg_aliases 0.1.1 (https://github.com/katharostech/cfg_aliases)
 - cfg_aliases 0.2.2 (https://github.com/katharostech/cfg_aliases)
 
 Full license text:
@@ -10284,6 +10218,35 @@ Full license text:
 MIT License
 
 Copyright (c) 2023 dAxpeDDa
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+License: MIT License (MIT)
+Used by:
+- ansi-width 0.1.1 (https://github.com/uutils/ansi-width)
+
+Full license text:
+
+MIT License
+
+Copyright (c) 2023 uutils developers
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11596,7 +11559,6 @@ THE SOFTWARE.
 License: MIT License (MIT)
 Used by:
 - nix 0.26.4 (https://github.com/nix-rust/nix)
-- nix 0.28.0 (https://github.com/nix-rust/nix)
 - nix 0.30.1 (https://github.com/nix-rust/nix)
 - nix 0.31.3 (https://github.com/nix-rust/nix)
 

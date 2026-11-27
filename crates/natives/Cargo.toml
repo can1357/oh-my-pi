@@ -57,7 +57,6 @@ omp-vfs.workspace = true
 omp-voice.workspace = true
 omp-web.workspace = true
 ptts.workspace = true
-portable-pty.workspace = true
 png.workspace = true
 rayon.workspace = true
 regex.workspace = true
