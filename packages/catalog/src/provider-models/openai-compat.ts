@@ -11,6 +11,7 @@ import {
 	modelLimitsFor,
 } from "../compat/behavior";
 import { resolveAnthropicApiVersion } from "../compat/anthropic";
+import { AmbiguousOverlapError } from "../compat/cascade";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
@@ -7014,12 +7015,26 @@ function createCopilotLongContextVariant(
 	};
 	// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
 	// the default boundary); see copilotTierCost for the cache legs.
-	const scaleCache = resolveCatalogAxes(variant).tierCacheFollowsInput === true;
+	const scaleCache = copilotTierCacheFollowsInput(variant);
 	const longCost = copilotTierCost(longContext, base.cost, scaleCache);
 	if (longCost) {
 		variant.cost = longCost;
 	}
 	return variant;
+}
+
+/**
+ * The `tier-cache-follows-input` axis of a synthesized long-context row. A row the rule tree cannot
+ * resolve (an equal-rank overlap) scales nothing here; `buildModel` then skips that row alone instead
+ * of the throw rejecting the whole `/models` response.
+ */
+function copilotTierCacheFollowsInput(variant: ModelSpec<Api>): boolean {
+	try {
+		return resolveCatalogAxes(variant).tierCacheFollowsInput === true;
+	} catch (error) {
+		if (error instanceof AmbiguousOverlapError) return false;
+		throw error;
+	}
 }
 
 export function githubCopilotModelManagerOptions(config?: GithubCopilotModelManagerConfig): ModelManagerOptions<Api> {

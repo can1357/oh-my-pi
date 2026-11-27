@@ -106,4 +106,25 @@ describe("Copilot tier cache pricing", () => {
 		// The scaled fallback would be 0.02.
 		expect(cost("gpt-6-luna-1m")?.cacheRead).toBe(0.03);
 	});
+
+	it("keeps the other live rows when a long tier's rules cannot resolve", async () => {
+		// The rule tree has no reviewed rank for a reference-less Haiku 4.6, so its `-1m` row
+		// hits an equal-rank overlap; only that row may drop out.
+		const cost = await resolveCosts([
+			entry(
+				"claude-haiku-4.6",
+				{ max_prompt_tokens: 200_000, input_price: 100, output_price: 500 },
+				{ max_prompt_tokens: 936_000, input_price: 200, output_price: 1000 },
+			),
+			entry(
+				"gpt-6-luna",
+				{ max_prompt_tokens: 272_000, input_price: 13, output_price: 50 },
+				{ max_prompt_tokens: 936_000, input_price: 26, output_price: 75 },
+			),
+		]);
+		// Live prices, not the bundled fallback a rejected response would leave.
+		expect(cost("gpt-6-luna")?.input).toBe(0.13);
+		expect(cost("gpt-6-luna-1m")?.input).toBe(0.26);
+		expect(cost("claude-haiku-4.6-1m")).toBeUndefined();
+	});
 });
