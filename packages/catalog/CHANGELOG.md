@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed Antigravity model display and pricing: models now appear as included with the Google AI plan, can serve as the cheapest configured vision fallback, and report zero cost in OTLP telemetry.
+- Fixed `google-vertex` Claude Fable 5.1+ requests failing their first attempt with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#20765](https://github.com/can1357/oh-my-pi/issues/20765))
 
 ### Removed
 

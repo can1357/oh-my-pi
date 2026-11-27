@@ -293,11 +293,6 @@ class "anthropic" {
 				supports-turn-scoped-system #true
 			}
 		}
-		family "fable" {
-			revision ">=5.1" {
-				supports-thinking-binding-controls #true
-			}
-		}
 		family "sonnet" {
 			revision ">=5.5" {
 				supports-mid-conversation-system #true
@@ -317,7 +312,7 @@ class "anthropic" {
 			}
 		}
 	}
-	// Vertex rejects `thinking.block_binding` on Sonnet 5.5 with 400
+	// Vertex rejects `thinking.block_binding` on Sonnet 5.5 and Fable 5.2 with 400
 	// `thinking.adaptive.block_binding: Extra inputs are not permitted`,
 	// per-message `output_config` with 400 `messages.N.output_config: Extra
 	// inputs are not permitted` (it takes no `output_config.effort` at all; see
@@ -330,6 +325,7 @@ class "anthropic" {
 				supports-mid-conversation-tool-changes #true
 			}
 			revision ">=5.1" {
+				supports-thinking-binding-controls #true
 				supports-per-message-effort #true
 			}
 		}
