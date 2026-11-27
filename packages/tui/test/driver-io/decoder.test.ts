@@ -456,6 +456,21 @@ describe("InputDecoder: win32-input-mode records", () => {
 		expect(events).toEqual([{ type: "paste", paste: { text: "a\rb" } }]);
 	});
 
+	it("keeps Win32 Backspace before direct text in the same read", () => {
+		const { decoder, keys } = win32();
+		const backspace = record(8, 14, 8, 1, 0) + record(8, 14, 8, 0, 0);
+		decoder.process("chon");
+		decoder.process(backspace);
+		decoder.process(new TextEncoder().encode(`${backspace}ọn`));
+		expect(keys()).toEqual(["c", "h", "o", "n", "backspace", "backspace", "ọ", "n"]);
+	});
+
+	it("keeps Win32 Backspace before direct paste in the same read", () => {
+		const { decoder, events } = win32();
+		decoder.process(record(8, 14, 8, 1, 0) + "\x1b[200~ọn\x1b[201~");
+		expect(events.map(event => event.type)).toEqual(["key", "paste"]);
+	});
+
 	it("still decodes direct terminal replies and keys while records are on", () => {
 		const { decoder, replies, keys } = win32();
 		decoder.process("\x1b[?1;2c\x1b[A");

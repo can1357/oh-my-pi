@@ -7,12 +7,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
@@ -104,6 +105,34 @@ describe("turn states", () => {
 		expect(ui.node("md").p.text).toBe("Answer after thinking.");
 		mode.hideThinkingBlock = false;
 		expect(kinds()).toEqual(["section", "md"]);
+	});
+
+	it("hides thinking from the first reply when the setting is on at startup", async () => {
+		mode.stop();
+		await mode.shell.stop();
+		term.dispose();
+		session.setThinkingLevel(Effort.High);
+		cfgHideThinkingBlock.set(settings, true);
+		term = createModeTerminal({ columns: 120, rows: 32 });
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, new EventBus(), term.frame);
+		// No reasoning has streamed yet: the reply renders straight from the startup state.
+		mode.presentAssistant({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "Considering the request carefully." },
+				{ type: "text", text: "Answer after thinking." },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: USAGE,
+			timestamp: 10,
+		});
+		await using ui = await nativeShell(mode.shell);
+		const reply = parentOf(ui.node("md"));
+		expect(ui.get(reply).c.map(child => ui.get(child).k)).toEqual(["md"]);
+		expect(ui.node("md").p.text).toBe("Answer after thinking.");
 	});
 
 	it("keeps filling a returned background card with its job’s frames", async () => {

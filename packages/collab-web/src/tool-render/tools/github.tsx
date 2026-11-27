@@ -38,7 +38,7 @@ function formatPr(pr: unknown): string | null {
 	return parts.join(", ");
 }
 
-function shortSha(sha: string): string {
+export function shortSha(sha: string): string {
 	return /^[0-9a-f]{12,}$/i.test(sha) ? sha.slice(0, 7) : sha;
 }
 
@@ -105,7 +105,7 @@ function argValue(value: unknown): ReactNode {
 	return <InvalidArg />;
 }
 
-function ArgsGrid({ args }: { args: Record<string, unknown> }): ReactNode {
+export function ArgsGrid({ args }: { args: Record<string, unknown> }): ReactNode {
 	const rows: ReactNode[] = [];
 	for (const key in args) {
 		if (key === "op" || key === "body") continue;

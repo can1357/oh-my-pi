@@ -48,6 +48,12 @@ export interface MarkdownOptions {
 	/** Wrap links in OSC 8 hyperlinks (default false). */
 	readonly hyperlinks?: boolean;
 	/**
+	 * Draw ` (href)` after a link label that is not the href itself (default:
+	 * the host's {@link markdownLook}). Only honored with `hyperlinks`: an
+	 * unlinked label alone would lose the destination.
+	 */
+	readonly linkUrls?: boolean;
+	/**
 	 * Draw top-level H1 headings at double size with OSC 66 text sizing, over
 	 * their row and one reserved blank row (default false: the terminal must
 	 * draw OSC 66).
@@ -74,9 +80,10 @@ export interface MarkdownOptions {
 	 */
 	readonly stream?: boolean;
 	/**
-	 * Columns code fence bodies are indented by (default 2). 0 draws them
-	 * literally: at the row's column 0 whatever quote, list or padding holds
-	 * them, wrapped by cells, so copying the rows yields the code.
+	 * Columns code fence bodies are indented by (default 2). 0 draws them and
+	 * their ``` fence rows literally: at the row's column 0 whatever quote,
+	 * list or padding holds them, wrapped by cells, so copying the rows yields
+	 * the code and copying the whole block yields its markdown.
 	 */
 	readonly codeIndent?: number;
 }
@@ -336,9 +343,14 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 	const code = token.text;
 	const lines =
 		lang !== undefined && supportsLanguage(lang) ? highlightCode(code, lang, options.theme) : code.split("\n");
-	const out: Row[] = wrap(styles.codeBorder(`\`\`\`${lang ?? ""}`), width);
-	const fence = r.fence?.token === token ? r.fence : undefined;
 	const indent = options.codeIndent ?? 2;
+	// A literal body takes its fence rows to column 0 with it, so the block stays aligned.
+	const border = (text: string): Row[] =>
+		indent > 0
+			? wrap(styles.codeBorder(text), width)
+			: wrap(styles.codeBorder(text), r.fullWidth).map(literal => ({ literal }));
+	const out: Row[] = border(`\`\`\`${lang ?? ""}`);
+	const fence = r.fence?.token === token ? r.fence : undefined;
 	for (let i = 0; i < lines.length; i++) {
 		// Every line another line follows is final; the last one can still grow or become the closing fence.
 		if (fence && i === lines.length - 1) fence.head = out.length;
@@ -347,7 +359,7 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 		else if (line === "") out.push({ literal: "" });
 		else for (const literal of wrap(line, r.fullWidth)) out.push({ literal });
 	}
-	out.push(...wrap(styles.codeBorder("```"), width));
+	out.push(...border("```"));
 	return out;
 }
 
@@ -527,6 +539,7 @@ function createRenderer(tokens: readonly Token[], fullWidth: number, options: Ma
 		inline: {
 			styles,
 			hyperlinks: options.hyperlinks ?? false,
+			linkUrls: drawsLinkUrls(options),
 			linkTarget: options.linkTarget,
 			extensionLink: extensionLinkTest(options.linkSchemes ?? []),
 			marks: options.marks,
@@ -745,6 +758,7 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.paddingX ?? 0,
 		options.colorful ?? true,
 		options.hyperlinks ?? false,
+		drawsLinkUrls(options),
 		options.textSizing ?? false,
 		options.mermaid ?? true,
 		options.textStyle ?? "",
@@ -752,6 +766,11 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.linkSchemes?.join(",") ?? "",
 		links,
 	].join("|");
+}
+
+/** Whether named links draw their ` (href)` suffix: always without OSC 8, where the label alone loses the target. */
+function drawsLinkUrls(options: MarkdownOptions): boolean {
+	return options.linkUrls !== false || options.hyperlinks !== true;
 }
 
 /** The reference definitions of a lexed document, as a key part ("" when there are none). */
@@ -869,11 +888,17 @@ export function renderMarkdown(source: string, width: number, options: MarkdownO
 	return [...renderMarkdownFrame(source, width, options).rows];
 }
 
-/** `options` with the host's look where they leave `colorful` or `mermaid` unset. */
+/** `options` with the host's look where they leave `colorful`, `mermaid` or `linkUrls` unset. */
 function withHostLook(options: MarkdownOptions): MarkdownOptions {
-	if (options.colorful !== undefined && options.mermaid !== undefined) return options;
+	if (options.colorful !== undefined && options.mermaid !== undefined && options.linkUrls !== undefined)
+		return options;
 	const look = markdownLook();
-	return { ...options, colorful: options.colorful ?? look.colorful, mermaid: options.mermaid ?? look.mermaid };
+	return {
+		...options,
+		colorful: options.colorful ?? look.colorful,
+		mermaid: options.mermaid ?? look.mermaid,
+		linkUrls: options.linkUrls ?? look.linkUrls,
+	};
 }
 
 /**

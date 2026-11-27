@@ -211,7 +211,7 @@ export class WorkerCore {
 				const payload = errorPayload(reason);
 				if (this.#lateRejections.length < LATE_REJECTION_NOTICES_MAX) {
 					this.#lateRejections.push(
-						`Unhandled rejection from finished eval cell ${recent} (missing await?): ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
+						`[unhandled rejection from finished cell ${recent}; missing await?] ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
 					);
 				} else {
 					this.#omittedLateRejections++;
@@ -387,7 +387,7 @@ export class WorkerCore {
 		};
 		for (const notice of this.#lateRejections.splice(0)) hooks.onText(notice);
 		if (this.#omittedLateRejections > 0) {
-			hooks.onText(`… and ${this.#omittedLateRejections} more late rejections from finished eval cells.\n`);
+			hooks.onText(`[+${this.#omittedLateRejections} more late rejections]\n`);
 			this.#omittedLateRejections = 0;
 		}
 		let result: RunResult;

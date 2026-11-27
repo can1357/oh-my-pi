@@ -503,7 +503,9 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 					}
 				}
 
-				await runtime.output(lines.length === 0 ? "No plugins installed" : lines.join("\n"));
+				if (lines.length === 0) await runtime.output("No plugins installed");
+				else if (runtime.report) runtime.report("Installed Plugins", lines.join("\n"));
+				else await runtime.output(lines.join("\n"));
 				return commandConsumed();
 			} catch (err) {
 				return usage(`Plugin error: ${errorMessage(err)}`, runtime);

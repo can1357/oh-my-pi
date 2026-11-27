@@ -1233,6 +1233,9 @@ export declare function __ompSetGrammarDir(dir: string): void
  */
 export declare function __piNativesBuildVersion(): string | null
 
+/** Parses and classifies a bash or zsh command for `bash` tool approval. */
+export declare function analyzeBashApproval(command: string, dialect?: 'bash' | 'zsh'): BashApprovalAnalysis
+
 /**
  * Reports whether the on-device model can generate, as an `availability`
  * event JSON: `{available, reason?, contextSize?, variant?, vision?,
@@ -1293,6 +1296,24 @@ export interface ApplicationQuery {
  * failure, a damaged or unsupported patch, or a patch made for other old data.
  */
 export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
+
+export interface ApprovalAndClause {
+  text: string
+  simple?: ApprovalSimpleCommand
+  syntacticallyStateful: boolean
+  stageCommands: Array<Array<string>>
+  restrictionSegments: Array<string>
+}
+
+export interface ApprovalSimpleCommand {
+  text: string
+  withoutAssignsText: string
+  assignNames: Array<string>
+  argv: Array<string>
+  globWordIndices: Array<number>
+  expansionFree: boolean
+  strictlyLiteral: boolean
+}
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1622,6 +1643,16 @@ export interface AxTextSelection {
    * act on the focused element.
    */
   focused: boolean
+}
+
+export interface BashApprovalAnalysis {
+  valid: boolean
+  hasControlChars: boolean
+  hasComment: boolean
+  single?: ApprovalSimpleCommand
+  andChain?: Array<ApprovalAndClause>
+  restrictionSegments: Array<string>
+  restrictionIncomplete: boolean
 }
 
 export interface BlockParseOptions {
@@ -4859,12 +4890,30 @@ export interface SnapcompactRenderOptions {
 export declare function snapcompactSupportedChars(font: string, chars: string): string
 
 /**
+ * Start a detached Windows process outside this process's job objects.
+ *
+ * Like Bun's `detached` spawn, the child gets no console (`DETACHED_PROCESS`),
+ * its own process group, and null stdio. Unlike it, the child also leaves
+ * every job this process belongs to (`CREATE_BREAKAWAY_FROM_JOB`), so a
+ * terminal host that terminates its job on close does not take the child
+ * down. A job that forbids breakaway makes `CreateProcessW` fail with
+ * `ERROR_ACCESS_DENIED`; the child is then started inside the job.
+ *
+ * Returns the child's pid.
+ *
+ * # Errors
+ * The spawn error, as a JS error whose `code` is errno-style; `ENOSYS` off
+ * Windows.
+ */
+export declare function spawnBreakaway(options: SpawnRawOptions): number
+
+/**
  * Spawn in its own process group with three pipes; parent-side fds are
  * CLOEXEC raw fds owned by the caller.
  */
 export declare function spawnRaw(options: SpawnRawOptions): RawChild
 
-/** Options for `spawnRaw`. */
+/** Options for `spawnRaw` and `spawnBreakaway`. */
 export interface SpawnRawOptions {
   /** Executable name or path (resolved against `env.PATH`). */
   application: string

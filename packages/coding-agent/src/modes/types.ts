@@ -762,9 +762,10 @@ export interface InteractiveModeContext {
 	presentAssistant(message?: AssistantMessage, options?: PresentAssistantOptions): AssistantView;
 	/**
 	 * Replay `entries` into a transcript of their own, drawn by the session's block presenters (the
-	 * rewind page's turns). Dispose it when the page closes.
+	 * rewind page's turns). `clipped`: the entries are a later part of the session, so the run they
+	 * open in may have started above them. Dispose it when the page closes.
 	 */
-	createTranscriptReplica(entries: readonly TranscriptEntryLike[]): TranscriptReplica;
+	createTranscriptReplica(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica;
 	/**
 	 * Mount a tool call's block: a tool card, or a reply block for a built-in `write` to a reply
 	 * URL (`out://`). Wired to the display flags; registers nothing in {@link pendingTools}.
@@ -1018,9 +1019,9 @@ export interface InteractiveModeContext {
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
-	showUserMessageSelector(startAt?: string): void;
-	showCopySelector(): void;
-	showTreeSelector(): void;
+	showUserMessageSelector(startAt?: string): Promise<void>;
+	showCopySelector(): Promise<void>;
+	showTreeSelector(): Promise<void>;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;

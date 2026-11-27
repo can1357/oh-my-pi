@@ -1105,7 +1105,9 @@ export function transformMessages<TApi extends Api>(
 			): boolean => {
 				if (candidate.type !== "thinking") return false;
 				if (!isAnthropicReplay) return false;
-				if (isLatestSurvivingAssistant && abandonedToolUse) return true;
+				if (isLatestSurvivingAssistant && abandonedToolUse) {
+					return !(isSameModel && isSigningAnthropicTarget && !candidate.thinkingSignature?.trim());
+				}
 				const candidateSignatureUntrustworthy =
 					abandonedToolUse || (invalidStopReason && candidateIndex === lastBlockIndex);
 				const replaySignature =
@@ -1156,7 +1158,13 @@ export function transformMessages<TApi extends Api>(
 						// Latest abandoned turn: Anthropic's byte-for-byte rule forbids
 						// even stripping a signature on the latest message — but only
 						// for turns the target's own provider issued.
-						if (isLatestSurvivingAssistant && abandonedToolUse && !crossProviderSource) return block;
+						// The rule binds signed blocks only: an unsigned same-model block
+						// cannot replay natively on a signing target, so it is dropped
+						// like on every other turn (see below), never demoted to text.
+						if (isLatestSurvivingAssistant && abandonedToolUse && !crossProviderSource) {
+							if (isSameModel && isSigningAnthropicTarget && !block.thinkingSignature?.trim()) return [];
+							return block;
+						}
 						// Preserve same-deployment signatures and let Anthropic perform
 						// its one-way model compatibility check. Across deployments,
 						// strip stale signatures so the encoder applies the target's

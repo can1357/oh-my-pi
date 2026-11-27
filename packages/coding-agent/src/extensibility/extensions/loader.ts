@@ -274,7 +274,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: RegisteredCommand["handler"];
 		},
 	): void {
-		this.extension.commands.set(name, { name, ...options });
+		this.extension.commands.set(name, { name, ...options, extensionPath: this.extension.path });
 	}
 
 	setLabel(label: string): void {
