@@ -15,7 +15,7 @@ import type {
 	Context,
 	DeveloperMessage,
 	TextContent,
-	UserMessage,
+	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
@@ -285,5 +285,44 @@ describe("repeated per-call messages", () => {
 			expect(isPerCallContextMessage(request.messages[0])).toBe(true);
 			expect(isRepeatedPerCallContextMessage(request.messages[0])).toBe(false);
 		}
+	});
+
+	it("reads a note's place off the tool result it follows, by that result's own bytes", async () => {
+		const { sent, mock } = recordingMock(3);
+		// The newest tool result, the place a tail reminder lands after. A host hands the same object to every
+		// request and rewrites it in place, as it may for a result it re-renders; the record keeps its own copy of
+		// the text, and shares `details`, which reaches no provider message.
+		const block: TextContent = { type: "text", text: "line 1" };
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "read",
+			content: [block],
+			details: { path: "notes.md" },
+			isError: false,
+			timestamp: 1,
+		};
+		const agent = new Agent({
+			initialState: { model: mock.model },
+			streamFn: (model, context, options) => mock.stream(model, context, options),
+			// After the conversion, so the request carries these objects as they are.
+			transformProviderContext: context => ({
+				...context,
+				messages: [...context.messages, result, perCall("remember the plan")],
+			}),
+		});
+
+		await agent.prompt("first");
+		await agent.prompt("second");
+		// The result the note follows is rewritten in place: the note sits after another message now.
+		block.text = "line 2";
+		await agent.prompt("third");
+
+		expect(sent).toHaveLength(3);
+		expect(sent[1]!.messages.at(-1)?.content).toBe("remember the plan");
+		expect(isRepeatedPerCallContextMessage(sent[1]!.messages.at(-1))).toBe(true);
+		expect(sent[2]!.messages.at(-2)?.content).toEqual([{ type: "text", text: "line 2" }]);
+		expect(isPerCallContextMessage(sent[2]!.messages.at(-1))).toBe(true);
+		expect(isRepeatedPerCallContextMessage(sent[2]!.messages.at(-1))).toBe(false);
 	});
 });
