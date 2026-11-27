@@ -713,7 +713,9 @@ async function openOnKind(
 	details.browser = kind.kind;
 
 	const wslRelay = automaticWslRelay(kind, session);
-	let existing = wslRelay ? undefined : matchingTab(name, kind);
+	// A name bound to a non-relay browser cannot match whatever discovery finds: fail before discovering.
+	const boundKind = getTab(name)?.browser.kind;
+	let existing = wslRelay && (!boundKind || boundKind.kind === "relay") ? undefined : matchingTab(name, kind);
 	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
 	if (params.insecure && kind.kind === "relay") {
 		throw new ToolError(
@@ -752,8 +754,7 @@ async function openOnKind(
 		: `launching or connecting to the browser (${describeKind(kind)})`;
 	try {
 		if (wslRelay) {
-			const bound = getTab(name)?.browser.kind;
-			kind = await resolveWslRelay(wslRelay, openSignal, bound?.kind === "relay" ? bound : undefined);
+			kind = await resolveWslRelay(wslRelay, openSignal, boundKind?.kind === "relay" ? boundKind : undefined);
 			existing = matchingTab(name, kind);
 			stage = `launching or connecting to the browser (${describeKind(kind)})`;
 		}

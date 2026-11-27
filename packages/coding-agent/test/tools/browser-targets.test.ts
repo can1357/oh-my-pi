@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { cdpTargets, findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
@@ -246,33 +246,33 @@ async function windowsKind(port: number) {
 describe("browser open with a mirrored WSL relay", () => {
 	it("reuses the verified name but refuses a different relay, even on the same port", async () => {
 		process.env.PI_BROWSER_RELAY = "1";
-		const mode = spyOn(networking, "getWslNetworkingMode").mockReturnValue("mirrored");
-		const local = spyOn(discovery, "discoverRelayEndpoints").mockReturnValue([]);
-		const windows = spyOn(windowsDiscovery, "discoverWindowsRelay");
 		const realWorker = globalThis.Worker;
 		let workers = 0;
-		// Use the real prelude, browser registry, relay and tab supervisor; only emulate the page worker.
-		globalThis.Worker = class extends EventTarget {
-			postMessage(message: WorkerInbound) {
-				const send = (data: WorkerOutbound) => this.dispatchEvent(new MessageEvent("message", { data }));
-				if (message.type === "init") {
-					send({ type: "setup" });
-					send({
-						type: "ready",
-						info: { targetId: String(++workers), url: "about:blank", viewport: { width: 800, height: 600 } },
-					});
-				} else if (message.type === "close") {
-					queueMicrotask(() => send({ type: "closed" }));
-				}
-			}
-			terminate() {}
-		} as unknown as typeof Worker;
 		const old = startRelayServer({ port: 0 });
 		const replacement = startRelayServer({ port: 0 });
 		const name = "windows-bound";
 		const freshName = "windows-fresh";
 		const panelName = "windows-panel";
 		try {
+			spyOn(networking, "getWslNetworkingMode").mockReturnValue("mirrored");
+			spyOn(discovery, "discoverRelayEndpoints").mockReturnValue([]);
+			const windows = spyOn(windowsDiscovery, "discoverWindowsRelay");
+			// Use the real prelude, browser registry, relay and tab supervisor; only emulate the page worker.
+			globalThis.Worker = class extends EventTarget {
+				postMessage(message: WorkerInbound) {
+					const send = (data: WorkerOutbound) => this.dispatchEvent(new MessageEvent("message", { data }));
+					if (message.type === "init") {
+						send({ type: "setup" });
+						send({
+							type: "ready",
+							info: { targetId: String(++workers), url: "about:blank", viewport: { width: 800, height: 600 } },
+						});
+					} else if (message.type === "close") {
+						queueMicrotask(() => send({ type: "closed" }));
+					}
+				}
+				terminate() {}
+			} as unknown as typeof Worker;
 			await connectExtension(old.port, []);
 			await connectExtension(replacement.port, []);
 			const oldKind = await windowsKind(old.port);
@@ -321,7 +321,8 @@ describe("browser open with a mirrored WSL relay", () => {
 
 			expect((await invoke(tool, { ...open, name: freshName })).text).toStartWith(`Opened tab "${freshName}"`);
 			expect(getTab(freshName)?.browser.kind).toEqual(replacementKind);
-			expect(windows).toHaveBeenCalledTimes(5);
+			// The relay discovery last verified answers its identity again: no new helper launch.
+			expect(windows).toHaveBeenCalledTimes(4);
 
 			process.env.PI_BROWSER_RELAY = "only";
 			process.env.PI_PANEL_RELAY_URL = replacementKind.cdpUrl;
@@ -329,16 +330,14 @@ describe("browser open with a mirrored WSL relay", () => {
 			await expect(invoke(panel, open)).rejects.toThrow(/bound to a different browser/);
 			expect((await invoke(panel, { ...open, name: panelName })).text).toStartWith(`Opened tab "${panelName}"`);
 			expect(getTab(panelName)?.browser.kind).toEqual({ kind: "relay", cdpUrl: replacementKind.cdpUrl });
-			expect(windows).toHaveBeenCalledTimes(5);
+			expect(windows).toHaveBeenCalledTimes(4);
 		} finally {
 			for (const tab of [name, freshName, panelName])
 				await releaseTab(tab, { keepPage: true }).catch(() => undefined);
 			old.stop();
 			replacement.stop();
 			globalThis.Worker = realWorker;
-			windows.mockRestore();
-			local.mockRestore();
-			mode.mockRestore();
+			mock.restore();
 		}
 	});
 });

@@ -6,7 +6,7 @@
  * restart, while Chrome starts the next host. A 503 means a relay is up and its browser has not said hello yet,
  * which takes moments.
  */
-import { withTimeout } from "@oh-my-pi/pi-utils";
+import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { ToolError, throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
@@ -68,7 +68,30 @@ function reportedRelayInstance(info: object | null): string | undefined {
 	}
 }
 
-async function probeRelayIdentity(cdpUrl: string, signal?: AbortSignal): Promise<string | undefined> {
+/** The Windows relay discovery last verified; reused only after its identity answers again. */
+let lastWindowsRelay: RelayKind | undefined;
+/** The discovery in flight, shared so concurrent opens start one helper. */
+let pendingWindowsDiscovery: Promise<RelayKind> | undefined;
+
+function discoverWindowsRelayShared(signal?: AbortSignal): Promise<RelayKind> {
+	// Runs to its own deadline: one caller cancelling must not fail the others waiting on it.
+	pendingWindowsDiscovery ??= discoverWindowsRelay()
+		.then(relay => {
+			lastWindowsRelay = relay;
+			return relay;
+		})
+		.finally(() => {
+			pendingWindowsDiscovery = undefined;
+		});
+	return untilAborted(signal, pendingWindowsDiscovery);
+}
+
+/** `readyOnly` rejects a relay whose browser is gone (503): a native host that lost Chrome is about to exit. */
+async function probeRelayIdentity(
+	cdpUrl: string,
+	signal?: AbortSignal,
+	readyOnly = false,
+): Promise<string | undefined> {
 	// The raw probe bounds its response but still awaits the TCP connect.
 	const reply = await withTimeout(
 		probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: WSL_RELAY_PROBE_TIMEOUT_MS, signal }),
@@ -77,7 +100,7 @@ async function probeRelayIdentity(cdpUrl: string, signal?: AbortSignal): Promise
 		signal,
 	).catch(() => null);
 	throwIfAborted(signal);
-	if (reply && (reply.status === 200 || reply.status === 503))
+	if (reply && (reply.status === 200 || (!readyOnly && reply.status === 503)))
 		return reportedRelayInstance(parseVersionBody(reply.body));
 }
 
@@ -89,7 +112,16 @@ export async function resolveWslRelay(local: RelayKind, signal?: AbortSignal, bo
 	if (local.cdpUrl && (local.cdpUrl === windows?.cdpUrl ? instance : await probeRelayIdentity(local.cdpUrl, signal)))
 		return local;
 
-	const discovered = await discoverWindowsRelay(signal);
+	// The bound relay already failed its probe above; any other last-verified relay saves a helper launch.
+	const cached = lastWindowsRelay;
+	if (
+		cached &&
+		cached.windowsInstance !== windows?.windowsInstance &&
+		(await probeRelayIdentity(cached.cdpUrl, signal, true)) === cached.windowsInstance
+	)
+		return cached;
+
+	const discovered = await discoverWindowsRelayShared(signal);
 	if (windows && discovered.cdpUrl === windows.cdpUrl && discovered.windowsInstance === windows.windowsInstance) {
 		// Windows can still see its relay when WSL's loopback no longer reaches it.
 		throw new ToolError(
