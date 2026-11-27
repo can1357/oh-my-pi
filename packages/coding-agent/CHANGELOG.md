@@ -80,8 +80,6 @@
 - Terminals that list OSC 133 commands (such as tuios' scrollback browser) now find each user prompt as a command instead of an empty entry ([#20123](https://github.com/can1357/oh-my-pi/issues/20123)).
 - `hideThinkingBlock: true` now hides thinking blocks from the moment the TUI starts, instead of showing them until the first streamed reasoning arrives ([#17369](https://github.com/can1357/oh-my-pi/issues/17369))
 - Alt+L (reset terminal display), Ctrl+T, Ctrl+R, Ctrl+G and Ctrl+Shift+O work again while an ask form or ask dialog holds focus ([#20771](https://github.com/can1357/oh-my-pi/issues/20771))
-- `/context` in Tern scrolls an entry's full content (such as the system prompt) with the arrow and Page Up/Page Down keys again, not only with the mouse wheel
-- `/context` in Tern scrolls an entry's full content (such as the system prompt) with the arrow and Page Up/Page Down keys again, not only with the mouse wheel ([#20774](https://github.com/can1357/oh-my-pi/pull/20774) by [@C-W-Z](https://github.com/C-W-Z))
 - `/context` in Tern scrolls an entry's full content (such as the system prompt) with `tui.select.up`, `tui.select.down`, `tui.select.pageUp`, and `tui.select.pageDown` again, not only with the mouse wheel ([#20774](https://github.com/can1357/oh-my-pi/pull/20774) by [@C-W-Z](https://github.com/C-W-Z))
 - A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"
 - Browser helper calls (`tab.goto`, `tab.click`, `tab.evaluate`, etc.) and tab reuse on Tern, WebKit, and cmux tabs no longer queue behind another tab's long-running `tab.run()`, and queued `tab.run()` timeouts now name the tab and agent holding the queue
