@@ -28,7 +28,7 @@ describe("blocks", () => {
 		expect(renderMarkdown("  \n\n \n", 40, { theme })).toEqual([]);
 	});
 
-	it("separates blocks by exactly one blank row and pads every row to the width", () => {
+	it("separates blocks by exactly one blank row without trailing spaces", () => {
 		const rows = renderMarkdown("# Title\n\n\n\nBody\n\n---\n\n```\ncode\n```", 30, {
 			theme,
 			paddingX: 2,
@@ -47,7 +47,8 @@ describe("blocks", () => {
 			"  ```",
 			"",
 		]);
-		expect(rows.every(row => visibleWidth(row) === 30)).toBe(true);
+		expect(rows.every(row => visibleWidth(row) <= 30)).toBe(true);
+		expect(rows.every(row => !Bun.stripANSI(row).endsWith(" "))).toBe(true);
 	});
 
 	it("keeps setext headings and draws rules in the character they were written with", () => {

@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Eliminated trailing spaces on default-background terminal rows (prose, code blocks, and blank rows) by omitting full-width space padding and relying on ANSI EL0 (`\x1b[K`) / EL2 (`\x1b[2K`) clearing, preventing trailing whitespace when copying text from the terminal.
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.

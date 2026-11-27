@@ -3,7 +3,7 @@
  * survive nested resets, padded text blocks and hex foregrounds.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
-import { padTo, replaceTabs, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { terminalPaddingX } from "../terminal-padding";
 
@@ -83,13 +83,17 @@ export function hexFg(hex: string, text: string): string {
 }
 
 /**
- * Styled text wrapped with the terminal's standard horizontal padding,
- * every row padded to the full width.
+ * Styled text wrapped with the terminal's standard horizontal padding
+ * (left-indented only, without right-padding default-background rows).
  */
 export function paddedText(text: string, width: number): string[] {
 	if (text === "") return [];
 	const paddingX = terminalPaddingX();
 	const inner = Math.max(1, width - paddingX * 2);
 	const pad = " ".repeat(paddingX);
-	return wrap(replaceTabs(text), inner).map(line => padTo(`${pad}${line}`, width));
+	return wrap(replaceTabs(text), inner).map(line => {
+		if (line === "") return "";
+		const row = `${pad}${line}`;
+		return visibleWidth(row) > width ? truncate(row, width, "") : row;
+	});
 }

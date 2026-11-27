@@ -594,7 +594,6 @@ function renderPart(
 	let uncachedAt = r.growing || open ? tokens.length - 1 : -1;
 	while (uncachedAt >= 0 && isBlank(tokens[uncachedAt]!)) uncachedAt--;
 	const out: string[] = [];
-	let blank: string | undefined;
 	let previous: Token | undefined;
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i]!;
@@ -619,7 +618,7 @@ function renderPart(
 		if (rows.length === 0 && token.type !== "def") continue;
 		// A list that interrupts a paragraph (no blank source line between them) follows it directly.
 		const interrupts = previous?.type === "paragraph" && token.type === "list";
-		if (out.length > 0 && !interrupts) out.push((blank ??= padRows([""], width, paddingX)[0]!));
+		if (out.length > 0 && !interrupts) out.push("");
 		for (const row of rows) out.push(row);
 		previous = token;
 	}
@@ -642,13 +641,13 @@ function normalizeSource(source: string, stream: boolean): string {
 	return stream ? speculativeStreamingSource(unified) : unified;
 }
 
-/** Content rows padded to the full width: `paddingX` blank cells on the left (none for literal rows), spaces to the right edge. */
+/** Content rows fitted to `width`: `paddingX` blank cells on the left (none for literal rows), without trailing spaces. */
 function padRows(rows: readonly Row[], width: number, paddingX: number): string[] {
 	const left = spaces(paddingX);
 	return rows.map(row => {
+		if (row === "") return "";
 		const line = typeof row === "string" ? left + row : row.literal;
-		const free = width - visibleWidth(line);
-		return free >= 0 ? line + spaces(free) : truncate(line, width, "");
+		return visibleWidth(line) > width ? truncate(line, width, "") : line;
 	});
 }
 
@@ -877,7 +876,7 @@ function renderPriorDefinitions(
 	return renderPart(lexed.tokens, inner, width, options, blockKeys, open, stable);
 }
 
-/** Rows of `source` at `width`, padded to the full width. Empty or blank sources have no rows. */
+/** Rows of `source` fitted to `width`. Empty or blank sources have no rows. */
 export function renderMarkdown(source: string, width: number, options: MarkdownOptions): string[] {
 	return [...renderMarkdownFrame(source, width, options).rows];
 }
@@ -918,7 +917,7 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 			undefined,
 			false,
 		);
-		return { rows: paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows, stable: 0 };
+		return { rows: paddingY > 0 ? padVertically(rows, paddingY, []) : rows, stable: 0 };
 	}
 	const lexed = lexStream(source, normalized);
 	const tokens = lexed.tokens;
@@ -934,7 +933,7 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 			? renderPriorDefinitions(tokens, 0, inner, width, options, true, fence)
 			: renderPart(tokens, inner, width, options, key, true, fence);
 		return {
-			rows: paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows,
+			rows: paddingY > 0 ? padVertically(rows, paddingY, []) : rows,
 			stable: fence.rows > 0 ? paddingY + fence.rows : 0,
 		};
 	}
@@ -966,19 +965,19 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 		: renderPart(tokens.slice(settled), inner, width, options, key, true, fence);
 	const separator = headRows.length > 0 && tailRows.length > 0;
 	const rows: string[] = [];
-	for (let i = 0; i < paddingY; i++) rows.push(spaces(width));
+	for (let i = 0; i < paddingY; i++) rows.push("");
 	for (const row of headRows) rows.push(row);
 	const stable = rows.length + (separator ? 1 : 0) + fence.rows;
-	if (separator) rows.push(spaces(width));
+	if (separator) rows.push("");
 	for (const row of tailRows) rows.push(row);
-	for (let i = 0; i < paddingY; i++) rows.push(spaces(width));
+	for (let i = 0; i < paddingY; i++) rows.push("");
 	return { rows, stable };
 }
 
 /** `rows` between `count` blank rows above and below. */
-function padVertically(rows: readonly string[], width: number, count: number, out: string[]): string[] {
-	for (let i = 0; i < count; i++) out.push(spaces(width));
+function padVertically(rows: readonly string[], count: number, out: string[]): string[] {
+	for (let i = 0; i < count; i++) out.push("");
 	for (const row of rows) out.push(row);
-	for (let i = 0; i < count; i++) out.push(spaces(width));
+	for (let i = 0; i < count; i++) out.push("");
 	return out;
 }

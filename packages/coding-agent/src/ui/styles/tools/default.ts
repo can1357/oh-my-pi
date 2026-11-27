@@ -36,10 +36,10 @@ export function tint(props: ToolProps): string | undefined {
 	return "toolSuccessBg";
 }
 
-/** A row filled to `width` in the tint's background, kept across nested resets. */
+/** A row filled to `width` in the tint's background, kept across nested resets (untinted rows omit trailing padding). */
 export function tintRow(theme: Theme, key: string | undefined, row: string, width: number): string {
+	if (!key) return visibleWidth(row) > width ? truncate(row, width, "") : row;
 	const padded = padTo(row, width);
-	if (!key) return padded;
 	const fill = (theme as { bgFill?: (color: string, text: string) => string }).bgFill;
 	return fill ? fill.call(theme, key, padded) : theme.bg(key, padded);
 }

@@ -32,9 +32,9 @@ describe("sized H1 rows", () => {
 		expect(rows).toHaveLength(4);
 		expect(rows[0]).toContain(SPAN);
 		expect(textSizedRows(rows[0]!)).toBe(2);
-		expect(visibleWidth(rows[0]!)).toBe(width);
-		expect(rows[1]).toBe(" ".repeat(width));
-		expect(rows[2]).toBe(" ".repeat(width));
+		expect(visibleWidth(rows[0]!)).toBe(22);
+		expect(rows[1]).toBe("");
+		expect(rows[2]).toBe("");
 		expect(plainRows(rows)[3]).toBe("Body");
 	});
 
@@ -49,14 +49,14 @@ describe("sized H1 rows", () => {
 		expect(rows).toHaveLength(2);
 		expect(rows[0]!.startsWith("  ")).toBe(true);
 		expect(rows[0]).toContain(SPAN);
-		expect(visibleWidth(rows[0]!)).toBe(26);
+		expect(visibleWidth(rows[0]!)).toBe(24);
 		expect(sized("# Hello World", 25, 2).some(row => row.includes("\x1b]66;"))).toBe(false);
 	});
 
 	it("gives every non-ASCII grapheme its own span with its cell count", () => {
 		const rows = sized("# 日本 ok", 40);
 		expect(rows[0]).toContain("\x1b]66;s=2:w=2;日\x1b\\\x1b]66;s=2:w=2;本\x1b\\\x1b]66;s=2; ok\x1b\\");
-		expect(visibleWidth(rows[0]!)).toBe(40);
+		expect(visibleWidth(rows[0]!)).toBe(14);
 	});
 
 	it("draws a link's label alone, linked when hyperlinks are on", () => {
@@ -66,7 +66,7 @@ describe("sized H1 rows", () => {
 			"\x1b]66;s=2;A bold \x1b\\\x1b]8;;https://e.com\x07\x1b]66;s=2;link\x1b\\\x1b]8;;\x07",
 		);
 		expect(linked[0]).not.toContain("(https://e.com)");
-		expect(visibleWidth(linked[0]!)).toBe(40);
+		expect(visibleWidth(linked[0]!)).toBe(22);
 
 		const unlinked = sized(source, 40);
 		expect(unlinked[0]).toContain("\x1b]66;s=2;A bold link\x1b\\");
