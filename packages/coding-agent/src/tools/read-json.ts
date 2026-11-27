@@ -24,6 +24,7 @@ import {
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import type { ToolSession } from "../sdk";
 import { quotePosixArgument } from "../utils/shell-quote";
+import { resolveArtifactSpillThreshold } from "./output-meta";
 import { resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult, prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
 import {
@@ -491,13 +492,15 @@ export async function readJson(
 		}
 	}
 
-	let truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES });
+	// A spill of an already-cut preview would advertise the prefix as the full query result.
+	const maxBytes = Math.min(DEFAULT_MAX_BYTES, resolveArtifactSpillThreshold(session.settings));
+	let truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES, maxBytes });
 	if (truncation.firstLineExceedsLimit) {
 		// truncateHead keeps nothing when the first line alone is over budget; show its
 		// UTF-8-safe byte prefix as one partial line instead of an empty result.
 		const newline = output.indexOf("\n");
 		const firstLine = newline === -1 ? output : output.slice(0, newline);
-		const snippet = truncateHeadBytes(firstLine, DEFAULT_MAX_BYTES);
+		const snippet = truncateHeadBytes(firstLine, maxBytes);
 		truncation = {
 			...truncation,
 			content: snippet.text,
@@ -511,7 +514,7 @@ export async function readJson(
 	if (resource) resultBuilder.sourceInternal(resource.url);
 	else if (file) resultBuilder.sourcePath(file.absolutePath);
 	if (truncation.truncated) {
-		resultBuilder.truncation(truncation, { direction: "head", maxBytes: DEFAULT_MAX_BYTES });
+		resultBuilder.truncation(truncation, { direction: "head", maxBytes });
 	}
 
 	return resultBuilder.done();

@@ -713,12 +713,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
 					throwReadSelectorMisfire(writeTarget, sel);
 				}
-				const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
-				if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+				if (endsWithReadTruncationNotice(rawContent)) {
+					const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
 					const existingBytes =
 						existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
-					const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
-					assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
+					const existingText =
+						existingBytes instanceof Uint8Array ? (decodeUtf8Text(existingBytes) ?? undefined) : existingBytes;
+					assertNotShorterReadProjection(writeTarget, rawContent, existingText, content);
 				}
 				entries.set(resolvedArchivePath.archiveSubPath, content);
 

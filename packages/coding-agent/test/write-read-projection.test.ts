@@ -250,6 +250,9 @@ describe("write tool read projection guard", () => {
 		await expect(
 			new WriteTool(session).execute("write-archive", { path: `${archivePath}:${member}`, content: projection }),
 		).rejects.toThrow("incomplete read projection");
+		await expect(
+			new WriteTool(session).execute("write-new-member", { path: `${archivePath}:copy.txt`, content: projection }),
+		).rejects.toThrow("Refusing to create");
 		expect(await Bun.file(archivePath).bytes()).toEqual(before);
 		const entries = await readArchiveEntries({ bytes: before, format: "zip" });
 		expect(new TextDecoder().decode(entries.get(member))).toBe(original);
