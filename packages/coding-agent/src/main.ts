@@ -1972,8 +1972,8 @@ interface RunRootCommandDependencies {
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
-	/** Prebuilt first prompt for a subcommand-owned single-shot run. */
-	initialPrompt?: string;
+	/** Prebuilt or extension-aware first prompt for a subcommand-owned single-shot run. */
+	initialPrompt?: string | ((parsed: Args) => string);
 	/** Do not inherit autoResume for a subcommand-owned single-shot run. */
 	freshSession?: boolean;
 }
@@ -2004,7 +2004,7 @@ export async function runRootCommand(
 		const parsedArgs = parsed;
 		if (deps.initialPrompt !== undefined) {
 			parsedArgs.print = true;
-			parsedArgs.messages = [];
+			if (typeof deps.initialPrompt !== "function") parsedArgs.messages = [];
 		}
 		try {
 			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
@@ -2706,7 +2706,7 @@ export async function runRootCommand(
 			const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
 			if (deps.initialPrompt !== undefined) {
 				initialArgs.print = true;
-				initialArgs.messages = [];
+				if (typeof deps.initialPrompt !== "function") initialArgs.messages = [];
 			}
 			normalizeContinueSessionArgs(initialArgs, rawArgs);
 			try {
@@ -2752,6 +2752,12 @@ export async function runRootCommand(
 					cfgPlanDefaultOnStartup.get(settingsInstance) && cfgPlanEnabled.get(settingsInstance),
 				);
 			}
+			const extensionAwareInitialPrompt =
+				typeof deps.initialPrompt === "function" ? deps.initialPrompt(initialArgs) : undefined;
+			if (extensionAwareInitialPrompt !== undefined) {
+				initialArgs.messages = [];
+				initialArgs.fileArgs = [];
+			}
 			if (autoPrintNeedsArgPrompt && initialArgs.messages.length === 0 && initialArgs.fileArgs.length === 0) {
 				exitWithoutTerminal();
 			}
@@ -2769,7 +2775,9 @@ export async function runRootCommand(
 				fileImages: processedFiles?.images,
 				stdinContent: pipedInput,
 			});
-			const initialMessage = deps.initialPrompt ?? builtInitialMessage.initialMessage;
+			const initialMessage =
+				extensionAwareInitialPrompt ??
+				(typeof deps.initialPrompt === "string" ? deps.initialPrompt : builtInitialMessage.initialMessage);
 			const initialImages = builtInitialMessage.initialImages;
 
 			const showStartupSplash = shouldShowStartupSplash({

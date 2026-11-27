@@ -11,29 +11,67 @@ import { reviewHelp as commandHelp } from "../cli/command-help";
 import { flagConsumesValue } from "../cli/flag-tables";
 import { CliUsageError } from "../cli/usage-error";
 import { buildReviewPrompt } from "../extensibility/custom-commands/bundled/review/prompt";
-import { getReviewTargetIssue, resolveBaseBranchTarget } from "../extensibility/custom-commands/bundled/review/target";
+import {
+	getReviewTargetIssue,
+	resolveBaseBranchTarget,
+	type ResolvedReviewTarget,
+} from "../extensibility/custom-commands/bundled/review/target";
 
 export interface ReviewLaunch {
 	base: string;
 	head?: string;
-	focus: string;
 	launchArgv: string[];
+}
+
+const REVIEW_RESTORE_FLAGS: ReadonlySet<string> = new Set([
+	"--continue",
+	"-c",
+	"--resume",
+	"-r",
+	"--restore",
+	"--session",
+	"--fork",
+	"--from-claude",
+	"--from-codex",
+]);
+const REVIEW_UNSUPPORTED_FLAGS: ReadonlySet<string> = new Set(["--export", "--goal", "--no-ui"]);
+
+function rejectReviewOnlyFlag(arg: string): void {
+	if (!arg.startsWith("-")) return;
+	const equals = arg.indexOf("=");
+	const name = equals === -1 ? arg : arg.slice(0, equals);
+	if (REVIEW_RESTORE_FLAGS.has(name)) {
+		throw new CliUsageError(`omp review starts a fresh session; remove ${name}.`);
+	}
+	if (REVIEW_UNSUPPORTED_FLAGS.has(name)) {
+		throw new CliUsageError(`omp review does not support ${name}.`);
+	}
+}
+
+/** Focus text is positional; an @-prefixed token must not silently disappear. */
+export function reviewFocus(args: ParsedArgs): string | undefined {
+	const focus = [...args.messages, ...args.fileArgs.map(file => `@${file}`)].join(" ").trim();
+	return focus || undefined;
 }
 
 export function parseReviewLaunch(argv: readonly string[]): ReviewLaunch {
 	const launch: string[] = [];
-	const focus: string[] = [];
 	let base: string | undefined;
 	let head: string | undefined;
+	let baseSpecified = false;
+	let headSpecified = false;
+	let baseMissingValue = false;
+	let headMissingValue = false;
 	let sawSeparator = false;
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index]!;
 		if (arg === "--") {
 			sawSeparator = true;
+			launch.push(arg);
 			continue;
 		}
 		if (sawSeparator) {
-			focus.push(arg);
+			launch.push(arg);
 			continue;
 		}
 		if (arg === "--base" || arg === "--head") {
@@ -41,38 +79,84 @@ export function parseReviewLaunch(argv: readonly string[]): ReviewLaunch {
 			const hasValue = next !== undefined && next !== "--" && !next.startsWith("-");
 			const value = hasValue ? next : "";
 			if (hasValue) index += 1;
-			if (arg === "--base") base = value;
-			else head = value;
+			if (arg === "--base") {
+				baseSpecified = true;
+				base = value;
+				baseMissingValue ||= !hasValue || !value.trim();
+			} else {
+				headSpecified = true;
+				head = value;
+				headMissingValue ||= !hasValue || !value.trim();
+			}
 			continue;
 		}
 		if (arg.startsWith("--base=")) {
+			baseSpecified = true;
 			base = arg.slice("--base=".length);
+			baseMissingValue ||= !base.trim();
 			continue;
 		}
 		if (arg.startsWith("--head=")) {
+			headSpecified = true;
 			head = arg.slice("--head=".length);
+			headMissingValue ||= !head.trim();
 			continue;
 		}
 		if (arg.startsWith("-") && arg !== "-") {
+			// `parseArgs` silently ignores a string flag with no value. Reject
+			// launch-only flags that this command never supports before the
+			// command can accidentally continue with a default model turn.
+			rejectReviewOnlyFlag(arg);
 			launch.push(arg);
 			// Keep a forwarded flag's value attached so focus text like "--head"
 			// is only interpreted as a review option when it is in option position.
 			if (flagConsumesValue(arg, argv[index + 1])) launch.push(argv[++index]!);
 			continue;
 		}
-		focus.push(arg);
+		launch.push(arg);
 	}
 
 	const trimmedBase = base?.trim();
-	if (!trimmedBase) throw new CliUsageError("--base requires a non-empty ref.");
+	if (!baseSpecified || baseMissingValue || !trimmedBase) {
+		throw new CliUsageError("--base requires a non-empty ref.");
+	}
 	const trimmedHead = head?.trim();
-	if (head !== undefined && !trimmedHead) throw new CliUsageError("--head requires a non-empty ref.");
+	if (headSpecified && (headMissingValue || !trimmedHead)) {
+		throw new CliUsageError("--head requires a non-empty ref.");
+	}
 	return {
 		base: trimmedBase,
 		head: trimmedHead,
-		focus: focus.join(" ").trim(),
 		launchArgv: ["--print", "--allow-home", "--wait-async", ...launch],
 	};
+}
+
+export function validateReviewLaunch(args: ParsedArgs): void {
+	const unsupported: string[] = [];
+	if (args.mode === "acp" || args.mode === "rpc" || args.mode === "rpc-ui") {
+		unsupported.push(`--mode ${args.mode}`);
+	}
+	if (args.export !== undefined) unsupported.push("--export");
+	if (args.goal !== undefined) unsupported.push("--goal");
+	if (args.noUi) unsupported.push("--no-ui");
+	if (unsupported.length > 0) {
+		throw new CliUsageError(`omp review does not support ${unsupported.join(", ")}.`);
+	}
+
+	const restore: string[] = [];
+	if (args.continue) restore.push("--continue");
+	if (args.resume !== undefined) restore.push("--resume");
+	if (args.restore) restore.push("--restore");
+	if (args.fork !== undefined) restore.push("--fork");
+	if (args.fromClaude) restore.push("--from-claude");
+	if (args.fromCodex) restore.push("--from-codex");
+	if (restore.length > 0) {
+		throw new CliUsageError(`omp review starts a fresh session; remove ${restore.join(", ")}.`);
+	}
+
+	if (args.noTools || (args.tools !== undefined && !args.tools.includes("task"))) {
+		throw new CliUsageError("omp review requires the task tool; include task in --tools or remove --no-tools.");
+	}
 }
 
 export default class Review extends Command {
@@ -89,6 +173,7 @@ export default class Review extends Command {
 	static flags = {
 		base: Flags.string({
 			description: "Base ref to compare against (for example origin/main)",
+			required: true,
 		}),
 		head: Flags.string({
 			description: "Head ref to review (default: HEAD)",
@@ -107,6 +192,7 @@ export default class Review extends Command {
 		try {
 			reviewLaunch = parseReviewLaunch(this.argv);
 			launchArgs = parseArgs(reviewLaunch.launchArgv);
+			validateReviewLaunch(launchArgs);
 		} catch (error) {
 			if (reportCliUsageError(error)) {
 				process.exitCode = 2;
@@ -114,17 +200,16 @@ export default class Review extends Command {
 			}
 			throw error;
 		}
-		const { base, head, focus } = reviewLaunch;
+		const { base, head } = reviewLaunch;
 		const reviewCwd = launchArgs.cwd ? path.resolve(launchArgs.cwd) : process.cwd();
 
-		let prompt: string;
+		let target: ResolvedReviewTarget;
 		try {
-			const target = await resolveBaseBranchTarget(reviewCwd, base, head ?? "HEAD", {
+			target = await resolveBaseBranchTarget(reviewCwd, base, head ?? "HEAD", {
 				pinRange: true,
 			});
 			const issue = getReviewTargetIssue(target);
 			if (issue) throw new Error(issue);
-			prompt = buildReviewPrompt(target, focus || undefined);
 		} catch (error) {
 			const usage = new CliUsageError(errorMessage(error));
 			if (reportCliUsageError(usage)) {
@@ -134,9 +219,19 @@ export default class Review extends Command {
 			throw error;
 		}
 
-		await runRootCommand(launchArgs, reviewLaunch.launchArgv, {
-			initialPrompt: prompt,
-			freshSession: true,
-		});
+		try {
+			await runRootCommand(launchArgs, reviewLaunch.launchArgv, {
+				initialPrompt: parsed => buildReviewPrompt(target, reviewFocus(parsed)),
+				freshSession: true,
+			});
+		} catch (error) {
+			if (reportCliUsageError(error)) {
+				// Startup has already created long-lived handles (theme watcher,
+				// settings timers, model registry). Exit like the launch command
+				// instead of waiting for them to drain.
+				process.exit(2);
+			}
+			throw error;
+		}
 	}
 }

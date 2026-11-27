@@ -11,7 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resolveCliArgv } from "@oh-my-pi/pi-coding-agent/cli-commands";
-import { parseReviewLaunch } from "@oh-my-pi/pi-coding-agent/commands/review";
+import { parseReviewLaunch, reviewFocus, validateReviewLaunch } from "@oh-my-pi/pi-coding-agent/commands/review";
 
 describe("resolveCliArgv routes subcommands hidden behind leading global flags", () => {
 	test("`--approval-mode=yolo acp` dispatches the acp subcommand with the flag preserved", () => {
@@ -85,8 +85,16 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 		expect(review).toEqual({
 			base: "main",
 			head: "HEAD",
-			focus: "focus",
-			launchArgv: ["--print", "--allow-home", "--wait-async", "--model", "anthropic/opus", "--max-time", "600"],
+			launchArgv: [
+				"--print",
+				"--allow-home",
+				"--wait-async",
+				"--model",
+				"anthropic/opus",
+				"--max-time",
+				"600",
+				"focus",
+			],
 		});
 		expect(parseArgs(review.launchArgv).waitAsync).toBe(true);
 	});
@@ -97,14 +105,89 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 		expect(() => parseReviewLaunch(["--base", "main", "--head", "HEAD", "--head"])).toThrow(
 			"--head requires a non-empty ref.",
 		);
+		expect(() => parseReviewLaunch(["--base", "main", "--head", "--head", "HEAD"])).toThrow(
+			"--head requires a non-empty ref.",
+		);
+		expect(() => parseReviewLaunch(["--base", "--base", "main"])).toThrow("--base requires a non-empty ref.");
+		expect(() => parseReviewLaunch(["--base=", "--base", "main"])).toThrow("--base requires a non-empty ref.");
+	});
+
+	test("rejects unsupported launch flags even when their value is missing", () => {
+		for (const argv of [
+			["--base", "main", "--fork"],
+			["--base", "main", "--export"],
+			["--base", "main", "--goal"],
+			["--base", "main", "--no-ui"],
+		]) {
+			expect(() => parseReviewLaunch(argv)).toThrow("omp review");
+		}
+	});
+
+	test("keeps flag-like values of supported string launch flags", () => {
+		const review = parseReviewLaunch(["--base", "main", "--system-prompt", "--fork", "focus"]);
+		const parsed = parseArgs(review.launchArgv);
+
+		expect(parsed.systemPrompt).toBe("--fork");
+		expect(parsed.messages).toEqual(["focus"]);
 	});
 
 	test("keeps option-looking focus text after the separator", () => {
-		expect(parseReviewLaunch(["--base", "main", "--", "check the --head flag"])).toEqual({
+		const review = parseReviewLaunch(["--base", "main", "--", "check the --head flag"]);
+		expect(review).toEqual({
 			base: "main",
-			focus: "check the --head flag",
-			launchArgv: ["--print", "--allow-home", "--wait-async"],
+			launchArgv: ["--print", "--allow-home", "--wait-async", "--", "check the --head flag"],
 		});
+		expect(parseArgs(review.launchArgv).messages).toEqual(["check the --head flag"]);
+	});
+
+	test("preserves focus after an extension-owned boolean flag", () => {
+		const review = parseReviewLaunch(["-e", "plan-mode.ts", "--base", "main", "--plan", "inspect", "auth"]);
+
+		const parsed = parseArgs(review.launchArgv, new Map([["plan", { type: "boolean" as const }]]));
+		expect(parsed.messages).toEqual(["inspect", "auth"]);
+	});
+
+	test("retains an @-prefixed focus token as text", () => {
+		const review = parseReviewLaunch(["--base", "main", "@src/auth.ts"]);
+		const parsed = parseArgs(review.launchArgv);
+
+		expect(parsed.messages).toEqual([]);
+		expect(parsed.fileArgs).toEqual(["src/auth.ts"]);
+		expect(reviewFocus(parsed)).toBe("@src/auth.ts");
+	});
+
+	test("rejects launch selectors that restore or import a session", () => {
+		for (const argv of [
+			["--continue"],
+			["--resume", "session-id"],
+			["--restore", "session-id"],
+			["--fork", "session-id"],
+			["--from-claude"],
+			["--from-codex"],
+		]) {
+			expect(() => validateReviewLaunch(parseArgs(argv))).toThrow("omp review starts a fresh session");
+		}
+	});
+
+	test("rejects launch modes that bypass the review runner", () => {
+		for (const argv of [
+			["--mode", "acp"],
+			["--mode", "rpc"],
+			["--mode", "rpc-ui"],
+			["--export", "out.html"],
+			["--goal", "ship it"],
+			["--no-ui"],
+		]) {
+			expect(() => validateReviewLaunch(parseArgs(argv))).toThrow("omp review does not support");
+		}
+	});
+
+	test("rejects tool restrictions that omit the reviewer task tool", () => {
+		expect(() => validateReviewLaunch(parseArgs(["--no-tools"]))).toThrow("omp review requires the task tool");
+		expect(() => validateReviewLaunch(parseArgs(["--tools", "read"]))).toThrow("omp review requires the task tool");
+		expect(() => validateReviewLaunch(parseArgs(["--no-tools", "--tools", "task"]))).toThrow(
+			"omp review requires the task tool",
+		);
 	});
 
 	test("`gc` dispatches as a top-level maintenance subcommand", () => {

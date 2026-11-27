@@ -92,6 +92,8 @@ async function initGitFixture(dir: string): Promise<VcsGitRepo> {
 	const repository = vcs.requireGit(dir);
 	await repository.configSet("user.email", "test@example.com");
 	await repository.configSet("user.name", "Test");
+	await repository.configSet("commit.gpgSign", "false");
+	await repository.configSet("tag.gpgSign", "false");
 	return repository;
 }
 
@@ -1117,17 +1119,21 @@ describe("ReviewCommand", () => {
 	it.skipIf(!supportsReftable)("peels annotated tags in reftable repositories", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-reftable-tag-"));
 		try {
+			// The in-process VCS backend cannot open a reftable repository, so its
+			// fixture plumbing must go through the Git CLI.
 			await $`git init -q --ref-format=reftable --initial-branch=main`.cwd(dir).quiet();
-			const repository = vcs.requireGit(dir);
 			await $`git config user.email test@example.com`.cwd(dir).quiet();
 			await $`git config user.name Test`.cwd(dir).quiet();
+			await $`git config commit.gpgSign false`.cwd(dir).quiet();
+			await $`git config tag.gpgSign false`.cwd(dir).quiet();
 			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
 			await $`git add a.txt`.cwd(dir).quiet();
 			await $`git commit -qm init`.cwd(dir).quiet();
-			const baseCommit = await repository.resolveRef("HEAD");
+			const baseCommit = (await $`git rev-parse HEAD`.cwd(dir).quiet().text()).trim();
 			if (!baseCommit) throw new Error("reftable fixture must have a base commit");
 			await vcs.tagCreate(dir, "v1", "v1");
 
+			const repository = vcs.requireGit(dir);
 			const tagObject = await repository.resolveRef("refs/tags/v1");
 			if (!tagObject) throw new Error("reftable fixture must have an annotated tag");
 			const details = await repository.commitDetails(`${tagObject}^{commit}`);
@@ -1174,6 +1180,7 @@ describe("ReviewCommand", () => {
 		expect(prompt).toContain(
 			"for a renamed or copied file include both its source and destination paths from the Changed Files table",
 		);
+		expect(prompt).toContain("for a rename's source path use `git show 111111111111:<path>`");
 	});
 
 	it("directs submodule paths to tree or submodule diff context", () => {
