@@ -14,7 +14,6 @@
 
 - Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
 - Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
-- The tool-call loop guard now also detects consecutive tool calls whose arguments drift only in numbers, such as `echo merge-live-3` after `echo merge-live-2`, when the assistant's text repeats. Progress-bearing arguments (`grep`'s `skip`, `offset`, cursor keys) and digits inside path-like tokens of command strings keep their values. Legitimate pagination and sweeps over distinct files are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))
 
 ### Fixed
 
@@ -29,6 +28,7 @@
 
 - Expanded xAI text-to-speech support with configurable playback speed, PCM output, and inputs up to 60,000 characters.
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
+- The tool-call loop guard now also detects consecutive tool calls whose arguments drift only in numbers, such as `echo merge-live-3` after `echo merge-live-2`, when the assistant's text repeats. Progress-bearing arguments (`grep`'s `skip`, `offset`, cursor keys) and digits inside path-like tokens of command strings keep their values. Legitimate pagination and sweeps over distinct files are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))
 
 ### Fixed
 
