@@ -269,6 +269,11 @@ export class AppFrame {
 		this.composer.setImeSafeCursor(enabled);
 	}
 
+	/** `tui.resizeScrollback` changed: resizes that settle from now on follow `mode` (start takes the initial one). */
+	setResizeScrollback(mode: ResizeScrollback): void {
+		this.shell.host?.driver.setResizeScrollback(mode);
+	}
+
 	/** Draw the bar. A startup prediction has no session routes, so it advertises no click actions. */
 	setStatusLine(
 		statusLine: StatusLineView | undefined,
