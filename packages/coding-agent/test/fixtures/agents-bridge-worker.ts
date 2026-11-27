@@ -9,10 +9,12 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../../src/registry/agent-registry";
+import { registerExternalAgent } from "../../src/registry/external-agents";
 import { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
@@ -79,6 +81,8 @@ export interface AgentsProbe {
 	disposed(key: string): Promise<boolean>;
 	/** Whether the worker's lifecycle proxy manages the worker's registry proxy. */
 	manages(): Promise<boolean>;
+	/** Register an external agent through the worker's registry proxy, settle it with `complete()`, and return its id. */
+	settleExternal(): Promise<string>;
 }
 
 /** Test-only boot globals of the probe service. */
@@ -252,6 +256,19 @@ const probe: AgentsProbe = {
 		return session.isDisposed;
 	},
 	manages: async () => AgentLifecycleManager.global().manages(AgentRegistry.global()),
+	settleExternal: async () => {
+		const handle = registerExternalAgent(
+			{ registry: AgentRegistry.global(), jobs: new AsyncJobManager({}), ownerId: "W-owner", emitFrame: () => {} },
+			{
+				label: "remote run",
+				execution: { backend: "queue", jobId: "q-1" },
+				readTranscript: async () => ({ text: "", newSize: 0 }),
+				steer: async () => {},
+			},
+		);
+		handle.complete({ status: "done", text: "remote result" });
+		return handle.id;
+	},
 };
 
 function isProbeGlobals(value: unknown): value is AgentsProbeGlobals {

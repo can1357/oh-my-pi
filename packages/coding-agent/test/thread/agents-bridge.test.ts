@@ -366,4 +366,11 @@ describe("agent bridging across subagent workers", () => {
 		expect(liveRef("W1").status).toBe("idle");
 		expect(worker.load).toBe(1);
 	});
+
+	it("settles an external agent registered through a worker's registry proxy", async () => {
+		const { probe } = await startWorker();
+		const ref = liveRef(await probe.settleExternal());
+		expect(ref.status).toBe("idle");
+		expect(ref.external?.steer).toBeUndefined();
+	});
 });
