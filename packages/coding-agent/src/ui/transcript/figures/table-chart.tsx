@@ -12,6 +12,7 @@ import { lexMarkdown, type Tokens } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import { buildChart, planChart } from "../../../auto-graph/chart-plan";
 import { analyzeTable } from "../../../auto-graph/table-data";
 import { renderChartSvg } from "../../../auto-graph/chart-svg";
+import { holdSettle } from "../../shell/transcript";
 import { type FigureOptions, RasterImage, SvgRaster } from "./svg-figure";
 
 /** Fewest rows a chart is drawn in. */
@@ -40,18 +41,49 @@ export function tableChartSvg(markdown: string): string | undefined {
 export function TableChart(
 	props: { readonly markdown: Reactive<string>; readonly inline?: boolean } & FigureOptions,
 ): JSXNode {
+	const source = computed(() => tableChartSvg(read(props.markdown)));
+	return (
+		<ChartFigure
+			source={source}
+			inline={props.inline}
+			cell={props.cell}
+			maxRows={props.maxRows}
+			theme={props.theme}
+		/>
+	);
+}
+
+/** Rasterize a planned chart; an inline chart keeps later prose live until it can draw. */
+export function ChartFigure(
+	props: {
+		readonly source: Reactive<string | Promise<void> | undefined>;
+		readonly inline?: boolean;
+		readonly nodeKey?: string;
+	} & FigureOptions,
+): JSXNode {
 	const raster = new SvgRaster(props);
-	const svg = computed(() => tableChartSvg(read(props.markdown)));
+	const source = computed(() => {
+		const rows = read(props.maxRows);
+		return rows === undefined || rows >= CHART_MIN_ROWS ? read(props.source) : undefined;
+	});
+	const pending = computed(() => {
+		const svg = source();
+		return svg instanceof Promise || (svg !== undefined && raster.state().status === "pending");
+	});
+	holdSettle(pending);
 	effect(() => {
-		const source = svg();
-		if (source !== undefined) untrack(() => raster.update(source, true));
+		const svg = source();
+		if (typeof svg === "string") untrack(() => raster.update(svg, true));
 	});
 	const term: ChartTerm = { inline: props.inline === true };
 	return () => {
-		const rows = read(props.maxRows);
-		if (svg() === undefined || (rows !== undefined && rows < CHART_MIN_ROWS)) return undefined;
+		const svg = source();
+		if (svg === undefined) return undefined;
+		if (pending()) return props.inline ? <text key={props.nodeKey} role="omp.figure.chart.pending" /> : undefined;
 		const state = raster.state();
-		if (state.status !== "ready") return undefined;
-		return untrack(() => <RasterImage raster={state.raster} role="omp.figure.chart" term={term} />);
+		if (typeof svg !== "string" || state.status !== "ready") return undefined;
+		return untrack(() => (
+			<RasterImage raster={state.raster} role="omp.figure.chart" nodeKey={props.nodeKey} term={term} />
+		));
 	};
 }

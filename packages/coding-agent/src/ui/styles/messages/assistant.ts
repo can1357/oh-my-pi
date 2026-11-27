@@ -233,7 +233,16 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	for (const child of node.children()) {
 		const role = propsOf<{ role: string }>(child).role ?? "";
 		const key = child.key() ?? "";
-		if (role === "omp.embed" || role === "omp.figure.svg" || role === "omp.figure.code") {
+		if (role === "omp.figure.chart.pending") {
+			// A late chart goes here, not after prose already committed to scrollback.
+			deferredAt = Math.min(deferredAt, rows.length);
+			afterFigure = rendered;
+		} else if (
+			role === "omp.embed" ||
+			role === "omp.figure.svg" ||
+			role === "omp.figure.code" ||
+			role === "omp.figure.chart"
+		) {
 			const figure = cx.paint(child, cx.width);
 			if (figure.rows.length > 0) {
 				if (rendered) rows.push("");
