@@ -38,6 +38,7 @@
 - Fixed code blocks drawn with `codeIndent: 0` putting their ``` fence rows one column right of the code; fences now sit at column 0 with it, so copying the whole block yields its markdown ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 - Stopped trusting an inherited `TERM_FEATURES` sync hint inside tmux/screen panes, which caused top-to-bottom redraw flashes while streaming in an inactive tmux 3.6 pane ([#20091](https://github.com/can1357/oh-my-pi/issues/20091))
 - Enabled kitty Unicode placeholder image rendering by default in Rex ([#19830](https://github.com/can1357/oh-my-pi/issues/19830))
+- Inline images inside tmux on terminals without Kitty Unicode placeholders (e.g. WezTerm) are no longer drawn at tmux's cursor; they use SIXEL when tmux renders it, else are skipped ([#19396](https://github.com/can1357/oh-my-pi/issues/19396))
 
 ## [19.2.1] - 2026-11-25
 
