@@ -225,6 +225,25 @@ describe("wait", () => {
 		build.resolve("done");
 	});
 
+	test("the back-to-back reminder names a watcher job for outside conditions, then the mode's next step", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		// A CI run or deploy no job reports: the agent arranges its own wake-up instead of handing the timer to the user.
+		const interactive = new WaitTool(session(manager, "Main", false, { tuiTranscript: true }));
+		await elapse(interactive, 240_000);
+		const endTurn = notice(await elapse(interactive, 240_000));
+		expect(endTurn).toContain("watcher");
+		expect(endTurn).toContain("end your turn: its finish starts your next one");
+		const headless = new WaitTool(session(manager));
+		await elapse(headless, 5_000);
+		const waitAgain = notice(await elapse(headless, 240_000));
+		expect(waitAgain).toContain("watcher");
+		expect(waitAgain).toContain("call `wait`: its finish ends the wait");
+		build.resolve("done");
+	});
+
 	test("news or a minute away from wait restarts the ladder at the floor", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
