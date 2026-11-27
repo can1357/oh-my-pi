@@ -17,6 +17,7 @@ import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 function makeSession(opts: {
+	cwd?: string;
 	spawns?: string | null;
 	backends?: Record<string, boolean>;
 	settings?: Record<string, unknown>;
@@ -28,7 +29,7 @@ function makeSession(opts: {
 	const settings = Settings.isolated({ ...opts.backends, ...opts.settings });
 	if (opts.maxRecursionDepth !== undefined) cfgTaskMaxRecursionDepth.set(settings, opts.maxRecursionDepth);
 	return {
-		cwd: "/tmp/eval-test",
+		cwd: opts.cwd ?? "/tmp/eval-test",
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => opts.spawns ?? "*",
@@ -402,7 +403,7 @@ describe("eval tool description await markers", () => {
 					'    "output": lambda: output("probe"),',
 					'    "wait": lambda: wait([]),',
 					'    "tool.<name>": lambda: tool.read({"path": os.path.join(dir, "in.txt")}),',
-					'    "sh": lambda: sh("true", cwd=dir),',
+					'    "sh": lambda: sh("true"),',
 					"}",
 					"def probe(name):",
 					"    if name not in probes:",
@@ -428,7 +429,7 @@ describe("eval tool description await markers", () => {
 				].join("\n");
 				const result = await executePython(code, {
 					sessionId: "eval-description-await-py",
-					toolSession: makeSession({}),
+					toolSession: makeSession({ cwd: tempDir.path() }),
 					cwd: tempDir.path(),
 				});
 				expect(result.exitCode).toBe(0);

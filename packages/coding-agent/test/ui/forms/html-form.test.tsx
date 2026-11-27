@@ -228,3 +228,14 @@ corpusSuite({
 		};
 	},
 });
+
+test("terminal: a multi-line textarea placeholder paints on one row", () => {
+	const painted = rows(
+		`<form><label>Copy<textarea name="copy" placeholder="A2 → one&#10;A5 → two&#10;A8 → three"></textarea></label></form>`,
+		80,
+	);
+	expect(painted.some(row => row.includes("\n"))).toBe(false);
+	expect(
+		painted.map(row => stripEscapes(row)).filter(row => row.includes("A2 → one A5 → two A8 → three")),
+	).toHaveLength(1);
+});

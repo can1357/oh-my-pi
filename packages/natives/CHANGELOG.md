@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Snapcompact renders with one installed font per transcript instead of shipping bitmap and Silver fonts.
 - Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline HTML rendering or `Reader` for URL reads; interactive terminal browsing is no longer available.
 
 ### Added
@@ -11,12 +12,16 @@
 - Added `renderHtml` for rendering HTML as Markdown or plain text, with automatic reader-content selection by default, a `mode: "full"` option for retaining all visible content, and configurable hidden-content handling.
 - Added `Reader` for step-by-step URL reading through host-provided HTTP and browser I/O, with the same reader-content and hidden-content options as `renderHtml`.
 - Added `analyzeBashApproval(command, dialect?)`, a synchronous Bash 5.3 and Zsh 5.9 AST analyzer for approving `bash` tool commands.
+- Added `spawnBreakaway(options)`, which starts a detached Windows process outside the caller's job objects when they allow breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
 
 ### Fixed
 
+- Reduced Snapcompact frame sizes with indexed PNGs while retaining antialiased text.
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
+- Fixed Wayland capture crashing on unreadable portal frame buffers while preserving capture from readable shared-memory frames on older PipeWire versions ([#19647](https://github.com/can1357/oh-my-pi/issues/19647))
+- Fixed `Shell.abort()` sometimes doing nothing to a `Shell.run` that was queued behind another run on the same shell, leaving the command and its child processes running ([#17105](https://github.com/can1357/oh-my-pi/issues/17105))
 
 ## [19.2.1] - 2026-11-25
 

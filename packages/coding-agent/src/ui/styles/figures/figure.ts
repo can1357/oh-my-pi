@@ -84,22 +84,12 @@ defineRolePainter("text", "omp.figure.pending", (node, cx) => {
 /** A frame's `[Visit]` link to its page (a local page by its `file:` URL), drawn where the terminal draws links. */
 const VISIT = "[Visit]";
 
-function pageUrl(link: EmbedTerm["link"]): string | undefined {
-	if (!link) return undefined;
-	if ("url" in link) return link.url;
-	try {
-		return Bun.pathToFileURL(link.file).href;
-	} catch {
-		return undefined;
-	}
-}
-
 function paintEmbed(node: UiNode, cx: PaintContext): Block {
 	const term = termOf<EmbedTerm>(node);
 	const picture = node.kind === "image" ? propsOf<{ blob: string; w: number; h: number }>(node) : term.still;
 	const label = sanitizeText(term.label ?? "").replace(/\s+/g, " ");
 	const page = term.page === true;
-	const visit = page && cx.hyperlinks ? pageUrl(term.link) : undefined;
+	const visit = page && cx.hyperlinks ? term.link?.url : undefined;
 	const visitRow = (text: string): string => {
 		const room = Math.max(1, cx.width - 2 - VISIT.length);
 		return ` ${cx.theme.fg("dim", truncate(text, room))} ${uriLink(cx, cx.theme.fg("accent", VISIT), visit)}`;

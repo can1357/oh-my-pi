@@ -65,7 +65,6 @@ import {
 	getBundledProviders,
 } from "@oh-my-pi/pi-catalog/models";
 import {
-	googleAntigravityModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
 	kiroModelManagerOptions,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
@@ -84,6 +83,7 @@ import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { groupModelCandidates, resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
+import { findStoredOAuthIdentity, prepareLocalAuthForProviders } from "../session/auth-daemon-backend";
 import type { AuthStorage } from "../session/auth-storage";
 import { redactUrlForLog } from "../utils/redact-url";
 import { END_SLICE, runSlicedWork } from "../utils/sliced-work";
@@ -144,8 +144,6 @@ import {
 	BUILT_IN_DISCOVERY_CACHE_TTL_MS,
 	BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS,
 	type BuiltInDiscoveryResult,
-	extractGoogleOAuthToken,
-	getOAuthCredentialsForProvider,
 	isAuthenticated,
 	isDiscoveryBearerApiKey,
 	kNoAuth,
@@ -604,6 +602,9 @@ export class ModelRegistry {
 	// `fallback` ranks the key below stored login credentials (see registerProvider).
 	#runtimeProviderApiKeys: Map<string, { keyConfig: string; fallback: boolean }> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
+	// An endpoint override registered without models survives replacement of the
+	// fixed models; a gateway URL supplied by those models' registration does not.
+	#independentRuntimeRoutes = new Map<string, Pick<ProviderOverride, "baseUrl" | "transport">>();
 	// Command-backed values from registerProvider (apiKey + provider/model
 	// headers). Separate from #commandConfigsByProvider because static reload
 	// rebuilds that map from models.yml only; runtime entries must survive.
@@ -1136,7 +1137,7 @@ export class ModelRegistry {
 					!this.#keylessProviders.has(providerId) &&
 					this.authStorage.keys.source(providerId) === undefined &&
 					!this.authStorage.keys.keyless(providerId) &&
-					getOAuthCredentialsForProvider(this.authStorage, providerId).length === 0
+					!this.authStorage.credentials.hasOAuth(providerId)
 				) {
 					return Promise.resolve<string | undefined>(undefined);
 				}
@@ -1801,7 +1802,7 @@ export class ModelRegistry {
 	/** A modifier runs only for a provider holding OAuth credentials; without one it cannot touch the catalog. */
 	#modelModifierCanApply(): boolean {
 		for (const providerName of this.#runtimeModelModifiers.keys()) {
-			if (this.authStorage.credentials.getOAuth(providerName)) return true;
+			if (this.authStorage.credentials.hasOAuth(providerName)) return true;
 		}
 		return false;
 	}
@@ -1826,9 +1827,9 @@ export class ModelRegistry {
 		if (this.#runtimeModelModifiers.size === 0) return models;
 		let projected = models;
 		for (const [providerName, modifyModels] of this.#runtimeModelModifiers) {
-			const credential = this.authStorage.credentials.getOAuth(providerName);
-			if (!credential) continue;
 			try {
+				const credential = this.authStorage.credentials.getOAuth(providerName);
+				if (!credential) continue;
 				// Clone mutable catalog data, retaining resolver functions as opaque
 				// capabilities. Hooks can then rename models without losing their
 				// request-time credentials or resolving them during catalog reads.
@@ -2277,7 +2278,9 @@ export class ModelRegistry {
 		const config = this.#providerOverrides.get(providerId);
 		if ((runtime?.transport ?? config?.transport) !== "pi-native") return undefined;
 		const baseUrl = runtime?.baseUrl ?? config?.baseUrl;
-		return baseUrl ? { baseUrl, apiKey: runtime?.apiKey ?? config?.apiKey } : undefined;
+		return baseUrl
+			? { baseUrl, apiKey: this.#runtimeProviderApiKeys.get(providerId)?.keyConfig ?? config?.apiKey }
+			: undefined;
 	}
 
 	/** Only probe auth when it contributes to a startup discovery state, not for every cache hit. */
@@ -3167,19 +3170,11 @@ export class ModelRegistry {
 		return discovery;
 	}
 
-	/**
-	 * Namespace suffix for the `discovery.advertisedReasoning` opt-out. Rows built
-	 * under one mode must never satisfy the other's cache read: under the
-	 * `offline` strategy nothing else refetches them.
-	 */
-	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig): string {
-		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
-	}
-
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
 		if (providerConfig.discovery.type === "ollama") {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
 		}
+		const reasoning = providerConfig.discovery.advertisedReasoning === false ? "advertised-off-" : "";
 		if (providerConfig.discovery.type === "openai-models-list") {
 			// context-v3 invalidates rows cached before server-advertised input
 			// modalities were parsed from `/v1/models`; warm v2 rows pinned
@@ -3197,12 +3192,14 @@ export class ModelRegistry {
 			// model; warm v5 rows stayed without the aliases, so an unsupported
 			// requested effort kept clamping to the tier below and a thinking-off
 			// request could reach a route that rejects it.
+			// context-v7 invalidates rows cached before a row's OpenRouter-style
+			// `pricing` was read; warm v6 rows reported $0 cost (issue #15655).
+			// context-v8 respects explicit price units and embedding input rates.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
-			return providerConfig.discovery.injectV1 === false
-				? `${providerConfig.provider}:openai-models-list-bare-${this.advertisedReasoningCacheSuffix(providerConfig)}`
-				: `${providerConfig.provider}:openai-models-list-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+			const bare = providerConfig.discovery.injectV1 === false ? "bare-" : "";
+			return `${providerConfig.provider}:openai-models-list-${bare}${reasoning}context-v8`;
 		}
 		if (providerConfig.discovery.type === "proxy") {
 			// proxy-v2 invalidates rows cached before a proxy row's advertised
@@ -3210,7 +3207,7 @@ export class ModelRegistry {
 			// provider id) pinned gateway ids at `reasoning: false`. The opt-out
 			// gets its own namespace for the same reason it does above: under the
 			// `offline` strategy nothing else would refetch the other mode's rows.
-			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+			return `${providerConfig.provider}:proxy-v2-${reasoning}context-v6`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
@@ -3453,8 +3450,7 @@ export class ModelRegistry {
 			if (cacheProviderId !== undefined) return peekedKey;
 			return (await this.#peekApiKeyForProvider(providerId, { includeExpired: true })) ?? peekedKey;
 		}
-		const oauthCredentials = getOAuthCredentialsForProvider(this.authStorage, providerId);
-		if (oauthCredentials.length === 0) {
+		if (!this.authStorage.credentials.hasOAuth(providerId)) {
 			return peekedKey;
 		}
 		// Authoritative providers prune bundled models only when their manager is
@@ -3498,31 +3494,8 @@ export class ModelRegistry {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			resolveKey: (value: string | undefined) => string | undefined;
-			createOptions: (key: string, raw: string | undefined) => ModelManagerOptions<Api>;
+			createOptions: (key: string) => ModelManagerOptions<Api> | Promise<ModelManagerOptions<Api>>;
 		}> = [
-			{
-				providerId: "google-antigravity",
-				resolveKey: extractGoogleOAuthToken,
-				createOptions: oauthToken =>
-					googleAntigravityModelManagerOptions({
-						resolveAccounts: async () => {
-							const accounts = await resolveOAuthDiscoveryAccounts(
-								this.authStorage,
-								"google-antigravity",
-								oauthToken,
-							);
-							return (
-								accounts?.map(account => ({
-									accessToken: account.accessToken,
-									accountKey: oauthAccountKey(account),
-									projectId: account.projectId,
-								})) ?? null
-							);
-						},
-						endpoint: this.#descriptorBaseUrl("google-antigravity"),
-						fetch: this.#fetch,
-					}),
-			},
 			{
 				providerId: "kiro",
 				resolveKey: value => value,
@@ -3544,7 +3517,7 @@ export class ModelRegistry {
 			{
 				providerId: "openai-codex",
 				resolveKey: value => value,
-				createOptions: accessToken => {
+				createOptions: async accessToken => {
 					// A custom endpoint (models.yml `baseUrl`) receives only a configured,
 					// runtime, or command key. Official credentials (stored ChatGPT OAuth or
 					// the provider env token) keep discovering against chatgpt.com, as on a
@@ -3554,9 +3527,7 @@ export class ModelRegistry {
 					const configuredBaseUrl = this.#descriptorBaseUrl("openai-codex");
 					const officialCredential =
 						accessToken === getEnvApiKey("openai-codex") ||
-						getOAuthCredentialsForProvider(this.authStorage, "openai-codex").some(
-							credential => credential.access === accessToken,
-						);
+						(await findStoredOAuthIdentity(this.authStorage, "openai-codex", accessToken)) !== undefined;
 					if (officialCredential || isOfficialCodexApiUrl(configuredBaseUrl)) {
 						return openaiCodexModelManagerOptions({
 							baseUrl: officialCredential ? undefined : configuredBaseUrl,
@@ -3631,9 +3602,10 @@ export class ModelRegistry {
 			) {
 				// Residency belongs to the token selected for discovery, not another
 				// stored account that happens to appear first in the pool.
-				const identity = getOAuthCredentialsForProvider(this.authStorage, descriptor.providerId).find(
-					credential => credential.access === apiKey,
-				);
+				const identity =
+					apiKey === undefined
+						? undefined
+						: await findStoredOAuthIdentity(this.authStorage, descriptor.providerId, apiKey);
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
@@ -3662,7 +3634,7 @@ export class ModelRegistry {
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(this.#withRuntimeDiscovery(descriptor.createOptions(key, specialKeys[i]), key));
+			options.push(this.#withRuntimeDiscovery(await descriptor.createOptions(key), key));
 		}
 
 		// A pi-native provider's roster is its gateway's: the gateway lists what it
@@ -4802,6 +4774,7 @@ export class ModelRegistry {
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
+		this.#independentRuntimeRoutes.delete(providerName);
 		this.#runtimeCommandConfigsByProvider.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
@@ -4910,6 +4883,18 @@ export class ModelRegistry {
 		}
 	}
 
+	/** Prepare local auth for extension providers before installing their callbacks. */
+	prepareProviderAuth(
+		registrations: readonly { name: string; config: ProviderConfigInput }[],
+	): Promise<void> | undefined {
+		if (this.#owner) return undefined;
+		const providers: string[] = [];
+		for (const { name, config } of registrations) {
+			if (config.oauth || config.usage) providers.push(name);
+		}
+		return providers.length > 0 ? prepareLocalAuthForProviders(this.authStorage, providers) : undefined;
+	}
+
 	/**
 	 * Register a provider dynamically (from extensions).
 	 *
@@ -5010,6 +4995,7 @@ export class ModelRegistry {
 		if (config.usage && !this.#owner) {
 			this.authStorage.usage.setProvider(providerName, config.usage, config.apiKey);
 		}
+		const previousGateway = config.models?.length ? this.#piNativeGateway(providerName) : undefined;
 		if (config.apiKey) {
 			// A provider that owns a /login flow must not let its default key
 			// reference shadow the credential that login stores. Its apiKey is
@@ -5022,6 +5008,40 @@ export class ModelRegistry {
 			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: config.apiKey, fallback });
 		}
 		this.#recordRuntimeCommandConfigs(providerName, config);
+		let { baseUrl, transport } = config;
+		const independent = this.#independentRuntimeRoutes.get(providerName);
+		if (config.models?.length) {
+			// Keep ordinary per-model URLs on the overlays. Only a pi-native
+			// transport (provider-wide), or an independent override, replaces them.
+			const existing = this.#runtimeProviderOverrides.get(providerName);
+			transport ??= independent?.transport;
+			baseUrl = independent?.baseUrl ?? (transport ? baseUrl : undefined);
+			if (existing || transport) {
+				this.#runtimeProviderOverrides.set(providerName, {
+					...existing,
+					baseUrl,
+					transport,
+					apiKey: config.apiKey ?? existing?.apiKey,
+				});
+			}
+			const gateway = this.#piNativeGateway(providerName);
+			if (previousGateway?.baseUrl !== gateway?.baseUrl || previousGateway?.apiKey !== gateway?.apiKey) {
+				// An offline refresh may find no row for the new bearer. Don't keep
+				// the old gateway's authoritative roster in memory in that case.
+				this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(
+					model => model.provider !== providerName,
+				);
+				this.#runtimeAuthoritativeProviders.delete(providerName);
+				this.#cachedStandardModelsByProvider.delete(providerName);
+				this.#cachedAuthoritativeProviders.delete(providerName);
+				this.#providerDiscoveryStates.delete(providerName);
+			}
+		} else if (baseUrl !== undefined || transport !== undefined) {
+			this.#independentRuntimeRoutes.set(providerName, {
+				baseUrl: baseUrl ?? independent?.baseUrl,
+				transport: transport ?? independent?.transport,
+			});
+		}
 
 		if (config.models && config.models.length > 0) {
 			// Build model overlays that persist across refresh() cycles
@@ -5055,7 +5075,7 @@ export class ModelRegistry {
 			if (
 				config.oauth?.modifyModels &&
 				!this.#hasFullSnapshot &&
-				this.authStorage.credentials.getOAuth(providerName)
+				this.authStorage.credentials.hasOAuth(providerName)
 			) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}
@@ -5169,12 +5189,12 @@ export class ModelRegistry {
 			config.transport !== undefined
 		) {
 			const transportOverride = {
-				baseUrl: config.baseUrl,
+				baseUrl,
 				headers: config.headers,
 				apiKey: config.apiKey,
 				authHeader: config.authHeader,
 				remoteCompaction: config.remoteCompaction,
-				transport: config.transport,
+				transport,
 			};
 			const nextRuntimeOverride = this.#mergeProviderOverride(
 				this.#runtimeProviderOverrides.get(providerName),
@@ -5400,7 +5420,7 @@ export interface ProviderConfigInput {
 	discoverModels?(context: ProviderDiscoveryContext): Promise<readonly ModelSpec<Api>[] | null>;
 	/** Runs grounded web searches for this provider's models in place of their grounding backend's request. */
 	webSearch?(params: SearchParams): Promise<SearchResponse>;
-	/** Rule directives for every model of this provider, as a KDL `provider` block sets them (`{ "prompt-perturbation": true }`). */
+	/** Rule directives for every model of this provider, as a KDL `provider` block sets them (`{ "requires-native-tools": true }`). */
 	rules?: Readonly<Record<string, unknown>>;
 	oauth?: {
 		name: string;

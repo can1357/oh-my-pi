@@ -1507,17 +1507,16 @@ export class SessionAdvisors {
 					...streamOptions,
 					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(requestModel),
 				};
+				// The advisor bills its own lane, whose ledger counts delivered replies only: an attempt
+				// a retry discards stays out of it rather than landing in the primary session's journal.
+				options.onDiscardedAttempt ??= () => {};
 				if (requestModel.api === "openai-codex-responses") {
 					return baseAdvisorStreamFn(requestModel, context, {
 						...options,
 						codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS,
 					});
 				}
-				if (
-					requestModel.api === "google-generative-ai" ||
-					requestModel.api === "google-gemini-cli" ||
-					requestModel.api === "google-vertex"
-				) {
+				if (requestModel.api === "google-generative-ai" || requestModel.api === "google-vertex") {
 					return baseAdvisorStreamFn(requestModel, context, { ...options, acceptEmptyResponse: true });
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);
@@ -2378,7 +2377,8 @@ export class SessionAdvisors {
 	 */
 	#spendCredentialSwitch(advisor: ActiveAdvisor, provider: string): boolean {
 		const spent = advisor.credentialSwitches?.provider === provider ? advisor.credentialSwitches.count : 0;
-		if (spent >= this.#host.modelRegistry.authStorage.credentials.list(provider).length - 1) return false;
+		const active = this.#host.modelRegistry.authStorage.credentials.summaries(provider).filter(row => !row.disabled);
+		if (spent >= active.length - 1) return false;
 		advisor.credentialSwitches = { provider, count: spent + 1 };
 		return true;
 	}

@@ -2625,7 +2625,6 @@ use std::{
 	time::SystemTime,
 };
 
-use ansi_width::ansi_width;
 use glob::MatchOptions;
 
 use omp_vfs::{DirEntry, Metadata};
@@ -3025,10 +3024,10 @@ pub fn display_items(
 				let mut current_col = 0;
 				if let Some(name) = names.next() {
 					write_os_str(&mut state.out, &name)?;
-					current_col = ansi_width(&name.to_string_lossy()) as u16 + 2;
+					current_col = xutf::width_ansi_str(&name.to_string_lossy()) as u16 + 2;
 				}
 				for name in names {
-					let name_width = ansi_width(&name.to_string_lossy()) as u16;
+					let name_width = xutf::width_ansi_str(&name.to_string_lossy()) as u16;
 					// If the width is 0 we print one single line
 					if config.width != 0 && current_col + name_width + 1 > config.width {
 						current_col = name_width + 2;
@@ -3612,7 +3611,7 @@ fn display_item_long(
 			None,
 			None,
 			state.style_manager.as_mut(),
-			LazyCell::new(|| ansi_width(&String::from_utf8_lossy(&state.display_buf))),
+			LazyCell::new(|| xutf::width_ansi_str(&String::from_utf8_lossy(&state.display_buf))),
 		);
 
 		let needs_space = quoted && !os_str_starts_with(&item_display.displayed, b"'");
@@ -3716,7 +3715,7 @@ fn display_item_long(
 			None,
 			None,
 			state.style_manager.as_mut(),
-			LazyCell::new(|| ansi_width(&String::from_utf8_lossy(&state.display_buf))),
+			LazyCell::new(|| xutf::width_ansi_str(&String::from_utf8_lossy(&state.display_buf))),
 		);
 		let date_len = 12;
 

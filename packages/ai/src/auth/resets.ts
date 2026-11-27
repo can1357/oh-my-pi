@@ -6,6 +6,7 @@ import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCred
 import type { CredentialBlocks } from "./blocks";
 import { providerTypeKey } from "./blocks";
 import { raceSignal } from "./abort";
+import type { SessionAffinity } from "./affinity";
 import { isUsageLimitReached } from "./usage-report";
 import type { OAuthAccounts } from "./oauth";
 import type { CredentialPool } from "./pool";
@@ -27,6 +28,7 @@ export interface ResetCreditsDeps {
 	store: AuthCredentialStore;
 	pool: CredentialPool;
 	oauth: OAuthAccounts;
+	affinity: SessionAffinity;
 	usage: UsageService;
 	usageCache: UsageCache;
 	blocks: CredentialBlocks;
@@ -53,35 +55,52 @@ export class ResetCredits implements ResetsApi {
 		const provider = options?.provider ?? "openai-codex";
 		if (provider !== "openai-codex" && provider !== "anthropic") return [];
 		const baseUrl = options?.baseUrlResolver?.(provider);
-		if (provider !== "anthropic") return this.#listAccounts(provider, baseUrl, options);
+		const sessionId = options?.sessionId;
+		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
+		let accounts = this.#deps.oauth.accounts(provider, sessionId);
+		if (restricted && sessionId !== undefined) {
+			accounts = accounts.filter(account => this.#deps.affinity.permits(provider, sessionId, account.credentialId));
+		}
+		if (provider !== "anthropic") return this.#listAccounts(provider, baseUrl, accounts, options);
 		options?.signal?.throwIfAborted();
-		const activeId = this.#deps.oauth
-			.accounts(provider, options?.sessionId)
-			.find(account => account.active)?.credentialId;
-		// Discovery is sequential and probes the active account first, so only
-		// callers sharing that account can share one pass.
-		const key = JSON.stringify([provider, baseUrl, activeId]);
+		// Discovery probes the active account first. Restricted callers must not
+		// share discovery with other sessions, whose permission may change independently.
+		const activeId = accounts.find(account => account.active)?.credentialId;
+		const key = JSON.stringify([
+			provider,
+			baseUrl,
+			activeId,
+			restricted ? sessionId : undefined,
+			accounts.map(account => account.credentialId),
+		]);
 		let pending = this.#listInFlight.get(key);
 		if (!pending) {
-			pending = this.#listAccounts(provider, baseUrl, { ...options, signal: undefined }).finally(() =>
+			pending = this.#listAccounts(provider, baseUrl, accounts, { ...options, signal: undefined }).finally(() =>
 				this.#listInFlight.delete(key),
 			);
 			this.#listInFlight.set(key, pending);
 		}
-		return raceSignal(pending, options?.signal, "Reset discovery aborted");
+		const statuses = await raceSignal(pending, options?.signal, "Reset discovery aborted");
+		if (sessionId === undefined || !this.#deps.affinity.isRestricted(provider, sessionId)) return statuses;
+		return statuses.filter(status => this.#deps.affinity.permits(provider, sessionId, status.credentialId));
 	}
 
 	async #listAccounts(
 		provider: string,
 		baseUrl: string | undefined,
+		accounts: OAuthAccountSummary[],
 		options?: ListResetCreditsOptions,
 	): Promise<ResetCreditAccountStatus[]> {
-		const accounts = this.#deps.oauth.accounts(provider, options?.sessionId);
-		const loadAccount = async (account: OAuthAccountSummary): Promise<ResetCreditAccountStatus> => {
+		const sessionId = options?.sessionId;
+		const permits = (credentialId: number) =>
+			sessionId === undefined || this.#deps.affinity.permits(provider, sessionId, credentialId);
+		const loadAccount = async (account: OAuthAccountSummary): Promise<ResetCreditAccountStatus | undefined> => {
+			if (!permits(account.credentialId)) return undefined;
 			const base = { ...account, provider };
 			const access = await this.#deps.oauth.accessById(provider, account.credentialId, {
 				signal: options?.signal,
 			});
+			if (!permits(account.credentialId)) return undefined;
 			if (!access?.ok)
 				return {
 					...base,
@@ -100,6 +119,7 @@ export class ResetCredits implements ResetsApi {
 				},
 			};
 			const list = provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
+			if (!permits(account.credentialId)) return undefined;
 			if (!list)
 				return {
 					...base,
@@ -110,12 +130,16 @@ export class ResetCredits implements ResetsApi {
 				};
 			return { ...base, ...list };
 		};
-		if (provider !== "anthropic") return Promise.all(accounts.map(loadAccount));
+		if (provider !== "anthropic") {
+			const statuses = await Promise.all(accounts.map(loadAccount));
+			return statuses.filter(status => status !== undefined);
+		}
 		const results: ResetCreditAccountStatus[] = [];
 		accounts.sort((left, right) => Number(right.active) - Number(left.active));
 		for (const account of accounts) {
 			options?.signal?.throwIfAborted();
-			results.push(await loadAccount(account));
+			const status = await loadAccount(account);
+			if (status) results.push(status);
 		}
 		return results;
 	}

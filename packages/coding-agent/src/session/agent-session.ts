@@ -87,7 +87,6 @@ import { type Effort, SERVICE_TIER_UNAVAILABLE_FEATURE, serviceTierFamily, strea
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAnthropicFastModeFallback } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
-import { isPromptPerturbationEnabled, perturbPromptText } from "@oh-my-pi/pi-ai/prompts/perturbation";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -377,6 +376,7 @@ import {
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
+	buildTanResultMessages,
 } from "./async-job-delivery";
 import { type AsyncNotifyEntry, type AsyncNotifySource, buildAsyncNotifyBatchMessage } from "./async-notify";
 import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
@@ -458,6 +458,7 @@ import {
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
+	markDuringLiveCall,
 	normalizeCustomMessagePayload,
 	operatorTitleText,
 	type PythonExecutionMessage,
@@ -543,6 +544,11 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
+import { type AiuTotals, sessionAiu } from "./aiu-billing";
+import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
+import type { AgentCostSnapshot, AgentTreeSpend } from "../modes/view-model/overlays/agent-hub-projection";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
+import type { SessionObserverRegistry } from "../task/session-observer-registry";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -588,7 +594,6 @@ import {
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
-	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
@@ -1091,6 +1096,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** False for a subagent, whose gate belongs to its session tree's root. */
 	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
+	/** Identity of the connected voice call that delegated work here, cleared synchronously on disconnect. */
+	activeVoiceCall?: symbol;
 	/** Entries of tools mounted as bash commands; empty when none are mounted. */
 	getToolCommandEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -1198,6 +1205,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
+	#pendingCredentialPins: Promise<void> | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
@@ -1227,6 +1235,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
+	/** Per-subagent spend reads the tree roll-up reuses between calls; see {@link getSubagentTreeSpend}. */
+	readonly #subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	/** The current root's persisted-subagent registration; see {@link hydratePersistedSubagents}. */
+	#subagentHydration: { root: string; promise: Promise<void> } | undefined;
+	/** Live subagent observers of the host; see {@link attachSubagentObservers}. */
+	#subagentObservers: SessionObserverRegistry | undefined;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -2350,6 +2364,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const name = `${model.provider}/${model.id}`;
 				try {
 					const prepared = await this.#modelRegistry.refreshSelectedModelMetadata(model);
+					if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 					if (await this.#modelRegistry.getApiKey(prepared, this.sessionId)) return prepared;
 					return `no credential for planning model ${name}`;
 				} catch (error) {
@@ -2566,6 +2581,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -2584,7 +2600,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
-			sessionId: () => this.sessionId,
 		};
 		this.#stats = new SessionStatsTracker(statsHost);
 		const memoryHost: SessionMemoryHost = {
@@ -4081,6 +4096,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * (spilling oversized output to an artifact), enqueue it as an async-result
 	 * follow-up, and settle only after the yield queue injects or discards it.
 	 * This keeps the job body recoverable through `proc://` while injection is pending.
+	 * A `/tan` job's completion takes {@link #deliverTanResult} instead.
 	 */
 	async #deliverAsyncJobResult(
 		manager: AsyncJobManagerApi,
@@ -4090,6 +4106,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<void> {
 		if (this.#isDisposed) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
+		const tanRequest = job?.request;
+		if (job && tanRequest !== undefined) {
+			await this.#deliverTanResult(jobId, job, tanRequest);
+			return;
+		}
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
 		// must not enqueue — the suppression marker alone is unreliable because
@@ -4107,6 +4128,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			durationMs,
 			epoch,
 		});
+	}
+
+	/**
+	 * A finished `/tan` never starts or extends a turn: the tangent was the user's
+	 * work, not this agent's. The user sees its breadcrumb now; the model gets a
+	 * hidden record linking the clone's output, appended now when idle, else with
+	 * the next prompt (see {@link buildTanResultMessages}).
+	 */
+	async #deliverTanResult(jobId: string, job: AsyncJob, request: string): Promise<void> {
+		const { breadcrumb, record } = buildTanResultMessages(jobId, job, request);
+		await this.sendCustomMessage(breadcrumb);
+		await this.sendCustomMessage(record, { deliverAs: "nextTurn" });
 	}
 
 	/**
@@ -7015,7 +7048,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// the account-scoped prompt cache. Skipped for fresh provider sessions —
 		// those explicitly want new routing identity.
 		if (!this.#freshProviderSessionId) {
-			seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
+			const pending = seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
+			if (pending) {
+				const previous = this.#pendingCredentialPins;
+				const settled = (previous ? Promise.all([previous, pending]) : pending).then(() => {
+					if (this.#pendingCredentialPins === settled) this.#pendingCredentialPins = undefined;
+				});
+				this.#pendingCredentialPins = settled;
+			}
 		}
 		// Keep every live advisor's provider identity in lockstep with the primary's
 		// across every session-boundary transition — including branch paths that
@@ -7023,6 +7063,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// conversation's session id/metadata (issue #6625). Guarded because this
 		// runs once during construction before the advisor controller exists.
 		if (this.#advisors) this.#advisors.refreshProviderIdentity();
+	}
+
+	/** Wait for transcript pins enqueued during synchronous session construction. */
+	waitForCredentialPins(): Promise<void> | undefined {
+		return this.#pendingCredentialPins;
 	}
 
 	#notifySessionChangeCallbacks(): void {
@@ -7737,8 +7782,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #runUsageAwarePreflight(signal?: AbortSignal): Promise<boolean> {
-		if (signal?.aborted) return false;
 		const generation = this.#promptGeneration;
+		if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
+		if (signal?.aborted || this.#promptGeneration !== generation) return false;
 
 		const controller = new AbortController();
 		const onAbort = () => controller.abort(signal?.reason);
@@ -9513,6 +9559,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
+		if (this.activeVoiceCall) markDuringLiveCall(message);
+
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
 			if (eagerTodoPrelude.toolChoice) {
@@ -9719,6 +9767,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(customMessage);
 		const hasSkillImages =
 			isUserInvokedSkillPrompt(customMessage) &&
 			Array.isArray(customMessage.content) &&
@@ -10037,6 +10086,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptSetupAbortController = setupAbort;
 		try {
 			options?.onPromptAdmitted?.();
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
@@ -10338,8 +10388,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!command) return undefined;
 		onRouted?.();
 
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this.#extensionRunner.createCommandContext();
+		const ctx = this.#extensionRunner.createCommandContext(command.extensionPath);
 
 		try {
 			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
@@ -10391,6 +10440,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			openPlanReview: async () => false,
 			getContextUsage: () => this.getContextUsage(),
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
+			cancelAsyncJob: id => this.cancelAsyncJob(id),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });
@@ -10812,6 +10862,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
+			if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
@@ -10861,6 +10912,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			mode === "followUp"
 				? { role: "user", content, attribution, timestamp }
 				: { role: "user", content, steering: true, attribution, timestamp };
+		if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 		this.#queuedMessageRawText.set(userMessage, rawText);
 		const group = [...companions, userMessage];
 		if (mode === "followUp") {
@@ -11362,6 +11414,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const preprocessed = options?.preprocessed;
 		const prependMessages = options?.prependMessages ?? [];
 		const onPromptAdmitted = options?.onPromptAdmitted;
@@ -11512,6 +11565,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			excludeFromContext: normalizedPayload.excludeFromContext,
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (normalizedAppMessage.excludeFromContext) {
 			// The model never sees this row, so it must not start or extend a turn: a steer or aside would
@@ -12997,6 +13051,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			await this.#prewalk.resetForNewSession(this.#agentKind === "main" && cfgPrewalkEnabled.get(this.settings));
 			// Re-apply the configured selector so the new session does not inherit
 			// the previous session's auto-classified effort: auto stays auto but
@@ -13166,6 +13221,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			// The list is the same, but under a new session id: no list write tells the backend.
 			this.#mirrorTodoPhases();
 			this.#memory.rekeyForCurrentSessionId();
@@ -13448,6 +13504,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			let recorded = false;
 			try {
 				recorded = await this.#modelRegistry.authStorage.limits.markServiceTierUnavailable(message.provider, {
+					sessionId: this.agent.sessionId,
 					credentialId: message.credentialId,
 					serviceTier: "priority",
 					modelId: message.model,
@@ -14130,7 +14187,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Whether the last turn ended aborted/failed on a tool call, so {@link retry} would re-attempt it. */
 	get hasAbortedToolCallTail(): boolean {
-		return this.#recovery.hasAbortedToolCallTail;
+		return this.#recovery.hasAbortedToolCallTail(this.#prunedTerminalFailure);
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
@@ -14863,6 +14920,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.sessionManager.clearTaskSiblingCandidate();
 			}
 			this.#syncAgentSessionId(undefined, false);
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
@@ -15050,6 +15108,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
 			this.#tools.restoreBaseSystemPrompt(previousBaseSystemPrompt, previousSystemPromptSources);
@@ -15291,6 +15350,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -15423,6 +15483,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -15612,6 +15673,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let summaryDetails: unknown;
 		if (options.summarize && entriesToSummarize.length > 0 && !hookSummary) {
 			const model = this.model!;
+			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
@@ -15954,7 +16016,65 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Get session statistics.
 	 */
 	getSessionStats(): SessionStats {
-		return this.#stats.getSessionStats();
+		const stats = this.#stats.getSessionStats();
+		const aiu = this.getSessionAiu();
+		return aiu ? { ...stats, aiu } : stats;
+	}
+
+	/**
+	 * The session's server-reported AI credits: its own recorded calls (assistant messages and
+	 * `model_usage`, from the usage index) plus its subagent tree's (see {@link getSubagentTreeSpend}).
+	 * Advisors bill apart, as their dollars do. Undefined until a call reported a charge or missed its frame.
+	 */
+	getSessionAiu(): AiuTotals | undefined {
+		const usage = this.sessionManager.getUsageStatistics();
+		return sessionAiu({ nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls }, this.getSubagentTreeSpend().aiu);
+	}
+
+	/**
+	 * Spend (dollars and AI credits) of this session's subagent tree, descendants included and its own
+	 * advisors excluded: the one sum the status line, `/session`, ACP and RPC report. Reads the registry
+	 * only; a host that needs subagents persisted by an earlier process awaits
+	 * {@link hydratePersistedSubagents} first. File-less subagents count while the observers attached by
+	 * {@link attachSubagentObservers} track them.
+	 */
+	getSubagentTreeSpend(): AgentTreeSpend {
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			observers: this.#subagentObservers,
+			rootSessionFile: this.sessionFile,
+			sessionCosts: this.#subagentSpend,
+		});
+	}
+
+	/** Count the file-less subagents `observers` tracks live (a `--no-session` root's) in the tree spend. */
+	attachSubagentObservers(observers: SessionObserverRegistry): void {
+		this.#subagentObservers = observers;
+	}
+
+	/**
+	 * Register the subagent and advisor transcripts persisted under this session's file (with their usage
+	 * history) as parked registry refs, so a resumed tree's spend counts before anything opens the Agent
+	 * Hub. Scans once per stay on a root: switching away and back scans again (another root's scan may have
+	 * re-targeted shared ids), and a scan cut short by the switch is not kept as done. Never rejects.
+	 */
+	hydratePersistedSubagents(): Promise<void> {
+		const root = this.sessionFile;
+		if (!root || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		if (this.#subagentHydration?.root === root) return this.#subagentHydration.promise;
+		const promise: Promise<void> = registerPersistedSubagents(AgentRegistry.global(), root, {
+			shouldContinue: () => this.sessionFile === root,
+		})
+			.catch(error => {
+				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile: root, error: String(error) });
+			})
+			.then(() => {
+				if (this.sessionFile !== root && this.#subagentHydration?.promise === promise) {
+					this.#subagentHydration = undefined;
+				}
+			});
+		this.#subagentHydration = { root, promise };
+		return promise;
 	}
 
 	#goalUsage(): GoalTokenUsage {
@@ -15991,17 +16111,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const authStorage = this.#modelRegistry.authStorage;
 		if (!authStorage.usage.reports) return null;
 		const reports = await authStorage.usage.reports({
-			baseUrlResolver: provider => {
-				if (provider === "google-antigravity") {
-					const mode = cfgProvidersAntigravityEndpoint.get(this.settings);
-					if (mode === "sandbox") {
-						return "https://daily-cloudcode-pa.sandbox.googleapis.com";
-					} else if (mode === "production") {
-						return "https://daily-cloudcode-pa.googleapis.com";
-					}
-				}
-				return this.#modelRegistry.getProviderBaseUrl?.(provider);
-			},
+			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 			signal,
 		});
 		// Every fresh usage snapshot doubles as the salvage-sweep heartbeat: the
@@ -16054,10 +16164,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Pin a stored OAuth account to the current model provider for this session.
 	 * Returns false while streaming or when the credential is no longer available.
 	 */
-	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
+	async pinCurrentProviderOAuthAccount(credentialId: number): Promise<boolean> {
 		const provider = this.model?.provider;
+		const sessionId = this.sessionId;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
+		if (this.#pendingCredentialPins) {
+			await this.#pendingCredentialPins;
+			if (this.model?.provider !== provider || this.sessionId !== sessionId || this.isStreaming) return false;
+		}
+		return this.#modelRegistry.authStorage.sessions.pin(provider, sessionId, credentialId);
 	}
 
 	/**
@@ -16152,15 +16267,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
 		try {
 			const choice = await runner.getUIContext().select(question, [
-				{ label: "Yes", description: `Redeem now and set ${keyList} to yes.` },
-				{ label: "No", description: `Do not redeem, and set ${keyList} to no.` },
+				{ label: "Not now", description: "Do not redeem; ask again next time." },
+				{ label: "Redeem once", description: "Redeem now without changing settings." },
+				{ label: "Always redeem", description: `Redeem now and set ${keyList} to yes.` },
+				{ label: "Never redeem", description: `Do not redeem, and set ${keyList} to no.` },
 			]);
-			if (choice === "Yes" || choice === "No") {
+			if (choice === "Always redeem" || choice === "Never redeem") {
 				for (const key of keys) {
-					if (key.get(this.settings) === "unset") key.set(this.settings, choice === "Yes" ? "yes" : "no");
+					if (key.get(this.settings) === "unset")
+						key.set(this.settings, choice === "Always redeem" ? "yes" : "no");
 				}
-				if (choice === "Yes") return actions;
 			}
+			if (choice === "Redeem once" || choice === "Always redeem") return actions;
 		} catch (error) {
 			logger.warn(`${source} prompt failed`, { error: String(error) });
 		}
@@ -16192,6 +16310,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		identity: OAuthAccountIdentity | undefined,
 		coordinator: CodexAutoRedeemCoordinator,
 		activeBlockUnblockAtMs?: number,
+		permitsCredential?: (credentialId: number) => boolean,
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
 		const model = this.model;
@@ -16202,8 +16321,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelId: model?.id ?? "",
 			settings: resetPlanSettings(resetWindowModes("openai-codex", this.settings), cfg),
 			identity,
-			permitsCredential: credentialId =>
-				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
+			permitsCredential,
 			reports,
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
@@ -16222,6 +16340,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		statuses: readonly ResetCreditAccountStatus[],
 		coordinator: CodexAutoRedeemCoordinator,
 		activeBlockUnblockAtMs?: number,
+		permitsCredential?: (credentialId: number) => boolean,
 	): ClaudeResetPlan {
 		const cfg = cfgClaudeResets.get(this.settings);
 		const model = this.model;
@@ -16233,8 +16352,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: resetPlanSettings(resetWindowModes("anthropic", this.settings), cfg),
 			reports,
 			statuses,
-			permitsCredential: credentialId =>
-				this.#modelRegistry.authStorage.sessions.permits("anthropic", this.sessionId, credentialId),
+			permitsCredential,
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
 			lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
@@ -16266,7 +16384,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		for (const status of statuses) {
 			if (status.provider !== this.model?.provider) continue;
 			// A peer's reset of an account outside the session's pool cannot serve its retry.
-			if (!this.#modelRegistry.authStorage.sessions.permits(status.provider, this.sessionId, status.credentialId)) {
+			if (
+				!(await this.#modelRegistry.authStorage.sessions.permits(
+					status.provider,
+					this.sessionId,
+					status.credentialId,
+				))
+			) {
 				continue;
 			}
 			const lockKey = resetAccountLockKey(status);
@@ -16303,10 +16427,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		// Consent, earlier actions, the fence and the live listing all wait after
 		// planning: a restore the session's account pool no longer allows is dropped.
-		// Checked with no await before the redeem call.
-		const outsidePool = (action: CodexResetAction | ClaudeResetAction): boolean =>
+		// Checked immediately before the redeem call.
+		const outsidePool = async (action: CodexResetAction | ClaudeResetAction): Promise<boolean> =>
 			action.reason === "blocked-account" &&
-			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
+			!(await authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId));
 		const restored: number[] = [];
 		let poolLimited = false;
 		for (const action of actions) {
@@ -16327,7 +16451,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
-					leftPool = outsidePool(action);
+					leftPool = await outsidePool(action);
 					if (!leftPool) outcome = await authStorage.resets.redeem(redeemOptions);
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
@@ -16349,10 +16473,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 								if (balance) return { ok: false, code: balance, provider } satisfies ResetCreditRedeemOutcome;
 							}
 							const { outcome: result, attemptedAt } = await markedRedeem(async () => {
-								// Checked after the pending marker is written, with no await before
-								// the redeem. A restore the pool no longer allows is never sent:
+								// Check after the pending marker is written, just before redeem.
+								// A restore the pool no longer allows is never sent:
 								// report a no-op so the fence clears its marker, and drop it below.
-								leftPool = outsidePool(action);
+								leftPool = await outsidePool(action);
 								if (leftPool) return { ok: false, code: "nothing_to_reset", provider };
 								return authStorage.resets.redeem(redeemOptions);
 							});
@@ -16465,10 +16589,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let existing = coordinator.inFlightByAccount.get(accountKey);
 		while (existing) {
 			const shared = await existing;
-			const serves = shared.restored
-				? shared.restoredCredentialIds?.some(id => authStorage.sessions.permits(provider, this.sessionId, id))
-				: !shared.poolLimited;
-			if (serves) return shared;
+			if (shared.restored) {
+				try {
+					for (const id of shared.restoredCredentialIds ?? []) {
+						if (await authStorage.sessions.permits(provider, this.sessionId, id)) return shared;
+					}
+				} catch (error) {
+					logger.warn("auto-reset: shared account permission check failed", { provider, error: String(error) });
+					return { restored: false };
+				}
+			} else if (!shared.poolLimited) {
+				return shared;
+			}
 			existing = coordinator.inFlightByAccount.get(accountKey);
 		}
 
@@ -16481,15 +16613,44 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.
 			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
+			const effectiveReports =
+				provider === "openai-codex"
+					? overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() })
+					: reports;
+			const candidateIds = new Set<number>();
+			if (provider === "anthropic") {
+				for (const status of statuses) candidateIds.add(status.credentialId);
+			} else {
+				for (const report of effectiveReports ?? []) {
+					const id = report.metadata?.resetCreditCredentialId;
+					if (report.provider === provider && typeof id === "number" && Number.isInteger(id)) candidateIds.add(id);
+				}
+			}
+			const sessionId = this.sessionId;
+			const permittedIds = new Set<number>();
+			await Promise.all(
+				Array.from(candidateIds, async id => {
+					if (await authStorage.sessions.permits(provider, sessionId, id)) permittedIds.add(id);
+				}),
+			);
+			const permitsCredential = (id: number) => permittedIds.has(id);
 			const plan =
 				provider === "anthropic"
-					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
+					? this.#planClaudeResets(
+							"blocked",
+							reports,
+							statuses,
+							coordinator,
+							activeBlockUnblockAtMs,
+							permitsCredential,
+						)
 					: this.#planCodexResets(
 							"blocked",
-							overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
+							effectiveReports,
 							identity,
 							coordinator,
 							activeBlockUnblockAtMs,
+							permitsCredential,
 						);
 			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
 			if (plan.actions.length === 0) {
@@ -16813,16 +16974,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #formatLlmRequestJson(messages: AgentMessage[]): Promise<string> {
 		const llmMessages = await this.convertMessagesToLlm(messages);
 		const model = this.agent.state.model;
-		// Mirror `streamDispatch`: show the prose the model receives, not the bundled wording.
-		const perturb = model && isPromptPerturbationEnabled(model) ? perturbPromptText : (text: string) => text;
 		const payload = {
 			model: model ?? null,
 			thinkingLevel: this.thinkingLevel ?? null,
 			serviceTier: this.#models.serviceTierEntry(),
-			systemPrompt: this.agent.state.systemPrompt.map(perturb),
+			systemPrompt: this.agent.state.systemPrompt,
 			tools: this.agent.state.tools.map(tool => ({
 				name: tool.name,
-				description: perturb(tool.description),
+				description: tool.description,
 				parameters: toolWireSchema(tool),
 				...(tool.strict !== undefined ? { strict: tool.strict } : {}),
 				...(tool.customWireName ? { customWireName: tool.customWireName } : {}),

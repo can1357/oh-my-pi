@@ -1,8 +1,7 @@
 /**
- * Claude's image contract, enforced before a request leaves the client. Every
- * wire that delivers images to a Claude reader shares it: `anthropic-messages`
- * always, and Google's Cloud Code Assist wire when resolved policy declares
- * the host's limits (`max-image-dimension` / `max-image-payload-bytes`).
+ * Claude's image contract, enforced before an `anthropic-messages` request
+ * leaves the client. Resolved policy may declare the host's limits
+ * (`max-image-dimension` / `max-image-payload-bytes`).
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Context, ImageContent, Message, Model, TextContent } from "../types";
@@ -225,7 +224,7 @@ async function resizeAnthropicImageMessage(
  */
 export async function prepareAnthropicImageContext(
 	context: Context,
-	model: Model<"anthropic-messages"> | Model<"google-gemini-cli">,
+	model: Model<"anthropic-messages">,
 ): Promise<Context> {
 	if (!model.input.includes("image")) return context;
 	const imageCount = countAnthropicImageBlocks(context.messages);

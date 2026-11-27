@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { StoredAuthCredential, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import type { StoredCredentialSummary, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	limitMatchesActiveAccount,
 	reportMatchesActiveAccount,
@@ -128,14 +128,7 @@ describe("limitMatchesActiveAccount", () => {
 		).toBe(true);
 	});
 
-	test("a shared Google project or Team account id never stands in for a different email", () => {
-		const project = "aicode-consumers";
-		const alice = { email: "alice@example.com", projectId: project };
-		const antigravityReport = (email: string) =>
-			makeReport({ provider: "google-antigravity", metadata: { email, projectId: project } });
-		const sharedProjectLimit = makeLimit({ provider: "google-antigravity", projectId: project });
-		expect(limitMatchesActiveAccount(antigravityReport("bob@example.com"), sharedProjectLimit, alice)).toBe(false);
-		expect(limitMatchesActiveAccount(antigravityReport("alice@example.com"), sharedProjectLimit, alice)).toBe(true);
+	test("a shared Team account id never stands in for a different email", () => {
 		// Codex Team seats share the workspace account and org ids.
 		const seat = { email: "alice@example.com", accountId: "workspace", orgId: "workspace" };
 		const teammateReport = makeReport({
@@ -183,21 +176,18 @@ describe("toLogoutAccounts org scoping", () => {
 		orgId?: string,
 		orgName?: string,
 		identity?: { email?: string; accountId?: string },
-	): StoredAuthCredential {
+	): StoredCredentialSummary {
 		return {
 			id,
 			provider: "anthropic",
-			credential: {
-				type: "oauth",
-				access: `access-${id}`,
-				refresh: `refresh-${id}`,
-				expires: Date.now() + 60_000,
-				accountId: identity?.accountId ?? "account-shared",
-				email: identity?.email ?? "shared@example.com",
-				orgId,
-				orgName,
-			},
-			disabledCause: null,
+			type: "oauth",
+			disabled: false,
+			accessOff: false,
+			fileUploadAllowed: true,
+			accountId: identity?.accountId ?? "account-shared",
+			email: identity?.email ?? "shared@example.com",
+			orgId,
+			orgName,
 		};
 	}
 
@@ -235,31 +225,6 @@ describe("toLogoutAccounts org scoping", () => {
 		expect(activeIds).toEqual([1]);
 	});
 
-	test("Antigravity accounts on one Google project: only the active email's row is marked active", () => {
-		const row = (id: number, email: string): StoredAuthCredential => ({
-			id,
-			provider: "google-antigravity",
-			credential: {
-				type: "oauth",
-				access: `access-${id}`,
-				refresh: `refresh-${id}`,
-				expires: Date.now() + 60_000,
-				email,
-				projectId: "aicode-consumers",
-			},
-			disabledCause: null,
-		});
-		const accounts = toLogoutAccounts(
-			"google-antigravity",
-			[row(1, "alice@example.com"), row(2, "bob@example.com")],
-			{
-				activeIdentity: { email: "alice@example.com", projectId: "aicode-consumers" },
-			},
-		);
-		const activeIds = accounts.filter(account => account.active).map(account => account.credentialId);
-		expect(activeIds).toEqual([1]);
-	});
-
 	test("org-only active identity marks same-org rows active on the org alone", () => {
 		const accounts = toLogoutAccounts(
 			"anthropic",
@@ -282,6 +247,44 @@ describe("toLogoutAccounts org scoping", () => {
 			"shared@example.com (Personal Max)",
 			"shared@example.com (Team Workspace)",
 		]);
+	});
+});
+
+describe("toLogoutAccounts credential metadata", () => {
+	test("shows the stored id and active state for a key-only provider", () => {
+		expect(
+			toLogoutAccounts("anthropic", [{ id: 8, provider: "anthropic", type: "api_key", disabled: false }], {
+				activeApiKey: true,
+			}),
+		).toEqual([
+			{
+				credentialId: 8,
+				provider: "anthropic",
+				label: "API key #8",
+				detail: "stored API key #8",
+				type: "api_key",
+				active: true,
+			},
+		]);
+	});
+
+	test("uses the enterprise host as the fallback label without needing a grant", () => {
+		const [account] = toLogoutAccounts("anthropic", [
+			{
+				id: 9,
+				provider: "anthropic",
+				type: "oauth",
+				disabled: false,
+				enterpriseUrl: "https://enterprise.example.com",
+				accessOff: true,
+				fileUploadAllowed: true,
+			},
+		]);
+		expect(account).toMatchObject({
+			credentialId: 9,
+			label: "https://enterprise.example.com",
+			detail: "anthropic off · oauth #9",
+		});
 	});
 });
 

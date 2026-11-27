@@ -1,3 +1,4 @@
+import { providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import type { SessionCredential } from "./affinity";
 import type {
@@ -96,6 +97,82 @@ export interface StoredAuthCredential {
 	provider: string;
 	credential: AuthCredential;
 	disabledCause: string | null;
+}
+
+/** Storage identity and availability, with no credential or disable diagnostic attached. */
+export type StoredCredentialSummary = {
+	id: number;
+	provider: string;
+	disabled: boolean;
+} & (
+	| { type: "api_key"; source?: ApiKeyCredential["source"] }
+	| ({
+			type: "oauth";
+			/** Access-token expiry, in epoch milliseconds, when known. */
+			expires?: number;
+			/** Grant expiry, in epoch milliseconds, when known. */
+			refreshExpires?: number;
+			/** Login time, in epoch milliseconds, when known. */
+			authorizedAt?: number;
+			/** Display-only HTTPS/HTTP origin or bare enterprise host, not a request URL. */
+			enterpriseUrl?: string;
+			region?: string;
+			inferenceRegion?: OAuthCredentials["inferenceRegion"];
+			/** Login is stored, but the grant lacks a required scope. */
+			accessOff: boolean;
+			/** The grant supports file uploads; legacy Anthropic grants without recorded scopes are allowed. */
+			fileUploadAllowed: boolean;
+	  } & OAuthAccountIdentity)
+);
+
+function metadataString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function enterpriseDisplayUrl(value: unknown): string | undefined {
+	const text = metadataString(value)?.trim();
+	if (!text) return undefined;
+	const url = URL.parse(text);
+	if (url) return url.protocol === "https:" || url.protocol === "http:" ? url.origin : undefined;
+	// Copilot stores a domain instead of a URL.
+	if (/[/?#@\\]/.test(text)) return undefined;
+	return URL.parse(`https://${text}`)?.host;
+}
+
+/** Project an explicit allowlist; never copy a stored credential or diagnostic into a summary. */
+export function summarizeStoredCredential(row: StoredAuthCredential): StoredCredentialSummary {
+	const { id, provider, credential, disabledCause } = row;
+	const disabled = disabledCause !== null;
+	if (credential.type === "api_key") {
+		return { id, provider, disabled, type: "api_key", source: credential.source === "login" ? "login" : undefined };
+	}
+	// Legacy SQLite rows are parsed without validating every OAuth field.
+	const { expires, refreshExpires, authorizedAt, inferenceRegion, scope } = credential;
+	return {
+		id,
+		provider,
+		disabled,
+		type: "oauth",
+		expires: Number.isFinite(expires) ? expires : undefined,
+		refreshExpires: Number.isFinite(refreshExpires) ? refreshExpires : undefined,
+		authorizedAt: Number.isFinite(authorizedAt) ? authorizedAt : undefined,
+		accountId: metadataString(credential.accountId),
+		email: metadataString(credential.email),
+		projectId: metadataString(credential.projectId),
+		orgId: metadataString(credential.orgId),
+		orgName: metadataString(credential.orgName),
+		enterpriseUrl: enterpriseDisplayUrl(credential.enterpriseUrl),
+		region: metadataString(credential.region),
+		inferenceRegion:
+			inferenceRegion === "global" || inferenceRegion === "eu" || inferenceRegion === "us"
+				? inferenceRegion
+				: undefined,
+		accessOff: providerAccessOff(provider, metadataString(scope)),
+		fileUploadAllowed:
+			provider !== "anthropic" ||
+			scope === undefined ||
+			(typeof scope === "string" && /(?:^|\s)user:file_upload(?:\s|$)/.test(scope)),
+	};
 }
 
 /** One persisted rate-limit block: credential row id + provider-type key + optional scope. */
@@ -198,8 +275,8 @@ export interface CredentialCompletionResult {
  * Credential payload handed to {@link CompletionProbe}. For API-key
  * credentials only the bytes are exposed; for OAuth, every identity field
  * carried by the refreshed credential is included so the probe can compose
- * provider-specific apiKey shapes (e.g. GitHub Copilot / Google Gemini CLI
- * expect a JSON blob with `token` + `projectId`, not the raw access token).
+ * provider-specific apiKey shapes (e.g. a JSON blob carrying the token and an
+ * account or project id instead of the raw access token).
  *
  * `refreshToken` may be {@link REMOTE_REFRESH_SENTINEL} when the credential
  * lives behind a broker; the chat endpoint never reads it, so the probe can
@@ -279,10 +356,11 @@ export const REMOTE_REFRESH_SENTINEL = "__remote__" as const;
 /** Opaque marker for OAuth refresh tokens retained by a broker. */
 export type RemoteRefreshSentinel = typeof REMOTE_REFRESH_SENTINEL;
 
-/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable client secrets removed. */
-export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret"> & {
+/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable secrets removed. */
+export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret" | "dpopKey"> & {
 	refresh: RemoteRefreshSentinel;
 	kiroClientSecret?: never;
+	dpopKey?: never;
 };
 
 /** Discriminated credential payload as published by the broker. */
@@ -349,6 +427,12 @@ export type AuthStorageOptions = {
 	/** Global reserve fallback for accounts without a matching reservePct policy. */
 	defaultReservePct?: number;
 	usageFetch?: typeof fetch;
+	/**
+	 * Learn an unknown GitHub Copilot billing mode with a background
+	 * `copilot_internal/user` probe (via `usageFetch`) when a key is resolved.
+	 * Default true; hermetic hosts and tests that hold fake tokens pass false.
+	 */
+	copilotBillingProbe?: boolean;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
 	/**
@@ -525,6 +609,8 @@ export type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
+	/** @internal With forceRefresh, target only the durable row authorized by the store owner. */
+	forceRefreshCredentialId?: number;
 	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
 	refreshReason?: OAuthRefreshReason;
 	/**
@@ -542,7 +628,7 @@ export type AuthApiKeyOptions = {
  * Identity that multi-account discovery records in `Model.accountAccess` and
  * that {@link AuthApiKeyOptions.accountIds} selection matches: the provider
  * account id (Codex `chatgpt_account_id`), else the login email for providers
- * whose credentials carry no account id (Antigravity), else the project id for
+ * whose credentials carry no account id, else the project id for
  * a login whose email lookup failed. Same precedence as the credential store's
  * identity key.
  */
@@ -601,10 +687,14 @@ export interface OAuthLoginIdentity {
 	accountId?: string;
 	orgId?: string;
 	orgName?: string;
+	/** The login is stored but lacks the provider's `required-scope`: signed in, provider off. */
+	accessOff?: boolean;
 }
 
 /** Failure while resolving access to one OAuth account. */
 export interface OAuthAccessFailure {
+	/** Safe failure classification for callers that cannot receive the diagnostic. */
+	category?: "refresh-unavailable" | "missing-api-key" | "selection-failed";
 	credentialId?: number;
 	accountId?: string;
 	email?: string;
@@ -621,7 +711,7 @@ export interface OAuthAccessFailure {
  * Identity of the OAuth credential a session is currently routed to. Read-only
  * display/metadata shape: `accountId` is the provider's account UUID, `email`
  * the user-facing login, `projectId` the GCP-style project for providers that
- * key usage on it (Gemini CLI / Antigravity).
+ * key usage on it.
  */
 export interface OAuthAccountIdentity {
 	accountId?: string;
@@ -662,6 +752,8 @@ export interface OAuthAccountSummary {
 }
 /** Scope a matching-key invalidation to a session or signal. */
 export interface InvalidateCredentialMatchingOptions {
+	/** Match the current bearer of this exact OAuth row, without inspecting other rows. */
+	credentialId?: number;
 	signal?: AbortSignal;
 	sessionId?: string;
 }
@@ -814,6 +906,8 @@ export type MarkUsageLimitOptions = {
 
 /** Identify the credential that was refused a service tier, and for how long to stop preferring it. */
 export type MarkServiceTierUnavailableOptions = {
+	/** Restrict stored refusal recording to the credential pool allowed by this session. */
+	sessionId?: string;
 	/**
 	 * Stored row that served the refused request
 	 * ({@link ResolvedApiKey.credentialId}). Omit when the bearer had no row
@@ -834,9 +928,26 @@ export type MarkServiceTierUnavailableOptions = {
  */
 export const SERVICE_TIER_BLOCK_MS = 30 * 60_000;
 
+/** Credential-routing facts projected without forwarding the original upstream error. */
+export type CredentialRotationFailure =
+	| {
+			kind:
+				| "mismatched-model"
+				| "model-policy"
+				| "organization-policy"
+				| "account-policy"
+				| "invalidated-oauth"
+				| "auth";
+	  }
+	| { kind: "usage-limit"; retryAfterMs?: number };
+
 /** Resolve a failed request to its credential and rotate if possible. */
 export type RotateCredentialOptions = {
 	error?: unknown;
+	/** A transport may classify the error before sending it to the credential owner. */
+	failure?: CredentialRotationFailure;
+	/** For a hard failure attributed to an exact OAuth row, require its rejected access token to still be current. */
+	rejectedOAuthAccess?: string;
 	modelId?: string;
 	/** Provider base URL for usage-report probes during a usage-limit block. */
 	baseUrl?: string;
@@ -853,7 +964,7 @@ export type RotateCredentialOptions = {
  * `switched` is `true` when a usable same-type sibling credential is available,
  * so the caller's next resolve hands it out. `afterSiblingWait` is `true` when
  * no sibling was free at the failure but rotation slept out a sibling's short
- * block (e.g. a Cloud Code Assist capacity 429 that resets in under a second);
+ * block (e.g. a capacity 429 that resets in under a second);
  * the freed credential may be one the caller already sent in this request, so
  * attempted-bearer dedupe must let it through once.
  */
@@ -941,6 +1052,8 @@ export interface CredentialsApi {
 	 * List stored credential rows, optionally filtered by provider.
 	 */
 	list(provider?: string): StoredAuthCredential[];
+	/** List metadata for the same rows as {@link list}, without credential secrets. */
+	summaries(provider?: string): StoredCredentialSummary[];
 	/**
 	 * Check if credentials exist for a provider in storage.
 	 */
@@ -1143,6 +1256,19 @@ export interface OAuthRefreshByIdOptions {
 	rejectedAccess?: string;
 }
 
+/** How {@link OAuthApi.signOut} removes a login. */
+export interface OAuthSignOutOptions {
+	signal?: AbortSignal;
+}
+
+/** Outcome of {@link OAuthApi.signOut}. */
+export interface OAuthSignOutResult {
+	/** `false` when no such login was stored. */
+	removed: boolean;
+	/** Why the provider's sign-out hook failed (a revocation it did not confirm); the login is removed regardless. */
+	signOutError?: string;
+}
+
 /** OAuth login, access, account identity, and refresh operations. */
 export interface OAuthApi {
 	/**
@@ -1152,6 +1278,12 @@ export interface OAuthApi {
 	 * login registered.
 	 */
 	login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined>;
+	/**
+	 * Remove one stored login. The provider's `sign-out` hook first revokes the
+	 * grant at the provider. The login is removed even when the hook fails;
+	 * {@link OAuthSignOutResult.signOutError} says why.
+	 */
+	signOut(provider: string, credentialId: number, options?: OAuthSignOutOptions): Promise<OAuthSignOutResult>;
 	/**
 	 * Resolve the OAuth credential for `provider`, refreshing through the same
 	 * pipeline as {@link AuthStorage.keys.get} but returning the refreshed
@@ -1259,7 +1391,12 @@ export interface SessionsApi {
 	 * warm-window semantics: a resume inside the prompt-cache TTL reuses the
 	 * account, a stale resume re-ranks.
 	 */
-	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean;
+	pin(
+		provider: string,
+		sessionId: string,
+		credentialId: number,
+		options?: { restoredAtMs?: number },
+	): boolean | Promise<boolean>;
 	/**
 	 * Copy stored credential affinities from one live session to another.
 	 *
@@ -1273,7 +1410,7 @@ export interface SessionsApi {
 		sourceSessionId: string,
 		targetSessionId: string,
 		include?: (provider: string, explicit: boolean) => boolean,
-	): number;
+	): number | Promise<number>;
 	/**
 	 * Restrict one session's credentials for `provider` to the OAuth accounts
 	 * whose identity key (`email:<address>|org:<id>` for org-scoped providers;
@@ -1300,14 +1437,16 @@ export interface SessionsApi {
 	 * an unrestricted session, otherwise only an OAuth account its
 	 * {@link restrict} list names.
 	 */
-	permits(provider: string, sessionId: string, credentialId: number): boolean;
+	permits(provider: string, sessionId: string, credentialId: number): boolean | Promise<boolean>;
 	/**
 	 * Release a session's sticky credential so its next {@link getApiKey} call
 	 * re-runs native pool ranking. This never blocks or penalizes the released
 	 * account; usage-aware routing uses it when another sibling has more
 	 * headroom, before considering a model/provider fallback.
 	 */
-	release(provider: string, sessionId: string): boolean;
+	release(provider: string, sessionId: string): boolean | Promise<boolean>;
+	/** Clear the session's stored credential affinity without lifting any restriction. */
+	clear(provider: string, sessionId: string): void | Promise<void>;
 	/**
 	 * Read-only display and usage-attribution surface: the credential row that
 	 * most recently served `sessionId` for `provider`, including API-key rows
@@ -1331,7 +1470,7 @@ export interface UsageApi {
 		provider: Provider,
 		headers: Record<string, string>,
 		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-	): boolean;
+	): boolean | Promise<boolean>;
 	/**
 	 * Discard cached usage reports before a user-requested refresh. The next
 	 * read probes upstream serially per provider; a failure reports no fresh
@@ -1362,6 +1501,11 @@ export interface UsageApi {
 	 * providers without a usage API) — the latter never warrants a usage row.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined;
+	/**
+	 * HTTP status (401/403) of the active usage failure cooldown for this stored
+	 * row's most recently collected report, including reports read from cache.
+	 */
+	authRejection(provider: Provider, credentialId: number): number | undefined;
 	/**
 	 * Return model ids whose live reports map to a quantitative usage scope.
 	 * Provider strategies supply model/tier mapping when available; otherwise
@@ -1486,9 +1630,10 @@ export interface LimitsApi {
 	 * Forget every recorded refusal of `serviceTier` on `modelId` for a provider
 	 * and drop its cached usage reports, so the next request probes each
 	 * credential for the tier again. For re-arming the tier (`/fast on`) once
-	 * the user has fixed what the provider refused.
+	 * the user has fixed what the provider refused. When scoped to a session,
+	 * refuse the provider-wide operation unless that session permits every row.
 	 */
-	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void>;
+	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string, sessionId?: string): Promise<void>;
 	/** Invalidate a credential matching an API key after authentication failure. */
 	invalidateMatching(
 		provider: string,

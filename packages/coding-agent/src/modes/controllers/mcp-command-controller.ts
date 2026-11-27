@@ -42,12 +42,9 @@ import {
 	updateMCPServer,
 	validateServerName,
 } from "../../mcp/config-writer";
-import {
-	mcpOAuthCredentialIdsForServerUrl,
-	removeManagedMcpOAuthCredential,
-	removeManagedMcpOAuthCredentials,
-} from "../../mcp/oauth-credentials";
+import { mcpOAuthCredentialIdsForServerUrl, removeManagedMcpOAuthCredentials } from "../../mcp/oauth-credentials";
 import type { MCPAuthChallenge, MCPConfigFile, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
+import { localAuthOwner } from "../../session/auth-daemon-backend";
 import { shortenPath } from "../../utils/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
@@ -426,7 +423,7 @@ export class MCPCommandController {
 								oauth.tokenUrl,
 								oauth.clientId ?? finalConfig.oauth?.clientId ?? "",
 								finalConfig.oauth?.clientSecret ?? "",
-								oauth.scopes ?? "",
+								finalConfig.oauth?.scope?.trim() || oauth.scopes || "",
 								{
 									callbackPort: finalConfig.oauth?.callbackPort,
 									callbackPath: finalConfig.oauth?.callbackPath,
@@ -695,7 +692,10 @@ export class MCPCommandController {
 				status.set(
 					options?.suppressDisconnectedWarning
 						? currentTheme().fg("muted", `◌ Connection check complete for "${name}"`)
-						: currentTheme().fg("warning", `⚠ Could not connect to "${name}" yet`),
+						: currentTheme().fg(
+								"warning",
+								`${currentTheme().symbols.symbol("status.warning")} Could not connect to "${name}" yet`,
+							),
 				);
 			}
 			return state;
@@ -778,7 +778,12 @@ export class MCPCommandController {
 				);
 				lines.push("");
 			} else {
-				lines.push(currentTheme().fg("warning", `⚠ Server added but not yet connected`));
+				lines.push(
+					currentTheme().fg(
+						"warning",
+						`${currentTheme().symbols.symbol("status.warning")} Server added but not yet connected`,
+					),
+				);
 				lines.push(
 					currentTheme().fg(
 						"muted",
@@ -945,7 +950,7 @@ export class MCPCommandController {
 				lines.push("");
 			}
 
-			// Show discovered servers (from .claude.json, .cursor/mcp.json, .vscode/mcp.json, etc.)
+			// Show discovered servers (from .claude/.mcp.json, .codex/config.toml, opencode.json, etc.)
 			if (discoveredServers.length > 0) {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
 					lines.push(currentTheme().fg("accent", providerName) + currentTheme().fg("muted", ` (${shortPath}):`));
@@ -1365,23 +1370,21 @@ export class MCPCommandController {
 
 			const currentAuth = found.config.auth;
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			if (currentAuth?.type === "oauth") {
-				await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
-			}
-			// Also drop this profile's url-keyed binding so the server is truly
-			// signed out even when the config carries no auth block. Runtime
-			// discovery expands `${...}` URL values before MCPManager looks up the
-			// deterministic credential row, so unauth must clear that same key.
-			let removedUrlKeyedCredential = false;
-			if ((found.config.type === "http" || found.config.type === "sse") && found.config.url) {
-				removedUrlKeyedCredential = await removeManagedMcpOAuthCredentials(
-					authStorage,
-					mcpOAuthCredentialIdsForServerUrl(found.config.url),
-				);
+			// Clear the profile's URL-keyed binding as well as the explicit auth pointer.
+			const credentialIds: (string | undefined)[] =
+				found.config.type === "http" || found.config.type === "sse"
+					? mcpOAuthCredentialIdsForServerUrl(found.config.url)
+					: [];
+			if (currentAuth?.type === "oauth") credentialIds.unshift(currentAuth.credentialId);
+			let removedCredential = false;
+			if (credentialIds.length > 0) {
+				const owner = await localAuthOwner(authStorage);
+				removedCredential = await removeManagedMcpOAuthCredentials(owner, credentialIds);
+				if (removedCredential && owner !== authStorage) await authStorage.credentials.reload();
 			}
 
 			if (found.discovered && currentAuth?.type !== "oauth") {
-				if (!removedUrlKeyedCredential) {
+				if (!removedCredential) {
 					this.#showMessage(
 						["", currentTheme().fg("muted", `No stored OAuth auth to remove for "${name}".`), ""].join("\n"),
 					);

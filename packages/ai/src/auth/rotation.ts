@@ -24,6 +24,7 @@ import type { AuthCredentialStore } from "./store";
 import {
 	type AuthCredential,
 	type CredentialRotation,
+	type CredentialRotationFailure,
 	type InvalidateCredentialMatchingOptions,
 	type LimitsApi,
 	type MarkServiceTierUnavailableOptions,
@@ -43,8 +44,8 @@ import {
 
 /**
  * Longest sibling block {@link RateLimits.rotate} sleeps out instead of giving
- * up. Covers Cloud Code Assist capacity 429s ("Resets in 0s", sub-second
- * `retryDelay`) that briefly block every healthy account; longer blocks stay
+ * up. Covers capacity 429s ("Resets in 0s", sub-second `retryDelay`) that
+ * briefly block every healthy account; longer blocks stay
  * with the caller's own backoff layer.
  */
 const SIBLING_UNBLOCK_WAIT_MAX_MS = 5_000;
@@ -73,6 +74,28 @@ export interface RateLimitsDeps {
 	strategies: RankingStrategyResolver;
 }
 
+/** Classify the original error once, retaining only facts that affect credential routing. */
+export function classifyCredentialRotationFailure(
+	provider: string,
+	error: unknown,
+	modelId?: string,
+	baseUrl?: string,
+): CredentialRotationFailure {
+	// Provider-controlled model names must match the request before any mutation.
+	if (AIError.isMismatchedModelEntitlementDenial(error, provider, modelId)) return { kind: "mismatched-model" };
+	if (AIError.isModelEntitlementDenial(error, provider, modelId)) return { kind: "model-policy" };
+	if (AIError.isAccountPolicyError(error)) {
+		return {
+			kind: AIError.isAnthropicOAuthOrganizationDenial(provider, error) ? "organization-policy" : "account-policy",
+		};
+	}
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(AIError.status(error), message)) {
+		return { kind: "usage-limit", retryAfterMs: extractProviderRetryHint(provider, message, baseUrl) };
+	}
+	return { kind: AIError.isInvalidatedOAuthTokenError(error) ? "invalidated-oauth" : "auth" };
+}
+
 /** Usage-limit marking, credential rotation after failures, and bearer-matched invalidation. */
 export class RateLimits implements LimitsApi {
 	#deps: RateLimitsDeps;
@@ -98,7 +121,9 @@ export class RateLimits implements LimitsApi {
 			const stored = this.#deps.pool.entries(provider);
 			const index = stored.findIndex(entry => entry.id === options.credentialId);
 			const entry = index === -1 ? undefined : stored[index];
-			if (entry) return { type: entry.credential.type, index, explicit: true };
+			if (entry && this.#deps.affinity.allows(provider, sessionId, entry.credential)) {
+				return { type: entry.credential.type, index, explicit: true };
+			}
 		}
 		if (options?.apiKey !== undefined) {
 			const stored = this.#deps.pool.entries(provider);
@@ -325,7 +350,14 @@ export class RateLimits implements LimitsApi {
 		});
 		if (!sessionCredential) return { switched: false };
 		const target = this.#deps.pool.entries(provider)[sessionCredential.index];
-		if (!target || target.credential.type !== sessionCredential.type) return { switched: false };
+		if (
+			!target ||
+			target.credential.type !== sessionCredential.type ||
+			(options?.credentialId !== undefined && options.apiKey === undefined && target.id !== options.credentialId) ||
+			!this.#deps.affinity.allows(provider, sessionId, target.credential)
+		) {
+			return { switched: false };
+		}
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
 
@@ -408,7 +440,7 @@ export class RateLimits implements LimitsApi {
 		const entries = this.#deps.pool.entries(provider);
 		const index = entries.findIndex(entry => entry.id === options.credentialId);
 		const entry = entries[index];
-		if (!entry) return false;
+		if (!entry || !this.#deps.affinity.allows(provider, options.sessionId, entry.credential)) return false;
 		const providerKey = providerTypeKey(provider, entry.credential.type);
 		if (this.#deps.blocks.isScopeBlocked(provider, providerKey, index, blockScope)) return false;
 		this.#deps.blocks.mark(
@@ -422,10 +454,21 @@ export class RateLimits implements LimitsApi {
 		return true;
 	}
 
-	async rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void> {
+	async rearmServiceTier(
+		provider: string,
+		serviceTier: ServiceTier,
+		modelId: string,
+		sessionId?: string,
+	): Promise<void> {
 		const blockScope = serviceTierBlockScope(serviceTier, modelId);
 		if (blockScope === undefined) return;
 		await this.#deps.pool.adoptExternalChanges();
+		if (
+			sessionId !== undefined &&
+			this.#deps.pool.entries(provider).some(row => !this.#deps.affinity.allows(provider, sessionId, row.credential))
+		) {
+			throw new Error("Session account pool does not permit a provider-wide service tier reset");
+		}
 		this.#deps.blocks.clearServiceTierRefusals(provider, blockScope);
 	}
 
@@ -453,26 +496,34 @@ export class RateLimits implements LimitsApi {
 	): Promise<boolean> {
 		const signal = options?.signal;
 		const sessionId = options?.sessionId;
+		const credentialId = options?.credentialId;
+		if (credentialId !== undefined) await this.#deps.pool.adoptExternalChanges();
 		const stored = this.#deps.pool.entries(provider);
-		let matched: { id: number; type: AuthCredential["type"]; index: number } | undefined;
-		for (let index = 0; index < stored.length; index++) {
-			const entry = stored[index];
-			if (entry && (await this.#credentialMatchesApiKey(entry.credential, apiKey))) {
-				matched = { id: entry.id, type: entry.credential.type, index };
-				break;
+		let index: number;
+		if (credentialId !== undefined) {
+			index = stored.findIndex(
+				row => row.id === credentialId && row.credential.type === "oauth" && row.credential.access === apiKey,
+			);
+		} else {
+			for (index = 0; index < stored.length; index++) {
+				const row = stored[index];
+				if (row && (await this.#credentialMatchesApiKey(row.credential, apiKey))) break;
 			}
 		}
-
-		if (!matched) {
-			await this.#deps.pool.reload();
+		const matched = stored[index];
+		if (!matched || !this.#deps.affinity.allows(provider, sessionId, matched.credential)) {
+			if (credentialId === undefined) await this.#deps.pool.reload();
 			return false;
 		}
 
-		this.#deps.affinity.clear(provider, sessionId);
+		const sticky = this.#deps.affinity.get(provider, sessionId);
+		if (credentialId === undefined || (sticky?.type === matched.credential.type && sticky.index === index)) {
+			this.#deps.affinity.clear(provider, sessionId);
+		}
 		this.#deps.blocks.mark(
 			provider,
-			providerTypeKey(provider, matched.type),
-			matched.index,
+			providerTypeKey(provider, matched.credential.type),
+			index,
 			Date.now() + DEFAULT_BLOCK_MS,
 			AUTH_BLOCK_SCOPE,
 		);
@@ -506,7 +557,7 @@ export class RateLimits implements LimitsApi {
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
 	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan,
-	 *   Anthropic model-not-found 404, or agy `Unknown model ID`) → temporarily
+	 *   Anthropic model-not-found 404, agy `Unknown model ID`, or Gemini per-user quota model refusal) → temporarily
 	 *   block only that requested model, then rotate. A denial naming another model or provider changes nothing.
 	 * - exact OAuth organization denial → persist a longer account-wide block.
 	 * - other account-scoped policy denial → temporarily block that account
@@ -527,18 +578,12 @@ export class RateLimits implements LimitsApi {
 		options?: RotateCredentialOptions,
 	): Promise<CredentialRotation> {
 		await this.#deps.pool.adoptExternalChanges();
-		const error = options?.error;
-		const status = AIError.status(error);
-		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-		// A provider-controlled model id must match the provider and request before any mutation.
-		if (AIError.isMismatchedModelEntitlementDenial(error, provider, options?.modelId)) return { switched: false };
-		const modelPolicy = AIError.isModelEntitlementDenial(error, provider, options?.modelId);
-		const accountPolicy = modelPolicy || AIError.isAccountPolicyError(error);
-		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
-			// Thread the provider-specified reset window (e.g. Devin "Your limit
-			// will reset in 13 minutes") into the block duration so the credential
-			// is not reselected and hammered while the cap remains active.
-			const retryAfterMs = extractProviderRetryHint(provider, message, options?.baseUrl);
+		const failure =
+			options?.failure ??
+			classifyCredentialRotationFailure(provider, options?.error, options?.modelId, options?.baseUrl);
+		if (failure.kind === "mismatched-model") return { switched: false };
+		if (failure.kind === "usage-limit") {
+			const { retryAfterMs } = failure;
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,
@@ -551,11 +596,25 @@ export class RateLimits implements LimitsApi {
 			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
 		}
 
+		const modelPolicy = failure.kind === "model-policy";
+		const accountPolicy = modelPolicy || failure.kind === "account-policy" || failure.kind === "organization-policy";
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
 			allowStaleOAuthBearer: accountPolicy,
 		});
+		const target = sessionCredential && this.#deps.pool.entries(provider)[sessionCredential.index];
+		if (
+			sessionCredential &&
+			(!target ||
+				target.credential.type !== sessionCredential.type ||
+				(options?.credentialId !== undefined &&
+					options.apiKey === undefined &&
+					target.id !== options.credentialId) ||
+				!this.#deps.affinity.allows(provider, sessionId, target.credential))
+		) {
+			return { switched: false };
+		}
 		if (accountPolicy) {
 			const modelPolicyScope = modelPolicy ? modelAccountPolicyBlockScope(options?.modelId) : undefined;
 			if (modelPolicy && modelPolicyScope === undefined) return { switched: false };
@@ -570,10 +629,7 @@ export class RateLimits implements LimitsApi {
 				return this.#exhaustedOrgPolicyRotation(provider, sessionId, routing.siblingBlockScopes);
 			}
 			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
-			const orgPolicy =
-				!modelPolicy &&
-				sessionCredential.type === "oauth" &&
-				AIError.isAnthropicOAuthOrganizationDenial(provider, error);
+			const orgPolicy = sessionCredential.type === "oauth" && failure.kind === "organization-policy";
 			routing.blockScope =
 				modelPolicyScope ?? (orgPolicy ? OAUTH_ORG_POLICY_BLOCK_SCOPE : ACCOUNT_POLICY_BLOCK_SCOPE);
 			const sticky = this.#deps.affinity.get(provider, sessionId);
@@ -597,7 +653,15 @@ export class RateLimits implements LimitsApi {
 			if (rotation.switched || sessionCredential.type !== "oauth") return rotation;
 			return this.#exhaustedOrgPolicyRotation(provider, sessionId, routing.siblingBlockScopes);
 		}
-		if (!sessionCredential) return { switched: false };
+		if (!sessionCredential || !target) return { switched: false };
+		if (
+			(options?.rejectedOAuthAccess !== undefined && target.credential.type !== "oauth") ||
+			(options?.failure !== undefined &&
+				target.credential.type === "oauth" &&
+				(options.credentialId !== target.id || target.credential.access !== options.rejectedOAuthAccess))
+		) {
+			return { switched: false };
+		}
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting
@@ -611,7 +675,6 @@ export class RateLimits implements LimitsApi {
 					!this.#deps.blocks.isBlocked(provider, providerKey, index) &&
 					this.#deps.affinity.allows(provider, sessionId, credential),
 			);
-		const target = this.#deps.pool.entries(provider)[sessionCredential.index];
 		const sticky = this.#deps.affinity.get(provider, sessionId);
 		if (
 			!sessionCredential.explicit ||
@@ -627,7 +690,9 @@ export class RateLimits implements LimitsApi {
 			AUTH_BLOCK_SCOPE,
 		);
 
-		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
+		if (failure.kind === "invalidated-oauth") {
+			const error = options?.error;
+			const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 			const disabledCause = message ?? "upstream reported invalidated OAuth token";
 			const deleted = await this.#deps.pool.disable(target.id, disabledCause);
 			if (deleted) {
@@ -640,19 +705,17 @@ export class RateLimits implements LimitsApi {
 			return { switched: deleted && hasSibling };
 		}
 
-		if (target) {
-			const markSuspect = this.#deps.store.markCredentialSuspect?.bind(this.#deps.store);
-			if (markSuspect) {
-				await markSuspect(target.id, { signal: options?.signal });
-			} else {
-				await this.#deps.pool.reload();
-			}
-			const latestRows = this.#deps.store.listAuthCredentials(provider);
-			this.#deps.pool.replace(
-				provider,
-				latestRows.map(row => ({ id: row.id, credential: row.credential })),
-			);
+		const markSuspect = this.#deps.store.markCredentialSuspect?.bind(this.#deps.store);
+		if (markSuspect) {
+			await markSuspect(target.id, { signal: options?.signal });
+		} else {
+			await this.#deps.pool.reload();
 		}
+		const latestRows = this.#deps.store.listAuthCredentials(provider);
+		this.#deps.pool.replace(
+			provider,
+			latestRows.map(row => ({ id: row.id, credential: row.credential })),
+		);
 
 		return { switched: hasSibling };
 	}

@@ -78,7 +78,7 @@ export default class Token extends Command {
 	static examples = [
 		"# Get API key for Anthropic\n  omp token anthropic",
 		"# Get raw Copilot credential JSON\n  omp token github-copilot --raw",
-		"# Force refresh and get an Antigravity token\n  omp token google-antigravity --force-refresh",
+		"# Force refresh and get a Codex token\n  omp token openai-codex --force-refresh",
 		"# List Anthropic OAuth accounts\n  omp token anthropic --list",
 		"# Get the 2nd Anthropic OAuth account's token\n  omp token anthropic --account 2",
 	];
@@ -192,10 +192,9 @@ export default class Token extends Command {
 						activeProviders.add(p.id);
 					}
 				}
-				const all = authStorage.credentials.all();
-				for (const p in all) {
-					if (authStorage.keys.source(p) !== undefined) {
-						activeProviders.add(p);
+				for (const { provider: id } of authStorage.credentials.summaries()) {
+					if (!activeProviders.has(id) && authStorage.keys.source(id) !== undefined) {
+						activeProviders.add(id);
 					}
 				}
 

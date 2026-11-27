@@ -12,7 +12,7 @@ import * as AIError from "../error";
 import { getProviderDefinition } from "../registry";
 import { assertProviderEnabled, providerPauseReason } from "../registry/oauth";
 import { AUTHENTICATED_SENTINEL, type ProviderDefinition } from "../registry/types";
-import type { SessionAffinity } from "./affinity";
+import type { SessionAffinity, SessionCredential } from "./affinity";
 import { type CredentialBlocks, providerTypeKey, serviceTierBlockScope } from "./blocks";
 import type { CredentialPool } from "./pool";
 import type { ApiKeySelection } from "./rank";
@@ -34,6 +34,36 @@ type OAuthKeyEncoder = NonNullable<ProviderDefinition["getApiKey"]>;
 
 /** A stored API key chosen for a request, and whether it leaves the request's service tier unserved. */
 type StoredApiKeyChoice = { selection: ApiKeySelection; serviceTierUnavailable: boolean };
+
+/** Nonsecret facts about the caller's own key sources. References and keys stay with the caller. */
+export interface StoredAuthLocalSources {
+	runtime?: boolean;
+	configOverride?: boolean;
+	configFallback?: boolean;
+	/** Ambient auth can serve an ordinary request but cannot displace OAuth for a service tier. */
+	env?: "bearer" | "ambient";
+	/** The caller's unstored key was refused the requested service tier and is cooling down locally. */
+	serviceTierRefused?: boolean;
+	/** The caller could not resolve the stored key selected instead of OAuth for this tier. */
+	skipTierApiKey?: boolean;
+}
+
+export type StoredAuthResolveOptions = AuthApiKeyOptions & { local?: StoredAuthLocalSources };
+export type StoredAuthPeekOptions = AuthPeekOptions & { local?: StoredAuthLocalSources };
+
+type StoredAuthLocalChoice = {
+	kind: "local";
+	source: "runtime" | "config-override" | "config-fallback" | "env";
+	serviceTierUnavailable?: true;
+};
+
+type StoredAuthKeyChoice = ResolvedApiKey & { needsResolution?: true; fallbackToOAuth?: true };
+
+/** The winning source. A stored API-key value may still need caller-local config resolution. */
+export type StoredAuthResolution =
+	| { kind: "stored"; resolved: ResolvedApiKey; needsResolution?: true; fallbackToOAuth?: true }
+	| StoredAuthLocalChoice
+	| { kind: "missing" };
 
 /**
  * Default config value resolver that checks env vars and treats as literal.
@@ -165,6 +195,8 @@ export interface KeyCascadeDeps {
 	affinity: SessionAffinity;
 	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
 	rotate: LimitsApi["rotate"];
+	/** Learns a resolved key's unknown account billing mode in the background (GitHub Copilot). */
+	learnBillingMode: (provider: string, resolved: ResolvedApiKey) => void;
 	sourceLabel?: string;
 }
 
@@ -286,16 +318,35 @@ export class KeyCascade implements KeysApi {
 	 * peek returns the same one, so credential-scoped discovery caches stay on
 	 * one namespace.
 	 */
-	async peek(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {
-		if (providerPauseReason(provider) !== undefined) return undefined;
-		const runtimeKey = this.#deps.overrides.runtimeKey(provider);
-		if (runtimeKey) {
-			return runtimeKey;
-		}
+	peek(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {
+		return this.#peek(provider, options, undefined);
+	}
 
-		const configKey = this.#deps.overrides.configKey(provider);
-		if (configKey !== undefined) {
-			return await this.#deps.overrides.resolve(configKey);
+	/** Peek at the store owner's pool without refreshing or resolving any config references. */
+	peekStoredAuth(provider: string, options?: StoredAuthPeekOptions): Promise<StoredAuthResolution> {
+		return this.#peek(provider, options, options?.local ?? {});
+	}
+
+	#peek(provider: string, options: AuthPeekOptions | undefined, local: undefined): Promise<string | undefined>;
+	#peek(
+		provider: string,
+		options: AuthPeekOptions | undefined,
+		local: StoredAuthLocalSources,
+	): Promise<StoredAuthResolution>;
+	async #peek(
+		provider: string,
+		options: AuthPeekOptions | undefined,
+		local: StoredAuthLocalSources | undefined,
+	): Promise<string | StoredAuthResolution | undefined> {
+		if (providerPauseReason(provider) !== undefined) return local ? { kind: "missing" } : undefined;
+		if (local) {
+			if (local.runtime) return { kind: "local", source: "runtime" };
+			if (local.configOverride) return { kind: "local", source: "config-override" };
+		} else {
+			const runtimeKey = this.#deps.overrides.runtimeKey(provider);
+			if (runtimeKey) return runtimeKey;
+			const configKey = this.#deps.overrides.configKey(provider);
+			if (configKey !== undefined) return this.#deps.overrides.resolve(configKey);
 		}
 
 		await this.#deps.pool.adoptExternalChanges();
@@ -321,15 +372,29 @@ export class KeyCascade implements KeysApi {
 				? this.#deps.selector.selectByType(provider, "oauth", undefined, servable)
 				: undefined);
 		if (oauthSelection) {
-			if (provider === "github-copilot") {
-				return JSON.stringify({
-					token: oauthSelection.credential.access,
-					enterpriseUrl: oauthSelection.credential.enterpriseUrl,
-					apiEndpoint: oauthSelection.credential.apiEndpoint,
-				});
-			}
-			if (getApiKey) return this.#encodeOAuthKey(getApiKey, oauthSelection.credential);
-			return oauthSelection.credential.access;
+			const { credential, index } = oauthSelection;
+			const apiKey =
+				provider === "github-copilot"
+					? JSON.stringify({
+							token: credential.access,
+							enterpriseUrl: credential.enterpriseUrl,
+							apiEndpoint: credential.apiEndpoint,
+						})
+					: getApiKey
+						? this.#encodeOAuthKey(getApiKey, credential)
+						: local && authPolicyFor(provider)?.apiKeyFormat === "structured"
+							? JSON.stringify({ token: credential.access, enterpriseUrl: credential.enterpriseUrl })
+							: credential.access;
+			if (!local) return apiKey;
+			if (apiKey === undefined) return { kind: "missing" };
+			return {
+				kind: "stored",
+				resolved: {
+					apiKey,
+					credentialId: this.#deps.pool.entries(provider)[index]?.id,
+					oauthAccess: credential.access,
+				},
+			};
 		}
 
 		const loginApiKeySelection = this.#deps.selector.selectByType(
@@ -341,21 +406,39 @@ export class KeyCascade implements KeysApi {
 				credential.source === "login" &&
 				!this.isKeylessFallback(provider, credential),
 		);
-		if (loginApiKeySelection) {
-			return this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+		if (loginApiKeySelection) return this.#peekApiKey(provider, loginApiKeySelection, local);
+
+		if (local) {
+			if (local.configFallback) return { kind: "local", source: "config-fallback" };
+			if (local.env) return { kind: "local", source: "env" };
+		} else {
+			const fallbackKey = this.#deps.overrides.fallbackKey(provider);
+			if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
+			const envKey = getEnvApiKey(provider);
+			if (envKey) return envKey;
 		}
 
-		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
+		const apiKeySelection = this.#deps.selector.selectByType(
+			provider,
+			"api_key",
+			undefined,
+			local ? credential => !this.isKeylessFallback(provider, credential) : undefined,
+		);
+		if (apiKeySelection) return this.#peekApiKey(provider, apiKeySelection, local);
+		return local ? { kind: "missing" } : undefined;
+	}
 
-		const envKey = getEnvApiKey(provider);
-		if (envKey) return envKey;
-
-		const apiKeySelection = this.#deps.selector.selectByType(provider, "api_key");
-		if (apiKeySelection) {
-			return this.#deps.overrides.resolve(apiKeySelection.credential.key);
-		}
-		return undefined;
+	#peekApiKey(
+		provider: string,
+		{ credential, index }: ApiKeySelection,
+		local: StoredAuthLocalSources | undefined,
+	): StoredAuthResolution | Promise<string | undefined> {
+		if (!local) return this.#deps.overrides.resolve(credential.key);
+		return {
+			kind: "stored",
+			resolved: { apiKey: credential.key, credentialId: this.#deps.pool.entries(provider)[index]?.id },
+			needsResolution: true,
+		};
 	}
 
 	/**
@@ -371,7 +454,17 @@ export class KeyCascade implements KeysApi {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		assertProviderEnabled(provider);
-		return this.#resolve(provider, sessionId, options);
+		return this.#resolveForRequest(provider, sessionId, options);
+	}
+
+	async #resolveForRequest(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+	): Promise<ResolvedApiKey | undefined> {
+		const resolved = await this.#resolve(provider, sessionId, options);
+		if (resolved) this.#deps.learnBillingMode(provider, resolved);
+		return resolved;
 	}
 
 	/**
@@ -393,7 +486,7 @@ export class KeyCascade implements KeysApi {
 	 */
 	async get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
 		try {
-			return (await this.#resolve(provider, sessionId, options))?.apiKey;
+			return (await this.#resolveForRequest(provider, sessionId, options))?.apiKey;
 		} catch (error) {
 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
 			logger.debug("API key probe skipped transient OAuth refresh failure", { provider, error: error.message });
@@ -405,6 +498,24 @@ export class KeyCascade implements KeysApi {
 	async prefetchUsage(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<void> {
 		options?.signal?.throwIfAborted();
 		if (this.source(provider)?.kind !== "oauth") return;
+		await this.#deps.selector.prefetchUsage(provider, sessionId, options);
+	}
+
+	/** Warm managed OAuth usage without consulting ambient key sources or a config resolver. */
+	async prefetchStoredAuthUsage(
+		provider: string,
+		sessionId?: string,
+		options?: StoredAuthResolveOptions,
+	): Promise<void> {
+		options?.signal?.throwIfAborted();
+		if (
+			options?.local?.runtime ||
+			options?.local?.configOverride ||
+			providerPauseReason(provider) !== undefined ||
+			!this.#deps.pool.credentials(provider).some(credential => credential.type === "oauth")
+		) {
+			return;
+		}
 		await this.#deps.selector.prefetchUsage(provider, sessionId, options);
 	}
 
@@ -451,20 +562,33 @@ export class KeyCascade implements KeysApi {
 			: { apiKey };
 	}
 
+	#callerLocalChoice(source: StoredAuthLocalChoice["source"], local: StoredAuthLocalSources): StoredAuthLocalChoice {
+		return { kind: "local", source, ...(local.serviceTierRefused ? { serviceTierUnavailable: true } : {}) };
+	}
+
 	/** Pin a chosen stored API key to the session and resolve its bearer. */
 	async #useStoredApiKey(
 		provider: string,
 		sessionId: string | undefined,
 		options: AuthApiKeyOptions | undefined,
+		sessionBasis: SessionCredential | undefined,
 		{ selection, serviceTierUnavailable }: StoredApiKeyChoice,
-	): Promise<ResolvedApiKey | undefined> {
+		callerResolves: boolean,
+	): Promise<StoredAuthKeyChoice | undefined> {
 		if (options?.recordAffinity !== false) {
-			this.#deps.affinity.record(provider, sessionId, "api_key", selection.index);
+			this.#deps.affinity.recordSelection(provider, sessionId, "api_key", selection.index, sessionBasis);
 		}
 		const credentialId = this.#deps.pool.entries(provider)[selection.index]?.id;
-		const apiKey = await this.#deps.overrides.resolve(selection.credential.key);
+		const apiKey = callerResolves
+			? selection.credential.key
+			: await this.#deps.overrides.resolve(selection.credential.key);
 		if (apiKey === undefined) return undefined;
-		return { apiKey, credentialId, ...(serviceTierUnavailable ? { serviceTierUnavailable: true } : {}) };
+		return {
+			apiKey,
+			credentialId,
+			...(serviceTierUnavailable ? { serviceTierUnavailable: true } : {}),
+			...(callerResolves ? { needsResolution: true } : {}),
+		};
 	}
 
 	/**
@@ -478,7 +602,9 @@ export class KeyCascade implements KeysApi {
 		provider: string,
 		sessionId: string | undefined,
 		options: AuthApiKeyOptions | undefined,
-	): Promise<ResolvedApiKey | undefined> {
+		sessionBasis: SessionCredential | undefined,
+		local: StoredAuthLocalSources | undefined,
+	): Promise<StoredAuthKeyChoice | StoredAuthLocalChoice | undefined> {
 		const tierScope = serviceTierBlockScope(options?.serviceTier, options?.modelId);
 		if (tierScope === undefined) return undefined;
 		const loginKey = await this.#deps.selector.selectServiceTierApiKey(
@@ -488,18 +614,32 @@ export class KeyCascade implements KeysApi {
 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
 		);
 		if (loginKey) {
-			return this.#useStoredApiKey(provider, sessionId, options, {
-				selection: loginKey,
-				serviceTierUnavailable: false,
-			});
+			return this.#useStoredApiKey(
+				provider,
+				sessionId,
+				options,
+				sessionBasis,
+				{ selection: loginKey, serviceTierUnavailable: false },
+				local !== undefined,
+			);
 		}
 
-		const envKey = getEnvApiKey(provider);
-		if (envKey && envKey !== AUTHENTICATED_SENTINEL && !this.#deps.blocks.isUnstoredKeyRefused(provider, tierScope)) {
-			// As on the ordinary environment path: the request is not
-			// OAuth-authenticated, so the session's OAuth pin must not attribute it.
-			if (sessionId) this.#deps.affinity.forget(provider, sessionId);
-			return { apiKey: envKey };
+		if (local) {
+			if (local.env === "bearer" && !local.serviceTierRefused) {
+				if (sessionId) this.#deps.affinity.forget(provider, sessionId);
+				return { kind: "local", source: "env" };
+			}
+		} else {
+			const envKey = getEnvApiKey(provider);
+			if (
+				envKey &&
+				envKey !== AUTHENTICATED_SENTINEL &&
+				!this.#deps.blocks.isUnstoredKeyRefused(provider, tierScope)
+			) {
+				// The request is not OAuth-authenticated; do not attribute its account.
+				if (sessionId) this.#deps.affinity.forget(provider, sessionId);
+				return { apiKey: envKey };
+			}
 		}
 
 		const storedKey = await this.#deps.selector.selectServiceTierApiKey(
@@ -510,7 +650,14 @@ export class KeyCascade implements KeysApi {
 		);
 		return (
 			storedKey &&
-			this.#useStoredApiKey(provider, sessionId, options, { selection: storedKey, serviceTierUnavailable: false })
+			this.#useStoredApiKey(
+				provider,
+				sessionId,
+				options,
+				sessionBasis,
+				{ selection: storedKey, serviceTierUnavailable: false },
+				local !== undefined,
+			)
 		);
 	}
 
@@ -535,18 +682,65 @@ export class KeyCascade implements KeysApi {
 		// honor it instead of forwarding an upstream OAuth token that the proxy
 		// won't accept.
 		if (restricted && this.#deps.overrides.configKey(provider) !== undefined) {
-			throw new AIError.MissingApiKeyError(
-				provider,
-				`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool, but models.yml configures an apiKey for this provider, and pooled OAuth tokens are never sent past it)`,
-			);
+			this.#throwRestrictedConfigOverride(provider, sessionId);
 		}
 		const configKey = restricted ? undefined : this.#deps.overrides.configKey(provider);
 		if (configKey !== undefined) {
 			return this.#unstoredKey(provider, await this.#deps.overrides.resolve(configKey), options);
 		}
+		return this.#resolveFromPool(provider, sessionId, options, restricted, undefined);
+	}
 
-		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
-		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
+	/** Resolve from the owner's pool using only nonsecret information about caller-owned key sources. */
+	async resolveStoredAuth(
+		provider: string,
+		sessionId?: string,
+		options?: StoredAuthResolveOptions,
+	): Promise<StoredAuthResolution> {
+		assertProviderEnabled(provider);
+		const local = options?.local ?? {};
+		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
+		if (local.runtime && !restricted) return this.#callerLocalChoice("runtime", local);
+		if (local.configOverride) {
+			if (restricted) this.#throwRestrictedConfigOverride(provider, sessionId);
+			return this.#callerLocalChoice("config-override", local);
+		}
+		const result = await this.#resolveFromPool(provider, sessionId, options, restricted, local);
+		if (!result) return { kind: "missing" };
+		if ("kind" in result) return result;
+		const { needsResolution, fallbackToOAuth, ...resolved } = result;
+		return { kind: "stored", resolved, needsResolution, fallbackToOAuth };
+	}
+
+	#throwRestrictedConfigOverride(provider: string, sessionId: string | undefined): never {
+		throw new AIError.MissingApiKeyError(
+			provider,
+			`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool, but models.yml configures an apiKey for this provider, and pooled OAuth tokens are never sent past it)`,
+		);
+	}
+
+	#resolveFromPool(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+		restricted: boolean,
+		local: undefined,
+	): Promise<ResolvedApiKey | undefined>;
+	#resolveFromPool(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+		restricted: boolean,
+		local: StoredAuthLocalSources,
+	): Promise<StoredAuthKeyChoice | StoredAuthLocalChoice | undefined>;
+	async #resolveFromPool(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+		restricted: boolean,
+		local: StoredAuthLocalSources | undefined,
+	): Promise<StoredAuthKeyChoice | StoredAuthLocalChoice | undefined> {
+		// OAuth/login wins, then a config fallback or environment, then a stored static API key.
 		// A transient OAuth refresh failure still lets later sources serve the request; it is
 		// rethrown only when none can, so callers retry instead of reporting a missing key.
 		let oauthResolved: OAuthResolutionResult | undefined;
@@ -554,6 +748,8 @@ export class KeyCascade implements KeysApi {
 		// A tier-preferring resolve may still hand the request to an API key, so
 		// the session pin is recorded once the choice is final.
 		const tierPreferring = options?.serviceTier !== undefined;
+		// What selection starts from; a pin installed while it runs outranks its choice.
+		const sessionBasis = this.#deps.affinity.get(provider, sessionId);
 		try {
 			oauthResolved = await this.#deps.selector.resolveOAuth(
 				provider,
@@ -566,14 +762,17 @@ export class KeyCascade implements KeysApi {
 		}
 		if (oauthResolved) {
 			const serviceTierUnavailable = oauthResolved.serviceTierOffered === false;
-			if (serviceTierUnavailable && !restricted) {
-				const tierApiKey = await this.#resolveServiceTierApiKey(provider, sessionId, options);
-				if (tierApiKey) return tierApiKey;
+			if (serviceTierUnavailable && !restricted && !local?.skipTierApiKey) {
+				const tierApiKey = await this.#resolveServiceTierApiKey(provider, sessionId, options, sessionBasis, local);
+				if (tierApiKey) {
+					if (!("kind" in tierApiKey) && tierApiKey.needsResolution) tierApiKey.fallbackToOAuth = true;
+					return tierApiKey;
+				}
 			}
 			const { credentialId, credential } = oauthResolved;
 			if (tierPreferring && options?.recordAffinity !== false && credentialId !== undefined) {
 				const index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === credentialId);
-				if (index !== -1) this.#deps.affinity.record(provider, sessionId, "oauth", index);
+				if (index !== -1) this.#deps.affinity.recordSelection(provider, sessionId, "oauth", index, sessionBasis);
 			}
 			const oauthIdentity: OAuthRequestIdentity = {
 				accountId: credential.accountId,
@@ -602,27 +801,35 @@ export class KeyCascade implements KeysApi {
 			options,
 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
 		);
-		if (loginApiKey) return this.#useStoredApiKey(provider, sessionId, options, loginApiKey);
+		if (loginApiKey) {
+			return this.#useStoredApiKey(provider, sessionId, options, sessionBasis, loginApiKey, local !== undefined);
+		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
 		// env/api_key, not OAuth, so clear it now so getOAuthAccountId() correctly
 		// suppresses account_uuid for this session.
 		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
 
-		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
-		if (fallbackKey !== undefined) {
-			return this.#unstoredKey(provider, await this.#deps.overrides.resolve(fallbackKey), options);
+		if (local) {
+			if (local.configFallback) return this.#callerLocalChoice("config-fallback", local);
+			if (local.env) return this.#callerLocalChoice("env", local);
+		} else {
+			const fallbackKey = this.#deps.overrides.fallbackKey(provider);
+			if (fallbackKey !== undefined) {
+				return this.#unstoredKey(provider, await this.#deps.overrides.resolve(fallbackKey), options);
+			}
+			const envKey = getEnvApiKey(provider);
+			if (envKey) return this.#unstoredKey(provider, envKey, options);
 		}
-
-		const envKey = getEnvApiKey(provider);
-		if (envKey) return this.#unstoredKey(provider, envKey, options);
 		const storedApiKey = await this.#selectStoredApiKey(
 			provider,
 			sessionId,
 			options,
-			credential => credential.source !== "login",
+			credential => credential.source !== "login" && (!local || !this.isKeylessFallback(provider, credential)),
 		);
-		if (storedApiKey) return this.#useStoredApiKey(provider, sessionId, options, storedApiKey);
+		if (storedApiKey) {
+			return this.#useStoredApiKey(provider, sessionId, options, sessionBasis, storedApiKey, local !== undefined);
+		}
 		if (oauthRefreshFailure) throw oauthRefreshFailure;
 		return undefined;
 	}

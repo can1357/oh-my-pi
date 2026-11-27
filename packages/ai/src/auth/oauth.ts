@@ -1,3 +1,4 @@
+import { providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
@@ -15,6 +16,7 @@ import type {
 	AuthApiKeyOptions,
 	AuthCredentialSnapshotEntry,
 	OAuthAccess,
+	OAuthAccessFailure,
 	OAuthAccessResolution,
 	OAuthAccountIdentity,
 	OAuthAccountSummary,
@@ -23,6 +25,8 @@ import type {
 	OAuthLoginController,
 	OAuthLoginIdentity,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	StoredOAuthRefreshOptions,
 	StoredOAuthRefreshResult,
 } from "./types";
@@ -121,8 +125,10 @@ export class OAuthAccounts implements OAuthApi {
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
 		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
+		const storedAs = def.storeCredentialsAs ?? provider;
 		return {
 			type: "oauth",
+			...(providerAccessOff(storedAs, newCredential.scope) ? { accessOff: true } : {}),
 			email: newCredential.email,
 			accountId: newCredential.accountId,
 			orgId: newCredential.orgId,
@@ -147,6 +153,26 @@ export class OAuthAccounts implements OAuthApi {
 	 * Rejects with {@link AIError.OAuthRefreshUnavailableError} (transient,
 	 * retryable) when a retryable refresh failure left no usable credential.
 	 */
+	async signOut(
+		provider: string,
+		credentialId: number,
+		options: OAuthSignOutOptions = {},
+	): Promise<OAuthSignOutResult> {
+		const credential = this.#deps.pool.entries(provider).find(entry => entry.id === credentialId)?.credential;
+		if (!credential) return { removed: false };
+		const signOut = getProviderDefinition(provider)?.signOut;
+		let signOutError: string | undefined;
+		if (signOut && credential.type === "oauth") {
+			try {
+				await signOut(credential, { signal: options.signal });
+			} catch (error) {
+				signOutError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const removed = await this.#deps.pool.removeById(provider, credentialId);
+		return signOutError === undefined ? { removed } : { removed, signOutError };
+	}
+
 	async access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined> {
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be
@@ -203,15 +229,28 @@ export class OAuthAccounts implements OAuthApi {
 				});
 				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
 				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);
-				if (index === -1) throw new Error(`OAuth credential ${selection.credentialId} was removed during refresh`);
+				if (index === -1) {
+					throw new AIError.MissingApiKeyError(
+						provider,
+						`OAuth credential ${selection.credentialId} was removed during refresh`,
+					);
+				}
 			}
+			let category: OAuthAccessFailure["category"] = "missing-api-key";
 			const resolved = await this.#deps.selector.tryOAuth(
 				provider,
 				{ credential: selection.credential, index },
 				providerKey,
 				undefined,
 				options,
-				{ checkUsage: false, allowBlocked: true, allowFallback: false },
+				{
+					checkUsage: false,
+					allowBlocked: true,
+					allowFallback: false,
+					onTransientRefreshFailure: error => {
+						category = AIError.retriable(AIError.classify(error)) ? "refresh-unavailable" : "selection-failed";
+					},
+				},
 			);
 			if (!resolved) {
 				return {
@@ -223,6 +262,7 @@ export class OAuthAccounts implements OAuthApi {
 					enterpriseUrl: selection.credential.enterpriseUrl,
 					orgId: selection.credential.orgId,
 					orgName: selection.credential.orgName,
+					category,
 					error: "OAuth access unavailable",
 				};
 			}
@@ -251,6 +291,14 @@ export class OAuthAccounts implements OAuthApi {
 				enterpriseUrl: selection.credential.enterpriseUrl,
 				orgId: selection.credential.orgId,
 				orgName: selection.credential.orgName,
+				category:
+					error instanceof AIError.MissingApiKeyError ||
+					AIError.isDefinitiveOAuthFailure(error) ||
+					!this.#deps.pool.entries(provider).some(entry => entry.id === selection.credentialId)
+						? "missing-api-key"
+						: AIError.retriable(AIError.classify(error))
+							? "refresh-unavailable"
+							: "selection-failed",
 				error: error instanceof Error ? error.message : String(error),
 			};
 		}

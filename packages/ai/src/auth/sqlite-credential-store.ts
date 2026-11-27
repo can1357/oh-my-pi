@@ -21,6 +21,12 @@ import {
 	openSqliteDatabase,
 	readSalvageableRows,
 } from "@oh-my-pi/pi-utils";
+import {
+	CredentialCipher,
+	credentialVaultAvailable,
+	loadCredentialCipher,
+	storeCredentialMasterKey,
+} from "./credential-cipher";
 import type { AuthCredentialStore, CredentialRefreshLeaseFence, CredentialRefreshLeaseHolder } from "./store";
 import type {
 	AuthCredential,
@@ -64,12 +70,17 @@ const CLIENT_USAGE_BUCKET_MS = 5 * 60_000;
 // SqliteAuthCredentialStore
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Row shape for auth_credentials table queries */
+/**
+ * Row shape for auth_credentials table queries. `data` is the credential JSON;
+ * a non-NULL `salt` marks it sealed (see {@link CredentialCipher}) until
+ * `SqliteAuthCredentialStore.#reveal` opens it.
+ */
 type AuthRow = {
 	id: number;
 	provider: string;
 	credential_type: string;
 	data: string;
+	salt: string | null;
 	disabled_cause: string | null;
 	identity_key: string | null;
 };
@@ -96,6 +107,7 @@ type CredentialStateRow = {
 	provider: string;
 	credential_type: string;
 	data: string;
+	salt: string | null;
 	identity_key: string | null;
 	disabled_cause: string | null;
 };
@@ -108,7 +120,7 @@ function storesSerializedCredential(row: CredentialStateRow, serialized: Seriali
 	);
 }
 
-const AUTH_SCHEMA_VERSION = 8;
+const AUTH_SCHEMA_VERSION = 9;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
@@ -323,7 +335,7 @@ export function matchesReplacementCredential(
  * whichever identity key each is stored under. The email decides when both carry one;
  * otherwise a matching account id does, unless it is the organization's own id (a
  * ChatGPT workspace id shared by every member). Project ids are shared between users
- * (every consumer Antigravity login has the same one) and never count.
+ * and never count.
  */
 export function isSameOAuthAccount(a: OAuthCredential, b: OAuthCredential): boolean {
 	const orgId = normalizeStoredAccountId(a.orgId);
@@ -399,15 +411,43 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 	}
 }
 /**
+ * Whether a store seals new writes: `true` always (generating the master key on
+ * first use), `false` never, `"auto"` per {@link SqliteAuthCredentialStore.unlock}.
+ */
+export type CredentialEncryption = boolean | "auto";
+
+interface CredentialUnlockOptions {
+	encrypt?: CredentialEncryption;
+	/** Fail when sealed rows cannot be opened or the requested sealing cannot be enabled. */
+	requireUnlocked?: boolean;
+}
+
+/** How a {@link SqliteAuthCredentialStore} treats sealed credential rows. */
+export interface SqliteAuthCredentialStoreOptions {
+	/** Opens sealed rows; without it they read as unparsable and are skipped. */
+	cipher?: CredentialCipher;
+	/** Seal new writes with `cipher`; otherwise they are stored in plaintext. */
+	encrypt?: boolean;
+}
+
+/**
  * Default SQLite-backed implementation of {@link AuthCredentialStore}.
  *
  * Used by the pi-ai CLI and as the default store for `AuthStorage.create()`.
  * Also exposes convenience methods (`saveOAuth`, `getOAuth`, `saveApiKey`,
  * `getApiKey`, `listProviders`, `deleteProvider`) that callers can use directly
  * without going through `AuthStorage`.
+ *
+ * Credential rows may be sealed under the OS-vault master key
+ * ({@link CredentialCipher}): {@link unlock} loads the key, `encrypt` seals new
+ * writes, and rows written in plaintext stay readable.
  */
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
+	#cipher: CredentialCipher | undefined;
+	#encrypt: boolean;
+	/** One warning per store for rows sealed under a key this machine does not hold. */
+	#warnedUnopenable = false;
 	#listActiveStmt: Statement;
 	#listActiveByProviderStmt: Statement;
 	#listDisabledStmt: Statement;
@@ -415,8 +455,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#insertStmt: Statement;
 	#updateStmt: Statement;
 	#deleteStmt: Statement;
-	#deleteIfMatchesStmt: Statement;
-	#updateIfMatchesStmt: Statement;
 	#deleteByProviderStmt: Statement;
 	#hardDeleteStmt: Statement;
 	#getCacheStmt: Statement;
@@ -424,8 +462,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#upsertCacheStmt: Statement;
 	#deleteCachePrefixStmt: Statement;
 	#deleteExpiredCacheStmt: Statement;
-	#updateIfMatchesWithLeaseStmt: Statement;
-	#deleteIfMatchesWithLeaseStmt: Statement;
 	#getCredentialBlockStmt: Statement;
 	#listCredentialBlockScopesStmt: Statement;
 	#listCredentialBlocksStmt: Statement;
@@ -453,57 +489,35 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#localAuthRevision: number;
 	#closed = false;
 
-	constructor(db: Database) {
+	constructor(db: Database, options: SqliteAuthCredentialStoreOptions = {}) {
 		this.#db = db;
+		this.#cipher = options.cipher;
+		this.#encrypt = options.encrypt === true && options.cipher !== undefined;
 		this.#initializeSchema();
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
 
 		this.#listActiveStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
+			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
 		);
 		this.#listActiveByProviderStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
+			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
 		);
 		this.#listDisabledStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE disabled_cause IS NOT NULL ORDER BY id ASC",
+			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE disabled_cause IS NOT NULL ORDER BY id ASC",
 		);
 		this.#listDisabledByProviderStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
+			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
 		);
 		this.#insertStmt = this.#db.prepare(
-			`INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ${SQLITE_NOW_EPOCH}, ${SQLITE_NOW_EPOCH}) RETURNING id`,
+			`INSERT INTO auth_credentials (provider, credential_type, data, salt, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ${SQLITE_NOW_EPOCH}, ${SQLITE_NOW_EPOCH}) RETURNING id`,
 		);
 		this.#updateStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET credential_type = ?, data = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
-		);
-		this.#updateIfMatchesStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET credential_type = ?, data = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND data = ? AND disabled_cause IS NULL`,
-		);
-		this.#updateIfMatchesWithLeaseStmt = this.#db.prepare(
-			`UPDATE auth_credentials
-			SET credential_type = ?, data = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH}
-			WHERE id = ? AND data = ? AND disabled_cause IS NULL
-				AND EXISTS (
-					SELECT 1 FROM auth_credential_refresh_leases
-					WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?
-				)`,
+			`UPDATE auth_credentials SET credential_type = ?, data = ?, salt = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
 		);
 		this.#deleteStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
-		);
-		this.#deleteIfMatchesStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND data = ? AND disabled_cause IS NULL`,
-		);
-		this.#deleteIfMatchesWithLeaseStmt = this.#db.prepare(
-			`UPDATE auth_credentials
-			SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH}
-			WHERE id = ? AND data = ? AND disabled_cause IS NULL
-				AND EXISTS (
-					SELECT 1 FROM auth_credential_refresh_leases
-					WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?
-				)`,
 		);
 		this.#deleteByProviderStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE provider = ? AND disabled_cause IS NULL`,
@@ -573,7 +587,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
 		);
 		this.#getCredentialStateStmt = this.#db.prepare(
-			"SELECT provider, credential_type, data, identity_key, disabled_cause FROM auth_credentials WHERE id = ?",
+			"SELECT provider, credential_type, data, salt, identity_key, disabled_cause FROM auth_credentials WHERE id = ?",
 		);
 		this.#holdsCredentialRefreshLeaseStmt = this.#db.prepare(
 			"SELECT 1 FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?",
@@ -592,8 +606,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 	}
 
-	/** Opens credential storage with bounded busy retries and one-shot corruption recovery. */
-	static async open(dbPath: string = getAgentDbPath()): Promise<SqliteAuthCredentialStore> {
+	/**
+	 * Opens credential storage with bounded busy retries and one-shot corruption recovery,
+	 * then {@link unlock}s it: `encrypt` decides whether new writes are sealed.
+	 */
+	static async open(
+		dbPath: string = getAgentDbPath(),
+		options: CredentialUnlockOptions = {},
+	): Promise<SqliteAuthCredentialStore> {
 		const dir = path.dirname(dbPath);
 		const dirExists = await fs
 			.stat(dir)
@@ -622,8 +642,180 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				},
 			},
 		);
-		if (preservedPath) store.salvageQuarantinedCredentials(preservedPath);
-		return store;
+		try {
+			if (preservedPath) store.salvageQuarantinedCredentials(preservedPath);
+			await store.unlock(options);
+			return store;
+		} catch (error) {
+			try {
+				store.close();
+			} catch (closeError) {
+				logger.warn("Failed to close credential storage after unlock failure", {
+					dbPath,
+					error: String(closeError),
+				});
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * Load the OS-vault master key: needed to read sealed rows and to seal new
+	 * writes. Sealing follows `encrypt`; `"auto"` keeps a store as it is: one
+	 * holding sealed rows keeps sealing, one holding only plaintext rows stays
+	 * plaintext, and an empty store seals only when the vault answers without
+	 * prompting ({@link credentialVaultAvailable}; never on headless hosts).
+	 * Without sealing the vault is touched only to read sealed rows. A host
+	 * without a vault keeps writing plaintext unless `requireUnlocked` is set
+	 * and the store has sealed rows or needs to seal new writes.
+	 */
+	async unlock(options: CredentialUnlockOptions = {}): Promise<void> {
+		using sealed = this.#db.prepare("SELECT 1 FROM auth_credentials WHERE salt IS NOT NULL LIMIT 1");
+		const sealedRows = sealed.get() !== null;
+		const strict = options.requireUnlocked === true;
+		let encrypt = options.encrypt === true;
+		if (options.encrypt === "auto") {
+			encrypt =
+				sealedRows ||
+				(this.#db.query("SELECT 1 FROM auth_credentials LIMIT 1").get() === null &&
+					(await credentialVaultAvailable()));
+		}
+		let cipher = this.#cipher;
+		if (!cipher && (encrypt || sealedRows)) {
+			cipher = await loadCredentialCipher();
+			if (!cipher && encrypt && !(strict && sealedRows)) {
+				// Concurrent first runs would each store a key and seal rows the other cannot
+				// open; the write lock lets the second find the first one's key.
+				this.#db.run("BEGIN IMMEDIATE");
+				try {
+					// Another opener may have sealed rows while we were waiting. In
+					// strict mode never create a replacement for an existing master key.
+					cipher = await loadCredentialCipher({ create: !strict || sealed.get() === null });
+				} finally {
+					this.#db.run("COMMIT");
+				}
+			}
+		}
+		if (strict) {
+			const hasSealedRows = sealedRows || sealed.get() !== null;
+			if (options.encrypt === "auto" && hasSealedRows) encrypt = true;
+			if (!cipher && (encrypt || hasSealedRows)) {
+				throw new Error("Credential master key unavailable; unlock the OS credential vault and try again");
+			}
+			if (cipher && hasSealedRows) {
+				using rows = this.#db.prepare<{ data: string; salt: string }, []>(
+					"SELECT data, salt FROM auth_credentials WHERE salt IS NOT NULL",
+				);
+				for (const row of rows.iterate()) {
+					try {
+						cipher.open(row);
+					} catch (cause) {
+						throw new Error("The OS credential vault master key cannot open existing sealed credentials", {
+							cause,
+						});
+					}
+				}
+			}
+		}
+		this.#cipher = cipher;
+		this.#encrypt = encrypt && cipher !== undefined;
+	}
+
+	/**
+	 * Make `masterKey` this machine's credential master key: every sealed row is
+	 * re-sealed under it and the OS vault stores it, together or not at all. A row
+	 * already sealed under `masterKey` (a database copied with its key) is kept.
+	 * @returns the number of rows re-sealed
+	 * @throws {Error} when a sealed row opens under neither the current key nor
+	 * `masterKey`, or the vault refuses the key; nothing changes then.
+	 */
+	async rekey(masterKey: Uint8Array): Promise<number> {
+		const next = new CredentialCipher(masterKey);
+		this.#cipher ??= await loadCredentialCipher();
+		let resealed = 0;
+		this.#db.run("BEGIN IMMEDIATE");
+		try {
+			const rows = this.#db
+				.query("SELECT id, data, salt FROM auth_credentials WHERE salt IS NOT NULL")
+				.all() as Array<{ id: number; data: string; salt: string }>;
+			for (const row of rows) {
+				let plaintext: string | undefined;
+				for (const cipher of [this.#cipher, next]) {
+					if (!cipher || plaintext !== undefined) continue;
+					try {
+						plaintext = cipher.open(row);
+					} catch {}
+				}
+				if (plaintext === undefined) {
+					throw new Error(
+						`Credential ${row.id} is sealed under a key that is neither the current nor the new one`,
+					);
+				}
+				const sealed = next.seal(plaintext);
+				this.#db.run("UPDATE auth_credentials SET data = ?, salt = ? WHERE id = ?", [
+					sealed.data,
+					sealed.salt,
+					row.id,
+				]);
+				resealed++;
+			}
+			this.#cipher = await storeCredentialMasterKey(masterKey);
+			this.#db.run("COMMIT");
+		} catch (error) {
+			this.#db.run("ROLLBACK");
+			throw error;
+		}
+		return resealed;
+	}
+
+	/** `row` with sealed `data` opened; a row this machine cannot open reads as unparsable, like a corrupt one. */
+	#reveal<T extends { data: string; salt: string | null }>(row: T): T {
+		if (row.salt === null) return row;
+		try {
+			if (this.#cipher) return { ...row, data: this.#cipher.open({ data: row.data, salt: row.salt }) };
+		} catch {}
+		if (!this.#warnedUnopenable) {
+			this.#warnedUnopenable = true;
+			logger.warn(
+				"Stored credentials are sealed under a master key this machine's credential vault does not hold; log in again to replace them",
+			);
+		}
+		return { ...row, data: "" };
+	}
+
+	#activeRows(provider?: string): AuthRow[] {
+		const rows = (provider ? this.#listActiveByProviderStmt.all(provider) : this.#listActiveStmt.all()) as AuthRow[];
+		return rows.map(row => this.#reveal(row));
+	}
+
+	#disabledRows(provider?: string): DisabledAuthRow[] {
+		const rows = (
+			provider ? this.#listDisabledByProviderStmt.all(provider) : this.#listDisabledStmt.all()
+		) as DisabledAuthRow[];
+		return rows.map(row => this.#reveal(row));
+	}
+
+	#credentialState(id: number): CredentialStateRow | null {
+		const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
+		return row && this.#reveal(row);
+	}
+
+	/** `data` as written: sealed when this store encrypts. */
+	#seal(data: string): { data: string; salt: string | null } {
+		return this.#encrypt && this.#cipher ? this.#cipher.seal(data) : { data, salt: null };
+	}
+
+	#insertRow(provider: string, serialized: SerializedCredentialRecord): number | null {
+		const { data, salt } = this.#seal(serialized.data);
+		const row = this.#insertStmt.get(provider, serialized.credentialType, data, salt, serialized.identityKey) as
+			| { id?: number }
+			| undefined;
+		return row?.id ?? null;
+	}
+
+	#updateRow(id: number, serialized: SerializedCredentialRecord): void {
+		const { data, salt } = this.#seal(serialized.data);
+		this.#updateStmt.run(serialized.credentialType, data, salt, serialized.identityKey, id);
 	}
 
 	/**
@@ -639,6 +831,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			"provider",
 			"credential_type",
 			"data",
+			"salt",
 			"disabled_cause",
 			"disabled",
 			"identity_key",
@@ -675,8 +868,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			let restored = 0;
 			this.#db.transaction(() => {
 				using insert = this.#db.prepare(
-					`INSERT OR IGNORE INTO auth_credentials (id, provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ${SQLITE_NOW_EPOCH}), COALESCE(?, ${SQLITE_NOW_EPOCH}))`,
+					`INSERT OR IGNORE INTO auth_credentials (id, provider, credential_type, data, salt, disabled_cause, identity_key, created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${SQLITE_NOW_EPOCH}), COALESCE(?, ${SQLITE_NOW_EPOCH}))`,
 				);
 				for (const row of rows) {
 					const result = insert.run(
@@ -684,6 +877,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						row.provider as string,
 						row.credential_type as string,
 						row.data as string,
+						text(row.salt),
 						present.has("disabled_cause")
 							? disabledCause(row.disabled_cause)
 							: row.disabled === 1
@@ -924,6 +1118,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				provider TEXT NOT NULL,
 				credential_type TEXT NOT NULL,
 				data TEXT NOT NULL,
+				salt TEXT DEFAULT NULL,
 				disabled_cause TEXT DEFAULT NULL,
 				identity_key TEXT DEFAULT NULL,
 				created_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH}),
@@ -1182,6 +1377,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (fromVersion < 8) {
 			this.#migrateAuthSchemaV7ToV8();
 		}
+		if (fromVersion < 9) {
+			this.#migrateAuthSchemaV8ToV9();
+		}
 	}
 
 	#migrateAuthSchemaV0ToV1(): void {
@@ -1393,13 +1591,24 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		migrate.immediate();
 	}
 
+	/**
+	 * Add the per-row `salt` that marks a sealed `data` column. Tables rebuilt by the
+	 * v1–v4 migrations already have it (they use the current DDL).
+	 */
+	#migrateAuthSchemaV8ToV9(): void {
+		const columns = this.#db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name: string }>;
+		if (!columns.some(column => column.name === "salt")) {
+			this.#db.run("ALTER TABLE auth_credentials ADD COLUMN salt TEXT DEFAULT NULL");
+		}
+	}
+
 	#backfillCredentialIdentityKeys(): void {
 		const selectRowsStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
+			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
 		);
 		let rows: AuthRow[];
 		try {
-			rows = selectRowsStmt.all() as AuthRow[];
+			rows = (selectRowsStmt.all() as AuthRow[]).map(row => this.#reveal(row));
 		} finally {
 			selectRowsStmt.finalize();
 		}
@@ -1423,13 +1632,20 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	// ─── AuthCredentialStore interface ──────────────────────────────────────
 
 	listAuthCredentials(provider?: string): StoredAuthCredential[] {
-		const rows =
-			(provider
-				? (this.#listActiveByProviderStmt.all(provider) as AuthRow[])
-				: (this.#listActiveStmt.all() as AuthRow[])) ?? [];
-
 		const results: StoredAuthCredential[] = [];
-		for (const row of rows) {
+		for (const row of this.#activeRows(provider)) {
+			const credential = deserializeCredential(row);
+			if (!credential) continue;
+			results.push(toStoredAuthCredential(row, credential));
+		}
+		return results;
+	}
+
+	/** Active and disabled logins alike, in id order; `AgentStorage.listAuthCredentials(…, includeDisabled)`. */
+	listAllAuthCredentials(provider?: string): StoredAuthCredential[] {
+		const rows: AuthRow[] = [...this.#activeRows(provider), ...this.#disabledRows(provider)];
+		const results: StoredAuthCredential[] = [];
+		for (const row of rows.sort((a, b) => a.id - b.id)) {
 			const credential = deserializeCredential(row);
 			if (!credential) continue;
 			results.push(toStoredAuthCredential(row, credential));
@@ -1438,12 +1654,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
-		const rows =
-			(provider
-				? (this.#listDisabledByProviderStmt.all(provider) as DisabledAuthRow[])
-				: (this.#listDisabledStmt.all() as DisabledAuthRow[])) ?? [];
 		const results: DisabledCredentialSummary[] = [];
-		for (const row of rows) {
+		for (const row of this.#disabledRows(provider)) {
 			const credential = deserializeCredential(row);
 			const summary: DisabledCredentialSummary = {
 				id: row.id,
@@ -1467,8 +1679,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
 		const replace = this.#db.transaction((providerName: string, items: AuthCredential[]) => {
-			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
-			const existing = existingRows.map(row => ({
+			const existing = this.#activeRows(providerName).map(row => ({
 				id: row.id,
 				credential: deserializeCredential(row),
 				identityKey: resolveRowCredentialIdentityKey(providerName, row),
@@ -1487,17 +1698,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				);
 				if (match) {
 					matchedExistingIds.add(match.id);
-					this.#updateStmt.run(serialized.credentialType, serialized.data, serialized.identityKey, match.id);
+					this.#updateRow(match.id, serialized);
 					result.push({ id: match.id, provider: providerName, credential, disabledCause: null });
 				} else {
-					const row = this.#insertStmt.get(
-						providerName,
-						serialized.credentialType,
-						serialized.data,
-						serialized.identityKey,
-					) as { id?: number } | undefined;
-					if (row?.id) {
-						result.push({ id: row.id, provider: providerName, credential, disabledCause: null });
+					const id = this.#insertRow(providerName, serialized);
+					if (id) {
+						result.push({ id, provider: providerName, credential, disabledCause: null });
 					}
 				}
 			}
@@ -1513,6 +1719,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		const result = replace(provider, credentials);
 		this.#purgeSupersededDisabledRows(provider, result);
+		this.#purgeAnonymousOAuthTombstones(provider, result);
 		return result;
 	}
 
@@ -1520,8 +1727,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		const upsert = this.#db.transaction((providerName: string, item: AuthCredential) => {
 			const serialized = serializeCredential(providerName, item);
 			if (!serialized) return this.listAuthCredentials(providerName);
-			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
-			const existing = existingRows.map(row => ({
+			const existing = this.#activeRows(providerName).map(row => ({
 				id: row.id,
 				credential: deserializeCredential(row),
 				identityKey: resolveRowCredentialIdentityKey(providerName, row),
@@ -1540,30 +1746,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				if (!matchesReplacementCredential(providerName, row.credential, row.identityKey, item)) continue;
 				if (targetId === null) {
 					targetId = row.id;
-					this.#updateStmt.run(serialized.credentialType, serialized.data, serialized.identityKey, row.id);
+					this.#updateRow(row.id, serialized);
 					continue;
 				}
 				this.#deleteStmt.run("replaced by newer credential", row.id);
 			}
 
-			if (targetId === null) {
-				const row = this.#insertStmt.get(
-					providerName,
-					serialized.credentialType,
-					serialized.data,
-					serialized.identityKey,
-				) as { id?: number } | undefined;
-				targetId = row?.id ?? null;
-			}
-
-			const activeRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
-			const result: StoredAuthCredential[] = [];
-			for (const row of activeRows) {
-				const activeCredential = deserializeCredential(row);
-				if (!activeCredential) continue;
-				result.push(toStoredAuthCredential(row, activeCredential));
-			}
-			return result;
+			if (targetId === null) this.#insertRow(providerName, serialized);
+			return this.listAuthCredentials(providerName);
 		});
 
 		const result = upsert(provider, credential);
@@ -1592,8 +1782,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			}
 			if (!hasActiveApiKey && activeIdentityKeys.size === 0) return;
 
-			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
-			for (const row of disabledRows) {
+			for (const row of this.#disabledRows(provider)) {
 				if (hasActiveApiKey && row.credential_type === "api_key") {
 					this.#hardDeleteStmt.run(row.id);
 					continue;
@@ -1624,18 +1813,41 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
+	 * Hard-deletes identity-less disabled OAuth rows once a full replacement stored an
+	 * identity-less OAuth credential (e.g. an `mcp_oauth:*` re-login, where the provider
+	 * id is the only identity). {@link replaceAuthCredentials} declares the provider's
+	 * complete credential set, so such a row is superseded just as an unmatched active
+	 * row is. Additive writes (upsert, refresh) never call this: a sibling identity-less
+	 * login there, such as a second Devin browser login, is not a replacement.
+	 */
+	#purgeAnonymousOAuthTombstones(provider: string, stored: StoredAuthCredential[]): void {
+		const storedAnonymous = stored.some(
+			row => row.credential.type === "oauth" && resolveCredentialIdentityKey(provider, row.credential) === null,
+		);
+		if (!storedAnonymous) return;
+		try {
+			for (const row of this.#listDisabledByProviderStmt.all(provider) as AuthRow[]) {
+				if (row.credential_type === "api_key") continue;
+				if (resolveRowCredentialIdentityKey(provider, row) === null) this.#hardDeleteStmt.run(row.id);
+			}
+		} catch {
+			// Best-effort cleanup; don't let it break the main operation
+		}
+	}
+
+	/**
 	 * Rewrites a row only when its persisted bytes change: an identical write would
 	 * still bump `updated_at` and `auth_change_revision`, making every peer process
 	 * reload credentials for nothing.
 	 */
 	updateAuthCredential(id: number, credential: AuthCredential): void {
 		try {
-			const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
+			const row = this.#credentialState(id);
 			const provider = row?.provider ?? "";
 			const serialized = serializeCredential(provider, credential);
 			if (!serialized) return;
 			if (row && storesSerializedCredential(row, serialized)) return;
-			this.#updateStmt.run(serialized.credentialType, serialized.data, serialized.identityKey, id);
+			this.#updateRow(id, serialized);
 			if (provider) {
 				this.#purgeSupersededDisabledRows(provider, this.listAuthCredentials(provider));
 			}
@@ -1650,43 +1862,27 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		credential: AuthCredential,
 		lease?: CredentialRefreshLeaseFence,
 	): boolean {
-		const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
-		const provider = row?.provider ?? "";
-		const serialized = serializeCredential(provider, credential);
-		if (!serialized) return false;
-		if (
-			row &&
-			row.disabled_cause === null &&
-			serialized.data === expectedData &&
-			storesSerializedCredential(row, serialized)
-		) {
-			// The row already holds exactly this credential: the CAS (and lease fence)
-			// matches, but rewriting identical bytes would only churn the revision.
-			return !lease || Boolean(this.#holdsCredentialRefreshLeaseStmt.get(id, lease.owner, lease.nowMs));
+		// Sealed rows differ byte-wise on every write, so the compare-and-set runs on
+		// opened `data` under the write lock instead of in the UPDATE's WHERE clause.
+		let rewrittenProvider: string | undefined;
+		const matched = this.#db
+			.transaction((): boolean => {
+				const row = this.#credentialState(id);
+				if (!row || row.disabled_cause !== null || row.data !== expectedData) return false;
+				if (lease && !this.#holdsCredentialRefreshLeaseStmt.get(id, lease.owner, lease.nowMs)) return false;
+				const serialized = serializeCredential(row.provider, credential);
+				if (!serialized) return false;
+				// Rewriting identical bytes would only churn the revision.
+				if (storesSerializedCredential(row, serialized)) return true;
+				this.#updateRow(id, serialized);
+				rewrittenProvider = row.provider;
+				return true;
+			})
+			.immediate();
+		if (rewrittenProvider) {
+			this.#purgeSupersededDisabledRows(rewrittenProvider, this.listAuthCredentials(rewrittenProvider));
 		}
-		const result = lease
-			? (this.#updateIfMatchesWithLeaseStmt.run(
-					serialized.credentialType,
-					serialized.data,
-					serialized.identityKey,
-					id,
-					expectedData,
-					id,
-					lease.owner,
-					lease.nowMs,
-				) as { changes: number })
-			: (this.#updateIfMatchesStmt.run(
-					serialized.credentialType,
-					serialized.data,
-					serialized.identityKey,
-					id,
-					expectedData,
-				) as { changes: number });
-		if (result.changes === 0) return false;
-		if (provider) {
-			this.#purgeSupersededDisabledRows(provider, this.listAuthCredentials(provider));
-		}
-		return true;
+		return matched;
 	}
 
 	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
@@ -1700,7 +1896,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * CAS-style disable: only soft-deletes the row when its `data` column still
+	 * CAS-style disable: only soft-deletes the row when its (opened) `data` still
 	 * matches `expectedData` and the row has not already been disabled. Used by
 	 * the OAuth refresh-failure path to avoid clobbering a peer that rotated the
 	 * row between our pre-check and the disable.
@@ -1711,19 +1907,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		disabledCause: string,
 		lease?: CredentialRefreshLeaseFence,
 	): boolean {
-		const result = lease
-			? (this.#deleteIfMatchesWithLeaseStmt.run(
-					normalizeDisabledCause(disabledCause),
-					id,
-					expectedData,
-					id,
-					lease.owner,
-					lease.nowMs,
-				) as { changes: number })
-			: (this.#deleteIfMatchesStmt.run(normalizeDisabledCause(disabledCause), id, expectedData) as {
-					changes: number;
-				});
-		return result.changes > 0;
+		return this.#db
+			.transaction((): boolean => {
+				const row = this.#credentialState(id);
+				if (!row || row.disabled_cause !== null || row.data !== expectedData) return false;
+				if (lease && !this.#holdsCredentialRefreshLeaseStmt.get(id, lease.owner, lease.nowMs)) return false;
+				return this.#deleteStmt.run(normalizeDisabledCause(disabledCause), id).changes > 0;
+			})
+			.immediate();
 	}
 	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
 		try {
@@ -2165,8 +2356,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * Get OAuth credentials for a provider.
 	 */
 	getOAuth(provider: string): OAuthCredentials | null {
-		const rows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
-		for (const row of rows) {
+		for (const row of this.#activeRows(provider)) {
 			const credential = deserializeCredential(row);
 			if (credential && credential.type === "oauth") {
 				const { type: _type, ...oauth } = credential;
@@ -2188,8 +2378,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * Get API key for a provider.
 	 */
 	getApiKey(provider: string): string | null {
-		const rows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
-		for (const row of rows) {
+		for (const row of this.#activeRows(provider)) {
 			const credential = deserializeCredential(row);
 			if (credential && credential.type === "api_key") {
 				return credential.key;
@@ -2295,7 +2484,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#insertStmt.finalize();
 		this.#updateStmt.finalize();
 		this.#deleteStmt.finalize();
-		this.#deleteIfMatchesStmt.finalize();
 		this.#deleteByProviderStmt.finalize();
 		this.#hardDeleteStmt.finalize();
 		this.#getCacheStmt.finalize();
@@ -2313,9 +2501,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#lastUsageHistoryStmt.finalize();
 		this.#listUsageHistoryStmt.finalize();
 		this.#updateUsageHistoryStmt.finalize();
-		this.#updateIfMatchesStmt.finalize();
-		this.#updateIfMatchesWithLeaseStmt.finalize();
-		this.#deleteIfMatchesWithLeaseStmt.finalize();
 		this.#deleteCachePrefixStmt.finalize();
 		this.#acquireCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialRefreshLeaseStmt.finalize();

@@ -6,7 +6,7 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
-import type { SessionAffinity } from "./affinity";
+import type { SessionAffinity, SessionCredential } from "./affinity";
 import { raceSignal } from "./abort";
 import {
 	credentialBlockScopesForRequest,
@@ -96,6 +96,8 @@ export type TryOAuthOptions = {
 	allowFallback?: boolean;
 	/** Receives a non-definitive refresh failure that left this credential unusable; the caller filters for retryable ones. */
 	onTransientRefreshFailure?: (error: unknown) => void;
+	/** The session's sticky when selection began; see {@link SessionAffinity.recordSelection}. */
+	sessionBasis?: SessionCredential;
 };
 
 /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
@@ -916,24 +918,27 @@ export class CredentialSelector {
 			const [preferred] = candidates.splice(sessionPreferredCandidate, 1);
 			candidates.unshift(preferred);
 		}
-		// Step (b) of the auth-retry policy: when `forceRefresh` is set, re-mint
-		// the session-preferred credential (or the first candidate when no
-		// session preference exists yet) even if its cached token still looks
-		// valid — a peer/broker may have rotated it out from under us.
-		const forceRefreshIndex = options?.forceRefresh
-			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
-			: undefined;
+		// Force recovery for an owner-issued handle only on its original row.
+		// Local retries instead target the session preference or first candidate.
+		const forceRefreshId = options?.forceRefresh ? options.forceRefreshCredentialId : undefined;
+		const forceRefreshIndex =
+			options?.forceRefresh && forceRefreshId === undefined
+				? (sessionPreferredIndex ?? candidates[0]?.selection.index)
+				: undefined;
 		// Candidate IDs were captured before ranking. Their synchronous rebinds
 		// share one provider re-list; resyncs after refresh await re-read the store.
 		let preflightRows: StoredAuthCredential[] | undefined;
 		await Promise.all(
 			candidates.map(async candidate => {
-				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
 				const initialCredentialId = credentialIds[candidate.selection.index];
 				if (initialCredentialId === undefined) {
 					preflightFailures.add(candidate);
 					return;
 				}
+				const force =
+					forceRefreshId !== undefined
+						? initialCredentialId === forceRefreshId
+						: candidate.selection.index === forceRefreshIndex;
 				const beforeSync = candidate.selection.credential;
 				preflightRows ??= this.#reloadProviderRows(provider);
 				if (!this.#rebindOAuthSelection(preflightRows, candidate.selection, initialCredentialId)) {
@@ -1131,6 +1136,7 @@ export class CredentialSelector {
 					blockScope,
 					blockScopes,
 					onTransientRefreshFailure: recordTransientRefreshFailure,
+					sessionBasis: sessionCredential,
 				});
 				if (!resolved) continue;
 				// A dead grant makes `tryOAuth` re-resolve onto a sibling, whose own
@@ -1352,7 +1358,13 @@ export class CredentialSelector {
 			}
 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
 			if (options?.recordAffinity !== false) {
-				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
+				this.#deps.affinity.recordSelection(
+					provider,
+					sessionId,
+					"oauth",
+					selection.index,
+					usageOptions.sessionBasis,
+				);
 			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {

@@ -235,3 +235,92 @@ async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, 
     row = db.get_issue("octo/widget#1")
     assert row is not None
     assert row.state == "reproducing"
+
+
+def _repo_and_issue(_github, _payload):
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://x/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=1,
+        title="crash",
+        body="b",
+        state="open",
+        author="alice",
+        labels=("duplicate", "triaged"),
+        is_pull_request=False,
+    )
+    return repo, issue
+
+
+async def test_triage_issue_reopen_drops_prior_verdict(db, settings, monkeypatch, tmp_path):
+    """A maintainer reopening a bot-closed duplicate must get a fresh triage, not
+    the old `duplicate` workflow (which would close it again)."""
+
+    async def _resolve(github, payload):
+        return _repo_and_issue(github, payload)
+
+    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve)
+    db.upsert_issue(key="octo/widget#1", repo="octo/widget", number=1, state="closed")
+    db.set_issue_classification("octo/widget#1", "duplicate")
+    removed: list[tuple[int, str]] = []
+
+    async def _remove_label(_repo, number, label):
+        removed.append((number, label))
+
+    github = SimpleNamespace(remove_issue_label=_remove_label)
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_k: SimpleNamespace(branch="farm/x/y", session_dir=str(tmp_path / "sess")),
+        remove_workspace=lambda **_k: None,
+    )
+
+    async def _noop_run_task(**_kwargs):
+        return None
+
+    monkeypatch.setattr(tasks, "run_task", _noop_run_task)
+
+    await tasks.triage_issue(
+        settings=settings,
+        db=db,
+        github=github,
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload={},
+        delivery_id="d1",
+    )
+
+    row = db.get_issue("octo/widget#1")
+    assert row is not None
+    assert row.classification is None
+    assert removed == [(1, "duplicate")]
+
+
+async def test_comment_on_closed_duplicate_gets_no_reopen_reply(db, settings, monkeypatch):
+    """The close comment asks reporters to reply with what differs; the canned
+    "reopen" answer would contradict it, since reporters cannot reopen."""
+
+    async def _resolve(github, payload):
+        return _repo_and_issue(github, payload)
+
+    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve)
+    db.upsert_issue(key="octo/widget#1", repo="octo/widget", number=1, state="closed")
+    db.set_issue_classification("octo/widget#1", "duplicate")
+    posted: list[str] = []
+
+    async def _post(_repo, _number, body):
+        posted.append(body)
+
+    payload = {"comment": {"id": 5, "body": "not the same: mine happens on Windows", "user": {"login": "alice"}}}
+    await tasks.handle_comment(
+        settings=settings,
+        db=db,
+        github=SimpleNamespace(post_comment=_post),
+        sandbox=SimpleNamespace(),
+        git_transport=SimpleNamespace(),
+        payload=payload,
+        delivery_id="d2",
+    )
+
+    assert posted == []

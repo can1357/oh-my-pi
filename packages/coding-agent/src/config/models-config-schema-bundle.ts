@@ -1,6 +1,6 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
-import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
+import { MODEL_KINDS, RUNNER_API_KINDS, SPEECH_FORMATS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
 import {
 	isConfigurableFrameSize,
@@ -104,6 +104,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"toolStrictMode?": '"all_strict" | "none"',
 		"streamIdleTimeoutMs?": "number >= 0",
 		"streamMarkupHealingPattern?": '"kimi" | "dsml" | "qwen" | "thinking"',
+		"supportsPromptCacheBreakpoints?": "boolean",
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"supportsReasoningSummary?": "boolean",
@@ -114,6 +115,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsConfigurationUpdate?": "boolean",
 		"supportsSteering?": "boolean",
 		"stripImageInput?": "boolean",
+		"neutralizeDeepseekSpecialTokens?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
 		"supportsContextManagement?": "boolean",
 		"supportsEagerToolInputStreaming?": "boolean",
@@ -144,7 +146,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -154,6 +156,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		type.enumerated(...Object.keys(RUNNER_API_KINDS).filter(api => api !== "web-search")),
 	);
 	const ModelKindSchema = type.enumerated(...MODEL_KINDS.filter(kind => kind !== "search"));
+	const SpeechFormatsSchema = type.enumerated(...SPEECH_FORMATS).array();
 	const ModelInputSchema = type.enumerated(...supportedInputModalities()).array();
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
@@ -275,6 +278,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"long?": "number",
 		},
 		"premiumMultiplier?": "number",
+		"voice?": "string",
+		"speechFormats?": SpeechFormatsSchema,
 		"contextWindow?": "number",
 		"maxContextWindow?": "number",
 		"maxTokens?": "number",
@@ -336,6 +341,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"long?": "number",
 		},
 		"premiumMultiplier?": "number",
+		"voice?": "string",
+		"speechFormats?": SpeechFormatsSchema,
 		"contextWindow?": "number",
 		"maxContextWindow?": "number",
 		"maxTokens?": "number",

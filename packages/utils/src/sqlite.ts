@@ -52,15 +52,31 @@ export type SqliteFileIdentity = string | null | undefined;
  * so the opener that quarantines the store closes its peers' dead handles too.
  */
 const pendingCorruptHandles = new Map<string, Set<Database>>();
+const quarantineReleases = new Map<string, Set<() => void>>();
 
-function corruptHandleKey(dbPath: string): string {
+function sqliteHandleKey(dbPath: string): string {
 	const resolved = path.resolve(dbPath);
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+/** Release a known local handle after corruption is backed up but before SQLite's original files are removed. */
+export function registerSqliteQuarantineRelease(dbPath: string, release: () => void): () => void {
+	const key = sqliteHandleKey(dbPath);
+	let releases = quarantineReleases.get(key);
+	if (!releases) {
+		releases = new Set();
+		quarantineReleases.set(key, releases);
+	}
+	releases.add(release);
+	return () => {
+		releases.delete(release);
+		if (releases.size === 0 && quarantineReleases.get(key) === releases) quarantineReleases.delete(key);
+	};
+}
+
 function registerCorruptHandle(dbPath: string, db: Database | undefined): void {
 	if (!db) return;
-	const key = corruptHandleKey(dbPath);
+	const key = sqliteHandleKey(dbPath);
 	let handles = pendingCorruptHandles.get(key);
 	if (!handles) {
 		handles = new Set();
@@ -71,7 +87,7 @@ function registerCorruptHandle(dbPath: string, db: Database | undefined): void {
 
 function unregisterCorruptHandle(dbPath: string, db: Database | undefined): void {
 	if (!db) return;
-	const key = corruptHandleKey(dbPath);
+	const key = sqliteHandleKey(dbPath);
 	const handles = pendingCorruptHandles.get(key);
 	if (!handles) return;
 	handles.delete(db);
@@ -80,7 +96,7 @@ function unregisterCorruptHandle(dbPath: string, db: Database | undefined): void
 
 /** Closes peers' failed handles on the store; each peer still closes (idempotently) and adopts on its own path. */
 function closePeerCorruptHandles(dbPath: string, own: Database | undefined): void {
-	const handles = pendingCorruptHandles.get(corruptHandleKey(dbPath));
+	const handles = pendingCorruptHandles.get(sqliteHandleKey(dbPath));
 	if (!handles) return;
 	for (const peer of handles) {
 		if (peer === own) continue;
@@ -240,6 +256,8 @@ function quarantineCorruptSqliteStore(dbPath: string, db: Database | undefined):
 	// each peer must keep its own handle until it closes it after adopting the
 	// replacement; closing it here races the peer's recovery on POSIX.
 	if (process.platform === "win32") closePeerCorruptHandles(dbPath, db);
+	const releases = quarantineReleases.get(sqliteHandleKey(dbPath));
+	if (releases) for (const release of releases) release();
 
 	const removed: string[] = [];
 	try {

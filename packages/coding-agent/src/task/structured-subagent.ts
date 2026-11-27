@@ -28,7 +28,7 @@ import {
 } from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { Settings } from "../config/settings";
-import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import { isProviderEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
@@ -226,6 +226,8 @@ export interface EffectiveSubagentPolicy {
 	structured: boolean;
 	/** Present for a per-call `model`: every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
+	/** {@link modelOverride} is the caller's per-call selection, not a spawn-hook replacement; its explicit `:level`s are the caller's. */
+	callerSelectedModel?: boolean;
 	schema: StructuredSubagentSchemaResolution;
 	/** Registry a per-call role was resolved against when the session had none; the child reuses it. */
 	modelRegistry?: ModelRegistry;
@@ -561,9 +563,12 @@ async function preflightPerCallModel(
 				fail(error.message);
 			}
 			const identity = formatModelStringWithRouting(model);
+			// A level from a role's configured value is the operator's, not the caller's: an `effort`
+			// hint picks the level instead, as it does over any configured model suffix.
+			const operatorLevel = candidateRole !== undefined && !candidate.includes(":") && request.effort !== undefined;
 			// Keep an explicit :inherit: omitting it would use the agent's configured effort instead.
 			patterns.push(
-				resolution.explicitThinkingLevel && resolution.thinkingLevel
+				resolution.explicitThinkingLevel && resolution.thinkingLevel && !operatorLevel
 					? `${identity}:${resolution.thinkingLevel}`
 					: identity,
 			);
@@ -596,12 +601,7 @@ const inflightDiscovery = new Map<string, { fn: typeof discoverAgents; promise: 
 
 function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
-	const policy = [
-		isProviderEnabled("omp-plugins"),
-		isProviderEnabled("claude-plugins"),
-		isUserSourceEnabled("claude-plugins"),
-		isUserSourceEnabled("claude"),
-	].join(",");
+	const policy = [isProviderEnabled("omp-plugins"), isProviderEnabled("claude-plugins")].join(",");
 	const key = `${path.resolve(cwd)}\0${policy}\0${JSON.stringify(extensionRoots ?? null)}`;
 	const existing = inflightDiscovery.get(key);
 	if (existing && existing.fn === fn) return existing.promise;
@@ -745,6 +745,7 @@ export async function resolveEffectiveSubagentPolicy(
 		oauthAccountPools,
 		parentActiveModelPattern,
 		perCallModelGrants,
+		callerSelectedModel: perCall !== undefined,
 		modelRegistry: perCall?.modelRegistry,
 		structured,
 		schema,
@@ -788,6 +789,9 @@ async function applySpawnHook(
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
+			...(request.parentToolCallId !== undefined
+				? { parentToolCallId: request.parentToolCallId, itemIndex: request.index ?? 0 }
+				: {}),
 		},
 		request.signal,
 	);
@@ -797,7 +801,15 @@ async function applySpawnHook(
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
-	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
+	const unchanged =
+		replacement.length === policy.modelOverride?.length &&
+		replacement.every((pattern, index) => pattern === policy.modelOverride?.[index]);
+	return {
+		...policy,
+		modelOverride: replacement,
+		modelRoute: spawnResult.note,
+		callerSelectedModel: policy.callerSelectedModel === true && unchanged,
+	};
 }
 
 /** Reserve a session-global agent id only after preflight has succeeded. */
@@ -901,6 +913,7 @@ function buildExecutorOptions(
 		parentActiveProvider: session.getActiveModel?.()?.provider,
 		journalTaskLabel: journalCompletion(session.sessionManager, { purpose: "task-label" }),
 		perCallModelGrants: policy.perCallModelGrants,
+		callerSelectedModel: policy.callerSelectedModel,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: policy.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,

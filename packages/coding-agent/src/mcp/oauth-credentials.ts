@@ -36,6 +36,46 @@ export function hasMcpAuthorizationHeader(config: MCPServerConfig): boolean {
 	return Object.keys(config.headers ?? {}).some(header => header.toLowerCase() === "authorization");
 }
 
+function mcpOAuthCredentialCandidatesForServer(
+	auth: MCPAuthConfig | undefined,
+	serverUrl: string | undefined,
+	allowUrlKeyedFallback: boolean,
+): string[] {
+	if (auth && auth.type !== "oauth") return [];
+	const candidates = mcpOAuthCredentialIdsForServerUrl(serverUrl);
+	const pointer = auth?.credentialId;
+	const eligiblePointer =
+		pointer && (!pointer.startsWith("mcp_oauth:profile:") || candidates.includes(pointer)) ? pointer : undefined;
+	if (!allowUrlKeyedFallback) return eligiblePointer ? [eligiblePointer] : [];
+	if (eligiblePointer) {
+		const duplicate = candidates.indexOf(eligiblePointer);
+		if (duplicate !== -1) candidates.splice(duplicate, 1);
+		candidates.unshift(eligiblePointer);
+	}
+	return candidates;
+}
+
+export function mcpOAuthCredentialCandidates(config: MCPServerConfig): string[] {
+	const serverUrl = config.type === "http" || config.type === "sse" ? config.url : undefined;
+	return mcpOAuthCredentialCandidatesForServer(config.auth, serverUrl, !hasMcpAuthorizationHeader(config));
+}
+
+/** Provider keys can contain configured URLs and must not be sent over the auth daemon link. */
+export function mcpOAuthProviderDigest(provider: string): string {
+	return Bun.SHA256.hash(provider, "hex");
+}
+
+function lookupMcpOAuthCredentialCandidates(
+	authStorage: AuthStorage,
+	candidates: readonly string[],
+): MCPOAuthCredentialLookup | undefined {
+	for (const credentialId of candidates) {
+		const credential = authStorage.credentials.get(credentialId);
+		if (credential?.type === "oauth") return { credentialId, credential };
+	}
+	return undefined;
+}
+
 export function lookupMcpOAuthCredentialForServer(
 	authStorage: AuthStorage | null | undefined,
 	auth: MCPAuthConfig | undefined,
@@ -43,39 +83,16 @@ export function lookupMcpOAuthCredentialForServer(
 	options: { allowUrlKeyedFallback?: boolean } = {},
 ): MCPOAuthCredentialLookup | undefined {
 	if (!authStorage) return undefined;
-	if (auth && auth.type !== "oauth") return undefined;
-	const urlKeyedCredentialIds = mcpOAuthCredentialIdsForServerUrl(serverUrl);
-	if (
-		auth?.credentialId &&
-		(!auth.credentialId.startsWith("mcp_oauth:profile:") || urlKeyedCredentialIds.includes(auth.credentialId))
-	) {
-		const credential = authStorage.credentials.get(auth.credentialId);
-		if (credential?.type === "oauth") {
-			return { credentialId: auth.credentialId, credential };
-		}
-	}
-	if (options.allowUrlKeyedFallback === false) return undefined;
-	for (const credentialId of urlKeyedCredentialIds) {
-		const credential = authStorage.credentials.get(credentialId);
-		if (credential?.type === "oauth") {
-			return { credentialId, credential };
-		}
-	}
-	return undefined;
+	const candidates = mcpOAuthCredentialCandidatesForServer(auth, serverUrl, options.allowUrlKeyedFallback !== false);
+	return lookupMcpOAuthCredentialCandidates(authStorage, candidates);
 }
 
 export function lookupMcpOAuthCredential(
 	authStorage: AuthStorage | null | undefined,
 	config: MCPServerConfig,
 ): MCPOAuthCredentialLookup | undefined {
-	const auth = config.auth;
-	if (config.type !== "http" && config.type !== "sse") {
-		return lookupMcpOAuthCredentialForServer(authStorage, auth, undefined);
-	}
-	if (hasMcpAuthorizationHeader(config)) {
-		return lookupMcpOAuthCredentialForServer(authStorage, auth, config.url, { allowUrlKeyedFallback: false });
-	}
-	return lookupMcpOAuthCredentialForServer(authStorage, auth, config.url);
+	if (!authStorage) return undefined;
+	return lookupMcpOAuthCredentialCandidates(authStorage, mcpOAuthCredentialCandidates(config));
 }
 
 export function selectMcpOAuthRefreshMaterial(
@@ -167,6 +184,8 @@ export async function refreshStoredManagedMcpOAuthCredential(
 		auth?: MCPAuthConfig;
 		forceRefresh?: boolean;
 		keepCredentialOnRefreshFailure?: boolean;
+		/** Reject a grant when the current stored row would need runtime-only material. */
+		allowRefresh?: (credential: MCPStoredOAuthCredential) => boolean;
 		onRefreshFailure?: (error: unknown) => void;
 	} = {},
 ): Promise<StoredOAuthRefreshResult<MCPStoredOAuthCredential>> {
@@ -190,6 +209,7 @@ export async function refreshStoredManagedMcpOAuthCredential(
 		forceRefresh: opts.forceRefresh,
 		refreshSkewMs: 5 * 60_000,
 		canRefresh: current => {
+			if (opts.allowRefresh?.(current) === false) return false;
 			const material = selectMcpOAuthRefreshMaterial(current, opts.auth);
 			return Boolean(current.refresh && material?.tokenUrl);
 		},

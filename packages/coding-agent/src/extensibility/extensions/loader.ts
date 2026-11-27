@@ -274,7 +274,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: RegisteredCommand["handler"];
 		},
 	): void {
-		this.extension.commands.set(name, { name, ...options });
+		this.extension.commands.set(name, { name, ...options, extensionPath: this.extension.path });
 	}
 
 	setLabel(label: string): void {
@@ -470,13 +470,13 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.setSessionName(name);
 	}
 
-	registerProvider(name: string, config: ProviderConfig): void {
+	registerProvider(name: string, config: ProviderConfig): void | Promise<void> {
 		this.extension.registersProviders = true;
-		this.runtime.registerProvider(name, config, this.extension.path);
+		return this.runtime.registerProvider(name, config, this.extension.path);
 	}
 
-	unregisterProvider(name: string): void {
-		this.runtime.unregisterProvider(name, this.extension.path);
+	unregisterProvider(name: string): void | Promise<void> {
+		return this.runtime.unregisterProvider(name, this.extension.path);
 	}
 }
 
@@ -793,9 +793,9 @@ export async function discoverExtensionPaths(
 	if (ambient) {
 		// 1. Discover extension modules via capability API (native .omp/.pi only).
 		// Scope the load to the native provider — the extension-module capability
-		// also has claude/codex/gemini/opencode providers, and their items were
+		// also has claude/codex/opencode providers, and their items were
 		// discarded here anyway (see #4198). The provider filter skips the walk
-		// entirely instead of running four foreign directory scans and dropping
+		// entirely instead of running three foreign directory scans and dropping
 		// the results.
 		const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
 			...loadOptions,

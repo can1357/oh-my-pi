@@ -7,11 +7,7 @@
  * remaining model/tier scopes, exact-model groups outrank provider-wide ones
  * and untiered groups outrank tiered ones.
  */
-import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import {
-	getAntigravityCounterKeyForModel,
-	scopeAntigravityLimitsForModel,
-} from "@oh-my-pi/pi-ai/usage/google-antigravity";
+import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { summarizeUsageResetCredits } from "../../session/usage-display";
 import type { StatusQuota } from "../../ui/status/facts";
 import type { CodexResetUsageSnapshot } from "../view-model/overlays/codex-reset-fireworks";
@@ -107,8 +103,6 @@ export function quotaFromReports(
 ): StatusQuota | undefined {
 	if (!Array.isArray(reports)) return undefined;
 	const activeModelId = normalizeScopeValue(context.modelId);
-	const antigravityCounter =
-		context.provider === "google-antigravity" ? getAntigravityCounterKeyForModel(context.modelId) : undefined;
 	const monthlyProvider = context.provider !== undefined && MONTHLY_SUBSCRIPTION_PROVIDERS[context.provider] === true;
 	const groups = new Map<string, ScopeGroup>();
 	const resetReports: UsageReport[] = [];
@@ -118,11 +112,7 @@ export function quotaFromReports(
 		if (report.resetCredits && (!context.identity || reportMatchesExactIdentity(report, context.identity))) {
 			resetReports.push(report);
 		}
-		const limits: readonly UsageLimit[] =
-			report.provider === "google-antigravity" && antigravityCounter
-				? scopeAntigravityLimitsForModel(report, context)
-				: report.limits;
-		for (const limit of limits) {
+		for (const limit of report.limits) {
 			if (!limit?.scope || !limit.amount) continue;
 			if (context.identity && !host.limitMatchesActiveAccount(report, limit, context.identity)) continue;
 			const fraction = limit.amount.usedFraction;

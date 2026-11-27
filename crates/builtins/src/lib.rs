@@ -57,6 +57,15 @@ mod quoting_style;
 mod time_zone;
 #[cfg(any(feature = "util.cp", feature = "util.mv"))]
 mod progress;
+/// Refusal of whole-disk walks, shared by the recursive search utilities.
+#[cfg(any(
+	feature = "util.ast-grep",
+	feature = "util.fd",
+	feature = "util.find",
+	feature = "util.grep",
+	feature = "util.rg"
+))]
+mod root_guard;
 
 // ── Utility builtins ──────────────────────────────────────────────────────────
 // Ports of the standalone command-line utilities the shell ships in-process.
@@ -136,6 +145,10 @@ mod entr;
 mod env;
 #[cfg(all(feature = "util.errno", unix))]
 mod errno;
+/// Command lines sized to what one `exec` takes, for `xargs`, `find -exec +`
+/// and `fd -X`.
+#[cfg(any(feature = "util.fd", feature = "util.find", feature = "util.xargs"))]
+mod exec_line;
 #[cfg(feature = "util.fd")]
 mod fd;
 #[cfg(all(feature = "util.file", any(unix, windows)))]
