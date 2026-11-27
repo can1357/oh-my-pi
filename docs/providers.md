@@ -409,11 +409,11 @@ Path scopes are resolved **after** the settings merge. Because a higher-preceden
 | Entry type            | Examples                                                                      | Effect                                                          |
 | --------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | Model provider ID     | `anthropic`, `openai`, `google`, `groq`, `openrouter`, `ollama`, `my-gateway` | Removes that provider's models from availability.               |
-| Discovery provider ID | `native`, `claude`, `codex`, `gemini`, `agents`, `github`                     | Stops that discovery source from contributing capability items. |
+| Discovery provider ID | `native`, `claude`, `codex`, `agents`, `github`                             | Stops that discovery source from contributing capability items. |
 
 `enabledProviders` controls opt-in user-level foreign discovery sources; it is not a model-provider allowlist. Project-level foreign sources have separate discovery behavior. Use model settings to narrow model selection.
 
-Watch the related names. The Google Gemini **API** models use the model provider ID `google`; `gemini` is a **discovery** provider ID (the source that reads `GEMINI.md`), not the Google model provider. Use discovery IDs only when you intend to disable an entire config source. See [Context files](./context-files.md) for the discovery-provider side.
+Watch the related names. The Google Gemini **API** models use the model provider ID `google`; discovery provider IDs such as `claude` or `codex` name config sources, not model providers. Use discovery IDs only when you intend to disable an entire config source. See [Context files](./context-files.md) for the discovery-provider side.
 
 ## Custom providers in `models.yml`
 
@@ -499,6 +499,6 @@ disabledProviders:
 
 **A provider still appears even though I disabled it.** `disabledProviders` arrays are replaced, not merged: a project `<project>/.omp/config.yml` array fully overrides the global one. Verify the _effective_ list for the directory you are in (path-scoped entries only apply at or under their configured path), and confirm the ID is spelled exactly. Use `omp config get disabledProviders` to inspect the merged value (see [Settings](./settings.md)).
 
-**A discovery provider name had no effect on models (or vice-versa).** The ID namespace is shared. `gemini`, `codex`, `claude`, `native`, and `agents` are discovery-source IDs; the Google model backend is `google`. Make sure you are disabling the right kind of provider.
+**A discovery provider name had no effect on models (or vice-versa).** The ID namespace is shared. `codex`, `claude`, `native`, and `agents` are discovery-source IDs; the Google model backend is `google`. Make sure you are disabling the right kind of provider.
 
 **A custom `models.yml` provider does not load.** A YAML or schema error makes the registry skip the custom file. Validate the file with `omp models` (use `omp models find <substr>` to scope it to one provider). A provider with custom `models` needs `baseUrl`, authentication (`apiKey`, unless `auth: none` or `auth: oauth`), and `api` at provider level or on every model. A provider with no models is also valid when it defines at least one supported override (`baseUrl`, `headers`, `apiKey`, `auth: none`, `compat`, `disableStrictTools`, `guardrailIdentifier`, `requestMetadata`, `remoteCompaction`, `modelOverrides`, or `discovery`). Discovery providers may omit `models`, but need provider-level `api` unless `discovery.type` is `proxy`. An explicit `ollama`, `lm-studio`, or `llama.cpp` entry intentionally replaces built-in discovery for that ID. See [Model and Provider Configuration](./models.md).

@@ -42,13 +42,6 @@ const FIXTURES: Fixture[] = [
 		}),
 	},
 	{
-		provider: "gemini",
-		file: ".gemini/settings.json",
-		content: JSON.stringify({
-			mcpServers: { markitdown: { command: "uvx", args: ["markitdown-mcp"], type: "stdio", enabled: false } },
-		}),
-	},
-	{
 		provider: "windsurf",
 		file: ".windsurf/mcp_config.json",
 		content: JSON.stringify({
@@ -80,7 +73,6 @@ interface CompoundFixture {
 const COMPOUND_FIXTURES: CompoundFixture[] = [
 	{ provider: "claude", userFile: ".claude.json", projectFile: ".claude/.mcp.json" },
 	{ provider: "cursor", userFile: ".cursor/mcp.json", projectFile: ".cursor/mcp.json" },
-	{ provider: "gemini", userFile: ".gemini/settings.json", projectFile: ".gemini/settings.json" },
 	{ provider: "windsurf", userFile: ".codeium/windsurf/mcp_config.json", projectFile: ".windsurf/mcp_config.json" },
 ];
 

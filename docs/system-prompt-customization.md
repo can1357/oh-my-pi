@@ -35,7 +35,7 @@ Programmatic API options use separate contracts, not CLI flags; see [Programmati
 
 That empty literal suppresses discovered `SYSTEM.md` and `SYSTEM_TEMPLATE.md`, but does not disable OMP-generated instructions; only the programmatic `CreateAgentSessionOptions.systemPrompt` full-replacement option does that.
 
-Without an explicit custom source, discovery is project-first, then user-level. Within each scope a literal beats a template: project `SYSTEM.md` beats project `SYSTEM_TEMPLATE.md`, which beats user `SYSTEM.md`, which beats user `SYSTEM_TEMPLATE.md`. `SYSTEM.md` is the long-established override, so an existing literal keeps working until its author deliberately removes it in favor of a template. Both filenames resolve through the same capability providers, so ancestor walk-up (repo-root `.omp` from a nested cwd) and `.agent` / `.agents` directories apply to templates exactly as they do to literals. `.claude`, `.codex`, and `.gemini` project bases resolve at the launch cwd. Foreign user bases require `enabledProviders` opt-in; `CLAUDE_CONFIG_DIR` also opts in and relocates the Claude user base.
+Without an explicit custom source, discovery is project-first, then user-level. Within each scope a literal beats a template: project `SYSTEM.md` beats project `SYSTEM_TEMPLATE.md`, which beats user `SYSTEM.md`, which beats user `SYSTEM_TEMPLATE.md`. `SYSTEM.md` is the long-established override, so an existing literal keeps working until its author deliberately removes it in favor of a template. Both filenames resolve through the same capability providers, so ancestor walk-up (repo-root `.omp` from a nested cwd) and `.agent` / `.agents` directories apply to templates exactly as they do to literals. `.claude` and `.codex` project bases resolve at the launch cwd. Foreign user bases require `enabledProviders` opt-in; `CLAUDE_CONFIG_DIR` also opts in and relocates the Claude user base.
 
 The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. Both capability discovery (`SYSTEM.md`, `SYSTEM_TEMPLATE.md`) and the shared config-base lookup (`APPEND_SYSTEM.md`, `TITLE_SYSTEM.md`) resolve the native user base through `getAgentDir()`, so in the default profile `PI_CODING_AGENT_DIR` relocates all four; named profiles ignore it. An explicit CLI flag or programmatic API option still wins over every discovered file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
 
@@ -85,14 +85,14 @@ generated block — the append text is emitted unchanged, without a heading.
 
 Which automatic inputs reach each kind of session. An input applies only when it exists or is enabled, and Personality means the default template's personality block. Advisors build a dedicated prompt that also carries memory instructions and the shared and per-advisor instructions; `@path` imports in `WATCHDOG.md` are expanded.
 
-| Session type     | `AGENTS.md`   | `CLAUDE.md` / `GEMINI.md` | `APPEND_SYSTEM.md` / `--append-system-prompt` | MCP tools | MCP server instructions | `WATCHDOG.md` | Personality |
+| Session type     | `AGENTS.md`   | `CLAUDE.md` | `APPEND_SYSTEM.md` / `--append-system-prompt` | MCP tools | MCP server instructions | `WATCHDOG.md` | Personality |
 | ---------------- | ------------- | ------------------------- | --------------------------------------------- | --------- | ----------------------- | ------------- | ----------- |
 | Main session     | Discovered    | Discovered                | Yes                                           | Yes       | Yes                     | No            | Configured  |
 | Task subagent    | Not inherited | Inherited                 | No                                            | Inherited | Inherited               | No            | `none`      |
 | Advisor/watchdog | Inherited     | Inherited                 | No                                            | No        | No                      | Yes           | None        |
 
 1. Task subagents drop every context file whose basename is `agents.md` (case-insensitive), whether inherited from the parent or discovered for an additional workspace root, including the user-level `~/.omp/agent/AGENTS.md`. Text pulled in through `@` imports is not filtered.
-2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. Foreign user files require `enabledProviders` opt-in. A standalone `CLAUDE.md` is supported; `GEMINI.md` is read from the user and project `.gemini` directories.
+2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. Foreign user files require `enabledProviders` opt-in. A standalone `CLAUDE.md` is supported.
 3. A task agent's `tools:` list does not remove MCP tools or server instructions: the tools stay available top-level or as bash tool commands. Plan-mode tasks and children of restricted sessions run with `restrictToolNames`, which drops both.
 
 ## Handlebars template route

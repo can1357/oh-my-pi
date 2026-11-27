@@ -36,14 +36,13 @@ OMP also translates these current tool-native sources:
 
 - Claude Code: `~/.claude.json`, `~/.claude/mcp.json`, and project `.claude/.mcp.json` / `.claude/mcp.json`
 - Codex: `~/.codex/config.toml` and `.codex/config.toml` (`[mcp_servers.*]`)
-- Gemini CLI: `~/.gemini/settings.json` and `.gemini/settings.json`
 - OpenCode: `opencode.json` / `opencode.jsonc` in `~/.config/opencode/`, the project root, and project `.opencode/` (the `mcp` map)
 - Cursor: `~/.cursor/mcp.json` and `.cursor/mcp.json`
 - Windsurf: `~/.codeium/windsurf/mcp_config.json` and `.windsurf/mcp_config.json`
 - VS Code: project-only `.vscode/mcp.json` using `mcp.servers`
 - installed Claude marketplace plugins, OMP extension packages, and portable Agent Plugins (`plugin.json` plus root `mcp.json`) that declare MCP servers
 
-For Claude Code, Codex, Gemini CLI, Cursor, and Windsurf, the project entry is encountered before its same-named user entry — matching OMP-native config, whose project entry precedes its active-profile user entry — so a project `enabled: false` suppresses a same-named user server. OpenCode deep-merges each server across layers: project overrides user, `.opencode/` overrides the project root, and `.jsonc` overrides `.json` within a directory. Partial overrides inherit fields from lower layers. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
+For Claude Code, Codex, Cursor, and Windsurf, the project entry is encountered before its same-named user entry — matching OMP-native config, whose project entry precedes its active-profile user entry — so a project `enabled: false` suppresses a same-named user server. OpenCode deep-merges each server across layers: project overrides user, `.opencode/` overrides the project root, and `.jsonc` overrides `.json` within a directory. Partial overrides inherit fields from lower layers. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
 
 ### Profiles
 
@@ -532,11 +531,10 @@ OMP loads providers in descending priority. The MCP-capable order is:
 3. Claude Code
 4. Agent Plugins
 5. Claude marketplace plugins and Codex
-6. Gemini CLI
-7. OpenCode
-8. Cursor and Windsurf
-9. VS Code
-10.   root `mcp.json` / `.mcp.json` fallback files
+6. OpenCode
+7. Cursor and Windsurf
+8. VS Code
+9. root `mcp.json` / `.mcp.json` fallback files
 
 Across providers, the first definition wins. Duplicate names are not merged; OpenCode's internal config layers are the exception described above. A differently named definition is also shadowed when its transport, endpoint/command inputs, auth, and request-id mode are equivalent to a higher-priority definition.
 

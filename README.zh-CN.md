@@ -573,7 +573,7 @@ omp 派生自 [Mario Zechner](https://github.com/mariozechner) 的 [Pi](https://
 
 ### 自动发现
 
-首次运行时，omp 会继承磁盘上已有的一切：来自 `.claude`、`.cursor`、`.windsurf`、`.gemini`、`.codex`、`.cline`、`.github/copilot` 和 `.vscode` 的规则、技能和 MCP 服务器。无需迁移脚本。
+首次运行时，omp 会继承磁盘上已有的一切：来自 `.claude`、`.cursor`、`.windsurf`、`.codex`、`.cline`、`.github/copilot` 和 `.vscode` 的规则、技能和 MCP 服务器。无需迁移脚本。
 
 ### 可扩展性
 

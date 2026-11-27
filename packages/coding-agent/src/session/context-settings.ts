@@ -26,7 +26,6 @@ export const cfgWorkspaceAdditionalDirectories = register({
 const BUILTIN_CONTEXT_FILE_NAMES: Record<string, true> = {
 	"agents.md": true,
 	"claude.md": true,
-	"gemini.md": true,
 	"copilot-instructions.md": true,
 };
 
@@ -44,7 +43,7 @@ function contextFileNameError(entry: unknown): string | undefined {
 	return undefined;
 }
 
-/** Extra instruction filenames discovered in addition to AGENTS.md / CLAUDE.md / GEMINI.md. */
+/** Extra instruction filenames discovered in addition to AGENTS.md / CLAUDE.md. */
 export const cfgContextFilesExtra = register({
 	id: "contextFiles.extra",
 	type: "array",
