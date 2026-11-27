@@ -1,0 +1,9 @@
+{
+	"name": "notes-cli",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"notes": "bun src/cli.ts",
+		"test": "bun test"
+	}
+}

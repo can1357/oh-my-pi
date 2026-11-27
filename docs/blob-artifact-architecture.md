@@ -176,7 +176,8 @@ Handled by `AgentProtocolHandler` over registered active session artifact direct
 - `agent://<id>` returns markdown text; nested subagent outputs use the dotted id (`agent://Parent.Child` reads `Parent.Child.md`)
 - resolution refreshes persisted agent-roster references when a calling session file is available and searches that root session's artifact directory before process-global registry directories
 - `write agent://<id>` sends a peer message when IRC is available; `agent://all` is a write-only broadcast for the main agent (refused from subagents), not an output file
-- a slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
+- `write agent://<id>/model` selects the configured model of a permitted task agent kind, including user-tagged kinds such as `m1`. Add an optional effort suffix (`task:high`). `write agent://<id>/effort` changes only the current model's effort (`high`, `auto`, etc.). Both act only on the calling agent or one of its live direct children in the same instance. They report the applied selection, clamp unsupported effort to a viable level, and do not change user defaults.
+- a slash path on a read is JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
 - extraction reads the `<id>.json` sidecar when present, else parses `<id>.md`; it requires valid JSON and returns `application/json` (a string leaf is returned as `text/markdown` prose)
 - an id with no `<id>.md` yet that is registered in the agent registry (the registry `write agent://<id>` delivers to) resolves to a progress document instead of an error: the agent's status, every accepted `yield` payload so far (non-terminal sections included), and its latest assistant text, read from the live session or else its retained session file. Once `<id>.md` exists it wins. JSON-path extraction on such an id throws `Output <id> is not published yet`
 
@@ -252,7 +253,7 @@ The two systems intersect only indirectly: both reduce session JSONL bloat, but 
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts) — blob reference format, hashing, put/get, externalize/resolve helpers.
 - [`src/session/artifacts.ts`](../packages/coding-agent/src/session/artifacts.ts) — spill storage at the `local://` root and numeric spill ID/path allocation.
 - [`src/internal-urls/local-root.ts`](../packages/coding-agent/src/internal-urls/local-root.ts) — where the session's `local://` root (and so its spills) lives.
-- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts) — `OutputSink` truncation/spill-to-file behavior and summary metadata.
+- [`packages/coding-agent/src/tools/streaming-output.ts`](../packages/coding-agent/src/tools/streaming-output.ts) — `OutputSink` truncation/spill-to-file behavior and summary metadata.
 - [`src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts) — `BlobStore`/`ArtifactManager` construction, persistence-transform and blob-rehydration call sites, session fork/move interactions.
 - [`src/session/session-persistence.ts`](../packages/coding-agent/src/session/session-persistence.ts) — `prepareEntryForPersistence()`: large-string truncation, transient-field stripping, and synchronous image-blob externalization.
 - [`src/session/session-loader.ts`](../packages/coding-agent/src/session/session-loader.ts) — `resolveBlobRefsInEntries()`: blob-ref rehydration to base64 / data URLs on load.

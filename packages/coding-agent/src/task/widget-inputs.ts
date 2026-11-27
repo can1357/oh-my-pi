@@ -4,7 +4,7 @@
  * source, every source of the jobs the subagent itself started re-exposed as
  * `<jobId>:<sourceId>`, and a brief read live from the job's progress.
  */
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress } from "./task-details";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { TextTap } from "../job-widgets/text-tap";
 import {

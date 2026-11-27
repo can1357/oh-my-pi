@@ -217,6 +217,7 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 		s: &'a mut Session,
 		ig: &'a Ignorer,
 		dir: &'a Dir,
+		abs: &'a Path,
 		rel: &'a [u8],
 		parent: Option<&'a Arc<Frame>>,
 		out: &'a mut Vec<String>,
@@ -228,7 +229,7 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 			for r in listing.records() {
 				names.record(listing.name(r), r.file_type, sources.custom);
 			}
-			let frame = DirIgnores::load(s, dir, names, sources, false)
+			let frame = DirIgnores::load(s, dir, abs, names, sources, false)
 				.await
 				.frame(parent, names, rel);
 			let mut scratch = Vec::new();
@@ -248,7 +249,8 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 				}
 				if is_dir {
 					let sub = s.open_child(dir, name).await.unwrap();
-					visit(s, ig, &sub, &child, frame.as_ref(), out).await;
+					let sub_abs = omp_vfs::child_path(abs, OsStr::new(str::from_utf8(name).unwrap()));
+					visit(s, ig, &sub, &sub_abs, &child, frame.as_ref(), out).await;
 				} else {
 					out.push(String::from_utf8(child).unwrap());
 				}
@@ -259,7 +261,7 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 	let (ig, frame) = Ignorer::new(&mut s, fs, Path::new(root), sources).await;
 	let dir = s.open_dir(Path::new(root)).await.unwrap();
 	let mut out = Vec::new();
-	visit(&mut s, &ig, &dir, b"", frame.as_ref(), &mut out).await;
+	visit(&mut s, &ig, &dir, Path::new(root), b"", frame.as_ref(), &mut out).await;
 	out.sort();
 	out
 }

@@ -1,7 +1,7 @@
 import type { OAuthAccountSummary } from "../../session/auth-storage";
 import { formatActiveAccountLabel } from "./active-oauth-account";
 
-import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+import type { SessionPinAccount } from "../../modes/view-model/overlays/session-account-selector";
 
 /** Add stable user-facing labels to provider account summaries. */
 export function toSessionPinAccounts(accounts: readonly OAuthAccountSummary[]): SessionPinAccount[] {

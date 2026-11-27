@@ -26,13 +26,13 @@ import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { UsageLimitState } from "../../session/usage-limit";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
+import type { AgentProgress } from "../../task/task-details";
 import type { RpcModelPickerResult } from "./rpc-model-picker";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import type { TodoPhase } from "../../tools/details/todo";
+import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
+import type { LivePhase } from "../view-model/apps/live-visualizer";
 import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
@@ -222,8 +222,10 @@ export interface RpcSessionState {
 	/** Displayable queue-chip text for pending user-authored messages, mirroring
 	 *  `AgentSession.getQueuedMessages()`. Render the queue from this snapshot
 	 *  (and the `queue_update` event) instead of tracking chips independently.
-	 *  `liveSteered` counts the leading `steering` entries already sent into the
-	 *  streaming response; `remove_queued_message` cannot reach them. */
+	 *  Input the agent already took leads its list until the transcript records
+	 *  it; `liveSteered` counts the leading `steering` entries among it (live
+	 *  steering inside the streaming response, or steering on its way into the
+	 *  next request), which `remove_queued_message` cannot reach. */
 	queuedMessages: { steering: string[]; followUp: string[]; liveSteered: number };
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */

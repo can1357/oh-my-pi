@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import {
 	ensureRuntimeInstalled,
+	errorMessage,
 	getTinyModelsCacheDir,
 	installRuntimeModuleResolver,
 	resolveRuntimeModule,
@@ -40,10 +41,6 @@ const LINUX_X64_ONNX_RUNTIME_CUDA_PROVIDER_DIR = path.join("bin", "napi-v6", "li
 
 export function errorText(error: unknown): string {
 	return error instanceof Error ? (error.stack ?? error.message) : String(error);
-}
-
-export function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 // ── Structured logging ──────────────────────────────────────────────
