@@ -4,6 +4,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
+import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
 import type { ToolSession } from ".";
 
 import { isGlobalMemoryScopeAvailable } from "../memory-backend/global-scope";
@@ -56,13 +57,30 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "supermemory") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "supermemory" && !isSupermemoryConfigured(loadSupermemoryConfig(session.settings))) return null;
 		return new MemoryRetainTool(session);
 	}
 
 	async execute(toolCallId: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = cfgMemoryBackend.get(this.session.settings);
+		if (backend === "supermemory") {
+			const state = this.session.getSupermemorySessionState?.();
+			if (!state) {
+				throw new Error("Supermemory backend is not initialised for this session.");
+			}
+			// Acknowledge only once the whole call is on disk; delivery follows from the outbox.
+			await state.enqueueRetain(
+				toolCallId,
+				params.items.map(item => ({ content: item.content, context: item.context, source: "coding-agent-retain" })),
+			);
+			const count = params.items.length;
+			return {
+				content: [{ type: "text", text: `${count} ${count === 1 ? "memory" : "memories"} queued.` }],
+				details: { count },
+			};
+		}
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {

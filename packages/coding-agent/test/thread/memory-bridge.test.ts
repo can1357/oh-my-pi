@@ -14,6 +14,8 @@ import type { MnemopiBackendConfig } from "../../src/mnemopi/config";
 import { loadMnemopi, loadMnemopiCore, MnemopiSessionState } from "../../src/mnemopi/state";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
+import { SupermemoryClient } from "../../src/supermemory/client";
+import { SupermemorySessionState } from "../../src/supermemory/state";
 import type { MainThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { WorkerPeer } from "../../src/thread/services";
@@ -187,6 +189,110 @@ describe("memory thread service", () => {
 			expect(parent.getScopedMemory(report.storedId)).toBeNull();
 		} finally {
 			await parent.dispose({ consolidate: false });
+		}
+	});
+
+	it("lands a worker Supermemory alias's retain in main's outbox, maps a remote per-id forget error, and previews and reads through main", async () => {
+		const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
+		using server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const { pathname } = new URL(request.url);
+				const body = (request.method === "GET" ? {} : await request.json()) as Record<string, unknown>;
+				requests.push({ method: request.method, path: pathname, body });
+				// Documents stay undelivered so the write is observable in the outbox; forgets find nothing.
+				if (pathname.endsWith("/document")) return Response.json({}, { status: 503 });
+				if (pathname.endsWith("/memories/semantic")) {
+					return Response.json({ count: 1, matches: [{ id: "mem-9", memory: "old build on 9000" }], errors: [] });
+				}
+				if (pathname.endsWith("/memories/mem-1")) {
+					return Response.json({
+						id: "mem-1",
+						memory: "build on 9100",
+						metadata: {},
+						isStatic: false,
+						isInference: false,
+						isLatest: true,
+						isForgotten: false,
+						version: 2,
+						system: { createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z" },
+						included: {
+							related: { parents: [{ id: "mem-0", memory: "build on 9000" }], children: [], siblings: [] },
+						},
+					});
+				}
+				if (pathname.endsWith("/memories/missing"))
+					return Response.json({ error: "Memory not found" }, { status: 404 });
+				return Response.json({ count: 0, matches: [], errors: [{ id: "missing", error: "Memory not found" }] });
+			},
+		});
+		const notices: string[] = [];
+		vi.spyOn(parentSession, "emitNotice").mockImplementation((_level, message) => {
+			notices.push(message);
+		});
+		const apiKey = "sm-synthetic-bridge-key";
+		const parent = new SupermemorySessionState({
+			session: parentSession,
+			client: new SupermemoryClient(server.url.origin, apiKey),
+			config: {
+				baseUrl: server.url.origin,
+				apiKey,
+				namespace: undefined,
+				scoping: "global",
+				autoRecall: false,
+				autoRetain: false,
+				retainEveryNTurns: 1,
+				recallLimit: 5,
+				threshold: 0.5,
+				searchMode: "hybrid",
+				recallTimeoutMs: 4_000,
+			},
+			namespace: "omp-global",
+			automatic: true,
+			agentDir: tempDir,
+		});
+		try {
+			const report = await probe.supermemoryChild(parent, "worker fact");
+			await parent.drainOutbox();
+
+			expect(report).toEqual({
+				aliasesRemoteParent: true,
+				namespace: "omp-global",
+				retained: "1 memory queued.",
+				editError: "Memory missing was not found in namespace omp-global.",
+				previewed: expect.stringContaining("- old build on 9000 (id: mem-9)"),
+				updated: expect.stringContaining("HTTP 503"),
+				memoryRead: "build on 9100 <- mem-0",
+				missingStatus: 404,
+			});
+			// Delivery runs in the background and the drain retries it, so dedupe and ignore order.
+			const sent = new Set(requests.map(request => `${request.method} ${request.path}`));
+			expect([...sent].sort()).toEqual([
+				"DELETE /ns/omp-global/memories",
+				"DELETE /ns/omp-global/memories/semantic",
+				"GET /ns/omp-global/memories/mem-1",
+				"GET /ns/omp-global/memories/missing",
+				"POST /ns/omp-global/document",
+			]);
+			expect(requests.find(request => request.path.endsWith("/semantic"))?.body).toEqual({
+				query: "old build",
+				dryRun: true,
+			});
+			expect(requests.find(request => request.body.content === "worker fact")?.body).toMatchObject({
+				content: "worker fact",
+				metadata: { source: "coding-agent-retain" },
+			});
+			// A worker child's correction still asks for instant processing once it reaches main.
+			expect(requests.find(request => request.body.content === "build on 9200")?.body).toMatchObject({
+				dreaming: "instant",
+			});
+			// The undelivered write waits in main's outbox, reported on the parent session.
+			const files = await fs.readdir(path.join(tempDir, "supermemory-outbox"), { recursive: true });
+			expect(files.filter(name => name.endsWith(".json"))).toHaveLength(1);
+			expect(notices.join(" ")).toContain("1 memory kept in the Supermemory outbox");
+		} finally {
+			await parent.dispose();
 		}
 	});
 });

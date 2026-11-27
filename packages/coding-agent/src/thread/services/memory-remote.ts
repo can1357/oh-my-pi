@@ -1,7 +1,8 @@
 /**
  * Worker-side proxies of the main thread's memory objects. A subagent alias built on a
- * worker reads its parent through these, so retains, recalls, bank confirmations, and
- * Mnemopi writes land in main's live client, bank set, and SQLite banks.
+ * worker reads its parent through these, so retains, recalls, bank confirmations,
+ * Mnemopi writes, and Supermemory tool calls land in main's live client, bank set,
+ * SQLite banks, and Supermemory outbox.
  */
 import type { RecallResult } from "@oh-my-pi/pi-mnemopi";
 import type { HindsightBankSet } from "../../hindsight/bank";
@@ -47,11 +48,21 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
+import type {
+	SupermemoryDocument,
+	SupermemoryDocumentInput,
+	SupermemoryForgetResult,
+	SupermemoryMemory,
+	SupermemoryMemoryMatch,
+	SupermemorySearchItem,
+} from "../../supermemory/client";
+import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RemoteObject } from "../rpc";
 import type {
 	HindsightClientProtocol,
 	HindsightSessionStateProtocol,
 	MnemopiSessionStateProtocol,
+	SupermemorySessionStateProtocol,
 } from "./memory-protocol";
 
 /** Main's Hindsight client, as seen from a worker; every request runs on main. */
@@ -283,5 +294,50 @@ export class RemoteMnemopiSessionState implements MnemopiSessionStateApi {
 
 	consolidate(options?: MnemopiConsolidateOptions): Promise<void> {
 		return this.#remote.call("consolidate", options);
+	}
+}
+
+/** A main-thread parent Supermemory state, as seen from a worker; every tool call runs on main's state. */
+export class RemoteSupermemorySessionState implements SupermemorySessionStateApi {
+	readonly #remote: RemoteObject<SupermemorySessionStateProtocol>;
+
+	constructor(remote: RemoteObject<SupermemorySessionStateProtocol>) {
+		this.#remote = remote;
+	}
+
+	get namespace(): string {
+		return this.#remote.callSync("namespace");
+	}
+
+	get aliasOf(): SupermemorySessionStateApi | undefined {
+		return this.#remote.callSync("aliasOf");
+	}
+	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
+		return this.#remote.call("search", query, limit, signal);
+	}
+
+	enqueueRetain(toolCallId: string, items: SupermemoryRetainInput[]): Promise<void> {
+		return this.#remote.call("enqueueRetain", toolCallId, items);
+	}
+
+	save(
+		content: string,
+		metadata: Record<string, string | number | boolean>,
+		id?: string,
+		dreaming?: SupermemoryDocumentInput["dreaming"],
+	): Promise<SupermemoryDocument> {
+		return this.#remote.call("save", content, metadata, id, dreaming);
+	}
+
+	forgetMemory(id: string, signal?: AbortSignal): Promise<SupermemoryForgetResult> {
+		return this.#remote.call("forgetMemory", id, signal);
+	}
+
+	previewForget(query: string, signal?: AbortSignal): Promise<SupermemoryMemoryMatch[]> {
+		return this.#remote.call("previewForget", query, signal);
+	}
+
+	getMemory(id: string, signal?: AbortSignal): Promise<SupermemoryMemory> {
+		return this.#remote.call("getMemory", id, signal);
 	}
 }

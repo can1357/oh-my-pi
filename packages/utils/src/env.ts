@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
-import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv, resolveEquivalentPath } from "./dirs";
 import { isBunTestRuntime } from "./test-runtime";
 
 export * from "./test-runtime";
@@ -290,7 +290,8 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
+const launchProjectDir = getProjectDir();
+const projectEnv = parseEnvFile(path.join(launchProjectDir, ".env"));
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];
@@ -307,7 +308,7 @@ for (const key of Object.keys(Bun.env)) {
  * inherits them. Read through {@link $otelEnv}; {@link withOmpOtelEnv} exposes
  * them to the OpenTelemetry SDK for the synchronous span of its construction.
  *
- * Keys are folded with {@link foldOtelEnvName}.
+ * Keys are folded with {@link foldEnvName}.
  */
 const ompOtelEnvFileValues = new Map<string, string>();
 
@@ -317,7 +318,7 @@ const ompOtelEnvFileValues = new Map<string, string>();
  * name; match and key them folded there, exactly on POSIX (names are
  * case-sensitive).
  */
-function foldOtelEnvName(name: string, platform: NodeJS.Platform): string {
+function foldEnvName(name: string, platform: NodeJS.Platform = process.platform): string {
 	return platform === "win32" ? name.toUpperCase() : name;
 }
 
@@ -337,7 +338,7 @@ export function claimOmpOtelEnvFileEntry(
 	value: string,
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
-	const key = foldOtelEnvName(name, platform);
+	const key = foldEnvName(name, platform);
 	if (!key.startsWith("OTEL_")) return false;
 	if (!Bun.env[name] && !ompOtelEnvFileValues.get(key)) ompOtelEnvFileValues.set(key, value);
 	return true;
@@ -351,7 +352,7 @@ export function claimOmpOtelEnvFileEntry(
 export function $otelEnv(name: string): string | undefined {
 	const live = Bun.env[name];
 	if (live) return live;
-	return ompOtelEnvFileValues.get(foldOtelEnvName(name, process.platform)) ?? live;
+	return ompOtelEnvFileValues.get(foldEnvName(name)) ?? live;
 }
 
 /**
@@ -389,6 +390,93 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 			if (file === projectEnv) projectEnvNamesLoadedByOmp.add(key);
 		}
 	}
+}
+
+// Startup values that came from a dotenv file of the launch project (OMP's merge above) or of the
+// process cwd (Bun's autoload), with the value to trust instead: what the launch environment held
+// (absent, or a launcher value such as `""` that dotenv overwrote), else the user's own `.env` value
+// the project's shadowed. Captured now: those values stay in `Bun.env` after the project directory
+// changes or the files are edited, and a filter that re-reads the files misses them.
+const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string | undefined }> = (() => {
+	const values = new Map<string, { planted: string; trusted: string | undefined }>();
+	const home = resolveEquivalentPath(os.homedir());
+	const launchDirs = [...new Set([launchProjectDir, process.cwd()].map(dir => resolveEquivalentPath(dir)))].filter(
+		dir => dir !== home,
+	);
+	// Names each launch dir's dotenv files define. Without a launch snapshot, the filter decides by value,
+	// which `${VAR}` expansion against a later-merged `.env` or a mode file it does not read can defeat:
+	// every such name is refused, at the cost of a shell export the project's files also name.
+	const dotenvNames = (dir: string) => {
+		const names = new Set<string>();
+		if (launchEnvValues) return names;
+		// The files Bun's autoload and OMP's merge can read: `.env`, `.env.local` and each mode's pair
+		// (a `.env.example` documenting names is not loaded, so its names stay usable).
+		const modes = new Set(["development", "production", "test", Bun.env.NODE_ENV]);
+		const files = [".env", ".env.local"];
+		for (const mode of modes) if (mode) files.push(`.env.${mode}`, `.env.${mode}.local`);
+		for (const file of files) for (const key in parseEnvFile(path.join(dir, file))) names.add(foldEnvName(key));
+		return names;
+	};
+	const launch = launchDirs.map(dir => ({
+		dir,
+		filtered: filterChildShellEnvInternal(Bun.env, dir),
+		named: dotenvNames(dir),
+	}));
+	const plantedIn = (entry: (typeof launch)[number], key: string) =>
+		entry.named.has(foldEnvName(key)) || entry.filtered[key] !== Bun.env[key];
+	// The agent and config dirs (and their `.env`) are the user's own only if nothing a project dotenv
+	// file supplied relocated them: a checkout must not designate its own trusted root.
+	const dirAffecting = /^(PI_CODING_AGENT_DIR|PI_CONFIG_DIR|PI_PROFILE|OMP_PROFILE)$/i;
+	const dirsPlanted = launch.some(entry =>
+		Object.keys(Bun.env).some(key => dirAffecting.test(key) && plantedIn(entry, key)),
+	);
+	const userDirs = new Set([
+		home,
+		...(dirsPlanted ? [] : [getConfigRootDir(), getAgentDir()].map(dir => resolveEquivalentPath(dir))),
+	]);
+	const userValue = (key: string) =>
+		(dirsPlanted ? homeEnv[key] : agentEnv[key] || piEnv[key] || homeEnv[key]) || undefined;
+	for (const entry of launch) {
+		// Launched from the home (or a trusted agent/config) dir: its `.env` is the user's own.
+		if (userDirs.has(entry.dir)) continue;
+		for (const key in Bun.env) {
+			const planted = Bun.env[key];
+			if (planted === undefined || !plantedIn(entry, key)) continue;
+			const kept = entry.named.has(foldEnvName(key)) ? undefined : entry.filtered[key];
+			const candidate = kept ?? userValue(key);
+			// Two directories disagreeing on what to trust: trust neither.
+			const previous = values.get(foldEnvName(key));
+			const trusted = previous && previous.trusted !== candidate ? undefined : candidate;
+			values.set(foldEnvName(key), { planted, trusted });
+		}
+	}
+	// A relocated agent/config dir: OMP's merge above already loaded its `.env`, whose names the
+	// project's files never mention. Those values are the checkout's too, unless the launcher set them.
+	if (dirsPlanted) {
+		for (const file of [agentEnv, piEnv]) {
+			for (const key in file) {
+				const planted = Bun.env[key];
+				if (planted === undefined || planted !== file[key] || launchEnvValues?.get(key) === planted) continue;
+				if (!values.has(foldEnvName(key)))
+					values.set(foldEnvName(key), { planted, trusted: homeEnv[key] || undefined });
+			}
+		}
+	}
+	return values;
+})();
+
+/**
+ * `Bun.env[name]`, except a value the startup environment took from a project dotenv file (the launch
+ * project's or the process cwd's): that reads as the launch environment's value, else the user's own
+ * `.env` value, else unset. Unlike `filterChildShellEnv`, this still holds after the project directory
+ * changes (`--cwd`, `/move`) or the files are edited. For settings a cloned repository must not
+ * control. A value set after startup is returned as is: no dotenv file is loaded into the
+ * environment later.
+ */
+export function launchTrustedEnv(name: string): string | undefined {
+	const value = Bun.env[name];
+	const launch = launchDotenvValues.get(foldEnvName(name));
+	return launch !== undefined && value === launch.planted ? launch.trusted : value;
 }
 
 // Directory-affecting keys (XDG_*_HOME, and in default mode PI_CODING_AGENT_DIR)

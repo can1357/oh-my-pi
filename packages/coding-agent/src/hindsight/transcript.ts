@@ -10,8 +10,10 @@
  * event time.
  */
 
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { type SessionEntry, type SessionHeader, TAN_FORK_BOUNDARY_CUSTOM_TYPE } from "../session/session-entries";
+import { isUserTurnInitiator } from "../session/transcript/messages";
 import { type HindsightMessage, hasSubstantiveContent } from "./content";
 
 /** Finds the first retainable entry, skipping the transcript copied into this `/tan` fork. */
@@ -39,11 +41,21 @@ export function retentionStart(entries: readonly SessionEntry[], header?: Sessio
  *   toolCall blocks are intentionally dropped: the user never saw them, so
  *   retaining them would prime recall on internal monologue.
  */
-export function extractMessages(entries: readonly SessionEntry[], start = 0): HindsightMessage[] {
+export function extractMessages(
+	entries: readonly SessionEntry[],
+	start = 0,
+	options?: TranscriptTurnOptions,
+): HindsightMessage[] {
 	const messages: HindsightMessage[] = [];
 
 	for (let i = start; i < entries.length; i++) {
 		const entry = entries[i]!;
+		const customTurn = customTurnText(entry, options);
+		if (customTurn !== undefined) {
+			if (hasSubstantiveContent(customTurn))
+				messages.push({ role: "user", content: customTurn, timestamp: entry.timestamp });
+			continue;
+		}
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
 		const role = msg.role;
@@ -62,14 +74,40 @@ export function extractMessages(entries: readonly SessionEntry[], start = 0): Hi
  * without extracting assistant text or allocating the message list. Not memoized: messages may be
  * rewritten in place (e.g. image stripping), so each call re-inspects current content.
  */
-export function countUserTurns(entries: readonly SessionEntry[], start = 0): number {
+export function countUserTurns(entries: readonly SessionEntry[], start = 0, options?: TranscriptTurnOptions): number {
 	let count = 0;
 	for (let i = start; i < entries.length; i++) {
-		const entry = entries[i]!;
-		if (entry.type !== "message" || entry.message.role !== "user") continue;
-		if (hasSubstantiveContent(extractUserText(entry.message))) count++;
+		if (isUserTurn(entries[i]!, options)) count++;
 	}
 	return count;
+}
+
+/** Entry ids of the user turns {@link countUserTurns} counts, in order. */
+export function userTurnEntryIds(
+	entries: readonly SessionEntry[],
+	start = 0,
+	options?: TranscriptTurnOptions,
+): string[] {
+	return entries.slice(start).flatMap(entry => (isUserTurn(entry, options) ? [entry.id] : []));
+}
+
+export interface TranscriptTurnOptions {
+	/** Also count a user-invoked `/skill:` or collab prompt (stored as a custom message) as a user turn. */
+	customTurns?: boolean;
+}
+
+function isUserTurn(entry: SessionEntry, options?: TranscriptTurnOptions): boolean {
+	const text =
+		entry.type === "message" && entry.message.role === "user"
+			? extractUserText(entry.message)
+			: customTurnText(entry, options);
+	return text !== undefined && hasSubstantiveContent(text);
+}
+
+/** The prompt text of a user-turn-initiating custom message, when {@link TranscriptTurnOptions.customTurns} counts them. */
+function customTurnText(entry: SessionEntry, options?: TranscriptTurnOptions): string | undefined {
+	if (!options?.customTurns || entry.type !== "custom_message" || !isUserTurnInitiator(entry)) return undefined;
+	return extractUserText(entry);
 }
 
 function extractUserText(msg: { content: unknown }): string {
@@ -94,4 +132,34 @@ function extractAssistantText(msg: AssistantMessage): string {
 		if (block.type === "text" && block.text) parts.push(block.text);
 	}
 	return parts.join("\n");
+}
+
+/** Reduce arbitrary AgentMessages (e.g. the messages a compaction summarizes) into the flat-text shape. */
+export function flattenMessagesForRecall(messages: AgentMessage[]): HindsightMessage[] {
+	const out: HindsightMessage[] = [];
+	for (const msg of messages) {
+		if (msg.role === "user") {
+			const content = msg.content;
+			if (typeof content === "string") {
+				if (hasSubstantiveContent(content)) out.push({ role: "user", content });
+				continue;
+			}
+			if (Array.isArray(content)) {
+				const text = content
+					.filter((b): b is { type: "text"; text: string } => !!b && (b as { type?: unknown }).type === "text")
+					.map(b => b.text)
+					.join("\n");
+				if (hasSubstantiveContent(text)) out.push({ role: "user", content: text });
+			}
+			continue;
+		}
+		if (msg.role === "assistant") {
+			const text = msg.content
+				.filter((b): b is { type: "text"; text: string } => b.type === "text")
+				.map(b => b.text)
+				.join("\n");
+			if (hasSubstantiveContent(text)) out.push({ role: "assistant", content: text });
+		}
+	}
+	return out;
 }

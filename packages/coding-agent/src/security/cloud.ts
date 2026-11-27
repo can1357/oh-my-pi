@@ -1,5 +1,6 @@
 import { decodeJwt } from "@oh-my-pi/pi-ai/registry/oauth/openai-codex";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { nonEmptyString } from "@oh-my-pi/pi-utils";
 import type { AuthStorage } from "../session/auth-storage";
 import { resolveExactSecurityOAuthAccess } from "./auth";
 import {
@@ -114,10 +115,6 @@ function requiredString(value: unknown, field: string): string {
 	return value;
 }
 
-function optionalString(value: unknown): string | undefined {
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
 function finiteNumber(value: unknown, fallback = 0): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
@@ -136,22 +133,22 @@ function normalizeConfiguration(value: unknown): CodexSecurityCloudConfiguration
 		repositoryUrl: requiredString(scanInput.repo_url, "repository URL"),
 		environmentId: requiredString(scanInput.environment_id, "environment id"),
 	};
-	const sourceId = optionalString(raw.id);
+	const sourceId = nonEmptyString(raw.id);
 	if (sourceId && sourceId !== id) configuration.sourceId = sourceId;
-	const state = optionalString(scanInput.state);
+	const state = nonEmptyString(scanInput.state);
 	if (state) configuration.state = state;
-	const currentStep = optionalString(raw.current_step);
+	const currentStep = nonEmptyString(raw.current_step);
 	if (currentStep) configuration.currentStep = currentStep;
-	const scanType = optionalString(scanInput.scan_type);
+	const scanType = nonEmptyString(scanInput.scan_type);
 	if (scanType) configuration.scanType = scanType;
 	const remainingScans = typeof raw.scans_remaining === "number" ? raw.scans_remaining : raw.remaining_scans;
 	if (typeof remainingScans === "number" && Number.isFinite(remainingScans))
 		configuration.remainingScans = remainingScans;
 	if (typeof raw.total_scans === "number" && Number.isFinite(raw.total_scans))
 		configuration.totalScans = raw.total_scans;
-	const createdAt = optionalString(raw.created_at);
+	const createdAt = nonEmptyString(raw.created_at);
 	if (createdAt) configuration.createdAt = createdAt;
-	const updatedAt = optionalString(raw.updated_at);
+	const updatedAt = nonEmptyString(raw.updated_at);
 	if (updatedAt) configuration.updatedAt = updatedAt;
 	return configuration;
 }
@@ -239,7 +236,7 @@ export class CodexSecurityCloudClient {
 		});
 		const items = Array.isArray(raw.items) ? raw.items.map(normalizeConfiguration) : [];
 		const result: CodexSecurityCloudConfigurationPage = { items };
-		const nextCursor = optionalString(raw.next_cursor);
+		const nextCursor = nonEmptyString(raw.next_cursor);
 		if (nextCursor) result.nextCursor = nextCursor;
 		if (typeof raw.total_in_account === "number") result.totalInAccount = raw.total_in_account;
 		return result;
@@ -313,17 +310,17 @@ export class CodexSecurityCloudClient {
 				informational: finiteNumber(raw.informational_findings),
 			},
 		};
-		const sourceConfigurationId = optionalString(raw.config_id);
+		const sourceConfigurationId = nonEmptyString(raw.config_id);
 		if (sourceConfigurationId && sourceConfigurationId !== configurationId) {
 			result.sourceConfigurationId = sourceConfigurationId;
 		}
-		const currentStep = optionalString(raw.current_step);
+		const currentStep = nonEmptyString(raw.current_step);
 		if (currentStep) result.currentStep = currentStep;
-		const lastScannedCommit = optionalString(raw.last_scanned_commit_hash);
+		const lastScannedCommit = nonEmptyString(raw.last_scanned_commit_hash);
 		if (lastScannedCommit) result.lastScannedCommit = lastScannedCommit;
-		const lastScannedAt = optionalString(raw.last_scanned_commit_dt);
+		const lastScannedAt = nonEmptyString(raw.last_scanned_commit_dt);
 		if (lastScannedAt) result.lastScannedAt = lastScannedAt;
-		const updatedAt = optionalString(raw.updated_at);
+		const updatedAt = nonEmptyString(raw.updated_at);
 		if (updatedAt) result.updatedAt = updatedAt;
 		return result;
 	}
@@ -346,11 +343,11 @@ export class CodexSecurityCloudClient {
 				signal,
 			});
 			if (Array.isArray(page.items)) summaries.push(...page.items.map(object));
-			cursor = optionalString(page.next_cursor);
+			cursor = nonEmptyString(page.next_cursor);
 		} while (cursor);
 		const configurationIds = new Set([configuration.id, configuration.sourceId].filter((id): id is string => !!id));
 		const attributed = (item: JsonObject): boolean => {
-			const configuredScanId = optionalString(item.configured_scan_id);
+			const configuredScanId = nonEmptyString(item.configured_scan_id);
 			return configuredScanId === undefined || configurationIds.has(configuredScanId);
 		};
 		const selected = summaries.filter(attributed);
@@ -481,9 +478,9 @@ function normalizeFinding(
 	const commit = optionalObject(raw.commit_analysis);
 	const title = requiredString(commit.title ?? raw.title, "finding title");
 	const ruleId =
-		optionalString(commit.rule_id) ??
+		nonEmptyString(commit.rule_id) ??
 		`codex-security:${Bun.SHA256.hash(title.trim().toLowerCase(), "hex").slice(0, 16)}`;
-	const category = optionalString(commit.category) ?? "codex-security";
+	const category = nonEmptyString(commit.category) ?? "codex-security";
 	const cloudId = requiredString(raw.hid ?? raw.id, "finding id");
 	const preliminary = locationsAndEvidence(commit, cloudId);
 	const fingerprint = createSecurityFindingFingerprint({ ruleId, category, locations: preliminary.locations });
@@ -492,7 +489,7 @@ function normalizeFinding(
 		id: createSecurityEvidenceId(fingerprint, item.label, index),
 	}));
 	const validationEvidenceIds = evidence.filter(item => item.kind === "validation").map(item => item.id);
-	const createdAt = optionalString(raw.created_at) ?? importedAt;
+	const createdAt = nonEmptyString(raw.created_at) ?? importedAt;
 	const producer = { ...CLOUD_PRODUCER };
 	const sourceIds: Record<string, string> = { cloudConfigurationId: configuration.id, cloudFindingId: cloudId };
 	for (const [key, value] of [
@@ -503,7 +500,7 @@ function normalizeFinding(
 		if (typeof value === "string" && value.length > 0) sourceIds[key] = value;
 	}
 	const upstream: NonNullable<SecurityProvenance["upstream"]> = { repository: configuration.repositoryUrl };
-	const revision = optionalString(commit.commit_hash);
+	const revision = nonEmptyString(commit.commit_hash);
 	if (revision) upstream.revision = revision;
 	const provenance: SecurityProvenance = {
 		producer,
@@ -525,14 +522,14 @@ function normalizeFinding(
 		status: commit.validated === true ? "validated" : "unvalidated",
 		evidenceIds: validationEvidenceIds,
 	};
-	const validatedAt = optionalString(commit.validation_finished_at);
+	const validatedAt = nonEmptyString(commit.validation_finished_at);
 	if (validatedAt) validation.validatedAt = validatedAt;
 	const validationSummary = text(commit.validation_report);
 	if (validationSummary) validation.summary = validationSummary;
 	const findingDisposition: SecurityFinding["disposition"] = { status: disposition(raw.status) };
 	const dispositionRationale = text(raw.resolution_reason);
 	if (dispositionRationale) findingDisposition.rationale = dispositionRationale;
-	const dispositionUpdatedAt = optionalString(raw.updated_at);
+	const dispositionUpdatedAt = nonEmptyString(raw.updated_at);
 	if (dispositionUpdatedAt) findingDisposition.updatedAt = dispositionUpdatedAt;
 	const finding: SecurityFinding = {
 		id: createSecurityFindingId(fingerprint),

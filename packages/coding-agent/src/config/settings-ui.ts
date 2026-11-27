@@ -34,6 +34,7 @@ const CONDITIONS: Record<string, () => boolean> = {
 	composerPredictionsEnabled: whenSettings(s => cfgComposerPredictions.get(s) === true),
 	hindsightActive: whenSettings(s => cfgMemoryBackend.get(s) === "hindsight"),
 	mnemopiActive: whenSettings(s => cfgMemoryBackend.get(s) === "mnemopi"),
+	supermemoryActive: whenSettings(s => cfgMemoryBackend.get(s) === "supermemory"),
 	autolearnActive: whenSettings(s => cfgAutolearnEnabled.get(s) === true),
 	autoThinkingActive: whenSettings(s => cfgDefaultThinkingLevel.get(s) === "auto"),
 	usageAwareFallbackEnabled: whenSettings(s => cfgRetryUsageAwareFallback.get(s) === true),

@@ -2,8 +2,8 @@
  * Memory-backend bridge between the main thread and subagent workers.
  *
  * A subagent aliases its parent's memory state (`ExecutorOptions.parentHindsightSessionState`
- * / `parentMnemopiSessionState`). When the child runs on a worker, those parents stay on
- * main and cross by reference:
+ * / `parentMnemopiSessionState` / `parentSupermemorySessionState`). When the child runs on a
+ * worker, those parents stay on main and cross by reference:
  *
  * - `HindsightSessionState` → {@link RemoteHindsightSessionState}: the worker alias copies
  *   the parent's routing and config as an in-process alias does, but its client is main's
@@ -13,12 +13,17 @@
  * - `MnemopiSessionState` → {@link RemoteMnemopiSessionState}: an alias whose parent is
  *   remote holds no banks; it routes every scoped-bank read and write to the parent, so
  *   saves land in main's live SQLite banks.
+ * - `SupermemorySessionState` → {@link RemoteSupermemorySessionState}: the worker alias
+ *   routes every tool search, retain, save, edit and memory read to the parent, so writes land in main's
+ *   outbox and container; `SupermemoryHttpError` keeps its `status` across the hop.
  *
  * Nothing is held per worker: the link releases exported objects when it closes.
  */
 import { HindsightApi, HindsightError } from "../../hindsight/client";
 import { HindsightSessionState } from "../../hindsight/state";
 import { MnemopiSessionState } from "../../mnemopi/state";
+import { SupermemoryHttpError } from "../../supermemory/client";
+import { SupermemorySessionState } from "../../supermemory/state";
 import type { WorkerThreadLink } from "../protocol";
 import { registerRpcError, type RpcServe } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
@@ -29,8 +34,15 @@ import {
 	type HindsightSessionStateProtocol,
 	MNEMOPI_SESSION_STATE_KIND,
 	type MnemopiSessionStateProtocol,
+	SUPERMEMORY_SESSION_STATE_KIND,
+	type SupermemorySessionStateProtocol,
 } from "./memory-protocol";
-import { RemoteHindsightClient, RemoteHindsightSessionState, RemoteMnemopiSessionState } from "./memory-remote";
+import {
+	RemoteHindsightClient,
+	RemoteHindsightSessionState,
+	RemoteMnemopiSessionState,
+	RemoteSupermemorySessionState,
+} from "./memory-remote";
 
 const serveHindsightClient: RpcServe<HindsightApi, HindsightClientProtocol> = {
 	retain: (client, bankId, content, options) => client.retain(bankId, content, options),
@@ -88,16 +100,29 @@ const serveMnemopiState: RpcServe<MnemopiSessionState, MnemopiSessionStateProtoc
 	consolidate: (state, options) => state.consolidate(options),
 };
 
+const serveSupermemoryState: RpcServe<SupermemorySessionState, SupermemorySessionStateProtocol> = {
+	namespace: state => state.namespace,
+	aliasOf: state => state.aliasOf,
+	search: (state, query, limit, signal) => state.search(query, limit, signal),
+	enqueueRetain: (state, toolCallId, items) => state.enqueueRetain(toolCallId, items),
+	save: (state, content, metadata, id, dreaming) => state.save(content, metadata, id, dreaming),
+	forgetMemory: (state, id, signal) => state.forgetMemory(id, signal),
+	previewForget: (state, query, signal) => state.previewForget(query, signal),
+	getMemory: (state, id, signal) => state.getMemory(id, signal),
+};
+
 let memoryErrorsRegistered = false;
 
-/** Rebuild Hindsight request errors by class on the receiving thread. */
+/** Rebuild Hindsight and Supermemory request errors by class on the receiving thread. */
 function registerMemoryErrors(): void {
 	if (memoryErrorsRegistered) return;
 	memoryErrorsRegistered = true;
 	registerRpcError("HindsightError", message => new HindsightError(message));
+	// `status` is an own field: the link copies it onto the rebuilt error.
+	registerRpcError("SupermemoryHttpError", message => Object.assign(new SupermemoryHttpError(0), { message }));
 }
 
-/** Hindsight and Mnemopi parent-state bridging for subagent workers. */
+/** Hindsight, Mnemopi and Supermemory parent-state bridging for subagent workers. */
 export const memoryThreadService: ThreadService = {
 	name: "memory",
 
@@ -119,6 +144,11 @@ export const memoryThreadService: ThreadService = {
 			(value): value is MnemopiSessionState => value instanceof MnemopiSessionState,
 			serveMnemopiState,
 		);
+		link.exportClass<SupermemorySessionState, SupermemorySessionStateProtocol>(
+			SUPERMEMORY_SESSION_STATE_KIND,
+			(value): value is SupermemorySessionState => value instanceof SupermemorySessionState,
+			serveSupermemoryState,
+		);
 	},
 
 	installWorker(link: WorkerThreadLink): void {
@@ -134,6 +164,10 @@ export const memoryThreadService: ThreadService = {
 		link.importClass<RemoteMnemopiSessionState, MnemopiSessionStateProtocol>(
 			MNEMOPI_SESSION_STATE_KIND,
 			remote => new RemoteMnemopiSessionState(remote),
+		);
+		link.importClass<RemoteSupermemorySessionState, SupermemorySessionStateProtocol>(
+			SUPERMEMORY_SESSION_STATE_KIND,
+			remote => new RemoteSupermemorySessionState(remote),
 		);
 	},
 };

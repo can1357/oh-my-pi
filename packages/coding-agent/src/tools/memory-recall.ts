@@ -1,11 +1,13 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, untilAborted, toError } from "@oh-my-pi/pi-utils";
+import { logger, prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
 import type { ToolSession } from ".";
 
+import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
+import { recallNote } from "../supermemory/state";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
 const memoryRecallSchema = type({
@@ -19,7 +21,9 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	readonly approval = "read" as const;
 	readonly label = "Recall";
 	get description(): string {
-		return prompt.render(recallDescription);
+		return prompt.render(recallDescription, {
+			supermemory: cfgMemoryBackend.get(this.session.settings) === "supermemory",
+		});
 	}
 	readonly parameters = memoryRecallSchema;
 	readonly strict = true;
@@ -30,14 +34,42 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 
 	static createIf(session: ToolSession): MemoryRecallTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "supermemory") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "supermemory" && !isSupermemoryConfigured(loadSupermemoryConfig(session.settings))) return null;
 		return new MemoryRecallTool(session);
 	}
 
 	async execute(_id: string, params: MemoryRecallParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
 			const backend = cfgMemoryBackend.get(this.session.settings);
+			if (backend === "supermemory") {
+				const state = this.session.getSupermemorySessionState?.();
+				if (!state) {
+					throw new Error("Supermemory backend is not initialised for this session.");
+				}
+				const results = await state.search(params.query, undefined, signal);
+				if (results.length === 0) {
+					return {
+						content: [{ type: "text", text: "No relevant memories found." }],
+						details: {},
+						useless: true,
+					};
+				}
+				// Memory ids feed `memory_edit`; chunk ids address documents and are not editable.
+				const formatted = formatMemories(
+					results.map(item => ({ text: sanitizeText(item.content + recallNote(item)) })),
+				);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Found ${results.length} relevant ${results.length === 1 ? "memory" : "memories"} (as of ${formatCurrentTime()} UTC):\n\n${formatted}`,
+						},
+					],
+					details: {},
+				};
+			}
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {

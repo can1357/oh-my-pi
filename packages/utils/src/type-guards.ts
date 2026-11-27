@@ -12,6 +12,11 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
 	return isRecord(value) ? value : null;
 }
 
+/** `value` when it is a non-empty string, else `undefined`. */
+export function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 /**
  * Message text of a thrown value: `Error.message` for errors, `String(value)` otherwise.
  * `String()` can itself throw (a null-prototype object, a throwing `toString`); that error propagates.

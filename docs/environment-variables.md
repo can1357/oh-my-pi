@@ -569,6 +569,22 @@ Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips 
 | `STENCIL_SPOTLIGHT_URL`      | Overrides `spotlight.url`, the Spotlight ranking endpoint (default `https://cloud.stencil.so/v1/spotlight`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `OMP_DAEMON_IDLE_GRACE_MS`   | Milliseconds a daemon broker waits after its last `omp` client disconnects before it shuts down and stops the non-detached daemons it supervises, such as services started with the bash tool's `name` (default `3000`). Read once when an `omp` process launches the broker, using the base-10 `parseInt` prefix (`5s` reads as `5`, `2.5` as `2`); `0` shuts the broker down as soon as the last client disconnects, and negative values or values without leading digits use the default                                                                                                                |
 
+### Supermemory memory backend
+
+The API key, origin and namespace override are read from the process environment only; there is no
+`supermemory.*` setting for them, so a project-local config file cannot redirect the key to another origin,
+replace the account, or choose an arbitrary namespace of your account (`supermemory.scoping` only switches
+between `omp-global` and the per-repository namespace). Values from the current project's dotenv files are
+ignored for the same reason; the launch environment and your own `~/.env` or agent-dir `.env` count, unless the
+project's dotenv file defines the same name (then your own `.env` value counts, or the variable reads as unset; on macOS and Windows, where the launch environment cannot be told apart from dotenv values, this applies to a shell export too). Values loaded from the dotenv
+files of the directory `omp` was launched in stay ignored after switching to another project directory or editing those files (launched from your home, config or agent directory, its `.env` counts as your own).
+
+| Variable                | Accepted value / built-in default                                                                                                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SUPERMEMORY_API_KEY`   | Non-empty API key; unset leaves the backend inert                                                                                                                                                  |
+| `SUPERMEMORY_BASE_URL`  | `https:` URL, or `http:` on `localhost`/`127.0.0.1`/`[::1]`; default `https://api.supermemory.ai`; other URLs are rejected                                                                          |
+| `SUPERMEMORY_NAMESPACE` | Namespace for every session, overriding `supermemory.scoping` (the variable Supermemory's own CLI uses); 1–100 of `A-Z a-z 0-9 _ : -`; unset uses scoping; an invalid value leaves the backend inert |
+
 ### Hindsight memory backend
 
 Each supported environment variable overrides the corresponding `hindsight.*` setting, which in
