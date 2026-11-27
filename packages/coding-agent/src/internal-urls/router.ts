@@ -19,6 +19,7 @@ import { AgentProtocolHandler } from "./agent-protocol";
 import { AttachmentProtocolHandler } from "./attachment-protocol";
 import { CfgProtocolHandler } from "./cfg-protocol";
 import { ConflictProtocolHandler } from "./conflict-protocol";
+import { GitProtocolHandler } from "./git-protocol";
 import { HelpProtocolHandler } from "./help-protocol";
 import { HistoryProtocolHandler } from "./history-protocol";
 import { IssueProtocolHandler, PrProtocolHandler } from "./issue-pr-protocol";
@@ -32,6 +33,7 @@ import { extractUriScheme, parseInternalUrl } from "./parse";
 import { ProcProtocolHandler } from "./proc-protocol";
 import { RuleProtocolHandler } from "./rule-protocol";
 import { SecurityProtocolHandler } from "./security-protocol";
+import { SessionProtocolHandler } from "./session-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
 import { SshProtocolHandler } from "./ssh-protocol";
 import type {
@@ -110,6 +112,7 @@ export class InternalUrlRouter {
 		this.register(new OutProtocolHandler());
 		this.register(new AgentProtocolHandler());
 		this.register(new HistoryProtocolHandler());
+		this.register(new SessionProtocolHandler());
 		this.register(new LocalProtocolHandler());
 		this.register(new ProcProtocolHandler());
 		this.register(new CfgProtocolHandler());
@@ -120,6 +123,7 @@ export class InternalUrlRouter {
 		this.register(new IssueProtocolHandler());
 		this.register(new PrProtocolHandler());
 		this.register(new MrProtocolHandler());
+		this.register(new GitProtocolHandler());
 		this.register(resourceFallback);
 		this.register(new OmpProtocolHandler());
 		this.register(new HelpProtocolHandler());

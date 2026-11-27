@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
+import { describe, expect, it } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, FetchImpl, Model, ThinkingBudgets } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -25,19 +24,16 @@ function bundled(provider: GeneratedProvider, id: string): Model<Api> {
 async function captureGenerationConfig(
 	model: Model<Api>,
 	maxTokens: number | undefined,
-	options: { apiKey?: string; thinkingBudgets?: ThinkingBudgets; reasoning?: Effort } = {},
+	options: { thinkingBudgets?: ThinkingBudgets; reasoning?: Effort } = {},
 ): Promise<GenerationConfig | undefined> {
 	let generationConfig: GenerationConfig | undefined;
 	const fetch: FetchImpl = async (_url, init) => {
-		const body = JSON.parse(init?.body as string) as {
-			generationConfig?: GenerationConfig;
-			request?: { generationConfig?: GenerationConfig };
-		};
-		generationConfig = body.request?.generationConfig ?? body.generationConfig;
+		const body = JSON.parse(init?.body as string) as { generationConfig?: GenerationConfig };
+		generationConfig = body.generationConfig;
 		return new Response('{"error":{"message":"bad request"}}', { status: 400 });
 	};
 	await streamSimple(model, ctx, {
-		apiKey: options.apiKey ?? "k",
+		apiKey: "k",
 		maxTokens,
 		reasoning: options.reasoning ?? Effort.High,
 		thinkingBudgets: options.thinkingBudgets,
@@ -47,21 +43,11 @@ async function captureGenerationConfig(
 }
 
 describe("Google thinking headroom in maxOutputTokens", () => {
-	// Antigravity is paused in its auth rules; its transport stays for when it is turned back on.
-	beforeEach(() => vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined));
-	afterEach(() => vi.restoreAllMocks());
-
 	it.each([
-		["google-generative-ai level", bundled("google", "gemini-3.1-pro-preview"), "k"],
-		["google-vertex level", bundled("google-vertex", "gemini-3.1-pro-preview"), "k"],
-		[
-			// Without a discovered wire profile: a profiled SKU sends its roster's fixed cap instead.
-			"google-gemini-cli level (Antigravity argon)",
-			{ ...bundled("google-antigravity", "gemini-4-argon"), antigravityWireProfiles: undefined },
-			JSON.stringify({ token: "t", projectId: "p" }),
-		],
-	])("%s adds the effort's thinking estimate on top of the caller budget", async (_name, model, apiKey) => {
-		const config = await captureGenerationConfig(model, 512, { apiKey });
+		["google-generative-ai level", bundled("google", "gemini-3.1-pro-preview")],
+		["google-vertex level", bundled("google-vertex", "gemini-3.1-pro-preview")],
+	])("%s adds the effort's thinking estimate on top of the caller budget", async (_name, model) => {
+		const config = await captureGenerationConfig(model, 512);
 
 		expect(config?.maxOutputTokens).toBe(512 + 16384);
 		expect(config?.thinkingConfig?.thinkingLevel).toBe("HIGH");

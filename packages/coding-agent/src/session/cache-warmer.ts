@@ -115,8 +115,8 @@ const CACHE_WARMING_DECIDE_TIMEOUT_MS = 2_000;
 const REPLAY_OUTPUT_PRIOR_TOKENS = 512;
 /** A bridge compaction is decided this long before its entry expires, so its request still reads the entry. */
 const BRIDGE_COMPACTION_LEAD_MS = 60_000;
-/** A refresh replacing a bridge compaction that never reached the provider must go out this long before expiry. */
-const BRIDGE_FALLBACK_MARGIN_MS = 10_000;
+/** Minimum remaining cache lifetime for a warming decision to act. */
+const CACHE_WARMING_EXPIRY_MARGIN_MS = 10_000;
 /** Status reason while a bridge compaction holds the entry. */
 const BRIDGE_IN_PROGRESS_REASON = "bridge compaction in progress";
 
@@ -132,8 +132,8 @@ export function resolveBridgeCompactionThreshold(contextWindow: number, percent:
 
 /** Refresh at 90% of the TTL while preserving at least ten seconds of margin. */
 export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
-	if (ttlMs <= 10_000) return undefined;
-	return Math.max(1, Math.floor(Math.min(ttlMs * 0.9, ttlMs - 10_000)));
+	if (ttlMs <= CACHE_WARMING_EXPIRY_MARGIN_MS) return undefined;
+	return Math.max(1, Math.floor(Math.min(ttlMs * 0.9, ttlMs - CACHE_WARMING_EXPIRY_MARGIN_MS)));
 }
 
 /**
@@ -870,6 +870,7 @@ export class CacheWarmer {
 		run.timer = undefined;
 		run.refreshSentAt = undefined;
 		if (!this.#validateRun(run)) return;
+		// Use the scheduled slot for bridge selection; validation checks wall-clock expiry.
 		const evaluation = this.#evaluate(run, run.nextWarmAt);
 		const { decision, stopReason } = evaluation;
 		run.decisions++;
@@ -912,8 +913,7 @@ export class CacheWarmer {
 		run.bridgeFailed = true;
 		if (outcome === "failed-unaccepted" && this.#validateRun(run)) {
 			const method = this.#rentMethod(run);
-			const expiresAt = this.#expiresAt(run);
-			if (method && expiresAt !== undefined && Date.now() <= expiresAt - BRIDGE_FALLBACK_MARGIN_MS) {
+			if (method) {
 				await this.#refresh(run, method, extensionOverride);
 				return;
 			}
@@ -1145,8 +1145,14 @@ export class CacheWarmer {
 
 	#validateRun(run: ActiveRun): boolean {
 		if (this.#run !== run) return false;
-		const reason =
+		let reason =
 			this.#getModeStopReason(run) ?? (run.change() !== undefined ? "conversation context changed" : undefined);
+		if (!reason) {
+			const expiresAt = this.#expiresAt(run);
+			if (expiresAt === undefined) reason = "cache lifetime unavailable";
+			else if (Date.now() > expiresAt - CACHE_WARMING_EXPIRY_MARGIN_MS)
+				reason = "cache expiry safety margin reached";
+		}
 		if (!reason) return true;
 		this.#stop(reason);
 		return false;

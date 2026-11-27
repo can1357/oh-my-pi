@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -247,6 +246,64 @@ describe("ModelRegistry runtime discovery", () => {
 
 		expect(modelListCalls).toBe(1);
 		expect(registry.find("gateway", "dynamic-model")).toBeDefined();
+	});
+
+	test("openai-models-list prices chat and embedding rows in their advertised units", async () => {
+		writeRawModelsJson({
+			relay: {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) === "http://127.0.0.1:9993/v1/models") {
+				return Response.json({
+					data: [
+						{
+							id: "relay-priced",
+							pricing: { prompt: "0.000003", completion: "0.000015", input_cache_read: "0.0000003" },
+						},
+						{
+							id: "relay-per-million",
+							pricing: { unit: "per_million_tokens", prompt: "2", completion: "10", input_cache_read: "0.5" },
+						},
+						{
+							id: "relay-embedding",
+							output_modalities: ["embeddings"],
+							pricing: { prompt: "0.00000025" },
+						},
+						{ id: "relay-unpriced" },
+					],
+				});
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshDiscoverableProviders(["relay"], "online");
+
+		const priced = registry.find("relay", "relay-priced")?.cost;
+		expect(priced?.input).toBeCloseTo(3);
+		expect(priced?.output).toBeCloseTo(15);
+		expect(priced?.cacheRead).toBeCloseTo(0.3);
+		expect(priced?.cacheWrite).toBe(0);
+		expect(registry.find("relay", "relay-per-million")?.cost).toEqual({
+			input: 2,
+			output: 10,
+			cacheRead: 0.5,
+			cacheWrite: 0,
+		});
+		expect(registry.find("relay", "relay-embedding")).toMatchObject({
+			api: "openai-embeddings",
+			cost: { input: 0.25, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		expect(registry.find("relay", "relay-unpriced")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
 	});
 
 	test("does not coalesce or apply discovery across provider config changes", async () => {
@@ -703,125 +760,15 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(getModelsForProvider(registry, "openai-codex").length).toBeGreaterThan(0);
 	});
 
-	test("Antigravity discovery unions every account's roster and routes each model to an account serving it", async () => {
-		// Antigravity is paused in its auth rules; its discovery stays for when it is turned back on.
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-		// Account A's plan omits Claude 5.5; account B's serves it. Discovery is
-		// authoritative, so reading only one account's roster would prune Claude
-		// 5.5 for both whenever A is the account discovery happens to pick.
-		await authStorage.credentials.set("google-antigravity", [
-			{
-				type: "oauth",
-				access: "token-a",
-				refresh: "refresh-a",
-				expires: Date.now() + 3_600_000,
-				email: "a@example.com",
-				projectId: "project-a",
-			},
-			{
-				type: "oauth",
-				access: "token-b",
-				refresh: "refresh-b",
-				expires: Date.now() + 3_600_000,
-				email: "b@example.com",
-				projectId: "project-b",
-			},
-		]);
-		const gemini = { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true } };
-		const claude = Object.fromEntries(
-			["low", "medium", "high"].map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }]),
-		);
-		const rosters: Record<string, object> = {
-			"Bearer token-a": { models: gemini },
-			"Bearer token-b": { models: { ...gemini, ...claude } },
-		};
-		const fetchMock: FetchImpl = async (input, init) => {
-			const url = String(input);
-			if (url.includes(":fetchAvailableModels")) {
-				const roster = rosters[new Headers(init?.headers).get("authorization") ?? ""];
-				return roster ? Response.json(roster) : new Response("Unauthorized", { status: 401 });
-			}
-			return new Response("version: 2.19.1\n");
-		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-
-		await registry.refreshProvider("google-antigravity", "online");
-
-		const opus = registry.find("google-antigravity", "claude-opus-5-5");
-		expect(opus?.accountAccess).toEqual({ "b@example.com": {} });
-		expect(registry.find("google-antigravity", "gemini-3.1-pro")?.accountAccess).toEqual({
-			"a@example.com": {},
-			"b@example.com": {},
-		});
-		// Bundled rows that no account serves stay pruned.
-		expect(registry.find("google-antigravity", "claude-sonnet-5-5")).toBeUndefined();
-
-		// A session pinned to account A moves to B for a model only B serves.
-		const sessionId = "antigravity-claude-session";
-		const accountA = authStorage.oauth.accounts("google-antigravity")[0];
-		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
-		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
-		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
-	});
-
-	test("Antigravity routing still works for an account whose login stored no email", async () => {
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-		// Google's userinfo lookup is optional at login; such a credential keeps
-		// only its project id, which must still tag and select the account.
-		await authStorage.credentials.set("google-antigravity", [
-			{
-				type: "oauth",
-				access: "token-a",
-				refresh: "refresh-a",
-				expires: Date.now() + 3_600_000,
-				email: "a@example.com",
-				projectId: "project-a",
-			},
-			{
-				type: "oauth",
-				access: "token-b",
-				refresh: "refresh-b",
-				expires: Date.now() + 3_600_000,
-				projectId: "project-b",
-			},
-		]);
-		const gemini = { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true } };
-		const claude = Object.fromEntries(
-			["low", "medium", "high"].map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }]),
-		);
-		const rosters: Record<string, object> = {
-			"Bearer token-a": { models: gemini },
-			"Bearer token-b": { models: { ...gemini, ...claude } },
-		};
-		const fetchMock: FetchImpl = async (input, init) => {
-			if (String(input).includes(":fetchAvailableModels")) {
-				const roster = rosters[new Headers(init?.headers).get("authorization") ?? ""];
-				return roster ? Response.json(roster) : new Response("Unauthorized", { status: 401 });
-			}
-			return new Response("version: 2.19.1\n");
-		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-
-		await registry.refreshProvider("google-antigravity", "online");
-
-		const opus = registry.find("google-antigravity", "claude-opus-5-5");
-		expect(opus?.accountAccess).toEqual({ "project-b": {} });
-		const sessionId = "antigravity-emailless-session";
-		const accountA = authStorage.oauth.accounts("google-antigravity")[0];
-		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
-		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
-		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
-	});
-
 	test("configured discovery suppresses built-in special OAuth discovery", async () => {
-		await authStorage.credentials.set("google-antigravity", {
+		await authStorage.credentials.set("openai-codex", {
 			type: "oauth",
-			access: "fresh-google-antigravity",
-			refresh: "refresh-google-antigravity",
+			access: "fresh-openai-codex",
+			refresh: "refresh-openai-codex",
 			expires: Date.now() + 3_600_000,
 		});
 		writeRawModelsJson({
-			"google-antigravity": {
+			"openai-codex": {
 				baseUrl: "http://127.0.0.1:4893",
 				api: "openai-completions",
 				auth: "none",
@@ -833,7 +780,7 @@ describe("ModelRegistry runtime discovery", () => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:4893/v1/models") {
 				return Response.json({
-					data: [{ id: "configured-antigravity-model", context_length: 65_536 }],
+					data: [{ id: "configured-codex-model", context_length: 65_536 }],
 				});
 			}
 			unexpectedUrls.push(url);
@@ -841,10 +788,10 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 
-		await registry.refreshProvider("google-antigravity", "online");
+		await registry.refreshProvider("openai-codex", "online");
 
 		expect(unexpectedUrls).toEqual([]);
-		const configuredModel = registry.find("google-antigravity", "configured-antigravity-model");
+		const configuredModel = registry.find("openai-codex", "configured-codex-model");
 		expect(configuredModel?.baseUrl).toBe("http://127.0.0.1:4893");
 		expect(configuredModel?.contextWindow).toBe(65_536);
 	});
@@ -1657,6 +1604,44 @@ describe("ModelRegistry runtime discovery", () => {
 		const llamaModels = getModelsForProvider(registry, "llama.cpp");
 		const apiKey = await registry.getApiKey(llamaModels[0]);
 		expect(apiKey).toBe(kNoAuth);
+	});
+	test("does not send llama.cpp-local placeholder as discovery bearer", async () => {
+		writeRawModelsJson({
+			"llama.cpp": {
+				baseUrl: "http://127.0.0.1:8080",
+				apiKey: "llama-cpp-local",
+				api: "openai-responses",
+				discovery: { type: "llama.cpp" },
+			},
+		});
+
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:8080/props") {
+				const headers = init?.headers as Headers | Record<string, string> | undefined;
+				const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+				expect(authHeader).toBeUndefined();
+				return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 8192 } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url !== "http://127.0.0.1:8080/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			const headers = init?.headers as Headers | Record<string, string> | undefined;
+			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+			expect(authHeader).toBeUndefined();
+			return new Response(JSON.stringify({ data: [{ id: "local-llama" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("llama.cpp");
+
+		expect(registry.getProviderDiscoveryState("llama.cpp")?.status).toBe("ok");
 	});
 	test("llama.cpp discovery maps unlimited output limits to the context window", async () => {
 		const fetchMock: FetchImpl = async input => {
@@ -2739,6 +2724,378 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(modelListCalls).toBe(1);
 		expect(registry.find("llama.cpp", "restarted-model")?.contextWindow).toBe(88832);
 	});
+	test("discovers custom openai-compatible models and lets configured models override discovered fields", async () => {
+		writeRawModelsJson({
+			vllm: {
+				baseUrl: "http://192.168.5.3:8085/v1",
+				apiKey: "sk-1234",
+				api: "openai-completions",
+				auth: "apiKey",
+				discovery: { type: "openai-models-list" },
+				models: [{ id: "qwen3.6", name: "Qwen3.6", contextWindow: 128000, maxTokens: 8192 }],
+			},
+		});
+
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url !== "http://192.168.5.3:8085/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			const headers = init?.headers as Headers | Record<string, string> | undefined;
+			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+			expect(authHeader).toBe("Bearer sk-1234");
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "qwen3.6" }, { id: "vllm-lab-fork-b2" }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("vllm");
+
+		const providerModels = getModelsForProvider(registry, "vllm");
+		expect(providerModels.map(model => model.id).sort()).toEqual(["qwen3.6", "vllm-lab-fork-b2"]);
+		expect(registry.getProviderDiscoveryState("vllm")?.status).toBe("ok");
+
+		const qwen = registry.find("vllm", "qwen3.6");
+		expect(qwen?.api).toBe("openai-completions");
+		expect(qwen?.provider).toBe("vllm");
+		expect(qwen?.name).toBe("Qwen3.6");
+		expect(qwen?.contextWindow).toBe(128000);
+		expect(qwen?.maxTokens).toBe(8192);
+
+		const discovered = registry.find("vllm", "vllm-lab-fork-b2");
+		expect(discovered?.api).toBe("openai-completions");
+		expect(discovered?.provider).toBe("vllm");
+		expect(discovered?.name).toBe("vllm-lab-fork-b2");
+		expect(discovered?.contextWindow).toBe(128000);
+		expect(discovered?.maxTokens).toBe(32_768);
+	});
+
+	test("discovers multiple configurable vllm instances and preserves advertised context metadata", async () => {
+		writeRawModelsJson({
+			"vllm-fast": {
+				baseUrl: "http://192.168.5.3:8085/v1",
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "openai-models-list" },
+			},
+			"vllm-long": {
+				baseUrl: "http://192.168.5.4:8085/v1",
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://192.168.5.3:8085/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [{ id: "vllm-lab-fork-flash", max_model_len: 262_144 }],
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			}
+			if (url === "http://192.168.5.4:8085/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [{ id: "vllm-lab-fork-long", context_length: "1048576" }],
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("vllm-fast");
+		await registry.refreshProvider("vllm-long");
+
+		const fast = registry.find("vllm-fast", "vllm-lab-fork-flash");
+		expect(fast?.contextWindow).toBe(262_144);
+		expect(fast?.maxTokens).toBe(32_768);
+		const long = registry.find("vllm-long", "vllm-lab-fork-long");
+		expect(long?.contextWindow).toBe(1_048_576);
+		expect(long?.maxTokens).toBe(32_768);
+		expect(registry.getProviderDiscoveryState("vllm-fast")?.status).toBe("ok");
+		expect(registry.getProviderDiscoveryState("vllm-long")?.status).toBe("ok");
+	});
+
+	test.each([true, false])("preserves the proxy offline roster (advertisedReasoning=%s)", advertisedReasoning => {
+		const provider = "cached-proxy";
+		const baseUrl = "https://proxy.example/v1";
+		writeRawModelsJson({
+			[provider]: {
+				baseUrl,
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "proxy", advertisedReasoning },
+			},
+		});
+		const bundled = getBundledModels("openai")[0];
+		writeModelCache(
+			`${provider}:proxy-v2-${advertisedReasoning ? "" : "advertised-off-"}context-v6`,
+			Date.now(),
+			[{ ...bundled, provider, baseUrl, id: "offline-only" }],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.find(provider, "offline-only")?.baseUrl).toBe(baseUrl);
+	});
+
+	test("configured openai-models-list discovery ignores rows cached under the bare provider namespace", async () => {
+		writeRawModelsJson({
+			"vllm-fast": {
+				baseUrl: "http://192.168.5.3:8085/v1",
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		writeModelCache(
+			"vllm-fast",
+			Date.now(),
+			[
+				buildModel({
+					id: "Stale",
+					name: "Stale",
+					provider: "vllm-fast",
+					api: "openai-completions",
+					baseUrl: "http://192.168.5.3:8085/v1",
+					contextWindow: 128_000,
+					maxTokens: 32_768,
+					reasoning: false,
+					input: ["text"],
+					cost: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+					},
+				}),
+			],
+			true,
+			"",
+			cacheDbPath,
+		);
+
+		const calls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			calls.push(url);
+			if (url !== "http://192.168.5.3:8085/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			return new Response(JSON.stringify({ data: [{ id: "Fresh", max_model_len: 262_144 }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("vllm-fast", "online-if-uncached");
+
+		expect(calls).toEqual(["http://192.168.5.3:8085/v1/models"]);
+		expect(registry.find("vllm-fast", "Fresh")?.contextWindow).toBe(262_144);
+		expect(registry.find("vllm-fast", "Stale")).toBeUndefined();
+	});
+
+	test("uses default vllm baseUrl override for built-in discovery", async () => {
+		writeRawModelsJson({ vllm: { baseUrl: "http://192.168.5.3:8085/v1", auth: "none" } });
+
+		await authStorage.credentials.set("vllm", {
+			type: "api_key",
+			key: "vllm-local",
+		});
+
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url !== "http://192.168.5.3:8085/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			const headers = init?.headers as Headers | Record<string, string> | undefined;
+			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+			expect(authHeader).toBeUndefined();
+			expect(init?.signal).toBeInstanceOf(AbortSignal);
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "DeepSeek-V4-Flash", max_model_len: 262_144 }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("vllm");
+
+		const model = registry.find("vllm", "DeepSeek-V4-Flash");
+		expect(model?.baseUrl).toBe("http://192.168.5.3:8085/v1");
+		expect(model?.contextWindow).toBe(262_144);
+		expect(model?.provider).toBe("vllm");
+	});
+
+	test("does not probe built-in vllm unless it is explicitly configured", async () => {
+		writeRawModelsJson({});
+
+		const urls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			urls.push(url);
+			if (url === "http://127.0.0.1:8000/v1/models") {
+				throw new Error("Unexpected default vLLM probe");
+			}
+			return new Response(JSON.stringify({ data: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		expect(urls).not.toContain("http://127.0.0.1:8000/v1/models");
+	});
+
+	test("treats auth none only vllm config as explicit built-in discovery", async () => {
+		writeRawModelsJson({ vllm: { auth: "none" } });
+
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url !== "http://127.0.0.1:8000/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			expect(init?.signal).toBeInstanceOf(AbortSignal);
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "DefaultVllm", max_model_len: 262_144 }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("vllm");
+
+		expect(registry.find("vllm", "DefaultVllm")?.contextWindow).toBe(262_144);
+	});
+
+	test("refetches built-in vllm discovery when the configured baseUrl changes", async () => {
+		writeRawModelsJson({ vllm: { baseUrl: "http://192.168.5.3:8085/v1", auth: "none" } });
+
+		const calls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://192.168.5.3:8085/v1/models") {
+				calls.push(url);
+				return new Response(JSON.stringify({ data: [{ id: "Old", max_model_len: 262_144 }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "http://192.168.5.4:8085/v1/models") {
+				calls.push(url);
+				return new Response(JSON.stringify({ data: [{ id: "New", max_model_len: 524_288 }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const firstRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await firstRegistry.refreshProvider("vllm");
+		expect(firstRegistry.find("vllm", "Old")?.contextWindow).toBe(262_144);
+
+		writeRawModelsJson({ vllm: { baseUrl: "http://192.168.5.4:8085/v1", auth: "none" } });
+		const secondRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await secondRegistry.refresh();
+
+		expect(secondRegistry.find("vllm", "New")?.contextWindow).toBe(524_288);
+		expect(calls).toEqual(["http://192.168.5.3:8085/v1/models", "http://192.168.5.4:8085/v1/models"]);
+	});
+
+	test("loads built-in vllm cache from the configured baseUrl namespace", async () => {
+		writeRawModelsJson({ vllm: { baseUrl: "http://192.168.5.3:8085/v1", auth: "none" } });
+
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url !== "http://192.168.5.3:8085/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			return new Response(JSON.stringify({ data: [{ id: "Cached", max_model_len: 262_144 }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const firstRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await firstRegistry.refreshProvider("vllm");
+		expect(firstRegistry.find("vllm", "Cached")?.contextWindow).toBe(262_144);
+
+		const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async input => {
+				throw new Error(`Unexpected online fetch: ${String(input)}`);
+			},
+		});
+		expect(cachedRegistry.find("vllm", "Cached")?.contextWindow).toBe(262_144);
+	});
+
+	test("does not send vllm-local placeholder as discovery bearer", async () => {
+		writeRawModelsJson({
+			vllm: {
+				baseUrl: "http://192.168.5.3:8085/v1",
+				apiKey: "vllm-local",
+				api: "openai-completions",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url !== "http://192.168.5.3:8085/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			const headers = init?.headers as Headers | Record<string, string> | undefined;
+			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+			expect(authHeader).toBeUndefined();
+			return new Response(
+				JSON.stringify({
+					data: [{ id: "DeepSeek-V4-Flash", max_model_len: 262_144 }],
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("vllm");
+
+		expect(registry.getProviderDiscoveryState("vllm")?.status).toBe("ok");
+	});
+
 	test("openai-models-list discovery honors API-reported context_length over fallback", async () => {
 		writeRawModelsJson({
 			"openai-test": {
@@ -2947,6 +3304,40 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(maxTokensById["openai-test/nested-output-wins"]).toBe(32_768);
 		expect(maxTokensById["openai-test/output-over-context"]).toBe(8_192);
 		expect(maxTokensById["openai-test/no-limits"]).toBe(32_768);
+	});
+
+	test("openai-models-list discovery keeps anthropic-messages providers at the 8192 default", async () => {
+		// Anthropic's stream converter sends `max_tokens` as `(model.maxTokens / 3) | 0`.
+		// The 32K discovery default would surface as 10,922 requested output
+		// tokens, above the Claude 3.x hard cap, so anthropic-messages providers
+		// behind a bare `/v1/models` catalog keep the conservative 8K default.
+		writeRawModelsJson({
+			"third-party-anthropic": {
+				baseUrl: "https://anthropic-reseller.example.com/v1",
+				apiKey: "sk-test",
+				api: "anthropic-messages",
+				auth: "apiKey",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url !== "https://anthropic-reseller.example.com/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			return new Response(JSON.stringify({ data: [{ id: "claude-3-5-sonnet" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("third-party-anthropic");
+
+		const sonnet = registry.find("third-party-anthropic", "claude-3-5-sonnet");
+		expect(sonnet?.api).toBe("anthropic-messages");
+		expect(sonnet?.maxTokens).toBe(8192);
 	});
 
 	test("openai-models-list skips a model whose id names two vendors instead of dropping the provider (#18770)", async () => {
@@ -4001,6 +4392,50 @@ describe("ModelRegistry runtime discovery", () => {
 		const clampedRow = registry.find("proxy-test", "clamped-row-model");
 		expect(clampedRow?.input).toEqual(["text"]);
 		expect(clampedRow?.maxTokens).toBe(32000);
+	});
+
+	test("proxy discovery keeps anthropic-routed models at the 8192 default to stay under Claude 3.x output caps", async () => {
+		// Anthropic's stream converter sends `max_tokens` as `(model.maxTokens / 3) | 0`.
+		// The 32K discovery default would surface as 10,922 — above the 8,192 hard
+		// cap on classic Claude 3.x models — so the anthropic route keeps 8K.
+		writeRawModelsJson({
+			"newapi-proxy": {
+				baseUrl: "https://proxy.example.com/v1",
+				apiKey: "sk-test",
+				api: "openai-completions",
+				auth: "apiKey",
+				discovery: { type: "proxy" },
+			},
+		});
+
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url !== "https://proxy.example.com/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			return new Response(
+				JSON.stringify({
+					data: [
+						{ id: "claude-3-5-sonnet", supported_endpoint_types: ["anthropic"] },
+						{ id: "claude-3-5-haiku", supported_endpoint_types: ["anthropic", "openai"] },
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("newapi-proxy");
+
+		const sonnet = registry.find("newapi-proxy", "claude-3-5-sonnet");
+		expect(sonnet?.api).toBe("anthropic-messages");
+		expect(sonnet?.maxTokens).toBe(8192);
+
+		// Dual-endpoint advertisements prefer the anthropic route in the proxy
+		// branch, so they also stay capped at 8K.
+		const haiku = registry.find("newapi-proxy", "claude-3-5-haiku");
+		expect(haiku?.api).toBe("anthropic-messages");
+		expect(haiku?.maxTokens).toBe(8192);
 	});
 
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {

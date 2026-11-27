@@ -10,7 +10,7 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
-import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, errorMessage, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
 	APP_NAME,
@@ -52,7 +52,9 @@ import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
+import { applyModelPresetOverrides, applyPresetLaunchThinkingLevel } from "./config/model-presets";
 import { formatModelSelectorValue } from "./config/model-selector";
+import { type ConfiguredThinkingLevel, sanitizeDisplayWarnings } from "./utils/render-utils";
 import {
 	disabledProviderIds,
 	expandRoleAlias,
@@ -87,10 +89,12 @@ import {
 } from "./extensibility/plugins/marketplace-auto-update";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
+import { offerForeignConfigMigration, pendingForeignConfigMigration } from "./modes/foreign-config-migration";
 import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
+import type { NoticeEvent } from "./modes/rpc/wire/rpc-wire.generated";
 import { CURRENT_SETUP_VERSION } from "./config/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
@@ -143,7 +147,6 @@ import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking/levels";
 import type { LspStartupServerInfo } from "./tools";
-import { sanitizeDisplayWarnings } from "./utils/render-utils";
 import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
@@ -176,6 +179,7 @@ import {
 	cfgThemeLight,
 	cfgTuiImeSafeCursor,
 	cfgTuiResizeScrollback,
+	cfgTuiScreen,
 	cfgTuiSpinnerInterval,
 	cfgTuiVimMode,
 	cfgTuiMaxFps,
@@ -195,7 +199,8 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder, cfgModelRoles } from "./config/model-settings";
-import { cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgTaskAgentIdleTtlMs, cfgTaskMaxRecursionDepth } from "./task/settings";
+import { canSpawnAtDepth } from "./task/types";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 import { ensureTheme, getTerminalAppearance, initTheme, stopThemeWatcher } from "./ui/theme/service";
@@ -263,6 +268,18 @@ async function loadReadlineInterface() {
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
+
+/**
+ * An RPC startup that fails closed on a saved model exits before `ready`; without a
+ * frame the host could only read stderr. Delivers the reason as a stdout `notice`.
+ */
+async function writeRpcModelRestoreNotice(message: string): Promise<void> {
+	const frame: NoticeEvent = { type: "notice", level: "error", message, source: "session-model-restore" };
+	const { promise, resolve } = Promise.withResolvers<void>();
+	// The startup error ends the process either way; delivery failure only loses the frame.
+	process.stdout.write(`${JSON.stringify(frame)}\n`, () => resolve());
+	await promise;
 }
 
 /** Print a non-fatal startup warning, for launches without a UI to show it in. */
@@ -819,17 +836,23 @@ async function runInteractiveMode(
 		}
 		playStartupSplash = showStartupSplash && setupScenes.length === 0;
 		const offersStartupWorktree = !resuming && joinLink === undefined;
+		const foreignConfigTools = await pendingForeignConfigMigration([
+			settings.getGlobalSettings(),
+			settings.getProjectSettings(),
+		]);
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
-				// Setup scenes and the startup worktree question wait on the user before any
-				// prompt runs, so they keep the boot `idle`. The worktree check runs before its
-				// async git check, so a folder where the question never shows also keeps `idle`.
+				// Setup scenes, the startup worktree question and the foreign-config offer wait on
+				// the user before any prompt runs, so they keep the boot `idle`. The worktree check
+				// runs before its async git check, so a folder where the question never shows also
+				// keeps `idle`.
 				startupRun:
 					setupScenes.length === 0 &&
+					foreignConfigTools.length === 0 &&
 					!(offersStartupWorktree && mode.mayAskForStartupWorktree()) &&
 					(startupGoal !== undefined || initialMessage !== undefined || initialMessages.length > 0),
 			}),
@@ -899,6 +922,14 @@ async function runInteractiveMode(
 
 		if (offersStartupWorktree) {
 			await mode.maybeAutoCreateWorktree();
+		}
+
+		if (foreignConfigTools.length > 0) {
+			try {
+				await offerForeignConfigMigration(mode, foreignConfigTools);
+			} catch (error) {
+				mode.showWarning(`Could not offer to keep inherited config: ${errorMessage(error)}`);
+			}
 		}
 
 		// `omp join <link>`: dispatch through the same builtin path as a typed
@@ -2193,6 +2224,25 @@ export async function runRootCommand(
 		// Initialize discovery system with settings for provider persistence
 		logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);
 
+		// Apply --preset first. A later --smol/--slow/--plan flag overrides the
+		// preset's value for that role (ephemeral).
+		let presetThinkingLevel: ConfiguredThinkingLevel | undefined;
+		if (parsedArgs.preset !== undefined) {
+			const presetResult = applyModelPresetOverrides(settingsInstance, parsedArgs.preset);
+			if (presetResult.kind !== "applied") {
+				const rawMessage =
+					presetResult.kind === "missing"
+						? `Model preset not found: ${parsedArgs.preset}`
+						: `Model preset "${parsedArgs.preset}" is malformed: ${presetResult.reason}`;
+				// Both the flag value and a malformed project-config role key reach this
+				// line verbatim, so strip terminal controls and stray whitespace before it
+				// reaches the terminal.
+				process.stderr.write(`${chalk.red(sanitizeDisplayWarnings([rawMessage])[0] ?? rawMessage)}\n`);
+				process.exit(1);
+			}
+			presetThinkingLevel = presetResult.defaultThinkingLevel;
+		}
+
 		// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 		const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
 		const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
@@ -2262,6 +2312,7 @@ export async function runRootCommand(
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settingsInstance),
 			vim: cfgTuiVimMode.get(settingsInstance),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),
+			screen: cfgTuiScreen.get(settingsInstance),
 			theme: {
 				symbolPreset: cfgSymbolPreset.get(settingsInstance),
 				colorBlindMode: cfgColorBlindMode.get(settingsInstance),
@@ -2800,6 +2851,9 @@ export async function runRootCommand(
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 			} catch (error) {
 				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof sdk.SessionModelRestoreError)) {
+					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof sdk.SessionModelRestoreError) {
+						await writeRpcModelRestoreNotice(error.message);
+					}
 					throw error;
 				}
 				await sessionManager.close();
@@ -2828,6 +2882,13 @@ export async function runRootCommand(
 			if (isInteractive)
 				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
 			if (!isInteractive) session.validateRetryFallbackChains();
+			// The preset's thinking level seeds the session the way `/modelpreset switch`
+			// applies it, past the model's own default. An explicit `--thinking` or selector
+			// level already set `sessionOptions.thinkingLevel`; a resumed, imported or
+			// auto-resumed session keeps the effort it saved. Seed only a fresh session.
+			if (presetThinkingLevel !== undefined && !explicitSessionSelection && !autoResumed) {
+				applyPresetLaunchThinkingLevel(session, presetThinkingLevel, sessionOptions.thinkingLevel);
+			}
 
 			const sessionToolNames = session.getAllToolNames();
 			try {
@@ -2839,6 +2900,17 @@ export async function runRootCommand(
 				const evalWarning = sessionToolNames.includes("eval") ? undefined : await pythonEvalWarningPromise;
 				if (evalWarning && error instanceof CliUsageError) {
 					throw new CliUsageError(`${error.message}\n${evalWarning}`);
+				}
+				const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settingsInstance);
+				if (
+					error instanceof CliUsageError &&
+					initialArgs.tools?.includes("task") &&
+					!sessionToolNames.includes("task") &&
+					!canSpawnAtDepth(maxRecursionDepth, 0)
+				) {
+					throw new CliUsageError(
+						`${error.message}\n\`task\` is disabled by task.maxRecursionDepth: ${maxRecursionDepth}; set it to 1 or higher to allow subagents.`,
+					);
 				}
 				throw error;
 			}

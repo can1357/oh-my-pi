@@ -181,6 +181,7 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 	const entry = hub.activeEntry();
 	const refresh =
 		entry.kind === "provider" && !entry.locked ? pickerAction("refresh", "Refresh provider", "f5") : undefined;
+	const manage = hub.manageUrl() ? pickerAction("manage", "Manage access", "f6") : undefined;
 	const assigning = hub.assigning;
 	if (assigning !== null) {
 		const label =
@@ -260,6 +261,7 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 			hub.browser.pickerSelected ? { primary: true } : { primary: true, disabled: "No model selected" },
 		),
 		refresh,
+		manage,
 		hub.browser.query.length > 0 ? cancel("Clear search") : closeAction(),
 	].filter((value): value is TspPickerAction => value !== undefined);
 }
@@ -524,6 +526,14 @@ function hubProps(hub: ModelHubState): TspPickerProps {
 		if (hub.configError && entry.kind !== "provider") return [{ s: "error", t: hub.configError }];
 		if (entry.kind === "provider" && hub.isRefreshing(entry.providerId))
 			return `${entry.label} · refreshing model list…`;
+		const manageUrl = hub.manageUrl(entry);
+		if (manageUrl && entry.providerId) {
+			const off = hub.accessOff(entry.providerId);
+			return [
+				{ s: off ? "warning" : "muted", t: off ? "Off for this account · " : "On · " },
+				{ s: "muted", t: `F6 manages access at ${manageUrl}` },
+			];
+		}
 		const presets = rolesView ? hub.presets() : undefined;
 		if (presets && presets.names.length > 0)
 			return [

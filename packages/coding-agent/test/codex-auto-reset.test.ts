@@ -143,7 +143,7 @@ function input(reports: UsageReport[] | null, overrides: Partial<CodexResetPlanI
 		trigger: "blocked",
 		provider: "openai-codex",
 		modelId: "gpt-5.3-codex",
-		settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+		settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR, expirySalvage: true },
 		identity: IDENTITY,
 		reports,
 		attemptedKeys: new Set<string>(),
@@ -335,7 +335,9 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 
 	it("respects the reserve: 1 credit with keepCredits 1 is held back", () => {
 		const plan = planCodexResetRedemptions(
-			input([report()], { settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 } }),
+			input([report()], {
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0, expirySalvage: true },
+			}),
 		);
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "blocked-account", reason: "reserve" });
@@ -344,7 +346,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("restores above the reserve: 2 credits with keepCredits 1", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ credits: 2 })], {
-				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0, expirySalvage: true },
 			}),
 		);
 		expect(plan.actions).toMatchObject([{ reason: "blocked-account", availableCount: 2 }]);
@@ -499,6 +501,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			minBlockedMinutes: 60,
 			keepCredits: 0,
 			salvageHorizonMs: 0,
+			expirySalvage: true,
 		} as const;
 		const weekly = planCodexResetRedemptions(input([report()], { settings }));
 		expect(weekly.actions).toEqual([]);
@@ -522,7 +525,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("returns nothing when the policy is disabled", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
-				settings: { modes: {}, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
+				settings: { modes: {}, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0, expirySalvage: true },
 			}),
 		);
 		expect(plan).toEqual({ actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] });
@@ -577,6 +580,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			minBlockedMinutes: 60,
 			keepCredits: 0,
 			salvageHorizonMs: 0,
+			expirySalvage: true,
 		} as const;
 		const plan = planCodexResetRedemptions(input([active, sibling], { settings }));
 		expect(plan.actions[0]).toMatchObject({ window: "5h", active: false });
@@ -655,6 +659,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
+					expirySalvage: true,
 				},
 			}),
 		);
@@ -755,7 +760,13 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 12 * HOUR },
+				settings: {
+					modes: ALL,
+					minBlockedMinutes: 60,
+					keepCredits: 5,
+					salvageHorizonMs: 12 * HOUR,
+					expirySalvage: true,
+				},
 			}),
 		);
 		expect(plan.actions).toHaveLength(1);
@@ -794,16 +805,35 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0, expirySalvage: true },
 			}),
 		);
 		expect(plan.actions).toEqual([]);
 	});
 
+	it("spends only on exhausted blocks when expiry salvage is off, last chance included", () => {
+		const settings = {
+			modes: ALL,
+			minBlockedMinutes: 60,
+			keepCredits: 0,
+			salvageHorizonMs: 12 * HOUR,
+			expirySalvage: false,
+		};
+		for (const expiresInMs of [IMMINENT_RESET_EXPIRY_MS, 2 * HOUR]) {
+			const plan = planCodexResetRedemptions(
+				input([report({ weeklyUsed: 0.7, creditExpiries: [expiresInMs] })], { trigger: "sweep", settings }),
+			);
+			expect(plan.actions).toEqual([]);
+			expect(plan.skipped).toContainEqual({ accountKey: "*", rule: "expiring-credit", reason: "disabled" });
+		}
+		const blocked = planCodexResetRedemptions(input([report({ creditExpiries: [2 * HOUR] })], { settings }));
+		expect(blocked.actions).toMatchObject([{ reason: "blocked-account" }]);
+	});
+
 	it("salvages at five minutes inclusively despite a zero horizon", () => {
 		const base = input([], {
 			trigger: "sweep",
-			settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
+			settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0, expirySalvage: true },
 		});
 		for (const expiresInMs of [1, 5 * 60_000, 5 * 60_000 + 1]) {
 			const plan = planCodexResetRedemptions({
@@ -845,7 +875,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([zero, unknown], {
 				trigger: "sweep",
-				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0, expirySalvage: true },
 			}),
 		);
 		expect(plan.actions).toMatchObject([
@@ -869,7 +899,13 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
 				trigger: "sweep",
-				settings: { modes: {}, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+				settings: {
+					modes: {},
+					minBlockedMinutes: 60,
+					keepCredits: 0,
+					salvageHorizonMs: 12 * HOUR,
+					expirySalvage: true,
+				},
 			}),
 		);
 		expect(plan).toEqual({ actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] });

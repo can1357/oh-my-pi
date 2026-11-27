@@ -11,6 +11,7 @@ import { getNativeFinishReasonError } from "@oh-my-pi/pi-ai/providers/native-fin
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Mirrors the transient-transport alternative the session retry gate matches on.
@@ -529,6 +530,177 @@ describe("premature stream closure", () => {
 		expect(attempts).toBeGreaterThan(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "Hi" }]);
+	}, 10_000);
+});
+
+describe("[DONE]-terminated stream without finish_reason", () => {
+	// Many OpenAI-compatible hosts stream content, then terminate with the `[DONE]`
+	// sentinel while omitting (or `null`ing) `finish_reason`. `[DONE]` is the
+	// streaming protocol's terminal signal, so those turns completed by server
+	// agreement and must finalize cleanly; only a genuine transport EOF (no
+	// `[DONE]`) is a truncated stream.
+	const litellmModel = buildModel({
+		id: "test-model",
+		name: "Test",
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "http://127.0.0.1:4000/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 100_000,
+		maxTokens: 8_000,
+	});
+
+	const doneTerminated: readonly (readonly [string, unknown[], string])[] = [
+		[
+			"no terminal finish chunk, just [DONE]",
+			[{ choices: [{ delta: { content: "Hel" } }] }, { choices: [{ delta: { content: "lo" } }] }, "[DONE]"],
+			"Hello",
+		],
+		[
+			"trailing finish_reason:null then [DONE]",
+			[{ choices: [{ delta: { content: "Hel" } }] }, { choices: [{ delta: {}, finish_reason: null }] }, "[DONE]"],
+			"Hel",
+		],
+		[
+			"trailing empty choices:[] then [DONE]",
+			[{ choices: [{ delta: { content: "Hel" } }] }, { choices: [] }, "[DONE]"],
+			"Hel",
+		],
+	];
+
+	for (const [label, frames, expectedText] of doneTerminated) {
+		it(`finalizes as a clean stop with content preserved (${label})`, async () => {
+			const msg = await streamOpenAICompletions(litellmModel, baseContext(), {
+				apiKey: "k",
+				fetch: createSseFetch(frames),
+			}).result();
+			const text = msg.content.reduce((acc, block) => (block.type === "text" ? acc + block.text : acc), "");
+			expect(msg.stopReason).toBe("stop");
+			expect(msg.errorMessage).toBeUndefined();
+			expect(text).toBe(expectedText);
+		});
+	}
+
+	it("promotes a [DONE]-terminated tool-call turn without finish_reason to toolUse", async () => {
+		const msg = await streamOpenAICompletions(litellmModel, baseContext(), {
+			apiKey: "k",
+			fetch: createSseFetch([
+				{
+					choices: [
+						{
+							delta: {
+								tool_calls: [{ index: 0, id: "call_1", function: { name: "foo", arguments: '{"a":1}' } }],
+							},
+						},
+					],
+				},
+				"[DONE]",
+			]),
+		}).result();
+		expect(msg.stopReason).toBe("toolUse");
+		expect(msg.errorMessage).toBeUndefined();
+		expect(msg.content.some(block => block.type === "toolCall")).toBe(true);
+	});
+});
+
+describe("finish_reason: repetition", () => {
+	// OpenAI-compatible servers report a generation degenerating into repetition
+	// as a terminal signal (`finish_reason: "repetition"` and/or
+	// `stop_reason: "repetition_detected"`). It must classify as a thinking loop
+	// and drop the degenerate partial reasoning instead of replaying it.
+	const reasoningModel = buildModel({
+		id: "repetition-model",
+		name: "Repetition Model",
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "http://127.0.0.1:4000/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 100_000,
+		maxTokens: 8_000,
+	});
+
+	/**
+	 * Build a stream that thinks in `?!` and then reports a repetition stop.
+	 *
+	 * 64 characters of reasoning is below the detector's 180-character floor, so the
+	 * server stop signal is the only thing that can classify this turn.
+	 */
+	function repetitionStream(choice: Record<string, unknown>): { fetchMock: FetchImpl; requests: () => number } {
+		const chunk = (extra: Record<string, unknown>) => ({
+			id: "chatcmpl-repetition",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: reasoningModel.id,
+			choices: [{ index: 0, ...extra }],
+		});
+		const frames = [
+			...Array.from({ length: 32 }, () => chunk({ delta: { reasoning_content: "?!" }, finish_reason: null })),
+			chunk({ delta: {}, ...choice }),
+		];
+		const body = `${frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\n`;
+		let requests = 0;
+		const fetchMock = Object.assign(
+			async (): Promise<Response> => {
+				requests += 1;
+				return new Response(body, { headers: { "content-type": "text/event-stream" } });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		return { fetchMock, requests: () => requests };
+	}
+
+	// The `stop_reason` form is reported both alongside a clean `stop` and with no
+	// `finish_reason` at all, so it cannot be read only from `finish_reason`.
+	const REPETITION_CHOICES: ReadonlyArray<Record<string, unknown>> = [
+		{ finish_reason: "repetition", stop_reason: "repetition_detected" },
+		{ finish_reason: "repetition" },
+		{ finish_reason: "stop", stop_reason: "repetition_detected" },
+		{ stop_reason: "repetition_detected" },
+	];
+
+	for (const choice of REPETITION_CHOICES) {
+		it(`classifies ${JSON.stringify(choice)} as a thinking loop and drops the partial`, async () => {
+			const { fetchMock, requests } = repetitionStream(choice);
+			const result = await streamOpenAICompletions(reasoningModel, baseContext(), {
+				apiKey: "test-key",
+				fetch: fetchMock,
+			}).result();
+
+			// One request: the provider stops at the terminal signal rather than
+			// resampling on its own.
+			expect(requests()).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+			// Degenerate reasoning is replay garbage; retaining it is what made the
+			// loop survive across turns.
+			expect(result.content).toEqual([]);
+		}, 10_000);
+	}
+
+	it("keeps the raw stop reasons for diagnosis", async () => {
+		const { fetchMock } = repetitionStream({ finish_reason: "repetition", stop_reason: "repetition_detected" });
+		const result = await streamOpenAICompletions(reasoningModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.errorMessage).toContain("finish_reason=repetition");
+		expect(result.errorMessage).toContain("stop_reason=repetition_detected");
+	}, 10_000);
+
+	it("leaves an ordinary stop finish untouched", async () => {
+		const { fetchMock } = repetitionStream({ finish_reason: "stop" });
+		const result = await streamOpenAICompletions(reasoningModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(false);
 	}, 10_000);
 });
 

@@ -33,7 +33,7 @@ describe("tool activity visibility", () => {
 		const visible = renderTranscript(ctx).join("\n");
 		expect(visible).toContain("ts-no-tiny-functions");
 
-		ctx.hideToolActivity = true;
+		ctx.toolActivity = "hidden";
 		expect(renderTranscript(ctx).join("\n")).not.toContain("ts-no-tiny-functions");
 		await controller.handleEvent({
 			type: "todo_reminder",
@@ -43,7 +43,7 @@ describe("tool activity visibility", () => {
 		} as AgentSessionEvent);
 		expect(renderTranscript(ctx).join("\n")).not.toContain("finish the task");
 
-		ctx.hideToolActivity = false;
+		ctx.toolActivity = "detailed";
 		const restored = renderTranscript(ctx).join("\n");
 		expect(restored).toContain("ts-no-tiny-functions");
 		expect(restored).toContain("finish the task");

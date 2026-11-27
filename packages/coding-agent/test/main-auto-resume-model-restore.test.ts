@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 import { Terminal as VirtualTerminal } from "@oh-my-pi/pi-utils/vterm";
 
 type Scenario =
 	| "auto"
 	| "continue"
 	| "resume"
+	| "rpc-resume"
 	| "headless"
 	| "restorable"
 	| "override"
@@ -17,6 +18,8 @@ interface Observation {
 	providerRequests?: number;
 	agentError?: unknown;
 	session?: { id: string; model?: string; messages: unknown[]; cacheKey?: string };
+	/** Protocol frames the launch wrote to stdout, besides the fixture's observation line. */
+	notices: unknown[];
 }
 
 /** Run real CLI/SDK startup in a process whose config, leases and registries cannot escape the fixture. */
@@ -83,6 +86,7 @@ async function runScenario(scenario: Scenario): Promise<Observation> {
 			"--no-prewalk", "--trusted-extension", ${JSON.stringify(extension)}];
 		if (scenario === "continue") args.push("-c");
 		if (scenario === "resume") args.push("--resume", file);
+		if (scenario === "rpc-resume") args.push("--mode", "rpc", "--resume", file);
 		if (scenario === "headless") args.push("-p", "Continue.");
 		if (scenario === "override") args.push("--model", "resume-fixture/fresh");
 		if (scenario === "expired-deadline") args.push("--max-time", "30");
@@ -158,6 +162,8 @@ async function runScenario(scenario: Scenario): Promise<Observation> {
 			WINDIR: process.env.WINDIR,
 			TZ: "Asia/Tokyo",
 			NO_COLOR: "1",
+			// Test runtime: keeps the child off the OS keychain.
+			PI_TEST_RUNTIME: "1",
 		},
 		stdin: "ignore",
 		stdout: "pipe",
@@ -173,7 +179,12 @@ async function runScenario(scenario: Scenario): Promise<Observation> {
 		if (exitCode !== 0) throw new Error(`Startup fixture exited ${exitCode}: ${stderr}\n${stdout}`);
 		const result = stdout.split("\n").find(line => line.startsWith("OBSERVATION_17043:"));
 		if (!result) throw new Error(`Startup fixture produced no observation: ${stderr}\n${stdout}`);
-		return JSON.parse(result.slice("OBSERVATION_17043:".length)) as Observation;
+		const notices = stdout
+			.split("\n")
+			.filter(line => line.startsWith("{"))
+			.map(line => JSON.parse(line) as unknown)
+			.filter(frame => isRecord(frame) && frame.type === "notice");
+		return { ...(JSON.parse(result.slice("OBSERVATION_17043:".length)) as Omit<Observation, "notices">), notices };
 	} finally {
 		proc.kill();
 		await proc.exited;
@@ -197,9 +208,24 @@ describe("implicit auto-resume model restoration", () => {
 			const result = await runScenario(scenario);
 			expect(result.error?.name).toBe("SessionModelRestoreError");
 			expect(result.session).toBeUndefined();
+			expect(result.notices).toEqual([]);
 		},
 		30_000,
 	);
+
+	test("tells an RPC host why a fail-closed startup resume exits before ready", async () => {
+		const result = await runScenario("rpc-resume");
+		expect(result.error?.name).toBe("SessionModelRestoreError");
+		expect(result.session).toBeUndefined();
+		expect(result.notices).toEqual([
+			{
+				type: "notice",
+				level: "error",
+				message: "Could not restore model lost/missing",
+				source: "session-model-restore",
+			},
+		]);
+	}, 30_000);
 
 	test.each(["restorable", "override"] as const)(
 		"preserves the selected transcript for %s restoration",
@@ -244,6 +270,8 @@ describe("implicit auto-resume model restoration", () => {
 				OMP_TUI_NATIVE: "0",
 				PI_TUI_NATIVE: "0",
 				AWS_EC2_METADATA_DISABLED: "true",
+				// Test runtime: keeps the children off the OS keychain.
+				PI_TEST_RUNTIME: "1",
 			};
 			await Bun.write(
 				path.join(agentDir, "config.yml"),

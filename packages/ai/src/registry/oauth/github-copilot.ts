@@ -16,7 +16,7 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	COPILOT_API_HEADERS,
 	COPILOT_CHAT_INTEGRATION_ID,
-	discoverGitHubCopilotApiEndpoint,
+	discoverGitHubCopilotAccount,
 	getGitHubCopilotBaseUrl,
 	isPublicGitHubHost,
 	normalizeCopilotIntegrationId,
@@ -371,7 +371,8 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 		options.pollIntervalScaleMs,
 	);
 
-	const apiEndpoint = await discoverGitHubCopilotApiEndpoint(githubAccessToken, fetchImpl);
+	const account = await discoverGitHubCopilotAccount(githubAccessToken, fetchImpl);
+	const apiEndpoint = account.apiEndpoint;
 
 	// Keep storing the GitHub token directly so credentials minted by the
 	// Copilot CLI OAuth app remain valid alongside new OpenCode app logins.
@@ -381,6 +382,7 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 		expires: FAR_FUTURE_MS,
 		enterpriseUrl: enterpriseDomain ?? undefined,
 		apiEndpoint,
+		...(account.tokenBasedBilling === undefined ? {} : { tokenBasedBilling: account.tokenBasedBilling }),
 	};
 
 	// Enable all models after successful login

@@ -5,7 +5,7 @@
 import type { Theme } from "./contract";
 import { ThemeSymbols } from "./symbols";
 
-/** The colorless theme (unicode glyphs). */
+/** The colorless theme (unicode glyphs, conservative emoji forms). */
 export const PLAIN_THEME: Theme = {
 	name: "plain",
 	dark: true,

@@ -15,9 +15,7 @@ function sessionOver(manager: SessionManager): { session: RpcOpenSessionSession;
 		get sessionFile() {
 			return manager.getSessionFile();
 		},
-		get sessionId() {
-			return manager.getSessionId();
-		},
+		sessionManager: manager,
 		get messages(): AgentMessage[] {
 			return manager.getEntries().flatMap(entry => (entry.type === "message" ? [entry.message] : []));
 		},

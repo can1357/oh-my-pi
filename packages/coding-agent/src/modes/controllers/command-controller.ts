@@ -93,6 +93,7 @@ import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { collapseSharedUsageReports, formatLimitTitle, summarizeUsageResetCredits } from "../../session/usage-display";
+import { formatAiuCredits } from "../../session/aiu-billing";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "../../slash-commands/helpers/usage-amounts";
 import type { UnavailableUsageAccount } from "../view-model/overlays/usage-dashboard";
 
@@ -695,10 +696,16 @@ export class CommandController {
 			}
 		}
 
-		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
+		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined || stats.aiu !== undefined) {
 			info += `\n${bold("Cost")}\n`;
 			if (stats.cost > 0) {
 				info += `${currentTheme().fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
+			}
+			if (stats.aiu !== undefined) {
+				info += `${currentTheme().fg("dim", "AI Credits (reported):")} ${formatAiuCredits(stats.aiu, 4)}\n`;
+				if (stats.aiu.unknownCalls > 0) {
+					info += `${currentTheme().fg("dim", "Calls without billing frame:")} ${stats.aiu.unknownCalls.toLocaleString()}\n`;
+				}
 			}
 			if (normalizedPremiumRequests > 0) {
 				info += `${currentTheme().fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
@@ -947,7 +954,9 @@ export class CommandController {
 		if (!usageReports) {
 			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
 			if (!provider.fetchUsageReports) {
-				this.ctx.showWarning("Usage reporting is not configured for this session.");
+				const sessionAiu = this.ctx.session.getSessionStats().aiu;
+				if (sessionAiu) this.ctx.showUsageDashboard([], sessionAiu);
+				else this.ctx.showWarning("Usage reporting is not configured for this session.");
 				return;
 			}
 			try {
@@ -957,7 +966,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showUsageDashboard(usageReports ?? []);
+		this.ctx.showUsageDashboard(usageReports ?? [], this.ctx.session.getSessionStats().aiu);
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {
@@ -2656,8 +2665,8 @@ export function renderUsageReports(
 		for (const report of providerReports) {
 			for (const limit of report.limits) {
 				const windowId = limit.window?.id ?? limit.scope.windowId ?? "default";
-				// Distinct buckets can share a label and window (Antigravity's Gemini
-				// vs Gemini (Argon) weekly) and must stay separate rows instead of
+				// Distinct buckets can share a label and window (e.g. two weekly
+				// buckets both labelled "Gemini") and must stay separate rows instead of
 				// averaging into "50% free", so the id joins the key. Label and window
 				// stay in it too: some providers build ids positionally or per plan
 				// (kimi's `${index}`, copilot's allowance), where ids differ across

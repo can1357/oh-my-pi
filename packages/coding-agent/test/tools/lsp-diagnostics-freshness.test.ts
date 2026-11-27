@@ -5,7 +5,11 @@ import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
 import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
-import { formatContent, INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
+import {
+	formatContent,
+	getDiagnosticsForFile,
+	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+} from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import {
 	type Diagnostic,
 	FileChangeType,
@@ -932,5 +936,95 @@ describe("LSP diagnostics freshness", () => {
 		} finally {
 			orphanDir.removeSync();
 		}
+	});
+});
+
+/**
+ * The batched writethrough flush reaches `getDiagnosticsForFile` on its blocking branch with a
+ * user-abort-only signal, and the edit tool runs `exclusive`, so one wedged server would queue every
+ * later edit behind it. Each server's whole pipeline therefore runs under a wall-clock budget
+ * (`pipelineBudgetMs`, defaulting to the diagnostics wait budget plus
+ * `DIAGNOSTICS_PIPELINE_GRACE_MS`); an overrunning server is rejected and skipped by the
+ * `Promise.allSettled` collection. These cases use the custom-linter branch (no real LSP process)
+ * with the budget shrunk so the bound is observable in milliseconds.
+ */
+describe("diagnostics pipeline wall-clock budget", () => {
+	const FILE = "/tmp/omp-lsp-pipeline-budget/target.py";
+	const CWD = "/tmp/omp-lsp-pipeline-budget";
+
+	it("a linter that never settles cannot hang getDiagnosticsForFile", async () => {
+		const client: LinterClient = {
+			format: async (_filePath, content) => content,
+			lint: () => Promise.withResolvers<Diagnostic[]>().promise,
+		};
+		const config: ServerConfig = {
+			command: "hung-linter",
+			fileTypes: [".py"],
+			rootMarkers: [],
+			createClient: () => client,
+		};
+		const started = Date.now();
+		// Unique server name: getLinterClient caches by `serverName:cwd`.
+		const result = await getDiagnosticsForFile(FILE, CWD, [["hung-linter", config]], { pipelineBudgetMs: 50 });
+		const elapsed = Date.now() - started;
+
+		// The hung server is skipped, so no server produced results.
+		expect(result).toBeUndefined();
+		// Bounded promptly by the budget, not by any multi-second default.
+		// Generous ceiling to stay robust on slow CI machines.
+		expect(elapsed).toBeLessThan(5_000);
+	});
+
+	it("passes the pipeline deadline to cancellable linter work", async () => {
+		let aborted = false;
+		const pending = Promise.withResolvers<Diagnostic[]>();
+		const client: LinterClient = {
+			format: async (_filePath, content) => content,
+			lint: (_filePath, signal) => {
+				signal?.addEventListener(
+					"abort",
+					() => {
+						aborted = true;
+						pending.reject(signal.reason);
+					},
+					{ once: true },
+				);
+				return pending.promise;
+			},
+		};
+		const config: ServerConfig = {
+			command: "cancellable-linter",
+			fileTypes: [".py"],
+			rootMarkers: [],
+			createClient: () => client,
+		};
+
+		const result = await getDiagnosticsForFile(FILE, CWD, [["cancellable-linter", config]], {
+			pipelineBudgetMs: 50,
+		});
+
+		expect(result).toBeUndefined();
+		expect(aborted).toBe(true);
+	});
+
+	it("a healthy linter still reports normally under the same budget", async () => {
+		const client: LinterClient = {
+			format: async (_filePath, content) => content,
+			lint: async () => [],
+		};
+		const config: ServerConfig = {
+			command: "healthy-linter",
+			fileTypes: [".py"],
+			rootMarkers: [],
+			createClient: () => client,
+		};
+		const result = await getDiagnosticsForFile(FILE, CWD, [["healthy-linter", config]], {
+			pipelineBudgetMs: 5_000,
+		});
+
+		expect(result).toBeDefined();
+		expect(result?.server).toBe("healthy-linter");
+		expect(result?.summary).toBe("OK");
+		expect(result?.errored).toBe(false);
 	});
 });

@@ -115,13 +115,14 @@ export function resetWindowMode(modes: ResetWindowModes, window: ResetWindow | u
 /** Planner settings from a provider's `codexResets.*` or `claudeResets.*` group. */
 export function resetPlanSettings(
 	modes: ResetWindowModes,
-	cfg: { minBlockedMinutes: number; keepCredits: number; salvageHorizonHours: number },
+	cfg: { minBlockedMinutes: number; keepCredits: number; salvageHorizonHours: number; expirySalvage?: boolean },
 ): CodexResetPlanInput["settings"] {
 	return {
 		modes,
 		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
+		expirySalvage: cfg.expirySalvage ?? true,
 	};
 }
 
@@ -167,6 +168,8 @@ export interface CodexResetPlanInput {
 		keepCredits: number;
 		/** `expiring-credit`: broader salvage window; `<= 0` leaves only the five-minute fallback. */
 		salvageHorizonMs: number;
+		/** `expiring-credit`: `false` turns the whole rule off, five-minute fallback included. */
+		expirySalvage: boolean;
 	};
 	/** Active account (marks the preferred restore candidate); may be undefined. */
 	identity: OAuthAccountIdentity | undefined;
@@ -582,7 +585,8 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 
 	// --- expiring-credit: salvage every credit that would otherwise die.
 	const salvages: CodexResetAction[] = [];
-	for (const snapshot of snapshots) {
+	if (!settings.expirySalvage) skipped.push({ accountKey: "*", rule: "expiring-credit", reason: "disabled" });
+	for (const snapshot of settings.expirySalvage ? snapshots : []) {
 		if (snapshot.accountKey === restore?.accountKey) continue; // restore already spends its soonest credit
 		const rule = "expiring-credit" as const;
 		const skip = (reason: CodexResetSkipReason) => skipped.push({ accountKey: snapshot.accountKey, rule, reason });
