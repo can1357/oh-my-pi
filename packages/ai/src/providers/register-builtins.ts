@@ -64,26 +64,12 @@ interface StreamLimits {
 	 */
 	providerHandlesStreamTimeouts?: boolean;
 	/**
-	 * The provider retries or fails over when no first event arrives, while the
-	 * shared wrapper continues to own steady-state idle detection.
-	 */
-	providerHandlesFirstEventTimeouts?: boolean;
-	/**
 	 * Apply OpenAI-family idle timeout precedence in the shared wrapper. Used by
 	 * local backends whose users historically tune slow prompt-processing gaps
 	 * with `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`.
 	 */
 	openAIIdleEnvFloorsFirstEvent?: boolean;
 }
-/**
- * Cloud Code Assist owns first-event detection because Antigravity can return
- * successful headers and then never emit an SSE event. Keeping the watchdog in
- * the provider lets it fail over before surfacing an error; the shared wrapper
- * still catches post-first-event stalls.
- */
-const GOOGLE_GEMINI_CLI_STREAM_LIMITS: StreamLimits = {
-	providerHandlesFirstEventTimeouts: true,
-};
 
 const PROVIDER_HANDLED_STREAM_TIMEOUTS: StreamLimits = {
 	providerHandlesStreamTimeouts: true,
@@ -104,7 +90,6 @@ function forwardStream<TApi extends Api>(
 	(async () => {
 		try {
 			const providerHandlesStreamTimeouts = limits?.providerHandlesStreamTimeouts === true;
-			const providerHandlesFirstEventTimeouts = limits?.providerHandlesFirstEventTimeouts === true;
 			// Per-model catalog compat can widen the fallback watchdog for hosts
 			// with no keepalive events (e.g. Bedrock reasoning models that go
 			// quiet for minutes mid-thinking, issue #4758). Caller options and
@@ -122,13 +107,12 @@ function forwardStream<TApi extends Api>(
 					(limits?.openAIIdleEnvFloorsFirstEvent
 						? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs)
 						: getStreamIdleTimeoutMs(idleTimeoutFallbackMs)));
-			const firstItemTimeoutMs =
-				providerHandlesStreamTimeouts || providerHandlesFirstEventTimeouts
-					? 0
-					: (options.streamFirstEventTimeoutMs ??
-						(limits?.openAIIdleEnvFloorsFirstEvent
-							? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, limits.defaultFirstEventTimeoutMs)
-							: getStreamFirstEventTimeoutMs(idleTimeoutMs, limits?.defaultFirstEventTimeoutMs)));
+			const firstItemTimeoutMs = providerHandlesStreamTimeouts
+				? 0
+				: (options.streamFirstEventTimeoutMs ??
+					(limits?.openAIIdleEnvFloorsFirstEvent
+						? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, limits.defaultFirstEventTimeoutMs)
+						: getStreamFirstEventTimeoutMs(idleTimeoutMs, limits?.defaultFirstEventTimeoutMs)));
 			// Providers with a server-driven local tool bridge (e.g. the Cursor
 			// exec channel) mark their stream busy while a local tool runs; the
 			// watchdog must not read that silence as a provider stall (#4593).
@@ -250,13 +234,6 @@ export const streamAzureOpenAIResponses = createLazyProviderStream(
 export const streamGoogle = createLazyProviderStream(
 	() => import("./google"),
 	mod => mod.streamGoogle,
-);
-
-/** Stream Cloud Code Assist while retaining its first-event watchdog. */
-export const streamGoogleGeminiCli = createLazyProviderStream(
-	() => import("./google-gemini-cli"),
-	mod => mod.streamGoogleGeminiCli,
-	GOOGLE_GEMINI_CLI_STREAM_LIMITS,
 );
 
 /** Stream the Vertex API through the shared watchdog. */

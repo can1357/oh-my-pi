@@ -120,7 +120,6 @@ collapse {
     effort-family "cursor" "gpt-5.6-luna"
     routing-variant-suffix "-wm" "openai-codex" "openai-codex-device"
     variant-family "devin" "claude-opus-5" name="Claude Opus 5" { /* reviewed routing */ }
-    variant-family "google-antigravity" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" { /* per-revision template */ }
     provider-alias "devin" "opus" "claude-opus-5"
 }
 ```
@@ -225,7 +224,7 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `thinking-effort-map` maps served efforts to wire values. An entry for an effort the ladder does not serve whose value is a served effort is an alias instead: clamping a request for that effort follows it rather than stepping down to the next lower tier (Refuseless sends `medium` to `high` on its `low|high|max` ladder). `reasoning-effort-map` entries never alias.
 
-`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it); the ceiling also lowers discovered Antigravity per-SKU `maxOutputTokens` (`antigravityWireProfiles`, row and per-account), which the transport sends verbatim. Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
+`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it). Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
 
 `inline-image-byte-budget` caps retained base64 image characters for a deployment's request body. It leaves room for tool schemas and text beneath the provider's body-size limit; the coding agent reads it through `resolveInlineImageByteBudget` before sending live history, and snapcompact gives its archive frames half of it (`frameDataBytesBudget`). The budget applies only while the request reaches the host the rules describe (the Anthropic API, first-party OpenAI, the Codex backend at its default URL, DeepSeek's API, or Factory Droid's own global or EU API host), which callers decide with pi-ai's `reachesBudgetedHost`: `compat.officialEndpoint` for the configured `baseUrl`, for first-party Anthropic models also the `ANTHROPIC_BASE_URL` or Foundry `FOUNDRY_BASE_URL` reroute applied at request time, and for Factory Droid models the `baseUrl` origin. A custom or rerouted endpoint imposes its own body limit.
 
@@ -333,7 +332,7 @@ behavior {
         exclude-substring "embedding"
     }
     model-operations provider="openai" { exact "o3"; prefix "gpt-"; operation "generate_image" }
-    append-only-context-providers "deepseek" "ollama" "google-antigravity" "google" "google-vertex"
+    append-only-context-providers "deepseek" "ollama" "google" "google-vertex"
     cursor-effort family-marker="gpt-" { tier "minimal" "low" "medium" "high" "xhigh" "max" }
     cursor-model-parameter model="composer-2.5" id="fast" value="false"
     quota-tiers provider="openai-codex" {
@@ -350,8 +349,8 @@ behavior {
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
     retry-reset-timezone provider="zhipu-coding-plan" base-url="https://open.bigmodel.cn/api/coding/paas/v4" offset="+08:00"
-    pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
-        alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
+    pricing-peer provider="xai-oauth" peers="xai" {
+        alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
     }
     role-defaults "smol" {
         model "claude-haiku-5-5"

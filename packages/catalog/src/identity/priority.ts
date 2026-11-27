@@ -30,7 +30,6 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	// explicitly, but should not win ambiguous automatic role selection.
 	"alibaba-coding-plan",
 	"umans",
-	"google-antigravity",
 	"opencode-zen",
 	"gitlab-duo",
 	"opencode-go",

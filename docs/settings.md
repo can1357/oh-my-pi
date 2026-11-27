@@ -27,7 +27,7 @@ The global paths above describe the default profile. `omp --profile work` select
 
 On Linux and macOS, configured `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` can redirect data/state/cache when the corresponding `omp` directories exist. Named profiles require the corresponding `omp/profiles/<name>` directory. This does not move `config.yml`: it stays under the active agent directory, while `agent.db` and other categorized data may live elsewhere. `omp config init-xdg` creates the base directories but does not migrate files or set environment variables.
 
-Native project settings are intentionally scoped to the process working directory's `.omp/` folder — settings discovery does **not** walk ancestor directories looking for the nearest `.omp/`. Other discovery providers (Claude, Codex, Gemini, Cursor, OpenCode) can also contribute project-level settings from their own files; those are read-only from `omp` settings commands and can be turned off by provider id (see [Provider and source disabling](#provider-and-source-disabling)).
+Native project settings are intentionally scoped to the process working directory's `.omp/` folder — settings discovery does **not** walk ancestor directories looking for the nearest `.omp/`. Other discovery providers (Claude, Codex, Cursor, OpenCode) can also contribute project-level settings from their own files; those are read-only from `omp` settings commands and can be turned off by provider id (see [Provider and source disabling](#provider-and-source-disabling)).
 
 ## Config file formats
 
@@ -375,7 +375,7 @@ For `bash.patterns` and `bashInterceptor.patterns`, a scoped entry may wrap a li
 
 ## Provider and source disabling
 
-`enabledProviders` opts foreign user-level configuration sources into discovery. Its default is empty, so user roots from Cursor, Codex, Claude, Claude marketplace plugins, Gemini, OpenCode, Windsurf, and GitHub are normally excluded until their provider id is listed (or `*`/`all` is listed). Enabling `claude` also enables `claude-plugins`; an explicit `CLAUDE_CONFIG_DIR` opts Claude's user root in without a list entry. Explicitly selected discovery roots can also opt in. `disabledProviders` still wins.
+`enabledProviders` opts foreign user-level configuration sources into discovery. Its default is empty, so user roots from Cursor, Codex, Claude, Claude marketplace plugins, OpenCode, Windsurf, and GitHub are normally excluded until their provider id is listed (or `*`/`all` is listed). Enabling `claude` also enables `claude-plugins`; an explicit `CLAUDE_CONFIG_DIR` opts Claude's user root in without a list entry. Explicitly selected discovery roots can also opt in. `disabledProviders` still wins.
 
 Project roots remain enabled. Native OMP and `.agents` roots—including native marketplace plugins—are not foreign and do not require an entry.
 
@@ -384,7 +384,7 @@ Project roots remain enabled. Native OMP and `.agents` roots—including native 
 | Entry kind        | Example ids                                                                        | Effect                                                                                                                                                         |
 | ----------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Model providers   | `anthropic`, `openai`, `google`, `groq`, `ollama`, `openrouter`                    | Removes those backends from model selection, even when credentials are available. See [Providers](./providers.md).                                             |
-| Discovery sources | `native`, `claude`, `codex`, `gemini`, `github`, `opencode`, `cursor`, `agents-md` | Stops that source from contributing context files, MCP servers, commands, skills, hooks, tools, prompts, or settings. See [Context files](./context-files.md). |
+| Discovery sources | `native`, `claude`, `codex`, `github`, `opencode`, `cursor`, `agents-md` | Stops that source from contributing context files, MCP servers, commands, skills, hooks, tools, prompts, or settings. See [Context files](./context-files.md). |
 
 Most provider-control use cases list model provider ids. Disabling the `claude` discovery source is different from disabling the `anthropic` model provider — one stops Claude-format config discovery, the other stops the Anthropic model backend.
 
@@ -407,12 +407,12 @@ Native project `modelRoles` are also read directly from `.omp/config.yml`; disab
 
 ### Paused providers
 
-Some providers are paused in their auth rules because using them puts accounts at risk (for example `google-antigravity`). A paused provider offers no login, refuses token refresh and requests, and ignores stored and env credentials. `auth.unpausedProviders` turns listed ones back on, accepting the risk the pause reason names; stored logins come back as they were. Only your global config, `--config` files and runtime overrides count: a project's `.omp/config.yml` cannot unpause a provider. Pick them under **Unpaused Providers** in `/settings`, or in `~/.omp/agent/config.yml`:
+Some providers are paused in their auth rules because using them puts accounts at risk. A paused provider offers no login, refuses token refresh and requests, and ignores stored and env credentials. `auth.unpausedProviders` turns listed ones back on, accepting the risk the pause reason names; stored logins come back as they were. Only your global config, `--config` files and runtime overrides count: a project's `.omp/config.yml` cannot unpause a provider. Pick them under **Unpaused Providers** in `/settings`, or in `~/.omp/agent/config.yml`:
 
 ```yaml
 auth:
    unpausedProviders:
-      - google-antigravity
+      - <provider-id>
 ```
 
 Edits apply to a running session at once: stored credentials come back on the next lookup and a newly unpaused provider's model list refreshes, as after a login. With an auth broker, set it on the broker host too (`omp auth-broker serve` reads it at startup): the broker drops a paused provider's credentials before clients see them.
@@ -634,11 +634,10 @@ retry:
          - google-vertex/gemini-3-pro
       # A `provider/*` KEY covers every model of a provider — current or
       # future. A `provider/*` ENTRY keeps the failing model's id and swaps
-      # the provider: google-antigravity/x -> google/x -> google-vertex/x.
+      # the provider: google/x -> google-vertex/x.
       # Ids missing on the target provider are skipped (near-miss ids resolve
       # fuzzily); exact model keys override the wildcard for a specific model.
-      google-antigravity/*:
-         - google/*
+      google/*:
          - google-vertex/*
 
 providers:

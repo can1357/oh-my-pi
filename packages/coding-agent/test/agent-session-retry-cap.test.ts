@@ -21,7 +21,6 @@ import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/util
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -208,20 +207,18 @@ describe("AgentSession retry delay cap", () => {
 			maxDelayMs: 1_500_000,
 			outcome: "fallback",
 		},
-	])("Antigravity $name", async ({ maxDelayMs, outcome }) => {
-		// Antigravity is paused in its auth rules; its retry handling stays for when it is turned back on.
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-		const model = getBundledModel("google-antigravity", "gemini-3.7-flash");
+	])("Gemini quota $name", async ({ maxDelayMs, outcome }) => {
+		const model = getBundledModel("google", "gemini-3.7-flash");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!model || !fallbackModel) {
-			throw new Error("Expected bundled Antigravity and OpenAI fallback test models to exist");
+			throw new Error("Expected bundled Gemini and OpenAI fallback test models to exist");
 		}
 		const primarySelector = `${model.provider}/${model.id}`;
 		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
-		authStorage.keys.setRuntime(model.provider, "google-antigravity-test-key");
+		authStorage.keys.setRuntime(model.provider, "google-test-key");
 		authStorage.keys.setRuntime(fallbackModel.provider, "openai-test-key");
 
-		const quotaError = `Cloud Code Assist API error (429): ${JSON.stringify({
+		const quotaError = `Google API error (429): ${JSON.stringify({
 			error: {
 				code: 429,
 				status: "RESOURCE_EXHAUSTED",
@@ -230,7 +227,7 @@ describe("AgentSession retry delay cap", () => {
 					{
 						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
 						reason: "RATE_LIMIT_EXCEEDED",
-						domain: "cloudcode-pa.googleapis.com",
+						domain: "generativelanguage.googleapis.com",
 						metadata: { quotaResetDelay: "30m" },
 					},
 				],
@@ -276,7 +273,7 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		await session.prompt("Trigger Antigravity quota error");
+		await session.prompt("Trigger Gemini quota error");
 		await session.waitForIdle();
 
 		if (outcome === "fail") {

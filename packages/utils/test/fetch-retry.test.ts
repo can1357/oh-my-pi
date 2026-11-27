@@ -215,7 +215,7 @@ describe("extractRetryHint", () => {
 		).toBe(((71 * 60 + 48) * 60 + 47) * 1000);
 	});
 
-	it("honors a compound quotaResetDelay so an exhausted Cloud Code credential is not retried early", () => {
+	it("honors a compound quotaResetDelay so an exhausted credential is not retried early", () => {
 		expect(extractRetryHint(undefined, '{"metadata":{"quotaResetDelay":"17h48m25.5s"}}')).toBe(64105500);
 	});
 
@@ -230,7 +230,7 @@ describe("extractRetryHint", () => {
 		["1.5h", 5_400_000],
 		["1h30m", 5_400_000],
 	])("prefers structured quotaResetDelay %s to earlier display text", (quotaResetDelay, expected) => {
-		const body = `Cloud Code Assist API error (429): {"error":{"status":"RESOURCE_EXHAUSTED","message":"Resets in 3h0m0s.","details":[{"metadata":{"quotaResetDelay":"${quotaResetDelay}"}}]}}`;
+		const body = `Google API error (429): {"error":{"status":"RESOURCE_EXHAUSTED","message":"Resets in 3h0m0s.","details":[{"metadata":{"quotaResetDelay":"${quotaResetDelay}"}}]}}`;
 		expect(extractRetryHint(undefined, body)).toBe(expected);
 	});
 

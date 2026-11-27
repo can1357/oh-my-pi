@@ -563,7 +563,6 @@ const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
 	"anthropic-messages": true,
 	"bedrock-converse-stream": true,
 	"google-generative-ai": true,
-	"google-gemini-cli": true,
 	"google-vertex": true,
 	"ollama-chat": true,
 	"apple-foundation-models": true,

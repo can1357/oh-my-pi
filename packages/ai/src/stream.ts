@@ -47,7 +47,6 @@ import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./provid
 import type { GoogleOptions } from "./providers/google";
 import { perturbContext } from "./prompts/perturbation";
 import { getVertexAccessToken } from "./providers/google-auth";
-import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
 import type { KiroOptions } from "./providers/kiro/stream";
@@ -64,7 +63,6 @@ import {
 	streamCursor,
 	streamDevin,
 	streamGoogle,
-	streamGoogleGeminiCli,
 	streamGoogleVertex,
 	streamKiro,
 	streamOllama,
@@ -577,13 +575,6 @@ function streamDispatch<TApi extends Api>(
 
 		case "google-generative-ai":
 			return streamGoogle(providerModel as Model<"google-generative-ai">, context, providerOptions);
-
-		case "google-gemini-cli":
-			return streamGoogleGeminiCli(
-				providerModel as Model<"google-gemini-cli">,
-				context,
-				providerOptions as GoogleGeminiCliOptions,
-			);
 
 		case "ollama-chat":
 			return streamOllama(providerModel as Model<"ollama-chat">, context, providerOptions as OllamaChatOptions);
@@ -1261,7 +1252,7 @@ export function mapAnthropicToolChoice(choice?: ToolChoice): AnthropicOptions["t
 
 export function mapGoogleToolChoice(
 	choice?: ToolChoice,
-): GoogleOptions["toolChoice"] | GoogleGeminiCliOptions["toolChoice"] | GoogleVertexOptions["toolChoice"] {
+): GoogleOptions["toolChoice"] | GoogleVertexOptions["toolChoice"] {
 	if (!choice) return undefined;
 	if (typeof choice === "string") {
 		if (choice === "required") return "any";
@@ -1803,75 +1794,6 @@ function mapOptionsForApi<TApi extends Api>(
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
 				cachedContent: options?.cachedContent,
-			});
-		}
-
-		case "google-gemini-cli": {
-			const reasoning = options?.reasoning;
-			const toolChoice = mapGoogleToolChoice(options?.toolChoice);
-			if (reasoning && model.reasoning && !options?.disableReasoning && !options?.forceReasoningOff) {
-				const effort = requireSupportedEffort(model, reasoning);
-
-				// Gemini 3+ models use thinkingLevel instead of thinkingBudget
-				if (model.thinking?.mode === "google-level") {
-					return castApi<"google-gemini-cli">({
-						...base,
-						// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
-						maxTokens: googleMaxOutputTokens(
-							base.maxTokens,
-							model,
-							googleThinkingHeadroom(model, effort, options.thinkingBudgets),
-						),
-						requestModelId: resolveWireModelId(model, effort),
-						thinking: {
-							enabled: true,
-							level: mapEffortToGoogleThinkingLevel(effort, model),
-						},
-						hideThinkingSummary: options?.hideThinkingSummary,
-						toolChoice,
-						antigravityEndpointMode: options?.antigravityEndpointMode,
-					});
-				}
-
-				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ??
-					model.thinking?.effortBudgets?.[effort] ??
-					GOOGLE_THINKING_BUDGETS[effort];
-
-				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
-				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
-
-				// If not enough room for thinking + output, reduce thinking budget
-				if (maxTokens <= thinkingBudget) {
-					thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
-				}
-
-				if (thinkingBudget > 0) {
-					return castApi<"google-gemini-cli">({
-						...base,
-						maxTokens,
-						requestModelId: resolveWireModelId(model, effort),
-						thinking: { enabled: true, budgetTokens: thinkingBudget },
-						hideThinkingSummary: options?.hideThinkingSummary,
-						toolChoice,
-						antigravityEndpointMode: options?.antigravityEndpointMode,
-					});
-				}
-				// Budget clamped to zero — fall through to the thinking-off path.
-			}
-
-			const thinking: GoogleGeminiCliOptions["thinking"] = { enabled: false };
-			if (model.reasoning && model.thinking?.suppressWhenOff) {
-				// CCA re-applies the per-id baked server default when the config
-				// is omitted; suppression must be explicit on the wire.
-				thinking.suppress = model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 };
-			}
-			return castApi<"google-gemini-cli">({
-				...base,
-				requestModelId: resolveWireModelId(model, undefined),
-				thinking,
-				toolChoice,
-				antigravityEndpointMode: options?.antigravityEndpointMode,
 			});
 		}
 

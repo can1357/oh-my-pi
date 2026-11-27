@@ -43,8 +43,8 @@ import {
 
 /**
  * Longest sibling block {@link RateLimits.rotate} sleeps out instead of giving
- * up. Covers Cloud Code Assist capacity 429s ("Resets in 0s", sub-second
- * `retryDelay`) that briefly block every healthy account; longer blocks stay
+ * up. Covers capacity 429s ("Resets in 0s", sub-second `retryDelay`) that
+ * briefly block every healthy account; longer blocks stay
  * with the caller's own backoff layer.
  */
 const SIBLING_UNBLOCK_WAIT_MAX_MS = 5_000;

@@ -3768,7 +3768,7 @@ export class Settings {
 				const selector = bundledSelector(provider, model => model.webSearchModel);
 				return selector ? [selector] : [];
 			};
-			const geminiSelectors = (model: string): string[] => [`google-antigravity/${model}`, `google/${model}`];
+			const geminiSelectors = (model: string): string[] => [`google/${model}`];
 			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
@@ -3832,7 +3832,6 @@ export class Settings {
 			const legacyImageProviders: Record<string, string> = {
 				openai: "openai",
 				"openai-codex": "openai-codex",
-				antigravity: "google-antigravity",
 				xai: "xai",
 				gemini: "google",
 				deepinfra: "deepinfra",

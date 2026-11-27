@@ -324,8 +324,7 @@ function buildAssistantMessage(
  * transports replay the raw signature; every other transport keeps the stored envelope.
  */
 export function adoptReplayedGeminiSignatures(context: Context, model: Model): void {
-	const nativeGemini =
-		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "google-gemini-cli";
+	const nativeGemini = model.api === "google-generative-ai" || model.api === "google-vertex";
 	for (const message of context.messages) {
 		if (message.role !== "assistant") continue;
 		if (!message.content.some(block => block.type === "toolCall" && block.thoughtSignature)) continue;

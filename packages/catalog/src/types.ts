@@ -16,7 +16,6 @@ export type KnownApi =
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
-	| "google-gemini-cli"
 	| "google-vertex"
 	| "kiro-api"
 	| "ollama-chat"
@@ -102,7 +101,6 @@ export const IMAGE_GENERATION_APIS = [
 	"openai-images",
 	"openrouter-images",
 	"google-generative-ai",
-	"google-gemini-cli",
 	"openai-responses",
 	"openai-codex-responses",
 	"factory-droid-agent",
@@ -180,17 +178,15 @@ export interface ThinkingConfig {
 	/**
 	 * Per-effort thinking budget in tokens, baked at build time for collapsed
 	 * variants whose upstream expects an explicit `thinkingBudget` instead of a
-	 * value derived from the generic ladder (Antigravity Cloud Code Assist
-	 * gemini-3.x). Request mapping prefers caller `thinkingBudgets`, then this
+	 * value derived from the generic ladder. Request mapping prefers caller `thinkingBudgets`, then this
 	 * map, then the provider default ladder. Only meaningful for `mode: "budget"`.
 	 */
 	effortBudgets?: Readonly<Partial<Record<Effort, number>>>;
 	/**
 	 * When true, a thinking-off request MUST explicitly suppress thinking on
 	 * the wire (google-level: `thinkingLevel: "MINIMAL"` + `includeThoughts:
-	 * false`; budget: `thinkingBudget: 0`) instead of omitting thinkingConfig —
-	 * Cloud Code Assist re-applies the per-id baked server default when the
-	 * config is absent.
+	 * false`; budget: `thinkingBudget: 0`) instead of omitting thinkingConfig, for
+	 * upstreams that re-apply a baked server default when the config is absent.
 	 */
 	suppressWhenOff?: boolean;
 	/**
@@ -1346,7 +1342,7 @@ export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingPa
 	Pick<DevinCompat, "supportsSamplingParams" | "temperatureFloor">;
 /**
  * Compatibility settings for the Google API family (google-generative-ai,
- * google-vertex, google-gemini-cli). Class-driven defaults come from the
+ * google-vertex). Class-driven defaults come from the
  * compat cascade; sparse overrides follow the same shape.
  */
 export interface GoogleCompat {
@@ -1361,24 +1357,12 @@ export interface GoogleCompat {
 	 * `thoughtSignature` as bytes and reject the raw literal.
 	 */
 	base64SkipThoughtSignature?: boolean;
-	/** Drop unsigned thinking blocks from replayed history (Antigravity Claude). */
-	dropUnsignedThinking?: boolean;
-	/** Cloud Code Assist legacy `parameters` schema field instead of `parametersJsonSchema`. */
-	ccaLegacyParametersSchema?: boolean;
 	/** Whether multimodal (non-text) functionResponse parts are accepted (Gemini 3+). */
 	multimodalFunctionResponse?: boolean;
 	/** Stream-watchdog first-event timeout in ms; 0 disables it. */
 	streamFirstEventTimeoutMs?: number;
 	/** Stream-watchdog idle-timeout floor in ms. */
 	streamIdleTimeoutMs?: number;
-	/** Work around the Flash streaming leak (duplicate first chunk) on gemini-cli. */
-	flashStreamLeakWorkaround?: boolean;
-	/** Send the Claude thinking beta header on Antigravity Claude requests. */
-	claudeThinkingBetaHeader?: boolean;
-	/** Antigravity Claude tool-mode request framing. */
-	antigravityClaudeToolMode?: boolean;
-	/** Usage-label bucket Antigravity reports this model under. */
-	antigravityUsageLabel?: string;
 	/** Strip image inputs before encoding (text-only serving of a multimodal id). */
 	stripImageInput?: boolean;
 	/**
@@ -1403,7 +1387,6 @@ export type ResolvedGoogleCompat = Required<
 		GoogleCompat,
 		| "streamFirstEventTimeoutMs"
 		| "streamIdleTimeoutMs"
-		| "antigravityUsageLabel"
 		| "supportsSamplingParams"
 		| "base64SkipThoughtSignature"
 		| "maxImageDimension"
@@ -1412,7 +1395,6 @@ export type ResolvedGoogleCompat = Required<
 > & {
 	streamFirstEventTimeoutMs?: number;
 	streamIdleTimeoutMs?: number;
-	antigravityUsageLabel?: string;
 	supportsSamplingParams?: boolean;
 	base64SkipThoughtSignature?: boolean;
 	maxImageDimension?: number;
@@ -1441,7 +1423,7 @@ export type CompatConfigOf<TApi extends Api> = TApi extends
 			? BedrockCompat
 			: TApi extends "devin-agent"
 				? DevinCompat
-				: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
+				: TApi extends "google-generative-ai" | "google-vertex"
 					? GoogleCompat
 					: TApi extends "ollama-chat"
 						? OllamaCompat
@@ -1460,7 +1442,7 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 					? ResolvedBedrockCompat
 					: TApi extends "devin-agent"
 						? ResolvedDevinCompat
-						: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
+						: TApi extends "google-generative-ai" | "google-vertex"
 							? ResolvedGoogleCompat
 							: TApi extends "ollama-chat"
 								? ResolvedOllamaCompat
@@ -1589,13 +1571,6 @@ export interface ModelAccountAccess {
 	 */
 	cyberPrograms?: readonly string[];
 	/**
-	 * Antigravity request constants this account's `fetchAvailableModels`
-	 * roster advertised, keyed by upstream SKU id. Takes precedence over
-	 * {@link Model.antigravityWireProfiles}, which keeps only the first
-	 * account's values when multi-account rosters are unioned.
-	 */
-	antigravityWireProfiles?: Readonly<Record<string, AntigravityModelWireProfile>>;
-	/**
 	 * Service-tier ids this account's own catalog advertised for the model
 	 * (Codex `service_tiers[].id`). Tier entitlements differ per account
 	 * (Ultrafast is plan-gated), while {@link Model.serviceTiers} is the union
@@ -1618,20 +1593,6 @@ export interface CursorModelRoute {
 	maxMode?: boolean;
 }
 
-/**
- * Antigravity Cloud Code Assist request constants for one upstream SKU, as the
- * native client sends them; see {@link Model.antigravityWireProfiles}.
- */
-export interface AntigravityModelWireProfile {
-	/** Opaque `labels.model_enum` token (`fetchAvailableModels` `model`). */
-	modelEnum?: string;
-	/** Fixed `generationConfig.maxOutputTokens` the client always sends. */
-	maxOutputTokens?: number;
-	/** SKU thinking level; the native client sends it in preference to a budget. */
-	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "xhigh";
-	/** SKU thinking budget (`-1` is dynamic), sent when no level is advertised. */
-	thinkingBudget?: number;
-}
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -1762,19 +1723,10 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
 	/**
-	 * Per-wire-id Antigravity request constants recorded from the account's
-	 * `fetchAvailableModels` roster, keyed by upstream SKU id. A collapsed row
-	 * carries one entry per member it routes to; a raw row carries its own.
-	 * Absent on bundled snapshots that predate discovery.
-	 */
-	antigravityWireProfiles?: Readonly<Record<string, AntigravityModelWireProfile>>;
-	/**
 	 * Per-account availability recorded by multi-account discovery: provider
-	 * account key (Codex: ChatGPT `chatgpt_account_id`; Antigravity: login
-	 * email) → that account's entitlements on this model. An account appears
+	 * account key (Codex: ChatGPT `chatgpt_account_id`) → that account's entitlements on this model. An account appears
 	 * only when its own catalog lists the model, so credential selection can
-	 * route account-gated models (e.g. `gpt-daybreak-blue-latest`, Antigravity
-	 * Claude 5.5) straight to eligible accounts. Absent on bundled/config rows.
+	 * route account-gated models (e.g. `gpt-daybreak-blue-latest`) straight to eligible accounts. Absent on bundled/config rows.
 	 */
 	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
 	/** Cursor `RequestedModel.parameters` for this model's default variant. */

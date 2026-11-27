@@ -5,10 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { e2eApiKey, resolveApiKey } from "./oauth";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
-const [antigravityToken, openaiCodexToken] = await Promise.all([
-	resolveApiKey("google-antigravity"),
-	resolveApiKey("openai-codex"),
-]);
+const openaiCodexToken = await resolveApiKey("openai-codex");
 
 async function testAbortSignal<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
 	const context: Context = {
@@ -165,27 +162,6 @@ describe("AI Providers Abort Tests", () => {
 			"should handle immediate abort",
 			async () => {
 				await testImmediateAbort(llm);
-			},
-			{ retry: 3 },
-		);
-	});
-
-	// Google Antigravity (same Cloud Code Assist API as the retired Gemini CLI provider)
-	describe("Google Antigravity Provider Abort", () => {
-		it.skipIf(!antigravityToken)(
-			"should abort mid-stream",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-2.5-flash");
-				await testAbortSignal(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle immediate abort",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-2.5-flash");
-				await testImmediateAbort(llm, { apiKey: antigravityToken });
 			},
 			{ retry: 3 },
 		);

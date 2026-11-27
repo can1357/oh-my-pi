@@ -53,7 +53,6 @@ const FOREIGN_USER_PROVIDERS: Record<string, true> = {
 	codex: true,
 	claude: true,
 	"claude-plugins": true,
-	gemini: true,
 	opencode: true,
 	windsurf: true,
 	github: true,

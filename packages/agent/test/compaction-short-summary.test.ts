@@ -94,7 +94,7 @@ describe("compaction short summary isolation", () => {
 	test("a failed short summary keeps the full summary and omits shortSummary", async () => {
 		const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
 			completeImpl: completeWith(() =>
-				reply("error", [], "Cloud Code Assist API returned a thought-only response without final output"),
+				reply("error", [], "Gemini API returned a thought-only response without final output"),
 			),
 			oneshotRetry: false,
 		});
