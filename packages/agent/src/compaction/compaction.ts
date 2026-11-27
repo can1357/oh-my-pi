@@ -190,6 +190,13 @@ export interface CompactionSettings {
 	 * explicit value — even one equal to the default — is always honored.
 	 */
 	reserveTokens?: number;
+	/**
+	 * Opt-in output budget for regular history summaries, replacing the default
+	 * `min(floor(0.8 × reserveTokens), MAX_SUMMARY_TOKENS)` and clamped to the
+	 * summarizer's own output limit. Turn-prefix and provider-native summaries
+	 * keep their defaults. Unset keeps the default budget.
+	 */
+	summaryMaxTokens?: number;
 	keepRecentTokens: number;
 	autoContinue?: boolean;
 	remoteEnabled?: boolean;
@@ -225,6 +232,19 @@ export const COMPACTION_RECOVERY_BAND = 0.8;
  * mirrors {@link DEFAULT_RESERVE_TOKENS} so this adds no new tuning constant.
  */
 export const MAX_SUMMARY_TOKENS = DEFAULT_RESERVE_TOKENS;
+
+/**
+ * Output budget for one regular history summary. The default is the reserve
+ * fraction under {@link MAX_SUMMARY_TOKENS}; a positive configured
+ * `summaryMaxTokens` replaces it, bounded by the summarizer's output limit.
+ */
+function regularSummaryMaxTokens(model: Model, reserveTokens: number, summaryMaxTokens: number | undefined): number {
+	if (summaryMaxTokens === undefined || !Number.isFinite(summaryMaxTokens) || summaryMaxTokens <= 0) {
+		return Math.min(Math.floor(0.8 * reserveTokens), MAX_SUMMARY_TOKENS);
+	}
+	const requested = Math.floor(summaryMaxTokens);
+	return model.maxTokens && model.maxTokens > 0 ? Math.min(requested, model.maxTokens) : requested;
+}
 
 // reserveTokens is deliberately absent: an unset reserve is what marks it as
 // defaulted, which resolveBudgetReserveTokens needs to distinguish "user never
@@ -708,6 +728,8 @@ export interface SummaryOptions {
 	/** Additional summary context fetched only when a compaction request consumes it. */
 	loadExtraContext?: () => Promise<string[] | undefined>;
 	remoteEndpoint?: string;
+	/** Configured regular-summary output budget; see {@link CompactionSettings.summaryMaxTokens}. */
+	summaryMaxTokens?: number;
 	/** Stable system-prompt segments from the live turn, preserved for provider cache reuse. */
 	remoteSystemPrompt?: string[];
 	initiatorOverride?: MessageAttribution;
@@ -914,7 +936,9 @@ function summaryInputBudgetTokens(model: Model, maxTokens: number): number {
 	// 0.8, not "window minus reserves": provider tokenizers disagree with the
 	// local cl100k estimate by a few percent, and being wrong here is a hard
 	// 400 on the one call that is supposed to rescue an oversized session.
-	return Math.max(minSummaryInputTokens(model), Math.floor(window * 0.8) - maxTokens - MAX_SUMMARY_TOKENS);
+	// The carried-forward previous summary was generated under the same budget.
+	const previousSummaryTokens = Math.max(maxTokens, MAX_SUMMARY_TOKENS);
+	return Math.max(minSummaryInputTokens(model), Math.floor(window * 0.8) - maxTokens - previousSummaryTokens);
 }
 
 /**
@@ -977,7 +1001,7 @@ export async function generateSummary(
 	previousSummary?: string,
 	options?: SummaryOptions,
 ): Promise<string> {
-	const maxTokens = Math.min(Math.floor(0.8 * reserveTokens), MAX_SUMMARY_TOKENS);
+	const maxTokens = regularSummaryMaxTokens(model, reserveTokens, options?.summaryMaxTokens);
 
 	// Serialize conversation to text so model doesn't try to continue it
 	// Convert to LLM messages first (handles custom app messages when caller provides a transformer).
@@ -1857,6 +1881,7 @@ export async function compact(
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
+		summaryMaxTokens: settings.summaryMaxTokens,
 		remoteSystemPrompt: options?.remoteSystemPrompt,
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,

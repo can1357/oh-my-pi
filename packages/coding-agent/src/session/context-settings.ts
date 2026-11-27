@@ -302,6 +302,14 @@ export const cfgCompactionReserveTokens = register({
 	default: undefined,
 });
 
+// No default: unset keeps the summary budget at min(0.8 × reserve, 16384),
+// the ceiling that keeps large-window summaries compressing (#7008).
+export const cfgCompactionSummaryMaxTokens = register({
+	id: "compaction.summaryMaxTokens",
+	type: "number",
+	default: undefined,
+});
+
 export const cfgCompactionKeepRecentTokens = register({
 	id: "compaction.keepRecentTokens",
 	type: "number",
@@ -412,6 +420,7 @@ export const cfgCompaction = combine({
 	thresholdPercent: cfgCompactionThresholdPercent,
 	thresholdTokens: cfgCompactionThresholdTokens,
 	reserveTokens: cfgCompactionReserveTokens,
+	summaryMaxTokens: cfgCompactionSummaryMaxTokens,
 	keepRecentTokens: cfgCompactionKeepRecentTokens,
 	midTurnEnabled: cfgCompactionMidTurnEnabled,
 	asyncEnabled: cfgCompactionAsyncEnabled,

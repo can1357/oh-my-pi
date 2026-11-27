@@ -9,6 +9,10 @@
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
 - Corrected OpenTelemetry chat spans to report the model that actually served the response.
 
+### Added
+
+- Added `CompactionSettings.summaryMaxTokens`, an opt-in output budget for regular compaction summaries that replaces the reserve-derived `MAX_SUMMARY_TOKENS` cap, bounded by the model's output limit ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
