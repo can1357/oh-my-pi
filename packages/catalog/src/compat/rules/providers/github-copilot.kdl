@@ -113,7 +113,11 @@ provider "github-copilot" {
 	}
 	// Live billing frames on a 300K-token prompt priced these long tiers at
 	// exactly 2x input, cache read and cache write, while
-	// `token_prices.long_context` reports neither cache leg.
+	// `token_prices.long_context` reports neither cache leg. The list is
+	// evidence-limited to those frames: other `-1m` siblings (gpt-5.6-sol-1m,
+	// gpt-5.6-terra-1m, gpt-6-sol-1m, gpt-6.1-sol-1m, gpt-6-astra-1m,
+	// gpt-6.2-astra-1m) are unverified and keep their cache legs unscaled
+	// until a billing frame prices them.
 	models "gpt-6-luna-1m" "gpt-5.6-luna-1m" "gpt-6.1-terra-1m" "gpt-6.2-sol-1m" {
 		tier-cache-follows-input #true
 	}
