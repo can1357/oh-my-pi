@@ -678,10 +678,10 @@ export class SessionEntryIndex {
 
 	rebuild(entries: readonly SessionEntry[]): void {
 		this.clear();
-		this.#inheritedThrough = this.#readInheritedThrough();
+		// A marker naming no entry marks no prefix (fail open, as `inheritedMarkerWithin` does).
+		const marker = this.#readInheritedThrough();
+		this.#inheritedThrough = marker !== undefined && entries.some(entry => entry.id === marker) ? marker : undefined;
 		for (const entry of entries) this.insert(entry);
-		// Entries appended later are the session's own, even when the marked entry is missing.
-		this.#inheritedThrough = undefined;
 		// A captured late-usage leaf can dangle after its target was rolled back or rewritten away.
 		if (this.#leaf !== null && !this.#entriesById.has(this.#leaf)) this.setLeaf(lastSelfSelectedLeafId(entries));
 	}
