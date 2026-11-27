@@ -790,13 +790,23 @@ export class UsageService implements UsageApi {
 			}
 
 			if (entries.length === 0) {
+				// Probe with the key requests send (KeyCascade): a models.yml apiKey
+				// outranks extension and env keys, and an unresolvable one fails
+				// closed instead of exposing an ambient env key.
 				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
-				const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey,
-					extensionUsageKey = extensionUsageKeyConfig
+				const configKey = this.#deps.overrides.configKey(providerId);
+				let apiKey: string | undefined;
+				if (runtimeKey) {
+					apiKey = runtimeKey;
+				} else if (configKey !== undefined) {
+					apiKey = await this.#deps.overrides.resolve(configKey);
+				} else {
+					const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey;
+					const extensionUsageKey = extensionUsageKeyConfig
 						? await this.#deps.overrides.resolve(extensionUsageKeyConfig)
-						: undefined,
-					envKey = getEnvApiKey(providerId);
-				const apiKey = runtimeKey ?? extensionUsageKey ?? envKey;
+						: undefined;
+					apiKey = extensionUsageKey ?? getEnvApiKey(providerId);
+				}
 				if (!apiKey) continue;
 				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;

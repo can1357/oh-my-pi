@@ -236,6 +236,7 @@
 - Fixed hold-to-talk ending right after it started when opening the microphone blocked the TUI for slightly longer than the release window, which left the recording empty ([#16121](https://github.com/can1357/oh-my-pi/issues/16121))
 - Fixed `browser.open()` over a connected relay with no eligible tabs waiting 10 seconds and failing with a raw timeout; it now fails at once and says to open a normal web page ([#16100](https://github.com/can1357/oh-my-pi/issues/16100))
 - Fixed `read` JSON queries returning an empty `0B` result when a single output line exceeded the display limit; they now show a byte prefix with a partial-line notice ([#16018](https://github.com/can1357/oh-my-pi/issues/16018))
+- Fixed `/usage` and `omp usage` showing nothing for an extension usage provider on a custom provider whose key is only set in `models.yml`; the quota is now fetched with that key ([#16081](https://github.com/can1357/oh-my-pi/issues/16081), reported by [@feihu-lgtm](https://github.com/feihu-lgtm))
 
 ### Removed
 
