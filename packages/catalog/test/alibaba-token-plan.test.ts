@@ -192,6 +192,35 @@ describe("QwenCloud Token Plan provider", () => {
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 	});
 
+	test("restores V4.1 Flash image input from ID-only Token Plan discovery", async () => {
+		const options = alibabaTokenPlanModelManagerOptions({
+			apiKey: "sk-sp-test",
+			fetch: async () =>
+				Response.json({
+					data: [
+						{ id: "deepseek-v4.1-flash" },
+						{ id: "deepseek-v4.1-flash-1017" },
+						{ id: "deepseek-v4-flash-0731" },
+						{ id: "deepseek-v4-pro-0813" },
+					],
+				}),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(
+			Object.fromEntries(
+				(models ?? []).map(spec => {
+					const { id, input, compat } = buildModel(spec);
+					return [id, { input, stripImageInput: compat.stripImageInput }];
+				}),
+			),
+		).toEqual({
+			"deepseek-v4.1-flash": { input: ["text", "image"], stripImageInput: false },
+			"deepseek-v4.1-flash-1017": { input: ["text", "image"], stripImageInput: false },
+			"deepseek-v4-flash-0731": { input: ["text"], stripImageInput: true },
+			"deepseek-v4-pro-0813": { input: ["text"], stripImageInput: true },
+		});
+	});
+
 	test("routes discovery to the credential's region when it is China (Beijing)", async () => {
 		let requestedUrl = "";
 		const fetchMock: FetchImpl = input => {

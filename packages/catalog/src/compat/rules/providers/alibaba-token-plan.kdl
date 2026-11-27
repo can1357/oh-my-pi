@@ -110,6 +110,17 @@ provider "alibaba-token-plan" {
 			supports-reasoning-effort #true
 		}
 	}
+
+	// Token Plan's /models rows omit modalities. Alibaba documents image
+	// input for V4.1 Flash and its snapshots, not V4.0 Flash or V4 Pro.
+	class "deepseek" {
+		family "flash" {
+			revision ">=4.1 <4.2" {
+				input-modalities "text" "image"
+			}
+		}
+	}
+
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek-v4-pro" {
 		thinking-format "qwen"
