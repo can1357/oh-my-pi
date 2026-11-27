@@ -16,6 +16,7 @@ import type {
 	DeveloperMessage,
 	TextContent,
 	ToolResultMessage,
+	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
