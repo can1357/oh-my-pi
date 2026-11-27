@@ -8,14 +8,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { ComposerOwner, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { imageAttachmentSource } from "@oh-my-pi/pi-coding-agent/utils/image-source";
-import type { KeyEvent, UiNode } from "@oh-my-pi/pi-tui";
+import { type KeyEvent, UiNode } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { InputEvent } from "@oh-my-pi/pi-tui/driver/index";
 import type { HtmlFormData } from "../src/tools/html-form/data";
 import { parseHtmlForm } from "../src/tools/html-form/parse";
 import { Composer } from "../src/ui/composer/composer";
 import { HtmlFormModel } from "../src/ui/forms/html-form";
-import type { OverlayHandle } from "../src/ui/shell";
+import { type OverlayHandle, Overlays } from "../src/ui/shell";
 import { createInputHarness, type InputHarness } from "./helpers/input-harness";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import { key, sendKey } from "./ui/composer/harness";
@@ -86,7 +86,7 @@ function createContext() {
 		...input.context,
 		shell: {
 			focused: () => focused,
-			overlays: { open: () => overlayVisible },
+			overlays: { open: () => overlayVisible, blocking: () => overlayVisible },
 			paste: shellPaste,
 			host: { replayHistory, driver: { writeRaw } },
 		},
@@ -1434,6 +1434,56 @@ describe("InputController global editor actions", () => {
 
 		expect(context.press("ctrl+t")).toBe("global");
 		expect(toggle).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps history search and link hints available under passive overlays but defers to active overlays", () => {
+		const context = createContext();
+		const overlays = new Overlays({
+			focused: context.ctx.shell.focused,
+			focus: context.setFocused,
+			fallback: () => context.editor.field,
+		});
+		let hintsActive = false;
+		const startLinkHints = vi.fn(() => {
+			hintsActive = true;
+			return true;
+		});
+		const cancelLinkHints = vi.fn(() => {
+			hintsActive = false;
+		});
+		const ctx = {
+			...context.ctx,
+			shell: { ...context.ctx.shell, overlays },
+			get linkHintsActive() {
+				return hintsActive;
+			},
+			startLinkHints,
+			cancelLinkHints,
+		} as InteractiveModeContext;
+		context.setKeybinding("app.links.hint", ["alt+h"]);
+		new InputController(ctx).setupKeyHandlers();
+		overlays.show(() => new UiNode("overlay", { modal: false }), { focus: false });
+		try {
+			expect(overlays.open()).toBe(true);
+			expect(ctx.shell.focused()).toBe(context.editor.field);
+			expect(context.input.press(ctx, "ctrl+r")).toBe("global");
+			expect(ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+			expect(context.input.press(ctx, "alt+h")).toBe("intercepted");
+			expect(startLinkHints).toHaveBeenCalledTimes(1);
+
+			const active = overlays.show(() => new UiNode("overlay", { modal: true }));
+			expect(context.input.press(ctx, "ctrl+r")).toBe("unhandled");
+			expect(cancelLinkHints).toHaveBeenCalledTimes(1);
+			expect(ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+			expect(context.input.press(ctx, "alt+h")).toBe("unhandled");
+			expect(startLinkHints).toHaveBeenCalledTimes(1);
+			active.close();
+
+			expect(context.input.press(ctx, "alt+h")).toBe("intercepted");
+			expect(startLinkHints).toHaveBeenCalledTimes(2);
+		} finally {
+			overlays.closeAll();
+		}
 	});
 
 	it("defers while an overlay owns the active surface", () => {

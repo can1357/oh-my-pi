@@ -42,7 +42,7 @@ function createCtx(clipboard?: ConstructorParameters<typeof InputController>[1],
 	const ctx = {
 		composer,
 		...input.context,
-		shell: { focused: () => composer.field, host: undefined, overlays: { open: () => false } },
+		shell: { focused: () => composer.field, host: undefined, overlays: { open: () => false, blocking: () => false } },
 		keybindings: KeybindingsManager.inMemory(),
 		session: { extensionRunner: undefined, prewarmModelConnection: vi.fn() },
 		dictationSpaceHold: () => undefined,

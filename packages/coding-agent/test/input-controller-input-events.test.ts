@@ -67,7 +67,7 @@ async function createHarness(factory: ExtensionFactory) {
 	const ctx = {
 		composer: editor,
 		...input.context,
-		shell: { focused: () => editor.field, host: undefined, overlays: { open: () => false } },
+		shell: { focused: () => editor.field, host: undefined, overlays: { open: () => false, blocking: () => false } },
 		session,
 		viewSession: session,
 		sessionManager,

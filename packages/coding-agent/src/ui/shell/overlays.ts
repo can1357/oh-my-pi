@@ -40,6 +40,7 @@ export interface FocusHost {
 
 interface OverlayEntry extends ViewEntry {
 	readonly mouse: MouseTracking | undefined;
+	readonly blocking: boolean;
 	readonly handle: OverlayHandle;
 }
 
@@ -57,6 +58,9 @@ export class Overlays {
 
 	/** Whether any overlay is open (reactive). */
 	readonly open: Accessor<boolean> = () => this.#list.entries().length > 0;
+
+	/** Whether an overlay owns input and defers app-wide shortcuts (reactive). */
+	readonly blocking: Accessor<boolean> = () => this.#list.entries().some(entry => entry.blocking);
 
 	constructor(focus: FocusHost) {
 		this.#focus = focus;
@@ -84,7 +88,7 @@ export class Overlays {
 				options?.onClose?.();
 			},
 		};
-		const entry: OverlayEntry = { ...view, handle, mouse: options?.mouse };
+		const entry: OverlayEntry = { ...view, handle, mouse: options?.mouse, blocking: options?.focus !== false };
 		this.#list.push(entry);
 		const focus = options?.focus ?? true;
 		if (focus === true) this.#focus.focus(view.node);

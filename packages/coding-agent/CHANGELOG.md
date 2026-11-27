@@ -144,6 +144,7 @@
 ### Fixed
 
 - The compiled extension module registry locates the current `packages/tui` workspace, retaining the canonical modern pi-tui root and shared reactive runtime for extension imports.
+- Passive extension overlays no longer block composer shortcuts or keyboard link hints.
 
 ## [19.2.1] - 2026-11-25
 
