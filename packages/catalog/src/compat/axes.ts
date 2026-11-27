@@ -614,6 +614,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * pre-warm request.
 	 */
 	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
+	/** The provider reports a distinct server-side AI-credit charge on usage (`usage.aiu`); a reply without it is unknown, not free. */
+	"reports-aiu": { key: "reportsAiu", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**

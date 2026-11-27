@@ -24,6 +24,7 @@ import {
 	removeBlankCoreWeaveProjectHeaders,
 } from "@oh-my-pi/pi-catalog/wire/coreweave";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	$env,
 	classifyJsonPrefix,
@@ -68,6 +69,7 @@ import {
 } from "../types";
 import { mergeHeaders } from "./anthropic-headers";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
+import { applyCopilotUsageFrame } from "./github-copilot-billing";
 import { resolveXaiBaseUrl } from "./xai-base-url";
 
 export type { OpenAIPromptCacheOptions } from "../types";
@@ -4084,6 +4086,11 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
+			if (resolveCatalogPolicy(model).reportsAiu === true) {
+				// Copilot reports the charge as a top-level `copilot_usage` field of the
+				// terminal event, a sibling of `response`.
+				applyCopilotUsageFrame(output.usage, terminalEvent);
+			}
 			calculateCost(model, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
 			output.serviceTier = applyOpenAIResponsesServiceTierCost(
