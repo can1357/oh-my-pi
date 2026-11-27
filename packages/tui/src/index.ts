@@ -7,5 +7,4 @@ export * from "./reactive";
 export * from "./surface";
 export * from "./types";
 export * from "./host";
-export * from "./driver/input/keys";
-export * from "./driver/caps/env";
+export * from "./input";
