@@ -1043,6 +1043,8 @@ describe("todo backend", () => {
 		});
 
 		it("todo calls after bash in one message: apply sees the committed list; a refusal and a throw leave no retry reminder, and only the throw is an extension error", async () => {
+			// The bash executor reads the global settings: keep them in memory, off the user's agent.db.
+			await Settings.init({ inMemory: true, cwd: dir.path() });
 			// Written by the bash call itself as it ends: a real signal that it has finished.
 			const marker = path.join(dir.path(), "bash-done");
 			const asked: Array<{ op: string; bashDone: boolean; previous: TodoPhase[] }> = [];
