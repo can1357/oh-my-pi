@@ -4,6 +4,7 @@
  * exchange, credential projection, userinfo enrichment and after-exchange hook.
  */
 import type { CompiledAuthProvider, CompiledCallback, CompiledOAuthCodeLogin } from "@oh-my-pi/pi-catalog/compat/types";
+import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { validateApiKeyAgainstModelsEndpoint } from "../api-key-validation";
@@ -36,8 +37,16 @@ export async function resolveCallbackOptions(
 	provider: string,
 	signal?: AbortSignal,
 ): Promise<OAuthCallbackFlowOptions> {
+	const configuredPort = callback.portEnv ? $env[callback.portEnv]?.trim() : undefined;
+	const preferredPort = configuredPort ? Number(configuredPort) : callback.port;
+	if (configuredPort && (!/^\d+$/.test(configuredPort) || preferredPort > 65_535)) {
+		throw new AIError.OAuthError(`Invalid ${callback.portEnv}: expected a port from 0 to 65535`, {
+			kind: "configuration",
+			provider,
+		});
+	}
 	const base: OAuthCallbackFlowOptions = {
-		preferredPort: callback.port,
+		preferredPort,
 		callbackPath: callback.path,
 		callbackHostname: callback.hostname,
 		allowPortFallback: callback.portFallback,

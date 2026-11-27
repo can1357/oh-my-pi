@@ -447,6 +447,8 @@ Login kinds:
 - `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
 
+Use `port-env="VAR"` when a provider accepts variable loopback ports: it overrides the preferred `port` with an integer from `0` to `65535` and keeps `port-fallback`. `0` lets the OS pick a port. Use `redirect-uri-env="VAR"` when the advertised redirect URI must match exactly; that override disables port fallback. Do not combine `port-env` with either `redirect-uri` or `redirect-uri-env`.
+
 Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registry/hooks` by that package's `auth-hooks-registry` test. Values marked `encoding="base64"` are public OAuth client ids stored obfuscated to keep secret scanners quiet; they are decoded at runtime.
 
 ## Provider catalog grammar

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Anthropic OAuth logins can use `ANTHROPIC_OAUTH_CALLBACK_PORT` to avoid devcontainer port-forwarding conflicts ([#14135](https://github.com/can1357/oh-my-pi/issues/14135), [#20460](https://github.com/can1357/oh-my-pi/pull/20460) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
 ### Added
 
 - Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- OAuth rules can override the preferred loopback port with `port-env` without disabling the existing port fallback ([#14135](https://github.com/can1357/oh-my-pi/issues/14135), [#20460](https://github.com/can1357/oh-my-pi/pull/20460) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
 ### Breaking Changes
 
 - Moonshot no longer accepts `KIMI_API_KEY` as a fallback alias; the Open Platform provider uses `MOONSHOT_API_KEY` only, since a Moonshot key does not authenticate the Kimi Code endpoints and the shared alias made `KIMI_API_KEY` expose Moonshot models instead of Kimi Code (removes the legacy #2883 alias; [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)). Migrate Moonshot Open Platform keys from `KIMI_API_KEY` to `MOONSHOT_API_KEY`.
