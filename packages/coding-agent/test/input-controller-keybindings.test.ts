@@ -1453,7 +1453,7 @@ describe("InputController global editor actions", () => {
 		});
 		const ctx = {
 			...context.ctx,
-			shell: { ...context.ctx.shell, overlays },
+			shell: Object.assign(context.ctx.shell, { overlays }),
 			get linkHintsActive() {
 				return hintsActive;
 			},
