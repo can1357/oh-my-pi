@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { PROVIDER_DESCRIPTORS, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 
 test("lightweight cache resolver matches every descriptor default", () => {
 	for (const descriptor of PROVIDER_DESCRIPTORS) {
@@ -123,13 +124,26 @@ test("Kimi Code cache scope survives access-token refresh for the same account",
 	expect(before).not.toContain("user-a");
 });
 
-test("Codex cache scope follows a gateway baseUrl but keeps the official namespace (#13830)", () => {
+test("Codex cache scope follows a gateway baseUrl and shares one official namespace (#13830)", () => {
 	const official = resolveModelCacheProviderId("openai-codex");
-	// Pre-existing official caches stay readable whether or not the registry passes the bundled baseUrl.
+	// The registry reads the official row whether or not it passes the bundled baseUrl.
 	expect(resolveModelCacheProviderId("openai-codex", { baseUrl: "https://chatgpt.com/backend-api/" })).toBe(official);
 	const gateway = openaiCodexModelManagerOptions({ baseUrl: "https://codex-proxy.example/backend-api" });
 	expect(gateway.cacheProviderId).toBe(
 		resolveModelCacheProviderId("openai-codex", { baseUrl: "https://codex-proxy.example/backend-api/" }),
 	);
 	expect(gateway.cacheProviderId).not.toBe(official);
+});
+
+test("Codex namespaces that skip the /models fallback move past rows earlier builds wrote; gateway rows stay (#20269)", () => {
+	const version = getCodexClientVersion();
+	const legacyHashed = (baseUrl: string): string => `openai-codex:${version}:${Bun.hash(baseUrl).toString(36)}`;
+	// An official-host base URL other than the bundled one also loses the fallback, so its older row may hold the Web roster.
+	const officialSubpath = "https://chatgpt.com/backend-api/codex";
+	expect(resolveModelCacheProviderId("openai-codex", { baseUrl: officialSubpath })).not.toBe(
+		legacyHashed(officialSubpath),
+	);
+	// A gateway still probes `/models`, so the roster an earlier build cached for it stays readable after upgrade.
+	const gateway = "https://codex-proxy.example/backend-api";
+	expect(resolveModelCacheProviderId("openai-codex", { baseUrl: gateway })).toBe(legacyHashed(gateway));
 });
