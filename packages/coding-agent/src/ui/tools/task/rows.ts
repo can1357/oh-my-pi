@@ -448,8 +448,8 @@ function outputSection(
 			const tree = jsonTreeLines(parsed);
 			if (tree.lines.length > 0) {
 				if (!warning) lines.push([...cp, seg("Output", "dim")]);
-				for (const line of tree.lines) lines.push([...inner, seg("  "), ...line]);
-				if (tree.truncated) lines.push([...inner, seg("  "), seg("…", "dim")]);
+				for (const line of tree.lines) lines.push([...cp, seg("  "), ...line]);
+				if (tree.truncated) lines.push([...cp, seg("  "), seg("…", "dim")]);
 				return lines;
 			}
 		}
@@ -478,7 +478,7 @@ function reviewRows(cx: RowContext, review: ReviewVerdict, cp: Line): Line[] {
 	const lines: Line[] = [
 		[
 			...cp,
-			seg(" Patch is "),
+			seg("Patch is "),
 			seg(summary.overall_correctness, correct ? "success" : "error"),
 			seg(" "),
 			icon(cx, correct ? "success" : "error"),
@@ -542,7 +542,8 @@ function findingRows(cx: RowContext, findings: readonly FindingDetails[], cp: Li
 				lines.push([...cp, ...gutter, seg(replaceTabs(line), "dim")]);
 		}
 	}
-	if (!cx.expanded && findings.length > 3) lines.push([...cp, seg(moreItems(findings.length - 3, "finding"), "dim")]);
+	if (!cx.expanded && findings.length > 3)
+		lines.push([...cp, seg(cx.glyph("tree.last")), seg(" "), seg(moreItems(findings.length - 3, "finding"), "dim")]);
 	return lines;
 }
 
