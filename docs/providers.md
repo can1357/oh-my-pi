@@ -35,7 +35,7 @@ When a provider needs an API key, `omp` resolves it in this order (first match w
 1. **Runtime override**: a key supplied for the current process, for example CLI `--api-key`. Never persisted.
 2. **`models.yml` config key**: an `apiKey` pinned on a custom provider, registered as a config-sourced bearer. This deliberately beats stored OAuth, so a key supplied for a custom `baseUrl` or gateway is honored instead of forwarding an upstream OAuth token the proxy would reject.
 3. **Stored OAuth credential**: refreshed when needed; multiple accounts are ranked and rotated automatically. For Anthropic and ChatGPT (Codex), each organization or workspace counts as its own account: one email holding both a Team or Enterprise seat and a personal plan can log in once per subscription (pick the workspace on the browser consent page), and rotation treats them as two accounts.
-4. **Login-sourced stored API key**: An API-key credential saved by a successful `/login`.
+4. **Login-sourced stored API key**: an API-key credential saved by a successful `/login`.
 5. **Extension config fallback**: an extension provider registered with both an `apiKey` reference and an OAuth/login flow ranks that reference below stored OAuth and login keys.
 6. **Provider environment variable**: including values loaded from `.env` files (see [the env-var table](#environment-variables-and-env-files)).
 7. **Other stored API key**: for example, a broker-migrated key. This is a last resort so an explicit environment variable wins.
@@ -63,7 +63,7 @@ When a model has no credentials, `omp` tells you to run `/login` or set the prov
 
 For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline dashboard and validate a newly created API key against `/users/me`, without a completion probe or subscription-quota charge. OMP refreshes membership from Cline's public recommended-models endpoint and bundles reviewed Cline metadata for offline startup. New live IDs are enriched from upstream references or use conservative metadata without invented reasoning controls. `omp usage` reports five-hour, weekly, and monthly quota windows. Free-tier models are marked `(free)` and use the same key; subscription models show API-equivalent reference pricing, while streamed gateway cost is authoritative for the actual charge. Requests mirror Cline CLI client headers and a stable per-session task ID; reasoning controls remain model-specific.
 
-For Command Code, set `COMMAND_CODE_API_KEY` or run `/login commandcode`; login checks the key against Command Code's `/alpha/whoami` endpoint and rejects it only on a 401, as the Command Code CLI does, so a 403 or an unreachable check keeps the key. Claude models use the Anthropic Messages endpoint, the ten GPT models use the OpenAI Responses endpoint, and every other model uses OpenAI Completions, the same split the Command Code CLI uses. Thinking levels, image input, output limits, and prices follow the Command Code CLI's model registry; Claude Sonnet 5.5, whose thinking levels and image input that registry does not list yet, takes those two from Anthropic's catalog. The GPT models can run hosted web search, but not hosted image generation, which Command Code does not serve. TypeSafe's `typesafe/jev` decision model is available to the `judge` role. `omp usage`, `/usage`, and the status line show the credit balance, plus the five-hour and weekly windows on plans that have them. These figures come from the account endpoints the Command Code CLI uses; the Provider API docs do not document them.
+For Command Code, set `COMMAND_CODE_API_KEY` or run `/login commandcode`; login checks the key against Command Code's `/alpha/whoami` endpoint and rejects it only on a 401, as the Command Code CLI does, so a 403 or an unreachable check keeps the key. Claude models use the Anthropic Messages endpoint, the ten GPT models use the OpenAI Responses endpoint, and every other model uses Chat Completions, the same split the Command Code CLI uses. Thinking levels, image input, output limits, and prices follow the Command Code CLI's model registry; Claude Sonnet 5.5, whose thinking levels and image input that registry does not list yet, takes those two from Anthropic's catalog. The GPT models can run hosted web search, but not hosted image generation, which Command Code does not serve. TypeSafe's `typesafe/jev` decision model is available to the `judge` role. `omp usage`, `/usage`, and the status line show the credit balance, plus the five-hour and weekly windows on plans that have them. These figures come from the account endpoints the Command Code CLI uses; the Provider API docs do not document them.
 
 ### Pinning a key in `models.yml`
 
@@ -99,14 +99,14 @@ The variables below supply credentials after runtime/config overrides and stored
 | `google`         | `GEMINI_API_KEY`                                                                                                                                        |
 | `google-vertex`  | `GOOGLE_CLOUD_API_KEY`, or ADC (explicit `GOOGLE_APPLICATION_CREDENTIALS` or gcloud's default ADC file, plus project and location variables; see below) |
 | `groq`           | `GROQ_API_KEY`                                                                                                                                          |
-| `openrouter`     | `OPENROUTER_API_KEY`                                                                                                                                   |
+| `openrouter`     | `OPENROUTER_API_KEY`                                                                                                                                    |
 | `mistral`        | `MISTRAL_API_KEY`                                                                                                                                       |
 | `xai`            | `XAI_API_KEY`                                                                                                                                           |
 | `xai-oauth`      | `XAI_OAUTH_TOKEN`, then `XAI_API_KEY`                                                                                                                   |
 | `github-copilot` | `COPILOT_GITHUB_TOKEN`                                                                                                                                  |
 | `cursor`         | `CURSOR_ACCESS_TOKEN`                                                                                                                                   |
 | `azure`          | `AZURE_OPENAI_API_KEY`                                                                                                                                  |
-| `amazon-bedrock`  | `AWS_BEARER_TOKEN_BEDROCK`, AWS profiles, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA/EC2 credential chain                            |
+| `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, AWS profiles, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA/EC2 credential chain                            |
 
 ### Additional hosted providers
 
@@ -122,7 +122,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `chutes`                         | `CHUTES_API_KEY`                                                                    |
 | `commandcode`                    | `COMMAND_CODE_API_KEY`, then `COMMANDCODE_API_KEY`                                  |
 | `coralbricks`                    | `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`                                         |
-| `deepinfra`                       | `DEEPINFRA_API_KEY`                                                                 |
+| `deepinfra`                      | `DEEPINFRA_API_KEY`                                                                 |
 | `deepseek`                       | `DEEPSEEK_API_KEY`                                                                  |
 | `siliconflow`                    | `SILICONFLOW_API_KEY`                                                               |
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                            |
@@ -139,13 +139,13 @@ The variables below supply credentials after runtime/config overrides and stored
 | `kiro`                           | `KIRO_API_KEY` (`ksk_…`); `KIRO_API_REGION` pins its region                         |
 | `moonshot`                       | `MOONSHOT_API_KEY`                                                                  |
 | `stepfun`                        | `STEPFUN_API_KEY`                                                                   |
-| `helmcode`                      | `HELMCODE_API_KEY`                                                                  |
+| `helmcode`                       | `HELMCODE_API_KEY`                                                                  |
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                                |
 | `nanogpt`                        | `NANO_GPT_API_KEY`                                                                  |
 | `novita`                         | `NOVITA_API_KEY`                                                                    |
 | `venice`                         | `VENICE_API_KEY`                                                                    |
 | `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery)       |
-| `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLAKE_GATEWAY_ID` |
+| `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | `cloudflare-workers-ai`          | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, + `CLOUDFLARE_ACCOUNT_ID`     |
 | `liquid`                         | `LIQUID_API_KEY`                                                                    |
 | `nace`                           | `NACE_API_KEY`                                                                      |
@@ -163,7 +163,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `refuseless`                     | `REFUSELESS_API_KEY`                                                                |
 | `synthetic`                      | `SYNTHETIC_API_KEY`                                                                 |
 | `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                              |
-| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                            |
+| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                           |
 | `minimax`                        | `MINIMAX_API_KEY`                                                                   |
 | `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                       |
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
@@ -179,7 +179,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                          |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                                    |
 | `xiaomi-token-plan-ams`          | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`                                                     |
-| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                     |
+| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                      |
 | `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                                     |
 | `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                              |
 | `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)                  |
@@ -197,7 +197,7 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
-`cloudflare-workers-ai` serves Cloudflare's Clef decision models (`cloudflare-workers-ai/@cf/cloudflare/clef` and `cloudflare-workers-ai/@cf/cloudflare/clef-flash`) as `judge` models; assign one to the `judge` role to use it. `/login cloudflare-workers-ai` prompts for a Cloudflare API token with Workers AI Read and Edit permissions (create one at `https://dash.cloudflare.com/profile/api-tokens`) and your account ID, then stores both together. To use environment variables, set `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`) and `CLOUDFLAKE_ACCOUNT_ID`.
+`cloudflare-workers-ai` serves Cloudflare's Clef decision models (`cloudflare-workers-ai/@cf/cloudflare/clef` and `cloudflare-workers-ai/@cf/cloudflare/clef-flash`) as `judge` models; assign one to the `judge` role to use it. `/login cloudflare-workers-ai` prompts for a Cloudflare API token with Workers AI Read and Edit permissions (create one at `https://dash.cloudflare.com/profile/api-tokens`) and your account ID, then stores both together. To use environment variables, set `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`) and `CLOUDFLARE_ACCOUNT_ID`.
 
 `liquid` serves Liquid AI's decision models (`liquid/d1.2`, `liquid/d1.2-ultra`, and the deprecated `liquid/d1.1` and `liquid/d1-ultra`) as `judge` models; assign one to the `judge` role to use it. `/login liquid` prompts for an API key from `https://console.liquid.ai/` (Dashboard > API Keys); to use an environment variable, set `LIQUID_API_KEY`. Images sent to Liquid are resized to fit its 10,000 patches of 32×32 pixels per request.
 
@@ -252,12 +252,12 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 Ollama, llama.cpp, and LM Studio are discovered automatically without needing a `models.yml` entry. Each uses a base URL that can be overridden by an environment variable:
 
 | Provider ID | Base URL (env override → default)                                                 | Notes                                        |
-| ----------- | ---------------------------------------------------------------------------------- -------------------------------------------- |
+| ----------- | --------------------------------------------------------------------------------- | -------------------------------------------- |
 | `ollama`    | `OLLAMA_BASE_URL`, then `OLLAMA_HOST` (normalized), else `http://127.0.0.1:11434` | Keyless by default.                          |
 | `llama.cpp` | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080`                                | Keyless unless authentication is configured. |
 | `lm-studio` | `LM_STUDIO_BASE_URL`, else `http://127.0.0.1:1234/v1`                             | Keyless by default.                          |
 
-Implicit Ollama and llama.cpp models use `openai-responses`; LM Studio uses `openai-completions`. On macOS arm64, `apple` also probes the in-process Apple Foundation Models bridge (`local://apple-foundation-model`). It offers `apple/on-device` only when the bridge reports the model usable; an ineligible device, disabled Apple Intelligence, or a build without the bridge yields no models. Its on-device context can be too small for the standard prompt plus project instructions, so OMP does not auto-select it; use `--model apple/on-device` or `/model` to opt in.
+Implicit Ollama and llama.cpp models use `openai-responses`; LM Studio uses `openai-completions`. On macOS arm64, `apple` also probes the in-process Apple Foundation Models bridge (`local://apple-foundation-models`). It offers `apple/on-device` only when the bridge reports the model usable; an ineligible device, disabled Apple Intelligence, or build without the bridge yields no models. Its on-device context can be too small for the standard prompt plus project instructions, so OMP does not auto-select it; use `--model apple/on-device` or `/model` to opt in.
 
 These implicit engines are **skipped** when:
 
@@ -363,7 +363,7 @@ Path scopes are resolved **after** the settings merge. Because a higher-preceden
 - **Discovery providers** — sources of context files, MCP servers, commands, skills, hooks, tools, prompts, and settings. Disabling one stops that source from contributing capability items.
 
 | Entry type            | Examples                                                                      | Effect                                                          |
-| --------------------- | ----------------------------------------------------------------------------- ---------------------------------------------------------------- |
+| --------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | Model provider ID     | `anthropic`, `openai`, `google`, `groq`, `openrouter`, `ollama`, `my-gateway` | Removes that provider's models from availability.               |
 | Discovery provider ID | `native`, `claude`, `codex`, `agents`, `opencode`                           | Stops that discovery source from contributing capability items. |
 
@@ -418,8 +418,8 @@ providers:
       models:
          - id: local-model
            name: Local Model
-            contextWindow: 32768
-            maxTokens: 4096
+           contextWindow: 32768
+           maxTokens: 4096
 ```
 
 Discovery-enabled provider (models fetched from the endpoint at runtime):

@@ -39,23 +39,8 @@ const LEGACY_TOGGLES = [
 	"commands.enableOpencodeUser",
 ];
 
-<<<<<<< HEAD
-/** Names listed per kind before the offer collapses the rest into a count. */
-const MAX_LISTED = 8;
-
-/** Heading of each kind in the offer, in listing order. */
-const KIND_HEADINGS: ReadonlyArray<readonly [InheritedItem["kind"], string]> = [
-	["context", "Context"],
-	["skill", "Skills"],
-	["command", "Commands"],
-	["prompt", "Prompts"],
-	["rule", "Rules"],
-	["mcp", "MCP servers"],
-];
-=======
 /** Rows listed per tool before the offer collapses the rest into a count. */
 const MAX_LISTED = 12;
->>>>>>> c14ad6c5db (refactor(discovery): pruned foreign user-level config and minor providers)
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -458,20 +443,9 @@ function display(text: string): string {
 function describe(found: InheritedConfig, agentDir: string): string {
 	const lines = [`omp no longer reads ${found.tool.label} config from ${shortenPath(found.tool.root)}.`];
 	if (found.items.length > 0) {
-<<<<<<< HEAD
-		// One line per kind: column padding only lines up in monospace, and Tern draws dialogs proportionally.
-		lines.push("You were inheriting:");
-		for (const [kind, heading] of KIND_HEADINGS) {
-			const names = found.items.filter(item => item.kind === kind).map(item => display(item.name));
-			if (names.length === 0) continue;
-			const more = names.length > MAX_LISTED ? `, … and ${names.length - MAX_LISTED} more` : "";
-			lines.push(`• ${heading}: ${names.slice(0, MAX_LISTED).join(", ")}${more}`);
-		}
-=======
 		lines.push("You were inheriting:");
 		for (const item of found.items.slice(0, MAX_LISTED)) lines.push(`  ${item.kind.padEnd(8)} ${display(item.name)}`);
 		if (found.items.length > MAX_LISTED) lines.push(`  … and ${found.items.length - MAX_LISTED} more`);
->>>>>>> c14ad6c5db (refactor(discovery): pruned foreign user-level config and minor providers)
 	}
 	for (const note of found.notes) lines.push(display(note));
 	if (found.items.length > 0) lines.push(`Keep them in ${shortenPath(agentDir)}?`);

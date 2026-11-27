@@ -13,11 +13,7 @@ import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { loadSkills, loadSkillPromptBody } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
-<<<<<<< HEAD
-import { __resetDirsFromEnvForTests, getPluginsDir, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
-=======
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
->>>>>>> c14ad6c5db (refactor(discovery): pruned foreign user-level config and minor providers)
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 
 describe("parseClaudePluginsRegistry", () => {
