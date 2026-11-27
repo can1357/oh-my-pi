@@ -100,6 +100,7 @@
 - Moonshot no longer accepts `KIMI_API_KEY` as a fallback alias for `MOONSHOT_API_KEY`: the alias silently authenticated Moonshot and exposed Moonshot models whenever a Kimi Code key was set. `KIMI_API_KEY` now belongs to the `kimi-code` / `kimi-code-global` providers; set `MOONSHOT_API_KEY` for Moonshot ([#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 - The eval `commit` draft summary now ends Review with a scoped recovery hint (`show(path)`, then `take(path, units)` for the units your edits or commands such as a formatter produced), and Unrecorded points to `take(path, units)` for part of a file ([#20556](https://github.com/can1357/oh-my-pi/issues/20556))
 - LSP servers now shut down after 15 minutes idle by default instead of staying alive for the whole session; set `idleTimeoutMs: 0` in `lsp.json` to keep them running ([#17477](https://github.com/can1357/oh-my-pi/issues/17477))
+- `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
 
 ### Fixed
 

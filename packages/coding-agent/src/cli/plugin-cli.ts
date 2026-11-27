@@ -1128,6 +1128,7 @@ async function handleSetEnabled(
 				console.log(JSON.stringify({ [jsonKey]: name }));
 			} else {
 				console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} ${pastTense} ${name}`));
+				if (!enabled) console.log(chalk.dim(`  Running sessions keep ${name} until they restart.`));
 			}
 		} catch (err) {
 			console.error(
