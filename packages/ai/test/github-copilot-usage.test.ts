@@ -267,7 +267,7 @@ describe("github copilot usage provider — quota snapshot units", () => {
 		const allowance = report?.limits.find(limit => limit.id === "copilot:premium");
 		expect(allowance?.label).toBe("AI Credits");
 		expect(allowance?.amount).toMatchObject({ unit: "credits", used: 24817, limit: 50000 });
-		expect(allowance?.notes).toContain("Overage credits: 12");
+		expect(allowance?.notes).toContain("Overage: 12");
 	});
 
 	it("keeps request wording when neither the account nor the snapshot flags usage-based billing", async () => {

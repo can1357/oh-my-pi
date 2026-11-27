@@ -235,7 +235,8 @@ function buildLimitFromQuota(
 	const notes: string[] = [];
 	if (quota.unlimited) notes.push("Unlimited");
 	if (quota.overage_count > 0) {
-		notes.push(`Overage ${credits ? "credits" : "requests"}: ${quota.overage_count}`);
+		// GitHub reports a bare `overage_count`; only the request-billed unit is established.
+		notes.push(credits ? `Overage: ${quota.overage_count}` : `Overage requests: ${quota.overage_count}`);
 	}
 	return {
 		id: `copilot:${key}`,
