@@ -457,6 +457,7 @@ export interface SqliteAuthCredentialStoreOptions {
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
 	readonly #borrowConnection: boolean;
+	readonly #statements: Statement[] = [];
 	#cipher: CredentialCipher | undefined;
 	#encrypt: boolean;
 	/** One warning per store for rows sealed under a key this machine does not hold. */
@@ -512,112 +513,120 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
 
-		this.#listActiveStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
-		);
-		this.#listActiveByProviderStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
-		);
-		this.#listDisabledStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE disabled_cause IS NOT NULL ORDER BY id ASC",
-		);
-		this.#listDisabledByProviderStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
-		);
-		this.#insertStmt = this.#db.prepare(
-			`INSERT INTO auth_credentials (provider, credential_type, data, salt, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ${SQLITE_NOW_EPOCH}, ${SQLITE_NOW_EPOCH}) RETURNING id`,
-		);
-		this.#updateStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET credential_type = ?, data = ?, salt = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
-		);
-		this.#deleteStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
-		);
-		this.#deleteByProviderStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE provider = ? AND disabled_cause IS NULL`,
-		);
-		this.#hardDeleteStmt = this.#db.prepare("DELETE FROM auth_credentials WHERE id = ?");
-		this.#getCacheStmt = this.#db.prepare(
-			`SELECT value FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH}`,
-		);
-		this.#getCacheIncludingExpiredStmt = this.#db.prepare("SELECT value FROM cache WHERE key = ?");
-		this.#upsertCacheStmt = this.#db.prepare(
-			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
-		);
-		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
-		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
-		this.#getCredentialBlockStmt = this.#db.prepare(
-			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
-		);
-		this.#listCredentialBlockScopesStmt = this.#db.prepare(
-			"SELECT block_scope, blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND blocked_until_ms > ?",
-		);
-		// One statement for any number of ids: `json_each` keeps the caller's id
-		// order (`ids.key`) and the per-credential provider/scope order.
-		this.#listCredentialBlocksStmt = this.#db.prepare(
-			`SELECT b.credential_id, b.provider_key, b.block_scope, b.blocked_until_ms, b.updated_at
+		const prepare = (sql: string) => {
+			const stmt = db.prepare(sql);
+			this.#statements.push(stmt);
+			return stmt;
+		};
+		try {
+			this.#listActiveStmt = prepare(
+				"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
+			);
+			this.#listActiveByProviderStmt = prepare(
+				"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
+			);
+			this.#listDisabledStmt = prepare(
+				"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE disabled_cause IS NOT NULL ORDER BY id ASC",
+			);
+			this.#listDisabledByProviderStmt = prepare(
+				"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
+			);
+			this.#insertStmt = prepare(
+				`INSERT INTO auth_credentials (provider, credential_type, data, salt, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ${SQLITE_NOW_EPOCH}, ${SQLITE_NOW_EPOCH}) RETURNING id`,
+			);
+			this.#updateStmt = prepare(
+				`UPDATE auth_credentials SET credential_type = ?, data = ?, salt = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
+			);
+			this.#deleteStmt = prepare(
+				`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
+			);
+			this.#deleteByProviderStmt = prepare(
+				`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE provider = ? AND disabled_cause IS NULL`,
+			);
+			this.#hardDeleteStmt = prepare("DELETE FROM auth_credentials WHERE id = ?");
+			this.#getCacheStmt = prepare(`SELECT value FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH}`);
+			this.#getCacheIncludingExpiredStmt = prepare("SELECT value FROM cache WHERE key = ?");
+			this.#upsertCacheStmt = prepare(
+				"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
+			);
+			this.#deleteCachePrefixStmt = prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
+			this.#deleteExpiredCacheStmt = prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
+			this.#getCredentialBlockStmt = prepare(
+				"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
+			);
+			this.#listCredentialBlockScopesStmt = prepare(
+				"SELECT block_scope, blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND blocked_until_ms > ?",
+			);
+			// One statement for any number of ids: `json_each` keeps the caller's id
+			// order (`ids.key`) and the per-credential provider/scope order.
+			this.#listCredentialBlocksStmt = prepare(
+				`SELECT b.credential_id, b.provider_key, b.block_scope, b.blocked_until_ms, b.updated_at
 			FROM json_each(?) AS ids
 			JOIN auth_credential_blocks AS b ON b.credential_id = ids.value
 			WHERE b.blocked_until_ms > ?
 				AND NOT (b.provider_key = ? AND b.block_scope = ?)
 			ORDER BY ids.key ASC, b.provider_key ASC, b.block_scope ASC`,
-		);
-		this.#upsertCredentialBlockStmt = this.#db.prepare(
-			`INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at)
+			);
+			this.#upsertCredentialBlockStmt = prepare(
+				`INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at)
 			VALUES (?, ?, ?, ?, ${SQLITE_NOW_EPOCH})
 			ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
 				blocked_until_ms = MAX(blocked_until_ms, excluded.blocked_until_ms),
 				updated_at = excluded.updated_at`,
-		);
-		this.#deleteCredentialBlocksStmt = this.#db.prepare("DELETE FROM auth_credential_blocks WHERE credential_id = ?");
-		this.#deleteCredentialBlockStmt = this.#db.prepare(
-			"DELETE FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
-		);
-		this.#deleteExpiredCredentialBlocksStmt = this.#db.prepare(
-			"DELETE FROM auth_credential_blocks WHERE blocked_until_ms <= ?",
-		);
-		this.#acquireCredentialRefreshLeaseStmt = this.#db.prepare(
-			`INSERT INTO auth_credential_refresh_leases (credential_id, owner, expires_at_ms, updated_at)
+			);
+			this.#deleteCredentialBlocksStmt = prepare("DELETE FROM auth_credential_blocks WHERE credential_id = ?");
+			this.#deleteCredentialBlockStmt = prepare(
+				"DELETE FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+			);
+			this.#deleteExpiredCredentialBlocksStmt = prepare(
+				"DELETE FROM auth_credential_blocks WHERE blocked_until_ms <= ?",
+			);
+			this.#acquireCredentialRefreshLeaseStmt = prepare(
+				`INSERT INTO auth_credential_refresh_leases (credential_id, owner, expires_at_ms, updated_at)
 			VALUES (?, ?, ?, ${SQLITE_NOW_EPOCH})
 			ON CONFLICT(credential_id) DO UPDATE SET
 				owner = excluded.owner,
 				expires_at_ms = excluded.expires_at_ms,
 				updated_at = excluded.updated_at
 			WHERE auth_credential_refresh_leases.expires_at_ms <= ?`,
-		);
-		this.#getCredentialRefreshLeaseStmt = this.#db.prepare(
-			"SELECT expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
-		);
-		this.#getCredentialRefreshLeaseHolderStmt = this.#db.prepare(
-			"SELECT owner, expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
-		);
-		this.#handBackCredentialRefreshLeaseStmt = this.#db.prepare(
-			`UPDATE auth_credential_refresh_leases SET owner = ?, expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
-		);
-		this.#renewCredentialRefreshLeaseStmt = this.#db.prepare(
-			`UPDATE auth_credential_refresh_leases SET expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
-		);
-		this.#releaseCredentialRefreshLeaseStmt = this.#db.prepare(
-			"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
-		);
-		this.#getCredentialStateStmt = this.#db.prepare(
-			"SELECT provider, credential_type, data, salt, identity_key, disabled_cause FROM auth_credentials WHERE id = ?",
-		);
-		this.#holdsCredentialRefreshLeaseStmt = this.#db.prepare(
-			"SELECT 1 FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?",
-		);
-		this.#insertUsageHistoryStmt = this.#db.prepare(
-			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		);
-		this.#lastUsageHistoryStmt = this.#db.prepare(
-			"SELECT id, recorded_at FROM usage_history WHERE provider = ? AND account_key = ? AND limit_id = ? ORDER BY recorded_at DESC LIMIT 1",
-		);
-		this.#updateUsageHistoryStmt = this.#db.prepare(
-			"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, status = ?, resets_at = ? WHERE id = ?",
-		);
-		this.#listUsageHistoryStmt = this.#db.prepare(
-			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
-		);
+			);
+			this.#getCredentialRefreshLeaseStmt = prepare(
+				"SELECT expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
+			);
+			this.#getCredentialRefreshLeaseHolderStmt = prepare(
+				"SELECT owner, expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
+			);
+			this.#handBackCredentialRefreshLeaseStmt = prepare(
+				`UPDATE auth_credential_refresh_leases SET owner = ?, expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
+			);
+			this.#renewCredentialRefreshLeaseStmt = prepare(
+				`UPDATE auth_credential_refresh_leases SET expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
+			);
+			this.#releaseCredentialRefreshLeaseStmt = prepare(
+				"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
+			);
+			this.#getCredentialStateStmt = prepare(
+				"SELECT provider, credential_type, data, salt, identity_key, disabled_cause FROM auth_credentials WHERE id = ?",
+			);
+			this.#holdsCredentialRefreshLeaseStmt = prepare(
+				"SELECT 1 FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?",
+			);
+			this.#insertUsageHistoryStmt = prepare(
+				"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			);
+			this.#lastUsageHistoryStmt = prepare(
+				"SELECT id, recorded_at FROM usage_history WHERE provider = ? AND account_key = ? AND limit_id = ? ORDER BY recorded_at DESC LIMIT 1",
+			);
+			this.#updateUsageHistoryStmt = prepare(
+				"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, status = ?, resets_at = ? WHERE id = ?",
+			);
+			this.#listUsageHistoryStmt = prepare(
+				"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
+			);
+		} catch (error) {
+			for (const stmt of this.#statements) stmt.finalize();
+			throw error;
+		}
 	}
 
 	/**
@@ -2480,39 +2489,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		this.#listActiveStmt.finalize();
-		this.#listActiveByProviderStmt.finalize();
-		this.#listDisabledStmt.finalize();
-		this.#listDisabledByProviderStmt.finalize();
-		this.#insertStmt.finalize();
-		this.#updateStmt.finalize();
-		this.#deleteStmt.finalize();
-		this.#deleteByProviderStmt.finalize();
-		this.#hardDeleteStmt.finalize();
-		this.#getCacheStmt.finalize();
-		this.#getCacheIncludingExpiredStmt.finalize();
-		this.#upsertCacheStmt.finalize();
-		this.#deleteExpiredCacheStmt.finalize();
-		this.#getCredentialBlockStmt.finalize();
-		this.#listCredentialBlockScopesStmt.finalize();
-		this.#listCredentialBlocksStmt.finalize();
-		this.#upsertCredentialBlockStmt.finalize();
-		this.#deleteCredentialBlocksStmt.finalize();
-		this.#deleteCredentialBlockStmt.finalize();
-		this.#deleteExpiredCredentialBlocksStmt.finalize();
-		this.#insertUsageHistoryStmt.finalize();
-		this.#lastUsageHistoryStmt.finalize();
-		this.#listUsageHistoryStmt.finalize();
-		this.#updateUsageHistoryStmt.finalize();
-		this.#deleteCachePrefixStmt.finalize();
-		this.#acquireCredentialRefreshLeaseStmt.finalize();
-		this.#getCredentialRefreshLeaseStmt.finalize();
-		this.#getCredentialRefreshLeaseHolderStmt.finalize();
-		this.#handBackCredentialRefreshLeaseStmt.finalize();
-		this.#renewCredentialRefreshLeaseStmt.finalize();
-		this.#releaseCredentialRefreshLeaseStmt.finalize();
-		this.#getCredentialStateStmt.finalize();
-		this.#holdsCredentialRefreshLeaseStmt.finalize();
+		for (const stmt of this.#statements) stmt.finalize();
 		if (!this.#borrowConnection) this.#db.close();
 	}
 }
