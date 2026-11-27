@@ -81,6 +81,11 @@ interface MarkdownToken {
 	items?: MarkdownToken[];
 }
 
+/**
+ * The turns of `entries`, tool results folded into their call's turn. An assistant message with
+ * neither prose nor tool calls (the empty reply a cancelled prompt leaves) has nothing to copy, so
+ * it is no target.
+ */
 function targetsOf(entries: readonly TranscriptEntryLike[]): Target[] {
 	const targets: Target[] = [];
 	for (const entry of entries) {
@@ -91,6 +96,12 @@ function targetsOf(entries: readonly TranscriptEntryLike[]): Target[] {
 			targets[targets.length - 1] = { ...previous, entries: [...previous.entries, entry] };
 			continue;
 		}
+		if (
+			message.role === "assistant" &&
+			!message.content.some(part => part.type === "toolCall") &&
+			!assistantText(entry)
+		)
+			continue;
 		targets.push({ turnId: entry.id, isUserTurn: isUserRequestEntry(entry), entries: [entry] });
 	}
 	return targets;

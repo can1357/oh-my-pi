@@ -353,6 +353,41 @@ describe("copy selector", () => {
 		expect(sources).toEqual([{ entry: entries[1] }, { entry: entries[0] }]);
 	});
 
+	it("opens on the cancelled prompt, not the empty reply its abort left", () => {
+		const prompt = "refactor the parser";
+		const entries = [
+			...makeEntries(),
+			entry("u2", "t1", { role: "user", content: prompt, timestamp: 4 } as AgentMessage),
+			entry("a2", "u2", {
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "" }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "aborted",
+				errorMessage: "Request was aborted",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 5,
+			} as unknown as AgentMessage),
+		];
+		const picks: Pick[] = [];
+		const term = makeSelector(picks, () => {}, undefined, entries);
+		press(term, "enter", "up", "enter");
+		term.dispose();
+
+		expect(picks).toEqual([
+			{ content: prompt, label: "user message" },
+			{ content: ASSISTANT_TEXT, label: "assistant message" },
+		]);
+	});
+
 	it("keeps block content and metadata exact while retaining each block's source entry", () => {
 		const quote = "quoted first line\nquoted second line";
 		const assistantText = `${ASSISTANT_TEXT}\n> ${quote.replace("\n", "\n> ")}`;
