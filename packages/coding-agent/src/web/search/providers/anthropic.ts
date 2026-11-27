@@ -20,7 +20,6 @@ import {
 	withAuth,
 } from "@oh-my-pi/pi-ai";
 import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { applySessionHeader } from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
 	anthropicApiVersionAcceptsSamplingParams,
 	isOfficialAnthropicApiUrl,
@@ -133,7 +132,6 @@ async function callSearch(
 	signal?: AbortSignal,
 	fetchImpl: FetchImpl = fetch,
 	timeoutMs?: number,
-	sessionId?: string,
 ): Promise<AnthropicApiResponse> {
 	const url = buildAnthropicUrl(auth);
 	// Only Anthropic's own endpoint runs the fallback chain, and only models with
@@ -147,9 +145,6 @@ async function callSearch(
 			model.compat.allowAnthropicHeaderOverrides === true,
 		extraBetas: serverSideFallback ? [SERVER_SIDE_FALLBACK_BETA] : undefined,
 	});
-	// The host's own conversation header (KDL `session-header`): Copilot answers Claude replies with a blocked
-	// message when it is missing. The provider request path applies it; this direct request must too.
-	applySessionHeader(headers, model.compat, sessionId);
 
 	const injectClaudeCodeInstruction =
 		model.compat === undefined ||
@@ -402,7 +397,6 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 				params.signal,
 				params.fetch,
 				params.timeoutMs,
-				params.sessionId,
 			);
 		},
 		{

@@ -279,7 +279,7 @@ describe("Anthropic Copilot auth config", () => {
 		);
 		await streamAnthropic(makeCopilotClaudeModel(), testContext, {
 			apiKey: "ghu_test_copilot_token",
-			fetch: fetchMock as unknown as typeof fetch,
+			fetch: fetchMock,
 			sessionId,
 			headers,
 		}).result();
@@ -313,7 +313,7 @@ describe("Anthropic Copilot auth config", () => {
 		);
 		await streamAnthropic(model, testContext, {
 			apiKey: "sk-test",
-			fetch: fetchMock as unknown as typeof fetch,
+			fetch: fetchMock,
 			sessionId: "conversation",
 		}).result();
 
