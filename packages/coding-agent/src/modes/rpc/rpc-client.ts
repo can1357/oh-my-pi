@@ -1443,8 +1443,9 @@ export class RpcClient {
 	}
 
 	/**
-	 * Remove one stored credential. Rejects when it is no longer stored.
-	 * `remainingSource` names what still authenticates the provider (another stored credential, env var, config).
+	 * Remove one stored credential, revoking it at the provider when one supports it. Rejects when it is no
+	 * longer stored. `remainingSource` names what still authenticates the provider (another stored credential,
+	 * env var, config).
 	 */
 	async logout(providerId: string, credentialId: number): Promise<{ remainingSource?: string }> {
 		const response = await this.#send({ type: "logout", providerId, credentialId });

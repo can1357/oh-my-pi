@@ -110,6 +110,18 @@ provider "alibaba-token-plan" {
 			supports-reasoning-effort #true
 		}
 	}
+	// Alibaba documents image input for DeepSeek V4.1 Flash on the Token Plan,
+	// and endpoint probes read two different images correctly (#20773). Its
+	// `/models` rows carry no modality metadata, so ID-only discovery cannot
+	// declare it. Keyed on family/revision so the dated snapshot
+	// (`deepseek-v4.1-flash-1017`) matches too; V4.0 ids stay text-only until verified.
+	class "deepseek" {
+		family "flash" {
+			revision ">=4.1 <4.2" {
+				input-modalities "text" "image"
+			}
+		}
+	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek-v4-pro" {
 		thinking-format "qwen"

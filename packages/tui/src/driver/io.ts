@@ -65,7 +65,7 @@ export interface TerminalInput extends Pick<
 	stop(): void;
 	/** Current alternate-screen keyboard bytes (they change once the keyboard probe settles). */
 	keyboardScreenModes(): KeyboardScreenModes;
-	setMouse(tracking: MouseTracking): void;
+	setMouse(tracking: MouseTracking, reportFocus?: boolean): void;
 	/** Re-query the background color (OSC 11); the answer arrives through `onCapabilities`. */
 	refreshAppearance(): void;
 	/** Ask for the cursor position (CPR); null when the terminal does not answer in time. */

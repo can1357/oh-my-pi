@@ -1414,6 +1414,7 @@ async function runLoopBody(
 			);
 			await emitTurnEnd(stream, currentContext, resumeTail, executionResult.toolResults, config, signal, {
 				willContinue: !isDeadlineExceeded(config.deadline),
+				unresolvedToolCallIds: executionResult.unresolvedToolCallIds,
 				...(resumeContextMessage ? { additionalMessages: [resumeContextMessage] } : {}),
 			});
 			turnOpen = false;
@@ -1775,6 +1776,7 @@ async function runLoopBody(
 
 				const toolResults: ToolResultMessage[] = [];
 				const additionalMessages: AgentMessage[] = [];
+				let unresolvedToolCallIds: string[] | undefined;
 				if (softNonCompliant && softRequiredTool !== undefined) {
 					SpeculativeOperationCoordinator.discardForMessage(message, "soft tool requirement deferred execution");
 					// A soft-required tool is pending but the model called something else
@@ -1829,6 +1831,7 @@ async function runLoopBody(
 						[...liveAccepted, ...liveDeferred],
 					);
 					toolResults.push(...executionResult.toolResults);
+					unresolvedToolCallIds = executionResult.unresolvedToolCallIds;
 
 					for (const result of toolResults) {
 						currentContext.messages.push(result);
@@ -1913,6 +1916,7 @@ async function runLoopBody(
 				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
 					additionalMessages,
 					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
+					unresolvedToolCallIds,
 				});
 				turnOpen = false;
 
@@ -3443,7 +3447,7 @@ async function executeToolCalls(
 	// Steering the provider took off the queue during the response that emitted
 	// this batch; it injects at this batch's boundary like queued steering.
 	liveSteering: readonly AgentMessage[],
-): Promise<{ toolResults: ToolResultMessage[]; additionalContext?: string }> {
+): Promise<{ toolResults: ToolResultMessage[]; additionalContext?: string; unresolvedToolCallIds: string[] }> {
 	const tools = currentContext.tools;
 	const {
 		hasSteeringMessages,
@@ -4134,6 +4138,7 @@ async function executeToolCalls(
 	return {
 		toolResults: emittedToolResults,
 		...(additionalContext !== undefined ? { additionalContext } : {}),
+		unresolvedToolCallIds: records.filter(record => record.tool === undefined).map(record => record.toolCall.id),
 	};
 }
 

@@ -27,6 +27,7 @@ import {
 	resolveExactModelIdentity,
 	resolveModelFromString,
 	resolveModelOverride,
+	resolveModelOverrideWithAuthFallback,
 	resolveModelRoleValue,
 	resolveModelScope,
 	resolveRoleChain,
@@ -36,7 +37,7 @@ import {
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 
@@ -854,6 +855,56 @@ describe("parseModelPattern", () => {
 			// A spelling matching neither id exactly stays ambiguous and fails closed.
 			expect(resolveModelRoleValue("xiaomi/MIMO-V2.6-PRO", models).model).toBeUndefined();
 		});
+
+		describe("custom provider ids containing a slash", () => {
+			// The provider lock exists to stop bundled aggregator copies from shadowing
+			// provider-qualified selectors; a models.yml provider carries no bundled
+			// catalog, so its literal slash id must never be locked out.
+			const customProxyOpus = buildModel({
+				id: "anthropic/claude-opus-5",
+				name: "Claude Opus 5 (Custom Proxy)",
+				api: "anthropic-messages",
+				provider: "my-proxy",
+				baseUrl: "https://proxy.example.com/v1",
+				reasoning: true,
+				thinking: {
+					mode: "budget",
+					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				},
+				input: ["text", "image"],
+				cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+				contextWindow: 200000,
+				maxTokens: 32000,
+			});
+
+			test("a custom provider's literal slash id resolves to the custom provider", () => {
+				// "anthropic" is a bundled provider that carries "claude-opus-5"; the lock
+				// must not swallow this exact-id match and fall through to the
+				// provider-prefix strip, which would route to the built-in provider.
+				const result = parseModelPattern("anthropic/claude-opus-5", [customProxyOpus]);
+				expect(result.model?.provider).toBe("my-proxy");
+				expect(result.model?.id).toBe("anthropic/claude-opus-5");
+			});
+
+			test("resolveCliModel routes the slash id to the custom provider", () => {
+				const result = resolveCliModel({
+					cliModel: "anthropic/claude-opus-5",
+					modelRegistry: {
+						getAll: () => [customProxyOpus],
+						getAvailable: () => [customProxyOpus],
+					},
+				});
+				expect(result.model?.provider).toBe("my-proxy");
+				expect(result.model?.id).toBe("anthropic/claude-opus-5");
+				expect(result.error).toBeUndefined();
+			});
+
+			test("an explicit custom-provider reference keeps working", () => {
+				const result = parseModelPattern("my-proxy/anthropic/claude-opus-5", [customProxyOpus]);
+				expect(result.model?.provider).toBe("my-proxy");
+				expect(result.model?.id).toBe("anthropic/claude-opus-5");
+			});
+		});
 	});
 
 	describe("edge cases", () => {
@@ -1169,6 +1220,52 @@ describe("resolveModelRoleValue", () => {
 		expect(result.warning).toBeUndefined();
 	});
 });
+
+describe("provider-qualified role selectors", () => {
+	test("prefers the explicit anthropic provider when the exact pair exists", () => {
+		const availableModels = [
+			createOpusModel("amazon-bedrock", "claude-3-7-sonnet", "amazon-bedrock/claude-3-7-sonnet"),
+			createOpusModel("anthropic", "claude-3-7-sonnet", "anthropic/claude-3-7-sonnet"),
+		];
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-3-7-sonnet" },
+		});
+
+		const resolved = resolveModelFromSettings({ settings, availableModels });
+		expect(resolved?.provider).toBe("anthropic");
+		expect(resolved?.id).toBe("claude-3-7-sonnet");
+	});
+
+	test("does not silently fall back to bedrock when a provider-qualified role misses", () => {
+		const availableModels = [
+			createOpusModel("amazon-bedrock", "claude-3-7-sonnet", "amazon-bedrock/claude-3-7-sonnet"),
+			createOpusModel("anthropic", "claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"),
+		];
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-3-7-sonnet" },
+		});
+
+		const roleValue = settings.getModelRole("default");
+		const roleResolved = resolveModelRoleValue(roleValue, availableModels, { settings });
+		expect(roleResolved.model).toBeUndefined();
+
+		const settingsResolved = resolveModelFromSettings({ settings, availableModels });
+		expect(settingsResolved).toBeUndefined();
+
+		const cliResolved = resolveCliModel({
+			cliModel: "anthropic/claude-3-7-sonnet",
+			modelRegistry: {
+				getAll: () => availableModels,
+				getAvailable: () => availableModels,
+			},
+		});
+		expect(cliResolved.model).toBeUndefined();
+		expect(cliResolved.error).toBe(
+			'Model "anthropic/claude-3-7-sonnet" not found. Run "omp models" to see available models.',
+		);
+	});
+});
+
 describe("resolveAgentPrewalkPattern", () => {
 	test("agent definition alone decides: true → default target, pattern → custom, false/absent → off", () => {
 		expect(resolveAgentPrewalkPattern({ agentPrewalk: true })).toBe("@smol");
@@ -1529,6 +1626,254 @@ describe("resolveModelOverride", () => {
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 		expect(result.thinkingLevel).toBe(Effort.High);
 		expect(result.explicitThinkingLevel).toBe(true);
+	});
+});
+
+describe("resolveModelOverrideWithAuthFallback", () => {
+	// A resolved subagent model without working credentials falls back to the parent
+	// session's active model, which has working auth because the parent turn uses it.
+	type AuthLookupRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey">;
+
+	const parentModel: Model<Api> = buildModel({
+		id: "deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+
+	const unauthedTaskModel: Model<Api> = buildModel({
+		id: "qwen3.6-plus-free",
+		name: "Qwen3.6 Plus Free",
+		api: "openai-completions",
+		provider: "opencode-zen",
+		baseUrl: "https://opencode.ai/zen/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+
+	const sharedModel: Model<Api> = buildModel({
+		id: "shared-id",
+		name: "Shared",
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+
+	function authedRegistry(models: Model<Api>[], authedProviders: Set<string>): AuthLookupRegistry {
+		return {
+			getAvailable: () => models,
+			getApiKey: async (model: Model<Api>) => (authedProviders.has(model.provider) ? "sk-test-token" : undefined),
+		};
+	}
+
+	describe("missing subagent credentials", () => {
+		test("tries configured authenticated fallbacks before the parent model", async () => {
+			const registry = authedRegistry([unauthedTaskModel, sharedModel, parentModel], new Set(["deepseek"]));
+			const selected = await resolveModelOverrideWithAuthFallback(
+				["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+			);
+			expect(selected.model?.id).toBe("shared-id");
+			expect(selected.thinkingLevel?.toString()).toBe("high");
+			expect(selected.authFallbackUsed).toBe(false);
+		});
+
+		test("falls back to parent active model when resolved subagent model has no auth", async () => {
+			// DeepSeek is authenticated; opencode-zen is not.
+			const registry = authedRegistry([parentModel, unauthedTaskModel], new Set(["deepseek"]));
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["qwen3.6-plus-free"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+			);
+
+			expect(result.authFallbackUsed).toBe(true);
+			expect(result.model?.provider).toBe("deepseek");
+			expect(result.model?.id).toBe("deepseek-v4-pro");
+		});
+
+		test("does not fall back when resolved subagent model has working auth", async () => {
+			const registry = authedRegistry([parentModel, unauthedTaskModel], new Set(["deepseek", "opencode-zen"]));
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["qwen3.6-plus-free"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+			);
+
+			expect(result.authFallbackUsed).toBe(false);
+			expect(result.model?.provider).toBe("opencode-zen");
+			expect(result.model?.id).toBe("qwen3.6-plus-free");
+		});
+
+		test("returns primary unchanged when parent active model also has no auth", async () => {
+			const registry = authedRegistry([parentModel, unauthedTaskModel], new Set());
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["qwen3.6-plus-free"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+			);
+
+			expect(result.authFallbackUsed).toBe(false);
+			expect(result.model?.provider).toBe("opencode-zen");
+			expect(result.model?.id).toBe("qwen3.6-plus-free");
+		});
+
+		test("returns primary unchanged when no parent active model is provided", async () => {
+			const registry = authedRegistry([parentModel, unauthedTaskModel], new Set(["deepseek"]));
+
+			const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], undefined, registry);
+
+			expect(result.authFallbackUsed).toBe(false);
+			expect(result.model?.provider).toBe("opencode-zen");
+		});
+
+		test("does not fall back when subagent and parent resolve to the same model", async () => {
+			// Even with no auth, an identical model gains nothing from falling back.
+			const registry = authedRegistry([sharedModel], new Set());
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["deepseek/shared-id"],
+				"deepseek/shared-id",
+				registry,
+			);
+
+			expect(result.authFallbackUsed).toBe(false);
+			expect(result.model?.id).toBe("shared-id");
+		});
+
+		test("treats keyless providers (kNoAuth marker) as authenticated", async () => {
+			// Keyless-by-design providers (Ollama, llama.cpp, lm-studio) advertise the
+			// kNoAuth sentinel from getApiKey to signal that they do not require
+			// credentials. The helper treats this as authenticated so an explicitly
+			// configured local model is never silently rerouted to the parent's
+			// remote provider (see #1008).
+			const registry: AuthLookupRegistry = {
+				getAvailable: () => [parentModel, unauthedTaskModel],
+				getApiKey: async (model: Model<Api>) => {
+					if (model.provider === "deepseek") return "sk-test";
+					if (model.provider === "opencode-zen") return kNoAuth;
+					return undefined;
+				},
+			};
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["qwen3.6-plus-free"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+			);
+
+			expect(result.authFallbackUsed).toBe(false);
+			expect(result.model?.provider).toBe("opencode-zen");
+			expect(result.model?.id).toBe("qwen3.6-plus-free");
+		});
+	});
+
+	describe("session-sticky OAuth", () => {
+		// Session-sticky OAuth credentials only resolve with a session id, so the
+		// pre-flight auth check must forward it to getApiKey; without it a credential
+		// usable once the subagent session starts would look missing.
+		test("forwards sessionId to getApiKey for the primary model", async () => {
+			let receivedSessionId: string | undefined;
+			const registry: AuthLookupRegistry = {
+				getAvailable: () => [parentModel, unauthedTaskModel],
+				getApiKey: async (model: Model<Api>, sessionId?: string) => {
+					if (model.provider === "opencode-zen") {
+						receivedSessionId = sessionId;
+						// Without sessionId, OAuth can't resolve; with it, it can.
+						return sessionId ? "sk-resolved-token" : undefined;
+					}
+					if (model.provider === "deepseek") return "sk-test";
+					return undefined;
+				},
+			};
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["qwen3.6-plus-free"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+				undefined,
+				"subagent-session-123",
+			);
+
+			expect(receivedSessionId).toBe("subagent-session-123");
+			expect(result.authFallbackUsed).toBe(false);
+			expect(result.model?.provider).toBe("opencode-zen");
+			expect(result.model?.id).toBe("qwen3.6-plus-free");
+		});
+
+		test("forwards sessionId to getApiKey for the fallback model", async () => {
+			const receivedSessionIds: string[] = [];
+			const registry: AuthLookupRegistry = {
+				getAvailable: () => [parentModel, unauthedTaskModel],
+				getApiKey: async (model: Model<Api>, sessionId?: string) => {
+					if (sessionId) receivedSessionIds.push(`${model.provider}:${sessionId}`);
+					if (model.provider === "opencode-zen") return undefined;
+					return sessionId ? "sk-resolved-token" : undefined;
+				},
+			};
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["qwen3.6-plus-free"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+				undefined,
+				"subagent-session-456",
+			);
+
+			expect(receivedSessionIds).toEqual(["opencode-zen:subagent-session-456", "deepseek:subagent-session-456"]);
+			expect(result.authFallbackUsed).toBe(true);
+			expect(result.model?.provider).toBe("deepseek");
+		});
+
+		test("preserves the requested model warning when auth falls back", async () => {
+			const registry = authedRegistry([parentModel, unauthedTaskModel], new Set(["deepseek"]));
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["qwen3.6-plus-free:invalid"],
+				"deepseek/deepseek-v4-pro",
+				registry,
+			);
+
+			expect(result.authFallbackUsed).toBe(true);
+			expect(result.warning).toBe(
+				'Invalid thinking level "invalid" in pattern "qwen3.6-plus-free:invalid". Using default instead.',
+			);
+		});
+	});
+
+	describe("disabled providers", () => {
+		test("skips an authenticated model from a disabled provider", async () => {
+			const settings = Settings.isolated({ disabledProviders: ["opencode-zen"] });
+			const registry = authedRegistry([unauthedTaskModel, parentModel], new Set(["opencode-zen", "deepseek"]));
+
+			const result = await resolveModelOverrideWithAuthFallback(
+				["opencode-zen/qwen3.6-plus-free", "deepseek/deepseek-v4-pro"],
+				undefined,
+				registry,
+				settings,
+			);
+
+			expect(result.model?.provider).toBe("deepseek");
+			expect(result.model?.id).toBe("deepseek-v4-pro");
+		});
 	});
 });
 
@@ -3232,9 +3577,9 @@ describe("effort-tier variant aliases", () => {
 			id: "gemini-3.5-flash",
 			requestModelId: "gemini-3.5-flash-extra-low",
 			name: "Gemini 3.5 Flash",
-			api: "google-gemini-cli",
-			provider: "google-antigravity",
-			baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
 			reasoning: true,
 			thinking: {
 				mode: "google-level",
@@ -3258,9 +3603,9 @@ describe("effort-tier variant aliases", () => {
 		buildModel({
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
-			api: "google-gemini-cli",
-			provider: "google-antigravity",
-			baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
 			reasoning: true,
 			thinking: { mode: "google-level", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
 			input: ["text", "image"],
@@ -3285,32 +3630,26 @@ describe("effort-tier variant aliases", () => {
 	];
 
 	test("provider-qualified retired tier ids preserve their routed effort", () => {
-		const result = parseModelPattern("google-antigravity/gemini-3.5-flash-low", variantModels);
+		const result = parseModelPattern("google/gemini-3.5-flash-low", variantModels);
 		expect(result.model?.id).toBe("gemini-3.5-flash");
 		expect(result.thinkingLevel).toBe(Effort.High);
 	});
 
 	test("the default wire id shared by several levels leaves the thinking level unset", () => {
-		const result = parseModelPattern("google-antigravity/gemini-3.5-flash-extra-low", variantModels);
+		const result = parseModelPattern("google/gemini-3.5-flash-extra-low", variantModels);
 		expect(result.model?.id).toBe("gemini-3.5-flash");
 		expect(result.thinkingLevel).toBeUndefined();
 		expect(result.explicitThinkingLevel).toBe(false);
 	});
 
 	test("retired tier ids keep explicit :level suffixes", () => {
-		const result = parseModelPattern("google-antigravity/gemini-3.5-flash-low:high", variantModels);
+		const result = parseModelPattern("google/gemini-3.5-flash-low:high", variantModels);
 		expect(result.model?.id).toBe("gemini-3.5-flash");
 		expect(result.thinkingLevel).toBe(Effort.High);
 	});
 
-	test("bare retired tier ids resolve through the alias table", () => {
-		const result = parseModelPattern("gemini-3.5-flash-extra-low", variantModels);
-		expect(result.model?.id).toBe("gemini-3.5-flash");
-		expect(result.model?.provider).toBe("google-antigravity");
-	});
-
 	test("live models always beat recycled aliases", () => {
-		const result = parseModelPattern("google-antigravity/gemini-3-flash", variantModels);
+		const result = parseModelPattern("google/gemini-3-flash", variantModels);
 		expect(result.model?.id).toBe("gemini-3-flash");
 	});
 
@@ -3393,6 +3732,12 @@ describe("Devin selector parity", () => {
 			},
 		}),
 	];
+
+	test("bare retired tier ids resolve through the alias table", () => {
+		const result = parseModelPattern("claude-opus-5-xhigh", devinModels);
+		expect(result.model?.id).toBe("claude-opus-5");
+		expect(result.model?.provider).toBe("devin");
+	});
 
 	test("provider-scoped native aliases beat fuzzy id matches", () => {
 		expect(parseModelPattern("devin/opus", devinModels).model?.id).toBe("claude-opus-5");

@@ -13,7 +13,7 @@
 import type * as fs from "node:fs";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, signal, untrack } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../../config/settings";
 import { formatModelString } from "../../../config/model-resolver";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "../../../modes/view-model/overlays/agent-hub";
@@ -68,7 +68,17 @@ export interface AgentTranscriptViewerDeps {
 	/** Collab guest: the host serves the transcript. */
 	readonly remote?: AgentHubRemote;
 	/** Progress snapshot source for the stats row. */
-	readonly observers?: { getSession(id: string): { readonly progress?: ViewerProgress } | undefined };
+	readonly observers?: {
+		getSession(id: string):
+			| {
+					/** `"active"` while the agent runs; its elapsed time then advances from {@link progressAt}. */
+					readonly status?: string;
+					readonly progress?: ViewerProgress;
+					/** `Date.now()` when {@link progress} arrived; its `durationMs` was current then. */
+					readonly progressAt?: number;
+			  }
+			| undefined;
+	};
 	/** Revive+prompt path of messageable local agents (lazy). */
 	readonly lifecycle?: () => {
 		ensureLive(
@@ -246,8 +256,11 @@ export class AgentTranscriptViewerModel {
 
 	#metaSignature(): string {
 		const ref = this.ref();
+		const progress = this.progress();
+		// A running agent's time advances every poll: compare it as the stats row shows it, so the row redraws only when that text changes.
+		const shown = progress && { ...progress, durationMs: formatDuration(progress.durationMs) };
 		// `sendable` flips when an external agent settles without a status change (idle, then complete()).
-		return JSON.stringify([ref?.status, ref?.kind, ref?.parentId, ref?.sessionFile, this.sendable, this.progress()]);
+		return JSON.stringify([ref?.status, ref?.kind, ref?.parentId, ref?.sessionFile, this.sendable, shown]);
 	}
 
 	touch(): void {
@@ -269,8 +282,12 @@ export class AgentTranscriptViewerModel {
 		return Boolean(this.deps.remote || this.deps.lifecycle);
 	}
 
+	/** The latest progress; a running agent's elapsed time advances from the snapshot's arrival, as snapshots that would only advance the clock are not sent. */
 	progress(): ViewerProgress | undefined {
-		return this.deps.observers?.getSession(this.deps.agentId)?.progress;
+		const session = this.deps.observers?.getSession(this.deps.agentId);
+		const progress = session?.progress;
+		if (!progress || session.status !== "active" || session.progressAt === undefined) return progress;
+		return { ...progress, durationMs: progress.durationMs + Math.max(0, Date.now() - session.progressAt) };
 	}
 
 	/** What the body says while there are no messages. */

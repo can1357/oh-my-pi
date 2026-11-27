@@ -336,7 +336,6 @@ describe("supportsRemoteImageUrls", () => {
 		expect(supportsRemoteImageUrls(anthropicModel)).toBe(true);
 		expect(supportsRemoteImageUrls(makeModel("openai-codex-responses", "openai-codex"))).toBe(true);
 		expect(supportsRemoteImageUrls(makeModel("openai-responses", "xai"))).toBe(true);
-		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-antigravity"))).toBe(true);
 		// Same API shape, backend that cannot fetch arbitrary URLs.
 		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "opencode"))).toBe(false);
 		// Moonshot-native hosts reject remote image URLs on both transports
@@ -344,7 +343,6 @@ describe("supportsRemoteImageUrls", () => {
 		expect(supportsRemoteImageUrls(makeModel("openai-completions", "kimi-code"))).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "kimi-code"))).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("openai-completions", "moonshot"))).toBe(false);
-		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-gemini-cli"))).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("bedrock-converse-stream", "amazon-bedrock"))).toBe(false);
 	});
 });

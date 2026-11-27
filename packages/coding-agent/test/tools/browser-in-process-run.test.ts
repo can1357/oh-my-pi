@@ -265,7 +265,7 @@ describe("in-process browser runs", () => {
 				timeoutMs: 50,
 				snapshot,
 			}),
-		).rejects.toThrow("timed out after 50ms");
+		).rejects.toThrow("timed out after 50ms (stalled on tab.click())");
 	});
 
 	it("names the blocking tab and agent when a queued tab.run times out before starting", async () => {

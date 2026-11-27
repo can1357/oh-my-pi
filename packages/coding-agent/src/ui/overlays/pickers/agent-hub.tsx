@@ -71,7 +71,6 @@ import type {
 	HubEntries,
 	HubEntry,
 	HubLookTerm,
-	HubRecentLine,
 } from "../../styles/pickers/agent-hub";
 import { contextLevel, contextTone } from "../../status/format";
 import {
@@ -92,6 +91,7 @@ import {
 	metricsText,
 	NATIVE_CHILD_IDS,
 	projectAgentTree,
+	recentActivityLine,
 	roleBadge,
 	STATUS_DOT,
 	span,
@@ -1275,13 +1275,6 @@ export function AgentHub<T extends AgentRecordLike>(
 		};
 	};
 
-	const recentLine = (row: AgentActivityRow): HubRecentLine => ({
-		clock: activityClock(row.timestamp),
-		glyph: activityGlyph(row),
-		title: activityTitle(row),
-		summary: activitySummary(row),
-	});
-
 	const detailOf = (ref: T, at: number): HubDetail => {
 		const session = observed(ref.id);
 		const progress = session?.progress;
@@ -1313,7 +1306,7 @@ export function AgentHub<T extends AgentRecordLike>(
 				...(artifacts?.nestedPatchPaths ?? []).map(nested => `Nested patch ${shortenPath(nested)}`),
 				...(artifacts?.branchName ? [`Worktree branch ${artifacts.branchName}`] : []),
 			],
-			recent: props.activity.recent(ref.id, Math.max(1, props.rows())).map(recentLine),
+			recent: props.activity.recent(ref.id, Math.max(1, props.rows())).map(recentActivityLine),
 		};
 	};
 
@@ -1321,7 +1314,7 @@ export function AgentHub<T extends AgentRecordLike>(
 		const ref = registry.get(row.agentId);
 		const role = observedById.get(row.agentId)?.progress?.modelRole ?? ref?.history?.modelRole;
 		return {
-			...recentLine(row),
+			...recentActivityLine(row),
 			id: row.id,
 			agent: row.agentId,
 			role: role && props.getRoleInfo ? roleBadge(role, props.getRoleInfo(role)) : undefined,

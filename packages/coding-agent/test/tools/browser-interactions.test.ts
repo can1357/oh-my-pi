@@ -2613,6 +2613,34 @@ try { await tab.click("#vol"); return "clicked"; } catch (caught) { return Strin
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 30_000);
+
+	test("an action on a selector the page cannot parse fails at once, naming a prefix inside a CSS list", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-invalid-selector" };
+		const tabName = `invalid-selector-${crypto.randomUUID()}`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent("<input name=projectName>")}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `try { await tab.fill('input[name="projectName"], label/Project name', "omp"); return "filled"; } catch (caught) { return String(caught?.message ?? caught); }`,
+					timeout: 20,
+				},
+				context,
+			);
+			const error = valueFrom<string>(result);
+			expect(error).toContain("is not a valid selector");
+			expect(error).toContain("a label/ prefix applies to the whole selector and cannot join a CSS list");
+			expect(error).not.toContain("timed out");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
 });
 
 describe("looking a replaced element up again", () => {

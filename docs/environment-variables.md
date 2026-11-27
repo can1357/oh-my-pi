@@ -45,7 +45,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `ANTHROPIC_FOUNDRY_API_KEY`           | Anthropic via Azure Foundry / enterprise gateway   | `CLAUDE_CODE_USE_FOUNDRY` enabled                              | Takes precedence over `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` when Foundry mode is enabled                                           |
 | `OPENAI_API_KEY`                      | OpenAI auth                                        | Using OpenAI-family providers without explicit apiKey argument | Used by OpenAI Completions/Responses providers                                                                                               |
 | `OPENAI_CODEX_OAUTH_TOKEN`            | OpenAI Codex auth                                  | Using `openai-codex` provider                                  | Environment-supplied Codex OAuth token                                                                                                       |
-| `GEMINI_API_KEY`                      | Google Gemini auth                                 | Using `google` provider models                                 | Primary key for Gemini provider mapping                                                                                                      |
+| `GEMINI_API_KEY`                      | Google Gemini auth                                 | Using `google` provider models                                 | Primary key for Gemini provider mapping; also configured via the interactive API-key login (`/login google`)                                 |
 | `GROQ_API_KEY`                        | Groq auth                                          | Using Groq models                                              |                                                                                                                                              |
 | `CEREBRAS_API_KEY`                    | Cerebras auth                                      | Using Cerebras models                                          |                                                                                                                                              |
 | `FIREWORKS_API_KEY`                   | Fireworks auth                                     | Using Fireworks models                                         |                                                                                                                                              |
@@ -73,7 +73,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `XIAOMI_TOKEN_PLAN_CN_API_KEY`        | Xiaomi MiMo Token Plan auth (CN)                   | Using `xiaomi-token-plan-cn` provider                          |                                                                                                                                              |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`       | Xiaomi MiMo Token Plan auth (SGP)                  | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                                                              |
 | `KIRO_API_KEY`                        | Kiro API-key auth                                  | Using `kiro` without `/login kiro`                             | Must be a `ksk_…` key; a stored `/login kiro` credential wins                                                                                |
-| `MOONSHOT_API_KEY`                    | Moonshot auth                                      | Using `moonshot` provider                                      | `KIMI_API_KEY` is accepted as a fallback alias                                                                                               |
+| `MOONSHOT_API_KEY`                    | Moonshot auth                                      | Using `moonshot` provider                                      | `KIMI_API_KEY` is NOT accepted; it authenticates the mainland `kimi-code` provider instead                                                            |
 | `STEPFUN_API_KEY`                     | StepFun auth                                       | Using `stepfun` provider                                       | Keys are region-scoped: the `.ai` key works against `api.stepfun.ai`, the `.com` key against `api.stepfun.com`                               |
 | `HELMCODE_API_KEY`                    | Helmcode auth                                      | Using `helmcode` provider                                      |                                                                                                                                              |
 | `XAI_API_KEY`                         | xAI auth                                           | Using xAI models or as fallback for `xai-oauth`                |                                                                                                                                              |
@@ -313,13 +313,17 @@ Base URL resolution: option `azureBaseUrl` → env `AZURE_OPENAI_BASE_URL` → o
 
 ### Kimi
 
-| Variable               | Default / behavior                                       |
-| ---------------------- | -------------------------------------------------------- |
-| `KIMI_CODE_OAUTH_HOST` | Primary OAuth host override                              |
-| `KIMI_OAUTH_HOST`      | Fallback OAuth host override                             |
-| `KIMI_CODE_BASE_URL`   | Overrides Kimi usage endpoint base URL (`usage/kimi.ts`) |
+| Variable               | Default / behavior                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `KIMI_API_KEY`           | API-key auth for the mainland `kimi-code` (kimi.com) provider; never used by Moonshot                          |
+| `KIMI_CODE_GLOBAL_API_KEY` | API-key auth for the `kimi-code-global` (kimi.ai) provider                                                    |
+| `KIMI_CODE_OAUTH_HOST`   | Shared OAuth host override for both Kimi Code providers                                                       |
+| `KIMI_OAUTH_HOST`        | Shared fallback OAuth host override for both providers                                                        |
+| `KIMI_GLOBAL_OAUTH_HOST` | Global OAuth host override (`kimi-code-global` only; takes precedence over the shared overrides)              |
+| `KIMI_GLOBAL_AUTH_HOST`  | Fallback global OAuth host override (`kimi-code-global` only; applies before the shared overrides)            |
+| `KIMI_CODE_BASE_URL`     | Overrides Kimi usage endpoint base URL (`usage/kimi.ts`) for the mainland `kimi-code` deployment only         |
 
-OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`.
+OAuth host chain: mainland `kimi-code` resolves `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`; global `kimi-code-global` resolves `KIMI_GLOBAL_OAUTH_HOST` → `KIMI_GLOBAL_AUTH_HOST` → `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.ai`, with its API base at `https://api.kimi.ai/coding/v1`.
 
 ### Kiro
 
@@ -340,14 +344,6 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route                                                                                                                                                          |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly                                                                                                                                                            |
 
-### Antigravity compatibility
-
-| Variable                    | Default / behavior                                                                                                                                |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PI_AI_ANTIGRAVITY_VERSION` | Overrides the auto-discovered Antigravity hub user-agent version; when unset and discovery fails, the fallback is `2.26.0`                        |
-| `PI_AI_ANTIGRAVITY_CL`      | Overrides Antigravity hub user-agent build changelist (`1005016104` if unset)                                                                     |
-| `PI_AI_ANTIGRAVITY_OS`      | Overrides Antigravity hub user-agent os_type (unset: the native build for the host OS, `darwin`, `linux` or `windows`; other OSes report `linux`) |
-| `PI_AI_ANTIGRAVITY_ARCH`    | Overrides Antigravity hub user-agent arch (unset: that build's arch, `arm64` on macOS, `amd64` on Linux and Windows)                              |
 
 ### Prompt perturbation
 
@@ -623,7 +619,6 @@ These affect where coding-agent stores data and which process-local settings ove
 | `PI_SESSION_ORIGIN`                                 | `chrome` (set by the omp extension's native host for side panel chats) marks the sessions the process starts as the panel's: the terminal's resume picker, recent sessions, `--continue` and ACP session lists skip them, `--resume <id\|path>` still opens one, and the process writes no terminal breadcrumb |
 | `PI_NATIVES_DIR`                                    | Native addon extraction/staging root override, before XDG/default paths; the loader appends `<version>`. Trimmed, `~`-expanded, and normalized; empty or relative values are ignored. Also moves downloaded tree-sitter grammars (`grammars/`); does not move sessions, plugins, or other data. Must be writable only by the user(s) running `omp`: an existing addon of the expected size is reused without re-extraction, and its version is checked only after it loads                                                                      |
 | `PI_CONFIG_FILES`                                   | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `CLAUDE_CONFIG_DIR`                                 | Claude Code user-config directory override (trimmed, resolved relative to process cwd); also moves Claude's `.claude.json` to `<override>/.claude.json`. Does not relocate project `.claude` directories                                                                                                                                                                                                                                                                                                                                        |
 | `OMP_AUTORESEARCH_DB_DIR`                           | Directory override for per-project autoresearch DB and project-artifact roots; see [Autoresearch](./autoresearch.md)                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | On macOS/Linux, redirect corresponding OMP paths only when the target `omp` root (or named-profile root) already exists                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `PWD`                                               | Used when matching canonical current working directory in path helpers                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -685,7 +680,7 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | `APPDATA`, `XDG_CONFIG_HOME`                                                       | lspmux config path resolution                 |
 | `HOME`                                                                             | Path shortening in MCP command UI             |
 
-`COPILOT_HOME` overrides the GitHub Copilot config home (default `~/.copilot`), and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` supplies additional comma-separated instruction directories. `JS_DEBUG_DAP_SERVER` selects an existing JavaScript debug-adapter server; `XDG_DATA_HOME` also participates in bundled debugger discovery.
+`JS_DEBUG_DAP_SERVER` selects an existing JavaScript debug-adapter server; `XDG_DATA_HOME` also participates in bundled debugger discovery.
 
 ---
 

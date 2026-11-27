@@ -25,7 +25,7 @@ export function supportsExternalThinking(model: Model | null | undefined): boole
 	) {
 		return false;
 	}
-	if (model.api === "google-generative-ai" || model.api === "google-gemini-cli" || model.api === "google-vertex") {
+	if (model.api === "google-generative-ai" || model.api === "google-vertex") {
 		return !model.reasoning || model.thinking?.mode === "budget" || model.thinking?.suppressWhenOff === true;
 	}
 	return (

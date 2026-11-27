@@ -93,6 +93,8 @@ async function withCli(
 		SHELL: "/bin/sh",
 		NO_COLOR: "1",
 		TERM: "dumb",
+		// Test runtime: keeps the child off the OS keychain.
+		PI_TEST_RUNTIME: "1",
 		...(process.env.PI_NATIVES_DIR ? { PI_NATIVES_DIR: process.env.PI_NATIVES_DIR } : {}),
 	};
 	const client = new RpcClient({

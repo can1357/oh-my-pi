@@ -164,7 +164,10 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				};
 			}
 			try {
-				await writeManagedSkill(params.skill);
+				await writeManagedSkill({
+					...params.skill,
+					origin: { generator: "learn", sessionId: this.session.getSessionId?.(), project: this.session.cwd },
+				});
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
 				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
