@@ -113,6 +113,16 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 	}
 }
 
+/**
+ * Resolve a configured Cloud.ru Foundation Models base URL. Discovery and the
+ * cache namespace both key off the result, so the registry's raw configured
+ * value and the model manager's value must normalize identically.
+ */
+export function normalizeCloudRuBaseUrl(baseUrl?: string): string {
+	const trimmed = baseUrl?.trim().replace(/\/+$/, "");
+	return trimmed || getDefaultModelDiscoveryBaseUrl("cloud-ru")!;
+}
+
 /** Resolve an Ollama model-cache namespace scoped to the normalized discovery endpoint. */
 export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: string): string {
 	const defaultBaseUrl = getDefaultModelDiscoveryBaseUrl("ollama")!;
@@ -202,6 +212,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// `/v1`-suffixed one; both must land on one namespace.
 			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
 		}
+		case "cloud-ru":
+			// Discovery is authoritative and `/v1/models` is public, so the roster
+			// follows the endpoint, not the key: a proxy must never serve the
+			// official roster from a warm cache, or the reverse.
+			return `cloud-ru:models-v1:${Bun.hash(normalizeCloudRuBaseUrl(options.baseUrl)).toString(36)}`;
 		case "kimi-code":
 		case "kimi-code-global": {
 			// The `/coding/v1/models` roster depends on the subscription plan behind

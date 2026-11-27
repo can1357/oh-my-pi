@@ -1,0 +1,18 @@
+// Cloud.ru Foundation Models (https://cloud.ru/docs/foundation-models/ug/topics/quickstart):
+// OpenAI-compatible gateway at https://foundation-models.api.cloud.ru/v1 serving
+// both Cloud.ru-hosted models (GigaChat, DeepSeek, Qwen, GLM, Kimi, MiniMax,
+// gpt-oss) and external frontier models.
+provider "cloud-ru" {
+	default-model "deepseek-ai/DeepSeek-V4-Pro"
+	env "CLOUD_RU_API_KEY" "CLOUDRU_API_KEY"
+	base-url "https://foundation-models.api.cloud.ru/v1"
+	dynamic-models-authoritative #true
+	// Cloud.ru publishes each model's own context window, input modalities, and
+	// tool/reasoning flags in `/v1/models`; same-id rows on other hosts may
+	// serve different modalities or limits.
+	skip-cross-provider-reference-fills #true
+	discovery label="Cloud.ru" allow-unauthenticated=#true
+
+	// OpenAI-only storage flag is not part of Cloud.ru's OpenAI-compatible surface.
+	supports-store #false
+}
