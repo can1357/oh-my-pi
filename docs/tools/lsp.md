@@ -328,7 +328,7 @@ Uses the same location normalization and output shape as `definition`, but sends
    - Caches config per cwd in `configCache`; workspace `reload` invalidates the entry.
    - Caches LSP clients by spawn/initialization identity and cwd, with `pendingRequests`, `diagnostics`, `openFiles`, `serverCapabilities`, and project-load state. The transport may represent a shared mux link rather than an owned process.
    - Caches custom linter clients by `serverName:cwd`.
-   - Updates client `lastActivity`; optional idle-timeout cleanup is driven by workspace `idleTimeoutMs` or `setIdleTimeout()`.
+   - Updates client `lastActivity`; idle-timeout cleanup (default 15 min) is driven by workspace `idleTimeoutMs` or `setIdleTimeout()`.
    - Stamps each open document's `lastUsedAt` when an operation opens, syncs, saves, reconciles, or explicitly refreshes it. Before sending a `didOpen`, the client sends `didClose` for documents unused for 5 minutes, so the server can drop their projects; a queued close is written even if the opener is cancelled first, so a later use always reopens with a `didOpen` of the current text, and a close whose write is in flight when the opener is cancelled tears down a server that stopped reading stdin. A reopen resumes past the old version, and within the deferred-diagnostics window diagnostics waits treat an empty publish, or one versioned before the reopen, as provisional, since it may predate the close. Overlays ahead of disk and documents mid-operation stay open, and refreshing every open document after a watched-file change or `reload`, or syncing every open document before a query or diagnostics, does not count as a use.
 - Background work / cancellation
    - Every request has an abortable timeout signal.
