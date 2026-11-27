@@ -92,6 +92,7 @@ import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
+import type { NoticeEvent } from "./modes/rpc/wire/rpc-wire.generated";
 import { CURRENT_SETUP_VERSION } from "./config/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
@@ -264,6 +265,18 @@ async function loadReadlineInterface() {
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
+
+/**
+ * An RPC startup that fails closed on a saved model exits before `ready`; without a
+ * frame the host could only read stderr. Delivers the reason as a stdout `notice`.
+ */
+async function writeRpcModelRestoreNotice(message: string): Promise<void> {
+	const frame: NoticeEvent = { type: "notice", level: "error", message, source: "session-model-restore" };
+	const { promise, resolve } = Promise.withResolvers<void>();
+	// The startup error ends the process either way; delivery failure only loses the frame.
+	process.stdout.write(`${JSON.stringify(frame)}\n`, () => resolve());
+	await promise;
 }
 
 /** Print a non-fatal startup warning, for launches without a UI to show it in. */
@@ -2815,6 +2828,9 @@ export async function runRootCommand(
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 			} catch (error) {
 				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof sdk.SessionModelRestoreError)) {
+					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof sdk.SessionModelRestoreError) {
+						await writeRpcModelRestoreNotice(error.message);
+					}
 					throw error;
 				}
 				await sessionManager.close();
