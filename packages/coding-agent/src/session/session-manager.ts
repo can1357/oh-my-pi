@@ -88,6 +88,7 @@ import {
 	type SessionOrigin,
 	type SessionTitleSource,
 	type SessionTreeNode,
+	TAN_FORK_BOUNDARY_CUSTOM_TYPE,
 	type ThinkingLevelChangeEntry,
 	TITLE_CHANGE_ENTRY_TYPE,
 	type TitleChangeEntry,
@@ -509,6 +510,47 @@ function resetNestedTaskBilling(extractedToolData: Record<string, unknown[]> | u
 	const tasks = extractedToolData?.task;
 	if (!Array.isArray(tasks)) return;
 	for (const task of tasks) resetTaskResultBilling(task);
+}
+
+/**
+ * `SessionHeader.inheritedThroughEntryId` for a session holding only `kept` of `all`: the last kept
+ * entry at or before `marker` in `all`'s file order, so the inherited prefix still ends where it did.
+ */
+function inheritedMarkerWithin(
+	kept: readonly SessionEntry[],
+	all: readonly SessionEntry[],
+	marker: string | undefined,
+): string | undefined {
+	if (marker === undefined) return undefined;
+	const position = new Map(all.map((entry, index) => [entry.id, index]));
+	const markerAt = position.get(marker);
+	if (markerAt === undefined) return undefined;
+	let inherited: string | undefined;
+	for (const entry of kept) {
+		const at = position.get(entry.id);
+		if (at !== undefined && at <= markerAt) inherited = entry.id;
+	}
+	return inherited;
+}
+
+/**
+ * End of `entries`' inherited prefix: the header's `inheritedThroughEntryId`, else, for a `/tan` clone
+ * written before that marker, the entry before its last `tan-fork-boundary` (the boundary follows the
+ * copied entries). Derived sessions carry the result as their header marker, so the prefix survives a
+ * branch that drops the boundary itself.
+ */
+function inheritedPrefixEnd(marker: string | undefined, entries: readonly SessionEntry[]): string | undefined {
+	if (marker !== undefined) return marker;
+	let previous: string | undefined;
+	let end: string | undefined;
+	for (const entry of entries) {
+		if (entry.type === "custom" && entry.customType === TAN_FORK_BOUNDARY_CUSTOM_TYPE) {
+			end = previous;
+			continue;
+		}
+		previous = entry.id;
+	}
+	return end;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -2652,6 +2694,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			inheritedThroughEntryId: inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries),
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
@@ -2912,6 +2955,7 @@ export class SessionManager {
 		manager.#additionalDirectories = [...this.#additionalDirectories];
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
+		manager.#header.inheritedThroughEntryId = inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries);
 		manager.#entries = structuredClone(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
@@ -4295,6 +4339,11 @@ export class SessionManager {
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
+			inheritedThroughEntryId: inheritedMarkerWithin(
+				entriesToKeep,
+				this.#entries,
+				inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries),
+			),
 		};
 
 		const labels: LabelEntry[] = [];
@@ -4441,6 +4490,10 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
+		// A reset makes everything copied the parent's; a plain copy keeps the source's own inherited prefix.
+		manager.#header.inheritedThroughEntryId = options?.resetInheritedCost
+			? history.at(-1)?.id
+			: inheritedPrefixEnd(sourceHeader?.inheritedThroughEntryId, history);
 		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;

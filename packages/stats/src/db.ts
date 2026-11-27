@@ -12,7 +12,7 @@ import {
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { $envpos, getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
-import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
+import { classifyAgentType, type ParseSessionResult, readResetFork, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
 import {
 	mergeRanges,
@@ -171,6 +171,12 @@ const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 // approval recording shipped are re-parsed once so older cursors stay put.
 const TOOL_APPROVALS_BACKFILL_KEY = "tool_approvals_v1";
 const TOOL_APPROVALS_SINCE_MS = Date.parse("2026-11-01T00:00:00Z");
+// A reset fork (`/tan`) now leaves the requests, prompts, tool calls, approvals and Spotlight rows of its
+// copied prefix to its parent; a clone an older build synced before its parent still owns them. Re-parsing
+// the reset forks and their parents from byte zero once hands them back (see `replayInheritedPrefixes`).
+const INHERITED_PREFIX_REPLAY_KEY = "inherited_prefix_replay_v1";
+/** Header reads {@link replayInheritedPrefixes} keeps in flight. */
+const INHERITED_PREFIX_SCAN_FILES = 64;
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -876,6 +882,49 @@ function reparseModifiedSince(database: Database, key: string, sinceMs: number):
 	database.transaction(() => {
 		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(sinceMs);
 		database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, BACKFILL_COMPLETE);
+	})();
+}
+
+/**
+ * Hand each reset fork's copied prefix back to its parent once ({@link INHERITED_PREFIX_REPLAY_KEY}) by
+ * dropping the cursors of the reset forks ({@link readResetFork}) and their parents: the sync rebuilds both
+ * from byte zero, so a fork gives up every copied row and its parent takes them back when both land in
+ * one batch. A parent ingested in an earlier batch is blocked by the fork's old rows, whose removal marks
+ * a reconciliation replay; a full sync runs it before returning. Only the header line of any other
+ * transcript is read, and nothing of it is re-parsed. Runs under the sync lock, before the sync reads cursors.
+ */
+export async function replayInheritedPrefixes(): Promise<void> {
+	const database = db;
+	if (!database) return;
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(INHERITED_PREFIX_REPLAY_KEY);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	const files = database
+		.query<{ session_file: string }, []>("SELECT session_file FROM file_offsets")
+		.all()
+		.map(offset => offset.session_file);
+	const fileById = new Map<string, string>();
+	const forks: { sessionFile: string; parentSession?: string }[] = [];
+	for (let start = 0; start < files.length; start += INHERITED_PREFIX_SCAN_FILES) {
+		const batch = files.slice(start, start + INHERITED_PREFIX_SCAN_FILES);
+		const headers = await Promise.all(batch.map(readResetFork));
+		headers.forEach((header, index) => {
+			if (!header) return;
+			if (header.id !== undefined) fileById.set(header.id, batch[index]);
+			if (header.resetFork) forks.push({ sessionFile: batch[index], parentSession: header.parentSession });
+		});
+	}
+	const dropCursor = database.query("DELETE FROM file_offsets WHERE session_file = ?");
+	database.transaction(() => {
+		for (const { sessionFile, parentSession } of forks) {
+			dropCursor.run(sessionFile);
+			// A fork names its parent by session id; a branch, by file.
+			if (parentSession !== undefined) dropCursor.run(fileById.get(parentSession) ?? parentSession);
+		}
+		database
+			.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(INHERITED_PREFIX_REPLAY_KEY, BACKFILL_COMPLETE);
 	})();
 }
 

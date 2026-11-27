@@ -60,7 +60,7 @@ function buildAssistantEntry(opts: AssistantOptions) {
 async function writeSessionFile(
 	folderSlug: string,
 	fileName: string,
-	header: { id: string; cwd: string; parentSession?: string },
+	header: { id: string; cwd: string; parentSession?: string; inheritedThroughEntryId?: string },
 	entries: unknown[],
 ): Promise<string> {
 	const sessionDir = path.join(getSessionsDir(), folderSlug);
@@ -73,6 +73,7 @@ async function writeSessionFile(
 		timestamp: new Date().toISOString(),
 		cwd: header.cwd,
 		...(header.parentSession ? { parentSession: header.parentSession } : {}),
+		...(header.inheritedThroughEntryId ? { inheritedThroughEntryId: header.inheritedThroughEntryId } : {}),
 	};
 	const lines = [headerEntry, ...entries].map(entry => JSON.stringify(entry)).join("\n");
 	await Bun.write(sessionFile, `${lines}\n`);
@@ -102,6 +103,61 @@ async function writeForkSessionFile(parentFile: string, ...args: Parameters<type
 		// The file clock moves by a kernel tick (1 to 10 ms); no fake timer moves it.
 		await Bun.sleep(1);
 	}
+}
+
+/**
+ * Writes a parent and its reset fork (`/tan` clone) that copied the parent's prompt, its call to `read`
+ * and, with `approval`, that call's approval, then leaves the state an older build left when the fork
+ * synced first: the fork owns the copied rows at its zeroed cost, both cursors are current, and the
+ * upgrade's one-shot has not run. The database is closed, as before an upgrade.
+ */
+async function writeStaleResetFork(approval: boolean): Promise<{ parentFile: string; forkFile: string }> {
+	const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+	const userEntry = buildUserEntry("user01ab", ts, "hello");
+	const plainEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+	const toolCall = { type: "toolCall", id: "call01ab", name: "read", arguments: { path: "a.ts" } };
+	const assistantEntry = {
+		...plainEntry,
+		message: { ...plainEntry.message, content: [...plainEntry.message.content, toolCall] },
+	};
+	const approvalEntry = {
+		type: "custom",
+		id: "appr01ab",
+		parentId: "asst01ab",
+		timestamp: ts,
+		customType: "tool_approval_requested",
+		data: { toolCallId: "call01ab", toolName: "read", requestedAt: ts },
+	};
+	const parentFile = await writeSessionFile(
+		"--tmp--fork-dedup",
+		"01_parent.jsonl",
+		{ id: "parent00", cwd: "/tmp/project" },
+		approval ? [userEntry, assistantEntry, approvalEntry] : [userEntry, assistantEntry],
+	);
+	const copied = structuredClone(assistantEntry);
+	copied.message.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	const copies = approval ? [userEntry, copied, approvalEntry] : [userEntry, copied];
+	const lastCopy = copies[copies.length - 1].id;
+	const ownTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+	const forkFile = await writeSessionFile(
+		"--tmp--fork-dedup",
+		"02_fork.jsonl",
+		{ id: "fork0000", cwd: "/tmp/project", parentSession: "parent00", inheritedThroughEntryId: lastCopy },
+		[...copies, buildAssistantEntry({ entryId: "asst02cd", parentId: lastCopy, timestamp: ownTs })],
+	);
+	await syncAllSessions({ workers: 1, files: [parentFile, forkFile] });
+
+	const db = await initDb();
+	db.query(
+		"UPDATE messages SET session_file = ?, cost_input = 0, cost_output = 0, cost_total = 0 WHERE entry_id = ?",
+	).run(forkFile, "asst01ab");
+	db.query("UPDATE user_messages SET session_file = ? WHERE entry_id = ?").run(forkFile, "user01ab");
+	db.query("UPDATE tool_calls SET session_file = ? WHERE tool_call_id = ?").run(forkFile, "call01ab");
+	db.query("UPDATE tool_approvals SET session_file = ? WHERE tool_call_id = ?").run(forkFile, "call01ab");
+	db.query("DELETE FROM meta WHERE key = ?").run("inherited_prefix_replay_v1");
+	expect(getOverallStats().totalCost).toBeCloseTo(0.003, 8);
+	closeDb();
+	return { parentFile, forkFile };
 }
 
 function makeStat(sessionFile: string, entryId: string, timestamp: number, premium = 0): MessageStats {
@@ -299,5 +355,249 @@ describe("stats sync deduplicates forked-session entries", () => {
 		const requests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
 		expect(requests).toHaveLength(1);
 		expect(requests[0].usage.premiumRequests).toBe(1);
+	});
+
+	it("leaves a reset fork's copied calls to the parent even when the fork syncs first", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "hello");
+		const plainEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const toolCall = { type: "toolCall", id: "call01ab", name: "read", arguments: { path: "a.ts" } };
+		const assistantEntry = {
+			...plainEntry,
+			message: { ...plainEntry.message, content: [...plainEntry.message.content, toolCall] },
+		};
+		const approvalEntry = {
+			type: "custom",
+			id: "appr01ab",
+			parentId: "asst01ab",
+			timestamp: ts,
+			customType: "tool_approval_requested",
+			data: { toolCallId: "call01ab", toolName: "read", requestedAt: ts },
+		};
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[userEntry, assistantEntry, approvalEntry],
+		);
+		// `forkFrom` with `resetInheritedCost` (a `/tan` clone) zeroes the copy's cost and marks the
+		// copied prefix; the clone then makes a call of its own.
+		const copied = structuredClone(assistantEntry);
+		copied.message.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		const ownTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+		const forkFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"02_fork.jsonl",
+			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile, inheritedThroughEntryId: "appr01ab" },
+			[
+				userEntry,
+				copied,
+				approvalEntry,
+				buildAssistantEntry({ entryId: "asst02cd", parentId: "appr01ab", timestamp: ownTs }),
+			],
+		);
+
+		// The fork lands first, as a from-scratch sync of a fork newer than an idle parent does.
+		await syncAllSessions({ workers: 1, files: [forkFile, parentFile] });
+
+		const requests = getRecentRequests(10);
+		expect(requests.find(request => request.entryId === "asst01ab")?.sessionFile).toBe(parentFile);
+		expect(requests.find(request => request.entryId === "asst02cd")?.sessionFile).toBe(forkFile);
+		const overall = getOverallStats();
+		expect(overall.totalRequests).toBe(2);
+		// Without the marker the fork's zeroed copy claims the request and the parent's $0.003 is lost.
+		expect(overall.totalCost).toBeCloseTo(0.006, 8);
+		// The copied tool call stays the parent's, so it still joins the parent's request row.
+		const db = await initDb();
+		const owners = db
+			.query<{ session_file: string }, [string]>("SELECT session_file FROM tool_calls WHERE tool_call_id = ?")
+			.all("call01ab");
+		expect(owners.map(owner => owner.session_file)).toEqual([parentFile]);
+		// The copied prompt stays the parent's too, so the parent's reply link names its model.
+		const prompts = db
+			.query<{ session_file: string; model: string | null }, [string]>(
+				"SELECT session_file, model FROM user_messages WHERE entry_id = ?",
+			)
+			.all("user01ab");
+		expect(prompts).toEqual([{ session_file: parentFile, model: "gpt-5.4" }]);
+		// The copied approval stays with the call it gates.
+		const approvals = db
+			.query<{ session_file: string }, [string]>("SELECT session_file FROM tool_approvals WHERE tool_call_id = ?")
+			.all("call01ab");
+		expect(approvals.map(approval => approval.session_file)).toEqual([parentFile]);
+	});
+
+	it.each([
+		{ name: "its requests, prompts and tool calls", approval: false, apart: false },
+		{ name: "its tool approvals too", approval: true, apart: false },
+		// Blocked by the fork's old rows, the parent takes them back in the replay their removal marks.
+		{ name: "after the parent re-parsed in an earlier batch", approval: true, apart: true },
+	])(
+		"hands a reset fork's copies that an older build gave the fork back to the parent on upgrade: $name",
+		async ({ approval, apart }) => {
+			const { parentFile, forkFile } = await writeStaleResetFork(approval);
+
+			await initDb();
+			if (apart) {
+				await syncAllSessions({ workers: 1, files: [parentFile] });
+				await syncAllSessions({ workers: 1, files: [forkFile] });
+				const pending = (await initDb()).query("SELECT 1 FROM meta WHERE key = 'session_reconciliation'").get();
+				expect(pending).not.toBeNull();
+			}
+			await syncAllSessions({ workers: 1, files: [forkFile, parentFile] });
+
+			const requests = getRecentRequests(10);
+			expect(requests.find(request => request.entryId === "asst01ab")?.sessionFile).toBe(parentFile);
+			expect(requests.find(request => request.entryId === "asst02cd")?.sessionFile).toBe(forkFile);
+			expect(getOverallStats().totalCost).toBeCloseTo(0.006, 8);
+			const repaired = await initDb();
+			const owners = (sql: string, id: string) =>
+				repaired
+					.query<{ session_file: string }, [string]>(sql)
+					.all(id)
+					.map(row => row.session_file);
+			expect(owners("SELECT session_file FROM user_messages WHERE entry_id = ?", "user01ab")).toEqual([parentFile]);
+			expect(owners("SELECT session_file FROM tool_calls WHERE tool_call_id = ?", "call01ab")).toEqual([parentFile]);
+			expect(owners("SELECT session_file FROM tool_approvals WHERE tool_call_id = ?", "call01ab")).toEqual(
+				approval ? [parentFile] : [],
+			);
+		},
+	);
+
+	it("re-reads no transcript on upgrade when none is a reset fork", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "hello");
+		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[userEntry, assistantEntry],
+		);
+		// An ordinary fork names its parent but copies at full cost: nothing of it needs repair.
+		const forkFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"02_fork.jsonl",
+			{ id: "fork0000", cwd: "/tmp/project", parentSession: "parent00" },
+			[userEntry, assistantEntry],
+		);
+		await syncAllSessions({ workers: 1, files: [parentFile, forkFile] });
+		const db = await initDb();
+		db.query("DELETE FROM meta WHERE key = ?").run("inherited_prefix_replay_v1");
+
+		const parse = parser.parseSessionFile;
+		const parsed: string[] = [];
+		const observer = spyOn(parser, "parseSessionFile").mockImplementation(async (file, offset, state, replay) => {
+			parsed.push(file);
+			return parse(file, offset, state, replay);
+		});
+		try {
+			await syncAllSessions({ workers: 1, files: [parentFile, forkFile] });
+		} finally {
+			observer.mockRestore();
+		}
+
+		expect(parsed).toEqual([]);
+		expect(db.query("SELECT 1 FROM meta WHERE key = 'session_reconciliation'").get()).toBeNull();
+		const replayKey = db
+			.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'inherited_prefix_replay_v1'")
+			.get();
+		expect(replayKey?.value).toBe("complete");
+	});
+
+	it("finishes the upgrade scan when a tracked transcript cannot be read", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[buildUserEntry("user01ab", ts, "hello")],
+		);
+		await syncAllSessions({ workers: 1, files: [parentFile] });
+		// A tracked path that no longer opens as a file (here a directory) must not wedge every later sync.
+		const unreadable = path.join(getSessionsDir(), "--tmp--fork-dedup", "02_unreadable.jsonl");
+		await fs.mkdir(unreadable, { recursive: true });
+		const db = await initDb();
+		db.query("INSERT INTO file_offsets (session_file, offset, last_modified) VALUES (?, 1, 1)").run(unreadable);
+		db.query("DELETE FROM meta WHERE key = ?").run("inherited_prefix_replay_v1");
+
+		await syncAllSessions({ workers: 1, files: [parentFile] });
+
+		const replayKey = db
+			.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'inherited_prefix_replay_v1'")
+			.get();
+		expect(replayKey?.value).toBe("complete");
+	});
+
+	it("counts every call of a session whose header marks an entry its file does not hold", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const laterTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+		const sessionFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_session.jsonl",
+			{ id: "session0", cwd: "/tmp/project", inheritedThroughEntryId: "gone0000" },
+			[
+				buildUserEntry("user01ab", ts, "hello"),
+				buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts }),
+				buildUserEntry("user02cd", laterTs, "again"),
+				buildAssistantEntry({ entryId: "asst02cd", parentId: "user02cd", timestamp: laterTs }),
+			],
+		);
+
+		await syncAllSessions({ workers: 1, files: [sessionFile] });
+
+		const overall = getOverallStats();
+		expect(overall.totalRequests).toBe(2);
+		expect(overall.totalCost).toBeCloseTo(0.006, 8);
+		const db = await initDb();
+		const prompts = db.query<{ entry_id: string }, []>("SELECT entry_id FROM user_messages ORDER BY entry_id").all();
+		expect(prompts.map(prompt => prompt.entry_id)).toEqual(["user01ab", "user02cd"]);
+	});
+
+	it.each([
+		{ name: "a legacy /tan clone", boundaryData: "fork0000" },
+		// An ordinary fork of such a clone keeps the clone's boundary and id under its own header.
+		{ name: "a file derived from a legacy /tan clone", boundaryData: "tanclone" },
+	])("leaves $name's copies to the parent by its fork boundary", async ({ boundaryData }) => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "hello");
+		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[userEntry, assistantEntry],
+		);
+		// Written before `inheritedThroughEntryId`: no header marker, only the boundary entry right
+		// after the copied entries.
+		const copied = structuredClone(assistantEntry);
+		copied.message.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		const boundary = {
+			type: "custom",
+			id: "bound001",
+			parentId: "asst01ab",
+			timestamp: ts,
+			customType: "tan-fork-boundary",
+			data: boundaryData,
+		};
+		const ownTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+		const forkFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"02_fork.jsonl",
+			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile },
+			[
+				userEntry,
+				copied,
+				boundary,
+				buildAssistantEntry({ entryId: "asst02cd", parentId: "bound001", timestamp: ownTs }),
+			],
+		);
+
+		await syncAllSessions({ workers: 1, files: [forkFile, parentFile] });
+
+		const requests = getRecentRequests(10);
+		expect(requests.find(request => request.entryId === "asst01ab")?.sessionFile).toBe(parentFile);
+		expect(requests.find(request => request.entryId === "asst02cd")?.sessionFile).toBe(forkFile);
+		expect(getOverallStats().totalCost).toBeCloseTo(0.006, 8);
 	});
 });

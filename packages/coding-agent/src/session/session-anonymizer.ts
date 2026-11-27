@@ -282,6 +282,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"responseId",
 		"firstKeptEntryId",
 		"providerReplayThroughEntryId",
+		"inheritedThroughEntryId",
 		"fromId",
 		"targetId",
 		"sourceEntryId",
