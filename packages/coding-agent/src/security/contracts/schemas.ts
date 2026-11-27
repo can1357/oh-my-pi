@@ -177,6 +177,8 @@ export const getSecurityContractSchemas = once(() => {
 		},
 		"cost?": "number >= 0",
 		"premiumRequests?": "number >= 0",
+		"aiuNano?": "number >= 0",
+		"aiuUnreportedTurns?": "number.integer >= 0",
 	});
 
 	const securityScanSchema = type({

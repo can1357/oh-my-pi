@@ -216,6 +216,10 @@ export interface SecurityScanMetrics {
 	};
 	cost?: number;
 	premiumRequests?: number;
+	/** Server-reported GitHub Copilot AI credits in nano-AIU (1e9 = 1 credit); absent when no turn reported a charge. */
+	aiuNano?: number;
+	/** Turns expected to carry an AIU frame but whose charge was not reported; positive values make `aiuNano` a lower bound. */
+	aiuUnreportedTurns?: number;
 }
 
 export interface SecurityScan {

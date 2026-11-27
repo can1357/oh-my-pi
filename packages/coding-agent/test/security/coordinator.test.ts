@@ -174,6 +174,43 @@ describe("native security coordinator", () => {
 		expect(reopened.getSessionId()).toBeTruthy();
 	});
 
+	test("records the scan session's reported AI credits next to its premium requests", async () => {
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{ cwd: repositoryRoot, settings, authStorage, modelRegistry, activeModel: mock.model },
+			{
+				openStore: storeFactory,
+				gitAdapter,
+				createSession: async input => ({
+					prompt: async () => {
+						const publish = input.publicationTool as unknown as {
+							execute(toolCallId: string, params: unknown): Promise<unknown>;
+						};
+						await publish.execute("publish-1", FIXTURE_PUBLICATION);
+						return true;
+					},
+					waitForIdle: async () => undefined,
+					waitForRunEnd: async () => undefined,
+					getSessionStats: () => ({
+						tokens: { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
+						cost: 0,
+						premiumRequests: 0,
+						aiu: { nano: 443_380_000, unreportedTurns: 2 },
+					}),
+					abort: async () => undefined,
+					dispose: async () => undefined,
+				}),
+			},
+		);
+		const createdPlan = await coordinator.preflight({ credentialId, model: mock.model });
+		const started = await coordinator.start({ planId: createdPlan.id });
+		const terminal = await coordinator.wait(started.operationId);
+		expect(terminal.phase).toBe("completed");
+		const bundle = await (await storeFactory()).getBundle(terminal.scanId);
+		expect(bundle?.scan.metrics?.aiuNano).toBe(443_380_000);
+		expect(bundle?.scan.metrics?.aiuUnreportedTurns).toBe(2);
+	});
+
 	test("waits for background security-reviewer workers before ending the scan", async () => {
 		// Coordinator delegates, ends its turn while the worker runs as a background
 		// job, and publishes only once the worker's result is delivered back.
