@@ -166,30 +166,24 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		this.#unifiedMentions?.warm();
 	}
 
-	trySyncMentionCompletion(
-		lines: string[],
-		cursorLine: number,
-		cursorCol: number,
-		pinnedScope?: MentionCategoryId | null,
-	): UnifiedMentionSnapshot | null {
+	trySyncMentionCompletion(lines: string[], cursorLine: number, cursorCol: number): UnifiedMentionSnapshot | null {
 		if (!this.#unifiedMentions) return null;
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
 		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) return null;
-		return this.#unifiedMentions.querySync(lines, cursorLine, cursorCol, pinnedScope);
+		return this.#unifiedMentions.querySync(lines, cursorLine, cursorCol);
 	}
 
 	getMentionSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
-		pinnedScope: MentionCategoryId | null | undefined,
 		signal?: AbortSignal,
 		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
 	): Promise<UnifiedMentionSnapshot | null> {
 		if (!this.#unifiedMentions) return Promise.resolve(null);
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
 		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) return Promise.resolve(null);
-		return this.#unifiedMentions.queryAsync(lines, cursorLine, cursorCol, pinnedScope, signal, onPartial);
+		return this.#unifiedMentions.queryAsync(lines, cursorLine, cursorCol, signal, onPartial);
 	}
 
 	applyMentionCompletion(
@@ -216,13 +210,8 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		if (signal?.aborted) return null;
 		const textBeforeCursor = (lines[cursorLine] || "").slice(0, cursorCol);
 		if (this.#unifiedMentions && !this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) {
-			const snapshot = await this.#unifiedMentions.queryAsync(
-				lines,
-				cursorLine,
-				cursorCol,
-				undefined,
-				signal,
-				partial => onPartial?.({ items: [...partial.items], prefix: partial.prefix }),
+			const snapshot = await this.#unifiedMentions.queryAsync(lines, cursorLine, cursorCol, signal, partial =>
+				onPartial?.({ items: [...partial.items], prefix: partial.prefix }),
 			);
 			if (snapshot) {
 				return snapshot.items.length > 0 ? { items: [...snapshot.items], prefix: snapshot.prefix } : null;

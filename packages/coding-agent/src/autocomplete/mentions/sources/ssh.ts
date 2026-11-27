@@ -4,6 +4,7 @@
  * Hosts come from the `ssh` capability (`ssh.json` files and `~/.ssh/config`
  * aliases), loaded once per cwd and cached; keystrokes rank the cached list.
  */
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { SSHHost } from "../../../capability/ssh";
 import { hostAddress, loadConfiguredHosts } from "../../../internal-urls/ssh-protocol";
 import {
@@ -43,7 +44,7 @@ function buildSshItem(host: SSHHost, tier: MatchTier): MentionItem {
 		label: host.name,
 		description: detail,
 		nativeDetail: detail,
-		icon: "⇢",
+		icon: currentTheme().symbols.symbol("mention.ssh"),
 		iconName: "host",
 		pickerItem: {
 			id: `ssh:${host.name}`,
@@ -59,7 +60,6 @@ function buildSshItem(host: SSHHost, tier: MatchTier): MentionItem {
 export class SshMentionSource implements MentionSource {
 	readonly id = "ssh" as const;
 	readonly label = "SSH";
-	readonly icon = "host";
 
 	readonly #host: SshMentionHost;
 	#snapshot: HostSnapshot | undefined;
@@ -97,7 +97,7 @@ export class SshMentionSource implements MentionSource {
 
 	querySync(q: MentionQuery): MentionSourceResult {
 		const cwd = this.#host.getCwd();
-		const explicit = q.syntaxLock === "ssh" || q.pinnedScope === "ssh";
+		const explicit = q.syntaxLock === "ssh";
 		const fresh = this.#isFresh(cwd);
 		if (!fresh) void this.#refresh(cwd);
 		const hosts = this.#snapshot?.cwd === cwd ? this.#snapshot.hosts : [];
@@ -113,7 +113,7 @@ export class SshMentionSource implements MentionSource {
 		if (this.#isFresh(cwd)) return null;
 		const snap = await this.#refresh(cwd);
 		if (signal.aborted) return null;
-		return this.#rank(q, snap.hosts, false, q.syntaxLock === "ssh" || q.pinnedScope === "ssh");
+		return this.#rank(q, snap.hosts, false, q.syntaxLock === "ssh");
 	}
 
 	#rank(q: MentionQuery, hosts: readonly SSHHost[], loading: boolean, explicit: boolean): MentionSourceResult {

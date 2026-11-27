@@ -8,6 +8,7 @@
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { listGitTags } from "../../../internal-urls/git-protocol";
 import { FuzzyQuery, FuzzyText } from "../../../utils/fuzzy";
 import {
@@ -73,7 +74,7 @@ function buildDiffItem(kind: DiffRowKind, detail: string, tier: MatchTier, base?
 		label,
 		description: detail,
 		nativeDetail: detail,
-		icon: "±",
+		icon: currentTheme().symbols.symbol("mention.diff"),
 		iconName: "diff",
 		pickerItem: {
 			id: `vcs:diff:${kind}:${base ?? ""}`,
@@ -164,7 +165,7 @@ function buildBranchItem(name: string, isCurrent: boolean, tier: MatchTier): Men
 		description: isCurrent ? "current branch" : "branch",
 		nativeDetail: isCurrent ? "current branch" : "branch",
 		state: isCurrent ? "HEAD" : undefined,
-		icon: "⎇",
+		icon: currentTheme().symbols.symbol("mention.branch"),
 		iconName: "git-branch",
 		pickerItem: {
 			id: `vcs:branch:${name}`,
@@ -190,7 +191,7 @@ function buildCommitItem(entry: CommitEntry, tier: MatchTier): MentionItem {
 		description: entry.subject,
 		nativeDetail: entry.subject,
 		state: "commit",
-		icon: "○",
+		icon: currentTheme().symbols.symbol("mention.commit"),
 		iconName: "commit",
 		pickerItem: {
 			id: `vcs:commit:${shortSha}`,
@@ -214,7 +215,7 @@ function buildTagItem(name: string, tier: MatchTier): MentionItem {
 		label: name,
 		description: "tag",
 		nativeDetail: "tag",
-		icon: "⚑",
+		icon: currentTheme().symbols.symbol("mention.tag"),
 		iconName: "tag",
 		pickerItem: {
 			id: `vcs:tag:${name}`,
@@ -237,7 +238,6 @@ interface ScoredVcsItem {
 export class VcsMentionSource implements MentionSource {
 	readonly id = "vcs" as const;
 	readonly label = "Git";
-	readonly icon = "git-branch";
 
 	readonly #getCwd: () => string;
 	#snapshot: VcsSnapshot | undefined;

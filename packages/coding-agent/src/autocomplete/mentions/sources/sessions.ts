@@ -6,6 +6,7 @@
  * <1ms synchronously without reading session JSONL bodies on keystrokes.
  */
 import * as fs from "node:fs/promises";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import {
 	isEmptySession,
 	listSessionsForPicker,
@@ -15,6 +16,7 @@ import {
 import { sessionDirForCwd } from "../../../session/session-paths";
 import { FileSessionStorage } from "../../../session/session-storage";
 import { FuzzyQuery, FuzzyText } from "../../../utils/fuzzy";
+import { splitCardTitle } from "../../../utils/title-card";
 import {
 	MATCH_TIER,
 	type MatchTier,
@@ -73,26 +75,39 @@ function toSummaries(infos: readonly SessionInfo[]): SessionSummary[] {
 	return out;
 }
 
+/**
+ * The glyph and label a session mention shows for `title`: a card-form title's own
+ * icon leads its `CODE: title`, else the `mention.session` glyph leads the title,
+ * so a card never sits behind a second icon. Shared by palette rows and draft chips.
+ */
+export function sessionMentionHead(title: string): { glyph: string; label: string } {
+	const card = splitCardTitle(title);
+	return card
+		? { glyph: card.icon, label: `${card.code}: ${card.title}` }
+		: { glyph: currentTheme().symbols.symbol("mention.session"), label: title };
+}
+
 function buildSessionItem(entry: SessionSummary, tier: MatchTier): MentionItem {
 	const url = `session://${entry.id}`;
 	const age = formatAgeShort(entry.modifiedMs);
 	const shortId = entry.id.slice(0, 8);
 	const detail = entry.firstMessage && entry.firstMessage !== entry.title ? entry.firstMessage : shortId;
+	const head = sessionMentionHead(entry.title);
 	return {
 		category: "sessions",
 		tier,
 		value: url,
 		insertText: url,
 		appendSpace: true,
-		label: entry.title,
+		label: head.label,
 		description: age,
 		nativeDetail: detail,
 		state: age,
-		icon: "💬",
+		icon: head.glyph,
 		iconName: "message",
 		pickerItem: {
 			id: `session:${entry.id}`,
-			label: entry.title,
+			label: head.label,
 			detail,
 			icon: "message",
 			facts: { right: age },
@@ -104,7 +119,6 @@ function buildSessionItem(entry: SessionSummary, tier: MatchTier): MentionItem {
 export class SessionsMentionSource implements MentionSource {
 	readonly id = "sessions" as const;
 	readonly label = "Sessions";
-	readonly icon = "message";
 
 	readonly #host: SessionsMentionHost;
 	#snapshot: SessionSnapshot | undefined;
@@ -164,7 +178,7 @@ export class SessionsMentionSource implements MentionSource {
 	#querySnapshot(q: MentionQuery, snap: SessionSnapshot, loading: boolean): MentionSourceResult {
 		const currentId = this.#host.getCurrentSessionId?.();
 		const entries = currentId ? snap.entries.filter(e => e.id !== currentId) : snap.entries;
-		const explicit = q.syntaxLock === "sessions" || q.pinnedScope === "sessions";
+		const explicit = q.syntaxLock === "sessions";
 		if (entries.length === 0 && !explicit && !loading) {
 			return { category: "sessions", items: [], bestTier: MATCH_TIER.None, total: 0, available: false };
 		}
@@ -229,7 +243,7 @@ export class SessionsMentionSource implements MentionSource {
 
 	querySync(q: MentionQuery): MentionSourceResult {
 		const cwd = this.#host.getCwd();
-		const explicit = q.syntaxLock === "sessions" || q.pinnedScope === "sessions";
+		const explicit = q.syntaxLock === "sessions";
 		const fresh = this.#isFresh(cwd);
 		if (!fresh) void this.#refresh(cwd);
 		if (this.#snapshot?.cwd === cwd) {

@@ -53,7 +53,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { TspEditorDecoration, TspEffect, TspPickerLevel, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import "../styles/composer";
-import type { MentionCategoryId, MentionItem, UnifiedMentionSnapshot } from "../../autocomplete/mentions";
+import { MENTION_STYLES, type MentionItem, type UnifiedMentionSnapshot } from "../../autocomplete/mentions";
 import {
 	extractAtFilePrefix,
 	isDirectoryCompletionValue,
@@ -247,6 +247,13 @@ function isMentionItem(item: unknown): item is MentionItem {
 	);
 }
 
+/** Whether `open` is the bare `@` category list, whose rows Tab cycles instead of accepting. */
+function isCategoryList(open: Completion): boolean {
+	return (
+		open.mention?.query === "" && open.items.every(item => isMentionItem(item) && item.isNamespaceShortcut === true)
+	);
+}
+
 /** A token of the draft that shows as a chip (`/skill:name` as `🧩 name`) and is sent as `expansion`. */
 export interface DraftToken {
 	/** UTF-16 range of the token in the text it was found in. */
@@ -423,8 +430,6 @@ export class Composer {
 	readonly #completion: Signal<Completion | null> = signal<Completion | null>(null);
 	#completionRequest: AbortController | undefined;
 	#forceFiles = false;
-	#pinnedScope: MentionCategoryId | null | undefined;
-	#mentionAnchor: { readonly line: number; readonly startCol: number; readonly trigger: "@" | "^" | "#" } | undefined;
 
 	readonly #vimLayer: VimEditor;
 	readonly #vimOn: Signal<boolean>;
@@ -1265,18 +1270,11 @@ export class Composer {
 		this.#completionRequest?.abort();
 		this.#completionRequest = undefined;
 		this.#forceFiles = false;
-		this.#pinnedScope = undefined;
-		this.#mentionAnchor = undefined;
 		if (this.#completion() !== null) this.#completion.set(null);
 	}
 
 	/** Ask the provider about the token before the caret; a request the text moved past is dropped. */
-	async #complete(
-		explicitTab = false,
-		at = this.#position(),
-		force = false,
-		pinnedScopeOverride?: MentionCategoryId | null,
-	): Promise<void> {
+	async #complete(explicitTab = false, at = this.#position(), force = false): Promise<void> {
 		const provider = this.#autocomplete;
 		if (!provider) return;
 		const { lines, line, col, before } = at;
@@ -1309,11 +1307,7 @@ export class Composer {
 			});
 		};
 
-		const showMention = (
-			snapshot: UnifiedMentionSnapshot | null,
-			pinned: MentionCategoryId | null | undefined,
-			isFinal: boolean,
-		) => {
+		const showMention = (snapshot: UnifiedMentionSnapshot | null, isFinal: boolean) => {
 			if (!current()) return;
 			if (!snapshot) {
 				this.#completion.set(null);
@@ -1324,7 +1318,7 @@ export class Composer {
 				return;
 			}
 			const open = this.#completion.peek();
-			const sameQuery = open?.mention?.prefix === snapshot.prefix && open?.pinnedScope === pinned;
+			const sameQuery = open?.mention?.prefix === snapshot.prefix;
 			const selectedValue = sameQuery ? open.items[open.selected]?.value : undefined;
 			const kept = selectedValue === undefined ? -1 : snapshot.items.findIndex(item => item.value === selectedValue);
 			// Anti-thrash focus stability: once the user navigated or >120ms elapsed since the query
@@ -1340,7 +1334,6 @@ export class Composer {
 				open.prefix === snapshot.prefix &&
 				open.selected === nextSelected &&
 				open.effortOverride === preservedEffort &&
-				open.mention.activeScope === snapshot.mention.activeScope &&
 				open.mention.loading === snapshot.mention.loading &&
 				open.items.length === snapshot.items.length &&
 				open.items.every((prev, i) => prev.value === snapshot.items[i]?.value)
@@ -1354,7 +1347,6 @@ export class Composer {
 				chosen: kept >= 0 && sameQuery ? open.chosen : false,
 				revision,
 				mention: snapshot.mention,
-				pinnedScope: pinned,
 				effortOverride: preservedEffort,
 				openedAt: sameQuery && open.openedAt !== undefined ? open.openedAt : Date.now(),
 			});
@@ -1379,50 +1371,33 @@ export class Composer {
 
 			// Unified `@`, `^`, and `#<N>` mention palette: Tier 0 sync frame + streaming async refinement.
 			if (regular && provider.trySyncMentionCompletion) {
-				const initialPinned = pinnedScopeOverride !== undefined ? pinnedScopeOverride : this.#pinnedScope;
-				const probe = provider.trySyncMentionCompletion(lines, line, col, initialPinned);
-				if (probe) {
-					const startCol = col - probe.prefix.length;
-					const anchor = this.#mentionAnchor;
-					const sameToken =
-						anchor !== undefined &&
-						anchor.line === line &&
-						anchor.startCol === startCol &&
-						anchor.trigger === probe.query.trigger;
-					const pinned =
-						pinnedScopeOverride !== undefined ? pinnedScopeOverride : sameToken ? this.#pinnedScope : undefined;
-					this.#pinnedScope = pinned;
-					this.#mentionAnchor = { line, startCol, trigger: probe.query.trigger };
-					const syncResult =
-						pinned !== initialPinned ? provider.trySyncMentionCompletion(lines, line, col, pinned) : probe;
-					if (syncResult) {
-						const alreadyOpen = this.#completion.peek()?.mention !== undefined;
-						if (!syncResult.hasAsyncPending || !provider.getMentionSuggestions) {
-							showMention(syncResult, pinned, true);
-							return;
-						}
-						// When already open and refining `@…`, hold briefly (45ms) for fast native
-						// fuzzyFind to settle so keystrokes paint once instead of flashing sync→async.
-						const shouldDeferInterim =
-							alreadyOpen && pinnedScopeOverride === undefined && syncResult.query.query.length > 0;
-						if (!shouldDeferInterim) {
-							showMention(syncResult, pinned, false);
-						}
-						let gotAsync = false;
-						const asyncTask = provider.getMentionSuggestions(lines, line, col, pinned, signal, partial => {
-							gotAsync = true;
-							showMention(partial, pinned, false);
-						});
-						if (shouldDeferInterim) {
-							const settled = await Promise.race([asyncTask.then(() => true), Bun.sleep(45).then(() => false)]);
-							if (!current()) return;
-							if (!settled && !gotAsync) showMention(syncResult, pinned, false);
-						}
-						const final = await asyncTask;
-						if (!current()) return;
-						showMention(final, pinned, true);
+				const syncResult = provider.trySyncMentionCompletion(lines, line, col);
+				if (syncResult) {
+					const alreadyOpen = this.#completion.peek()?.mention !== undefined;
+					if (!syncResult.hasAsyncPending || !provider.getMentionSuggestions) {
+						showMention(syncResult, true);
 						return;
 					}
+					// When already open and refining `@…`, hold briefly (45ms) for fast native
+					// fuzzyFind to settle so keystrokes paint once instead of flashing sync→async.
+					const shouldDeferInterim = alreadyOpen && syncResult.query.query.length > 0;
+					if (!shouldDeferInterim) {
+						showMention(syncResult, false);
+					}
+					let gotAsync = false;
+					const asyncTask = provider.getMentionSuggestions(lines, line, col, signal, partial => {
+						gotAsync = true;
+						showMention(partial, false);
+					});
+					if (shouldDeferInterim) {
+						const settled = await Promise.race([asyncTask.then(() => true), Bun.sleep(45).then(() => false)]);
+						if (!current()) return;
+						if (!settled && !gotAsync) showMention(syncResult, false);
+					}
+					const final = await asyncTask;
+					if (!current()) return;
+					showMention(final, true);
+					return;
 				}
 			}
 
@@ -1549,6 +1524,21 @@ export class Composer {
 		const provider = this.#autocomplete;
 		if (!provider) return;
 		const at = this.#position();
+		// Typing after cycling to a row of the bare `@` category list enters that category: `@` + `o` → `@m:o`.
+		const entered =
+			!deleted && previous?.chosen && isCategoryList(previous) && !/\s/.test(insert)
+				? previous.items[previous.selected]
+				: undefined;
+		if (isMentionItem(entered) && at.before.endsWith(`@${insert}`)) {
+			const cursor = this.#cursor();
+			const from = cursor - insert.length - 1;
+			const replacement = `${entered.insertText}${insert}`;
+			// The user's keystroke already recorded this undo step.
+			this.#change(from, cursor, replacement, from + replacement.length, "history");
+			this.#typingAt = -1;
+			void this.#complete();
+			return;
+		}
 		if (!deleted && insert.length === 1 && provider.trySyncInlineReplace) {
 			let replacement: { replaceLen: number; insert: string } | null = null;
 			try {
@@ -1712,14 +1702,16 @@ export class Composer {
 				this.#closeCompletion();
 				return true;
 			}
-			// Shift+Tab cycles category scopes in the unified mention palette.
-			if (open.mention && key.id === "shift+tab" && open.mention.scopes.length > 1) {
-				const ids = open.mention.scopes.map(s => s.id);
-				const currentIdx = ids.indexOf(open.mention.activeScope);
-				const nextId = ids[(currentIdx + 1) % ids.length] ?? "all";
-				const nextPinned: MentionCategoryId | null = nextId === "all" ? null : (nextId as MentionCategoryId);
-				void this.#complete(false, this.#position(), false, nextPinned);
-				return true;
+			// The bare `@` category strip: Tab/→ and Shift+Tab/← move the lit category (↑/↓ below too);
+			// Enter or typing picks it.
+			if (isCategoryList(open)) {
+				const back = key.id === "shift+tab" || bindings.matches(key, "tui.editor.cursorLeft");
+				if (back || tab || right) {
+					const count = open.items.length;
+					const selected = (open.selected + (back ? count - 1 : 1)) % count;
+					this.#completion.set({ ...open, selected, chosen: true, effortOverride: undefined });
+					return true;
+				}
 			}
 			// Shift+Left/Right steps thinking effort on a highlighted model row.
 			if (open.mention && (key.id === "shift+left" || key.id === "shift+right")) {
@@ -2216,9 +2208,12 @@ export class Composer {
 							})
 						: palette.pickerItems;
 
-				const glyphs: Record<string, string> = {};
+				// A row's status (agent state, dirty file, PR state) colors its glyph, else its category does.
+				const glyphs: Record<string, TspSpan> = {};
 				for (const item of mentionItems) {
-					if (item.icon) glyphs[item.pickerItem.id] = plainLine(item.icon);
+					if (!item.icon) continue;
+					const tone = item.pickerItem.dot ?? item.pickerItem.tone;
+					glyphs[item.pickerItem.id] = { t: plainLine(item.icon), s: tone ?? MENTION_STYLES[item.category].color };
 				}
 				const mentionTerm: MentionPopupTerm = { maxLines: this.#autocompleteMaxVisible(), glyphs };
 
@@ -2231,13 +2226,10 @@ export class Composer {
 						modal={false}
 						size="md"
 						density="snug"
-						layout="rows"
+						layout={isCategoryList(open) ? "tiles" : "rows"}
 						search="none"
 						preview="none"
 						anchor={{ caret: "line/input" }}
-						scopeStyle="pills"
-						scopes={palette.scopes}
-						scope={palette.activeScope}
 						columns={palette.columns}
 						items={renderedPickerItems}
 						order={palette.order}
@@ -2264,12 +2256,6 @@ export class Composer {
 						onAction={(act, event) => {
 							if (act === "close") {
 								this.#closeCompletion();
-								return;
-							}
-							if (act === "scope" && event.value !== undefined) {
-								const nextPinned: MentionCategoryId | null =
-									event.value === "all" ? null : (event.value as MentionCategoryId);
-								void this.#complete(false, this.#position(), false, nextPinned);
 								return;
 							}
 							if (act === "level" && event.value !== undefined) {

@@ -97,6 +97,12 @@ describe("parseMentionQuery", () => {
 		expect(parseMentionQuery("@diff:")).toMatchObject({ syntaxLock: "vcs", subKind: "diff", query: "" });
 		expect(parseMentionQuery("@mcp:notes")).toMatchObject({ syntaxLock: "mcp", query: "notes" });
 		expect(parseMentionQuery("@ssh:prod")).toMatchObject({ syntaxLock: "ssh", query: "prod" });
+		// One-letter canonical tokens: `s` is SSH, sessions moved to `h`, and PRs/issues split.
+		expect(parseMentionQuery("@s:prod")).toMatchObject({ syntaxLock: "ssh", query: "prod" });
+		expect(parseMentionQuery("@h:auth")).toMatchObject({ syntaxLock: "sessions", query: "auth" });
+		expect(parseMentionQuery("@r:notes")).toMatchObject({ syntaxLock: "mcp", query: "notes" });
+		expect(parseMentionQuery("@p:12")).toMatchObject({ syntaxLock: "forge", subKind: "pr", query: "12" });
+		expect(parseMentionQuery("@i:")).toMatchObject({ syntaxLock: "forge", subKind: "issue", query: "" });
 		expect(parseMentionQuery("@#99")).toMatchObject({
 			syntaxLock: "forge",
 			query: "99",
@@ -128,15 +134,15 @@ describe("parseMentionQuery", () => {
 
 describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 	const metas: MentionSourceMeta[] = [
-		{ id: "files", label: "Files", icon: "file" },
-		{ id: "models", label: "Models", icon: "cpu" },
-		{ id: "agents", label: "Agents", icon: "users" },
-		{ id: "sessions", label: "Sessions", icon: "message" },
-		{ id: "vcs", label: "Git", icon: "git-branch" },
-		{ id: "forge", label: "GitHub", icon: "pr" },
+		{ id: "files", label: "Files" },
+		{ id: "models", label: "Models" },
+		{ id: "agents", label: "Agents" },
+		{ id: "sessions", label: "Sessions" },
+		{ id: "vcs", label: "Git" },
+		{ id: "forge", label: "GitHub" },
 	];
 
-	it("puts Files first on bare @ followed by discoverable @category: shortcuts", () => {
+	it("lists only the available @category: shortcuts on bare @", () => {
 		const query: MentionQuery = { trigger: "@", prefix: "@", query: "", rawBody: "" };
 		const results: MentionSourceResult[] = [
 			{
@@ -179,11 +185,8 @@ describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 		];
 
 		const out = arbitrateMentions(query, results, metas);
-		// Files lead (capped at 5), followed by `@model:`, `@agent:`, `@session:` shortcuts.
-		expect(out.items.slice(0, 5).every(i => i.category === "files" && !i.isNamespaceShortcut)).toBe(true);
-		expect(out.items.slice(5).map(i => i.insertText)).toEqual(["@model:", "@agent:", "@session:"]);
-		expect(out.items.slice(5).every(i => i.isNamespaceShortcut === true && i.appendSpace === false)).toBe(true);
-		expect(out.palette.scopes.map(s => s.id)).toEqual(["all", "files", "models", "agents", "sessions"]);
+		expect(out.items.map(i => i.insertText)).toEqual(["@f:", "@m:", "@a:", "@h:"]);
+		expect(out.items.every(i => i.isNamespaceShortcut === true && i.appendSpace === false)).toBe(true);
 	});
 
 	it("suppresses weak cross-category noise and auto-focuses a clear winner", () => {
@@ -211,8 +214,6 @@ describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 		const out = arbitrateMentions(query, results, metas);
 		expect(out.items.map(i => i.category)).toEqual(["models", "models"]);
 		expect(out.palette.lockedScope).toBe("models");
-		expect(out.palette.activeScope).toBe("models");
-		expect(out.palette.scopes.find(s => s.id === "models")?.locked).toBe(true);
 	});
 
 	it("keeps Files on top when tied with another strong category", () => {
@@ -271,6 +272,7 @@ describe("AgentsMentionSource (local & foreign mesh subagents)", () => {
 		const peers: MeshPeer[] = [
 			{
 				pid: 4812,
+				project: "/work/app",
 				title: "COMMIT: Very long session title that would truncate away subagent names",
 				sessionFile: null,
 				status: "idle",
@@ -374,7 +376,6 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 		const fastSource: MentionSource = {
 			id: "models",
 			label: "Models",
-			icon: "cpu",
 			querySync: () => ({
 				category: "models",
 				items: [
@@ -396,7 +397,6 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 		const slowSource: MentionSource = {
 			id: "files",
 			label: "Files",
-			icon: "file",
 			querySync: () => ({
 				category: "files",
 				items: [],
@@ -417,10 +417,10 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 		expect(syncSnap).not.toBeNull();
 		expect(syncSnap!.items[0]!.insertText).toBe("^anthropic/claude-opus-4-6");
 		expect(syncSnap!.hasAsyncPending).toBe(true);
-		expect(syncSnap!.mention.scopes.find(s => s.id === "files")?.loading).toBe(true);
+		expect(syncSnap!.mention.loading).toBe(true);
 
 		const partials: number[] = [];
-		const asyncTask = engine.queryAsync(["@op"], 0, 3, undefined, undefined, snap => {
+		const asyncTask = engine.queryAsync(["@op"], 0, 3, undefined, snap => {
 			partials.push(snap.items.length);
 		});
 		resolveSlow({
@@ -438,11 +438,10 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 		expect(partials.length).toBeGreaterThanOrEqual(1);
 	});
 
-	it("supports Shift+Left/Right effort stepping and Shift+Tab scope cycling in Composer", () => {
+	it("supports the bare-@ category strip and Shift+Left/Right effort stepping in Composer", () => {
 		const modelSource: MentionSource = {
 			id: "models",
 			label: "Models",
-			icon: "cpu",
 			querySync: () => ({
 				category: "models",
 				items: [
@@ -464,7 +463,6 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 		const fileSource: MentionSource = {
 			id: "files",
 			label: "Files",
-			icon: "file",
 			querySync: () => ({
 				category: "files",
 				items: [fakeItem("files", "@src/index.ts", "index.ts", MATCH_TIER.Exact)],
@@ -497,21 +495,24 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 			const env = corpusEnvironment("dark");
 			paintNode(env, composer.node, 80);
 
-			// Type `@` → opens with Files on top + `@model:` namespace shortcut.
+			// Type `@` → a strip of the categories alone, the lit one's token and description below.
 			sendKey(composer.node, composer.field, key("@"));
 			expect(composer.completing()).toBe(true);
 
 			const popupRows = plainRows(paintNode(env, composer.node, 80).rows)
 				.slice(2)
 				.join("\n");
-			expect(popupRows).toContain("index.ts");
-			expect(popupRows).toContain("@model:");
+			expect(popupRows).not.toContain("index.ts");
+			expect(popupRows).toMatch(/Files.*Models/);
+			expect(popupRows).toContain("@f:  Tag a file or directory");
 			expect(popupRows).not.toContain("──");
 
-			// Move down to `@model:` shortcut and accept → chains straight into Models!
-			composer.handleDraftKey({ id: "down", kind: "press", raw: "" });
+			// Tab lights the next category in place; typing then enters it.
 			composer.handleDraftKey({ id: "tab", kind: "press", raw: "\t" });
-			expect(composer.text()).toBe("@model:");
+			expect(composer.text()).toBe("@");
+			expect(plainRows(paintNode(env, composer.node, 80).rows).join("\n")).toContain("@m:  Tag a model");
+			sendKey(composer.node, composer.field, key("c"));
+			expect(composer.text()).toBe("@m:c");
 			expect(composer.completing()).toBe(true);
 
 			// Default model mention does NOT force a thinking suffix or show a Thinking bar.
@@ -527,8 +528,9 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 			composer.handleDraftKey({ id: "tab", kind: "press", raw: "\t" });
 			expect(composer.text()).toBe("^anthropic/claude-opus-4-6:high ");
 
-			// Open `@` again → Files is already selected at row 0; Tab inserts `@src/index.ts `.
+			// Typing right after `@` without cycling stays a plain search: Files lead; Tab inserts `@src/index.ts `.
 			sendKey(composer.node, composer.field, key("@"));
+			sendKey(composer.node, composer.field, key("i"));
 			expect(composer.completing()).toBe(true);
 			composer.handleDraftKey({ id: "tab", kind: "press", raw: "\t" });
 			expect(composer.text()).toBe("^anthropic/claude-opus-4-6:high @src/index.ts ");

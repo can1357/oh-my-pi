@@ -11,6 +11,7 @@
  */
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { tryResolveCurrentRepo } from "../../../tools/gh-common";
 import {
 	type ForgeIndexEntry,
@@ -70,11 +71,15 @@ function formatShortAge(iso: string): string {
 	return `${Math.floor(sec / 86400)}d`;
 }
 
+function forgeGlyph(kind: "pr" | "issue"): string {
+	return currentTheme().symbols.symbol(kind === "pr" ? "mention.pr" : "mention.issue");
+}
+
 function buildIndexedItem(entry: ForgeIndexEntry, tier: MatchTier): MentionItem {
 	const url = `${entry.kind}://${entry.number}`;
 	const badge = stateBadge(entry.kind, entry.state);
 	const iconName = entry.kind === "pr" ? "pr" : "info";
-	const glyph = entry.kind === "pr" ? "⑂" : "⊙";
+	const glyph = forgeGlyph(entry.kind);
 	const age = formatShortAge(entry.updatedAt);
 	const author = entry.author ? `@${entry.author}` : "";
 	const facts: Record<string, string> = {};
@@ -120,7 +125,7 @@ function buildSyntheticItem(kind: "pr" | "issue", number: string, tier: MatchTie
 		label,
 		description,
 		nativeDetail: description,
-		icon: kind === "pr" ? "⑂" : "⊙",
+		icon: forgeGlyph(kind),
 		iconName,
 		pickerItem: {
 			id: `forge:${url}`,
@@ -155,7 +160,6 @@ function toIndexEntries(kind: "pr" | "issue", rows: readonly GhListRow[]): Omit<
 export class ForgeMentionSource implements MentionSource {
 	readonly id = "forge" as const;
 	readonly label = "GitHub";
-	readonly icon = "pr";
 
 	readonly #getCwd: () => string;
 	readonly #repoByCwd = new Map<string, string | null>();
@@ -312,7 +316,7 @@ export class ForgeMentionSource implements MentionSource {
 		}
 
 		// Preserve instant synthetic `#<N>` suggestions (enriched when already in SQLite).
-		if (isNumeric && (q.trigger === "#" || q.syntaxLock === "forge" || q.pinnedScope === "forge")) {
+		if (isNumeric && (q.trigger === "#" || q.syntaxLock === "forge")) {
 			if (wantPr && !matchedNumbers.has(`pr:${trimmed}`)) {
 				scored.unshift({ item: buildSyntheticItem("pr", trimmed, MATCH_TIER.Exact), score: -1 });
 			}
@@ -336,7 +340,7 @@ export class ForgeMentionSource implements MentionSource {
 
 	querySync(q: MentionQuery): MentionSourceResult {
 		const cwd = this.#getCwd();
-		const explicit = q.trigger === "#" || q.syntaxLock === "forge" || q.pinnedScope === "forge";
+		const explicit = q.trigger === "#" || q.syntaxLock === "forge";
 		const knownRepo = this.#repoByCwd.get(cwd);
 		if (!explicit && (knownRepo === null || !vcs.git(cwd))) {
 			return { category: "forge", items: [], bestTier: MATCH_TIER.None, total: 0, available: false };
@@ -364,7 +368,7 @@ export class ForgeMentionSource implements MentionSource {
 	): Promise<MentionSourceResult | null> {
 		const cwd = this.#getCwd();
 		if (signal.aborted || !github.available() || !vcs.git(cwd)) return null;
-		const explicit = q.trigger === "#" || q.syntaxLock === "forge" || q.pinnedScope === "forge";
+		const explicit = q.trigger === "#" || q.syntaxLock === "forge";
 
 		const repo = await this.#ensureRepo(cwd, signal);
 		if (signal.aborted || !repo) return null;

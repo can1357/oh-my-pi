@@ -26,7 +26,7 @@ const MAX_AGENT_ITEMS = 25;
 export interface AgentsMentionHost {
 	/** Local agent registry; defaults to `AgentRegistry.global()`. */
 	readonly registry?: () => { list(): AgentRef[] };
-	/** Foreign mesh peers in this project; defaults to `agentMesh()?.peers() ?? []`. */
+	/** Foreign mesh peers in this project; defaults to `agentMesh()?.peers() ?? []` (other projects stay out of `@`). */
 	readonly peers?: () => readonly MeshPeer[];
 }
 
@@ -116,7 +116,6 @@ function buildLocalAgentItem(ref: AgentRef, tier: MatchTier): MentionItem {
 	const tone = statusTone(ref.status);
 	const detail = ref.activity || (ref.id !== title ? ref.id : "");
 	const right = shortModelLabel(ref.history?.resolvedModel) || ref.history?.agent || "";
-	const glyph = ref.status === "running" ? "●" : "○";
 	return {
 		category: "agents",
 		tier,
@@ -127,7 +126,7 @@ function buildLocalAgentItem(ref: AgentRef, tier: MatchTier): MentionItem {
 		description: detail || ref.status,
 		nativeDetail: detail || ref.status,
 		state: ref.status,
-		icon: glyph,
+		icon: currentTheme().symbols.symbol("mention.agent"),
 		iconName: "agent",
 		pickerItem: {
 			id: `agent:${url}`,
@@ -156,7 +155,7 @@ function buildForeignMainItem(peer: MeshPeer, tier: MatchTier): MentionItem {
 		description: detail,
 		nativeDetail: peer.status === "unknown" ? "peer session" : peer.status,
 		state: pidFact,
-		icon: "⇄",
+		icon: currentTheme().symbols.symbol("mention.peer"),
 		iconName: "users",
 		pickerItem: {
 			id: `agent:${url}`,
@@ -185,7 +184,7 @@ function buildForeignSubagentItem(peer: MeshPeer, sub: MeshSubagent, tier: Match
 		description: `${peerName} · ${sub.status}`,
 		nativeDetail: peerName,
 		state: pidFact,
-		icon: "⇄",
+		icon: currentTheme().symbols.symbol("mention.peer"),
 		iconName: "users",
 		pickerItem: {
 			id: `agent:${url}`,
@@ -202,7 +201,6 @@ function buildForeignSubagentItem(peer: MeshPeer, sub: MeshSubagent, tier: Match
 export class AgentsMentionSource implements MentionSource {
 	readonly id = "agents" as const;
 	readonly label = "Agents";
-	readonly icon = "users";
 
 	readonly #host: AgentsMentionHost;
 
@@ -211,7 +209,7 @@ export class AgentsMentionSource implements MentionSource {
 	}
 
 	querySync(q: MentionQuery): MentionSourceResult {
-		const explicit = q.syntaxLock === "agents" || q.pinnedScope === "agents";
+		const explicit = q.syntaxLock === "agents";
 		const onlyPeers = q.subKind === "peer";
 		const localRefs = (this.#host.registry?.() ?? AgentRegistry.global())
 			.list()
@@ -296,7 +294,7 @@ export class AgentsMentionSource implements MentionSource {
 		if (!onlyPeers && (explicit || trimmed.toLowerCase() === "all")) {
 			const allHit = scoreMatch(trimmed, fuzzyQuery, "all", "broadcast every agent", explicit);
 			if (allHit) {
-				const icon = currentTheme().symbols.symbol("icon.agents");
+				const icon = currentTheme().symbols.symbol("mention.agent");
 				pushUnique({
 					url: "agent://all",
 					item: {

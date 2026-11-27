@@ -889,7 +889,13 @@ export interface TspPickerProps {
 	search?: "head" | "list" | "none";
 	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
 	density?: "regular" | "snug";
-	layout?: "rows" | "cards" | "timeline" | "tree";
+	/**
+	 * How items are laid out. `"tiles"`: one left-to-right strip of `icon` + `label` tiles, the other
+	 * facts dim after the label; the first column's fact is the tile's short name, standing in for the
+	 * label when the strip is too narrow, and it leads a description line under the strip that shows
+	 * the lit (`selected`) or hovered tile's `detail`.
+	 */
+	layout?: "rows" | "cards" | "timeline" | "tree" | "tiles";
 	/** The program's search text (keys stay the program's); `null` hides the field. */
 	query?: string | null;
 	/** Caret as a UTF-16 offset into `query`; absent puts it at the end. */

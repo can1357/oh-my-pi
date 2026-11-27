@@ -440,7 +440,7 @@ export class InputController {
 				modelMentionAtomizer({
 					resolve: selector => this.ctx.session.resolveModelMention(selector),
 					selectorOf: agent => this.ctx.session.modelMentions.find(mention => mention.agent === agent)?.selector,
-					icon: () => currentTheme().symbols.symbol("icon.model"),
+					icon: () => currentTheme().symbols.symbol("mention.model"),
 				}),
 				mentionChipAtomizer(),
 			),

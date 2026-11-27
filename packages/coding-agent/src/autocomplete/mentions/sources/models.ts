@@ -153,7 +153,7 @@ function buildModelItem(
 		description: label,
 		nativeDetail: item.provider,
 		state: [ctx, price].filter(Boolean).join(" · ") || undefined,
-		icon: currentTheme().symbols.symbol("icon.model"),
+		icon: currentTheme().symbols.symbol("mention.model"),
 		iconName: "model",
 		pickerItem: {
 			id: `model:${canonicalSelector}`,
@@ -184,7 +184,6 @@ function buildModelItem(
 export class ModelsMentionSource implements MentionSource {
 	readonly id = "models" as const;
 	readonly label = "Models";
-	readonly icon = "cpu";
 
 	readonly #host: ModelsMentionHost;
 	#ranker?: ModelItemRanker;
@@ -345,8 +344,7 @@ export class ModelsMentionSource implements MentionSource {
 			}
 		}
 
-		const explicit =
-			q.trigger === "^" || q.syntaxLock === "models" || q.pinnedScope === "models" || trimmed.includes("/");
+		const explicit = q.trigger === "^" || q.syntaxLock === "models" || trimmed.includes("/");
 		const qCompact = compactModelSearchText(trimmed);
 		const ranked = ranker.rank(trimmed, this.#searchIndex);
 		const items: MentionItem[] = [...roleItems];

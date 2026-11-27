@@ -5,6 +5,7 @@
  * catalog not loaded yet is fetched in the async pass (never waiting on
  * servers still connecting). URI templates are skipped: they need arguments.
  */
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { MCPManager, type MCPManagerApi } from "../../../mcp/manager";
 import { FuzzyQuery, FuzzyText } from "../../../utils/fuzzy";
 import {
@@ -43,7 +44,7 @@ function buildMcpItem(entry: McpEntry, tier: MatchTier): MentionItem {
 		description: detail,
 		nativeDetail: detail,
 		state: entry.server,
-		icon: "⌁",
+		icon: currentTheme().symbols.symbol("mention.mcp"),
 		iconName: "mcp",
 		pickerItem: {
 			id: `mcp:${entry.server}:${entry.uri}`,
@@ -59,7 +60,6 @@ function buildMcpItem(entry: McpEntry, tier: MatchTier): MentionItem {
 export class McpMentionSource implements MentionSource {
 	readonly id = "mcp" as const;
 	readonly label = "MCP";
-	readonly icon = "mcp";
 
 	readonly #host: McpMentionHost;
 
@@ -100,7 +100,7 @@ export class McpMentionSource implements MentionSource {
 
 	querySync(q: MentionQuery): MentionSourceResult {
 		const manager = this.#manager();
-		const explicit = q.syntaxLock === "mcp" || q.pinnedScope === "mcp";
+		const explicit = q.syntaxLock === "mcp";
 		if (!manager) {
 			return { category: "mcp", items: [], bestTier: MATCH_TIER.None, total: 0, available: false };
 		}
@@ -119,7 +119,7 @@ export class McpMentionSource implements MentionSource {
 		if (unloaded.length === 0) return null;
 		await Promise.allSettled(unloaded.map(server => manager.ensureServerResources(server)));
 		if (signal.aborted) return null;
-		const explicit = q.syntaxLock === "mcp" || q.pinnedScope === "mcp";
+		const explicit = q.syntaxLock === "mcp";
 		return this.#rank(q, this.#entries(manager).entries, false, explicit);
 	}
 

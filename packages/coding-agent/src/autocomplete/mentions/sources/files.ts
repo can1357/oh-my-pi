@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fuzzyFind } from "@oh-my-pi/pi-natives";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { subsequenceMatch } from "../../tokens";
 import {
 	MATCH_TIER,
@@ -112,7 +113,7 @@ function buildFileItem(
 		description: cleanPath,
 		nativeDetail: detail,
 		state: options.dirty ? "dirty" : options.recent ? "recent" : undefined,
-		icon: options.isDirectory ? "▸" : "·",
+		icon: currentTheme().symbols.symbol(options.isDirectory ? "mention.folder" : "mention.file"),
 		iconName: options.isDirectory ? "folder" : "file",
 		pickerItem: {
 			id: `file:${completionPath}`,
@@ -135,7 +136,6 @@ interface DirCacheEntry {
 export class FilesMentionSource implements MentionSource {
 	readonly id = "files" as const;
 	readonly label = "Files";
-	readonly icon = "file";
 
 	readonly #host: FilesMentionHost;
 	readonly #dirCache = new Map<string, DirCacheEntry>();

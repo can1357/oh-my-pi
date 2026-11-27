@@ -14,7 +14,11 @@ interface NamespaceRule {
 	readonly subKind?: MentionSubKind;
 }
 
-/** Explicit `@<ns>:<query>` prefixes that hard-lock a single category. */
+/**
+ * Explicit `@<ns>:<query>` prefixes that hard-lock a single category. The
+ * one-letter keys are the canonical tokens the palette inserts (`@m:`, `@h:`,
+ * `@s:`, …); the long names stay as aliases.
+ */
 const NAMESPACE_PREFIXES: Readonly<Record<string, NamespaceRule>> = {
 	m: { category: "models" },
 	model: { category: "models" },
@@ -27,7 +31,8 @@ const NAMESPACE_PREFIXES: Readonly<Record<string, NamespaceRule>> = {
 	agents: { category: "agents" },
 	peer: { category: "agents", subKind: "peer" },
 	peers: { category: "agents", subKind: "peer" },
-	s: { category: "sessions" },
+	h: { category: "sessions" },
+	history: { category: "sessions" },
 	session: { category: "sessions" },
 	sessions: { category: "sessions" },
 	chat: { category: "sessions" },
@@ -46,21 +51,27 @@ const NAMESPACE_PREFIXES: Readonly<Record<string, NamespaceRule>> = {
 	tags: { category: "vcs", subKind: "tag" },
 	diff: { category: "vcs", subKind: "diff" },
 	changes: { category: "vcs", subKind: "diff" },
+	r: { category: "mcp" },
 	mcp: { category: "mcp" },
 	resource: { category: "mcp" },
+	resources: { category: "mcp" },
+	s: { category: "ssh" },
 	ssh: { category: "ssh" },
 	host: { category: "ssh" },
+	hosts: { category: "ssh" },
 	gh: { category: "forge" },
 	github: { category: "forge" },
+	p: { category: "forge", subKind: "pr" },
 	pr: { category: "forge", subKind: "pr" },
 	prs: { category: "forge", subKind: "pr" },
+	pull: { category: "forge", subKind: "pr" },
+	i: { category: "forge", subKind: "issue" },
 	issue: { category: "forge", subKind: "issue" },
 	issues: { category: "forge", subKind: "issue" },
 };
 
 /** Optional synchronous hints for disambiguating `head/tail` slash tokens. */
 export interface MentionParseOptions {
-	readonly pinnedScope?: MentionCategoryId | null;
 	readonly isKnownProvider?: (head: string) => boolean;
 	readonly isKnownDir?: (head: string) => boolean;
 }
@@ -83,7 +94,6 @@ function splitModelEffortSuffix(body: string): { base: string; effortSuffix?: st
  */
 export function parseMentionQuery(textBeforeCursor: string, options?: MentionParseOptions): MentionQuery | null {
 	if (!textBeforeCursor) return null;
-	const pinnedScope = options?.pinnedScope ?? undefined;
 
 	// 1. `^model[:effort]` shortcut → unified engine locked to Models.
 	const modelMatch = MODEL_MENTION_CONTEXT_RE.exec(textBeforeCursor);
@@ -98,7 +108,6 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 			query: effortSuffix !== undefined ? base : rawBody,
 			syntaxLock: "models",
 			...(effortSuffix !== undefined ? { modelEffortSuffix: effortSuffix } : {}),
-			...(pinnedScope !== undefined ? { pinnedScope } : {}),
 		};
 	}
 
@@ -112,7 +121,6 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 			query: ghRef.number,
 			syntaxLock: "forge",
 			...(ghRef.qualifier ? { subKind: ghRef.qualifier } : {}),
-			...(pinnedScope !== undefined ? { pinnedScope } : {}),
 		};
 	}
 
@@ -130,7 +138,6 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 			query: rawBody,
 			syntaxLock: "files",
 			quoted: true,
-			...(pinnedScope !== undefined ? { pinnedScope } : {}),
 		};
 	}
 
@@ -142,11 +149,10 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 			rawBody,
 			query: rawBody.slice(1),
 			syntaxLock: "forge",
-			...(pinnedScope !== undefined ? { pinnedScope } : {}),
 		};
 	}
 
-	// Explicit namespace prefix (`@m:`, `@a:`, `@f:`, `@g:`, `@gh:`, `@pr:`, `@branch:`, …).
+	// Explicit namespace prefix (`@m:`, `@a:`, `@f:`, `@g:`, `@h:`, `@p:`, `@i:`, `@r:`, `@s:`, `@branch:`, …).
 	const firstColon = rawBody.indexOf(":");
 	if (firstColon > 0) {
 		const nsKey = rawBody.slice(0, firstColon).toLowerCase();
@@ -162,7 +168,6 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 				syntaxLock: rule.category,
 				...(rule.subKind ? { subKind: rule.subKind } : {}),
 				...(modelSplit?.effortSuffix !== undefined ? { modelEffortSuffix: modelSplit.effortSuffix } : {}),
-				...(pinnedScope !== undefined ? { pinnedScope } : {}),
 			};
 		}
 	}
@@ -177,7 +182,6 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 			query: lineMatch ? lineMatch[1]! : rawBody,
 			syntaxLock: "files",
 			...(lineMatch ? { fileLineSuffix: lineMatch[2]! } : {}),
-			...(pinnedScope !== undefined ? { pinnedScope } : {}),
 		};
 	}
 
@@ -191,7 +195,6 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 			query: lineMatch[1]!,
 			syntaxLock: "files",
 			fileLineSuffix: lineMatch[2]!,
-			...(pinnedScope !== undefined ? { pinnedScope } : {}),
 		};
 	}
 
@@ -220,7 +223,6 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 		query: modelEffortSuffix !== undefined ? effortSplit!.base : rawBody,
 		...(syntaxLock ? { syntaxLock } : {}),
 		...(modelEffortSuffix !== undefined ? { modelEffortSuffix } : {}),
-		...(pinnedScope !== undefined ? { pinnedScope } : {}),
 	};
 }
 

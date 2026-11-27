@@ -73,6 +73,11 @@
 
 ### Changed
 
+- The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
+- The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
+- Mention categories now use one-letter tokens: `@f:` files, `@m:` models, `@a:` agents, `@h:` sessions, `@g:` git, `@p:` PRs, `@i:` issues, `@r:` MCP resources, `@s:` SSH hosts; the long names still work, but `@s:` now means SSH instead of sessions
+- A bare `@` shows the categories as a strip of icons: Tab/Shift+Tab or ←/→ light one and show its token and description below, and Enter or typing enters it (`@m:` plus what you typed)
+- The mention palette no longer shows category scope pills or pins a category with Shift+Tab; mixed results head each category with its icon and match count instead
 - Role mentions now insert only the model without an explicit thinking level
 - Models with 1M-class context windows (Claude extended context, GPT-6.2 Astra and Sol at 922K) auto-compact at 690K tokens by default instead of 85% of the window, cutting cache-read cost on long sessions; set `compaction.thresholdPercent`, `compaction.thresholdTokens`, or a `/models` compaction limit to compact later
 - Back-to-back idle `wait` calls on jobs and services stretch their top window to the session's prompt-cache lifetime less 1m (up to 30m) instead of a fixed 4m, as reply waits already did
@@ -110,6 +115,8 @@
 ### Fixed
 
 - Fixed web search with GitHub Copilot Claude models: it now uses the Copilot login's token and endpoint (Enterprise included) and sends the same Copilot and session headers as chat, so replies are no longer rejected or blocked ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
+- Session mentions whose title carries a card icon no longer show a second session icon in front of it
+- Git mention chips in the composer draw in the git color instead of plain text
 - Re-registering a fixed-model gateway now pairs the replacement URL with its credential and does not reuse another credential’s cached model list.
 - Discovered chat and embedding prices now honor the advertised per-token or per-million unit.
 - Oversized jq results no longer label a truncated preview as the full output, and `write` rejects incomplete read projections when creating archive members.

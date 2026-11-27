@@ -7,7 +7,7 @@
  * and unambiguous strong matches shine cleanly.
  */
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import type { TspPickerColumn, TspPickerGroup, TspPickerItem, TspPickerScope } from "@oh-my-pi/pi-wire";
+import type { TspPickerColumn, TspPickerGroup, TspPickerItem } from "@oh-my-pi/pi-wire";
 import type { AutocompleteItem } from "../autocomplete";
 
 /** Built-in mention categories, with Files first by default. */
@@ -58,8 +58,6 @@ export interface MentionQuery {
 	readonly syntaxLock?: MentionCategoryId;
 	/** Explicit sub-kind filter (`@pr:`, `@branch:`, `@peer:`, `pr #123`, …). */
 	readonly subKind?: MentionSubKind;
-	/** User-selected scope from Shift+Tab or clicking a scope pill (`null` = All). */
-	readonly pinnedScope?: MentionCategoryId | null;
 	/** Whether the `@` token opened with a double quote (`@"…`). */
 	readonly quoted?: boolean;
 	/** Preserved `:line` or `:start-end` suffix on a file mention. */
@@ -117,7 +115,6 @@ export interface MentionSourceResult {
 export interface MentionSourceMeta {
 	readonly id: MentionCategoryId;
 	readonly label: string;
-	readonly icon: string;
 }
 
 /** Pluggable mention source participating in the unified selector. */
@@ -136,8 +133,7 @@ export interface MentionSource extends MentionSourceMeta {
 
 /** Structured palette payload attached to {@link AutocompleteSuggestions} for unified mentions. */
 export interface MentionPaletteView {
-	readonly scopes: readonly TspPickerScope[];
-	readonly activeScope: string;
+	/** The category that took over the palette: a syntax lock (`@m:`, `^`, `#123`) or a clear winner. */
 	readonly lockedScope?: MentionCategoryId;
 	readonly columns: readonly TspPickerColumn[];
 	readonly pickerItems: readonly TspPickerItem[];

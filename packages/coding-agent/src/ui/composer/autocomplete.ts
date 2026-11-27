@@ -91,18 +91,12 @@ export interface AutocompleteProvider extends Pick<
 	/** Pre-warm background mention caches (non-blocking). */
 	warmMentions?(): void;
 	/** Synchronously resolve Tier 0 unified mention suggestions (`@`, `^`, `#<N>`). */
-	trySyncMentionCompletion?(
-		lines: string[],
-		line: number,
-		col: number,
-		pinnedScope?: MentionCategoryId | null,
-	): UnifiedMentionSnapshot | null;
+	trySyncMentionCompletion?(lines: string[], line: number, col: number): UnifiedMentionSnapshot | null;
 	/** Async streaming refinement for unified mention suggestions (`@`, `^`, `#<N>`). */
 	getMentionSuggestions?(
 		lines: string[],
 		line: number,
 		col: number,
-		pinnedScope: MentionCategoryId | null | undefined,
 		signal?: AbortSignal,
 		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
 	): Promise<UnifiedMentionSnapshot | null>;
@@ -128,8 +122,6 @@ export interface Completion {
 	readonly revision?: number;
 	/** Structured palette metadata when showing unified `@` / `^` / `#<N>` mentions. */
 	readonly mention?: MentionPaletteView;
-	/** User-selected category scope from Shift+Tab or clicking a scope pill (`null` = All). */
-	readonly pinnedScope?: MentionCategoryId | null;
 	/** Interactive thinking-effort override chosen via Shift+←/→ or Tern's level slider. */
 	readonly effortOverride?: Effort | "auto";
 	/** Timestamp when the query last changed, for 120ms anti-thrash focus stability. */

@@ -2,15 +2,16 @@
  * Cross-source Intent Arbiter for the unified mention palette.
  *
  * Design principles:
- * - **Files first**: bare `@` and general `@<query>` lead with workspace files.
- * - **Discoverable `@category:` shortcuts**: bare `@` pairs top files with crisp
- *   namespace jump rows (`@model:`, `@agent:`, `@session:`, `@git:`, `@pr:`) so
- *   nothing gets buried and there is zero 800-model / 30-agent spam.
+ * - **Categories on bare `@`**: an empty `@` lists only the namespace jump rows
+ *   (`@f:`, `@m:`, `@a:`, `@h:`, `@g:`, `@p:`, `@i:`, `@r:`, `@s:`), so nothing gets
+ *   buried and there is zero 800-model / 30-agent spam.
+ * - **Files first**: a general `@<query>` leads with workspace files.
  * - **Smart auto-switching**: once another category clearly wins (e.g. `@opus`
- *   has strong model matches and no strong file match, or `@model:`/`^`/`#123`
+ *   has strong model matches and no strong file match, or `@m:`/`^`/`#123`
  *   explicitly locks a scope), that category takes over cleanly at full depth.
  */
-import type { TspPickerColumn, TspPickerGroup, TspPickerItem, TspPickerScope } from "@oh-my-pi/pi-wire";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { TspPickerColumn, TspPickerGroup, TspPickerItem } from "@oh-my-pi/pi-wire";
 import {
 	MATCH_TIER,
 	MENTION_CATEGORY_ORDER,
@@ -20,88 +21,116 @@ import {
 	type MentionQuery,
 	type MentionSourceMeta,
 	type MentionSourceResult,
+	type MentionSubKind,
 } from "./types";
 
-const OVERVIEW_FILES_CAP = 5;
 const LOCKED_SCOPE_CAP = 20;
 const DOMINANT_WINNER_CAP = 15;
 const FILES_WITH_OTHERS_CAP = 6;
 const SECONDARY_CATEGORY_CAP = 2;
 const TOTAL_MIXED_CAP = 10;
 
+/** One `@<x>:` jump row: a short token that locks its category, named by the long form. */
 interface NamespaceShortcutDef {
 	readonly category: MentionCategoryId;
+	/** Inserted and shown token (`@m:`); the parser maps it to {@link category}. */
 	readonly token: string;
-	readonly label: string;
+	/** Display name (`Models`). */
+	readonly name: string;
 	readonly detail: string;
+	/** Tern icon name. */
 	readonly icon: string;
-	readonly glyph: string;
+	/** Theme symbol key of the terminal glyph. */
+	readonly symbol: string;
+	/** Typed prefixes (`@mod`) that surface the row; 2+ characters. */
 	readonly aliases: readonly string[];
+	/** Sub-kind the token narrows to; such a row shows no category-wide count. */
+	readonly subKind?: MentionSubKind;
 }
 
 const NAMESPACE_SHORTCUTS: readonly NamespaceShortcutDef[] = [
 	{
+		category: "files",
+		token: "@f:",
+		name: "Files",
+		detail: "Tag a file or directory",
+		icon: "file",
+		symbol: "mention.file",
+		aliases: ["file", "files"],
+	},
+	{
 		category: "models",
-		token: "@model:",
-		label: "@model:",
+		token: "@m:",
+		name: "Models",
 		detail: "Tag a model + thinking effort (or ^)",
 		icon: "cpu",
-		glyph: "⬢",
-		aliases: ["model", "models", "m"],
+		symbol: "mention.model",
+		aliases: ["model", "models"],
 	},
 	{
 		category: "agents",
-		token: "@agent:",
-		label: "@agent:",
+		token: "@a:",
+		name: "Agents",
 		detail: "Tag a local or peer subagent",
 		icon: "users",
-		glyph: "●",
-		aliases: ["agent", "agents", "peer", "peers", "a"],
+		symbol: "mention.agent",
+		aliases: ["agent", "agents", "peer", "peers"],
 	},
 	{
 		category: "sessions",
-		token: "@session:",
-		label: "@session:",
+		token: "@h:",
+		name: "Sessions",
 		detail: "Tag a past conversation",
 		icon: "message",
-		glyph: "💬",
-		aliases: ["session", "sessions", "chat", "conv", "conversation", "s"],
+		symbol: "mention.session",
+		aliases: ["session", "sessions", "history", "chat", "conv", "conversation"],
 	},
 	{
 		category: "vcs",
-		token: "@git:",
-		label: "@git:",
+		token: "@g:",
+		name: "Git",
 		detail: "Tag a diff, branch, commit, or tag",
 		icon: "git-branch",
-		glyph: "⎇",
-		aliases: ["git", "branch", "commit", "tag", "diff", "changes", "vcs", "g"],
+		symbol: "mention.git",
+		aliases: ["git", "branch", "commit", "tag", "diff", "changes", "vcs"],
 	},
 	{
 		category: "forge",
-		token: "@pr:",
-		label: "@pr:",
-		detail: "Tag a GitHub PR or issue (or #123)",
+		token: "@p:",
+		name: "PRs",
+		detail: "Tag a GitHub pull request (or #123)",
 		icon: "pr",
-		glyph: "⑂",
-		aliases: ["pr", "issue", "github", "gh"],
+		symbol: "mention.pr",
+		aliases: ["pr", "prs", "pull", "github", "gh"],
+		subKind: "pr",
+	},
+	{
+		category: "forge",
+		token: "@i:",
+		name: "Issues",
+		detail: "Tag a GitHub issue",
+		icon: "info",
+		symbol: "mention.issue",
+		aliases: ["issue", "issues"],
+		subKind: "issue",
 	},
 	{
 		category: "mcp",
-		token: "@mcp:",
-		label: "@mcp:",
+		token: "@r:",
+		name: "MCP",
 		detail: "Tag an MCP resource",
 		icon: "mcp",
-		glyph: "⌁",
-		aliases: ["mcp", "resource"],
+		symbol: "mention.mcp",
+		aliases: ["mcp", "resource", "resources"],
 	},
 	{
 		category: "ssh",
-		token: "@ssh:",
-		label: "@ssh:",
+		token: "@s:",
+		name: "SSH",
 		detail: "Tag an SSH host",
 		icon: "host",
-		glyph: "⇢",
-		aliases: ["ssh", "host"],
+		symbol: "mention.ssh",
+		aliases: ["ssh", "host", "hosts"],
 	},
 ];
 
@@ -121,8 +150,14 @@ function categoryOrderIndex(id: MentionCategoryId): number {
 	return index === -1 ? MENTION_CATEGORY_ORDER.length : index;
 }
 
-function makeNamespaceShortcutItem(def: NamespaceShortcutDef, count: number | undefined): MentionItem {
-	const right = count !== undefined && count > 0 && count <= 99 ? String(count) : undefined;
+/**
+ * A category jump row: the display name as label, the description as detail,
+ * the token as the `meta` fact and the category count as `right`.
+ */
+function makeNamespaceShortcutItem(def: NamespaceShortcutDef, count: number): MentionItem {
+	const facts: Record<string, string> = { meta: def.token };
+	const shown = def.subKind ? undefined : shownCount(count);
+	if (shown !== undefined) facts.right = String(shown);
 	return {
 		category: def.category,
 		tier: MATCH_TIER.Medium,
@@ -130,53 +165,24 @@ function makeNamespaceShortcutItem(def: NamespaceShortcutDef, count: number | un
 		insertText: def.token,
 		appendSpace: false,
 		isNamespaceShortcut: true,
-		label: def.label,
+		label: def.name,
 		description: def.detail,
 		nativeDetail: def.detail,
-		icon: def.glyph,
+		icon: currentTheme().symbols.symbol(def.symbol),
 		iconName: def.icon,
 		pickerItem: {
-			id: `ns:${def.category}`,
-			label: def.label,
+			id: `ns:${def.subKind ?? def.category}`,
+			label: def.name,
 			detail: def.detail,
 			icon: def.icon,
-			mono: true,
-			...(right ? { facts: { right } } : {}),
+			facts,
 		},
 	};
 }
 
-/** Build the scope pill strip (`All` + available categories, keeping pill labels clean and compact). */
-function buildScopes(
-	sources: readonly MentionSourceMeta[],
-	byId: ReadonlyMap<MentionCategoryId, MentionSourceResult>,
-	lockedScope: MentionCategoryId | undefined,
-	showCounts: boolean,
-): TspPickerScope[] {
-	let anyLoading = false;
-	const categoryPills: TspPickerScope[] = [];
-	for (const meta of sources) {
-		const res = byId.get(meta.id);
-		if (!res?.available) continue;
-		if (res.loading) anyLoading = true;
-		const pillCount = showCounts && res.total > 0 && res.total <= 99 ? res.total : undefined;
-		categoryPills.push({
-			id: meta.id,
-			label: meta.label,
-			icon: meta.icon,
-			...(pillCount !== undefined ? { count: pillCount } : {}),
-			...(res.loading ? { loading: true } : {}),
-			...(lockedScope === meta.id ? { locked: true } : {}),
-		});
-	}
-	return [
-		{
-			id: "all",
-			label: "All",
-			...(anyLoading ? { loading: true } : {}),
-		},
-		...categoryPills,
-	];
+/** A match count worth printing beside a category: 1..99, else nothing. */
+function shownCount(total: number): number | undefined {
+	return total > 0 && total <= 99 ? total : undefined;
 }
 
 /** Arbitrate results across all mention sources into display items + Tern palette metadata. */
@@ -190,8 +196,7 @@ export function arbitrateMentions(
 	for (const meta of sources) metaById.set(meta.id, meta);
 	for (const res of results) byId.set(res.category, res);
 
-	const pinned = query.pinnedScope ?? undefined;
-	const explicitLock = pinned ?? query.syntaxLock;
+	const explicitLock = query.syntaxLock;
 
 	interface Section {
 		readonly groupId: string;
@@ -211,32 +216,19 @@ export function arbitrateMentions(
 					groupId: explicitLock,
 					label: metaById.get(explicitLock)?.label ?? explicitLock,
 					items: res.items.slice(0, LOCKED_SCOPE_CAP),
-					count: res.total <= 99 ? res.total : undefined,
+					count: shownCount(res.total),
 				},
 			];
 		}
 	} else if (query.query.trim() === "") {
-		// Bare `@`: Files on top, followed by clean `@category:` jump shortcuts.
-		const filesRes = byId.get("files");
-		if (filesRes && filesRes.available && filesRes.items.length > 0) {
-			selectedSections.push({
-				groupId: "files",
-				label: "Files",
-				items: filesRes.items.slice(0, OVERVIEW_FILES_CAP),
-			});
-		}
+		// Bare `@`: the category jump rows alone; the composer Tab-cycles them.
 		const shortcuts: MentionItem[] = [];
 		for (const def of NAMESPACE_SHORTCUTS) {
 			const res = byId.get(def.category);
-			if (!res?.available) continue;
-			shortcuts.push(makeNamespaceShortcutItem(def, res.total));
+			if (res?.available) shortcuts.push(makeNamespaceShortcutItem(def, res.total));
 		}
 		if (shortcuts.length > 0) {
-			selectedSections.push({
-				groupId: "categories",
-				label: "More",
-				items: shortcuts,
-			});
+			selectedSections.push({ groupId: "categories", label: "Categories", items: shortcuts });
 		}
 	} else {
 		// Unlocked `@<query>`: Files stay on top whenever Files matches strongly/moderately;
@@ -295,6 +287,7 @@ export function arbitrateMentions(
 					groupId: topOther.category,
 					label: metaById.get(topOther.category)?.label ?? topOther.category,
 					items: topOther.items.slice(0, DOMINANT_WINNER_CAP),
+					count: shownCount(topOther.total),
 				},
 			];
 		} else {
@@ -310,6 +303,7 @@ export function arbitrateMentions(
 					groupId: "files",
 					label: "Files",
 					items: filesRes.items.slice(0, cap),
+					count: shownCount(filesRes.total),
 				});
 				remaining -= Math.min(cap, filesRes.items.length);
 			}
@@ -322,6 +316,7 @@ export function arbitrateMentions(
 					groupId: r.category,
 					label: metaById.get(r.category)?.label ?? r.category,
 					items: r.items.slice(0, cap),
+					count: shownCount(r.total),
 				});
 				remaining -= Math.min(cap, r.items.length);
 			}
@@ -347,6 +342,7 @@ export function arbitrateMentions(
 						groupId: r.category,
 						label: metaById.get(r.category)?.label ?? r.category,
 						items: r.items.slice(0, 4),
+						count: shownCount(r.total),
 					});
 				}
 			}
@@ -382,15 +378,10 @@ export function arbitrateMentions(
 	}
 
 	const loading = results.some(r => r.loading);
-	const showCounts = query.query.trim().length > 0;
-	const scopes = buildScopes(sources, byId, pinned ? undefined : lockedScope, showCounts);
-	const activeScope = pinned ?? lockedScope ?? "all";
 
 	return {
 		items,
 		palette: {
-			scopes,
-			activeScope,
 			...(lockedScope ? { lockedScope } : {}),
 			columns: MENTION_PICKER_COLUMNS,
 			pickerItems,

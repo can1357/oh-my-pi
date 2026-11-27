@@ -18,9 +18,10 @@ import type {
 	TspPickerItem,
 	TspPickerLevel,
 	TspPickerProps,
-	TspPickerScope,
+	TspSpan,
 	TspText,
 } from "@oh-my-pi/pi-wire";
+import { mentionStyle } from "../../../autocomplete/mentions/style";
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -203,25 +204,28 @@ defineRolePainter("overlay", "omp.autocomplete", paintPopup);
 /** Terminal-only display data for the modeless unified mention picker (`omp.mention-picker`). */
 export type MentionPopupTerm = {
 	readonly maxLines: number;
-	readonly glyphs?: Readonly<Record<string, string>>;
+	/** Leading glyph of each row by picker item id, styled in the row's color. */
+	readonly glyphs?: Readonly<Record<string, TspSpan>>;
 };
 
 function isPickerGroup(entry: string | TspPickerGroup): entry is TspPickerGroup {
 	return typeof entry !== "string";
 }
 
-function formatMentionTags(item: TspPickerItem, detail: string): string {
-	const parts: string[] = [];
+/** Badges (in their tones) and chips after a row's label, minus badges its detail already says. */
+function mentionTags(item: TspPickerItem, detail: string): TspSpan[] {
+	const tags: TspSpan[] = [];
 	const detailLower = detail.toLowerCase();
-	if (item.badges) {
-		for (const badge of item.badges) {
-			if (!detailLower.includes(badge.text.toLowerCase())) parts.push(badge.text);
-		}
+	for (const badge of item.badges ?? []) {
+		if (!detailLower.includes(badge.text.toLowerCase())) tags.push({ t: badge.text, s: badge.tone ?? "muted" });
 	}
-	if (item.chips) {
-		for (const chip of item.chips) parts.push(chip.text);
-	}
-	return parts.join(" ");
+	for (const chip of item.chips ?? []) tags.push({ t: chip.text, s: chip.on ? "accent" : "muted" });
+	return tags;
+}
+
+/** The plain text of a row's tags, as {@link mentionTags} lays them out. */
+function tagText(tags: readonly TspSpan[]): string {
+	return tags.map(tag => tag.t).join(" ");
 }
 
 function factText(item: TspPickerItem, colId: string): string {
@@ -230,21 +234,49 @@ function factText(item: TspPickerItem, colId: string): string {
 	return typeof val === "number" ? String(val) : plain(val);
 }
 
-function renderScopeStrip(
+/**
+ * `layout="tiles"` (the bare `@` categories): one strip of `<glyph> Label (count)` tiles with the lit
+ * one on the selection background, and under it the lit tile's short name and description. When the
+ * strip overflows, tiles fall back to their short name (the first column's fact), then to the glyph.
+ */
+function paintMentionTiles(
+	props: TspPickerProps & { term?: MentionPopupTerm },
+	items: readonly TspPickerItem[],
 	cx: PaintContext,
-	scopes: readonly TspPickerScope[],
-	activeScope: string | undefined,
-	width: number,
-): string {
-	const parts: string[] = [];
-	for (const scope of scopes) {
-		const label = plain(scope.label);
-		const active = scope.id === activeScope;
-		const text = scope.loading && active ? `${label}…` : label;
-		parts.push(active ? cx.theme.fg("accent", text) : cx.theme.fg("dim", text));
+	indent: string,
+): Block {
+	const lit = items.find(item => item.id === props.selected) ?? items[0];
+	if (!lit) return EMPTY_BLOCK;
+	const [shortCol, countCol] = (props.columns ?? []).map(col => col.id);
+	const shortOf = (item: TspPickerItem) => (shortCol ? factText(item, shortCol) : "");
+	const tile = (item: TspPickerItem, caption: string, count: string): string => {
+		const glyph = props.term?.glyphs?.[item.id] ?? { t: "·" };
+		const isLit = item === lit;
+		let body = ` ${cx.theme.style(glyph.s ?? "muted", glyph.t)}`;
+		if (caption) body += ` ${cx.theme.style(isLit ? "accent strong" : "dim", caption)}`;
+		if (count) body += ` ${cx.theme.fg("dim", `(${count})`)}`;
+		body += " ";
+		return isLit ? cx.theme.bg("selectedBg", body) : body;
+	};
+	const room = cx.width - visibleWidth(indent);
+	const forms: readonly ((item: TspPickerItem) => string)[] = [
+		item => tile(item, plain(item.label), countCol ? factText(item, countCol) : ""),
+		item => tile(item, shortOf(item), ""),
+		item => tile(item, "", ""),
+	];
+	let strip = "";
+	for (const form of forms) {
+		strip = items.map(form).join("");
+		if (visibleWidth(strip) <= room) break;
 	}
-	const sep = cx.theme.fg("dim", " · ");
-	return truncate(`  ${parts.join(sep)}  ${cx.theme.fg("dim", "(⇧Tab)")}`, width, "");
+	const short = shortOf(lit);
+	const about = `${short ? `${cx.theme.style("accent strong", short)}  ` : ""}${cx.theme.fg("muted", plain(lit.detail))}`;
+	return {
+		rows: [
+			truncate(`${indent}${strip}`, cx.width, ""),
+			truncate(`${indent}${about}`, cx.width, "…"),
+		],
+	};
 }
 
 function renderLevelFooter(cx: PaintContext, level: TspPickerLevel, width: number): string {
@@ -262,9 +294,10 @@ function paintMentionPopup(node: UiNode, cx: PaintContext): Block {
 	const props = node.props() as TspPickerProps & { term?: MentionPopupTerm };
 	const items = props.items ?? [];
 	if (items.length === 0) return EMPTY_BLOCK;
+	const marker = `${cx.theme.symbols.symbol("nav.cursor")} `;
+	const blank = " ".repeat(visibleWidth(marker));
+	if (props.layout === "tiles") return paintMentionTiles(props, items, cx, blank);
 	const order = props.order ?? items.map(item => item.id);
-	const scopes = props.scopes ?? [];
-	const activeScope = props.scope;
 	const selectedId = props.selected ?? undefined;
 	const level = props.level ?? undefined;
 	const term = props.term ?? { maxLines: 10 };
@@ -273,13 +306,7 @@ function paintMentionPopup(node: UiNode, cx: PaintContext): Block {
 	for (const item of items) byId.set(item.id, item);
 
 	const rows: string[] = [];
-	if (scopes.length > 1) {
-		rows.push(renderScopeStrip(cx, scopes, activeScope, cx.width));
-	}
-
-	const marker = `${cx.theme.symbols.symbol("nav.cursor")} `;
-	const blank = " ".repeat(visibleWidth(marker));
-	const listBudget = Math.max(3, term.maxLines - (scopes.length > 1 ? 1 : 0) - (level ? 1 : 0));
+	const listBudget = Math.max(3, term.maxLines - (level ? 1 : 0));
 
 	const colGap = 2;
 	const colIds = (props.columns ?? []).map(col => col.id);
@@ -292,13 +319,14 @@ function paintMentionPopup(node: UiNode, cx: PaintContext): Block {
 	let widestTags = 0;
 	const factWidths: number[] = colIds.map(() => 0);
 
+	const glyphOf = (item: TspPickerItem): TspSpan =>
+		term.glyphs?.[item.id] ?? { t: item.dot ? "●" : "·", ...(item.dot ? { s: item.dot } : {}) };
 	for (const item of items) {
-		const g = term.glyphs?.[item.id] ?? (item.dot ? "●" : "·");
-		widestGlyph = Math.max(widestGlyph, visibleWidth(g));
+		widestGlyph = Math.max(widestGlyph, visibleWidth(glyphOf(item).t));
 		widestLabel = Math.max(widestLabel, visibleWidth(plain(item.label)));
 		const detail = plain(item.detail);
 		widestDetail = Math.max(widestDetail, visibleWidth(detail));
-		widestTags = Math.max(widestTags, visibleWidth(formatMentionTags(item, detail)));
+		widestTags = Math.max(widestTags, visibleWidth(tagText(mentionTags(item, detail))));
 		for (let i = 0; i < colIds.length; i++) {
 			factWidths[i] = Math.max(factWidths[i]!, visibleWidth(factText(item, colIds[i]!)));
 		}
@@ -315,26 +343,33 @@ function paintMentionPopup(node: UiNode, cx: PaintContext): Block {
 	const availForMain = Math.max(10, contentWidth - prefixWidth - factsTotal - tagsTotal);
 	const labelCol = Math.min(30, Math.max(10, Math.min(widestLabel, Math.floor(availForMain * 0.55))));
 	const remainingForDetail = availForMain - labelCol - colGap;
-	const detailCol = widestDetail > 0 && remainingForDetail >= 8 ? Math.min(36, widestDetail, remainingForDetail) : 0;
+	const detailCol = widestDetail > 0 && remainingForDetail >= 8 ? Math.min(48, widestDetail, remainingForDetail) : 0;
 
 	type PaintedEntry = { readonly line: string; readonly isSelected: boolean; readonly isHeader: boolean };
 	const painted: PaintedEntry[] = [];
 
 	for (const entry of order) {
 		if (isPickerGroup(entry)) {
-			const line = `${blank}${cx.theme.fg("dim", plain(entry.label))}`;
+			// A category head: `<glyph> Files (5)`, the glyph in the category's color.
+			const style = mentionStyle(entry.group);
+			const icon = style && cx.theme.symbols.symbol(style.symbol);
+			const lead = style && icon ? `${cx.theme.fg(style.color, icon)} ` : "";
+			const head = entry.count === undefined ? plain(entry.label) : `${plain(entry.label)} (${entry.count})`;
+			const line = `${blank}${lead}${cx.theme.fg("dim", head)}`;
 			painted.push({ line: truncate(line, contentWidth, ""), isSelected: false, isHeader: true });
 			continue;
 		}
 		const item = byId.get(entry);
 		if (!item) continue;
 		const isSelected = item.id === selectedId;
-		const glyph = term.glyphs?.[item.id] ?? (item.dot ? "●" : "·");
+		const glyph = glyphOf(item);
 		const label = plain(item.label);
 		const detail = plain(item.detail);
-		const tags = formatMentionTags(item, detail);
+		const tags = mentionTags(item, detail);
+		// The selected row keeps its glyph and tag colors; its marker, label, detail and facts take the accent.
+		const rest = isSelected ? "accent" : "muted";
 
-		const glyphPad = " ".repeat(Math.max(1, widestGlyph - visibleWidth(glyph) + 1));
+		const glyphPad = " ".repeat(Math.max(1, widestGlyph - visibleWidth(glyph.t) + 1));
 		const labelStr = truncate(label, labelCol, "…");
 		const hasRightCols = detailCol > 0 || tagsCol > 0 || activeFacts.length > 0;
 		const labelCell = hasRightCols
@@ -344,22 +379,22 @@ function paintMentionPopup(node: UiNode, cx: PaintContext): Block {
 		const trailingCols: string[] = [];
 		if (detailCol > 0) {
 			const d = truncate(detail, detailCol, "…");
-			trailingCols.push(`${d}${" ".repeat(Math.max(0, detailCol - visibleWidth(d)))}`);
+			trailingCols.push(`${cx.theme.fg(rest, d)}${" ".repeat(Math.max(0, detailCol - visibleWidth(d)))}`);
 		}
 		if (tagsCol > 0) {
-			const t = truncate(tags, tagsCol, "…");
+			const t = truncate(tags.map(tag => cx.theme.style(tag.s, tag.t)).join(" "), tagsCol, "…");
 			trailingCols.push(`${t}${" ".repeat(Math.max(0, tagsCol - visibleWidth(t)))}`);
 		}
 		for (const col of activeFacts) {
 			const f = truncate(factText(item, col.id), col.width, "");
-			trailingCols.push(`${" ".repeat(Math.max(0, col.width - visibleWidth(f)))}${f}`);
+			trailingCols.push(`${" ".repeat(Math.max(0, col.width - visibleWidth(f)))}${cx.theme.fg(rest, f)}`);
 		}
 
 		const tail =
 			trailingCols.length > 0 ? `${" ".repeat(colGap)}${trailingCols.join(" ".repeat(colGap))}`.trimEnd() : "";
-		const line = isSelected
-			? cx.theme.fg("accent", `${marker}${glyph}${glyphPad}${labelCell}${tail}`)
-			: `${blank}${cx.theme.fg("muted", glyph)}${glyphPad}${labelCell}${tail ? cx.theme.fg("muted", tail) : ""}`;
+		const lead = isSelected ? cx.theme.fg("accent", marker) : blank;
+		const name = isSelected ? cx.theme.fg("accent", labelCell) : labelCell;
+		const line = `${lead}${cx.theme.style(glyph.s ?? "muted", glyph.t)}${glyphPad}${name}${tail}`;
 		painted.push({ line: truncate(line, contentWidth, ""), isSelected, isHeader: false });
 	}
 

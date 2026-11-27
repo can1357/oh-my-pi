@@ -9,4 +9,5 @@ export * from "./sources/models";
 export * from "./sources/sessions";
 export * from "./sources/ssh";
 export * from "./sources/vcs";
+export * from "./style";
 export * from "./types";

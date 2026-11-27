@@ -66,7 +66,7 @@ export class UnifiedMentionEngine {
 	constructor(options: UnifiedMentionEngineOptions) {
 		if (options.sources) {
 			this.#sources = options.sources;
-			this.#sourceMetas = options.sources.map(s => ({ id: s.id, label: s.label, icon: s.icon }));
+			this.#sourceMetas = options.sources.map(s => ({ id: s.id, label: s.label }));
 			return;
 		}
 		const vcsSource = new VcsMentionSource(options.getBasePath);
@@ -96,7 +96,7 @@ export class UnifiedMentionEngine {
 		);
 		this.#filesSource = filesSource;
 		this.#sources = sources;
-		this.#sourceMetas = sources.map(s => ({ id: s.id, label: s.label, icon: s.icon }));
+		this.#sourceMetas = sources.map(s => ({ id: s.id, label: s.label }));
 	}
 
 	/** Pre-warm background caches (cwd dir listing, VCS snapshot, GitHub index). */
@@ -105,23 +105,17 @@ export class UnifiedMentionEngine {
 	}
 
 	/** Parse the live mention token before the caret using live provider/dir hints. */
-	parse(textBeforeCursor: string, pinnedScope?: MentionCategoryId | null): MentionQuery | null {
+	parse(textBeforeCursor: string): MentionQuery | null {
 		return parseMentionQuery(textBeforeCursor, {
-			pinnedScope,
 			isKnownProvider: this.#modelsSource ? head => this.#modelsSource!.hasProviderPrefix(head) : undefined,
 			isKnownDir: this.#filesSource ? head => this.#filesSource!.isKnownDirSync(head) : undefined,
 		});
 	}
 
 	/** Run Tier 0 / warm-cache query synchronously for 0ms frame-0 painting. */
-	querySync(
-		lines: readonly string[],
-		cursorLine: number,
-		cursorCol: number,
-		pinnedScope?: MentionCategoryId | null,
-	): UnifiedMentionSnapshot | null {
+	querySync(lines: readonly string[], cursorLine: number, cursorCol: number): UnifiedMentionSnapshot | null {
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
-		const query = this.parse(textBeforeCursor, pinnedScope);
+		const query = this.parse(textBeforeCursor);
 		if (!query) return null;
 		const { results, hasAsyncPending } = this.#collectSyncResults(query);
 		const arbitrated = arbitrateMentions(query, [...results.values()], this.#sourceMetas);
@@ -143,13 +137,12 @@ export class UnifiedMentionEngine {
 		lines: readonly string[],
 		cursorLine: number,
 		cursorCol: number,
-		pinnedScope: MentionCategoryId | null | undefined,
 		signal: AbortSignal | undefined,
 		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
 	): Promise<UnifiedMentionSnapshot | null> {
 		if (signal?.aborted) return null;
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
-		const query = this.parse(textBeforeCursor, pinnedScope);
+		const query = this.parse(textBeforeCursor);
 		if (!query) return null;
 
 		const { results, asyncSources } = this.#collectSyncResults(query);
@@ -283,7 +276,7 @@ export class UnifiedMentionEngine {
 	} {
 		const results = new Map<MentionCategoryId, MentionSourceResult>();
 		const asyncSources: MentionSource[] = [];
-		const explicitLock = query.pinnedScope ?? query.syntaxLock;
+		const explicitLock = query.syntaxLock;
 		const canNarrowPrevious =
 			this.#lastPrefix !== undefined &&
 			this.#lastResults !== undefined &&
