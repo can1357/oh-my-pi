@@ -143,7 +143,7 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	const output = withoutDrawnPlaceholders(printed, props.term?.imageLinks, resultPictures(node, cx).length);
 	const outputLines = output.trim().length > 0 ? ansiLines(output).map(line => theme.fg("toolOutput", line)) : [];
 	const limit = Math.min(term.previewLines ?? PREVIEW_WINDOW_ROWS, PREVIEW_WINDOW_ROWS);
-	const shown = tailBlock(theme, outputLines, expanded ? Number.POSITIVE_INFINITY : limit, frameInner(width));
+	const shown = tailBlock(theme, outputLines, expanded ? Number.POSITIVE_INFINITY : limit, frameInner(width), node.id);
 	if (term.warning) shown.literal(theme.fg("warning", bracketed(theme, term.warning)));
 	const stats = (term.stats ?? []).map(stat => statText(theme, stat));
 	if (term.liveClock) {

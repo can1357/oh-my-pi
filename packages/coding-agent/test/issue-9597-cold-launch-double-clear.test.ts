@@ -88,13 +88,13 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		});
 		terminal.press("ctrl+d");
 		expect(await exit.promise).toBe(0);
-		if (cachedMode !== config.mode) {
-			// The speculative fullscreen frame is already visible when Settings resolve to inline.
-			await terminal.waitFor(() => terminal.memory.output.some(chunk => chunk.includes("\x1b[?1049h")));
-		} else {
-			// A cached inline prediction isn't permission to paint the normal screen.
-			expect(terminal.screen()).toEqual([]);
-		}
+		terminal.type("startup draft");
+		await terminal.waitFor(
+			rows => rows.some(row => row.includes("18.0.4")) && rows.some(row => row.includes("startup draft")),
+		);
+		expect(terminal.engine.isMainScreen).toBe(false);
+		const draftRow = () => terminal.screen().findIndex(row => row.includes("startup draft"));
+		const previewRow = draftRow();
 		expect(countResets(terminal.memory.output)).toBe(0);
 		applyStartupComposerPreferences({
 			...config,
@@ -106,6 +106,10 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		const lease = takeStartupComposerLease();
 		expect(lease).toBeDefined();
 		await lease!.ready;
+		await terminal.waitFor(() => terminal.engine.isMainScreen && draftRow() >= 0);
+		// An inline preview uses the inline layout: only the underlying buffer changes.
+		if (cachedMode === "inline") expect(draftRow()).toBe(previewRow);
+		else expect(draftRow()).toBeLessThan(previewRow);
 		const testSession = await createTestSession({ inMemory: true });
 		if (resuming) {
 			testSession.sessionManager.appendMessage(userMsg("resume marker question"));

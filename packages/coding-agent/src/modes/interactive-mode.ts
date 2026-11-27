@@ -170,7 +170,7 @@ import { hasSpotlightOriginal } from "./view-model/overlays/spotlight-sheet";
 import { vocalizer } from "../tts/vocalizer";
 
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
-import { copyToClipboard, copyToClipboardWithResult, readTextFromClipboard } from "../utils/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 
@@ -1987,7 +1987,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	#onPromptAction(act: string, text: string, timestamp: number): void {
 		switch (act) {
 			case "copy-message":
-				void this.#copyToClipboardWithStatus(text);
+				copyToClipboard(text).then(
+					() => this.showStatus("Copied to clipboard"),
+					(error: unknown) =>
+						this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
+				);
 				return;
 			case "edit-turn":
 			case "retry-turn":
@@ -7578,12 +7582,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 	}
 
-	/** Copy `text` and say how far it got: OSC 52 alone (over SSH, say) reaches the terminal unconfirmed. */
 	async #copyToClipboardWithStatus(text: string): Promise<void> {
-		const result = await copyToClipboardWithResult(text);
-		if (result === "success") this.showStatus("Copied to clipboard");
-		else if (result === "unconfirmed-terminal") this.showStatus("Sent to the terminal clipboard (unconfirmed)");
-		else this.showWarning("Failed to copy to clipboard");
+		try {
+			await copyToClipboard(text);
+			this.showStatus("Copied to clipboard");
+		} catch (error) {
+			this.showWarning(`Failed to copy: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	/**

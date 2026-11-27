@@ -34,6 +34,7 @@ import {
 import type { InputEvent, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
 import type {
+	FramePresentation,
 	ScrollMark,
 	SelectionClipboardResult,
 	TermPresentation,
@@ -79,10 +80,12 @@ export interface ShellStartOptions {
 	/** The terminal clock painters read (scripted replays); default the wall clock. */
 	readonly clock?: Accessor<number>;
 	/**
-	 * How the terminal renderer presents the transcript (`tui.mode`); inline by default. `null`
-	 * holds paint pending the startup mode, without suspending input or native rendering.
+	 * How the terminal renderer presents the transcript. Preview either layout on the
+	 * alternate screen at startup; `null` holds paint without suspending input.
 	 */
-	readonly presentation?: Accessor<TermPresentation | null>;
+	readonly presentation?: Accessor<FramePresentation>;
+	/** Give a new inline session a fresh screen and scrollback. */
+	readonly clearHistory?: boolean;
 	/** The fullscreen scrollbar's prompt marks. */
 	readonly marks?: Accessor<readonly ScrollMark[]>;
 	/** How fullscreen uses the mouse (`tui.fullscreenMouse`); `select` by default. */
@@ -206,6 +209,7 @@ export class Shell {
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
 			...(options.presentation ? { presentation: options.presentation } : {}),
+			clearHistory: options.clearHistory,
 			...(options.marks ? { marks: options.marks } : {}),
 			...(options.pointer ? { pointer: options.pointer } : {}),
 			...(options.copyOnRelease ? { copyOnRelease: options.copyOnRelease } : {}),

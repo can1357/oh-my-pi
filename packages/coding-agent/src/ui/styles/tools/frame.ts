@@ -12,8 +12,8 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { expandKeyLabel } from "../../keys/hints";
 import { type ToolProps, toolProps } from "./look";
-import type { RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
-import { RowText, sliceText } from "../rendered-text";
+import { lazyText, type RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { RowText, sliceText, textOf } from "../rendered-text";
 
 /** The run of rule glyphs before a head, a section label or a footer. */
 const LEAD = 3;
@@ -286,17 +286,30 @@ export function capLines(theme: Theme, lines: readonly string[], max: number): s
  * rows kept below the hidden line count and the tool expansion hint. Each
  * line copies as one logical line; the marker is decoration.
  */
-export function tailBlock(theme: Theme, lines: readonly string[], limit: number, width: number): RowText {
+export function tailBlock(
+	theme: Theme,
+	lines: readonly string[],
+	limit: number,
+	width: number,
+	source: number,
+): RowText {
 	const all = new RowText();
+	let lastLineRows = 0;
 	for (const line of lines) {
 		const wrapped = wrap(line, Math.max(1, width));
+		lastLineRows = Math.max(1, wrapped.length);
 		all.wrapped(line, wrapped.length > 0 ? wrapped : [""]);
 	}
 	const total = all.length;
 	if (total <= limit) return all;
 	const start = limit <= 0 ? total : total - limit;
 	const marker = theme.fg("dim", `… (${start} earlier lines, showing ${total - start} of ${total})`);
-	return new RowText().deco(`${marker} ${expandHint(theme)}`).block(sliceText(all.done(), start));
+	const shown = sliceText(all.done(), start);
+	const tail = { source, lines: lines.length, lastLineRows };
+	return new RowText().deco(`${marker} ${expandHint(theme)}`).block({
+		rows: shown.rows,
+		text: lazyText(() => textOf(shown).map(row => row && { ...row, tail })),
+	});
 }
 
 /** `⟦text⟧` with the theme's brackets. */

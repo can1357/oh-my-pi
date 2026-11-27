@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	copyFullscreenSelection,
 	copyToClipboard,
-	copyToClipboardWithResult,
 	isClipboardTerminalLocal,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
@@ -452,7 +452,7 @@ describe("isClipboardTerminalLocal", () => {
 	});
 });
 
-describe("copyToClipboardWithResult", () => {
+describe("clipboard copy routing", () => {
 	type WriteCallback = (error?: Error | null) => void;
 	const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 
@@ -490,7 +490,7 @@ describe("copyToClipboardWithResult", () => {
 		fakeStdout(false);
 		const nativeCopy = vi.spyOn(native, "copyToClipboard").mockImplementation(() => {});
 
-		expect(await copyToClipboardWithResult("native payload")).toBe("success");
+		expect(await copyFullscreenSelection("native payload")).toBe("success");
 		expect(nativeCopy).toHaveBeenCalledWith("native payload");
 	});
 
@@ -500,7 +500,7 @@ describe("copyToClipboardWithResult", () => {
 			throw new Error("clipboard unavailable");
 		});
 
-		expect(await copyToClipboardWithResult("terminal payload")).toBe("unconfirmed-terminal");
+		expect(await copyFullscreenSelection("terminal payload")).toBe("unconfirmed-terminal");
 		expect(output).toEqual([osc52("terminal payload")]);
 	});
 
@@ -510,7 +510,7 @@ describe("copyToClipboardWithResult", () => {
 			throw new Error("clipboard unavailable");
 		});
 
-		expect(await copyToClipboardWithResult("lost payload")).toBe("failed");
+		expect(await copyFullscreenSelection("lost payload")).toBe("failed");
 		expect(output).toEqual([]);
 	});
 
@@ -523,24 +523,55 @@ describe("copyToClipboardWithResult", () => {
 		expect(await copyToClipboard("legacy payload")).toBeUndefined();
 	});
 
+	it("still copies to an SSH-forwarded display after sending OSC 52", async () => {
+		process.env.SSH_CONNECTION = "192.0.2.10 50000 192.0.2.20 22";
+		process.env.DISPLAY = "localhost:10.0";
+		const output = fakeStdout(true);
+		const nativeCopy = vi.spyOn(native, "copyToClipboard").mockImplementation(text => {
+			output.push(`native: ${text}`);
+		});
+
+		await copyToClipboard("forwarded payload");
+
+		expect(output).toEqual([osc52("forwarded payload"), "native: forwarded payload"]);
+		expect(nativeCopy).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([0, 1])("still tries Termux over SSH and falls back only on failure (exit %i)", async exitCode => {
+		process.env.SSH_TTY = "/dev/pts/1";
+		process.env.TERMUX_VERSION = "fixture";
+		const output = fakeStdout(false);
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "", exitCode);
+		const nativeCopy = vi.spyOn(native, "copyToClipboard").mockImplementation(() => {});
+
+		await copyToClipboard("termux payload");
+
+		expect(calls.map(call => call.cmd)).toEqual([["termux-clipboard-set"]]);
+		expect(calls[0]?.options.stdin).toEqual(Buffer.from("termux payload"));
+		if (exitCode === 0) expect(nativeCopy).not.toHaveBeenCalled();
+		else expect(nativeCopy).toHaveBeenCalledWith("termux payload");
+		expect(output).toEqual([]);
+	});
+
 	it.each([
 		{ platform: "linux", termux: false, tty: true, expected: "unconfirmed-terminal" },
 		{ platform: "darwin", termux: false, tty: true, expected: "unconfirmed-terminal" },
 		{ platform: "linux", termux: true, tty: true, expected: "unconfirmed-terminal" },
 		{ platform: "linux", termux: false, tty: false, expected: "failed" },
 	] as const)(
-		"never runs native backends over SSH ($platform, Termux=$termux, TTY=$tty)",
+		"never sends a fullscreen selection to a system backend over SSH ($platform, Termux=$termux, TTY=$tty)",
 		async ({ platform, termux, tty, expected }) => {
 			setPlatform(platform);
 			process.env.SSH_CONNECTION = "192.0.2.10 50000 192.0.2.20 22";
-			process.env.DISPLAY = ":0";
+			process.env.DISPLAY = "localhost:10.0";
 			if (termux) process.env.TERMUX_VERSION = "fixture";
 			const output = fakeStdout(tty);
 			const nativeCopy = vi.spyOn(native, "copyToClipboard").mockImplementation(() => {});
 			const calls: SpawnCall[] = [];
 			spySpawn(calls, "");
 
-			expect(await copyToClipboardWithResult("ssh payload")).toBe(expected);
+			expect(await copyFullscreenSelection("ssh payload")).toBe(expected);
 			expect(nativeCopy).not.toHaveBeenCalled();
 			expect(calls).toEqual([]);
 			expect(output).toEqual(tty ? [osc52("ssh payload")] : []);

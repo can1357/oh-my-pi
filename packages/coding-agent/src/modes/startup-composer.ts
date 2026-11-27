@@ -63,15 +63,13 @@ export interface PrepaintComposerPreferences extends StartupPreferences {
 
 interface PendingFrame {
 	readonly frame: AppFrame;
-	/** Settles once the host is running, even when its first ANSI paint still awaits settings. */
+	/** Settles once the host is running and can be adopted. */
 	readonly started: Promise<void>;
 	readonly cwd: string;
 	/** Speculation store to refresh; `undefined` when caching is off or unavailable. */
 	readonly cache: StartupCache | undefined;
 	/** Drops the prepaint key handler (emergency Ctrl+C / Ctrl+D). */
 	readonly releaseKeys: () => void;
-	/** An inline launch clears exactly once, whichever resolves first: settings or the host. */
-	needsInlineClear: boolean;
 }
 
 let pending: PendingFrame | undefined;
@@ -136,10 +134,10 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	});
 	// Nothing would submit yet: the interactive mode lifts this once its pipeline exists.
 	frame.composer.setDisableSubmit(true);
-	// Even an empty cache may belong to a saved fullscreen launch. A mistaken alternate frame
-	// is reversible; a mistaken inline frame (including its ED3) is not.
+	// The cache predicts layout, not which buffer we own: a hand-edited fullscreen setting
+	// must still find the shell exactly as it was, even after an inline preview.
 	const override = options.tuiMode ?? parsePresentationEnv(Bun.env[PRESENTATION_ENV] ?? "");
-	frame.presentation.set(override ?? (preferences.mode === "fullscreen" ? "fullscreen" : null));
+	frame.presentation.set(override ?? { preview: preferences.mode });
 	// The bar and border a fresh session here will show; the interactive mode swaps in the live ones.
 	const status = options.status ?? cached.status;
 	if (status) frame.setStatusLine(predictedStatusLine(status, cwd), null);
@@ -167,25 +165,18 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		exit(0);
 		return true;
 	});
-	const current: PendingFrame = {
+	const started = frame.start({
+		clearHistory: true,
+		resizeScrollback: preferences.resizeScrollback,
+		driver: options.driver,
+	});
+	pending = {
 		frame,
 		cwd,
 		cache,
 		releaseKeys,
-		needsInlineClear: true,
-		started: frame.start({ resizeScrollback: preferences.resizeScrollback, driver: options.driver }).then(() => {
-			clearInlineOnce(current);
-			if (cache) rememberAppearance(frame, cache, cwd);
-		}),
+		started: cache ? started.then(() => rememberAppearance(frame, cache, cwd)) : started,
 	};
-	pending = current;
-}
-
-function clearInlineOnce(current: PendingFrame): void {
-	const { frame } = current;
-	if (!current.needsInlineClear || frame.presentation.peek() !== "inline" || !frame.shell.host) return;
-	current.needsInlineClear = false;
-	frame.shell.host.replayHistory();
 }
 
 function stopStartupFrame(frame: AppFrame, started: Promise<void>): void {
@@ -247,7 +238,5 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 		frame.pointer.set(pointer);
 		frame.copyOnRelease.set(copyOnRelease);
 	});
-	if (presentation === "inline") clearInlineOnce(current);
-	else current.needsInlineClear = false;
 	current.cache?.write(current.cwd, preferences, theme);
 }

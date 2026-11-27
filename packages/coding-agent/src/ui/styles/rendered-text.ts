@@ -142,16 +142,32 @@ function shiftAll(text: RenderedText, column: number): RenderedText {
  */
 export function mapPrefixed(source: string, rows: readonly string[], first: string, rest = first): RenderedText {
 	const leads: number[] = [];
-	const cut = !source.includes("…");
 	const bodies = rows.map((row, index) => {
-		let plain = Bun.stripANSI(row).trimEnd();
-		if (cut && plain.endsWith("…")) plain = plain.slice(0, -1);
+		const plain = Bun.stripANSI(row).trimEnd();
 		const prefix = index === 0 ? first : rest;
 		const has = prefix !== "" && plain.startsWith(prefix);
 		leads.push(has ? visibleWidth(prefix) : 0);
 		return has ? plain.slice(prefix.length) : plain;
 	});
-	return mapWrappedText(source, bodies).map((row, index) => offsetRenderedText(row, leads[index]!));
+	const mapped = mapWrappedText(source, bodies).map((row, index) => offsetRenderedText(row, leads[index]!));
+	// A prefixed label can be clipped on any logical line, not just the last line of the block.
+	let start = 0;
+	while (start < mapped.length) {
+		const row = mapped[start];
+		if (!row) {
+			start++;
+			continue;
+		}
+		let end = start + 1;
+		while (mapped[end]?.line === row.line) end++;
+		const shown = mapped[end - 1]!.end;
+		if (shown < row.line.text.length) {
+			const line = { text: row.line.text.slice(0, shown) };
+			for (let i = start; i < end; i++) mapped[i] = { ...mapped[i]!, line };
+		}
+		start = end;
+	}
+	return mapped;
 }
 
 /** Rows `start`..`end` of `block` with their text. */

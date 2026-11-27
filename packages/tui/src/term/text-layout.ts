@@ -27,6 +27,13 @@ export interface RenderedTextSpan {
 	readonly column: number;
 }
 
+/** The end of an unclamped output stream: rewrapping an earlier line does not advance its tail. */
+export interface RenderedTextTail {
+	readonly source: number;
+	readonly lines: number;
+	readonly lastLineRows: number;
+}
+
 /**
  * A painted row's content: `line.text.slice(start, end)` drawn from block
  * column `column`; `spans` lists every run when they are disjoint (list
@@ -35,6 +42,8 @@ export interface RenderedTextSpan {
 export interface RenderedTextRow extends RenderedTextSpan {
 	readonly line: RenderedTextLine;
 	readonly spans?: readonly RenderedTextSpan[];
+	/** Shared by the displayed rows of a rolling preview, identified by the producer's stable node id. */
+	readonly tail?: RenderedTextTail;
 }
 
 /** Aligned with `Block.rows`; `undefined` marks a decoration row (border, rule, padding, image). */
@@ -119,9 +128,7 @@ export function lazyText(compute: () => RenderedText): () => RenderedText {
 export function offsetRenderedText(row: RenderedTextRow | undefined, columns: number): RenderedTextRow | undefined {
 	if (!row || columns === 0) return row;
 	return {
-		line: row.line,
-		start: row.start,
-		end: row.end,
+		...row,
 		column: row.column + columns,
 		...(row.spans ? { spans: row.spans.map(span => ({ ...span, column: span.column + columns })) } : {}),
 	};
@@ -144,7 +151,8 @@ export function clipRenderedText(row: RenderedTextRow | undefined, limit: number
 		spans.push(kept === shown.length ? span : { start: span.start, end: span.start + kept, column: span.column });
 	}
 	if (!changed) return row;
-	return withSpans(row.line, spans);
+	const clipped = withSpans(row.line, spans);
+	return row.tail ? { ...clipped, tail: row.tail } : clipped;
 }
 
 /** A row of `line` showing `spans` (the first one anchors it); a row showing none keeps its line with no runs. */
@@ -203,7 +211,8 @@ export function sliceRenderedText(text: RenderedText, from: number, to: number):
 			end: span.end - moved.shift,
 			column: span.column,
 		}));
-		return withSpans(moved.line, spans);
+		const clipped = withSpans(moved.line, spans);
+		return row.tail ? { ...clipped, tail: row.tail } : clipped;
 	});
 }
 

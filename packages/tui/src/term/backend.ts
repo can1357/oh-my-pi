@@ -69,6 +69,14 @@ const SMOOTH_TICK_MS = 1000 / 20;
  * program on the alternate screen.
  */
 export type TermPresentation = "inline" | "fullscreen";
+
+/** A startup prediction uses the alternate buffer for either layout. `null` suppresses paint. */
+export type FramePresentation = TermPresentation | { readonly preview: TermPresentation } | null;
+
+function frameLayout(frame: FramePresentation): TermPresentation | null {
+	return typeof frame === "object" ? (frame?.preview ?? null) : frame;
+}
+
 /**
  * A turn's outcome as its scrollbar mark shows it (`warning`: completed with tool failures;
  * `error`: errored or aborted).
@@ -125,10 +133,12 @@ export interface TermBackendOptions {
 	/**
 	 * Draw `main` inline (default) or fullscreen: the transcript scrolls inside the program on
 	 * the alternate screen above the pinned dock, and terminal history is never written (see
-	 * term/fullscreen.ts). `null` holds all frames until startup resolves the presentation;
-	 * keyboard and paste input still reach the focused node.
+	 * term/fullscreen.ts). A preview paints that layout on the alternate screen. `null` holds
+	 * all frames; keyboard and paste input still reach the focused node.
 	 */
-	readonly presentation?: Accessor<TermPresentation | null>;
+	readonly presentation?: Accessor<FramePresentation>;
+	/** Clear the shell's history with the first authoritative frame if it is inline. */
+	readonly clearHistory?: boolean;
 	/** Marks on the fullscreen transcript's marks lane (main nodes, one per turn). */
 	readonly marks?: Accessor<readonly ScrollMark[]>;
 	/** What the pointer does over the fullscreen transcript. Default `select`. */
@@ -417,6 +427,7 @@ export class TermBackend {
 	#presentation: TermPresentation = "inline";
 	/** A display reset asked for while fullscreen: it runs once the presentation turns inline. */
 	#resetOwed = false;
+	#clearOnStart: boolean;
 	/** Sheets the last transcript frame drew over it (they keep their own pointer hits). */
 	#sheets: readonly Sheet[] = [];
 
@@ -424,6 +435,7 @@ export class TermBackend {
 		this.#surface = options.surface;
 		this.#driver = options.driver;
 		this.#options = options;
+		this.#clearOnStart = options.clearHistory === true;
 		this.#hyperlinks = signal(options.driver.capabilities.hyperlinks);
 		const terminalHyperlinks = this.#hyperlinks;
 		const hyperlinks: Accessor<boolean> = options.hyperlinks
@@ -453,7 +465,9 @@ export class TermBackend {
 			...(allowTextSizing
 				? {
 						textSizing: () =>
-							allowTextSizing() && terminalTextSizing() && options.presentation?.() !== "fullscreen",
+							allowTextSizing() &&
+							terminalTextSizing() &&
+							frameLayout(options.presentation?.() ?? "inline") !== "fullscreen",
 					}
 				: {}),
 		};
@@ -499,7 +513,7 @@ export class TermBackend {
 	}
 
 	/** Current presentation, without subscribing the caller; an absent option is inline. */
-	#presentationNow(): TermPresentation | null {
+	#presentationNow(): FramePresentation {
 		return this.#options.presentation ? untrack(this.#options.presentation) : "inline";
 	}
 
@@ -612,6 +626,13 @@ export class TermBackend {
 	}
 
 	#present(): void {
+		if (this.#clearOnStart) {
+			const mode = this.#presentationNow();
+			if (typeof mode === "string") {
+				this.#clearOnStart = false;
+				if (mode === "inline") this.#resetOwed = true;
+			}
+		}
 		// Inline again with a reset owed: it runs before this frame, which then carries the replay.
 		if (this.#resetOwed && this.#presentationNow() === "inline") {
 			this.#resetOwed = false;
@@ -820,8 +841,10 @@ export class TermBackend {
 	}
 
 	#compose(): FramePlan | null {
-		const presentation = this.#options.presentation ? this.#options.presentation() : "inline";
+		const mode = this.#options.presentation ? this.#options.presentation() : "inline";
+		const presentation = frameLayout(mode);
 		if (presentation === null) return null;
+		const preview = typeof mode === "object";
 		const width = Math.max(1, this.#driver.columns);
 		const height = Math.max(1, this.#driver.rows);
 		const flush = this.#flushing;
@@ -937,7 +960,7 @@ export class TermBackend {
 		// in the same frame; streaming heads start over (their stable rows go out again under pressure).
 		let ledger: string[] | undefined;
 		let ledgerLast: UiNode | undefined;
-		if (this.#replay && !this.#pending) {
+		if (!preview && this.#replay && !this.#pending) {
 			this.#emitted.clear();
 			this.#committed = new Set(main.slice(0, start));
 			ledger = [];
@@ -1024,7 +1047,7 @@ export class TermBackend {
 		// exactly when `i <= boundary`: retirement asks nothing else of the blocks above it.
 		// The shutdown flush retires every live block, settled or not (frozen as it is now).
 		let boundary = flush ? count - 1 : -1;
-		for (let i = count - 1, rows = 0; !flush && i >= 0; i--) {
+		for (let i = count - 1, rows = 0; !preview && !flush && i >= 0; i--) {
 			rows += shownRows(i);
 			if (rows > capacity) {
 				boundary = i;
@@ -1175,7 +1198,8 @@ export class TermBackend {
 			// The rows from the viewport's top down: a shrunk viewport keeps its top (only a dock pads it down).
 			const held = !fresh && pin.bottom ? Math.min(height, pin.span - written) : 0;
 			const span = Math.max(viewport.length + dockRows, held);
-			this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
+			if (!preview)
+				this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
 			// The screen rows above the viewport: everything written so far, or (at the bottom) what it leaves.
 			const above = bottom ? Math.max(0, height - span) : below + written;
 			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, above);
@@ -1200,6 +1224,8 @@ export class TermBackend {
 		if (layer.length > 0) for (; free > 0; free--) viewport.push("");
 		for (const node of layer) place(viewport, node);
 		this.#hits = hits;
+		// Keep an inline prediction's geometry without handing any of its rows to shell history.
+		if (preview) return { viewport: [], fullscreen: viewport, cursor };
 		return { ...(history ? { history } : {}), viewport, cursor };
 	}
 

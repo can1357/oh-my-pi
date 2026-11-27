@@ -13,6 +13,8 @@ The terminal backend never interprets messages, tools or transcript blocks: it s
 
 `startHost()` starts the driver, negotiates TSP, and renders the program's `Surface` natively (Tern) or with the `TermBackend`. The coding agent's frame puts the transcript blocks in `main` and live chrome in `dock`.
 
+Before settings load, the startup composer can use cached geometry, but it cannot trust a cached mode to decide whether to clear shell history. Without an explicit launch override, the terminal preview draws on the alternate screen. Confirming inline mode returns to the normal screen and clears it with the first inline frame. Confirming fullscreen leaves the normal screen untouched.
+
 Each terminal frame (`TermBackend.#compose`):
 
 1. Paint the dock; the rest of the screen height is the room for `main`.

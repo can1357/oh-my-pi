@@ -5,7 +5,7 @@
  * ahead of the composer, which would take PageUp/PageDown for its own caret.
  */
 import type { Accessor, TranscriptScroller, UiNode } from "@oh-my-pi/pi-tui";
-import type { TermPresentation } from "@oh-my-pi/pi-tui/term/backend";
+import type { FramePresentation } from "@oh-my-pi/pi-tui/term/backend";
 import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import type { KeybindingsManager } from "../../config/keybindings/keybindings";
 import type { Shell } from "../../ui/shell";
@@ -14,7 +14,7 @@ import type { Shell } from "../../ui/shell";
 export interface TranscriptKeysHost {
 	readonly shell: Pick<Shell, "interceptInput" | "focused" | "overlays" | "host">;
 	/** The frame's presentation: the keys act only in fullscreen. */
-	readonly presentation: Accessor<TermPresentation | null>;
+	readonly presentation: Accessor<FramePresentation>;
 	/** The composer's text field: the keys act only while it holds focus. */
 	field(): UiNode | undefined;
 	/** Whether the composer's completion popup is open (it pages with the same keys). */

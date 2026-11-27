@@ -3,7 +3,7 @@ import type { UiNode } from "../node";
 import { type Accessor, createRoot, effect, runWithOwner, signal } from "../reactive";
 import { type Block, EMPTY_BLOCK } from "./paint";
 import type { SelectionDocument } from "./selection";
-import { blockText, type RenderedTextRow } from "./text-layout";
+import { blockText, type RenderedTextRow, type RenderedTextTail } from "./text-layout";
 
 interface WindowPaint {
 	readonly read: Accessor<Block>;
@@ -147,6 +147,8 @@ interface Entry {
 	added: boolean;
 	/** Length and prefix checksum per row at this width; no offscreen strings or paints. */
 	ink?: Uint32Array;
+	/** Last source position of each rolling preview in this block. */
+	tails?: ReadonlyMap<number, RenderedTextTail>;
 	/** The last paint while in the window, never retained offscreen. */
 	painted?: Block;
 	heightWatch?: () => void;
@@ -320,20 +322,32 @@ export class FullscreenHistory {
 		const sameHeight = entry.ink?.length === size;
 		const ink = sameHeight ? entry.ink! : (entry.ink = new Uint32Array(size));
 		const compare = this.#detached && entry.known && sameHeight;
+		let tails: Map<number, RenderedTextTail> | undefined;
 		let grew = -1;
 		for (let r = 0; r < rows.length; r++) {
-			const text = rowContent(rows[r]);
+			const row = rows[r];
+			const text = rowContent(row);
+			const tail = row?.tail;
+			if (tail) (tails ??= new Map()).set(tail.source, tail);
 			const at = r * 2;
 			const length = ink[at]!;
-			if (
-				compare &&
-				text.length > length &&
-				(length === 0 || Bun.hash.cityHash32(text.slice(0, length)) === ink[at + 1])
-			)
-				grew = r;
+			if (compare) {
+				// A rolling pane replaces rows rather than extending them. Once it moved, the
+				// old checksum at this position belongs to a different source row, even on shrink.
+				const before = tail && entry.tails?.get(tail.source);
+				const shift = tail && before && (tail.lines - before.lines || tail.lastLineRows - before.lastLineRows);
+				if (tail && shift !== 0) {
+					if (shift !== undefined && shift > 0) grew = r;
+				} else if (
+					text.length > length &&
+					(length === 0 || Bun.hash.cityHash32(text.slice(0, length)) === ink[at + 1])
+				)
+					grew = r;
+			}
 			ink[at] = text.length;
 			ink[at + 1] = text.length ? Bun.hash.cityHash32(text) : 0;
 		}
+		if (tails || entry.tails) entry.tails = tails;
 		if (grew >= 0) this.#grewAt(entry, grew);
 	}
 

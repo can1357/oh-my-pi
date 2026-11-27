@@ -117,41 +117,28 @@ export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
 
 let macClipboardWrite = Promise.resolve();
 
-/**
- * Copy text to the system clipboard, best-effort; see {@link copyToClipboardWithResult}.
- *
- * @param text - UTF-8 text to place on the clipboard.
- */
+/** Enqueue OSC 52 on a TTY, then try the system clipboard (including a forwarded display). */
 export async function copyToClipboard(text: string): Promise<void> {
-	await copyToClipboardWithResult(text);
+	if (process.stdout.isTTY) writeTerminalSequence(osc52(text));
+	await tryCopyToSystemClipboard(text);
+}
+
+function osc52(text: string): string {
+	return `\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`;
 }
 
 /**
- * Send OSC 52 through `writeTerminalSequence`, so it cannot tear a TUI frame or a
- * ConPTY write chunk. Resolves whether a terminal accepted the bytes; OSC 52 has no
- * acknowledgement, and from a worker thread nothing is written.
+ * Copy a fullscreen transcript selection. Over SSH, a successful system write
+ * cannot prove delivery to the selecting terminal, even with a forwarded-looking
+ * DISPLAY. Use only OSC 52 there; writing its bytes is not an acknowledgement.
  */
-function writeOsc52(text: string): Promise<boolean> {
-	return writeTerminalSequence(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`, {
-		awaitDelivery: true,
-		ttyOnly: true,
-	});
+export async function copyFullscreenSelection(text: string): Promise<SelectionClipboardResult> {
+	const terminalCopy = writeTerminalSequence(osc52(text), { awaitDelivery: true, ttyOnly: true });
+	if (isClipboardTerminalLocal() && (await tryCopyToSystemClipboard(text))) return "success";
+	return (await terminalCopy) ? "unconfirmed-terminal" : "failed";
 }
 
-/**
- * Copy text and report how far it got.
- *
- * Emits OSC 52 first (works over SSH/mosh), then tries the local backends in order:
- * Termux, `pbcopy` on macOS, then the native clipboard (X11/Wayland, Windows, WSL interop).
- * Over SSH the native backends would write the remote host's clipboard, so only OSC 52 runs.
- *
- * @returns `"success"` when a local backend confirmed the write, `"unconfirmed-terminal"` when
- *   only OSC 52 reached the terminal, `"failed"` when nothing did.
- */
-export async function copyToClipboardWithResult(text: string): Promise<SelectionClipboardResult> {
-	const terminalCopy = writeOsc52(text);
-	if (!isClipboardTerminalLocal()) return (await terminalCopy) ? "unconfirmed-terminal" : "failed";
-
+async function tryCopyToSystemClipboard(text: string): Promise<boolean> {
 	// Keep pbcopy, document-header writes, and native fallbacks in invocation order.
 	let releaseWrite: (() => void) | undefined;
 	if (process.platform === "darwin") {
@@ -166,7 +153,7 @@ export async function copyToClipboardWithResult(text: string): Promise<Selection
 		if (process.env.TERMUX_VERSION) {
 			try {
 				await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
-				return "success";
+				return true;
 			} catch {
 				// Fall through to native
 			}
@@ -194,16 +181,16 @@ export async function copyToClipboardWithResult(text: string): Promise<Selection
 					timeoutMs: 5000,
 					env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
 				});
-				return "success";
+				return true;
 			} catch {
 				// Fall through to native.
 			}
 		}
 
 		await nativeCopyToClipboard(text);
-		return "success";
+		return true;
 	} catch {
-		return (await terminalCopy) ? "unconfirmed-terminal" : "failed";
+		return false;
 	} finally {
 		releaseWrite?.();
 	}

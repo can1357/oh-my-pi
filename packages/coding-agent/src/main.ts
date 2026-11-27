@@ -2127,8 +2127,7 @@ export async function runRootCommand(
 			deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
 		if (isInteractive && parsedArgs.tuiMode) cfgTuiMode.override(settingsInstance, parsedArgs.tuiMode);
 
-		// A prepaint without an authoritative presentation already owns input. Let it draw
-		// as soon as settings settle, without waiting for auth storage or session discovery.
+		// Move the startup preview to its configured screen before auth and session discovery.
 		logger.time("initTheme:final", initTheme, {
 			watch: isInteractive,
 			// Keep the startup frame's appearance (the last launch's report) until the terminal answers.

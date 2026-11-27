@@ -20,14 +20,14 @@ import {
 	type UiNode,
 } from "@oh-my-pi/pi-tui";
 import type { ResizeScrollback, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
-import type { ScrollMark, TermPresentation, TranscriptPointer } from "@oh-my-pi/pi-tui/term/backend";
+import type { FramePresentation, ScrollMark, TranscriptPointer } from "@oh-my-pi/pi-tui/term/backend";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { setSymbolPreset } from "../../ui/theme/service";
 import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import { getKeybindings } from "../../config/keybindings/keybindings";
-import { copyToClipboardWithResult } from "../../utils/clipboard";
+import { copyFullscreenSelection } from "../../utils/clipboard";
 import { Composer, ComposerChips } from "../../ui/composer";
 import {
 	DeferredCommand,
@@ -129,8 +129,8 @@ export class AppFrame {
 	readonly hyperlinks: Signal<boolean | undefined> = signal(undefined);
 	/** `tui.textSizing`: sized headings where the terminal supports them. */
 	readonly textSizing: Signal<boolean> = signal(false);
-	/** This launch's terminal presentation. `null` holds ANSI paint while startup resolves `tui.mode`. */
-	readonly presentation: Signal<TermPresentation | null> = signal<TermPresentation | null>("inline");
+	/** The terminal layout, a reversible startup preview, or `null` to suppress ANSI paint. */
+	readonly presentation: Signal<FramePresentation> = signal<FramePresentation>("inline");
 	/** How the fullscreen transcript uses the mouse (`tui.fullscreenMouse`). */
 	readonly pointer: Signal<TranscriptPointer> = signal<TranscriptPointer>("select");
 	/** `tui.copyOnRelease`: a fullscreen transcript selection is copied when the mouse is released. */
@@ -215,15 +215,14 @@ export class AppFrame {
 			textSizing: this.textSizing,
 			...(this.#terminal?.clock ? { clock: this.#terminal.clock } : {}),
 			presentation: this.presentation,
+			clearHistory: options.clearHistory,
 			marks: this.marks,
 			pointer: this.pointer,
 			copyOnRelease: this.copyOnRelease,
-			copyText: copyToClipboardWithResult,
+			copyText: copyFullscreenSelection,
 			copyShortcutLabel: () => actionKey("app.transcript.copyHighlight") || undefined,
 			activateTargets: this.activateTargets,
 		});
-		// Read once started: the resolved settings may have changed the presentation meanwhile.
-		if (options.clearHistory && this.presentation.peek() === "inline") this.shell.host?.replayHistory();
 		// Tern draws omp's icons with its own Nerd Font: a native surface always uses those symbols.
 		if (this.shell.native()) await setSymbolPreset("nerd");
 	}

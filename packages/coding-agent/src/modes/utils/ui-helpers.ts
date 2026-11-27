@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type JSXNode, jsx } from "@oh-my-pi/pi-tui";
+import { jsx } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
 import { InternalUrlRouter } from "../../internal-urls";
@@ -37,7 +37,7 @@ import {
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import type { Shell, TranscriptBlock } from "../../ui/shell";
-import { Notice, NoticeLine, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
+import { NoticeLine, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { normalizeBlobExtension } from "../../utils/image-format";
 import { imageAttachmentSource } from "../../utils/image-source";
@@ -123,18 +123,6 @@ const TRANSCRIPT_REPLAY_MAX_ATTEMPTS = 5;
 /** The assistant replies of `context` (their prose links resolve before a replay). */
 function assistantMessages(context: SessionContext): AssistantMessage[] {
 	return context.messages.filter((message): message is AssistantMessage => message.role === "assistant");
-}
-
-const CLEARED_HISTORY_MESSAGE =
-	"Earlier messages are hidden by a /clear boundary. Turn off Collapse Compacted History in /settings to show them; the model context stays cleared.";
-
-/** The note above a collapsed transcript whose `/clear` boundary hides earlier messages. */
-function clearedHistoryNotice(): JSXNode {
-	return jsx(Notice, {
-		tone: "info",
-		message: CLEARED_HISTORY_MESSAGE,
-		term: { line: { message: CLEARED_HISTORY_MESSAGE } },
-	});
 }
 
 function waitForImmediate(): Promise<void> {
@@ -999,7 +987,6 @@ export class UiHelpers {
 			ctx.updatePendingMessagesDisplay();
 			while (true) {
 				const passRendererSetVersion = this.#textRendererSetVersion;
-				if (this.#clearHidesHistory()) this.#presentNotice(clearedHistoryNotice);
 				if (ctx.viewSession.isStreaming) {
 					// Live events mutate the same maps; keep their replay atomic so a delta cannot
 					// land halfway through rebuilding its pending tool block.
@@ -1079,25 +1066,6 @@ export class UiHelpers {
 	showError(errorMessage: string, options?: { failsTurn?: boolean }): void {
 		const block = this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
 		if (options?.failsTurn) this.ctx.registerTranscriptEntry(block, { kind: "failure" });
-	}
-
-	/**
-	 * Whether the collapsed transcript hides messages behind the branch's latest `/clear` boundary.
-	 * A compaction after the boundary supersedes it (see `buildSessionContext`): then the summary
-	 * explains the gap, not `/clear`.
-	 */
-	#clearHidesHistory(): boolean {
-		if (!cfgDisplayCollapseCompacted.get(settings)) return false;
-		const branch = this.ctx.viewSession.sessionManager.getBranch();
-		const boundary = branch.findLastIndex(entry => entry.type === "reset_boundary");
-		if (boundary < 0) return false;
-		for (let i = boundary + 1; i < branch.length; i++) {
-			if (branch[i]!.type === "compaction") return false;
-		}
-		for (let i = 0; i < boundary; i++) {
-			if (branch[i]!.type === "message") return true;
-		}
-		return false;
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {

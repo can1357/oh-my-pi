@@ -95,35 +95,34 @@ describe("startup prepaint presentation", () => {
 
 	it("honors CLI over the environment, and speculates only on the alternate screen", async () => {
 		type Mode = StartupPreferences["mode"];
-		const cases: [string | undefined, Mode, Mode | undefined, Mode | null][] = [
-			["fullscreen", "inline", undefined, "fullscreen"],
-			[" Inline ", "fullscreen", undefined, "inline"],
-			["full", "fullscreen", undefined, "fullscreen"],
-			[undefined, "inline", undefined, null],
-			["inline", "inline", "fullscreen", "fullscreen"],
-			["fullscreen", "fullscreen", "inline", "inline"],
+		const cases: [string | undefined, Mode, Mode | undefined, boolean][] = [
+			["fullscreen", "inline", undefined, false],
+			[" Inline ", "fullscreen", undefined, true],
+			["full", "fullscreen", undefined, false],
+			[undefined, "inline", undefined, false],
+			["inline", "inline", "fullscreen", false],
+			["fullscreen", "fullscreen", "inline", true],
 		];
-		for (const [env, cached, cli, expected] of cases) {
+		for (const [env, cached, cli, inline] of cases) {
 			restoreEnv = presentationEnv(env);
 			const lease = await prepaint({ mode: cached }, cli);
-			expect(lease.frame.presentation.peek()).toBe(expected);
 			const output = term!.memory.output.join("");
-			expect(output.includes("\x1b[?1049h")).toBe(expected === "fullscreen");
-			expect(output.includes("\x1b[3J")).toBe(expected === "inline");
+			expect(output.includes("\x1b[?1049h")).toBe(!inline);
+			expect(output.includes("\x1b[3J")).toBe(inline);
 			await lease.frame.shell.stop();
 			term?.dispose();
 			restoreEnv();
 		}
 	});
 
-	it.each(["stale inline cache", "missing cache"])("preserves shell history with a %s", async cacheState => {
+	it.each(["stale inline cache", "missing cache"])("previews before saved fullscreen with a %s", async cacheState => {
 		restoreEnv = presentationEnv(undefined);
 		dir = TempDir.createSync("@omp-prepaint-history-");
 		cache = StartupCache.open(path.join(dir.path(), "composer.db"));
 		vi.spyOn(startupCache, "sharedStartupCache").mockReturnValue(cache);
-		if (cacheState === "stale inline cache") cache.write(dir.path(), BASE, {});
-		const terminal = (term = createModeTerminal({ columns: 80, rows: 8 }));
-		terminal.engine.write(Array.from({ length: 13 }, (_, i) => `shell line ${i}\r\n`).join(""));
+		if (cacheState === "stale inline cache") cache.write(dir.path(), { ...BASE, quiet: false }, {});
+		const terminal = (term = createModeTerminal({ columns: 80, rows: 24 }));
+		terminal.engine.write(Array.from({ length: 29 }, (_, i) => `shell line ${i}\r\n`).join(""));
 		const original = terminal.text();
 		const exit = vi.fn();
 		beginStartupComposer({ driver: terminal.memory.options, cwd: dir.path(), version: "test", exit });
@@ -133,8 +132,10 @@ describe("startup prepaint presentation", () => {
 		await terminal.waitFor(() => exit.mock.calls.length === 1);
 		terminal.type("early ");
 		terminal.paste("draft");
-		await terminal.settle();
-		expect(terminal.text()).toBe(original);
+		await terminal.waitFor(
+			rows => rows.some(row => row.includes("vtest")) && rows.some(row => row.includes("early draft")),
+		);
+		expect(terminal.engine.isMainScreen).toBe(false);
 		expect(terminal.memory.output.join("")).not.toContain("\x1b[3J");
 
 		applyStartupComposerPreferences({
@@ -148,13 +149,15 @@ describe("startup prepaint presentation", () => {
 		const lease = takeStartupComposerLease()!;
 		try {
 			await lease.ready;
-			await terminal.waitFor(rows => rows.some(row => row.includes("early draft")));
-			expect(lease.frame.composer.text()).toBe("early draft");
-			expect(terminal.memory.output.join("")).toContain("\x1b[?1049h");
+			terminal.type(" kept");
+			await terminal.waitFor(rows => rows.some(row => row.includes("early draft kept")));
+			expect(lease.frame.composer.text()).toBe("early draft kept");
+			expect(terminal.engine.isMainScreen).toBe(false);
 		} finally {
 			await lease.frame.shell.stop();
 		}
 		expect(terminal.memory.output.join("")).not.toContain("\x1b[3J");
+		expect(terminal.engine.isMainScreen).toBe(true);
 		expect(terminal.text()).toBe(original);
 	});
 
@@ -164,10 +167,12 @@ describe("startup prepaint presentation", () => {
 		beginStartupComposer({
 			driver: terminal.memory.options,
 			cache: false,
+			version: "8.7.6",
 			preferences: { ...BASE, mode: saved === "inline" ? "fullscreen" : "inline" },
 		});
 		applyStartupComposerPreferences({
 			...BASE,
+			quiet: false,
 			mode: saved,
 			presentation: saved,
 			pointer: "select",
@@ -181,6 +186,8 @@ describe("startup prepaint presentation", () => {
 			const output = terminal.memory.output.join("");
 			expect(output.includes("\x1b[?1049h")).toBe(saved === "fullscreen");
 			expect(output.split("\x1b[3J").length - 1).toBe(saved === "inline" ? 1 : 0);
+			const start = saved === "inline" ? "\x1b[3J" : "\x1b[?1049h";
+			expect(output.indexOf("v8.7.6")).toBeGreaterThan(output.indexOf(start));
 		} finally {
 			await lease.frame.shell.stop();
 		}
@@ -203,9 +210,11 @@ describe("startup prepaint presentation", () => {
 		const lease = await prepaint({ mode: "inline", quiet: false });
 		const terminal = term!;
 		terminal.type("abandoned draft");
-		await terminal.waitFor(() => lease.frame.composer.text() === "abandoned draft");
+		await terminal.waitFor(rows => rows.some(row => row.includes("abandoned draft")));
+		expect(terminal.engine.isMainScreen).toBe(false);
 		await lease.frame.shell.stop();
-		expect(terminal.memory.output.join("")).not.toMatch(/abandoned draft|vtest|\x1b\[3J/);
+		expect(terminal.memory.output.join("")).not.toContain("\x1b[3J");
+		expect(terminal.engine.isMainScreen).toBe(true);
 		expect(terminal.text()).toBe("");
 	});
 

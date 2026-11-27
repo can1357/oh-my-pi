@@ -336,7 +336,7 @@ describe("startup prepaint frame", () => {
 			version: options.version ?? "test",
 			cache: false,
 			exit,
-			tuiMode: options.tuiMode ?? (options.tern ? undefined : "inline"),
+			tuiMode: options.tuiMode,
 			preferences: { ...config, ...options.preferences },
 			...(options.status ? { status: options.status } : {}),
 		});

@@ -17,6 +17,7 @@ import "../../src/ui/styles/transcript/exec-run";
 import "../../src/ui/styles/transcript/read-group";
 import "../../src/ui/tools";
 import { Transcript } from "../../src/ui/shell/transcript";
+import { mapPrefixed } from "../../src/ui/styles/rendered-text";
 import { ExecRun, ExecRunBlock } from "../../src/ui/transcript/exec-run";
 import { AssistantMessageBlock } from "../../src/ui/transcript/messages/assistant-message";
 import { CustomMessageBlock, MessageFrame } from "../../src/ui/transcript/messages/frame";
@@ -191,6 +192,19 @@ describe("transcript look text", () => {
 		const selectedLine = text[last]!.line.text;
 		expect(selectedLine).toEndWith("VISIBLE_END");
 		expect(selectedLine).not.toContain("HIDDEN_PREFIX");
+	});
+
+	test("copies only the painted part of a truncated prefixed label", () => {
+		const [first, second, third] = mapPrefixed(
+			"visible hidden suffix\nwrapped words",
+			["├ visible…", "│ wrapped", "│ words"],
+			"├ ",
+			"│ ",
+		);
+		expect(first?.line.text).toBe("visible");
+		expect(first?.column).toBe(2);
+		expect(second?.line.text).toBe("wrapped words");
+		expect(third?.line).toBe(second?.line);
 	});
 
 	test("a generic tool card copies its output without the card padding", () => {

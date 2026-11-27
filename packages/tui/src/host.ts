@@ -28,10 +28,10 @@ import type { UiNode } from "./node";
 import type { Surface } from "./surface";
 import {
 	driverImages,
+	type FramePresentation,
 	type ScrollMark,
 	type SelectionClipboardResult,
 	TermBackend,
-	type TermPresentation,
 	type TranscriptPointer,
 } from "./term/backend";
 import type { Theme } from "./theme/contract";
@@ -86,10 +86,12 @@ export interface HostOptions {
 	/**
 	 * How the terminal renderer draws `main`: `inline` (default) flows it into terminal history;
 	 * `fullscreen` scrolls it inside the program on the alternate screen above the pinned dock
-	 * and never writes history (see {@link Host.scroller}). `null` captures input without painting
-	 * rows until the launch mode is known. Native surfaces do not use this option.
+	 * and never writes history (see {@link Host.scroller}). Startup previews use the alternate
+	 * screen for either layout. `null` holds all rows. Native surfaces do not use this option.
 	 */
-	readonly presentation?: Accessor<TermPresentation | null>;
+	readonly presentation?: Accessor<FramePresentation>;
+	/** Clear the shell's history on an inline launch, with its first authoritative frame. */
+	readonly clearHistory?: boolean;
 	/** Marks on the fullscreen transcript's marks lane (main nodes, one per turn). */
 	readonly marks?: Accessor<readonly ScrollMark[]>;
 	/** What the pointer does over the fullscreen transcript. Default `select`. */
@@ -474,6 +476,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(options.onKey ? { onKey: options.onKey } : {}),
 			...(options.intercept ? { intercept: options.intercept } : {}),
 			...(options.presentation ? { presentation: options.presentation } : {}),
+			clearHistory: options.clearHistory,
 			...(options.marks ? { marks: options.marks } : {}),
 			...(options.pointer ? { pointer: options.pointer } : {}),
 			...(options.copyOnRelease ? { copyOnRelease: options.copyOnRelease } : {}),

@@ -9,7 +9,7 @@ import {
 	type UiNode,
 	untrack,
 } from "@oh-my-pi/pi-tui";
-import type { TermPresentation } from "@oh-my-pi/pi-tui/term/backend";
+import type { FramePresentation } from "@oh-my-pi/pi-tui/term/backend";
 import { keyHintSpans } from "../../ui/keys/hints";
 import { applyEdit, type LineValue } from "../../ui/overlays/panels/common";
 import type { InteractiveModeContext } from "../types";
@@ -18,7 +18,7 @@ import type { InteractiveModeContext } from "../types";
 export function showTranscriptFind(
 	ctx: Pick<InteractiveModeContext, "shell" | "showEditorAreaDialog">,
 	scroller: TranscriptScroller,
-	presentation: Accessor<TermPresentation | null>,
+	presentation: Accessor<FramePresentation>,
 ): void {
 	const { shell } = ctx;
 	const ready = signal(false);
