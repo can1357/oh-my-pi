@@ -199,7 +199,8 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder, cfgModelRoles } from "./config/model-settings";
-import { cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgTaskAgentIdleTtlMs, cfgTaskMaxRecursionDepth } from "./task/settings";
+import { canSpawnAtDepth } from "./task/types";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 import { ensureTheme, getTerminalAppearance, initTheme, stopThemeWatcher } from "./ui/theme/service";
@@ -2899,6 +2900,17 @@ export async function runRootCommand(
 				const evalWarning = sessionToolNames.includes("eval") ? undefined : await pythonEvalWarningPromise;
 				if (evalWarning && error instanceof CliUsageError) {
 					throw new CliUsageError(`${error.message}\n${evalWarning}`);
+				}
+				const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settingsInstance);
+				if (
+					error instanceof CliUsageError &&
+					initialArgs.tools?.includes("task") &&
+					!sessionToolNames.includes("task") &&
+					!canSpawnAtDepth(maxRecursionDepth, 0)
+				) {
+					throw new CliUsageError(
+						`${error.message}\n\`task\` is disabled by task.maxRecursionDepth: ${maxRecursionDepth}; set it to 1 or higher to allow subagents.`,
+					);
 				}
 				throw error;
 			}

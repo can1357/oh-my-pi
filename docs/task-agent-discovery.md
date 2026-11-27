@@ -387,7 +387,7 @@ If denied: `Cannot spawn '...'. Allowed: ...`.
 
 ### Recursion-depth gating
 
-`task.maxRecursionDepth` defaults to `2`; a negative value disables the cap. The shared policy rejects a spawn when the current task depth has already reached the cap. When a child reaches the cap, `runSubprocess` also removes `task` from its tool list and sets its spawn policy empty.
+`task.maxRecursionDepth` defaults to `2`; a negative value disables the cap. Depth counts from the top-level session (depth `0`), so `0` removes `task` from the top-level session and disables subagents entirely, while `1` allows one generation of subagents that cannot nest. The shared policy rejects a spawn when the current task depth has already reached the cap. When a child reaches the cap, `runSubprocess` also removes `task` from its tool list and sets its spawn policy empty.
 
 For an explicit agent tool list, `runSubprocess` auto-adds `task` when `spawns` is declared and depth permits it. The legacy `exec` entry expands to `bash` plus `eval` when an eval backend is available. A list containing `task` or `bash` also gains `wait` unless the parent requires an exact restricted tool list; tool construction still omits `wait` when there is no async, IRC, or service wake source. Outbound peer messaging requires `write` in the child tool list and IRC enabled; inbound steering does not.
 

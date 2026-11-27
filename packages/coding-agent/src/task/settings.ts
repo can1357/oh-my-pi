@@ -530,10 +530,11 @@ export const cfgTaskMaxRecursionDepth = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Max Task Recursion",
-		description: "How many levels deep subagents can spawn their own subagents",
+		description:
+			"Subagent generations allowed, counting from this session: 0 disables subagents entirely, 1 lets this session spawn but not its subagents",
 		options: [
 			{ value: "-1", label: "Unlimited" },
-			{ value: "0", label: "None" },
+			{ value: "0", label: "Disabled" },
 			{ value: "1", label: "Single" },
 			{ value: "2", label: "Double" },
 			{ value: "3", label: "Triple" },

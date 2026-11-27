@@ -197,6 +197,7 @@
 - The `encourageEdits` rule now applies only to content-addressed edits and permits scripts for mechanical bulk or encoding transforms (cross-file patterns, line endings, whitespace) that `edit` cannot express ([#19350](https://github.com/can1357/oh-my-pi/issues/19350))
 - Logged automatic compactions vetoed by a `session_before_compact` hook, and mid-run compaction logs now report whether the attempt committed, was vetoed, or hit a dead end instead of always claiming it ran ([#19563](https://github.com/can1357/oh-my-pi/issues/19563))
 - Fixed `registerProvider` with a fixed `models` list ignoring the provider's `transport` ([#18960](https://github.com/can1357/oh-my-pi/issues/18960))
+- The `task.maxRecursionDepth` setting now states that `0` disables subagents entirely (it is labelled `Disabled`, not `None`) and `1` allows one generation, and `--tools task` names the setting when it removed `task` ([#19077](https://github.com/can1357/oh-my-pi/issues/19077))
 
 ### Removed
 
