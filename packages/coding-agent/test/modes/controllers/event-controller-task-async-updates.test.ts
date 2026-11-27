@@ -332,13 +332,39 @@ describe("EventController async update finalization", () => {
 			expect(term.screen().join("\n")).toContain("Second sample");
 			expect(term.screen().join("\n")).not.toContain("Off-screen completion");
 			expect(term.history()).toHaveLength(earlierRows + 2);
+
+			// A rebuild in the same session redraws the frozen card as it was, not the dropped completion.
+			const call: AssistantMessage = {
+				...createAssistantMessage(""),
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "run benchmark" } }],
+			};
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				...bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+				timestamp: call.timestamp + 1,
+			};
+			ctx.eventController = controller;
+			ctx.viewSession.activeToolExecutionUpdates = () => [
+				jobFrame(bashResult("Off-screen completion", "completed", 0)),
+			];
+			const helpers = new UiHelpers(ctx);
+			ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+			transcript.clear();
+			helpers.renderSessionContext({ messages: [call, result] } as SessionContext);
+			const rebuilt = transcriptText(ctx.shell, columns);
+			expect(rebuilt).toContain("Second sample");
+			expect(rebuilt).not.toContain("Off-screen completion");
 		} finally {
 			transcript.attach(undefined);
 			term.dispose();
 		}
 	});
 
-	it("reports backgrounded Bash frames to transcript presenters as partial until the job settles", async () => {
+	it("reports a background job result as partial only while its card takes job frames", async () => {
 		const { controller } = createFixture();
 		const asked = vi.spyOn(TranscriptPresenter.prototype, "presentationOf");
 		const lastPartial = (text: string) =>
@@ -363,6 +389,25 @@ describe("EventController async update finalization", () => {
 
 		await controller.handleEvent(jobFrame(bashResult("Final sample", "completed", 0)));
 		expect(lastPartial("Final sample")).toBe(false);
+
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-eval",
+			toolName: "eval",
+			args: { language: "py", code: "run()" },
+		});
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-eval",
+			toolName: "eval",
+			result: {
+				content: [{ type: "text", text: "Eval backgrounded" }],
+				details: { async: { state: "running", jobId: "eval-1", type: "eval" } },
+			},
+			isError: false,
+		});
+		// A plain-terminal eval card takes no job frames: its running result is all it will show.
+		expect(lastPartial("Eval backgrounded")).toBe(false);
 	});
 
 	describe("native rendering", () => {

@@ -42,7 +42,8 @@ export function parksAsBackground(toolName: string, details: unknown, native: bo
 /**
  * Whether a parked card of `toolName` takes job frames only while none of its content is in plain
  * terminal scrollback. Such a card stays settled (its rows may retire) and draws each frame as a
- * static result, so the rows it leaves in history match what it showed.
+ * static result, so the rows it leaves in history match what it showed. Once frozen it stays as it
+ * was across rebuilds of the same transcript.
  */
 export function followsViewportOnly(toolName: string, native: boolean): boolean {
 	return !native && JOB_CARD_TOOLS[toolName] === "viewport";

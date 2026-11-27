@@ -172,8 +172,15 @@ interface PendingBatch {
 	readonly marked?: ReadonlyMap<object, HistoryRowMark>;
 	/** Live main nodes the batch writes whole (committed on acknowledgement). */
 	readonly nodes: readonly UiNode[];
-	/** Rows of `nodes` when the batch was prepared: a repaint prepares it again. */
-	readonly painted: readonly (readonly string[])[];
+	/** The `main` list the batch was prepared from: a block added or removed prepares it again. */
+	readonly main: readonly UiNode[];
+	/**
+	 * Live blocks painted to decide the batch, indexed from the commit frontier (`nodes` first): any
+	 * repaint prepares it again, since a block that shrank or grew changes the pressure.
+	 */
+	readonly blocks: readonly (Block | undefined)[];
+	/** Nodes whose own rows the batch writes (not only a separator): see {@link TermBackend.contentInHistory}. */
+	readonly content: readonly UiNode[];
 	/** A streaming node's stable head moved into history: its emitted rows after this batch. */
 	readonly head?: { readonly node: UiNode; readonly rows: readonly string[]; readonly count: number };
 	/** The last non-empty block whose rows this batch writes. */
@@ -315,12 +322,6 @@ function sliceAfter(text: string, column: number): string {
 	return Bun.stripANSI(text).slice(index);
 }
 
-/** Whether `batch` (never written) still writes the blocks right after the commit frontier `start`, in order. */
-function heads(batch: PendingBatch, main: readonly UiNode[], start: number): boolean {
-	for (let k = 0; k < batch.nodes.length; k++) if (main[start + k] !== batch.nodes[k]) return false;
-	return !batch.head || main[start + batch.nodes.length] === batch.head.node;
-}
-
 /** Whether `rows` start with the `count` rows of `emitted` in history. */
 function startsWith(rows: readonly string[], emitted: readonly string[], count: number): boolean {
 	if (rows !== emitted) {
@@ -412,6 +413,8 @@ export class TermBackend {
 	#historyTail: UiNode | undefined;
 	/** Rows of live main nodes already moved into history (streaming heads), not repainted in the viewport. */
 	readonly #emitted = new Map<UiNode, Emitted>();
+	/** Main nodes with rows of their own in terminal history: a separator alone does not count. */
+	readonly #withContent = new Set<UiNode>();
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
@@ -552,7 +555,7 @@ export class TermBackend {
 
 	/** Whether the driver acknowledged rows of `node`'s own content in history, not only the separator above it. */
 	contentInHistory(node: UiNode): boolean {
-		return this.#committed.has(node) || (this.#emitted.get(node)?.count ?? 0) > 0;
+		return this.#withContent.has(node);
 	}
 
 	/**
@@ -711,6 +714,8 @@ export class TermBackend {
 		if (pending && written === pending.history.id) {
 			const replay = pending.history.kind === "replay";
 			if (pending.marked) for (const key of pending.marked.keys()) this.#marked.add(key);
+			if (replay) this.#withContent.clear();
+			for (const node of pending.content) this.#withContent.add(node);
 			for (const node of pending.nodes) {
 				this.#committed.add(node);
 				this.#emitted.delete(node);
@@ -997,18 +1002,17 @@ export class TermBackend {
 		const rowWise = this.#driver.replaysOnResize?.() ?? true;
 		this.#checkEmitted(main, start, width, rowWise);
 		const capacity = flush ? 0 : Math.max(0, height - dockRows + covering);
-		// An unwritten batch is prepared again when it no longer fits what it writes: another width or
-		// height, blocks that moved under it, or rows that changed before the driver could write them
-		// (a replay it was stays owed).
+		// An unwritten batch is prepared again when anything that decided it changed: the geometry, the
+		// blocks in `main`, or the rows of a block it painted (a replay it was stays owed).
 		const offered = this.#pending;
-		const repainted = (node: UiNode, rows: readonly string[]): boolean => this.#paint(node, width).rows !== rows;
 		if (
 			offered &&
 			(offered.width !== width ||
 				offered.capacity !== capacity ||
-				!heads(offered, main, start) ||
-				offered.nodes.some((node, i) => repainted(node, offered.painted[i]!)) ||
-				(offered.head !== undefined && repainted(offered.head.node, offered.head.rows)))
+				offered.main !== main ||
+				offered.blocks.some(
+					(block, i) => block !== undefined && this.#paint(main[start + i]!, width).rows !== block.rows,
+				))
 		) {
 			this.#pending = undefined;
 		}
@@ -1016,6 +1020,7 @@ export class TermBackend {
 		// in the same frame; streaming heads start over (their stable rows go out again under pressure).
 		let ledger: string[] | undefined;
 		let ledgerLast: UiNode | undefined;
+		const ledgerContent: UiNode[] = [];
 		if (this.#replay && !this.#pending) {
 			this.#emitted.clear();
 			this.#committed = new Set(main.slice(0, start));
@@ -1026,6 +1031,7 @@ export class TermBackend {
 				if (block.rows.length === 0) continue;
 				if (ledgerLast) for (let n = separator(ledgerLast, node); n > 0; n--) ledger.push("");
 				for (const row of block.rows) ledger.push(row);
+				ledgerContent.push(node);
 				ledgerLast = node;
 			}
 		}
@@ -1041,7 +1047,7 @@ export class TermBackend {
 				: this.#historyTail;
 		if (pending) {
 			for (let i = 0; i < pending.nodes.length; i++) {
-				if (pending.painted[i]!.length > 0) aboveLive = pending.nodes[i];
+				if (pending.blocks[i]!.rows.length > 0) aboveLive = pending.nodes[i];
 			}
 			first += pending.nodes.length;
 		}
@@ -1116,7 +1122,7 @@ export class TermBackend {
 			history = pending.history;
 		} else if (boundary >= 0 || ledger) {
 			const retired: UiNode[] = [];
-			const painted: (readonly string[])[] = [];
+			const content = ledgerContent;
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
 			let marked: Map<object, HistoryRowMark> | undefined;
@@ -1137,8 +1143,8 @@ export class TermBackend {
 				const block = blockAt(live);
 				const skip = skipAt(live);
 				retired.push(node);
-				painted.push(block.rows);
 				if (block.rows.length > skip) {
+					content.push(node);
 					// The separator may depend on whether the block above retires (it just did, in this batch).
 					leads[live] = undefined;
 					for (let i = leadAt(live); i > 0; i--) rows.push("");
@@ -1176,6 +1182,7 @@ export class TermBackend {
 						for (let i = lead; i > 0; i--) rows.push("");
 						const stop = Math.min(skip + take, block.rows.length);
 						appendRows(block, skip, stop);
+						if (stop > skip) content.push(node);
 						head = { node, rows: block.rows, count: stop };
 						skips[live] = stop;
 						leads[live] = 0;
@@ -1193,7 +1200,9 @@ export class TermBackend {
 				this.#pending = {
 					history,
 					nodes: retired,
-					painted,
+					main,
+					blocks,
+					content,
 					...(marked ? { marked } : {}),
 					...(head ? { head } : {}),
 					last,

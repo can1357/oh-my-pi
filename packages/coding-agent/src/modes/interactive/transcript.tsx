@@ -473,6 +473,8 @@ export class TranscriptPresenter {
 		// does not hold (a rebuild would pin the transcript behind it).
 		const striking = spec.name === "todo" ? signal(false) : undefined;
 		let strikeEnd: Timer | undefined;
+		// The call returned and its card keeps taking its background job's frames until one settles it.
+		const parked = signal(false);
 		const factory = () => {
 			if (striking) {
 				const facts = call.facts;
@@ -500,8 +502,9 @@ export class TranscriptPresenter {
 					args: call.facts.args(),
 					...(result ? { result } : {}),
 					isError: result?.isError === true,
-					// A job still running is progress, even when its card draws the frame as static.
-					isPartial: result === undefined || call.facts.partial() || asyncJobState(result.details) === "running",
+					// A parked card still taking its job's frames is in progress, even when it draws
+					// them as static results (a viewport-only Bash card).
+					isPartial: result === undefined || call.facts.partial() || (parked() && !call.facts.sealed()),
 				});
 			});
 			effect(() => {
@@ -529,6 +532,7 @@ export class TranscriptPresenter {
 			updateStreamPreview: preview => call.updateStreamPreview(preview),
 			updateResult: (result, partial) => {
 				call.updateResult(result, partial);
+				if (!partial && parked.peek() && asyncJobState(result.details) !== "running") parked.set(false);
 				if (striking && !partial && completesTasks(result) && untrack(call.facts.startedAt) !== undefined) {
 					clearTimeout(strikeEnd);
 					striking.set(true);
@@ -538,7 +542,7 @@ export class TranscriptPresenter {
 			},
 			setArgsComplete: () => call.setArgsComplete(),
 			setExecutionStarted: () => call.setExecutionStarted(),
-			parkAsBackground: () => {},
+			parkAsBackground: () => parked.set(true),
 			seal: () => {
 				call.seal();
 				this.#settle(block);

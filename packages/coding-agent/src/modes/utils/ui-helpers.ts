@@ -742,7 +742,10 @@ export class UiHelpers {
 					const frame = activeToolExecutionUpdates.find(
 						event => event.toolCallId === message.toolCallId,
 					)?.partialResult;
+					// A viewport-only card frozen in scrollback keeps what it showed; frames it dropped stay dropped.
+					const frozen = ctx.eventController?.frozenJobResult(message.toolCallId);
 					const isBackground =
+						frozen === undefined &&
 						parksAsBackground(message.toolName, message.details, native) &&
 						(frame !== undefined || runningAsyncJobs.some(job => job.id === jobId));
 					const settled = isBackground && isSettledJobFrame(frame?.details);
@@ -756,7 +759,7 @@ export class UiHelpers {
 					} else if (frame && isBackground) {
 						pending.updateResult(frame, partial, message.toolCallId);
 					} else {
-						pending.updateResult(message, partial, message.toolCallId);
+						pending.updateResult(frozen ?? message, partial, message.toolCallId);
 					}
 					if (isBackground && !settled) {
 						pending.parkAsBackground();

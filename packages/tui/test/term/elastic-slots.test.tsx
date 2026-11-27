@@ -368,6 +368,51 @@ describe("exactly-once in-order ledger (ECH, Lemma 4.6, Corollary 4.14)", () => 
 			surface.dispose();
 		}
 	});
+
+	it("keeps a card live when the tail pressing it goes away before a deferred batch is written", () => {
+		const later = signal(true);
+		const { driver, backend, surface } = setup(() => [
+			<rows key="card" lines={lines("card", 3)} />,
+			() => (later() ? <rows key="later" lines={lines("later", 5)} /> : null),
+		]);
+		try {
+			const card = surface.main()[0]!;
+			driver.ack = false;
+			settle(card);
+			backend.renderNow();
+
+			later.set(false);
+			driver.ack = true;
+			backend.renderNow();
+			expect(driver.history).toEqual([]);
+			expect(driver.viewport).toEqual(lines("card", 3));
+			expect(backend.contentInHistory(card)).toBe(false);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it("does not count an empty block committed between others as content in history", () => {
+		const { backend, surface } = setup(() => [
+			<rows key="a" lines={lines("a", 4)} />,
+			<rows key="empty" lines={[]} />,
+			<rows key="b" lines={lines("b", 4)} />,
+			<rows key="c" lines={lines("c", 5)} />,
+		]);
+		try {
+			const [a, empty, b] = surface.main();
+			for (const node of [a!, empty!, b!]) settle(node);
+			backend.renderNow();
+			expect(backend.retired(empty!)).toBe(true);
+			expect(backend.contentInHistory(a!)).toBe(true);
+			expect(backend.contentInHistory(empty!)).toBe(false);
+			expect(backend.contentInHistory(b!)).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
 });
 
 describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => {
