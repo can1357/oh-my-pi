@@ -4,10 +4,19 @@
 
 ### Breaking Changes
 
-- `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
+- Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
+- Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
+- The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
+- Removed unused `parse*Args` and `print*Help` exports from the CLI configuration, grep, plugin, setup, shell, web-search, and update modules.
+- omp no longer reads other agents' user-level config (`~/.claude`, `~/.claude.json`, Claude Code plugins, `~/.codex`, `~/.config/opencode`, `~/.cursor`, `~/.codeium/windsurf`, `~/.copilot`); the `enabledProviders` setting, the `skills.enableClaudeUser`, `skills.enableCodexUser`, `commands.enableClaudeUser` and `commands.enableOpencodeUser` settings, and the dashboard's per-provider user toggle are gone. If you had opted in, the first launch offers to symlink or copy what you were inheriting into `~/.omp/agent`
+- Dropped discovery of GitHub Copilot (`.github/copilot-instructions.md`, `.github/instructions`, `.github/prompts`, `.github/skills`), Cursor (`.cursor/rules`, `.cursorrules`, `.cursor/mcp.json`), Windsurf (`.windsurf/`), VS Code (`.vscode/mcp.json`) and Cline (`.clinerules`) config
+- Project-level Claude Code, Codex and OpenCode config is limited to MCP servers, skills, commands and `.claude/CLAUDE.md`; `.claude/{tools,extensions,hooks,settings.json,SYSTEM.md}`, Codex commands, prompts, hooks, tools and settings, and OpenCode plugins and settings no longer load
 
 ### Added
 
+- Added OSC 7577 Program Resume Protocol reporting so supporting terminals (Tern, Rex, etc.) automatically restore open omp sessions with `--restore` and their launch flags after a crash or restart
+- Added a concise tool display mode, `display.toolActivity: concise`: each model tool call draws as one row with its time, status, tool and intent (`Ctrl+O`, or unfolding a row in Tern, opens the full card, and a failure keeps its last error line on the row); `display.toolActivity` (`detailed`, `concise`, `hidden`) replaces `display.hideToolActivity`, whose saved values migrate, and `Ctrl+Shift+O` now cycles the three modes ([#2785](https://github.com/can1357/oh-my-pi/issues/2785))
+- Added the `wait.idleTimeout` setting: `ladder` (default) keeps today's 5s/4m windows, a duration such as `30m` makes `wait` on your own background jobs and services return a still-running snapshot only after that window, and `none` blocks until a job or service finishes, a message or steering arrives, or you interrupt; waits for a reply are unchanged ([#18485](https://github.com/can1357/oh-my-pi/issues/18485))
 - Added the `tui.showLinkUrl` setting to hide the URL drawn after named Markdown links where the label is a clickable terminal hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
@@ -16,26 +25,82 @@
 - Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added the `gitlab` tool (`gitlab.enabled`, default off) covering project/file/issue reads, MR creation/updating/worktree checkout/push, discussions/notes/resolution, project/group/global search, and CI pipeline/job watching and logs, and expanded `mr://` URLs to support MR listings (`mr://`, `mr://<host>/<group>/<project>`) and cached MR overviews (`mr://<iid>`) alongside existing `/diff` slices ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
 - Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
+- Added `voice` and `speechFormats` to `models.yml` speech models; the `tts` tool switches between MP3 and WAV output to match the formats a model returns ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added `speech.cloud` (default off) to vocalize `speech.enabled` output through the cloud speech models configured in the `speech` role ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
+- Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
+- Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.
+- Updated `/fast` to switch Devin models to their fast lanes; use `tier.devin: priority` to start sessions in fast mode.
+- Improved glob tool output with clearer search patterns and highlighted wildcards, character classes, and brace alternations.
+- Added `<mark>` highlighting and preserved rich text styling in terminal and Tern ask forms.
+- Learned (auto-learn managed) skills now record where they came from — the writing tool, created/updated dates, and the sessions and projects that taught them — in `x-omp-provenance` frontmatter; review them with `/skills learned` and delete one with `/skills forget <name>` ([#2189](https://github.com/can1357/oh-my-pi/issues/2189))
+- Added an opt-in GitLab integration (`gitlab.enabled`) for project, file, issue, merge request, discussion, search, worktree, and CI workflows, along with expanded `mr://` resources for merge request listings, cached overviews, and diff slices.
+- Included `tool_approvals` in `omp gc` session statistics and purge handling.
+- Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
+- Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- The `logout` RPC response carries `signOutError` when the provider could not confirm revoking the login; the login is removed regardless
+- Esc hides the command output (`/mcp` and other slash commands) previewed above the editor while the agent streams, without interrupting the turn; the output still enters the transcript when the agent pauses ([#17954](https://github.com/can1357/oh-my-pi/issues/17954))
+- Added an uninstaller to the install scripts: `curl -fsSL https://omp.sh/install | sh -s -- --uninstall` (PowerShell: `-Uninstall`) removes the installed binary or bun/npm global package and keeps `~/.omp` unless you confirm the prompt or pass `--purge` (`-Purge`) ([#3351](https://github.com/can1357/oh-my-pi/issues/3351))
 
 ### Changed
 
-- Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
-- URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
-- URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
-- Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
-- Ask form table cells, field labels and option rows keep their `<strong>`, `<em>`, `<code>` and `<mark>` styling in the terminal instead of showing plain text ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-
-### Changed
-
-- `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
-- When `bash.patterns` allow rules can skip an approval prompt, the bash tool's description tells the agent which shell syntax (unquoted operators, `$`/backtick expansions) disqualifies them ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
+- Updated task prompt to forbid full builds or test suites mid‑flight and allow quick scoped checks
+- The shell's `find`, `grep -r`, `rg`, `fd` and `ast-grep` refuse to search a filesystem root such as `/` and explain why; `find`, `rg` and `fd` still allow a shallow look (max depth 2), and `-allow-root` (`find`) or `--allow-root` searches the whole disk on purpose
+- The `grep`, `glob`, `ast_grep` and `ast_edit` tools refuse a search scope that resolves to a filesystem root (`/usr/..`, `../../..`, `C:\`) and explain why; a bare `/` still means the workspace
+- `/tan` agents now treat the conversation they fork from as reference only and stop after finishing your request, instead of picking up or deferring to the main agent's in-progress work
+- The main agent no longer sees `/tan` dispatch notices or gets woken when a tangent finishes; with your next message it gets a short record linking the tangent's output
+- Redesigned the `/live` call panel in Tern: your voice as a moving wave in the call's color, the transcript as a caption, and the call's status beside Mute and End call.
+- Redesigned the composer's dictation control in Tern: while recording it shows a live wave of your voice and the time recorded beside a stop button.
+- In Tern, only a click on a `/btw` note's question line points the composer at the note; clicking its answer to read or select it no longer does.
+- Bash can now load approved `.envrc` files and opt-in `.env` files without requiring `direnv`, using the exact approved file contents.
+- URL reading now preserves cookies across redirects, follows meta refreshes, falls back to the headless browser when plain fetching is blocked, and uses the native reader for X, YouTube, docs.rs, Discourse, and Mastodon while raw reads bypass site-specific rendering.
+- Expanded `bash.gitGuard` protection in shared checkouts to cover more history-changing Git operations, including rebase, merge, pull, cherry-pick, revert, amend, and non-dry-run clean operations.
+- Improved bash approval guidance by explaining which shell syntax prevents a `bash.patterns` rule from bypassing approval prompts.
+- Exiting or restarting no longer flashes a "Closing session…" toast; a status appears only when closing takes longer than 3 seconds.
+- Local dictation now defaults to Fluid Speech Pro (`local/fluid-speech-pro`), a further-trained Parakeet TDT 0.6B v3 that stays accurate with noise or music in the room. `local/parakeet-tdt-0.6b-v3` roles and fallback chains migrate to it automatically.
+- Live voice mode now uses Codex's `gpt-live-1.1-codex` realtime model.
+- Updated the local speech runtimes to sherpa-onnx 2.0.3 and Transformers.js 4.3.2; they reinstall on first use.
+- Shortened and bracketed bash's notices, e.g. `[next call: cwd → …, set -e off]`, `[timeout clamped: 7200s → 3600s]`, `[backgrounded as bg_3, killed at 300s total; …]`, `[took 1.23s]`, `[exit code 3]`, `[timed out after 30s]`, `[cancelled]`; eval's notices follow suit, e.g. `[Python kernel restarted; earlier state gone]`, `[timed out after 30s; kernel interrupted, state kept]`.
+- `cfg://` writes to map settings such as `modelRoles` now change only the entries they name (`null` removes one), so approval prompts and transcripts show just those entries instead of the whole map, and saving one entry keeps the others in your config.
+- The task tool's agent list now shows each restricted agent's tools (e.g. `scout` has no shell), and `scout` reports a requested method it cannot perform instead of silently substituting a weaker one ([#7020](https://github.com/can1357/oh-my-pi/issues/7020))
 
 ### Fixed
 
+- Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back
+- Fixed a handoff model that never stops streaming holding automatic compaction indefinitely: handoff output is now capped like a summary, and the new `compaction.handoffTimeoutSeconds` setting (off by default) fails a handoff that runs too long so automatic compaction moves on to the next method and `/handoff` reports the timeout ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
+- Fixed the tool-call loop guard never stopping a model that keeps calling nonexistent tools (`wri`, `ed`, `ba`) with varying names or arguments; it now redirects after `model.toolCallLoopGuard.threshold` such turns in a row, while a single typo followed by a valid call is unaffected ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
+- Fixed eval `sh()` running commands the bash interceptor (`bashInterceptor.patterns`) redirects to dedicated tools; it now fails with the same guidance as the bash tool ([#20033](https://github.com/can1357/oh-my-pi/issues/20033))
+- User prompts emit OSC 133 marks only on first entering terminal history, keeping repaints from piling up markers in the VS Code terminal ([#20793](https://github.com/can1357/oh-my-pi/issues/20793)).
+- Terminals that list OSC 133 commands (such as tuios' scrollback browser) now find each user prompt as a command instead of an empty entry ([#20123](https://github.com/can1357/oh-my-pi/issues/20123)).
+- `hideThinkingBlock: true` now hides thinking blocks from the moment the TUI starts, instead of showing them until the first streamed reasoning arrives ([#17369](https://github.com/can1357/oh-my-pi/issues/17369))
+- Alt+L (reset terminal display), Ctrl+T, Ctrl+R, Ctrl+G and Ctrl+Shift+O work again while an ask form or ask dialog holds focus ([#20771](https://github.com/can1357/oh-my-pi/issues/20771))
+- A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"
+- Browser helper calls (`tab.goto`, `tab.click`, `tab.evaluate`, etc.) and tab reuse on Tern, WebKit, and cmux tabs no longer queue behind another tab's long-running `tab.run()`, and queued `tab.run()` timeouts now name the tab and agent holding the queue
+- Fixed `tab.waitFor(1500)`, `tab.waitFor(() => …)` and other non-string selectors on Tern and WebKit tabs failing with `Unsupported selector engine undefined` or `null is not an object (evaluating 'sel.engine')`; they now fail like on Chromium, naming the sleep or `page.waitForFunction` to use instead
+- Fixed a Chromium action on a selector the page cannot parse (`'input[name=q], label/Query'`) waiting out the whole action timeout; it now fails at once, and says that a `label/`-style prefix cannot join a CSS list
+- `tab.wait()`, `tab.waitForTimeout()`, `tab.waitForLoadState()`, `tab.waitForURL()`, `tab.navigate()`, `tab.$()`, `tab.$$()`, `tab.on()` and `tab.setExtraHTTPHeaders()` in eval JavaScript now say what to call instead of failing with `is not a function`
+- `page.setExtraHTTPHeaders()` in `tab.run` on Tern and WebKit tabs now says to use `tab.emulate({ credentials })` for basic auth or omp's own browser for other headers, instead of failing with `is not a function`
+- An eval JavaScript cell that uses `document`, `window`, `location` or another page-only global now says to run that code in the page with `tab.evaluate(...)`
+- A timed-out direct helper call on Tern, WebKit and cmux tabs now names the helper that stalled and how to raise the time limit
+- `tab.storage()` without a storage kind and `tab.setCookies([])` now say what they expected instead of "Storage kind must be local or session" and "malformed cookie input"
+- A relay tab Chrome refuses because another debugger already holds every new tab now says what holds it and how to get past it
+- The resume picker's **All projects** scope shows each session's folder in rows and the preview, and search matches folder paths there ([#20746](https://github.com/can1357/oh-my-pi/issues/20746))
+- Reading `history://current/full` on Claude no longer returns the model's own earlier reasoning as text, which Anthropic refuses as `reasoning_extraction` ([#19740](https://github.com/can1357/oh-my-pi/issues/19740))
+- The completion popup keeps the selected entry visible when descriptions wrap and hides its scrollbar when all entries fit ([#20731](https://github.com/can1357/oh-my-pi/issues/20731))
+- Turning an extension off in `/extensions` hides its editor widgets; turning it back on restores them ([#20725](https://github.com/can1357/oh-my-pi/issues/20725)).
+- On Windows, closing the terminal that first started the shared omp daemon no longer kills the daemon and the services of other sessions, as long as the terminal's job object allows breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
+- Fixed async compaction paying for a second summary during ordinary growth through a wide pre-threshold band ([#20739](https://github.com/can1357/oh-my-pi/issues/20739)).
+- `edit` on `ssh://` files no longer contacts the host before the call is approved, and refuses to overwrite a file that changed on the host after the edit fetched it. Writable RPC host URIs get the same check as a read just before the write, so a change landing between that read and the write is not caught ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
+- `edit` refuses `ssh://` symbolic links instead of replacing them with a regular file, and refuses creating, deleting or moving `ssh://` files before its preview ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
+- `read` and `edit` give `ssh://host/~/x` and its absolute spelling one tag, and `read` shows `ssh://` notebooks as cells like local ones ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - A todo update no longer hides the rest of a long turn: tool output after it stays in terminal scrollback instead of vanishing behind a one-row todo line and a clipped empty card frame ([#20705](https://github.com/can1357/oh-my-pi/pull/20705) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `/tree` opens on long sessions instead of failing with "Maximum call stack size exceeded" ([#20702](https://github.com/can1357/oh-my-pi/pull/20702) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `/copy` and `/rewind` open quickly on long sessions with few prompts: they draw the turns within the last 600 entries instead of reaching back to the prompt before them, often the whole session; `a` or a rewind filter query loads the rest ([#20703](https://github.com/can1357/oh-my-pi/pull/20703) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- The rewind, copy and tree pickers show "Loading the session history…" in the composer's hint while a long session's history draws, instead of seeming to ignore `/rewind`, `/copy`, `/tree` or Esc Esc until they appear ([#20704](https://github.com/can1357/oh-my-pi/pull/20704) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Pasting text that ends in an `@name` no longer opens the file completion list, so the next Enter sends the message instead of replacing the name with a file ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
 - `lsp` tool calls with `new_name: null` or `line: null` no longer crash the TUI while rendering ([#20663](https://github.com/can1357/oh-my-pi/issues/20663)).
+- IRC message cards draw the quoted message's rail and the recipient branches as one continuous line instead of a rail two cells right of the branches, and cancelled-job branches on `proc://` cards sit two cells in to match ([#20715](https://github.com/can1357/oh-my-pi/pull/20715) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Rebuilding the transcript now removes replaced blocks in one update instead of updating the view for each block ([#20658](https://github.com/can1357/oh-my-pi/pull/20658) by [@H4vC](https://github.com/H4vC))
 - Output after a running background task remains accessible in terminal scrollback when omp rebuilds the transcript. ([#20656](https://github.com/can1357/oh-my-pi/pull/20656) by [@loishi](https://github.com/loishi))
 - `/plugins` (and `/plugins list`) shows installed plugins in an "Installed Plugins" report with one plugin per line, like `/mcp list`, instead of a status line that ran them together ([#20653](https://github.com/can1357/oh-my-pi/issues/20653)).
@@ -75,10 +140,33 @@
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
+- Declining a provider's consent screen during `/login` or `omp login` now reports the sign-in as canceled, in the terminal and on the browser page, instead of as a failed login
+- Fixed headless browser automation on Windows sometimes showing a blank white Chrome window by launching its hidden native window off-screen ([#5397](https://github.com/can1357/oh-my-pi/issues/5397), [#5524](https://github.com/can1357/oh-my-pi/pull/5524) by [@dragonbaba](https://github.com/dragonbaba))
+- Fixed agents writing implementation details and session notes into README and other docs after every fix: the system prompt now asks for docs/changelog updates only when documented or user-visible behavior changes, in user terms and following the repository's own conventions ([#16155](https://github.com/can1357/oh-my-pi/issues/16155))
+- `/reload-plugins` now reports only what it reloaded (skills, slash commands, task agents and MCP servers in the TUI; skills and slash commands over ACP/RPC) and says extension hooks and tools need an omp restart, instead of claiming it reloaded them ([#7260](https://github.com/can1357/oh-my-pi/issues/7260))
+- Dictation now warns once when the speech model cannot load on the GPU (e.g. out of VRAM) and falls back to CPU, naming the fallback device and the reason ([#11040](https://github.com/can1357/oh-my-pi/issues/11040))
+- Fixed `wait` guidance sending agents to ask the user to check back later on an outside condition (a CI run, a deploy): the tool description and the back-to-back wait reminder now name one async `bash` watcher that exits once the condition holds, then ending the turn or calling `wait`, and limit the `sleep` job rule to sleeping just to keep calling `wait` ([#18900](https://github.com/can1357/oh-my-pi/issues/18900))
+- RPC mode now writes a `notice` frame with `source: "session-model-restore"` before exiting when a startup `--continue`/`--resume` cannot restore the saved model, so hosts can tell the fail-closed exit from a crash and rebind via `open_session`/`switch_session` with an explicit model ([#17611](https://github.com/can1357/oh-my-pi/issues/17611))
 
 ### Removed
 
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+- Fixed an empty toast with only a checkmark appearing in Tern each time dictation finished transcribing.
+- Fixed `bash` running its command approval analysis in yolo mode without `bash.patterns` rules, which failed every command when the native addon was out of date.
+- Fixed garbled live dictation (stray words like "Yeah. Oh. Hey.") with quiet microphones or background music: recordings are now split at pauses by the Silero voice activity detector instead of a loudness threshold that chopped speech into sub-second pieces. A recording with no detected speech, such as a song, is transcribed in one pass when recording stops.
+- Fixed terminal completion, focus, scrolling, and keyboard handling across prompts, ask forms, plugin and agent views, debugger and plan review screens, session management, and external editors.
+- Fixed transcript rebuilding so compaction, shaking, display changes, forks, and worktree operations remain responsive while preserving terminal scrollback and background-task status.
+- Fixed rendering of images and rich content in the terminal, including image sizing, edge placement, WebP and GIF embeds, annotated pasted images, Markdown styling, and syntax-highlighted paths.
+- Fixed crashes and rendering errors for LSP calls with null fields and for resumed or rewound sessions containing cancelled task results.
+- Fixed session and service lifecycle issues, including restarting after a deleted working directory, cleaning up descendant processes, reloading advisor rules, and restoring the correct session state after resume.
+- Fixed MCP connectivity for HTTP servers that reject discovery with HTTP 415, and restored OpenCode Go quota windows in `/usage`.
+- Fixed bash behavior for tab completion, read-only Perl commands, complex approval patterns, and benign command flags; long wildcard rules no longer freeze sessions.
+- Fixed model reference handling in `/prewalk`, `/switch`, and related commands when using provider/model/level completion.
+- Fixed Gemini planning behavior so long tool-free reasoning is not repeatedly interrupted.
+- Fixed ACP and RPC `/mcp` commands to honor project-server precedence, enable/disable overrides, and the session working directory.
+- Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
+- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
+- omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
 
 ## [19.2.1] - 2026-11-25
 

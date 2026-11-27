@@ -2,9 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bu
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
-import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
-import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
 	type LoadSkillsResult,
@@ -39,8 +37,6 @@ const expectedFixtureSkillOrder: string[] = [
  * installs out of every assertion.
  */
 const DISABLE_ALL_BUILTIN_SKILLS = {
-	enableCodexUser: false,
-	enableClaudeUser: false,
 	enableClaudeProject: false,
 	enablePiUser: false,
 	enablePiProject: false,
@@ -50,17 +46,10 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 
 // Every provider resolves user-level roots from `os.homedir()` (HOME on POSIX,
 // USERPROFILE on Windows) and the agent dir; point both at an empty temp home
-// so real `~/.omp/plugins`, `~/.claude/plugins`, and `~/.agents/skills`
+// so real `~/.omp/plugins` and `~/.agents/skills`
 // installs never leak into these tests. On POSIX, Bun fixes `os.homedir()` at
 // process start, so setting HOME alone is not enough; spy on it as well.
-const isolatedEnvKeys = [
-	"HOME",
-	"USERPROFILE",
-	"CLAUDE_CONFIG_DIR",
-	"PI_CODING_AGENT_DIR",
-	"OMP_PROFILE",
-	"PI_PROFILE",
-] as const;
+const isolatedEnvKeys = ["HOME", "USERPROFILE", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 const originalEnv: Record<string, string | undefined> = Object.fromEntries(
 	isolatedEnvKeys.map(key => [key, process.env[key]]),
 );
@@ -76,8 +65,6 @@ beforeAll(async () => {
 		process.env[key] = isolatedHome;
 		Bun.env[key] = isolatedHome;
 	}
-	delete process.env.CLAUDE_CONFIG_DIR;
-	delete Bun.env.CLAUDE_CONFIG_DIR;
 	setAgentDir(path.join(isolatedHome, ".omp", "agent"));
 });
 
@@ -159,44 +146,6 @@ describe("skills", () => {
 			expect(skills.map(s => s.name)).toEqual(expectedFixtureSkillOrder);
 		});
 
-		it("should keep user Claude skills when project .claude/skills is missing", async () => {
-			const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-			delete process.env.CLAUDE_CONFIG_DIR;
-			delete Bun.env.CLAUDE_CONFIG_DIR;
-			const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-home-"));
-			const tempProjectDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-project-"));
-			enableUserSource("claude");
-
-			try {
-				const userSkillDir = path.join(tempHomeDir, ".claude", "skills", "user-only-skill");
-				await fs.mkdir(userSkillDir, { recursive: true });
-				await fs.writeFile(
-					path.join(userSkillDir, "SKILL.md"),
-					[
-						"---",
-						"name: user-only-skill",
-						"description: User-only Claude skill",
-						"---",
-						"",
-						"# User-only skill",
-					].join("\n"),
-				);
-
-				const capability = getCapability<CapabilitySkill>(skillCapability.id);
-				expect(capability).toBeDefined();
-				const claudeProvider = capability?.providers.find(provider => provider.id === "claude");
-				expect(claudeProvider).toBeDefined();
-
-				const result = await claudeProvider!.load({ cwd: tempProjectDir, home: tempHomeDir, repoRoot: null });
-				expect(result.items.some(skill => skill.name === "user-only-skill" && skill.level === "user")).toBe(true);
-			} finally {
-				disableUserSource("claude");
-				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
-				await removeWithRetries(tempProjectDir);
-				await removeWithRetries(tempHomeDir);
-			}
-		});
-
 		// Regression for issue #2401: a user who disables the named third-party
 		// CLI toggles (codex/claude/native) MUST still see skills from the
 		// canonical OMP-native `~/.agent[s]/skills` (the `agents` provider).
@@ -214,8 +163,6 @@ describe("skills", () => {
 			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
 			try {
 				const { skills } = await loadSkills({
-					enableCodexUser: false,
-					enableClaudeUser: false,
 					enableClaudeProject: false,
 					enablePiUser: false,
 					enablePiProject: false,
@@ -253,8 +200,6 @@ describe("skills", () => {
 				process.env.USERPROFILE = tempHostHome;
 				try {
 					const { skills } = await loadSkills({
-						enableCodexUser: false,
-						enableClaudeUser: false,
 						enableClaudeProject: false,
 						enablePiUser: false,
 						enablePiProject: false,
@@ -358,8 +303,6 @@ describe("skills", () => {
 			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
 			try {
 				const { skills } = await loadSkills({
-					enableCodexUser: false,
-					enableClaudeUser: false,
 					enableClaudeProject: false,
 					enablePiUser: false,
 					enablePiProject: false,

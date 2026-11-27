@@ -38,6 +38,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { AgentViewSession } from "../session/agent-session-handle";
 import type { DroppedPrompt } from "../session/agent-session-types";
 import type { CompactMode } from "../session/compact-modes";
+import type { ToolActivityMode } from "./settings";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
@@ -303,6 +304,8 @@ export interface ToolCallSpec {
 	readonly id: string;
 	/** Directory the call's relative paths resolve against. */
 	readonly cwd: string;
+	/** Wall-clock ms the model made the call (a replayed call's message time); defaults to now. */
+	readonly timestamp?: number;
 }
 
 /**
@@ -317,8 +320,8 @@ export interface PendingTool {
 	readonly call?: ToolCall;
 	readonly group?: ReadGroup;
 	readonly reply?: AssistantView;
-	/** Streamed (or final) args. */
-	updateArgs(args: unknown, toolCallId: string): void;
+	/** Streamed (or final) args; `timestamp` dates a read joining a group (wall-clock ms, default now). */
+	updateArgs(args: unknown, toolCallId: string, timestamp?: number): void;
 	/** The edit preview a streaming edit-like call pushes. */
 	updateStreamPreview(preview: unknown): void;
 	/** A progress frame (`partial`) or the final result. */
@@ -606,14 +609,14 @@ export interface InteractiveModeContext {
 	isBashMode: boolean;
 	/**
 	 * Ctrl+O: tool output, read groups, `!`/`$` runs and expandable messages show in full.
-	 * Reactive like every display flag below ({@link hideToolActivity}, {@link hideThinkingBlock},
+	 * Reactive like every display flag below ({@link toolActivity}, {@link hideThinkingBlock},
 	 * {@link proseOnlyThinking}, {@link expandThinkingBlocks}): assigning it repaints every live
 	 * block that reads it; blocks already in terminal scrollback keep their rows until the
 	 * scrollback is rebuilt (`shell.host?.replayHistory()`). No walking blocks to push it.
 	 */
 	toolOutputExpanded: boolean;
-	/** Tool activity hidden (reactive, see {@link toolOutputExpanded}). */
-	hideToolActivity: boolean;
+	/** How tool activity shows: `display.toolActivity` (reactive, see {@link toolOutputExpanded}). */
+	toolActivity: ToolActivityMode;
 	todoExpanded: boolean;
 	planModeEnabled: boolean;
 	vibeModeEnabled: boolean;
@@ -751,9 +754,10 @@ export interface InteractiveModeContext {
 	presentAssistant(message?: AssistantMessage, options?: PresentAssistantOptions): AssistantView;
 	/**
 	 * Replay `entries` into a transcript of their own, drawn by the session's block presenters (the
-	 * rewind page's turns). Dispose it when the page closes.
+	 * rewind page's turns). `clipped`: the entries are a later part of the session, so the run they
+	 * open in may have started above them. Dispose it when the page closes.
 	 */
-	createTranscriptReplica(entries: readonly TranscriptEntryLike[]): TranscriptReplica;
+	createTranscriptReplica(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica;
 	/**
 	 * Mount a tool call's block: a tool card, or a reply block for a built-in `write` to a reply
 	 * URL (`out://`). Wired to the display flags; registers nothing in {@link pendingTools}.
@@ -777,6 +781,8 @@ export interface InteractiveModeContext {
 	showSessionInfo(info: string, context?: ContextUsage): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
+	/** Hide the deferred command output preview; the output still mounts at the settle. False when none is shown (Esc falls through). */
+	dismissDeferredCommandOutput(): boolean;
 	/**
 	 * Remove every transcript block (disposing their roots, so timers and subscriptions stop) and
 	 * forget the block maps. Used before a full rebuild.
@@ -789,6 +795,8 @@ export interface InteractiveModeContext {
 	showPinnedError(message: string): void;
 	clearPinnedError(): void;
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;
+	/** The provider's `active-notice` line when the viewed session moves onto a new model of that provider. */
+	showActiveModelNotice(): void;
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
@@ -1007,9 +1015,9 @@ export interface InteractiveModeContext {
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
-	showUserMessageSelector(startAt?: string): void;
-	showCopySelector(): void;
-	showTreeSelector(): void;
+	showUserMessageSelector(startAt?: string): Promise<void>;
+	showCopySelector(): Promise<void>;
+	showTreeSelector(): Promise<void>;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;

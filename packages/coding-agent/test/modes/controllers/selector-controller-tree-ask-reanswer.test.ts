@@ -122,7 +122,7 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		const { ctx, getPicker, navigateTree, showStatus } = createCtx(entry);
 		const controller = new SelectorController(ctx);
 
-		controller.showTreeSelector();
+		await controller.showTreeSelector();
 		await pickEntry(getPicker(), "leaf-user");
 
 		expect(showStatus).toHaveBeenCalledWith("Already at this point");
@@ -138,7 +138,7 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		});
 		const controller = new SelectorController(ctx);
 
-		controller.showTreeSelector();
+		await controller.showTreeSelector();
 		await pickEntry(getPicker(), "leaf-ask");
 
 		// The no-op short-circuit must not fire for the current-leaf ask result:
@@ -160,7 +160,7 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		});
 		const controller = new SelectorController(ctx);
 
-		controller.showTreeSelector();
+		await controller.showTreeSelector();
 		// A non-current target skips the no-op short-circuit and lands straight on
 		// the success path (navigateTree here returns a committed re-answer).
 		await pickEntry(getPicker(), "some-other-entry");
@@ -178,7 +178,7 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		const { ctx, getPicker, resumeAfterAskReanswer } = createCtx(entry, { cancelled: false });
 		const controller = new SelectorController(ctx);
 
-		controller.showTreeSelector();
+		await controller.showTreeSelector();
 		await pickEntry(getPicker(), "some-other-entry");
 
 		expect(resumeAfterAskReanswer).not.toHaveBeenCalled();

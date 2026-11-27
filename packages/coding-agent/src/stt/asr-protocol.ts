@@ -40,6 +40,16 @@ export type SttWorkerOutbound =
 	| { type: "downloaded"; id: string }
 	| { type: "error"; id: string; error: string }
 	| { type: "progress"; id: string; event: SttProgressEvent }
+	// The accelerated device failed to load the model (e.g. out of VRAM) and the
+	// worker fell back to `fallbackDevice`; sent once per model load.
+	| {
+			type: "device_fallback";
+			id: string;
+			modelKey: SttModelKey;
+			device: string;
+			fallbackDevice: string;
+			error: string;
+	  }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
 	// ── Live streaming session ──
 	// `partial` is the volatile transcript of the in-progress speech segment

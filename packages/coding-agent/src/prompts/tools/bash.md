@@ -1,5 +1,5 @@
 Persistent bash 5.3.
-Each call starts in the session cwd with `set -e` off; use `cwd`, not `cd`{{#if hasPty}}; `pty` = interactive{{/if}}.
+Each call starts in the session cwd with `set -e` off{{#if hasPty}}; `pty` = interactive{{/if}}.
 Internal URIs work as paths for builtins/coreutils, redirects, globs.
 In-process builtins, ahead of PATH: {{join builtins ", "}}.
 {{#if asyncEnabled}}

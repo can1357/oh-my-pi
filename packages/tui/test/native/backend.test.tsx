@@ -1098,6 +1098,33 @@ describe("native pacing and transport", () => {
 		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
 	});
 
+	it("lets the echo of a click overdraw stalled credits, so a form it closes leaves Tern at once", async () => {
+		const open = signal(true);
+		const h = await mount(
+			() => ({
+				main: [
+					<text>streaming</text>,
+					<Show when={open}>
+						<col key="form">
+							<row key="actions">
+								<button key="submit" text="Submit" onAction={() => open.set(false)} />
+							</row>
+						</col>
+					</Show>,
+				],
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		// The first frame holds the only credit and is never acknowledged.
+		const doc = h.tern.doc("s:t");
+		expect(doc.nodes.has("main/form/actions/submit")).toBe(true);
+		h.tern.event({ ev: "action", sf: "s:t", id: "main/form/actions/submit", act: "click" });
+		h.settle();
+		// Held behind the credit, the form would stay on screen: every further click would name a node
+		// the program already let go of.
+		expect(doc.nodes.has("main/form")).toBe(false);
+	});
+
 	it("lends no overdraft to a transcript change after input that changed nothing", async () => {
 		const transcript = signal("");
 		const text = signal("");

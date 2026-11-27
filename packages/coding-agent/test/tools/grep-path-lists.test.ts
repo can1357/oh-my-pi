@@ -102,6 +102,21 @@ describe("tool path arrays", () => {
 		resetSettingsForTest();
 	});
 
+	it("grep and ast_grep refuse a scope that names the filesystem root", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const { root } = path.parse(tempDir);
+		const calls = [
+			["grep", { pattern: "shared-needle", path: `${root}usr/..` }],
+			["grep", { pattern: "shared-needle", path: `apps/; ${root}usr/..` }],
+			["ast_grep", { pat: "legacyWrap($A, $B)", path: path.relative(tempDir, root) }],
+		] as const;
+		for (const [name, args] of calls) {
+			const tool = tools.find(entry => entry.name === name);
+			if (!tool) throw new Error(`Missing ${name} tool`);
+			await expect(tool.execute(`root-${name}`, args)).rejects.toThrow("Refusing to search the filesystem root");
+		}
+	});
+
 	it("search finds a named NUL-containing file and sanitizes matches and context", async () => {
 		await Bun.write(path.join(tempDir, "nul-named.md"), "before\0\x07\nneedle\0\x1b[31m red\x1b[0m\nafter\0\n");
 		const tools = await createTools(

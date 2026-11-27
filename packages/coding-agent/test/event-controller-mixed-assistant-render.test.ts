@@ -12,7 +12,7 @@ import { isSettled } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 import { blockText, transcriptText } from "./helpers/transcript-text";
 
-import { cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTerminalShowImages, type ToolActivityMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 const TOOL_CALL_A_ID = "toolu_mixed_text_order_a";
 const TOOL_CALL_B_ID = "toolu_mixed_text_order_b";
@@ -79,7 +79,7 @@ function assistantViews(ctx: InteractiveModeContext): AssistantView[] {
 }
 
 function createFixture(
-	hideToolActivity = false,
+	toolActivity: ToolActivityMode = "detailed",
 	toolByName: (name: string) => AgentTool | undefined = () => undefined,
 ) {
 	let hasDisplayableThinkingContent = false;
@@ -95,7 +95,7 @@ function createFixture(
 		}),
 		lastAssistantUsage: zeroUsage(),
 	});
-	ctx.hideToolActivity = hideToolActivity;
+	ctx.toolActivity = toolActivity;
 	return { controller: new EventController(ctx), ctx };
 }
 
@@ -261,7 +261,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		};
 		const streaming = assistantMessage([toolCall]);
 
-		const live = createFixture(false, toolByName);
+		const live = createFixture("detailed", toolByName);
 		await live.controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
 			AgentSessionEvent,
 			{ type: "message_start" }
@@ -278,7 +278,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 		expect(transcriptText(live.ctx.shell, 120)).toContain("GitHub Repo can1357/oh-my-pi");
 
-		const executionOnly = createFixture(false, toolByName);
+		const executionOnly = createFixture("detailed", toolByName);
 		await executionOnly.controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -287,7 +287,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
 		expect(transcriptText(executionOnly.ctx.shell, 120)).toContain("GitHub Repo can1357/oh-my-pi");
 
-		const rebuilt = createFixture(false, toolByName);
+		const rebuilt = createFixture("detailed", toolByName);
 		const rebuiltHelpers = new UiHelpers(rebuilt.ctx);
 		rebuilt.ctx.addMessageToChat = (message, options) => rebuiltHelpers.addMessageToChat(message, options);
 		rebuiltHelpers.renderSessionContext({
@@ -303,7 +303,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 	});
 
 	it("keeps assistant text streaming while hiding bash failures and grouped read activity", async () => {
-		const { controller, ctx } = createFixture(true);
+		const { controller, ctx } = createFixture("hidden");
 		const bashCall: ToolCall = {
 			type: "toolCall",
 			id: TOOL_CALL_A_ID,

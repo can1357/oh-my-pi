@@ -7,22 +7,37 @@
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
+- Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added the ArkaneCloud provider, including `/login arkanecloud`, `ARKANECLOUD_API_KEY` authentication, and live model and pricing discovery per API key.
+- Added xAI SuperGrok speech-to-text support through `xai-oauth/grok-voice-transcribe-2.0`.
+- Added the Refuseless provider with `/login refuseless`, `REFUSELESS_API_KEY` authentication, live model discovery, and support for abliterated and standard open-weight models.
+- Added OpenAI's `gpt-transcribe` speech-to-text model, the replacement for `whisper-1`, `gpt-4o-transcribe`, and `gpt-4o-mini-transcribe`, which OpenAI shuts down on 2027-02-26.
+- Added OpenRouter speech-to-text models `openai/gpt-transcribe`, `openai/whisper-large-v3-turbo`, `nvidia/nemotron-3.5-transcribe`, `elevenlabs/scribe-v2`, `assemblyai/universal-3-6-pro`, `deepgram/nova-3`, `qwen/qwen3-asr-1.7b`, and `x-ai/grok-stt-2.0`.
+- Added DeepInfra text-to-speech models `Qwen/Qwen3-TTS` and `sesame/csm-1b`.
+- Added the `connected-name` and `active-notice` auth nodes: what a provider is called once an account is signed in, and the transcript line shown when a session starts using one of its models
+- Added `window-ms` to hook-refreshed logins (`refresh hook="…" { window-ms … }`), so their access tokens can renew earlier than the 60-second default
+- Added the `device-bound` auth node (logins that depend on a key only this machine holds stay out of the auth broker) and the `sign-out hook="…"` node (forgets a removed login's secrets kept outside `agent.db` and revokes it upstream)
 
 ### Changed
 
-- Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
-- Devin's Fast models (`-fast`) are no longer listed separately: each model carries its fast lane, which `/fast` switches on
+- Seeded models now remain available even when their provider applies model exclusions.
+- Replaced the local `parakeet-tdt-0.6b-v3` dictation seed with `fluid-speech-pro`, now the default dictation model, and added `parakeet-tdt-0.6b-v2` (English).
+- Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.
 
 ### Fixed
 
-- Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
+- Fixed QwenCloud Token Plan (`alibaba-token-plan`) DeepSeek V4.1 Flash models (`deepseek-v4.1-flash`, `deepseek-v4.1-flash-1017`) dropping attached images as text-only; they now accept image input ([#20773](https://github.com/can1357/oh-my-pi/issues/20773))
+- Fixed Antigravity model display and pricing: models now appear as included with the Google AI plan, can serve as the cheapest configured vision fallback, and report zero cost in OTLP telemetry.
+- Fixed `google-vertex` Claude Fable 5.1+ requests failing their first attempt with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#20765](https://github.com/can1357/oh-my-pi/issues/20765))
 - Factory Droid models now use per-install prompt perturbation ([#19895](https://github.com/can1357/oh-my-pi/pull/19895) by [@Xytronix](https://github.com/Xytronix))
 
 ### Added
+
+
 ### Removed
 
-- Removed unused exports `hasQuotaTierPolicy` (`/compat/behavior`), `hasRoutingVariants` (`/compat/taxonomy`), `toFirepassPublicModelId` (`/fireworks-model-id`), `isAzureDeploymentsUrl` (`/hosts`) and `toPositiveNumberOrNull` (`/utils`) ([#20528](https://github.com/can1357/oh-my-pi/pull/20528))
-- Removed Devin Fusion pairings (`fusion-<lead>-sidekick-*`) from the model list: omp runs only the lead, so the 1000+ rows duplicated the lead models pinned to one thinking level
+- Removed unused public compatibility, model-ID, host, and utility exports.
+- Removed Devin Fusion lead/sidekick model pairings from the model list; omp now lists the lead models directly without redundant entries.
 
 ## [19.2.1] - 2026-11-25
 

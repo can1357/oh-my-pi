@@ -20,6 +20,7 @@ import { OUTPUT_ACTIVE_LEVEL, OutputActivity } from "./output-activity";
 import { type LiveEndpoint, LiveTransport, resolveLiveEndpoint } from "./transport";
 import type { LivePhase } from "../modes/view-model/apps/live-visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
+import { rmsLevel } from "../stt/wav";
 
 const MIN_BARGE_IN_LEVEL = 0.04;
 const OUTPUT_ECHO_RATIO = 0.65;
@@ -74,16 +75,6 @@ export interface LiveSessionControllerOptions {
 function clampLevel(level: number): number {
 	if (!Number.isFinite(level) || level <= 0) return 0;
 	return Math.min(1, level);
-}
-
-function microphoneLevel(samples: Float32Array): number {
-	if (samples.length === 0) return 0;
-	let sumSquares = 0;
-	for (let index = 0; index < samples.length; index += 1) {
-		const sample = samples[index] ?? 0;
-		sumSquares += sample * sample;
-	}
-	return clampLevel(Math.sqrt(sumSquares / samples.length));
 }
 
 function currentUser(): { username: string; firstName: string } {
@@ -441,7 +432,7 @@ export class LiveSessionController {
 			return;
 		}
 		if (this.#muted) return;
-		this.#inputLevel = microphoneLevel(samples);
+		this.#inputLevel = rmsLevel(samples);
 		this.#emitLevels();
 		const outputActive = this.#outputLevel > OUTPUT_ACTIVE_LEVEL;
 		const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);

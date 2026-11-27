@@ -144,6 +144,11 @@ export interface Host {
 	 */
 	onFrame(listener: (frame: PresentedFrame) => void): () => void;
 	/**
+	 * Schedule a terminal frame even when nothing it shows changed, so {@link Host.onFrame}
+	 * listeners hear one (a no-op natively).
+	 */
+	requestFrame(): void;
+	/**
 	 * Set the terminal's mouse reporting (the driver's `setMouse`). Turning it off also forgets
 	 * the hovered hit, whose band no report would clear anymore.
 	 */
@@ -223,6 +228,7 @@ type Renderer = Pick<
 	| "checkoutShown"
 	| "setMouse"
 	| "suspend"
+	| "requestFrame"
 > & {
 	/** Stop rendering and release the renderer (not the driver). */
 	stop(): void;
@@ -354,6 +360,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			feature: name => connection.hasFeature(name),
 			checkoutShown: () => connection.checkout(),
 			setMouse: tracking => driver.setMouse(tracking),
+			requestFrame: () => {},
 			async suspend(run) {
 				backend.stop(false);
 				await driver.stop();
@@ -410,6 +417,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			dispatch: event => backend.dispatch(event),
 			feature: () => false,
 			checkoutShown: () => false,
+			requestFrame: () => backend.requestRender(),
 			setMouse(tracking) {
 				driver.setMouse(tracking);
 				if (tracking === "off") backend.clearHover();
@@ -455,6 +463,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		feature: name => renderer.feature(name),
 		checkoutShown: () => renderer.checkoutShown(),
 		suspend: run => renderer.suspend(run),
+		requestFrame: () => renderer.requestFrame(),
 		onFrame(listener) {
 			frameListeners.add(listener);
 			return () => frameListeners.delete(listener);

@@ -3,6 +3,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const testContext: Context = {
@@ -352,6 +353,98 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		);
 		const payloadDisabled = (await p2) as Record<string, unknown>;
 		expect(payloadDisabled.thinking).toEqual({ type: "disabled" });
+	});
+});
+
+// Fireworks rejects `minimal` for MiniMax M2 / GPT-OSS, so the catalog declares
+// only low/medium/high for them; disabling reasoning must then clamp to `low`
+// rather than the Fireworks-wide minimal→none mapping.
+describe("Fireworks MiniMax M2 / GPT-OSS reasoning_effort tiers", () => {
+	function captureReasoningPayload(
+		model: Model<"openai-completions">,
+		reasoning: Effort,
+	): Promise<Record<string, unknown>> {
+		const { promise, resolve } = Promise.withResolvers<Record<string, unknown>>();
+		streamOpenAICompletions(model, testContext, {
+			apiKey: "test-key",
+			fetch: createMockFetchForQwen(resolve),
+			reasoning,
+		});
+		return promise;
+	}
+
+	it("declares only low/medium/high for fireworks/minimax-m2.7 and disables reasoning with low", async () => {
+		const model = getBundledModel("fireworks", "minimax-m2.7") as Model<"openai-completions">;
+		expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		const body = await captureDisableReasoningPayload(model);
+		expect(body.reasoning_effort).toBe("low");
+	});
+
+	it("declares only low/medium/high for fireworks/gpt-oss-120b and disables reasoning with low", async () => {
+		const model = getBundledModel("fireworks", "gpt-oss-120b") as Model<"openai-completions">;
+		expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		const body = await captureDisableReasoningPayload(model);
+		expect(body.reasoning_effort).toBe("low");
+	});
+
+	it("resolves MiniMax M2 thinking metadata through the catalog engine before sending a request", async () => {
+		const base = getBundledModel("fireworks", "minimax-m2.7") as Model<"openai-completions">;
+		const model = buildModel({
+			id: base.id,
+			name: base.name,
+			api: "openai-completions",
+			provider: "fireworks",
+			baseUrl: base.baseUrl,
+			reasoning: true,
+			input: base.input,
+			cost: base.cost,
+			contextWindow: base.contextWindow,
+			maxTokens: base.maxTokens,
+		});
+
+		expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(model.thinking?.effortMap).toBeUndefined();
+		const body = await captureDisableReasoningPayload(model);
+		expect(body.reasoning_effort).toBe("low");
+	});
+
+	it("preserves a custom compat.whenThinking reasoningEffortMap override at request time", async () => {
+		const base = getBundledModel("fireworks", "minimax-m2.7") as Model<"openai-completions">;
+		// Custom proxy: the whenThinking variant force-maps high to max; it must
+		// survive effort maps living on `model.thinking.effortMap`.
+		const model = buildModel({
+			id: base.id,
+			name: base.name,
+			api: "openai-completions",
+			provider: "fireworks",
+			baseUrl: base.baseUrl,
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			compat: { whenThinking: { reasoningEffortMap: { high: "max" } } },
+			input: base.input,
+			cost: base.cost,
+			contextWindow: base.contextWindow,
+			maxTokens: base.maxTokens,
+		});
+
+		const body = await captureReasoningPayload(model, Effort.High);
+		expect(body.reasoning_effort).toBe("max");
+	});
+
+	it("preserves low/medium/high passthrough on fireworks/minimax-m2.7", async () => {
+		const model = getBundledModel("fireworks", "minimax-m2.7") as Model<"openai-completions">;
+		const lowBody = await captureReasoningPayload(model, Effort.Low);
+		expect(lowBody.reasoning_effort).toBe("low");
+		const medBody = await captureReasoningPayload(model, Effort.Medium);
+		expect(medBody.reasoning_effort).toBe("medium");
+		const highBody = await captureReasoningPayload(model, Effort.High);
+		expect(highBody.reasoning_effort).toBe("high");
+	});
+
+	it("keeps the Fireworks-wide minimal→none mapping for non-restricted models (glm-5.1)", async () => {
+		const model = getBundledModel("fireworks", "glm-5.1") as Model<"openai-completions">;
+		const body = await captureDisableReasoningPayload(model);
+		expect(body.reasoning_effort).toBe("none");
 	});
 });
 

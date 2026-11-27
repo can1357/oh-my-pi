@@ -10,7 +10,7 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
-import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, errorMessage, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
 	APP_NAME,
@@ -87,10 +87,12 @@ import {
 } from "./extensibility/plugins/marketplace-auto-update";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
+import { offerForeignConfigMigration, pendingForeignConfigMigration } from "./modes/foreign-config-migration";
 import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
+import type { NoticeEvent } from "./modes/rpc/wire/rpc-wire.generated";
 import { CURRENT_SETUP_VERSION } from "./config/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
@@ -263,6 +265,18 @@ async function loadReadlineInterface() {
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
+
+/**
+ * An RPC startup that fails closed on a saved model exits before `ready`; without a
+ * frame the host could only read stderr. Delivers the reason as a stdout `notice`.
+ */
+async function writeRpcModelRestoreNotice(message: string): Promise<void> {
+	const frame: NoticeEvent = { type: "notice", level: "error", message, source: "session-model-restore" };
+	const { promise, resolve } = Promise.withResolvers<void>();
+	// The startup error ends the process either way; delivery failure only loses the frame.
+	process.stdout.write(`${JSON.stringify(frame)}\n`, () => resolve());
+	await promise;
 }
 
 /** Print a non-fatal startup warning, for launches without a UI to show it in. */
@@ -819,17 +833,23 @@ async function runInteractiveMode(
 		}
 		playStartupSplash = showStartupSplash && setupScenes.length === 0;
 		const offersStartupWorktree = !resuming && joinLink === undefined;
+		const foreignConfigTools = await pendingForeignConfigMigration([
+			settings.getGlobalSettings(),
+			settings.getProjectSettings(),
+		]);
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
-				// Setup scenes and the startup worktree question wait on the user before any
-				// prompt runs, so they keep the boot `idle`. The worktree check runs before its
-				// async git check, so a folder where the question never shows also keeps `idle`.
+				// Setup scenes, the startup worktree question and the foreign-config offer wait on
+				// the user before any prompt runs, so they keep the boot `idle`. The worktree check
+				// runs before its async git check, so a folder where the question never shows also
+				// keeps `idle`.
 				startupRun:
 					setupScenes.length === 0 &&
+					foreignConfigTools.length === 0 &&
 					!(offersStartupWorktree && mode.mayAskForStartupWorktree()) &&
 					(startupGoal !== undefined || initialMessage !== undefined || initialMessages.length > 0),
 			}),
@@ -899,6 +919,14 @@ async function runInteractiveMode(
 
 		if (offersStartupWorktree) {
 			await mode.maybeAutoCreateWorktree();
+		}
+
+		if (foreignConfigTools.length > 0) {
+			try {
+				await offerForeignConfigMigration(mode, foreignConfigTools);
+			} catch (error) {
+				mode.showWarning(`Could not offer to keep inherited config: ${errorMessage(error)}`);
+			}
 		}
 
 		// `omp join <link>`: dispatch through the same builtin path as a typed
@@ -2800,6 +2828,9 @@ export async function runRootCommand(
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 			} catch (error) {
 				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof sdk.SessionModelRestoreError)) {
+					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof sdk.SessionModelRestoreError) {
+						await writeRpcModelRestoreNotice(error.message);
+					}
 					throw error;
 				}
 				await sessionManager.close();

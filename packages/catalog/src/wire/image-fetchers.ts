@@ -99,7 +99,7 @@ export const IMAGE_FETCHERS: Readonly<Record<ImageFetcherId, ImageFetcherIdentit
 		label: "Google",
 		userAgent: "Google",
 		markerHeaders: [],
-		observedVia: "cloudcode-pa.googleapis.com v1internal:streamGenerateContent, fileData.fileUri",
+		observedVia: "Gemini generateContent, fileData.fileUri",
 		note: "Weakest signal of the set: the agent string is a bare vendor name with no version and no proprietary header.",
 	},
 };

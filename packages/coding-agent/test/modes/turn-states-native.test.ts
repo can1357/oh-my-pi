@@ -7,12 +7,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
+import { submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
@@ -106,6 +108,34 @@ describe("turn states", () => {
 		expect(kinds()).toEqual(["section", "md"]);
 	});
 
+	it("hides thinking from the first reply when the setting is on at startup", async () => {
+		mode.stop();
+		await mode.shell.stop();
+		term.dispose();
+		session.setThinkingLevel(Effort.High);
+		cfgHideThinkingBlock.set(settings, true);
+		term = createModeTerminal({ columns: 120, rows: 32 });
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, new EventBus(), term.frame);
+		// No reasoning has streamed yet: the reply renders straight from the startup state.
+		mode.presentAssistant({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "Considering the request carefully." },
+				{ type: "text", text: "Answer after thinking." },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: USAGE,
+			timestamp: 10,
+		});
+		await using ui = await nativeShell(mode.shell);
+		const reply = parentOf(ui.node("md"));
+		expect(ui.get(reply).c.map(child => ui.get(child).k)).toEqual(["md"]);
+		expect(ui.node("md").p.text).toBe("Answer after thinking.");
+	});
+
 	it("keeps filling a returned background card with its job’s frames", async () => {
 		const card = mode.presentToolCall({
 			name: "bash",
@@ -127,13 +157,18 @@ describe("turn states", () => {
 
 	it("sends the todo reminder as a checklist of its own in main, hidden with tool activity", async () => {
 		mode.present(() =>
-			todoReminderBlock([{ content: "Add tests", status: "in_progress" }], 1, 3, () => !mode.hideToolActivity),
+			todoReminderBlock(
+				[{ content: "Add tests", status: "in_progress" }],
+				1,
+				3,
+				() => mode.toolActivity !== "hidden",
+			),
 		);
 		await using ui = await nativeShell(mode.shell);
 		const checklist = ui.node("checklist");
 		expect(parentOf(checklist).endsWith("main")).toBe(true);
 		expect(checklist.p).toMatchObject({ mode: "reminder", note: "reminder 1/3", role: "omp.notice.todo" });
-		mode.hideToolActivity = true;
+		mode.toolActivity = "hidden";
 		expect(ui.node("checklist").p.hidden).toBe(true);
 	});
 
@@ -161,6 +196,21 @@ describe("turn states", () => {
 		mode.finishPendingSubmission(input);
 		expect(ui.node("kbd", "send").p.role).toBe("omp.composer.send");
 		expect(() => ui.node("text", "stop")).toThrow();
+	});
+
+	it("clears the optimistic loading animation when prompt returns without a model turn", async () => {
+		vi.spyOn(session, "prompt").mockResolvedValue(true);
+		vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
+		const input = mode.startPendingSubmission({ text: "/extension-no-turn" });
+		expect(mode.working).toBe("turn");
+		expect(mode.optimisticUserMessageSignature).toBe("/extension-no-turn\u00000");
+
+		await submitInteractiveInput(mode, session, input);
+
+		expect(mode.working).toBeUndefined();
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+		expect(mode.locallySubmittedUserSignatures.has("/extension-no-turn\u00000")).toBe(false);
+		expect(mode.hud.status.row()).toBeUndefined();
 	});
 
 	it("names a `?` draft’s mode on the composer and leads it with the btw chip", async () => {
