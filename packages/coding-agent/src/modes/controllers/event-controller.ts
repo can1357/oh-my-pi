@@ -4,7 +4,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { batch, isSettled, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
-import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
@@ -242,6 +242,18 @@ function mergeRules(rules: readonly NotificationRule[], added: readonly Notifica
 	const merged = [...rules];
 	for (const rule of added) if (!merged.some(existing => existing.name === rule.name)) merged.push(rule);
 	return merged;
+}
+
+/**
+ * Human label for a classified account usage/quota limit. Providers often send
+ * these as generic `rate_limit_error` bodies, which read like a transient
+ * throttle; the raw text stays in the transcript message and logs.
+ */
+function usageLimitLabel(errorMessage: string, provider?: string): string {
+	const subject = provider ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)} account` : "Account";
+	const resetMs = extractRetryHint(undefined, errorMessage);
+	const reset = resetMs !== undefined && resetMs > 0 ? `; resets in ${formatDuration(resetMs)}` : "";
+	return `${subject} usage limit reached${reset}`;
 }
 
 export class EventController {
@@ -2161,7 +2173,14 @@ export class EventController {
 				this.#pinnedErrorComponent = lastAssistant;
 				this.#pinnedErrorMessage = event.message;
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
-				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
+				if (!recoverableEmptyOutput) {
+					const usageLimit = AIError.is(AIError.classifyMessage(event.message), AIError.Flag.UsageLimit);
+					this.ctx.showPinnedError(
+						usageLimit
+							? usageLimitLabel(event.message.errorMessage, event.message.provider)
+							: event.message.errorMessage,
+					);
+				}
 			}
 			this.ctx.statusLine.refresh();
 		}
@@ -2781,7 +2800,14 @@ export class EventController {
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
 		this.ctx.clearPinnedError();
-		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
+		const usageLimit =
+			event.errorId !== undefined
+				? AIError.is(event.errorId, AIError.Flag.UsageLimit)
+				: AIError.isUsageLimit(event.errorMessage);
+		const reason = previewLine(
+			sanitizeText(usageLimit ? usageLimitLabel(event.errorMessage) : event.errorMessage),
+			TRUNCATE_LENGTHS.CONTENT,
+		);
 		// Replaces the turn's row with the countdown.
 		this.ctx.showWorking("retry", {
 			label: `Retrying (${event.attempt}/${event.maxAttempts})`,
