@@ -7,7 +7,8 @@
  * their path alike: dim directory, colored file name (a URL whole), muted selectors.
  * At the edge, content previews are framed code or Markdown cells titled
  * `Read <path>`, three rows while folded, each followed by its read's usage.
- * A presenter's compact read keeps its glyph and label at the edge over its rows.
+ * A presenter's compact read keeps its glyph and label at the edge over its rows;
+ * a concise read (`display.toolActivity: concise`) is its recent-activity row.
  * Reads {@link ReadGroupTerm}.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
@@ -25,6 +26,7 @@ import {
 	type ReadTermRow,
 } from "../../transcript/read-group";
 import { paintPresenterRows } from "../figures/presented";
+import { recentActivityRow } from "../pickers/agent-hub";
 import { codeCellRows, markdownCellRows } from "../tools/code-cell";
 import { fileLink, webLink } from "../tools/file-common";
 import { frameInner, hangingWrap, statusIcon } from "../tools/frame";
@@ -112,6 +114,7 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 	const width = cx.width;
 	if (term.presented) {
 		const compact = term.presented;
+		if (compact.activityLine) return { rows: [recentActivityRow(theme, compact.activityLine, width)] };
 		const mark = compact.status === "success" ? theme.fg("dim", "•") : glyph(cx, compact.status);
 		const label =
 			compact.label !== undefined

@@ -3307,6 +3307,26 @@ export class Settings {
 			raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
 		}
 
+		// display.hideToolActivity (boolean) -> display.toolActivity (detailed |
+		// concise | hidden): true hid tool calls, false drew full cards. Nested
+		// values win over quoted-dotted ones; an explicit new mode wins over both.
+		const displayObj = isRecord(raw.display) ? raw.display : undefined;
+		const legacyHideToolActivity =
+			typeof displayObj?.hideToolActivity === "boolean"
+				? displayObj.hideToolActivity
+				: typeof raw["display.hideToolActivity"] === "boolean"
+					? raw["display.hideToolActivity"]
+					: undefined;
+		if (displayObj) delete displayObj.hideToolActivity;
+		delete raw["display.hideToolActivity"];
+		if (
+			legacyHideToolActivity !== undefined &&
+			displayObj?.toolActivity === undefined &&
+			raw["display.toolActivity"] === undefined
+		) {
+			raw.display = { ...displayObj, toolActivity: legacyHideToolActivity ? "hidden" : "detailed" };
+		}
+
 		// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
 		// `true`/`false` mapped directly onto inline-on/inline-off, so preserve
 		// the user's explicit choice; new installs get the `auto` default that

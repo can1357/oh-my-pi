@@ -14,6 +14,7 @@
 
 ### Added
 
+- Added a concise tool display mode, `display.toolActivity: concise`: each model tool call draws as one row with its time, status, tool and intent (`Ctrl+O`, or unfolding a row in Tern, opens the full card, and a failure keeps its last error line on the row); `display.toolActivity` (`detailed`, `concise`, `hidden`) replaces `display.hideToolActivity`, whose saved values migrate, and `Ctrl+Shift+O` now cycles the three modes ([#2785](https://github.com/can1357/oh-my-pi/issues/2785))
 - Added the `tui.showLinkUrl` setting to hide the URL drawn after named Markdown links where the label is a clickable terminal hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
