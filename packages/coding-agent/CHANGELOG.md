@@ -17,6 +17,7 @@
 - Updated `/fast` to switch Devin models to their fast lanes; use `tier.devin: priority` to start sessions in fast mode.
 - Improved glob tool output with clearer search patterns and highlighted wildcards, character classes, and brace alternations.
 - Added `<mark>` highlighting and preserved rich text styling in terminal and Tern ask forms.
+- Learned (auto-learn managed) skills now record where they came from — the writing tool, created/updated dates, and the sessions and projects that taught them — in `x-omp-provenance` frontmatter; review them with `/skills learned` and delete one with `/skills forget <name>` ([#2189](https://github.com/can1357/oh-my-pi/issues/2189))
 - Added an opt-in GitLab integration (`gitlab.enabled`) for project, file, issue, merge request, discussion, search, worktree, and CI workflows, along with expanded `mr://` resources for merge request listings, cached overviews, and diff slices.
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.

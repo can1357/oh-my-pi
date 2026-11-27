@@ -99,7 +99,7 @@ Current registered skill providers:
    - `codex`
 7. `opencode` (priority 55)
 8. `github` (priority 30) — `.github/skills/<name>/SKILL.md` (GitHub Agent Skills layout, project-only)
-9. `omp-managed` (priority 5) — auto-learn skills under `~/.omp/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill
+9. `omp-managed` (priority 5) — auto-learn skills under `~/.omp/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill. Each carries `x-omp-provenance` frontmatter (writing tool, created/updated, contributing sessions and projects); `/skills learned` lists them with that provenance, including shadowed ones, and `/skills forget <name>` deletes one
 
 Capability dedup key is skill name; the first item with a given name wins in the deduped `items` view. `loadSkills()` resolves same-name collisions itself (see "Collision and duplicate handling").
 
