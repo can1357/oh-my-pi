@@ -141,6 +141,7 @@
 - Fixed headless browser automation on Windows sometimes showing a blank white Chrome window by launching its hidden native window off-screen ([#5397](https://github.com/can1357/oh-my-pi/issues/5397), [#5524](https://github.com/can1357/oh-my-pi/pull/5524) by [@dragonbaba](https://github.com/dragonbaba))
 - Fixed agents writing implementation details and session notes into README and other docs after every fix: the system prompt now asks for docs/changelog updates only when documented or user-visible behavior changes, in user terms and following the repository's own conventions ([#16155](https://github.com/can1357/oh-my-pi/issues/16155))
 - `/reload-plugins` now reports only what it reloaded (skills, slash commands, task agents and MCP servers in the TUI; skills and slash commands over ACP/RPC) and says extension hooks and tools need an omp restart, instead of claiming it reloaded them ([#7260](https://github.com/can1357/oh-my-pi/issues/7260))
+- Dictation now warns once when the speech model cannot load on the GPU (e.g. out of VRAM) and falls back to CPU, naming the fallback device and the reason ([#11040](https://github.com/can1357/oh-my-pi/issues/11040))
 
 ### Removed
 

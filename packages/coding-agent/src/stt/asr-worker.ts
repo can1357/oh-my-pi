@@ -180,6 +180,14 @@ async function loadPipelineWithDeviceFallback(
 				fallbackDevice,
 				error: errorMessage(error),
 			});
+			transport.send({
+				type: "device_fallback",
+				id: requestId,
+				modelKey,
+				device,
+				fallbackDevice,
+				error: errorMessage(error),
+			});
 		}
 	}
 	throw new Error("No stt model devices configured");
