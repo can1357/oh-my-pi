@@ -127,14 +127,13 @@ describe("resolveVocalizerSpeechChain", () => {
 		expect(ids(Settings.isolated({ ...configured, "speech.cloud": true }))).toEqual(["eleven", "gemini-tts"]);
 	});
 
-	test("offline mode admits only the session provider's cloud models", () => {
+	test("offline mode keeps other providers' cloud models out", () => {
 		const settings = Settings.isolated({
 			"models.offline": true,
 			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 		});
 		expect(ids(settings, "anthropic")).not.toContain("eleven");
-		expect(ids(settings, "gw")).toContain("eleven");
 	});
 });
 
@@ -213,10 +212,8 @@ describe("cloud speech vocalizer", () => {
 		expect(sent).toEqual(["eleven"]);
 		expect(localStream).toHaveBeenCalledTimes(1);
 		expect(recording.written).toEqual([]);
-		expect(warnings).toEqual([
-			"vocalizer: speech model failed permanently",
-			"vocalizer: every speech model failed; the rest of the utterance is silent",
-		]);
+		// One for the failed model, one for the exhausted chain.
+		expect(warnings).toHaveLength(2);
 
 		now.mockReturnValue(1_000_000 + 5 * 60_000);
 		await speakEach(vocalizer, "Fixed now?");

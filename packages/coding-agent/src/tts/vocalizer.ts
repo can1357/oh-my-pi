@@ -80,7 +80,8 @@ export interface VocalizerModelSource {
 	settings: Settings;
 	registry: VocalizerRegistry;
 	getSessionProvider?: () => string | undefined;
-	sessionId?: string;
+	/** Session whose credential affinity cloud synthesis uses. */
+	getSessionId?: () => string | undefined;
 }
 
 /** Resolve the first speech-role candidate that the local streaming worker can run. */
@@ -449,7 +450,7 @@ export class Vocalizer {
 			source && first && first.api !== "local-inference"
 				? createCloudSpeechStream({
 						chain,
-						resolveApiKey: model => source.registry.resolver(model, source.sessionId),
+						resolveApiKey: model => source.registry.resolver(model, source.getSessionId?.()),
 						localVoice: voice,
 						localSpeed: speed,
 						onPermanentFailure: model =>
