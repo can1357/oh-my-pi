@@ -229,9 +229,9 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			);
 		} else if (hits.length === 0) {
 			out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);
-			if (stats.judged < stats.listed) {
+			if (stats.filesVerified < stats.listed) {
 				out.push(
-					`not exhaustive: only the top ${stats.judged} of ${stats.listed} eligible files (lexical shortlist) were judged, and ${stats.filesRead} read; unjudged files may still match. Narrow \`path\` or use grep.`,
+					`not exhaustive: passages were verified in ${stats.filesVerified} of ${stats.listed} eligible files; the others may still match. Narrow \`path\` or use grep.`,
 				);
 			}
 		} else {
@@ -263,7 +263,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		const unanswered = stats.unanswered > 0 ? ` · ${stats.unanswered} unanswered` : "";
 		out.push(
 			"",
-			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests${unanswered} · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
+			`listed ${stats.listed} · scored ${stats.judged} filenames · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · verified ${stats.windowsJudged} passages · ${stats.requests} requests${unanswered} · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
 		);
 		if (stats.failures.length > 0) out.push("failures:", ...stats.failures.map(failure => `  ${failure}`));
 		const builder = toolResult(details).text(out.join("\n"));

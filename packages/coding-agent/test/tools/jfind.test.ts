@@ -546,7 +546,7 @@ describe("jfind cascade", () => {
 				includeHidden: false,
 			});
 			// One filename request answered with garbage, one sketch request threw, one verification succeeded.
-			expect(result.stats).toMatchObject({ requests: 3, failed: 1, unanswered: 1 });
+			expect(result.stats).toMatchObject({ requests: 3, failed: 1, unanswered: 1, judged: 0, filesVerified: 1 });
 			expect(result.coverage).toBe("partial");
 			expect(result.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
 		} finally {
@@ -815,6 +815,20 @@ describe("jfind cascade", () => {
 	}
 
 	const fillerNumber = (rel: string) => Number(/filler(\d+)\.ts/.exec(rel)![1]);
+
+	it("reports a non-exhaustive miss even when all filenames were scored", async () => {
+		const dir = await fillerTree("jfind-no-hit-");
+		try {
+			const judge = new FakeJudge(request => ("tree" in stateOf(request) ? 0.8 : 0.05));
+			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(request => judge.judge(request));
+			const result = await findTool(dir).execute("no-hit", { query: "token parsing", grep_keywords: [] });
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("passages were verified in 0 of 30 eligible files");
+			expect(text).toContain("scored 30 filenames · read 20 files");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
 
 	it("reads the files Spotlight scores highest after the two lexical picks, without judge name batches", async () => {
 		const dir = await fillerTree("jfind-spotlight-");
