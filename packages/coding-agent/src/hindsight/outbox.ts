@@ -24,11 +24,18 @@ export interface RetainInput {
 	scope?: MemoryWriteScope;
 }
 
-/** A published event file. Never rewritten, so its mtime is its enqueue time. */
+/** A published event file, never rewritten: its mtime is its enqueue time, which its TTL counts from. */
 export interface OutboxEvent {
 	version: 1;
 	/** Also the server `document_id`, so a resend replaces instead of duplicating. */
 	id: string;
+	/**
+	 * Its place in the destination's publication order: one past the highest pending event's when it
+	 * was published, under the queue lock. Delivery within a tag set follows it, never a file time:
+	 * events written in one tick of a filesystem's clock share an mtime, and a directory lists them in
+	 * an order of its own. An event an older release published has none.
+	 */
+	sequence?: number;
 	scope: MemoryWriteScope;
 	tags: string[];
 	timestamp: string;
@@ -69,7 +76,7 @@ export interface HindsightOutboxOptions {
 interface Pending {
 	file: string;
 	event: OutboxEvent;
-	/** Publication time (mtime); delivery follows it. */
+	/** Publication time (mtime): the TTL counts from it, and it orders an older release's unsequenced events. */
 	published: number;
 }
 
@@ -79,6 +86,8 @@ type SendOutcome = "accepted" | "rejected" | { error: string };
  * Durable queue of tool-initiated retains: one immutable file per memory under
  * `<agentDir>/hindsight-outbox/<destination>/`. A 2xx response deletes the event; it
  * means server acceptance, not completed extraction.
+ * Each tag set's events go out in the order they were published, which each one's `sequence`
+ * records; tag sets go in the order of their first event.
  *
  * Concurrency: a per-destination queue lock serializes capacity checks and
  * publication, and the drainer takes it for the instant it lists and reads
@@ -112,16 +121,27 @@ export class HindsightOutbox {
 		const events = items.map((item, index) => this.#event(call, item, index));
 		await fs.mkdir(this.#dir, { recursive: true, mode: 0o700 });
 		return withFileLock(path.join(this.#dir, "queue"), async () => {
-			const existing = new Set(await eventFiles(this.#dir));
+			const names = await eventFiles(this.#dir);
+			const existing = new Set(names);
 			const fresh = events.filter(event => !existing.has(eventFile(event.id)));
 			if (existing.size + fresh.length > MAX_EVENTS) {
 				throw new Error(`Hindsight outbox full (${existing.size} undelivered memories); memory NOT queued.`);
 			}
 			const written: string[] = [];
 			try {
+				// The queue lock serializes publication, so this call's events follow every pending one, in item order.
+				let sequence = fresh.length > 0 ? await nextSequence(this.#dir, names) : 0;
+				// Only a damaged event holds a sequence this high; once a drain sends it, the sequence starts over.
+				// The bound is checked without adding to `sequence`, which past 2^53 would round back into range.
+				if (
+					fresh.length > 0 &&
+					(!isSequence(sequence) || sequence > Number.MAX_SAFE_INTEGER - (fresh.length - 1))
+				) {
+					throw new Error("no safe integer sequence is left for this call's events");
+				}
 				for (const event of fresh) {
 					const file = path.join(this.#dir, eventFile(event.id));
-					await writeFileAtomically(file, JSON.stringify(event));
+					await writeFileAtomically(file, JSON.stringify({ ...event, sequence: sequence++ }));
 					written.push(file);
 				}
 				await syncDirectory(this.#dir);
@@ -224,7 +244,7 @@ export class HindsightOutbox {
 		// Hindsight unions a request's item tags onto its document(s): one request per tag set, so
 		// untagged global memories never share a request with project-tagged ones.
 		const groups = new Map<string, Pending[]>();
-		for (const entry of pending.sort((a, b) => a.published - b.published)) {
+		for (const entry of pending.sort(byPublication)) {
 			const key = JSON.stringify(entry.event.tags.toSorted());
 			const group = groups.get(key);
 			if (group) group.push(entry);
@@ -348,6 +368,48 @@ async function eventFiles(dir: string): Promise<string[]> {
 	return (await fs.readdir(dir)).filter(name => EVENT_FILE.test(name));
 }
 
+/**
+ * One past the highest sequence among the pending events `names` lists. A file that vanished was delivered
+ * or quarantined by a drain. One that is not JSON, or has no sequence (an older release's), adds nothing:
+ * a drain quarantines the first and sends the second before every sequenced event. Any other read failure
+ * is thrown, since skipping a pending event could place this call before it.
+ */
+async function nextSequence(dir: string, names: string[]): Promise<number> {
+	let next = 0;
+	for (const name of names) {
+		let text: string;
+		try {
+			text = await fs.readFile(path.join(dir, name), "utf8");
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			throw error;
+		}
+		let sequence: unknown;
+		try {
+			sequence = (JSON.parse(text) as Partial<OutboxEvent> | null)?.sequence;
+		} catch {
+			continue;
+		}
+		if (isSequence(sequence) && sequence >= next) next = sequence + 1;
+	}
+	return next;
+}
+
+function isSequence(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/**
+ * Publication order, total whatever the directory listing or file times. An older release's events carry
+ * no sequence and go first, by mtime: they were published before any sequenced one unless that release
+ * still runs beside this one. The file name breaks the ties left.
+ */
+function byPublication(a: Pending, b: Pending): number {
+	const order = (a.event.sequence ?? -1) - (b.event.sequence ?? -1) || a.published - b.published;
+	if (order !== 0) return order;
+	return a.file < b.file ? -1 : a.file > b.file ? 1 : 0;
+}
+
 /** Credential-free: query, fragment, and userinfo never reach the directory name. */
 function destinationKey(apiUrl: string, bankId: string): string {
 	const url = new URL(apiUrl);
@@ -370,7 +432,8 @@ async function readEvent(file: string, now: number): Promise<Pending | undefined
 			Number.isFinite(Date.parse(event.timestamp)) &&
 			typeof event.content === "string" &&
 			typeof event.context === "string" &&
-			typeof event.sessionId === "string";
+			typeof event.sessionId === "string" &&
+			(event.sequence === undefined || isSequence(event.sequence));
 		return valid ? { file, event, published } : undefined;
 	} catch {
 		return undefined;
