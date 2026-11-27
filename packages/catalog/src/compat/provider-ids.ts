@@ -44,6 +44,7 @@ export type KnownProvider =
 	| "inception"
 	| "kilo"
 	| "kimi-code"
+	| "kimi-code-global"
 	| "kiro"
 	| "liquid"
 	| "litellm"

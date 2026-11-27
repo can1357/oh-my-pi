@@ -22,9 +22,9 @@ import {
 	createSurface,
 	effect,
 	type Host,
+	type HostOptions,
 	type KeyEvent,
 	type Reactive,
-	type ScrollRequest,
 	type Signal,
 	type Surface,
 	signal,
@@ -34,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { InputEvent, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
-import type { ScreenMode } from "@oh-my-pi/pi-tui/term/backend";
+import type { TranscriptScroll } from "@oh-my-pi/pi-tui/term/backend";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 
@@ -50,12 +50,16 @@ function ensureTerminalStylesLoaded(): void {
 	require("../styles");
 }
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { copyToClipboard, isClipboardTerminalLocal } from "../../utils/clipboard";
 import { Dock, type DockSlot, NATIVE_DOCK, NATIVE_TAIL, TERMINAL_DOCK } from "./dock";
 import { Overlays } from "./overlays";
 import { Transcript } from "./transcript";
 
 /** Configuration of {@link Shell.start}. */
-export interface ShellStartOptions {
+export interface ShellStartOptions extends Pick<
+	HostOptions,
+	"screen" | "copyOnSelect" | "wheelLines" | "scrollbar" | "exitTranscript"
+> {
 	readonly theme: Accessor<Theme>;
 	readonly title?: string;
 	/** The native surface's role (Tern treats `omp.session` as omp's chat session). */
@@ -74,8 +78,7 @@ export interface ShellStartOptions {
 	readonly textSizing?: Accessor<boolean>;
 	/** The terminal clock painters read (scripted replays); default the wall clock. */
 	readonly clock?: Accessor<number>;
-	/** Where the terminal renderer draws the session (`tui.screen`, may change at runtime). Default inline. */
-	readonly screen?: Accessor<ScreenMode>;
+	readonly fullscreenMouse?: Accessor<boolean>;
 }
 
 /**
@@ -105,6 +108,7 @@ export class Shell {
 	#unwatchResize: (() => void) | undefined;
 	#unwatchHost: (() => void) | undefined;
 	#unwatchMouse: (() => void) | undefined;
+	#unwatchHold: (() => void) | undefined;
 	readonly #inlineMouse = signal<MouseTracking>("off");
 	readonly #interceptors: InputInterceptor[] = [];
 	readonly #globalKeys: ((key: KeyEvent) => boolean)[] = [];
@@ -163,7 +167,7 @@ export class Shell {
 	 * Scroll the fullscreen transcript (a page, a line, its start or end); its end follows the tail
 	 * again. False when none is on screen (inline mode, a page up, Tern, not started).
 	 */
-	scrollTranscript(by: ScrollRequest["by"]): boolean {
+	scrollTranscript(by: TranscriptScroll): boolean {
 		return this.#host?.scroll(by) ?? false;
 	}
 
@@ -192,15 +196,29 @@ export class Shell {
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
 			...(options.screen ? { screen: options.screen } : {}),
+			copySelection: text =>
+				void copyToClipboard(text, { terminalOnly: !isClipboardTerminalLocal(), passthrough: true }),
+			isPrompt: node => this.transcript.blockOf(node)?.prompt === true,
+			...(options.copyOnSelect ? { copyOnSelect: options.copyOnSelect } : {}),
+			...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
+			...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
+			...(options.exitTranscript ? { exitTranscript: options.exitTranscript } : {}),
 			beforeTerminalRenderer: ensureTerminalStylesLoaded,
 		});
 		this.#host = host;
 		this.#unwatchMouse = createRoot(dispose => {
 			effect(() => {
 				const inline = this.#inlineMouse();
-				// The fullscreen transcript scrolls with the wheel: the terminal must report it.
-				const wheel = inline === "off" && !host.native && options.screen?.() === "fullscreen";
-				host.setMouse(this.overlays.mouse() ?? (wheel ? "click" : inline));
+				// Fullscreen owns button drags; native surfaces keep their existing mouse mode.
+				const fullscreen = !host.native && options.screen?.() === "fullscreen";
+				const tracking = !fullscreen
+					? inline
+					: options.fullscreenMouse?.() === false
+						? "off"
+						: inline === "any"
+							? "any"
+							: "drag";
+				host.setMouse(this.overlays.mouse() ?? tracking);
 			});
 			return dispose;
 		});
@@ -214,6 +232,14 @@ export class Shell {
 		});
 		this.#size.set({ columns: host.driver.columns, rows: host.driver.rows });
 		this.#unwatchResize = host.driver.onResize((columns, rows) => this.#size.set({ columns, rows }));
+		// An overlay the user did not cause (an approval, a plan review, a picker) must
+		// never land behind a held screen: it would be invisible while the agent waits.
+		this.#unwatchHold = createRoot(dispose => {
+			effect(() => {
+				if (this.overlays.open()) host.setOutputHold(false);
+			});
+			return dispose;
+		});
 		this.transcript.attach(host);
 	}
 
@@ -238,10 +264,25 @@ export class Shell {
 		return rows;
 	}
 
+	/**
+	 * Hold the screen still (see {@link Host.setOutputHold}); false when the
+	 * renderer cannot hold or the state did not change.
+	 */
+	setOutputHold(hold: boolean, notice?: string): boolean {
+		return this.#host?.setOutputHold(hold, notice) ?? false;
+	}
+
+	/** Whether the output is held (see {@link Shell.setOutputHold}). */
+	getOutputHold(): boolean {
+		return this.#host?.getOutputHold() ?? false;
+	}
+
 	/** Stop rendering and restore the terminal; the surface stays mounted. */
 	async stop(): Promise<void> {
 		const host = this.#host;
 		this.#host = undefined;
+		this.#unwatchHold?.();
+		this.#unwatchHold = undefined;
 		this.#unwatchResize?.();
 		this.#unwatchResize = undefined;
 		this.#unwatchHost?.();

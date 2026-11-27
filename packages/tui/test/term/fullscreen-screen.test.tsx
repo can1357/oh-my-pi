@@ -36,7 +36,7 @@ function mount(
 			dock: <rows lines={["> prompt"]} />,
 			layer: options.layer?.() as never,
 		}),
-		{ columns: 20, rows: options.rows ?? 6, separator: () => 0, screen },
+		{ columns: 20, rows: options.rows ?? 6, separator: () => 0, screen, scrollbar: () => false, wheelLines: () => 3 },
 	);
 	return { term, items, screen };
 }
@@ -45,6 +45,25 @@ const append = (items: Signal<readonly Item[]>, item: Item): void => items.set([
 
 const wheel = (t: TestTerminal, button: "wheel-up" | "wheel-down"): void =>
 	t.mouse({ row: 0, col: 0, button, action: "press", mods: [] });
+
+it("uses every row above the composer for transcript text when the scrollbar supplies position", () => {
+	term = createTestTerminal(
+		() => ({
+			main: <rows lines={Array.from({ length: 12 }, (_, i) => `line ${i}`)} />,
+			dock: [<rows lines={["", ""]} />, <rows lines={["", "> draft"]} />],
+		}),
+		{ rows: 5, columns: 20, screen: () => "fullscreen" },
+	);
+	term.backend.scroll("start");
+	term.render();
+	expect(
+		term
+			.screen()
+			.slice(0, 4)
+			.map(row => row.match(/^line \d+/)?.[0]),
+	).toEqual(["line 0", "line 1", "line 2", "line 3"]);
+	expect(term.screen()[4]).toBe("> draft");
+});
 
 describe("fullscreen screen mode", () => {
 	it("pins the dock to the bottom row under a short transcript and writes no history", () => {
@@ -95,7 +114,7 @@ describe("fullscreen screen mode", () => {
 		expect(term.screen()).toEqual(["a5", "a6", "a7", "a8", "a9", "> prompt"]);
 	});
 
-	it("scrolls three rows per wheel tick", () => {
+	it("scrolls by the configured three rows per wheel tick", () => {
 		const { term } = mount([block("a", 10)]);
 		wheel(term, "wheel-up");
 		expect(term.screen()).toEqual(["a2", "a3", "a4", "a5", "↓ 4 lines below", "> prompt"]);
@@ -110,7 +129,7 @@ describe("fullscreen screen mode", () => {
 				main: <For each={items}>{item => <rows lines={item.lines} />}</For>,
 				dock: <rows lines={["> prompt"]} />,
 			}),
-			{ columns: 20, rows: 6, separator: () => 1, screen: () => "fullscreen" },
+			{ columns: 20, rows: 6, separator: () => 1, screen: () => "fullscreen", scrollbar: () => false },
 		);
 		// Tail: b2, "", c0..c2.
 		expect(term.screen()).toEqual(["b2", "", "c0", "c1", "c2", "> prompt"]);
@@ -140,7 +159,7 @@ describe("fullscreen screen mode", () => {
 				main: [<rows lines={first} />, <For each={items}>{item => <rows lines={item.lines} />}</For>],
 				dock: <rows lines={["> prompt"]} />,
 			}),
-			{ columns: 20, rows: 4, separator: () => 0, screen: () => "fullscreen" },
+			{ columns: 20, rows: 4, separator: () => 0, screen: () => "fullscreen", scrollbar: () => false },
 		);
 		items.set([block("b", 6)]);
 		term.render();

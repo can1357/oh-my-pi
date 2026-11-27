@@ -419,7 +419,11 @@ export class TranscriptPresenter {
 			: face.face;
 		const own = face.compact;
 		const compact = presented ? (own ? () => packed() || own() : packed) : own;
-		const block = this.#mount(factory, { before: options?.before, ...(compact ? { compact } : {}) });
+		const block = this.#mount(factory, {
+			before: options?.before,
+			prompt: message.role === "user" && !message.synthetic && !message.parentIrc,
+			...(compact ? { compact } : {}),
+		});
 		this.register(block, { kind: "message", message });
 		if (!options?.live) this.#settle(block);
 		return block;

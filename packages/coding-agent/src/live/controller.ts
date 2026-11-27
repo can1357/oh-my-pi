@@ -2,12 +2,13 @@ import * as os from "node:os";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
-import { prompt, toError } from "@oh-my-pi/pi-utils";
+import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
-import { LIVE_DELEGATION_MESSAGE_TYPE } from "../session/messages";
+import { LIVE_DELEGATION_MESSAGE_TYPE, LIVE_ENDED_MESSAGE_TYPE } from "../session/messages";
 import agentFinalMessageTemplate from "./prompts/agent-final-message.md" with { type: "text" };
+import liveEndedTemplate from "./prompts/live-ended.md" with { type: "text" };
 import liveInstructionsTemplate from "./prompts/live-instructions.md" with { type: "text" };
 import {
 	buildDelegationContextAppend,
@@ -118,6 +119,10 @@ export class LiveSessionController {
 	#emittedInputLevel = -1;
 	#emittedOutputLevel = -1;
 	#activeDelegationId: string | undefined;
+	/** Transcript whose spoken request dispatch accepted; only it must hear that the call ended. */
+	#delegatedSessionId: string | undefined;
+	/** Settles once every spoken request left dispatch, so the end notice never lands before one. */
+	#delegations: Promise<unknown> = Promise.resolve();
 	#userTranscript = "";
 	#assistantTranscript = "";
 	#userTranscriptFinal = false;
@@ -303,6 +308,30 @@ export class LiveSessionController {
 			}
 		}
 
+		void this.#delegations
+			.then(() => {
+				const delegatedSessionId = this.#delegatedSessionId;
+				if (
+					!delegatedSessionId ||
+					this.#session.isDisposed ||
+					delegatedSessionId !== this.#session.sessionManager.getSessionId()
+				) {
+					return;
+				}
+				return this.#session.sendCustomMessage(
+					{
+						customType: LIVE_ENDED_MESSAGE_TYPE,
+						content: prompt.render(liveEndedTemplate),
+						display: false,
+						attribution: "agent",
+					},
+					{ deliverAs: "nextTurn" },
+				);
+			})
+			.catch(cause => {
+				logger.warn("Live session end notice was not delivered", { error: toError(cause).message });
+			});
+
 		if (cleanupError) this.#emitPhaseSafely("error");
 		this.#emitTerminal(cleanupError);
 	}
@@ -354,7 +383,8 @@ export class LiveSessionController {
 		if (!request) return;
 		this.#activeDelegationId = event.item.id;
 		this.#refreshAudioPhase();
-		void this.#session
+		const sessionId = this.#session.sessionManager.getSessionId();
+		const delegation = this.#session
 			.sendCustomMessage(
 				{
 					customType: LIVE_DELEGATION_MESSAGE_TYPE,
@@ -364,7 +394,13 @@ export class LiveSessionController {
 				},
 				{ triggerTurn: true },
 			)
-			.catch(cause => this.#reportFailure(toError(cause)));
+			.then(
+				() => {
+					this.#delegatedSessionId = sessionId;
+				},
+				cause => this.#reportFailure(toError(cause)),
+			);
+		this.#delegations = Promise.all([this.#delegations, delegation]);
 	}
 
 	/** Offline mode reaches only the session's provider, unless `live.endpoint` names the voice server. */

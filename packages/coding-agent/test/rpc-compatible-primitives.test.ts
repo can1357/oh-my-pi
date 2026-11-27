@@ -160,6 +160,8 @@ async function startRpcServer(): Promise<RpcServer> {
 				XDG_CACHE_HOME: temp.join("cache"),
 				CI: "true",
 				PI_NO_TITLE: "1",
+				// Test runtime: keeps the child off the OS keychain.
+				PI_TEST_RUNTIME: "1",
 			},
 			stdin: "pipe",
 			stdout: "pipe",

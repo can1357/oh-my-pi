@@ -23,6 +23,7 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { FramePlan } from "../contract";
+import { alternatePlacement, rasterDamage } from "../images/viewport";
 import type { KeyboardScreenModes } from "../io";
 import {
 	ALT_ENTER,
@@ -46,11 +47,14 @@ import {
 	position,
 	reflowHeight,
 	right,
+	SGR_RESET,
 	SYNC_BEGIN,
 	SYNC_END,
 	up,
 } from "./ansi";
 import { planShift } from "./shift";
+import { singleLine, stripControl } from "../../text/sanitize";
+import { truncate } from "../../text/width";
 
 /** Where frames go: the terminal's output stream. */
 export interface OutputSink {
@@ -184,7 +188,8 @@ interface Transaction {
 	readonly rows: number;
 	shrank: boolean;
 	grew: boolean;
-	readonly inPlace: boolean;
+	/** Repaint in place; the release of a hold flips it so a held resize never replays history. */
+	inPlace: boolean;
 	/** Frames wait for the settle (in place, or no borrow). */
 	readonly quiet: boolean;
 	/** The viewport reached the bottom row before the resize. */
@@ -213,6 +218,8 @@ export class FrameWriter {
 	/** Cursor row/column relative to the viewport top (column -1: unknown). */
 	#cursorRow = 0;
 	#cursorCol = 0;
+	/** The shell's line may be partial (including a missing CPR); only the first inline frame may advance it. */
+	#partialShellLine = false;
 	/** Rows clipped from the start of the last inline frame. */
 	#clipped = 0;
 	/** Bounds on the viewport top's screen row; equal when known. */
@@ -229,6 +236,9 @@ export class FrameWriter {
 	#fullscreen = false;
 	/** Rows on the alternate screen, null to repaint all. */
 	#altShown: string[] | null = null;
+	/** Deletes for direct Kitty bands on alt. Resizing invalidates row diffs but need not discard placements. */
+	#altPlacements?: Set<string>;
+	#altAnchors = false;
 
 	/** The next inline frame clears screen and scrollback first (display reset, rebuild). */
 	#pendingClear = false;
@@ -262,6 +272,10 @@ export class FrameWriter {
 	#pushed: string[] = [];
 	/** Where the cursor report after that shrink must find the cursor for `#pushed` to hold; undefined once checked. */
 	#pushedCursor: number | undefined;
+	/** Output stopped by {@link setOutputHold}: no frame, resize write or anchor probe goes out. */
+	#held = false;
+	/** The hold notice is on the last screen row, outside the frame diff, until the release takes it down. */
+	#holdNotice = false;
 
 	constructor(options: FrameWriterOptions) {
 		this.#options = options;
@@ -302,7 +316,7 @@ export class FrameWriter {
 	 * known (CPR at startup); otherwise the viewport top stays unknown until
 	 * content fills the screen.
 	 */
-	start(cursor?: { readonly row: number; readonly col: number } | null): void {
+	start(cursor?: { readonly row: number; readonly col: number } | null, deferShellLine = false): void {
 		this.#epoch++;
 		this.#started = true;
 		this.#shown = [];
@@ -321,9 +335,10 @@ export class FrameWriter {
 		this.#deferred = undefined;
 		this.#pushed = [];
 		this.#pushedCursor = undefined;
+		this.#partialShellLine = deferShellLine && (!cursor || cursor.col > 0);
 		if (cursor) {
 			let row = Math.min(Math.max(0, cursor.row), this.#rows - 1);
-			if (cursor.col > 0) {
+			if (cursor.col > 0 && !this.#partialShellLine) {
 				// Leave a partial line the shell left behind.
 				this.#send("\r\n");
 				row = Math.min(row + 1, this.#rows - 1);
@@ -342,6 +357,11 @@ export class FrameWriter {
 	 */
 	present(frame: FramePlan): number | undefined {
 		if (!this.#started) return undefined;
+		if (this.#held) {
+			// Held: nothing is written, but the frame stays for stop() to flush.
+			if (!frame.fullscreen) this.#deferred = frame;
+			return undefined;
+		}
 		if (frame.fullscreen) {
 			this.#deferred = undefined;
 			if (!this.#anchoring) this.#paintAlternate(frame.fullscreen, frame.cursor, "", true);
@@ -378,7 +398,45 @@ export class FrameWriter {
 	 * the writer stops, so a shutdown flush is not lost.
 	 */
 	hold(frame: FramePlan): void {
-		if (this.#started && !frame.fullscreen) this.#deferred = frame;
+		if (this.#started) this.#deferred = frame.fullscreen ? undefined : frame;
+	}
+
+	/** Whether {@link setOutputHold} is holding the output. */
+	get outputHeld(): boolean {
+		return this.#held;
+	}
+
+	/**
+	 * Stop writing anything: frames, a resize borrow and its settle, and the
+	 * anchor probes it would start. The last frame is kept for {@link stop}, and
+	 * the frame source repaints on release, so nothing is lost — a user reading
+	 * native scrollback just stops losing their place to a streaming turn.
+	 *
+	 * A release settles a resize that arrived while held as an in-place repaint:
+	 * the terminal already reflowed the screen, and replaying history there is
+	 * the jump a hold exists to prevent. `notice` paints one hint row on the
+	 * last screen row without scrolling it.
+	 */
+	setOutputHold(hold: boolean, notice?: string): void {
+		if (this.#held === hold) return;
+		this.#held = hold;
+		const tx = this.#resize;
+		if (hold) {
+			// Everything queued now is exactly what the hold exists to stop.
+			tx?.cancel?.();
+			if (tx) tx.cancel = undefined;
+			// A borrowed alternate screen would hide the transcript for the whole hold.
+			if (this.#alt && !this.#fullscreen) this.#send(this.#leaveAlt());
+		} else if (this.#started && tx) {
+			// The terminal reflowed while held: recover the anchor, repaint in place, never replay.
+			// That repaint also covers the notice row.
+			this.#holdNotice = false;
+			tx.inPlace = true;
+			this.#settle();
+		} else if (this.#holdNotice) {
+			this.#clearHoldNotice();
+		}
+		if (hold && notice !== undefined && !this.#alt) this.#drawHoldNotice(notice);
 	}
 
 	/** Whether a settled width change replays history (the policy rebuilds or appends it, not in place). */
@@ -453,12 +511,15 @@ export class FrameWriter {
 		if (rows < before.rows) tx.shrank = true;
 		if (rows > before.rows) tx.grew = true;
 		if (!this.#pendingClear) this.#stale = true;
-		if (tx.inPlace && !this.#alt && !this.#options.multiplexer()) {
+		if (!this.#held && tx.inPlace && !this.#alt && !this.#options.multiplexer()) {
 			const erase = this.#preErase();
 			if (erase) this.#send(erase);
 		}
 		tx.cancel?.();
-		tx.cancel = (this.#options.schedule ?? schedule)(() => this.#settle(), this.#options.settleMs ?? 100);
+		// Held: the release settles this transaction in place (see setOutputHold).
+		tx.cancel = this.#held
+			? undefined
+			: (this.#options.schedule ?? schedule)(() => this.#settle(), this.#options.settleMs ?? 100);
 	}
 
 	/**
@@ -498,14 +559,17 @@ export class FrameWriter {
 	 * autowrap and the cursor. The caller restores input modes and flushes the
 	 * sink.
 	 */
-	stop(): void {
+	stop(emergency = false): void {
 		if (!this.#started) return;
+		// The handoff must reach the terminal even from a held screen.
+		this.#held = false;
 		this.#epoch++;
 		this.#started = false;
 		this.#anchoring = false;
 		this.#resize?.cancel?.();
 		this.#resize = undefined;
-		const deferred = this.#deferred;
+		// Do not take a cached transcript flush through the renderer when urgently handing back alt.
+		const deferred = emergency && this.#alt ? undefined : this.#deferred;
 		this.#deferred = undefined;
 		if (deferred) {
 			// The cursor is where the viewport starts (an alternate-screen exit restores it there); a viewport
@@ -517,6 +581,11 @@ export class FrameWriter {
 		}
 		let out = "";
 		if (this.#alt) out += this.#leaveAlt();
+		if (this.#partialShellLine) {
+			// Nothing took the normal-screen cursor. Even CR would move the next shell output.
+			this.#send(`${out}${AUTOWRAP_ON}${CURSOR_SHOW}`);
+			return;
+		}
 		const content = this.#shown.findLastIndex(row => row !== "");
 		if (this.#stale) {
 			// Mid-resize: the cursor sits where the reflow left it.
@@ -587,25 +656,29 @@ export class FrameWriter {
 	#paintInline(frame: FramePlan, prefix: string): number | undefined {
 		const width = this.#columns;
 		const height = this.#rows;
-		let body = prefix;
+		let body = "";
 		const offered = frame.history;
 		const history = offered && offered.id > this.#written ? offered : undefined;
 		if (history?.kind === "replay") {
 			if (this.#replayAppends) this.#replayAppends = false;
 			else this.#pendingClear = true;
 		}
-		let lead = "";
+		let lead = prefix;
 		if (this.#pendingClear) {
-			// The erase goes before the image sequences: it frees images without a placement.
-			lead = body + CLEAR_ALL;
-			body = "";
+			// Switch buffers and erase before uploading pictures to the destination buffer.
+			lead += CLEAR_ALL;
 			this.#options.images?.cleared?.();
 			this.#pendingClear = false;
 			this.#shown = [];
 			this.#cursorRow = 0;
 			this.#topLo = this.#topHi = 0;
 			this.#extent = height;
+		} else if (this.#partialShellLine) {
+			lead += "\r\n";
+			this.#topLo = Math.min(this.#topLo + 1, height - 1);
+			this.#topHi = Math.min(this.#topHi + 1, height - 1);
 		}
+		this.#partialShellLine = false;
 		const previousGraphics = this.#shown.length > 0 && this.#shownGraphics;
 		this.#clipped = Math.max(0, frame.viewport.length - height);
 		let viewport = this.#normalizeViewport(frame.viewport, width, this.#clipped);
@@ -741,6 +814,7 @@ export class FrameWriter {
 
 	#enterAlt(): string {
 		this.#options.images?.enteredAlternate?.();
+		this.#altPlacements = undefined;
 		this.#alt = true;
 		this.#altShown = null;
 		this.#visible = undefined;
@@ -754,6 +828,7 @@ export class FrameWriter {
 		this.#fullscreen = false;
 		this.#altShown = null;
 		this.#visible = undefined;
+		this.#altPlacements = undefined;
 		this.#expectEcho = this.#echoes();
 		return `${modes?.leaveAltBefore ?? ""}${ALT_LEAVE}${modes?.leaveAltAfter ?? ""}`;
 	}
@@ -764,23 +839,37 @@ export class FrameWriter {
 	}
 
 	#paintAlternate(rows: readonly string[], cursor: FramePlan["cursor"], prefix: string, fullscreen: boolean): void {
-		let body = prefix;
-		if (!this.#alt) body += this.#enterAlt();
+		let lead = this.#alt ? prefix : prefix + this.#enterAlt();
+		let body = "";
 		this.#fullscreen = fullscreen;
 		const height = this.#rows;
 		const width = this.#columns;
 		const shown = this.#altShown ?? [];
 		const next: string[] = [];
+		let placements: Set<string> | undefined;
+		let anchors = false;
 		for (let row = 0; row < height; row++) {
 			const text = normalizeRow(rows[row] ?? "", width);
-			next.push(text);
-			if (this.#altShown && shown[row] === text) continue;
+			anchors ||= text.includes("\x1b7\x1b[");
+			const placement = alternatePlacement(text, row);
+			next.push(placement?.row ?? text);
+			if (placement) (placements ??= new Set()).add(placement.deletion);
+		}
+		if (this.#altPlacements) {
+			for (const deletion of this.#altPlacements) if (!placements?.has(deletion)) lead += deletion;
+		}
+		this.#altPlacements = placements;
+		const damaged = this.#altShown && (anchors || this.#altAnchors) ? rasterDamage(shown, next) : undefined;
+		this.#altAnchors = anchors;
+		for (let row = 0; row < height; row++) {
+			const text = next[row]!;
+			if (this.#altShown && shown[row] === text && !damaged?.[row]) continue;
 			body += `${position(row, 0)}${drawRow(text, width, coveredCells(next, row))}`;
 		}
 		this.#altShown = next;
 		const show = cursor !== null && cursor.row >= 0 && cursor.row < height;
 		const park = show ? position(cursor.row, Math.min(cursor.col, width - 1)) : body ? position(height - 1, 0) : "";
-		this.#write(body, park, show);
+		this.#write(body, park, show, lead);
 	}
 
 	/** The viewport tail, bottom-anchored on the borrowed alternate screen. */
@@ -949,6 +1038,37 @@ export class FrameWriter {
 	}
 
 	// ── output ────────────────────────────────────────────────────────────
+
+	/**
+	 * A one-line hint on the last screen row for a held screen: cursor
+	 * save/restore and no line terminator, so the hint never pushes a row into
+	 * scrollback. Sanitized because the text is a public parameter.
+	 */
+	#drawHoldNotice(notice: string): void {
+		const label = truncate(singleLine(stripControl(notice)), this.#columns);
+		const sync = this.#options.synchronizedOutput();
+		const out =
+			`${sync ? SYNC_BEGIN : ""}\x1b7${position(this.#rows - 1, 0)}${SGR_RESET}${ERASE_LINE}` +
+			`\x1b[2m${label}${SGR_RESET}\x1b8${sync ? SYNC_END : ""}`;
+		this.#send(out);
+		this.#holdNotice = true;
+	}
+
+	/**
+	 * Take the hold notice down. The frame diff never saw it, so a frame row
+	 * under it is marked unknown (the next frame redraws it); a row below the
+	 * frame is erased directly.
+	 */
+	#clearHoldNotice(): void {
+		this.#holdNotice = false;
+		if (!this.#started || this.#alt) return;
+		const row = this.#rows - 1 - this.#topLo;
+		if (this.#topKnown() && row >= 0 && row < this.#shown.length) {
+			this.#shown[row] = UNKNOWN_ROW;
+			return;
+		}
+		this.#send(`\x1b7${position(this.#rows - 1, 0)}${SGR_RESET}${ERASE_LINE}\x1b8`);
+	}
 
 	/**
 	 * One frame write: `lead` (a screen switch and erase), images, rows with

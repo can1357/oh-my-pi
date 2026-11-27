@@ -18,7 +18,8 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
 import { isExcludedModel, isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
-import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
+import { isKimiCodeEndpoint } from "../src/compat/kimi-code";
+import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
 import { encodeModelCatalog } from "../src/model-catalog-format";
 import { createModelManager } from "../src/model-manager";
@@ -437,10 +438,29 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
  */
 function applyKimiCodeMaxTokens(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
-		if (model.provider !== "kimi-code") return model;
-		const capped = kimiCodeMaxTokens(model.id, model.maxTokens);
+		if (!isKimiCodeEndpoint(model)) return model;
+		const capped = kimiCodeMaxTokens(model.provider, model.id, model.maxTokens);
 		return capped === model.maxTokens ? model : { ...model, maxTokens: capped };
 	});
+}
+
+/**
+ * Both Kimi Code regions serve the same roster from region-scoped hosts, and
+ * generation usually holds a credential for at most one of them. When the
+ * global provider was not discovered live, mirror the mainland `kimi-code`
+ * rows onto the global host so `kimi-code-global` still ships a usable bundled
+ * roster. A live global `/models` snapshot is authoritative and is kept as-is.
+ */
+function projectKimiCodeGlobalModels(models: ModelSpec[]): ModelSpec[] {
+	// The global host is rule-owned (`base-url` node in providers/kimi-code-global.kdl).
+	const globalBaseUrl = providerBaseUrl("kimi-code-global");
+	if (!globalBaseUrl) {
+		throw new Error("kimi-code-global declares no managed base URL (`base-url` in providers/kimi-code-global.kdl)");
+	}
+	const projected = models
+		.filter(model => model.provider === "kimi-code")
+		.map(model => ({ ...model, provider: "kimi-code-global", baseUrl: globalBaseUrl }));
+	return [...models, ...projected];
 }
 
 /**
@@ -607,12 +627,20 @@ async function generateModels(selectedProvider?: string) {
 		...authoritativeSpecialDiscoveryProviders,
 		...modelsDevSnapshotExcludedProviders,
 		"firepass",
+		// Live-discovered or re-projected from `kimi-code` below; never resurrected from the previous snapshot.
+		"kimi-code-global",
 	]);
 
 	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
 	// applyGeneratedModelPolicies re-bakes `thinking` for every model, so the
 	// inbound shape is irrelevant beyond identity/pricing/compat fields.
 	allModels = mergePreviousSnapshotModels(allModels, prevModelsJson, previousSnapshotExcludedProviders);
+	const kimiCodeGlobalDiscovered = catalogProviderModelBatches.some(
+		batch => batch.descriptor.providerId === "kimi-code-global" && batch.succeeded && batch.models.length > 0,
+	);
+	if (!kimiCodeGlobalDiscovered) {
+		allModels = projectKimiCodeGlobalModels(allModels);
+	}
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.
