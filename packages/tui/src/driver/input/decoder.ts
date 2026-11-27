@@ -57,7 +57,7 @@ export class InputDecoder {
 			paste,
 		};
 		this.#main = new InputTokenizer(tokens, options);
-		this.#relay = new InputTokenizer(relayed, options);
+		this.#relay = new InputTokenizer(relayed, options, "relay");
 	}
 
 	get kitty(): boolean {

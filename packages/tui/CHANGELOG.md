@@ -30,6 +30,7 @@
 - Typing in a Tern composer keeps echoing while an agent streams, instead of stalling for seconds when Tern is slow to acknowledge frames. ([#20463](https://github.com/can1357/oh-my-pi/pull/20463) by [@Xytronix](https://github.com/Xytronix))
 - `wrap` closes inverse video at each wrapped row's end, like underline and strikethrough, so inverted text no longer spills into padding and borders after it ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov)).
 - Fixed win32-input-mode key records appearing as literal composer text when the Escape timer runs before stdin delivers the rest of the record ([#20608](https://github.com/can1357/oh-my-pi/issues/20608)).
+- Fixed Windows composer pastes inserting raw Win32 key records instead of pasted text, including non-ASCII characters ([#20718](https://github.com/can1357/oh-my-pi/issues/20718)).
 
 ## [19.2.1] - 2026-11-25
 

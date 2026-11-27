@@ -24,6 +24,7 @@
  */
 import { type Clock, systemClock } from "./clock";
 import { TSP_OPENERS } from "./tsp";
+import { readWin32PasteRecord } from "./win32";
 
 export interface TokenSink {
 	/** One complete sequence: a single character, an escape sequence, or an unterminated head flushed on timeout. */
@@ -176,7 +177,7 @@ interface StringTracking {
 interface PasteState {
 	readonly chunks: string[];
 	bytes: number;
-	/** A trailing head that may be the end marker or a TSP message. */
+	/** A trailing head that may be a paste delimiter, a TSP message or a Win32 record. */
 	pending: string;
 }
 
@@ -188,6 +189,7 @@ export class InputTokenizer {
 	/** Whether the event loop was stalled (a multi-line burst is then batched typing, not a paste). */
 	isStalled: (() => boolean) | undefined;
 
+	readonly #stream: "direct" | "relay";
 	readonly #sink: TokenSink;
 	readonly #clock: Clock;
 	readonly #keyTimeout: number;
@@ -225,8 +227,9 @@ export class InputTokenizer {
 	/** When a terminator-less in-band resize body was emitted (0: none); see `IN_BAND_BODY`. */
 	#inBandTail = 0;
 
-	constructor(sink: TokenSink, options: TokenizerOptions = {}) {
+	constructor(sink: TokenSink, options: TokenizerOptions = {}, stream: "direct" | "relay" = "direct") {
 		this.#sink = sink;
+		this.#stream = stream;
 		this.#clock = options.clock ?? systemClock;
 		this.#keyTimeout = options.keyTimeout ?? 20;
 		this.#burstTimeout = options.burstTimeout ?? 10;
@@ -590,9 +593,9 @@ export class InputTokenizer {
 		}
 		this.#cancelPartial = this.#clock.schedule(
 			timeout,
-			this.win32 && (head === ESC || head[1] === "[")
+			(this.win32 || this.#stream === "relay") && (head === ESC || head[1] === "[")
 				? () => {
-						// An overdue timer can run before stdin delivers the rest of the record.
+						// A queued read can complete a raw record or the sequence carried by those records.
 						this.#cancelPartial = this.#clock.schedule(0, this.#flushPartial);
 					}
 				: this.#flushPartial,
@@ -797,6 +800,20 @@ export class InputTokenizer {
 				i = end;
 				continue;
 			}
+			if (this.win32 && text[k + 1] === "[") {
+				const record = readWin32PasteRecord(text, k);
+				if (record === "partial") {
+					if (text.length - k <= this.#maxCsi) {
+						paste.pending = text.slice(k);
+						break;
+					}
+				} else if (record) {
+					add(record.text);
+					if (paste.bytes > this.#pasteByteLimit) break;
+					i = record.end;
+					continue;
+				}
+			}
 			const tail = text.slice(k);
 			if ([PASTE_END, PASTE_START, ...TSP_OPENERS].some(prefix => prefix.startsWith(tail))) {
 				paste.pending = tail;
@@ -826,7 +843,7 @@ export class InputTokenizer {
 		this.#cancelPasteWatchdog?.();
 		this.#cancelPasteWatchdog = null;
 		this.#sink.paste(paste.chunks.join(""));
-		// An unfinished TSP message stays on the report path; a partial end marker is dropped.
+		// An unfinished TSP message stays on the report path; other partial sequences are dropped.
 		const pending = TSP_OPENERS.some(prefix => paste.pending.startsWith(prefix)) ? paste.pending : "";
 		const after = pending + rest;
 		if (after) this.#append(after);

@@ -449,11 +449,48 @@ describe("InputDecoder: win32-input-mode records", () => {
 		]);
 	});
 
-	it("treats record-encoded paste markers as framing", () => {
-		const { decoder, events } = win32();
-		decoder.process(relay("\x1b[200~a"));
-		decoder.process(record(13, 28, 13, 1, 0) + relay("b\x1b[201~"));
-		expect(events).toEqual([{ type: "paste", paste: { text: "a\rb" } }]);
+	it("reassembles record-encoded paste markers when stdin follows the Escape timer", () => {
+		const text = relay("\x1b[200~中文") + record(13, 28, 13, 1, 0) + relay("b\x1b[201~");
+		for (let offset = 1; offset < text.length; offset++) {
+			const { clock, decoder, events } = win32();
+			decoder.process(text.slice(0, offset));
+			clock.schedule(20, () => decoder.process(text.slice(offset)));
+			clock.advance(100);
+			expect(events).toEqual([{ type: "paste", paste: { text: "中文\rb" } }]);
+		}
+	});
+
+	it("decodes Win32 records inside literal paste markers without consuming TSP or the next key", () => {
+		const report = '\x1b]877;tsp;e;{"a":1}\x07';
+		const enter = record(13, 28, 13, 1, 0);
+		const release = record(13, 28, 13, 0, 0);
+		const paste = [
+			"\x1b[200~",
+			record(16, 42, 0, 1, 16),
+			record(68, 32, 68, 1, 16),
+			record(68, 32, 68, 0, 16),
+			":\\",
+			enter,
+			release,
+			relay("中文"),
+			record(231, 0, 0xd83d, 1, 0),
+			report,
+			record(231, 0, 0xde00, 1, 0),
+			record(65, 30, 97, 1, 0, 2),
+			"[13;28;13;1;0;1_",
+			"\x1b[201~",
+		].join("");
+		for (let offset = 1; offset < paste.length; offset++) {
+			const { clock, decoder, events } = win32();
+			decoder.process(paste.slice(0, offset));
+			clock.schedule(20, () => decoder.process(paste.slice(offset) + enter + release));
+			clock.advance(100);
+			expect(events).toMatchObject([
+				{ type: "tsp", verb: "e", params: {}, body: '{"a":1}' },
+				{ type: "paste", paste: { text: "D:\\\r中文😀aa[13;28;13;1;0;1_" } },
+				{ type: "key", key: { id: "enter", kind: "press" } },
+			]);
+		}
 	});
 
 	it("keeps Win32 Backspace before direct text in the same read", () => {

@@ -7,9 +7,13 @@
  * distinct. Records with no virtual key relay the host terminal's own bytes
  * one character at a time; those bytes are passed through verbatim so the
  * tokenizer reassembles the escape sequences they spell.
+ * Inside literal bracketed paste markers, records represent text, not chords.
  */
 
-const RECORD = /^\x1b\[(\d+);(\d+);(\d+);(\d+);(\d+);(\d+)_$/;
+const RECORD_SOURCE = /\x1b\[(\d+);(\d+);(\d+);(\d+);(\d+);(\d+)_/.source;
+const RECORD = new RegExp(`^${RECORD_SOURCE}$`);
+const PASTE_RECORD = new RegExp(RECORD_SOURCE, "y");
+const PARTIAL_RECORD = /\x1b\[(?:\d+;){0,5}\d*$/y;
 
 const RIGHT_ALT = 0x1;
 const LEFT_ALT = 0x2;
@@ -57,6 +61,28 @@ export function isWin32Record(seq: string): boolean {
 	return RECORD.test(seq);
 }
 
+function repeatCount(repeat: number): number {
+	return Math.min(Math.max(repeat, 1), 0xffff);
+}
+
+/** Read one paste record at an ESC, preserving the UTF-16 code units in payload order. */
+export function readWin32PasteRecord(
+	input: string,
+	offset: number,
+): { end: number; text: string } | "partial" | undefined {
+	PASTE_RECORD.lastIndex = offset;
+	const record = PASTE_RECORD.exec(input);
+	if (!record) {
+		PARTIAL_RECORD.lastIndex = offset;
+		return PARTIAL_RECORD.test(input) ? "partial" : undefined;
+	}
+	const char = Number(record[3]);
+	return {
+		end: PASTE_RECORD.lastIndex,
+		text: char && Number(record[4]) ? String.fromCharCode(char).repeat(repeatCount(Number(record[6]))) : "",
+	};
+}
+
 export class Win32RecordDecoder {
 	#highSurrogate = "";
 
@@ -72,7 +98,7 @@ export class Win32RecordDecoder {
 			number,
 			number,
 		];
-		const count = Math.min(Math.max(repeat, 1), 0xffff);
+		const count = repeatCount(repeat);
 		if (!down) {
 			// Alt+Numpad composition arrives on the Alt release.
 			return vk === 18 && uc ? String.fromCharCode(uc) : "";
