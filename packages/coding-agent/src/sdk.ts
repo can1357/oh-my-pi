@@ -435,6 +435,7 @@ import {
 import { cfgInterruptMode } from "./modes/settings";
 import { cfgFollowUpMode } from "./modes/settings";
 import { cfgSteeringMode } from "./modes/settings";
+import { cfgGitChildRepoDiscovery } from "./modes/settings";
 import {
 	cfgCommandsEnableClaudeProject,
 	cfgCommandsEnableOpencodeProject,
@@ -2152,6 +2153,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir).then(contextFileFilter);
 	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
+		if (!cfgGitChildRepoDiscovery.get(settings)) return null;
 		try {
 			return await resolveActiveRepoContext(repoCwd);
 		} catch (err) {

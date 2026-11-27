@@ -63,6 +63,7 @@
 - Added the `find.timeoutMs` setting (default 20 s, up to 10 minutes) for the `find` tool's wall-clock budget, so a slow or serial judge can finish a scoped search ([#18335](https://github.com/can1357/oh-my-pi/issues/18335))
 - Added `codexResets.expirySalvage` (default `true`): set it to `false` to auto-redeem saved Codex resets only when an exhausted window blocks the account, never spending expiring credits early and forfeiting remaining weekly quota ([#18308](https://github.com/can1357/oh-my-pi/issues/18308))
 - Added `ctx.cancelAsyncJob(id)` to the extension context, so an extension can cancel the session's own background jobs (such as `task` workers) like `/jobs kill` ([#18033](https://github.com/can1357/oh-my-pi/issues/18033))
+- Added the `git.childRepoDiscovery` setting: set it to `false` to stop a session started outside a repository from scanning its direct child directories and adopting a single child checkout for the status line, git/PR lookup, and prompt context ([#18232](https://github.com/can1357/oh-my-pi/issues/18232))
 
 ### Changed
 

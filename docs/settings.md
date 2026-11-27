@@ -425,6 +425,18 @@ separate, run `omp config set session.worktreeScope directory` (or choose
 The all-projects tab still shows sessions across every directory, including
 sessions in deleted worktrees; this setting only narrows the current-folder list.
 
+## Child repository discovery
+
+When a session starts outside any repository and exactly one direct child
+directory is a git checkout, `omp` adopts that checkout as the active repo: the
+status line shows `cwd ↳ child`, git branch/status/PR lookups run there, and the
+system prompt and advisor are told about it. Run
+`omp config set git.childRepoDiscovery false` (or turn off **Discover Child
+Repository** in `/settings`) to skip the scan: child directories are not probed
+and the session keeps its own cwd. Sessions started inside a checkout,
+subdirectory, or linked worktree keep normal git detection either way. An
+explicit `/review` with no target still lists child checkouts to pick from.
+
 ## Settings catalog
 
 The catalog below highlights common settings; it is not the complete schema. `omp config list` is the authoritative reference for every key, current value, type, and description. Defaults and enum values shown here come from the schema. Settings that accept an env or flag override are noted; those overrides are process-local and not persisted.
