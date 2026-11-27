@@ -796,10 +796,10 @@ fn until_output(pty: &Pty, text: &str) {
 }
 
 /// A screen that comes after the step's output settled, and stays, is the
-/// step's, but is held before it
-/// counts, for at least 200 ms. On a loaded machine a program's next drawing
-/// came up to 199.5 ms after the screen before it (beside 64 busy loops on 8
-/// CPUs), so a shorter hold would take a screen that is about to change.
+/// step's, but is held before it counts, for at least 200 ms. On a loaded
+/// machine a program's next drawing came up to 199.5 ms after the screen
+/// before it (beside 64 busy loops on 8 CPUs), so a shorter hold would take a
+/// screen that is about to change.
 /// Only a lower bound is timed here, and a slow machine only lengthens it.
 #[test]
 fn wait_drawn_holds_a_late_screen_for_200_ms() -> io::Result<()> {
