@@ -263,14 +263,28 @@ interface PendingFile {
 }
 
 /**
+ * Refuse a Git checkout colocated with Jujutsu: advancing Git HEAD directly leaves jj's snapshotted
+ * working-copy change behind as a duplicate head.
+ */
+export async function assertNotColocatedJj(gitRoot: string): Promise<void> {
+	const jjRoot = vcs.jj(gitRoot)?.root();
+	if (jjRoot && (await fs.realpath(jjRoot)) === (await fs.realpath(gitRoot))) {
+		throw new Error(
+			"Selective commits would leave a duplicate of Jujutsu's working-copy change in this colocated workspace; commit with `jj` instead (`jj commit`, `jj split`).",
+		);
+	}
+}
+
+/**
  * Build a draft of the repository's current changes for the agents in scope.
- * @throws when `cwd` is not inside a git checkout or the scope names an unknown agent.
+ * @throws when `cwd` is not inside a git checkout, is a Jujutsu workspace, or the scope names an unknown agent.
  */
 export async function createDraft(source: DraftSource): Promise<Draft> {
 	if (vcs.isPureJj(source.cwd)) throw new Error("Selective commits need git; this is a Jujutsu workspace.");
 	const repo = vcs.git(source.cwd);
 	if (!repo) throw new Error(`Not inside a git repository: ${source.cwd}`);
 	const root = repo.info().repoRoot;
+	await assertNotColocatedJj(root);
 	const [headSha, branch] = await Promise.all([repo.headSha(source.signal), repo.currentBranch(source.signal)]);
 	const head = headSha ?? null;
 
