@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added `ctx.asyncJobs.register()` so extensions can run their own work as background jobs that show up in `wait` and the job list, can be cancelled, and deliver their results to the agent like native background jobs.
 - Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
 - Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
 - Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.

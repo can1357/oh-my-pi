@@ -40,6 +40,7 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
+import type { AsyncJobManagerApi } from "../../async";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
@@ -642,6 +643,7 @@ export class ExtensionRunner {
 	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
+	#asyncJobManager: AsyncJobManagerApi | undefined;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -1186,6 +1188,11 @@ export class ExtensionRunner {
 	 */
 	setUserWaitTracker(track: UserWaitTracker): void {
 		this.#trackUserWait = track;
+	}
+
+	/** Backs `ctx.asyncJobs` with the session's job manager; `undefined` leaves it off the context. */
+	setAsyncJobManager(manager: AsyncJobManagerApi | undefined): void {
+		this.#asyncJobManager = manager;
 	}
 
 	/** Waits until the interactive transcript can show the tool call being approved. */
@@ -1994,6 +2001,7 @@ export class ExtensionRunner {
 			void this.runtime.sendUserMessage(text, options);
 		};
 		const getSessionModes = () => this.#sessionModes;
+		const asyncJobManager = this.#asyncJobManager;
 		return {
 			ui: delegation?.extensionPath ? this.#uiForPath(delegation.extensionPath) : this.#uiContext,
 			mode: this.#mode,
@@ -2052,6 +2060,20 @@ export class ExtensionRunner {
 					}
 				: undefined,
 			startLive: this.#startLiveFn,
+			asyncJobs: asyncJobManager
+				? {
+						// Owned by the calling agent like its native background jobs, so `wait`,
+						// cancellation, and result delivery scope to it.
+						register: (label, run, options) =>
+							asyncJobManager.register(
+								"extension",
+								label,
+								({ jobId, signal, reportProgress }) =>
+									run({ jobId, signal, reportProgress: text => reportProgress(text) }),
+								{ ownerId: agent.id, intent: options?.intent },
+							),
+					}
+				: undefined,
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and

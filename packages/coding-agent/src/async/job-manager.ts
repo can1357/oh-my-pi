@@ -64,7 +64,7 @@ const DEFAULT_MAX_RUNNING_JOBS = 15;
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
-export type AsyncJobType = "bash" | "task" | "eval";
+export type AsyncJobType = "bash" | "task" | "eval" | "extension";
 
 /** Settled job-body payload: delivery text plus its parsed structured output. */
 export interface AsyncJobRunResult {

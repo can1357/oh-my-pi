@@ -461,6 +461,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
 - `runEphemeralTurn(...)` (optional; see below)
 - `startLive(...)` (optional; interactive mode only; see below)
+- `asyncJobs` (optional; absent when the session has no async job manager; see below)
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
 - `annotations`: `/annotate` as an API, for boards and remote clients. `submit({ source, notes, deliver?, review?, focus? })` builds the feedback `/annotate` would and delivers it without any UI; `open({ source, deliver?, focus? })` mounts the annotation overlay on the source and resolves with the operator's notes (`undefined` when dismissed; `mode === "tui"` only). Text sources are `{ kind: "text", text, label? }`, `{ kind: "file", path }` (resolved against the live session cwd), or `{ kind: "last" }`; diff sources are `{ kind: "diff", diff, label? }`, `{ kind: "uncommitted" }`, or `{ kind: "pr", ref }` (`ref` is a GitHub PR or GitLab MR URL, `pr://owner/repo/N`, or `mr://<host>/<group>/<project>/N/diff`). `review`/`focus` apply to diff sources only (a type error on text sources). Text notes are `{ note, line?, quote? }` (1-based; whole-source when omitted, and the quoted line is filled in); diff notes are `{ path, note, line?, side?, occurrence?, rawLine? }` (`side` defaults to `"new"`; `rawLine` is the diff row including its `+`/`-`/space prefix). Notes that do not match their source reject rather than being dropped. `text` and `diff` sources are frozen snapshots of what you pass; `file`, `last`, `uncommitted`, and `pr` are re-read at call time and line numbers are matched against the current content, so pass `quote`/`rawLine` to reject a note (naming it) when that content drifted. `deliver` defaults to `"auto"`: pasteable notes go into the composer when the interactive TUI editor is available and are sent otherwise; an LLM review request (`review: true` on a diff) is always sent. Sending uses `pi.sendUserMessage` and queues as a follow-up while the agent is streaming. `"paste"`/`"send"` force a channel and `"none"` only returns `text`. The result is discriminated by `kind`: `"text"` carries `TextReviewAnnotation[]` and, after `open`, `editedText` when the operator replaced the source in the external editor (the feedback then refers to that text); `"diff"` carries `CodeReviewAnnotation[]` and `review` (whether `text` is an LLM review request). Both carry the rendered `text` and the `delivered` channel.
   Explicit paste requires `ctx.ui.supportsEditor === true`: the TUI and non-headless RPC expose composers; ACP and no-op UI contexts do not. Supplied diffs used for LLM review reject above 50,000 characters or 20 reviewable files before delivery, and `open` rejects such a patch before mounting the overlay; split larger patches into smaller requests. Notes-only submissions do not have this review-prompt bound.
@@ -538,6 +539,32 @@ pi.on("session_start", async (_event, ctx) => {
 ```
 
 If you use raw `setInterval`/`setTimeout` or detached promises instead, you own the isolation: wrap the callback body in your own `try/catch` (an unhandled throw will take down the session) and clear the timer on `session_shutdown`.
+
+### Agent-visible jobs (`ctx.asyncJobs`)
+
+`ctx.asyncJobs.register(label, run, options?)` runs `run` as a background job of the calling agent and returns its job id at once. The job is listed by `wait`, `proc://`, and the job list like a native background job; `cancel` (or cancelling from the job list) aborts its `signal`; and the string `run` resolves to is delivered to the agent as the job's result, exactly like a finished background `bash` or `task` job. A rejection fails the job with the error message. Use it for work an extension runs elsewhere (a remote host, a job queue) that the agent should be able to wait on.
+
+```ts
+pi.registerTool({
+	name: "remote_build",
+	// ...
+	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		if (!ctx.asyncJobs) throw new Error("This session cannot run background jobs");
+		const jobId = ctx.asyncJobs.register(
+			`build ${params.target}`,
+			async ({ signal, reportProgress }) => {
+				const run = await startRemoteBuild(params.target, { signal });
+				for await (const line of run.log) await reportProgress(line);
+				return run.summary;
+			},
+			{ intent: "Build on the remote host" },
+		);
+		return { content: [{ type: "text", text: `Started ${jobId}; its result arrives when it finishes.` }] };
+	},
+});
+```
+
+`options.intent` is the one-line purpose job views show next to the label; `reportProgress(text)` replaces the job's progress text. `register` throws when the session's running-job limit is reached.
 
 ### Model selection (`ctx.models`)
 

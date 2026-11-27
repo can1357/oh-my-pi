@@ -827,6 +827,32 @@ export interface ExtensionLiveSession {
 	stop(): Promise<void>;
 }
 
+/** What an extension job's run receives from {@link ExtensionAsyncJobs.register}. */
+export interface ExtensionAsyncJobRunContext {
+	/** Id of the job, as `wait`, `cancel`, and job listings show it. */
+	jobId: string;
+	/** Aborted when the job is cancelled (by `cancel`, the job list, or session teardown). */
+	signal: AbortSignal;
+	/** Replace the job's progress text shown in job listings and `wait`. */
+	reportProgress(text: string): Promise<void>;
+}
+
+/** Background jobs an extension runs in this session's job manager; see {@link ExtensionContext.asyncJobs}. */
+export interface ExtensionAsyncJobs {
+	/**
+	 * Start `run` as a background job owned by the calling agent and return its id at once.
+	 * The job appears in `wait`, `proc://`, and the job list like a native background job,
+	 * cancelling it aborts `signal`, and the string `run` resolves to is delivered to the agent
+	 * as the job's result. A rejection fails the job with its message. Throws when the session's
+	 * running-job limit is reached.
+	 */
+	register(
+		label: string,
+		run: (job: ExtensionAsyncJobRunContext) => Promise<string>,
+		options?: { intent?: string },
+	): string;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -921,6 +947,11 @@ export interface ExtensionContext {
 	 * Optional: present only in hosts that run live sessions (currently interactive mode).
 	 */
 	startLive?(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession>;
+	/**
+	 * Run extension work as background jobs that `wait`, cancellation, and result delivery treat like
+	 * native ones. Optional: absent when the session has no async job manager.
+	 */
+	asyncJobs?: ExtensionAsyncJobs;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
 	/** `/annotate` as an API: build or collect annotation feedback on text and diffs. */
