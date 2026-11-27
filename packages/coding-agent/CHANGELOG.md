@@ -9,18 +9,6 @@
 
 ### Added
 
-- Added the `tui.showLinkUrl` setting to hide the URL drawn after named Markdown links where the label is a clickable terminal hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
-- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
-- `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
-- The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Added the `gitlab` tool (`gitlab.enabled`, default off) covering project/file/issue reads, MR creation/updating/worktree checkout/push, discussions/notes/resolution, project/group/global search, and CI pipeline/job watching and logs, and expanded `mr://` URLs to support MR listings (`mr://`, `mr://<host>/<group>/<project>`) and cached MR overviews (`mr://<iid>`) alongside existing `/diff` slices ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
-- Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
-- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
-- On Linux the tool guard also refuses heavy work started while the host is strained ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
-- Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
-- User-level TTSR gate rules accept `command:`, a check run in your shell before each matching tool call; a nonzero exit refuses the call ([#20216](https://github.com/can1357/oh-my-pi/pull/20216) by [@Xytronix](https://github.com/Xytronix))
 - Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
 - Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
 - Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.
@@ -31,6 +19,10 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
+- On Linux the tool guard also refuses heavy work started while the host is strained ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
+- Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
+- User-level TTSR gate rules accept `command:`, a check run in your shell before each matching tool call; a nonzero exit refuses the call ([#20216](https://github.com/can1357/oh-my-pi/pull/20216) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

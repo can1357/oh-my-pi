@@ -2,14 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `AgentTool.matcherSections(args)` hook returning each touched file's section of a multi-file payload, so pre-execution TTSR gates judge each file on its own ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
 - Corrected OpenTelemetry chat spans to report the model that actually served the response.
-
-### Added
-
-- Added optional `AgentTool.matcherSections(args)` hook returning each touched file's section of a multi-file payload, so pre-execution TTSR gates judge each file on its own ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.1] - 2026-11-25
 
