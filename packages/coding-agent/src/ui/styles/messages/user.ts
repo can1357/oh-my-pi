@@ -9,7 +9,8 @@
  *   top fill row (left and right, inside the padding).
  * - Tools and thumbnails are native-only.
  * - A one-row allocation shows the first content row (no zone marks).
- * - With prompt zones on, the first content row is marked when it enters terminal history.
+ * - With prompt zones on, the first content row is marked as an OSC 133 command
+ *   (`B`..`C`) when it enters terminal history.
  * - An empty prompt draws nothing.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
@@ -27,8 +28,10 @@ import { fileLink } from "../tools/file-common";
 import { expandKeyLabel } from "../../keys/hints";
 import { fillRow, hexFg, propsOf, termOf, withResolvedColor } from "./fill";
 
-const ZONE_START = "\x1b]133;A\x07";
-const ZONE_CLOSE = "\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07";
+/** Prompt start, then command start: terminals that list commands read the marked row (#20123). */
+const ZONE_START = "\x1b]133;A\x07\x1b]133;B\x07";
+/** Command executed and finished in the same write, so Ghostty leaves its input state (#8030). */
+const ZONE_CLOSE = "\x1b]133;C\x07\x1b]133;D;0\x07";
 const BG = "userMessageBg";
 
 interface UserTerm {

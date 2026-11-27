@@ -65,6 +65,7 @@
 - Fixed the tool-call loop guard never stopping a model that keeps calling nonexistent tools (`wri`, `ed`, `ba`) with varying names or arguments; it now redirects after `model.toolCallLoopGuard.threshold` such turns in a row, while a single typo followed by a valid call is unaffected ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
 - Fixed eval `sh()` running commands the bash interceptor (`bashInterceptor.patterns`) redirects to dedicated tools; it now fails with the same guidance as the bash tool ([#20033](https://github.com/can1357/oh-my-pi/issues/20033))
 - User prompts emit OSC 133 marks only on first entering terminal history, keeping repaints from piling up markers in the VS Code terminal ([#20793](https://github.com/can1357/oh-my-pi/issues/20793)).
+- Terminals that list OSC 133 commands (such as tuios' scrollback browser) now find each user prompt as a command instead of an empty entry ([#20123](https://github.com/can1357/oh-my-pi/issues/20123)).
 - `hideThinkingBlock: true` now hides thinking blocks from the moment the TUI starts, instead of showing them until the first streamed reasoning arrives ([#17369](https://github.com/can1357/oh-my-pi/issues/17369))
 - Alt+L (reset terminal display), Ctrl+T, Ctrl+R, Ctrl+G and Ctrl+Shift+O work again while an ask form or ask dialog holds focus ([#20771](https://github.com/can1357/oh-my-pi/issues/20771))
 - A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"
