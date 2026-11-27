@@ -145,10 +145,6 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		let hostHeader = isOpenCode || declaresSessionHeader(options.compat);
 		if (options.protocol === "anthropic") {
 			setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
-			// Copilot's `/v1/messages` proxy needs the Copilot CLI's session header:
-			// without it text replies come back as a `msg_blocked` placeholder
-			// prefixed with "cached data for request … not found" (#20678).
-			if (backend === "github-copilot") setHeaderIfAbsent(headers, "X-Client-Session-Id", sessionId);
 			// Official Anthropic keeps Claude Code's exact header set.
 			hostHeader ||= backend === "anthropic";
 		} else if (options.protocol === "openai" && backend === "openai") {

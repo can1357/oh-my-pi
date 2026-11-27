@@ -266,8 +266,10 @@ describe("Anthropic Copilot auth config", () => {
 
 	it("sends the conversation id as X-Client-Session-Id on Copilot message requests", async () => {
 		const requestedSessionIds: Array<string | null> = [];
+		const requestedGatewayIds: Array<string | null> = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			requestedSessionIds.push(getRequestHeader(input, init, "X-Client-Session-Id"));
+			requestedGatewayIds.push(getRequestHeader(input, init, "x-session-id"));
 			return new Response(JSON.stringify({ error: { type: "authentication_error", message: "Unauthorized" } }), {
 				status: 401,
 				headers: { "Content-Type": "application/json" },
@@ -282,6 +284,51 @@ describe("Anthropic Copilot auth config", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedSessionIds[0]).toBe("session-123");
+		// The host's own header must not displace the generic gateway fallback.
+		expect(requestedGatewayIds[0]).toBe("session-123");
+	});
+
+	it("sends no X-Client-Session-Id on Copilot requests without a conversation id", async () => {
+		const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+			Response.json({ error: { type: "authentication_error", message: "Unauthorized" } }, { status: 401 }),
+		);
+		await streamAnthropic(makeCopilotClaudeModel(), testContext, {
+			apiKey: "ghu_test_copilot_token",
+			fetch: fetchMock,
+		}).result();
+
+		const [input, init] = fetchMock.mock.calls[0]!;
+		expect(getRequestHeader(input, init, "X-Client-Session-Id")).toBeNull();
+	});
+
+	it("sends a KDL-declared session header on any Anthropic host, not only Copilot", async () => {
+		const base = buildModel({
+			id: "claude-proxy",
+			name: "Claude via proxy",
+			api: "anthropic-messages",
+			provider: "custom-anthropic-proxy",
+			baseUrl: "https://proxy.example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8_000,
+		});
+		const model: Model<"anthropic-messages"> = {
+			...base,
+			compat: { ...base.compat, sessionHeader: "x-client-session-id" },
+		};
+		const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+			Response.json({ error: { type: "authentication_error", message: "Unauthorized" } }, { status: 401 }),
+		);
+		await streamAnthropic(model, testContext, {
+			apiKey: "sk-test",
+			fetch: fetchMock,
+			sessionId: "conversation",
+		}).result();
+
+		const [input, init] = fetchMock.mock.calls[0]!;
+		expect(getRequestHeader(input, init, "X-Client-Session-Id")).toBe("conversation");
 	});
 
 	it("keeps a caller-supplied X-Client-Session-Id on Copilot requests", () => {
