@@ -478,7 +478,7 @@ describe("wait", () => {
 		test("the description follows a setting changed mid-session", () => {
 			const settings = Settings.isolated();
 			const tool = new WaitTool(session(undefined, "Main", false, { settings }));
-			expect(tool.description).toContain("it then blocks up to 4m, longer for a reply.");
+			expect(tool.description).toContain("it then blocks up to 4m, longer with a long-lived prompt cache.");
 			cfgWaitIdleTimeout.override(settings, "none");
 			expect(tool.description).toContain("returns only once one finishes or a message arrives");
 		});
