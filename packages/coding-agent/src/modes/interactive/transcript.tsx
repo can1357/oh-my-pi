@@ -40,7 +40,6 @@ import type { BashExecutionMessage, PythonExecutionMessage } from "../../session
 import type { ToolActivityMode } from "../settings";
 import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/reply-write";
 import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
-import { asyncJobState } from "../../session/transcript/tool-execution";
 import { capturePage } from "../../tools/browser/page-shot";
 import { type SpotlightDetails, spotlightDetails } from "../../tools/details/spotlight";
 import { TODO_STRIKE_FRAME_MS, TODO_STRIKE_TOTAL_FRAMES } from "../../tools/details/todo";
@@ -473,8 +472,6 @@ export class TranscriptPresenter {
 		// does not hold (a rebuild would pin the transcript behind it).
 		const striking = spec.name === "todo" ? signal(false) : undefined;
 		let strikeEnd: Timer | undefined;
-		// The call returned and its card keeps taking its background job's frames until one settles it.
-		const parked = signal(false);
 		const factory = () => {
 			if (striking) {
 				const facts = call.facts;
@@ -502,9 +499,9 @@ export class TranscriptPresenter {
 					args: call.facts.args(),
 					...(result ? { result } : {}),
 					isError: result?.isError === true,
-					// A parked card still taking its job's frames is in progress, even when it draws
-					// them as static results (a viewport-only Bash card).
-					isPartial: result === undefined || call.facts.partial() || (parked() && !call.facts.sealed()),
+					// What omp's own card draws: a viewport-only Bash card shows its job frames as static
+					// results, so a presenter sees no partial-to-final flip when its rows reach scrollback.
+					isPartial: result === undefined || call.facts.partial(),
 				});
 			});
 			effect(() => {
@@ -532,7 +529,6 @@ export class TranscriptPresenter {
 			updateStreamPreview: preview => call.updateStreamPreview(preview),
 			updateResult: (result, partial) => {
 				call.updateResult(result, partial);
-				if (!partial && parked.peek() && asyncJobState(result.details) !== "running") parked.set(false);
 				if (striking && !partial && completesTasks(result) && untrack(call.facts.startedAt) !== undefined) {
 					clearTimeout(strikeEnd);
 					striking.set(true);
@@ -542,7 +538,7 @@ export class TranscriptPresenter {
 			},
 			setArgsComplete: () => call.setArgsComplete(),
 			setExecutionStarted: () => call.setExecutionStarted(),
-			parkAsBackground: () => parked.set(true),
+			parkAsBackground: () => {},
 			seal: () => {
 				call.seal();
 				this.#settle(block);

@@ -53,7 +53,6 @@ import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import type { TranscriptBlock } from "../../ui/shell";
-import type { ToolCallResult } from "../../ui/transcript/tool-block";
 import { toolEditMode } from "../../ui/tools/edit";
 import { PREVIEW_LIMITS, previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
@@ -282,12 +281,6 @@ export class EventController {
 	#lastIntent: string | undefined = undefined;
 	/** Returned calls parked for their background job's frames ({@link parksAsBackground}). */
 	#backgroundCallIds = new Set<string>();
-	/**
-	 * What each viewport-only card ({@link followsViewportOnly}) showed when its content reached
-	 * scrollback, by call id: later frames are dropped, and a rebuild in the same session draws the
-	 * card as it was rather than from the job's latest frame. A transcript retarget clears it.
-	 */
-	#frozenJobResults = new Map<string, ToolCallResult>();
 	/**
 	 * A job's settled frame ({@link isSettledJobFrame}) that landed while its
 	 * call was still executing, keyed by call id: a fast job can settle before
@@ -1252,7 +1245,6 @@ export class EventController {
 		this.#postToolAssistantComponents.clear();
 		this.#toolReplyBlocks.clear();
 		this.#backgroundCallIds.clear();
-		this.#frozenJobResults.clear();
 		this.#settledBeforeReturn.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
@@ -1715,11 +1707,6 @@ export class EventController {
 		for (const toolCallId of toolCallIds) {
 			if (this.ctx.pendingTools.has(toolCallId)) this.#backgroundCallIds.add(toolCallId);
 		}
-	}
-
-	/** What a viewport-only card showed when it froze in scrollback (see {@link #frozenJobResults}). */
-	frozenJobResult(toolCallId: string): ToolCallResult | undefined {
-		return this.#frozenJobResults.get(toolCallId);
 	}
 
 	async #handleNotice(event: Extract<AgentSessionEvent, { type: "notice" }>): Promise<void> {
@@ -2289,9 +2276,7 @@ export class EventController {
 			const parked = this.#backgroundCallIds.has(event.toolCallId);
 			const viewportOnly = parked && followsViewportOnly(event.toolName, this.ctx.shell.native());
 			if (viewportOnly && this.ctx.shell.transcript.contentInHistory(component.block)) {
-				const shown = component.call?.facts.result();
-				if (shown) this.#frozenJobResults.set(event.toolCallId, shown);
-				// No frame reaches the card any more: it stops counting as in progress.
+				// Its content is in scrollback: later frames would rewrite rows history already holds.
 				component.seal();
 				this.#releasePendingTool(event.toolCallId, component);
 				this.#backgroundCallIds.delete(event.toolCallId);

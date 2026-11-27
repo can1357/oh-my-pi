@@ -289,10 +289,11 @@ describe("EventController async update finalization", () => {
 		ctx.presentAssistant(createAssistantMessage("Earlier assistant reply.")).finalized.set(true);
 		const transcript = ctx.shell.transcript;
 		const term = createTestTerminal(() => ({ main: transcript.nodes }), { columns, rows: 40 });
+		let replays = 0;
 		transcript.attach({
 			retired: node => term.backend.retired(node),
 			contentInHistory: node => term.backend.contentInHistory(node),
-			replayHistory: () => {},
+			replayHistory: () => replays++,
 			redescribe: () => {},
 		});
 		try {
@@ -327,13 +328,14 @@ describe("EventController async update finalization", () => {
 			term.resize(columns, cardRows - 1);
 			expect(term.history().at(-1)).toBe(firstCardRow);
 			expect(term.screen().join("\n")).toContain("Second sample");
-			await controller.handleEvent(jobFrame(bashResult("Off-screen completion", "completed", 0)));
+			await controller.handleEvent(jobFrame(bashResult("Off-screen sample")));
 			term.render();
 			expect(term.screen().join("\n")).toContain("Second sample");
-			expect(term.screen().join("\n")).not.toContain("Off-screen completion");
+			expect(term.screen().join("\n")).not.toContain("Off-screen sample");
 			expect(term.history()).toHaveLength(earlierRows + 2);
 
-			// A rebuild in the same session redraws the frozen card as it was, not the dropped completion.
+			// A rebuild drops the card's rows from scrollback (history is replayed), so it draws the
+			// job's latest frame, the one the frozen card dropped, and follows the job again.
 			const call: AssistantMessage = {
 				...createAssistantMessage(""),
 				stopReason: "toolUse",
@@ -348,23 +350,35 @@ describe("EventController async update finalization", () => {
 				timestamp: call.timestamp + 1,
 			};
 			ctx.eventController = controller;
-			ctx.viewSession.activeToolExecutionUpdates = () => [
-				jobFrame(bashResult("Off-screen completion", "completed", 0)),
-			];
+			ctx.viewSession.activeToolExecutionUpdates = () => [jobFrame(bashResult("Off-screen sample"))];
 			const helpers = new UiHelpers(ctx);
 			ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
-			transcript.clear();
+			// What `InteractiveMode.rebuildChatFromMessages` does when no call is live.
+			transcript.retain(new Set());
+			expect(replays).toBe(1);
 			helpers.renderSessionContext({ messages: [call, result] } as SessionContext);
-			const rebuilt = transcriptText(ctx.shell, columns);
-			expect(rebuilt).toContain("Second sample");
-			expect(rebuilt).not.toContain("Off-screen completion");
+			const rebuiltCard = ctx.pendingTools.get("tc-bash")!;
+			term.render();
+			expect(term.history()).toEqual([]);
+			expect(term.screen().join("\n")).toContain("Off-screen sample");
+			expect(term.screen().join("\n")).not.toContain("Second sample");
+
+			// The rebuilt card follows the job again, and freezes again once its content scrolls off.
+			await controller.handleEvent(jobFrame(bashResult("Sample after rebuild")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Sample after rebuild");
+			expect(term.backend.contentInHistory(rebuiltCard.block.node)).toBe(true);
+			await controller.handleEvent(jobFrame(bashResult("Dropped after rebuild", "completed", 0)));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Sample after rebuild");
+			expect(term.screen().join("\n")).not.toContain("Dropped after rebuild");
 		} finally {
 			transcript.attach(undefined);
 			term.dispose();
 		}
 	});
 
-	it("reports a background job result as partial only while its card takes job frames", async () => {
+	it("reports plain-terminal background job results to presenters as final, as omp's own card draws them", async () => {
 		const { controller } = createFixture();
 		const asked = vi.spyOn(TranscriptPresenter.prototype, "presentationOf");
 		const lastPartial = (text: string) =>
@@ -384,11 +398,10 @@ describe("EventController async update finalization", () => {
 			result: bashResult(formatBackgroundNotice("bash-1", 300)),
 			isError: false,
 		});
+		// A viewport-only Bash card draws its frames as static results; reporting them partial would flip
+		// the presentation when the card freezes in scrollback and rewrite rows history already holds.
 		await controller.handleEvent(jobFrame(bashResult("Running sample")));
-		expect(lastPartial("Running sample")).toBe(true);
-
-		await controller.handleEvent(jobFrame(bashResult("Final sample", "completed", 0)));
-		expect(lastPartial("Final sample")).toBe(false);
+		expect(lastPartial("Running sample")).toBe(false);
 
 		await controller.handleEvent({
 			type: "tool_execution_start",
