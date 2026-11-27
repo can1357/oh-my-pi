@@ -247,6 +247,7 @@
 - Repeated `vibe_wait` calls on a still-running worker no longer trip the tool-call loop guard; `vibe_wait` is now exempt by default ([#15011](https://github.com/can1357/oh-my-pi/issues/15011))
 - Advisors now use their own `retry.fallbackChains.advisor` chain on their first fallback instead of inheriting the main session's active fallback chain ([#15101](https://github.com/can1357/oh-my-pi/issues/15101))
 - Fixed eval `agent()` spawning past an exhausted Goal Mode token budget that `budget()` reported as a hard ceiling ([#14946](https://github.com/can1357/oh-my-pi/issues/14946))
+- Fixed hashline edits reusing stale line numbers after a shifting edit being accepted one line high, duplicating a line, when the body echoed the line above the range ([#15035](https://github.com/can1357/oh-my-pi/issues/15035))
 
 ### Removed
 

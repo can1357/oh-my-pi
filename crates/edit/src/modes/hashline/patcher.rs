@@ -328,7 +328,10 @@ fn line_carries(body_line: &str, evidence: &str) -> bool {
 /// rejects stale numbers whichever way lines moved: after lines shift down,
 /// a stale range's first line holds content from above the intended range;
 /// after lines shift up, its last line holds content from below it. Either
-/// way that end's content is absent from the payload.
+/// way that end's content is absent from the payload. A payload that also
+/// carries the line just below the range defeats this when the head is an
+/// echoed context row (lines shifted down, body restates the line above), so
+/// such payloads never count as evidence.
 fn body_targets(body: &[String], current_lines: &[&str], first: u32, last: u32) -> bool {
 	let Some(head) = unique_evidence(current_lines, first) else {
 		return false;
@@ -336,6 +339,11 @@ fn body_targets(body: &[String], current_lines: &[&str], first: u32, last: u32) 
 	let Some(head_at) = body.iter().position(|line| line_carries(line, head)) else {
 		return false;
 	};
+	if unique_evidence(current_lines, last + 1)
+		.is_some_and(|next| body.iter().any(|line| line_carries(line, next)))
+	{
+		return false;
+	}
 	if first == last {
 		return true;
 	}
@@ -1065,6 +1073,11 @@ mod tests {
 		// Tail carried only before the head is not this range.
 		let reversed = body(&["let v0004 = 4;", "let v0001 = 1;"]);
 		assert!(!body_targets(&reversed, &file, 1, 4));
+		// Lines shifted down with an echoed row above: the stale range's head
+		// is the echo and the intended last line sits just below the range.
+		let echoed = body(&["let v0001 = 1;", "let v0002 = 2; // e", "let v0003 = 3; // e"]);
+		assert!(!body_targets(&echoed, &file, 1, 2));
+		assert!(!body_targets(&body(&["let v0001 = 1;", "let v0002 = 2; // e"]), &file, 1, 1));
 	}
 }
 
