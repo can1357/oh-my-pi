@@ -24,11 +24,13 @@ function createRuntimeHarness(messages: AgentMessage[], viewMessages: AgentMessa
 	const showStatus = vi.fn();
 	const showWarning = vi.fn();
 	const showCopySelector = vi.fn();
+	const showCodeBlockSelector = vi.fn();
 	return {
 		setText,
 		showStatus,
 		showWarning,
 		showCopySelector,
+		showCodeBlockSelector,
 		runtime: {
 			ctx: {
 				session: { messages },
@@ -37,6 +39,7 @@ function createRuntimeHarness(messages: AgentMessage[], viewMessages: AgentMessa
 				showStatus,
 				showWarning,
 				showCopySelector,
+				showCodeBlockSelector,
 			} as unknown as InteractiveModeContext,
 		},
 	};
@@ -135,6 +138,44 @@ describe("/copy slash command", () => {
 		expect(await executeBuiltinSlashCommand("/copy", harness.runtime)).toBe(true);
 
 		expect(harness.showCopySelector).toHaveBeenCalledTimes(1);
+		expect(copySpy).not.toHaveBeenCalled();
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("strips trailing spaces per line when copying code blocks", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([assistantText("```ts\nconst a = 1;   \n  const b = 2;\t\n```")]);
+
+		expect(await executeBuiltinSlashCommand("/copy code", harness.runtime)).toBe(true);
+
+		expect(copySpy).toHaveBeenCalledWith("const a = 1;\n  const b = 2;");
+	});
+
+	it("copies a specific 1-based code block from the latest reply with /copy code <n>", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([
+			assistantText("old\n```ts\nconst old = 1;\n```"),
+			assistantText("first\n```sh\necho first   \n```\nsecond\n````md\n```ts\nconst nested = 2;  \n```\n````"),
+		]);
+
+		expect(await executeBuiltinSlashCommand("/copy code 1", harness.runtime)).toBe(true);
+		expect(copySpy).toHaveBeenLastCalledWith("echo first");
+		expect(harness.showStatus).toHaveBeenLastCalledWith("Copied sh code block #1 to clipboard");
+
+		expect(await executeBuiltinSlashCommand("/copy code 2", harness.runtime)).toBe(true);
+		expect(copySpy).toHaveBeenLastCalledWith("```ts\nconst nested = 2;\n```");
+		expect(harness.showStatus).toHaveBeenLastCalledWith("Copied md code block #2 to clipboard");
+
+		expect(await executeBuiltinSlashCommand("/copy code 3", harness.runtime)).toBe(true);
+		expect(harness.showStatus).toHaveBeenLastCalledWith("Code block #3 not found (latest reply has 2 code blocks).");
+	});
+
+	it("opens the interactive code-block selector with /copy code pick", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([assistantText("```sh\necho one\n```\n```ts\nconst two = 2;\n```")]);
+
+		expect(await executeBuiltinSlashCommand("/copy code pick", harness.runtime)).toBe(true);
+		expect(harness.showCodeBlockSelector).toHaveBeenCalledTimes(1);
 		expect(copySpy).not.toHaveBeenCalled();
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});

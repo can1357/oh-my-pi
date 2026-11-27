@@ -11,7 +11,12 @@ import { shareSession } from "../export/share";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import { sanitizeDisplayLine } from "../extensibility/inventory/display-text";
-import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "../modes/view-model/overlays/copy-targets";
+import {
+	extractLastCodeBlock,
+	extractLastCommand,
+	extractLastLink,
+	extractLastReplyCodeBlocks,
+} from "../modes/view-model/overlays/copy-targets";
 import { applyBrowserModeChange } from "../tools/browser";
 import { sanitizeDisplayWarnings, shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { truncateToWidth } from "../utils/text-width";
@@ -599,23 +604,63 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		name: "copy",
 		icon: "copy",
 		description: "Pick text or code from the conversation to copy",
+		subcommands: [
+			{ name: "code", description: "Copy a fenced code block (latest, #<n>, or pick)", usage: "[<n>|pick]" },
+			{ name: "cmd", description: "Copy the last bash or eval command" },
+			{ name: "link", description: "Copy the last URL from assistant output" },
+			{ name: "local", description: "Copy the session's local:// directory path" },
+		],
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
+			const parts = command.args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+			const arg = parts[0] ?? "";
 			if (!arg) {
 				clearSubmittedText(runtime);
 				await runtime.ctx.showCopySelector();
 				return;
 			}
 			if (arg === "code") {
-				const block = extractLastCodeBlock(runtime.ctx.viewSession.messages);
-				if (!block) {
-					runtime.ctx.showStatus("No code block to copy.");
+				const sub = parts[1];
+				if (!sub) {
+					const block = extractLastCodeBlock(runtime.ctx.viewSession.messages);
+					if (!block) {
+						runtime.ctx.showStatus("No code block to copy.");
+						clearSubmittedText(runtime);
+						return;
+					}
+					await copyToClipboard(block.code);
+					runtime.ctx.showStatus("Copied code block to clipboard");
 					clearSubmittedText(runtime);
 					return;
 				}
-				await copyToClipboard(block.code);
-				runtime.ctx.showStatus("Copied code block to clipboard");
+				if (sub === "pick") {
+					clearSubmittedText(runtime);
+					await runtime.ctx.showCodeBlockSelector();
+					return;
+				}
+				if (parts.length === 2 && /^[1-9]\d*$/.test(sub)) {
+					const index = Number.parseInt(sub, 10);
+					const blocks = extractLastReplyCodeBlocks(runtime.ctx.viewSession.messages);
+					if (blocks.length === 0) {
+						runtime.ctx.showStatus("No code block to copy.");
+						clearSubmittedText(runtime);
+						return;
+					}
+					const block = blocks[index - 1];
+					if (!block) {
+						runtime.ctx.showStatus(
+							`Code block #${index} not found (latest reply has ${blocks.length} code block${blocks.length === 1 ? "" : "s"}).`,
+						);
+						clearSubmittedText(runtime);
+						return;
+					}
+					await copyToClipboard(block.code);
+					const desc = block.lang ? `${block.lang} code block #${index}` : `code block #${index}`;
+					runtime.ctx.showStatus(`Copied ${desc} to clipboard`);
+					clearSubmittedText(runtime);
+					return;
+				}
+				runtime.ctx.showStatus("Usage: /copy code [<n>|pick]");
 				clearSubmittedText(runtime);
 				return;
 			}
@@ -652,7 +697,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /copy [code|cmd|link|local]");
+			runtime.ctx.showStatus("Usage: /copy [code [<n>|pick]|cmd|link|local]");
 			clearSubmittedText(runtime);
 		},
 	},

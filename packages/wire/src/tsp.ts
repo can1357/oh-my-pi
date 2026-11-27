@@ -330,6 +330,8 @@ export interface TspMarkdownProps {
 	stream?: boolean;
 	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
 	marks?: readonly TspSpan[];
+	/** Expose clickable copy actions (`code-copy:<hash>`) on fenced code blocks. */
+	codeCopy?: boolean;
 }
 /** A comment drawn on a {@link TspDocProps} document, anchored to a quote of its source. */
 export interface TspDocComment {

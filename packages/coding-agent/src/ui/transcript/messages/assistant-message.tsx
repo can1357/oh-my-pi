@@ -36,7 +36,13 @@ import {
 	signal,
 	untrack,
 } from "@oh-my-pi/pi-tui";
-import { holdPartialTableRow, speculativeStreamingSource } from "@oh-my-pi/pi-tui/text/markdown/index";
+import { markCodeCopied } from "@oh-my-pi/pi-tui/term/painters/md";
+import {
+	CODE_COPY_ACT_PREFIX,
+	extractFencedCodeBlocks,
+	holdPartialTableRow,
+	speculativeStreamingSource,
+} from "@oh-my-pi/pi-tui/text/markdown/index";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
@@ -553,6 +559,28 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 			}}
 			term={() => ({ thinkingDots: thinkingDots() })}
 			onAction={act => {
+				if (act.startsWith(CODE_COPY_ACT_PREFIX)) {
+					if (!model.onAction) return;
+					const hash = act.slice(CODE_COPY_ACT_PREFIX.length);
+					const sources: string[] = [];
+					for (const part of parts().values()) {
+						if (part.kind === "text") sources.push(part.source);
+					}
+					for (const block of reply()?.answer.content ?? []) {
+						if (block.type === "text") sources.push(block.text);
+					}
+					for (const source of sources) {
+						const match = extractFencedCodeBlocks(source, { includeQuotes: true }).find(
+							candidate => candidate.hash === hash,
+						);
+						if (match) {
+							model.onAction("copy-code", match.code);
+							markCodeCopied(hash);
+							return;
+						}
+					}
+					return;
+				}
 				if (act === "copy-error") {
 					const part = parts().get("error");
 					if (part?.kind === "error" && part.error.kind === "failed") model.onAction?.(act, part.error.text);
@@ -585,6 +613,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 						rate={() => read(model.thinkingRate) ?? 0}
 						tone={() => read(model.tone)}
 						thinkingRenderers={() => read(model.thinkingRenderers) ?? []}
+						codeCopy={Boolean(model.onAction)}
 					/>
 				)}
 			</For>
@@ -669,6 +698,7 @@ function ReplyPart(props: {
 	rate: () => number;
 	tone: () => TspTone | undefined;
 	thinkingRenderers: () => readonly AssistantThinkingRenderer[];
+	codeCopy: boolean;
 }): JSXNode {
 	const initial = untrack(props.part);
 	const kind = initial?.kind;
@@ -685,6 +715,7 @@ function ReplyPart(props: {
 				stream={() => (text()?.stream ? true : undefined)}
 				// Held before it was trimmed: a second hold would take the finished row for a partial one.
 				prepared={() => (text()?.stream ? true : undefined)}
+				codeCopy={props.codeCopy ? true : undefined}
 				tone={props.tone}
 				term={() => ({ source: text()?.source, links: text()?.links, deferFigures: text()?.deferFigures })}
 			/>

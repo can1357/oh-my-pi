@@ -29,6 +29,7 @@ import {
 	type Tokens,
 	type TokensList,
 } from "./lexer";
+import { codeBlockHash, codeCopyMarker } from "./code-copy";
 import { EXTENSION_LINK_ID, extensionLinkTest } from "./links";
 import { mermaidRows } from "./mermaid";
 import { markdownLook } from "./look";
@@ -86,6 +87,12 @@ export interface MarkdownOptions {
 	 * the code and copying the whole block yields its markdown.
 	 */
 	readonly codeIndent?: number;
+	/**
+	 * Draw a clickable `[Copy]` button on the opening fence line of fenced code
+	 * blocks, wrapped in a code-copy marker (`./code-copy`) the painter turns
+	 * into a mouse hit (default false).
+	 */
+	readonly codeCopy?: boolean;
 }
 
 /** A code row drawn at column 0 of the full width, outside every container. */
@@ -349,7 +356,29 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 		indent > 0
 			? wrap(styles.codeBorder(text), width)
 			: wrap(styles.codeBorder(text), r.fullWidth).map(literal => ({ literal }));
-	const out: Row[] = border(`\`\`\`${lang ?? ""}`);
+	const openerText = `\`\`\`${lang ?? ""}`;
+	const showCopy =
+		options.codeCopy === true && token.codeBlockStyle !== "indented" && (!options.stream || isClosedFence(token));
+	const headerWidth = indent > 0 ? width : r.fullWidth;
+	let headerRow: string | undefined;
+	if (showCopy) {
+		const label = "[Copy]";
+		const openerWidth = visibleWidth(openerText);
+		const buttonWidth = visibleWidth(label);
+		if (openerWidth + 1 + buttonWidth <= headerWidth) {
+			const hash = codeBlockHash(code);
+			headerRow =
+				styles.codeBorder(openerText) +
+				spaces(headerWidth - openerWidth - buttonWidth) +
+				codeCopyMarker(hash, options.theme.fg("muted", label));
+		}
+	}
+	const out: Row[] =
+		headerRow !== undefined
+			? indent > 0
+				? wrap(headerRow, width)
+				: wrap(headerRow, r.fullWidth).map(literal => ({ literal }))
+			: border(openerText);
 	const fence = r.fence?.token === token ? r.fence : undefined;
 	for (let i = 0; i < lines.length; i++) {
 		// Every line another line follows is final; the last one can still grow or become the closing fence.
@@ -396,6 +425,7 @@ function streamingFence(tokens: readonly Token[], options: MarkdownOptions): Ren
 	if (!opensFence(fence)) return undefined;
 	const lang = fenceLanguage(fence);
 	if (lang === "svg" || (lang === "mermaid" && options.mermaid !== false)) return undefined;
+	if (options.codeCopy === true && !isClosedFence(fence)) return undefined;
 	return { token: fence, head: 0 };
 }
 
@@ -730,7 +760,20 @@ const INDENT_ENDED = /^ {0,3}\S/;
 const OPEN_DISPLAY_MATH = /(?:^|\n)[ \t>]*(?:\$\$|\\\[|\\begin\{)/;
 
 function isClosedFence(token: Token): boolean {
-	return token.type === "code" && /\n[ \t]*(?:`{3,}|~{3,})[ \t]*\n?$/.test(token.raw);
+	if (token.type !== "code" || (token as Tokens.Code).codeBlockStyle === "indented") return false;
+	const opener = /^[ \t]*(`{3,}|~{3,})/.exec(token.raw);
+	if (!opener) return false;
+	const fence = opener[1]!;
+	const char = fence[0]!;
+	const stripped = token.raw.replace(/(?:\r?\n)+$/, "");
+	const lastNewline = stripped.lastIndexOf("\n");
+	if (lastNewline < 0) return false;
+	const trimmed = stripped.slice(lastNewline + 1).trim();
+	if (trimmed.length < fence.length) return false;
+	for (let i = 0; i < trimmed.length; i++) {
+		if (trimmed[i] !== char) return false;
+	}
+	return true;
 }
 
 /** Rows of the settled heads of streaming documents, by prefix (see `renderMarkdownFrame`). */
@@ -763,6 +806,7 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.mermaid ?? true,
 		options.textStyle ?? "",
 		options.codeIndent ?? 2,
+		options.codeCopy ?? false,
 		options.linkSchemes?.join(",") ?? "",
 		links,
 	].join("|");
