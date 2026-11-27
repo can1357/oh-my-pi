@@ -405,10 +405,13 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.setThinkingLevel = level => {
 			thinking = level as string | undefined;
 		};
+		const discardedIds: string[] = [];
 		host.sessionManager = {
-			appendModelChange: () => "model-change",
+			appendModelChange: () => "primary-model-change",
 			getLeafId: () => null,
-			discardEntryDurably: async () => {},
+			discardEntryDurably: async (id: string) => {
+				discardedIds.push(id);
+			},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
@@ -448,6 +451,56 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(await restoring).toBe(false);
 		expect(activeModel).toBe(fallback);
 		expect(thinking).toBe("low");
+		// The cancelled restore's primary `model_change` (and the thinking-level
+		// writes under it) must be durably discarded, not merely unlinked in
+		// memory: the persisted fallback-hop provenance is what a later close/resume
+		// reads, and an ordinary trailing thinking entry would persist the
+		// fallback's effort onto the primary.
+		expect(discardedIds).toEqual(["primary-model-change"]);
+	});
+
+	it("keeps fallback-hop effort provenance in the journal when a primary restore is cancelled", async () => {
+		// Replay the persisted journal of a cancelled primary restore: without the
+		// durable discard, the primary's ordinary `model_change` cleared
+		// `preFallbackThinking` and the trailing ordinary thinking entry resumed
+		// the primary at the fallback's effort. With the discard, the fallback
+		// hop's own entries remain and resume restores the original effort.
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model");
+		const { SessionManager } = await import("@oh-my-pi/pi-coding-agent/session/session-manager");
+		const { buildSessionContext } = await import("@oh-my-pi/pi-coding-agent/session/session-context");
+		const temp = TempDir.createSync("@omp-cancelled-restore-journal-");
+		const sessionManager = SessionManager.create(temp.path());
+		const primarySelector = `${model.provider}/${model.id}:high`;
+		const fallbackSelector = `${fallback.provider}/${fallback.id}:low`;
+
+		// Real journal order: the primary is selected at `high`, then the fallback
+		// hop is journaled as a fallback-tagged model_change followed by the hop's
+		// `low` thinking entry.
+		sessionManager.appendModelChange(primarySelector);
+		sessionManager.appendThinkingLevelChange("high", "high");
+		sessionManager.appendModelChange(fallbackSelector, "fallback", {
+			fallback: { from: primarySelector, trigger: "request-error" },
+		});
+		sessionManager.appendThinkingLevelChange("low", "low");
+
+		// A cancelled primary restore without the durable discard journals the
+		// primary as an ordinary model_change and both thinking writes; with the
+		// fix, `#maybeRestoreRetryFallbackPrimary` discards this entry instead.
+		const primaryChangeId = sessionManager.appendModelChange(primarySelector, "fallback");
+		sessionManager.appendThinkingLevelChange("high", "high");
+		sessionManager.appendThinkingLevelChange("low", "low");
+
+		const unfixContext = buildSessionContext(sessionManager.getEntries());
+		expect(unfixContext.thinkingLevel).toBe("low");
+		expect(unfixContext.models.default).toBe(primarySelector);
+
+		await sessionManager.discardEntryDurably(primaryChangeId);
+
+		const fixedContext = buildSessionContext(sessionManager.getEntries());
+		expect(fixedContext.thinkingLevel).toBe("high");
+		expect(fixedContext.models.default).toBe(primarySelector);
+		await sessionManager.close();
 	});
 
 	it("does not clobber a newer explicit model when cancellation lands during post-swap synchronization", async () => {

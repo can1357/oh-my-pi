@@ -2902,7 +2902,10 @@ export class TurnRecovery {
 			await this.#host.setModelWithProviderSessionReset(currentModel);
 			return false;
 		}
-		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+		const primaryChangeEntryId = this.#host.sessionManager.appendModelChange(
+			primarySelector,
+			EPHEMERAL_MODEL_CHANGE_ROLE,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
 		// The plain comparison: a hop kept the primary's prompt, so this is a no-op, unless a rebuild
@@ -2924,6 +2927,23 @@ export class TurnRecovery {
 			// `#fallbackGeneration` and installs the newer model and its configured
 			// effort. Only reapply the fallback's effort when this continuation
 			// still owns the session and the fallback model is active.
+			if (generation !== this.#fallbackGeneration || this.#host.model() !== currentModel) return false;
+			// Durably discard the restore attempt's journal entries (the primary's
+			// ordinary `model_change` and the thinking-level writes under it). Keeping
+			// them on the branch cleared `preFallbackThinking` in
+			// `buildSessionContext()`, so a session closed and resumed later selected
+			// the primary at the fallback's effort: the trailing ordinary
+			// `thinking_level_change` persisted the fallback's level onto the primary
+			// even though the live-effort rollback succeeded. Discarding restores the
+			// fallback hop's provenance, so resume still restores the primary at its
+			// original effort. Moving only the in-memory leaf is lost on reload,
+			// because the loader selects the last physical journal entry.
+			await this.#host.sessionManager.discardEntryDurably(primaryChangeEntryId);
+			// The durable discard awaited: a manual `setModel()` landing in that
+			// window advances `#fallbackGeneration` and installs the user's model.
+			// The ownership check ran before the await, so recheck the generation and
+			// the active model here; a newer explicit selection owns both the model
+			// and its effort, and the fallback's saved level must not overwrite it.
 			if (generation !== this.#fallbackGeneration || this.#host.model() !== currentModel) return false;
 			// `setThinkingLevel(thinkingToApply)` already installed the primary's
 			// effort; reapply the fallback's after reinstating the fallback model
