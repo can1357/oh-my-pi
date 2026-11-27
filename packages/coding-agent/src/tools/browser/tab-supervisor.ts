@@ -67,6 +67,7 @@ import {
 } from "./tab-protocol";
 
 import { cfgBrowserScreenshotDir } from "./settings";
+import { renderTabCall, type TabCallStep } from "./tab-call";
 import { listTernBlocks, noTernBlockError, pickTernBlock } from "./tern/blocks";
 import type * as Tern from "./tern/tern-tab";
 import { TernError } from "./tern/wire";
@@ -260,14 +261,14 @@ export interface AcquireTabResult {
 	note?: string;
 }
 
-export interface RunInTabOptions {
-	code: string;
+/** Input for {@link runInTab}: either arbitrary JS `code` or an allowlisted helper `callChain`. */
+export type RunInTabOptions = {
 	timeoutMs: number;
 	signal?: AbortSignal;
 	session: ToolSession;
 	/** The call is a direct `tab.waitForDownload()`. */
 	waitsForDownload?: boolean;
-}
+} & ({ code: string; callChain?: undefined } | { callChain: readonly TabCallStep[]; code?: undefined });
 
 export interface ReleaseTabOptions {
 	kill?: boolean;
@@ -641,36 +642,44 @@ async function acquireTabImpl(
 				if (opts.viewport && existing.backend === "worker" && existing.openOptions) {
 					existing.openOptions.viewport = opts.viewport;
 				}
-				const reuseSteps: string[] = [];
-				if (
-					opts.viewport &&
-					browser.kind.kind !== "cmux" &&
-					browser.kind.kind !== "tern" &&
-					browser.kind.kind !== "webkit"
-				) {
-					// Only a hidden headless tab has an emulated scale to fall back on; other windows keep their own (0).
-					const ownScale = browser.kind.kind === "headless" && browser.kind.headless ? undefined : 0;
-					const dsf = opts.viewport.deviceScaleFactor ?? ownScale;
-					reuseSteps.push(
-						`await page.setViewport({ width: ${opts.viewport.width}, height: ${opts.viewport.height}, deviceScaleFactor: ${dsf === undefined ? "undefined" : String(dsf)}, isMobile: ${opts.viewport.isMobile === true}, hasTouch: ${opts.viewport.hasTouch === true} });`,
-					);
-				}
-				if (opts.viewport && (existing.backend === "tern" || existing.backend === "webkit")) {
-					reuseSteps.push(
-						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor, isMobile: opts.viewport.isMobile, hasTouch: opts.viewport.hasTouch })} });`,
-					);
-				}
-				const reuse = async (): Promise<string | undefined> => {
-					if (reuseSteps.length) {
-						await runInTabWithSnapshot(
-							name,
-							{
-								code: reuseSteps.join("\n"),
+				const reuseViewportCall: RunTabOptions | undefined = !opts.viewport
+					? undefined
+					: existing.backend === "tern" || existing.backend === "webkit"
+						? {
+								callChain: [
+									{
+										method: "emulate",
+										args: [
+											{
+												viewport: {
+													width: opts.viewport.width,
+													height: opts.viewport.height,
+													scale: opts.viewport.deviceScaleFactor,
+													isMobile: opts.viewport.isMobile,
+													hasTouch: opts.viewport.hasTouch,
+												},
+											},
+										],
+									},
+								],
 								timeoutMs: opts.timeoutMs,
 								signal: opts.signal,
-							},
-							{ cwd: getProjectDir() },
-						);
+							}
+						: existing.backend === "worker"
+							? (() => {
+									// Only a hidden headless tab has an emulated scale to fall back on; other windows keep their own (0).
+									const ownScale = browser.kind.kind === "headless" && browser.kind.headless ? undefined : 0;
+									const dsf = opts.viewport.deviceScaleFactor ?? ownScale;
+									return {
+										code: `await page.setViewport({ width: ${opts.viewport.width}, height: ${opts.viewport.height}, deviceScaleFactor: ${dsf === undefined ? "undefined" : String(dsf)}, isMobile: ${opts.viewport.isMobile === true}, hasTouch: ${opts.viewport.hasTouch === true} });`,
+										timeoutMs: opts.timeoutMs,
+										signal: opts.signal,
+									};
+								})()
+							: undefined;
+				const reuse = async (): Promise<string | undefined> => {
+					if (reuseViewportCall) {
+						await runInTabWithSnapshot(name, reuseViewportCall, { cwd: getProjectDir() });
 					}
 					if (opts.url) return await navigateOpenedTab(name, opts.url, opts, startedAt);
 				};
@@ -865,7 +874,7 @@ async function navigateOpenedTab(
 		await runInTabWithSnapshot(
 			name,
 			{
-				code: `await tab.goto(${JSON.stringify(url)}, { waitUntil: ${JSON.stringify(opts.waitUntil ?? "load")} });`,
+				callChain: [{ method: "goto", args: [url, { waitUntil: opts.waitUntil ?? "load" }] }],
 				// tab.goto bounds itself to the cell budget less CELL_BUDGET_SLACK_MS.
 				timeoutMs: gotoMs + CELL_BUDGET_SLACK_MS,
 				signal: opts.signal,
@@ -1247,22 +1256,27 @@ function notAliveMessage(name: string): string {
 
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
 	const model = opts.session.getActiveModel?.();
-	const result = await runInTabWithSnapshot(
-		name,
-		{
-			code: opts.code,
-			timeoutMs: opts.timeoutMs,
-			signal: opts.signal,
-			session: opts.session,
-			waitsForDownload: opts.waitsForDownload,
-		},
-		{
-			cwd: opts.session.cwd,
-			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
-			excludeWebP: webpExclusionForModel(model),
-			screenshotLimits: model && screenshotLimits(model),
-		},
-	).catch(error => {
+	const invocation: RunTabOptions = opts.callChain
+		? {
+				callChain: opts.callChain,
+				timeoutMs: opts.timeoutMs,
+				signal: opts.signal,
+				session: opts.session,
+				waitsForDownload: opts.waitsForDownload,
+			}
+		: {
+				code: opts.code,
+				timeoutMs: opts.timeoutMs,
+				signal: opts.signal,
+				session: opts.session,
+				waitsForDownload: opts.waitsForDownload,
+			};
+	const result = await runInTabWithSnapshot(name, invocation, {
+		cwd: opts.session.cwd,
+		browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
+		excludeWebP: webpExclusionForModel(model),
+		screenshotLimits: model && screenshotLimits(model),
+	}).catch(error => {
 		// A worker's run reports this through its payload; an in-process (cmux, Tern) run throws the original.
 		if (isMissingPageGlobal(error)) addPageGlobalHint(error);
 		throw error;
@@ -1279,15 +1293,14 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 	return result;
 }
 
-interface RunTabOptions {
-	code: string;
+type RunTabOptions = {
 	timeoutMs: number;
 	signal?: AbortSignal;
 	session?: ToolSession;
 	/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
 	readopted?: boolean;
 	waitsForDownload?: boolean;
-}
+} & ({ code: string; callChain?: undefined } | { callChain: readonly TabCallStep[]; code?: undefined });
 
 /** A call registered in its tab's `pending`. */
 interface RegisteredRun {
@@ -1446,19 +1459,28 @@ async function dispatchRun(
 		try {
 			// In-process runners stay out of worker-backed tabs. A close during
 			// this import aborts `runSignal` and rejects `promise` first.
-			const { runInProcessTab } = await import("./in-process-run");
-			// `runInProcessTab.then(resolve, reject)` publishes the run's real
-			// outcome to `promise`, but `releaseTab` may have already
-			// rejected it — `Promise.withResolvers` settles on the first
-			// call and later resolve/reject are no-ops, so the tab-close
-			// error still wins the race.
-			runInProcessTab(tab.backend === "cmux" ? tab.cmuxTab : tab.ternTab, {
-				code: opts.code,
-				timeoutMs: opts.timeoutMs,
-				signal: runSignal,
-				session: pending.session,
-				snapshot,
-			}).then(pending.resolve, pending.reject);
+			const { callInProcessTab, runInProcessTab } = await import("./in-process-run");
+			const targetTab = tab.backend === "cmux" ? tab.cmuxTab : tab.ternTab;
+			// `.then(resolve, reject)` publishes the call's real outcome to
+			// `promise`, but `releaseTab` may have already rejected it —
+			// `Promise.withResolvers` settles on the first call and later
+			// resolve/reject are no-ops, so the tab-close error still wins the race.
+			const execution = opts.callChain
+				? callInProcessTab(targetTab, {
+						chain: opts.callChain,
+						timeoutMs: opts.timeoutMs,
+						signal: runSignal,
+						snapshot,
+					})
+				: runInProcessTab(targetTab, {
+						code: opts.code,
+						timeoutMs: opts.timeoutMs,
+						signal: runSignal,
+						session: pending.session,
+						snapshot,
+						tabName: name,
+					});
+			execution.then(pending.resolve, pending.reject);
 			return await boundInProcessRun(promise, closeAc, name, opts.timeoutMs, opts.signal);
 		} finally {
 			// Completion is use too: a run outlasting the idle timeout must
@@ -1487,11 +1509,12 @@ async function dispatchRun(
 	else opts.signal?.addEventListener("abort", abort, { once: true });
 	const execute = async (): Promise<RunResultOk> => {
 		try {
+			const code = opts.callChain ? renderTabCall(opts.callChain) : opts.code;
 			tab.worker.send({
 				type: "run",
 				id,
 				name,
-				code: opts.code,
+				code,
 				timeoutMs: opts.timeoutMs,
 				session: snapshot,
 			});
