@@ -11,7 +11,7 @@ import * as path from "node:path";
 import type { VcsGitRepo, VcsReconciledCommit } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { shortenPath } from "../../utils/render-utils";
-import type { Draft, SelectedChange } from "./draft";
+import { assertGitSelectiveWorkspace, type Draft, type SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
 
@@ -104,13 +104,15 @@ async function patchFor(repo: VcsGitRepo, change: SelectedChange, signal?: Abort
  * @throws when a merge, cherry-pick, revert, rebase, or git am is in progress, or the index has
  * unresolved conflicts; when nothing is selected;
  * on `amend` when HEAD is not a selective commit of this session; when HEAD moved onto changes
- * that conflict with the selection; when a hook fails; or when the shared index cannot be prepared.
+ * that conflict with the selection; when a hook fails; when the shared index cannot be prepared;
+ * or when the checkout becomes a Jujutsu workspace.
  */
 export async function commitSelection(
 	draft: Draft,
 	request: CommitRequest,
 	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
 ): Promise<CommitOutcome> {
+	assertGitSelectiveWorkspace(draft.root);
 	const changes = draft.selection();
 	if (changes.length === 0) {
 		if (draft.paths.length > 0) throw new Error("Nothing selected; use take() first.");
