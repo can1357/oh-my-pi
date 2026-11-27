@@ -673,16 +673,54 @@ function scanPrefixState(
 	return currentServiceTier;
 }
 
+/** `TAN_FORK_BOUNDARY_CUSTOM_TYPE` of coding-agent's session entries: a `/tan` clone's end-of-copy marker. */
+const TAN_FORK_BOUNDARY = "tan-fork-boundary";
+const TAN_FORK_BOUNDARY_BYTES = new TextEncoder().encode(TAN_FORK_BOUNDARY);
+
 /**
- * Tracks a reset fork's inherited prefix (`SessionHeader.inheritedThroughEntryId`): the model calls
- * the fork copied from its parent. They are the parent's calls, so they become no request rows here.
- * Fork copies keep their entry ids, so the parent's own rows win regardless of which file syncs first.
+ * The inherited prefix of a `/tan` clone written before `SessionHeader.inheritedThroughEntryId`: such a
+ * clone appends a `tan-fork-boundary` entry carrying its own session id right after the entries it copied,
+ * so the prefix ends at the entry before that boundary. Undefined for any other transcript.
+ */
+function legacyTanBoundary(bytes: Uint8Array): string | undefined {
+	if (Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).indexOf(TAN_FORK_BOUNDARY_BYTES) < 0) {
+		return undefined;
+	}
+	let sessionId: string | undefined;
+	let previous: string | undefined;
+	let through: string | undefined;
+	let found = false;
+	visitSessionEntriesLenient(bytes, entry => {
+		if (found) return;
+		const id = "id" in entry && typeof entry.id === "string" ? entry.id : undefined;
+		if (entry.type === "session") {
+			sessionId = id;
+			return;
+		}
+		const data: unknown = "data" in entry ? entry.data : undefined;
+		if ("customType" in entry && entry.customType === TAN_FORK_BOUNDARY && data === sessionId) {
+			through = previous;
+			found = true;
+			return;
+		}
+		if (id !== undefined) previous = id;
+	});
+	return through;
+}
+
+/**
+ * Tracks a reset fork's inherited prefix (`SessionHeader.inheritedThroughEntryId`, else a legacy clone's
+ * {@link legacyTanBoundary}): the model calls the fork copied from its parent. They are the parent's
+ * calls, so they become no request rows here. Fork copies keep their entry ids, so the parent's own
+ * rows win regardless of which file syncs first.
  */
 class InheritedPrefix {
 	#through: string | undefined;
+	readonly #legacyThrough: string | undefined;
 
-	constructor(through?: string) {
+	constructor(through?: string, legacyThrough?: string) {
 		this.#through = through;
+		this.#legacyThrough = legacyThrough;
 	}
 
 	get state(): string | undefined {
@@ -693,7 +731,7 @@ class InheritedPrefix {
 	visit(entry: SessionEntry): boolean {
 		if (entry.type === "session") {
 			const through = "inheritedThroughEntryId" in entry ? entry.inheritedThroughEntryId : undefined;
-			this.#through = typeof through === "string" ? through : undefined;
+			this.#through = typeof through === "string" ? through : this.#legacyThrough;
 			return false;
 		}
 		if (this.#through === undefined) return false;
@@ -893,6 +931,7 @@ export async function parseSessionFile(
 				inherited = new InheritedPrefix(state?.inheritedThrough);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
+				inherited = new InheritedPrefix(undefined, legacyTanBoundary(bytes));
 				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies, inherited);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
