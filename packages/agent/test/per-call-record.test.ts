@@ -6,6 +6,10 @@
  * or its SDK; or the stream function can throw a refusal. The record is taken as the provider reports its response
  * (`onResponse`), so neither becomes the record. Taken when the request is prepared, or in the dispatch hook, it would
  * mark the next request's changed note repeated although no request carried it.
+ *
+ * "Previous" must also mean this conversation. `Agent.reset()` ends one (`newSession`, a cleared context, and the
+ * memory release of a disposed parked-subagent session all call it), so the record is dropped there, with the copies
+ * it held; a request of the conversation that ended records nothing, whenever its answer arrives.
  */
 import { describe, expect, it } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -163,5 +167,90 @@ describe("the per-call record is the last request the provider answered", () => 
 		// The note changed since the last request answered: no request carried it, so it is not repeated.
 		expect(isPerCallContextMessage(contexts[2]?.messages[0])).toBe(true);
 		expect(isRepeatedPerCallContextMessage(contexts[2]?.messages[0])).toBe(false);
+	});
+
+	it("marks nothing repeated from the conversation a reset ended", async () => {
+		const server = gateway();
+		const contexts: Context[] = [];
+		const agent = new Agent({
+			initialState: { model },
+			getApiKey: () => "not-a-secret",
+			streamFn: (streamModel, context, options) => {
+				contexts.push(context);
+				return streamSimple(streamModel, context, { ...options, fetch: server.fetch });
+			},
+			// A context hook's note at the tail: the place it holds is the last history message.
+			transformContext: async messages => {
+				const status: AgentMessage = { role: "user", content: "status: idle", timestamp: 0 };
+				markPerCallContextMessage(status);
+				return [...messages, status];
+			},
+		});
+
+		// A conversation seeded from the store carries the timestamps it was stored with, so the prompt the next
+		// conversation starts from is the same bytes as this one's.
+		const stored = (): AgentMessage[] => [{ role: "user", content: "first", timestamp: 1_000 }];
+		await agent.prompt(stored());
+		await agent.prompt(stored());
+		agent.reset();
+		await agent.prompt(stored());
+
+		expect(server.bodies).toHaveLength(3);
+		// Control: inside one conversation the note at this place is repeated, so the assertions below can fail.
+		expect(isRepeatedPerCallContextMessage(contexts[1]?.messages.at(-1))).toBe(true);
+		// The reset ended that conversation: this request compares with nothing.
+		expect(contexts[2]?.messages.at(-1)?.content).toBe("status: idle");
+		expect(isPerCallContextMessage(contexts[2]?.messages.at(-1))).toBe(true);
+		expect(isRepeatedPerCallContextMessage(contexts[2]?.messages.at(-1))).toBe(false);
+	});
+
+	it("does not let the answer to a request of the ended conversation restore the record", async () => {
+		const server = gateway();
+		const contexts: Context[] = [];
+		let hold = false;
+		const atGateway = Promise.withResolvers<void>();
+		const released = Promise.withResolvers<void>();
+		// The gateway holds the second request until the reset has landed, so its answer arrives after it.
+		const fetch: FetchImpl = async (input, init) => {
+			if (hold) {
+				atGateway.resolve();
+				await released.promise;
+			}
+			return server.fetch(input, init);
+		};
+		const agent = new Agent({
+			initialState: { model },
+			getApiKey: () => "not-a-secret",
+			streamFn: (streamModel, context, options) => {
+				contexts.push(context);
+				return streamSimple(streamModel, context, { ...options, fetch });
+			},
+			transformContext: async messages => {
+				const status: AgentMessage = { role: "user", content: "status: idle", timestamp: 0 };
+				markPerCallContextMessage(status);
+				return [...messages, status];
+			},
+		});
+
+		const stored = (): AgentMessage[] => [{ role: "user", content: "first", timestamp: 1_000 }];
+		await agent.prompt(stored());
+		hold = true;
+		const inFlight = agent.prompt(stored());
+		await atGateway.promise;
+		// A new session starts while the request is out.
+		agent.reset();
+		released.resolve();
+		// The reset emptied the state under a running loop; what that run ends with is not this test's subject.
+		await inFlight.catch(() => {});
+		hold = false;
+		await agent.prompt(stored());
+
+		expect(server.bodies).toHaveLength(3);
+		// Control: the record was live when the second request went out, and that request repeated the first's note.
+		expect(isRepeatedPerCallContextMessage(contexts[1]?.messages.at(-1))).toBe(true);
+		// Its answer came back after the reset, so it recorded nothing for this conversation to match.
+		expect(contexts[2]?.messages.at(-1)?.content).toBe("status: idle");
+		expect(isPerCallContextMessage(contexts[2]?.messages.at(-1))).toBe(true);
+		expect(isRepeatedPerCallContextMessage(contexts[2]?.messages.at(-1))).toBe(false);
 	});
 });

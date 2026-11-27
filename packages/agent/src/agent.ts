@@ -1776,6 +1776,9 @@ export class Agent {
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();
 		this.#state.error = undefined;
+		// The conversation these messages belonged to ends here: the next one compares with nothing, and the copies
+		// the record held (a parked subagent's images and tool results among them) are released with it.
+		this.#repeatedPerCallMessages.clear();
 		this.clearAllQueues();
 	}
 

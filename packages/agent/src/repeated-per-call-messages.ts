@@ -22,12 +22,22 @@ interface Place {
  */
 function snapshot(message: Message): Message | undefined {
 	try {
-		const copy = { ...message, content: structuredClone(message.content) } as Message;
-		if ("providerPayload" in copy && copy.providerPayload)
-			copy.providerPayload = structuredClone(copy.providerPayload);
-		if (copy.role === "assistant" && copy.requestControls)
-			copy.requestControls = structuredClone(copy.requestControls);
-		return copy;
+		switch (message.role) {
+			case "assistant": {
+				const copy = { ...message, content: structuredClone(message.content) };
+				if (copy.providerPayload) copy.providerPayload = structuredClone(copy.providerPayload);
+				if (copy.requestControls) copy.requestControls = structuredClone(copy.requestControls);
+				return copy;
+			}
+			case "user":
+			case "developer": {
+				const copy = { ...message, content: structuredClone(message.content) };
+				if (copy.providerPayload) copy.providerPayload = structuredClone(copy.providerPayload);
+				return copy;
+			}
+			case "toolResult":
+				return { ...message, content: structuredClone(message.content) };
+		}
 	} catch {
 		return undefined;
 	}
@@ -67,9 +77,25 @@ function comparable(message: Message): Message | undefined {
  * answered left it. So does every request to a provider that reports no response (`onResponse`): it never advances the
  * record. An Agent used only with such providers marks nothing; but the record belongs to the Agent, not the provider,
  * so after a switch to one of them the record of the last answered request can still match.
+ *
+ * The record lives as long as the conversation: {@link RepeatedPerCallMessages.clear} drops it, and the copies it
+ * holds, when the Agent is reset for a new conversation (`Agent.reset`, which `newSession`, a cleared context and a
+ * disposed session's memory release all call).
  */
 export class RepeatedPerCallMessages {
 	#previous: Place[] = [];
+	/** Counts the conversations this record has held, so a {@link settle} of an earlier one settles nothing. */
+	#conversation = 0;
+
+	/**
+	 * Forgets the previous main request: no later request matches it, and the copies of its messages and their places
+	 * are released. A request already prepared, in flight or not, belongs to the conversation that ends here: its
+	 * answer records nothing.
+	 */
+	clear(): void {
+		this.#previous = [];
+		this.#conversation++;
+	}
 
 	/**
 	 * `messages`, with each per-call message equal to the previous main request's at its place and ordinal marked
@@ -77,6 +103,7 @@ export class RepeatedPerCallMessages {
 	 * that request (the loop calls it from the request's `onResponse`).
 	 */
 	settle(messages: Message[]): { messages: Message[]; sent: () => void } {
+		const conversation = this.#conversation;
 		const current: Place[] = [];
 		const matched = new Set<Place>();
 		let settled: Message[] | undefined;
@@ -124,6 +151,7 @@ export class RepeatedPerCallMessages {
 		return {
 			messages: settled ?? messages,
 			sent: () => {
+				if (this.#conversation !== conversation) return;
 				this.#previous = current;
 			},
 		};
