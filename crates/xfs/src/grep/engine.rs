@@ -12,6 +12,8 @@ use std::{borrow::Cow, fmt, sync::LazyLock};
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 
+use super::pcre::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
+
 /// `OMP_PCRE2_JIT` from the process environment, read once.
 static PCRE2_JIT: LazyLock<bool> =
 	LazyLock::new(|| pcre2_jit_enabled(std::env::var("OMP_PCRE2_JIT").ok().as_deref()));
