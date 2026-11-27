@@ -359,7 +359,11 @@ export class AskDialogModel {
 		if (!question.multi) this.advance();
 	}
 
-	/** Keys over the stacked questions; true when the key was the dialog's. */
+	/**
+	 * Keys over the stacked questions; true when the key was the dialog's. Keys it does not bind
+	 * return false so app-wide shortcuts (Alt+L display reset, Ctrl+T, Ctrl+R, …) still reach the
+	 * shell's global handlers while the ask holds focus (#11213, #12217, #20771).
+	 */
 	key(id: string, text: string | undefined): boolean {
 		if (this.closed || this.#promptActive) return true;
 		this.resetCountdown();
@@ -381,16 +385,15 @@ export class AskDialogModel {
 		}
 		const nav = selectKeyId(id);
 		if (this.hidden) {
-			if (nav === "enter") {
-				this.hidden = false;
-				this.touch();
-			}
+			if (nav !== "enter") return false;
+			this.hidden = false;
+			this.touch();
 			return true;
 		}
 		const index = this.current;
 		const question = this.questions[index];
 		const state = this.states[index];
-		if (!question || !state) return true;
+		if (!question || !state) return false;
 		const rows = this.rows(question);
 		const last = Math.max(0, rows.length - 1);
 		state.cursor = clamp(state.cursor, 0, last);
@@ -428,13 +431,13 @@ export class AskDialogModel {
 				return true;
 		}
 		const row = rows[state.cursor];
-		if (!row) return true;
+		if (!row) return false;
 		if (text === "n" || text === "N") {
 			void this.#promptNote(row);
 			return true;
 		}
 		const enter = nav === "enter" || id === "ctrl+j";
-		if (!enter && !(question.multi && id === "space")) return true;
+		if (!enter && !(question.multi && id === "space")) return false;
 		this.commit(row, enter);
 		this.touch();
 		return true;
