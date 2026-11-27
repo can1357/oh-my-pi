@@ -16,7 +16,6 @@ use foldhash as _;
 use hashbrown as _;
 use indexmap as _;
 use libc as _;
-use peg_runtime as _;
 use rand_core as _;
 use serde as _;
 use serde_core as _;

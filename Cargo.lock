@@ -6204,7 +6204,6 @@ dependencies = [
  "omp-xfs",
  "parking_lot",
  "pdf-inspector",
- "peg-runtime",
  "phf 0.14.0",
  "png",
  "ptts",
@@ -6601,12 +6600,6 @@ dependencies = [
  "unicode-bidi",
  "unicode-normalization",
 ]
-
-[[package]]
-name = "peg-runtime"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7011d97b484a5ebdc4b1fdb3b12d5e4bbbea56e9d22b688f2e79e04b65a7d8a6"
 
 [[package]]
 name = "pem"

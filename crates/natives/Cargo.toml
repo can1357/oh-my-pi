@@ -130,7 +130,6 @@ foldhash = "0.2"
 hashbrown = "0.17"
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
-peg-runtime = { version = "0.8", features = ["std"] }
 rand_core = { version = "0.6", features = ["std"] }
 serde = { workspace = true, features = ["rc", "alloc"] }
 serde_core = { version = "1", features = ["rc", "alloc"] }
