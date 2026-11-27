@@ -87,6 +87,7 @@
 ### Fixed
 
 - Edit results now show the edited branch and the session branch when a file is changed in another linked Git worktree ([#20801](https://github.com/can1357/oh-my-pi/pull/20801) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
+- Cross-worktree edit notices now also cover multi-file `magic` edits, both ends of cross-worktree moves, writes through file symlinks, Cursor-materialized edits, and browser/HTML transcript views, while skipping hashline no-ops ([#20823](https://github.com/can1357/oh-my-pi/pull/20823) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 - A running subagent no longer publishes a task progress update when only its elapsed time changed: such updates now go out at most every 5 seconds, which keeps elapsed timers moving and cuts task update traffic to RPC clients, session observers and transcripts by about 8x ([#20810](https://github.com/can1357/oh-my-pi/pull/20810) by [@Xytronix](https://github.com/Xytronix))
 - Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back
 - Fixed a handoff model that never stops streaming holding automatic compaction indefinitely: handoff output is now capped like a summary, and the new `compaction.handoffTimeoutSeconds` setting (off by default) fails a handoff that runs too long so automatic compaction moves on to the next method and `/handoff` reports the timeout ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
