@@ -118,7 +118,9 @@ import { UsageDashboard } from "../../ui/overlays/panels/usage-dashboard";
 import { UsageDashboardModel } from "../../ui/overlays/panels/usage-dashboard-model";
 import { AgentHub, type AgentHubHandle, type AgentHubProps } from "../../ui/overlays/pickers/agent-hub";
 import { AgentsHub, type AgentsHubHandle } from "../../ui/overlays/pickers/agents-hub";
+import { extractLastReplyCodeBlocks } from "../view-model/overlays/copy-targets";
 import { CopySelector } from "../../ui/overlays/pickers/copy-selector";
+import { SelectSheet } from "../../ui/overlays/pickers/select-sheet";
 import { HistorySearch } from "../../ui/overlays/pickers/history-search";
 import { LogoutAccountSelector } from "../../ui/overlays/pickers/logout-account-selector";
 import { ModelHub, type ModelHubProps } from "../../ui/overlays/pickers/model-hub";
@@ -1734,6 +1736,46 @@ export class SelectorController {
 				{ focus: layerContent },
 			);
 		});
+	}
+
+	async showCodeBlockSelector(): Promise<void> {
+		const blocks = extractLastReplyCodeBlocks(this.ctx.viewSession.messages);
+		if (blocks.length === 0) {
+			this.ctx.showStatus("No code block to copy.");
+			return;
+		}
+		const items = blocks.map((block, index) => {
+			const preview =
+				(block.code.split("\n").find(line => line.trim().length > 0) ?? "").replace(/\s+/g, " ").trim() ||
+				"(empty)";
+			const lineCount = block.code.length === 0 ? 0 : block.code.split("\n").length;
+			const head = block.lang ? `#${index + 1} · ${block.lang}` : `#${index + 1}`;
+			return {
+				id: String(index),
+				label: `${head} — ${preview}`,
+				detail: `${lineCount} line${lineCount === 1 ? "" : "s"}`,
+			};
+		});
+		this.#showInEditorArea(done =>
+			SelectSheet({
+				title: "Copy code block",
+				icon: "copy",
+				noun: "code blocks",
+				confirmLabel: "Copy",
+				items,
+				term: { maxRows: Math.min(items.length, 10) },
+				onPick: id => {
+					done();
+					const index = Number(id);
+					const block = blocks[index];
+					if (!block) return;
+					void copyToClipboard(block.code);
+					const desc = block.lang ? `${block.lang} code block #${index + 1}` : `code block #${index + 1}`;
+					this.ctx.showStatus(`Copied ${desc} to clipboard`);
+				},
+				onCancel: done,
+			}),
+		);
 	}
 
 	async showTreeSelector(): Promise<void> {

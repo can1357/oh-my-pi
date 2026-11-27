@@ -1010,6 +1010,7 @@ export interface InteractiveModeContext {
 	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
 	showUserMessageSelector(startAt?: string): Promise<void>;
 	showCopySelector(): Promise<void>;
+	showCodeBlockSelector(): Promise<void>;
 	showTreeSelector(): Promise<void>;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;

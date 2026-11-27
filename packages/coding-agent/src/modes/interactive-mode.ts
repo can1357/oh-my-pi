@@ -1883,6 +1883,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "copy-error":
 				if (copyText) void this.#copyToClipboardWithStatus(copyText);
 				return;
+			case "copy-code":
+				if (copyText !== undefined)
+					void this.#copyToClipboardWithStatus(copyText, "Copied code block to clipboard");
+				return;
 			case "edit-turn":
 			case "retry-turn":
 			case "rewind-turn":
@@ -7488,10 +7492,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 	}
 
-	async #copyToClipboardWithStatus(text: string): Promise<void> {
+	async #copyToClipboardWithStatus(text: string, status = "Copied to clipboard"): Promise<void> {
 		try {
 			await copyToClipboard(text);
-			this.showStatus("Copied to clipboard");
+			this.showStatus(status);
 		} catch (error) {
 			this.showWarning(`Failed to copy: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -8240,6 +8244,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showCopySelector(): Promise<void> {
 		return this.#selectorController.showCopySelector();
+	}
+
+	showCodeBlockSelector(): Promise<void> {
+		return this.#selectorController.showCodeBlockSelector();
 	}
 
 	showTreeSelector(): Promise<void> {

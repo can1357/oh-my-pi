@@ -23,11 +23,13 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
-import { routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
+import { copiedCodeHash, routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
 import {
+	CODE_COPY_ACT_PREFIX,
 	type MarkdownLook,
 	markdownLook,
 	renderMarkdownFrame,
+	takeCodeCopyMarkers,
 	takeExtensionLinks,
 } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -110,6 +112,7 @@ interface MarkdownNode extends UiNode {
 		hyperlinks: boolean;
 		textStyle: string | undefined;
 		schemes: readonly string[] | undefined;
+		copiedHash: string | undefined;
 		look: MarkdownLook;
 		frame: ReplyFrame;
 	};
@@ -125,6 +128,8 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		? "thinkingText em"
 		: (props.tone ?? (theme.has("assistantMessageText") ? "assistantMessageText" : undefined));
 	const schemes = thinking ? undefined : routedLinkSchemes();
+	const codeCopy = !thinking;
+	const copiedHash = codeCopy ? copiedCodeHash() : undefined;
 	const look = markdownLook();
 	const links = thinking ? undefined : term.links;
 	// A host link resolver can change its targets in place.
@@ -140,6 +145,7 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 			last.hyperlinks === hyperlinks &&
 			last.textStyle === textStyle &&
 			last.schemes === schemes &&
+			last.copiedHash === copiedHash &&
 			last.look === look
 		)
 			return last.frame;
@@ -148,23 +154,50 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		theme,
 		paddingX,
 		codeIndent: thinking ? undefined : 0,
+		codeCopy,
+		copiedCodeHash: copiedHash,
 		textStyle,
 		stream: props.stream === true,
 		hyperlinks,
 		linkTarget: links?.size ? href => links.get(href) : undefined,
 		linkSchemes: schemes?.length ? schemes : undefined,
 	});
-	if (schemes?.length) {
+	if (schemes?.length || codeCopy) {
 		const hits: Hit[] = [];
 		const rows = frame.rows.map((line, row) => {
-			const taken = takeExtensionLinks(line);
-			for (const link of taken.links)
-				hits.push({ row, col: link.start, width: link.end - link.start, height: 1, node: child, item: link.href });
-			return taken.row;
+			let out = line;
+			if (schemes?.length) {
+				const taken = takeExtensionLinks(out);
+				for (const link of taken.links)
+					hits.push({
+						row,
+						col: link.start,
+						width: link.end - link.start,
+						height: 1,
+						node: child,
+						item: link.href,
+					});
+				out = taken.row;
+			}
+			if (codeCopy) {
+				const taken = takeCodeCopyMarkers(out);
+				for (const button of taken.buttons)
+					hits.push({
+						row,
+						col: button.start,
+						width: button.end - button.start,
+						height: 1,
+						node: child,
+						act: `${CODE_COPY_ACT_PREFIX}${button.hash}`,
+					});
+				out = taken.row;
+			}
+			return out;
 		});
 		frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
 	}
-	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
+	if (cacheable)
+		child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, copiedHash, look, frame };
 	return frame;
 }
 

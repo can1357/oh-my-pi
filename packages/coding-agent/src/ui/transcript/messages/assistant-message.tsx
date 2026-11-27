@@ -36,7 +36,13 @@ import {
 	signal,
 	untrack,
 } from "@oh-my-pi/pi-tui";
-import { holdPartialTableRow, speculativeStreamingSource } from "@oh-my-pi/pi-tui/text/markdown/index";
+import { markCodeCopied } from "@oh-my-pi/pi-tui/term/painters/md";
+import {
+	CODE_COPY_ACT_PREFIX,
+	extractFencedCodeBlocks,
+	holdPartialTableRow,
+	speculativeStreamingSource,
+} from "@oh-my-pi/pi-tui/text/markdown/index";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
@@ -553,6 +559,27 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 			}}
 			term={() => ({ thinkingDots: thinkingDots() })}
 			onAction={act => {
+				if (act.startsWith(CODE_COPY_ACT_PREFIX)) {
+					const hash = act.slice(CODE_COPY_ACT_PREFIX.length);
+					const sources: string[] = [];
+					for (const part of parts().values()) {
+						if (part.kind === "text") sources.push(part.source);
+					}
+					for (const block of reply()?.answer.content ?? []) {
+						if (block.type === "text") sources.push(block.text);
+					}
+					for (const source of sources) {
+						const match = extractFencedCodeBlocks(source, { includeQuotes: true }).find(
+							candidate => candidate.hash === hash,
+						);
+						if (match) {
+							markCodeCopied(hash);
+							model.onAction?.("copy-code", match.code);
+							return;
+						}
+					}
+					return;
+				}
 				if (act === "copy-error") {
 					const part = parts().get("error");
 					if (part?.kind === "error" && part.error.kind === "failed") model.onAction?.(act, part.error.text);

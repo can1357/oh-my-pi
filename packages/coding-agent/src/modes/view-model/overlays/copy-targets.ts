@@ -1,6 +1,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
+import { extractFencedCodeBlocks, stripTrailingSpaces } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
+
+export { stripTrailingSpaces };
 import type { Token, Tokens } from "@oh-my-pi/pi-utils/marked";
 
 /** A runnable command found in the transcript. */
@@ -95,32 +98,41 @@ type TokenWithChildren = Token & { tokens?: Token[]; items?: Token[] };
 
 /**
  * Fenced code blocks of assistant markdown in document order (inside list
- * items too, never inside quotes), tokenized as the renderer does.
+ * items too, never inside quotes), tokenized as the renderer does, with
+ * trailing horizontal whitespace stripped from every line.
  */
-function extractCodeBlocks(text: string): CodeBlock[] {
+export function extractCodeBlocks(text: string): CodeBlock[] {
+	return extractFencedCodeBlocks(text).map(({ lang, code }) => ({ lang, code }));
+}
+
+/**
+ * Walk the transcript backwards for the most recent assistant message that
+ * contains fenced code blocks, returning all of its blocks in document order.
+ */
+export function extractLastReplyCodeBlocks(messages: readonly AgentMessage[]): CodeBlock[] {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const text = assistantText(messages[i]!);
+		if (!text) continue;
+		const blocks = extractCodeBlocks(text);
+		if (blocks.length > 0) return blocks;
+	}
+	return [];
+}
+
+/** All fenced code blocks across assistant messages in document order. */
+export function extractAllCodeBlocks(messages: readonly AgentMessage[]): CodeBlock[] {
 	const blocks: CodeBlock[] = [];
-	const walk = (tokens: readonly Token[] | undefined): void => {
-		for (const token of tokens ?? []) {
-			if (token.type === "code") {
-				const code = token as Tokens.Code;
-				if (code.codeBlockStyle !== "indented") blocks.push({ lang: (code.lang ?? "").trim(), code: code.text });
-			} else if (token.type === "list") walk((token as Tokens.List).items);
-			else if (token.type === "list_item") walk((token as Tokens.ListItem).tokens);
-		}
-	};
-	walk(lexMarkdown(text));
+	for (const msg of messages) {
+		const text = assistantText(msg);
+		if (!text) continue;
+		blocks.push(...extractCodeBlocks(text));
+	}
 	return blocks;
 }
 
 /** Walk the transcript backwards for the most recent fenced assistant code block. */
 export function extractLastCodeBlock(messages: readonly AgentMessage[]): CodeBlock | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const text = assistantText(messages[i]!);
-		if (!text) continue;
-		const blocks = extractCodeBlocks(text);
-		if (blocks.length > 0) return blocks[blocks.length - 1];
-	}
-	return undefined;
+	return extractLastReplyCodeBlocks(messages).at(-1);
 }
 
 /**

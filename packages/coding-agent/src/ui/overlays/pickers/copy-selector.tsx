@@ -18,7 +18,7 @@ import { type Accessor, batch, computed, type JSXNode, type KeyEvent, signal } f
 import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import type { TspPickerAction, TspPickerItem } from "@oh-my-pi/pi-wire";
 import type { CopyBlock, CopyPickSource } from "../../../modes/view-model/overlays/copy-selector";
-import { commandFromToolCall } from "../../../modes/view-model/overlays/copy-targets";
+import { commandFromToolCall, stripTrailingSpaces } from "../../../modes/view-model/overlays/copy-targets";
 import { isReplyWrite, toolResultReplies } from "../../../session/transcript/reply-write";
 import {
 	isUserRequestEntry,
@@ -171,7 +171,7 @@ function markdownBlocks(text: string, entry: TranscriptEntryLike): CopyBlock[] {
 				const lang = (token.lang ?? "").trim();
 				blocks.push({
 					label: lang ? `${lang} code` : "code",
-					content: token.text ?? "",
+					content: stripTrailingSpaces(token.text ?? ""),
 					entry,
 					kind: "code",
 					language: lang || undefined,
