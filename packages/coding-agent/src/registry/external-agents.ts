@@ -129,7 +129,8 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 				id,
 				agent,
 				agentSource: "user",
-				status: "running",
+				// An idle agent's turn is over, as a native subagent's is between runs.
+				status: registry.get(id)?.status === "idle" ? "completed" : "running",
 				task: label,
 				description: label,
 				...(progress ? { lastIntent: progress } : {}),

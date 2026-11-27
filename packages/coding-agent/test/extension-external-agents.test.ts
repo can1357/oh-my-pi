@@ -138,6 +138,7 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		agent.update({ status: "idle", model: "openai/gpt-y", progress: "waiting for review" });
 		expect(registry.get(agent.id)).toMatchObject({ status: "idle", history: { resolvedModel: "openai/gpt-y:high" } });
 		expect(rpc.getSubagents()[0]?.progress).toMatchObject({
+			status: "completed",
 			resolvedModel: "openai/gpt-y:high",
 			lastIntent: "waiting for review",
 		});
