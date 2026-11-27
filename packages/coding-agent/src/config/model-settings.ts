@@ -56,6 +56,20 @@ export const cfgAuthBrokerToken = register({
 	credential: true,
 });
 
+/**
+ * Force sealing new credentials in this machine's agent.db under a master key kept in the OS
+ * credential vault on or off. Unset, a store keeps its mode: encrypted stays encrypted, plaintext
+ * stays plaintext, and a fresh store encrypts when the vault answers without prompting (never on
+ * headless hosts). Like the broker connection, read by `@oh-my-pi/pi-ai/auth-broker/discover` from
+ * env + global config.yml only; this definition owns validation, CLI, and `cfg://` display.
+ */
+export const cfgAuthEncrypt = register({
+	id: "auth.encrypt",
+	type: "boolean",
+	default: undefined,
+	env: "OMP_AUTH_ENCRYPT",
+});
+
 export const cfgAuthAccountPolicies = register({
 	id: "auth.accountPolicies",
 	type: "array",

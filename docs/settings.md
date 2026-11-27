@@ -145,6 +145,7 @@ Environment variables are never written back to `config.yml`. Variables declared
 | `PI_TINY_DTYPE`                                     | `providers.tinyModelDtype`                        | ONNX precision for local tiny models.                                                             |
 | `OMP_AUTH_BROKER_URL`                               | `auth.broker.url`                                 | Env value takes precedence over config.                                                           |
 | `OMP_AUTH_BROKER_TOKEN`                             | `auth.broker.token`                               | Env value takes precedence over config.                                                           |
+| `OMP_AUTH_ENCRYPT`                                  | `auth.encrypt`                                    | `1` encrypts new credentials, `0` stores them unencrypted; unset keeps the store's mode.          |
 | `PI_CODING_AGENT_DIR`                               | (relocates default-profile agent dir)             | Named profiles ignore this override.                                                              |
 | `OMP_PROFILE` / `PI_PROFILE`                        | (selects profile)                                 | `OMP_PROFILE` wins when present; `--profile` wins over env.                                       |
 | `PI_EDIT_VARIANT`                                   | `edit.mode`                                       | `apply_patch`, `hashline`, `patch`, `replace`, `sloppy`, `magic`, or `none`; `auto` is unset. |

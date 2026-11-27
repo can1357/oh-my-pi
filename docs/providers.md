@@ -66,6 +66,10 @@ When a provider needs an API key, `omp` resolves it in this order (first match w
 
 Local credentials live in the active auth store (default: `~/.omp/agent/agent.db`); broker mode uses the configured shared auth broker. Named profiles and Linux XDG layouts can relocate the store. In the default profile, `PI_CODING_AGENT_DIR` overrides the agent directory. See [Settings](./settings.md) and [Secrets and credentials](./secrets.md) for path resolution.
 
+### Credential storage
+
+Credentials in `agent.db` can be encrypted (AES-256-GCM, a fresh salt per credential) under a master key kept in the OS credential vault: macOS Keychain, Windows Credential Manager, or a Secret Service keyring on Linux. By default a store keeps its mode: an existing unencrypted store stays unencrypted, an encrypted one keeps encrypting, and a fresh store encrypts when the vault answers without prompting. Headless hosts (SSH sessions, CI, Linux without a display) never use the vault on their own. Set `auth.encrypt: true` in `config.yml` (or `OMP_AUTH_ENCRYPT=1`) to encrypt new credentials, or `false` to stop; credentials already encrypted stay readable while the vault holds the key. Copying `agent.db` to another machine leaves its encrypted credentials unreadable there unless that machine gets the same key: `omp auth key` prints it, and `omp auth key -` reads one from stdin, stores it in the vault, and re-encrypts the machine's credentials under it (`omp auth key | ssh host omp auth key -`). In broker mode, the broker host encrypts its own store.
+
 ### OAuth vs API key, and provider-scoped logins
 
 Logins are **provider-scoped**: authenticating `anthropic` does not authenticate `openai`, and each provider tracks its own credentials. A disabled provider stays disabled even with valid stored auth.

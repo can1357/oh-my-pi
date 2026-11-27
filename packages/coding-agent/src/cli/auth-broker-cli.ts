@@ -31,7 +31,12 @@ import {
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
-import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	AuthBrokerClient,
+	DEFAULT_AUTH_BROKER_BIND,
+	openLocalAuthCredentialStore,
+	startAuthBroker,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { providerDeviceBound } from "@oh-my-pi/pi-catalog/compat/auth";
@@ -152,9 +157,8 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
 	const token = await ensureToken();
-	const dbPath = getAgentDbPath();
 	applyUnpausedProviders(await resolveEffectiveSettings());
-	const store = await SqliteAuthCredentialStore.open(dbPath);
+	const store = await openLocalAuthCredentialStore();
 	const storage = createBrokerAuthStorage(store);
 	await storage.credentials.reload();
 	const handle = startAuthBroker({
@@ -243,7 +247,7 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 async function runLocalLogin(rl: readline.Interface, provider: string): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await openLocalAuthCredentialStore();
 	const storage = new AuthStorage(store);
 	await storage.credentials.reload();
 	try {
@@ -534,7 +538,7 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		return;
 	}
 
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await openLocalAuthCredentialStore();
 	try {
 		for (const entry of entries) {
 			await store.upsertAuthCredential(entry.provider, entry.credential);
