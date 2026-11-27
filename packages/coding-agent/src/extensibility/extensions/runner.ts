@@ -40,7 +40,7 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
-import type { AsyncJobManagerApi } from "../../async";
+import { type AsyncJobManagerApi, formatAsyncJobLabel } from "../../async";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
@@ -2067,7 +2067,8 @@ export class ExtensionRunner {
 						register: (label, run, options) =>
 							asyncJobManager.register(
 								"extension",
-								label,
+								// Every `wait` report repeats the label: keep extension-supplied text to one bounded line.
+								formatAsyncJobLabel(label),
 								({ jobId, signal, reportProgress }) =>
 									run({ jobId, signal, reportProgress: text => reportProgress(text) }),
 								{ ownerId: this.agent.id, intent: options?.intent },

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ASYNC_JOB_LABEL_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -139,6 +140,18 @@ describe("ExtensionContext.asyncJobs", () => {
 
 		expect(session!.getAsyncJobSnapshot()?.running.map(job => job.id)).toEqual([jobId]);
 		expect(session!.cancelAsyncJob(jobId)).toBe(true);
+		gate.resolve("unused");
+	});
+
+	it("stores an extension-supplied label as one bounded line", async () => {
+		const ctx = await extensionContext();
+		const gate = Promise.withResolvers<string>();
+		const jobId = ctx.asyncJobs!.register(`build\n\ttarget ${"x".repeat(300)}`, () => gate.promise);
+
+		const label = session!.getAsyncJobSnapshot()!.running.find(job => job.id === jobId)!.label;
+		expect(label).toStartWith("build target xxx");
+		expect(label).not.toContain("\n");
+		expect(label.length).toBeLessThanOrEqual(ASYNC_JOB_LABEL_MAX_CHARS);
 		gate.resolve("unused");
 	});
 
