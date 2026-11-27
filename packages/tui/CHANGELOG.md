@@ -5,11 +5,13 @@
 ### Breaking Changes
 
 - `MarkdownLook.linkUrls` is now required. Callers of `setMarkdownLook` must provide this field.
+- `TermBackendOptions.tickInterval` and `TermBackend.setReduceMotion()` are replaced by the `spinnerInterval` and `reduceMotion` options (also on `HostOptions`), and `SPINNER_INTERVAL_MS` by `DEFAULT_SPINNER_INTERVAL_MS` in `term/paint`; painters read `PaintContext.spinnerInterval` (0 = still spinners) through `spinnerIndex` ([#20844](https://github.com/can1357/oh-my-pi/issues/20844))
 
 ### Added
 
 - Terminal canvas views can handle mouse clicks, motion, and wheel ticks with `onMouse` ([#20819](https://github.com/can1357/oh-my-pi/issues/20819)).
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- `ProcessTerminalDriver.setResizeScrollback()` and `FrameWriter.setResizeScrollback()` change the resize scrollback policy of a running driver ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
 - Added opt-in fullscreen terminal rendering: a scrollable transcript above a pinned dock, a draggable scrollbar, character/word/line selection and incremental search. The normal exit can append the transcript or keep the original screen ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe) and [#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 ### Added
 

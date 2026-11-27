@@ -2,7 +2,6 @@
 // High-level API
 // ============================================================================
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import { authPolicyFor, providerDisabledReason, providerLoginWarning } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { OAuthRefreshReason } from "../../auth/types";
 import * as AIError from "../../error";
@@ -37,51 +36,21 @@ const customOAuthProviders = new Map<string, OAuthProviderInterface>();
 /** Paused provider ids the end user turned back on (see {@link setUnpausedProviders}). */
 let unpausedProviders: ReadonlySet<string> = new Set();
 
-export interface ProviderPauseScope {
-	run<T>(fn: () => T): T;
-}
-
-const providerPauseScope = new AsyncLocalStorage<{
-	providers: ReadonlySet<string>;
-	revision: number;
-	overrideRevision: number;
-}>();
-
-// Never reuse a revision across scopes: a cache may be read under a different pause policy.
-let pauseRevisionClock = 0;
+/** Bumped whenever {@link providerPauseReason} may answer differently for some id. */
 let pauseRevision = 0;
-let pauseOverrideRevision = 0;
-
-/** Pins an exact unpaused-provider list for the callback and its async work. */
-export function createProviderPauseScope(providers: Iterable<string>): ProviderPauseScope {
-	const scope = {
-		providers: new Set(providers),
-		revision: ++pauseRevisionClock,
-		overrideRevision: pauseOverrideRevision,
-	};
-	return { run: fn => providerPauseScope.run(scope, fn) };
-}
 
 /**
- * Revision of the active pause policy. Extension logins taking or releasing a
- * paused id invalidate all scopes, while global setting changes only invalidate
- * the unscoped policy.
+ * Counter that moves whenever which providers are paused may have changed: the
+ * unpaused list, or an extension login taking or releasing a paused id. Caches
+ * that filter on {@link providerPauseReason} compare it to know when to refilter.
  */
 export function providerPauseRevision(): number {
-	const scope = providerPauseScope.getStore();
-	if (!scope) return pauseRevision;
-	if (scope.overrideRevision !== pauseOverrideRevision) {
-		scope.overrideRevision = pauseOverrideRevision;
-		scope.revision = ++pauseRevisionClock;
-	}
-	return scope.revision;
+	return pauseRevision;
 }
 
-/** Invalidate pause policies when `provider` is one the auth rules pause. */
+/** Bumps {@link pauseRevision} when `provider` is one the auth rules pause. */
 function notePauseOverride(provider: string): void {
-	if (providerDisabledReason(provider) !== undefined) {
-		pauseOverrideRevision = pauseRevision = ++pauseRevisionClock;
-	}
+	if (providerDisabledReason(provider) !== undefined) pauseRevision++;
 }
 
 /**
@@ -94,7 +63,7 @@ export function setUnpausedProviders(providers: Iterable<string>): void {
 	const next = new Set(providers);
 	if (next.size === unpausedProviders.size && [...next].every(provider => unpausedProviders.has(provider))) return;
 	unpausedProviders = next;
-	pauseRevision = ++pauseRevisionClock;
+	pauseRevision++;
 }
 
 /**
@@ -122,12 +91,11 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
 /**
  * Why `provider` is paused by its auth rules (`disabled "<reason>"`), or
  * undefined when it may be reached. An extension that registers its own OAuth
- * login under the paused id, or listing it in the active unpaused-provider
- * list, takes the id back: that is the end user's choice.
+ * login under the paused id, or listing it in {@link setUnpausedProviders},
+ * takes the id back: that is the end user's choice.
  */
 export function providerPauseReason(provider: string): string | undefined {
-	const providers = providerPauseScope.getStore()?.providers ?? unpausedProviders;
-	if (customOAuthProviders.has(provider) || providers.has(provider)) return undefined;
+	if (customOAuthProviders.has(provider) || unpausedProviders.has(provider)) return undefined;
 	return providerDisabledReason(provider);
 }
 

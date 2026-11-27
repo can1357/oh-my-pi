@@ -99,7 +99,7 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	let header: string | undefined;
 	if (term.header) {
 		const glyph = !term.result
-			? statusIcon(cx, cx.reduceMotion ? "pending" : "running")
+			? statusIcon(cx, cx.spinnerInterval === 0 ? "pending" : "running")
 			: outcome === "success"
 				? theme.fg("accent", theme.symbols.symbol("tool.bash"))
 				: statusIcon(cx, outcome === "running" ? "pending" : outcome === "warning" ? "warning" : "error");

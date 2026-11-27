@@ -31,14 +31,7 @@ import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
 import { commandConsumed, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { SlashCommandSpec } from "./types";
-import {
-	cfgComputerDisplay,
-	cfgComputerEnabled,
-	cfgComputerMaxHeight,
-	cfgComputerMaxWidth,
-	cfgComputerTakeover,
-	cfgRatchetEnabled,
-} from "../tools/settings";
+import { cfgComputerEnabled, cfgRatchetEnabled } from "../tools/settings";
 import { cfgPrewalkFrom, cfgPrewalkInto, cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
@@ -72,47 +65,53 @@ function resolveSessionModelSelector(
 	});
 }
 
-/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
-function formatFastModeStatus(session: AgentSession): string {
-	if (session.isUltrafastModeEnabled()) return "ultra";
-	return session.isFastModeEnabled() ? "on" : "off";
-}
-
-const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
-
-/**
- * `/fast [on|ultra|off|status]` for the active model: `on` selects the
- * family's `priority` tier, `ultra` the OpenAI `ultrafast` tier, `off` clears
- * either. Bare invocation toggles between off and priority. Returns the
- * user-facing reply, or `undefined` for an unknown argument.
- */
-function runFastCommand(arg: string, session: AgentSession): string | undefined {
+function modeToggleTarget(arg: string, enabled: boolean): boolean | undefined {
 	switch (arg) {
 		case "":
-		case "toggle": {
-			// toggleFastMode() cannot distinguish "toggled off" from "refused":
-			// route through setFastMode so a tier-less model reports
-			// unavailability instead of claiming success.
-			if (session.isFastModeEnabled()) {
-				session.setFastMode(false);
-				return "Fast mode disabled.";
-			}
-			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
-		}
+			return !enabled;
 		case "on":
-			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
-		case "ultra":
-		case "ultrafast":
-			return session.setUltrafastMode(true)
-				? "Ultrafast mode enabled."
-				: "Ultrafast is unavailable for the current model.";
+			return true;
 		case "off":
-			return session.setFastMode(false) ? "Fast mode disabled." : "Fast mode is unavailable for the current model.";
-		case "status":
-			return `Fast mode is ${formatFastModeStatus(session)}.`;
-		default:
-			return undefined;
+			return false;
 	}
+}
+
+/** Fast and Ultrafast toggle their own tier; the legacy `/fast ultra` always enables Ultrafast. */
+function speedToggle(name: "fast" | "ultrafast", description: string): SlashCommandSpec {
+	const hint = `Usage: /${name} [on|off]\nCheck status with /session info.`;
+	function toggle(args: string, session: AgentSession): string | undefined {
+		const arg = args.toLowerCase();
+		const legacyUltra = name === "fast" && arg === "ultra";
+		const ultra = name === "ultrafast" || legacyUltra;
+		const label = ultra ? "Ultrafast" : "Fast";
+		const ultrafastEnabled = session.isUltrafastModeEnabled();
+		const enabled = ultra ? ultrafastEnabled : !ultrafastEnabled && session.isFastModeEnabled();
+		const enable = modeToggleTarget(legacyUltra ? "on" : arg, enabled);
+		if (enable === undefined) return undefined;
+		const applied = ultra
+			? (!enable && !ultrafastEnabled) || session.setUltrafastMode(enable)
+			: session.setFastMode(enable);
+		if (!applied) return `${label} mode is unavailable for the current model.`;
+		return `${label} mode ${enable ? "enabled" : "disabled"}.`;
+	}
+	return {
+		name,
+		icon: name === "ultrafast" ? "rocket" : "fast",
+		description,
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const message = toggle(command.args, runtime.session);
+			if (message === undefined) return usage(hint, runtime);
+			await runtime.output(message);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const message = toggle(command.args, runtime.ctx.session);
+			if (message !== undefined) refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? hint);
+			clearSubmittedText(runtime);
+		},
+	};
 }
 
 const SLOW_UNSUPPORTED =
@@ -173,38 +172,21 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
 	return undefined;
 }
 
-/** Detailed, session-effective `/computer status` diagnostics. */
-function formatComputerUseStatus(session: AgentSession): string {
-	const enabled = cfgComputerEnabled.get(session.settings);
-	const active = session.getEvalPreludes().some(definition => definition.name === "computer");
-	const configured = {
-		display: cfgComputerDisplay.get(session.settings),
-		maxWidth: cfgComputerMaxWidth.get(session.settings),
-		maxHeight: cfgComputerMaxHeight.get(session.settings),
-		takeover: cfgComputerTakeover.get(session.settings),
-	};
-	return [
-		`Computer use: ${enabled ? "enabled" : "disabled"}`,
-		`prelude: ${active ? "active" : "inactive"}`,
-		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}, takeover=${configured.takeover}`,
-	].join(" · ");
-}
-
 /**
  * Apply a session-scoped computer-use toggle; the session's setting listener
  * reconciles the prompt without a mid-session cache-busting rebuild.
  * The override is never persisted to settings.json.
  */
-function applyComputerUseToggle(session: AgentSession, enable: boolean): string {
+function applyComputerUseCommand(args: string, session: AgentSession): string | undefined {
 	const previous = cfgComputerEnabled.get(session.settings);
+	const enable = modeToggleTarget(args.toLowerCase(), previous);
+	if (enable === undefined) return undefined;
 	cfgComputerEnabled.override(session.settings, enable);
 	if (enable && !session.getEvalPreludes().some(definition => definition.name === "computer")) {
 		cfgComputerEnabled.override(session.settings, previous);
 		return "Computer use is unavailable in this session.";
 	}
-	return enable
-		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
-		: "Computer use disabled for this session.";
+	return `Computer use ${enable ? "enabled" : "disabled"} for this session.`;
 }
 
 /** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
@@ -511,34 +493,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.ctx.switchSessionModel(resolved.model, resolved.thinkingLevel);
 		},
 	},
-	{
-		name: "fast",
-		icon: "fast",
-		description:
-			"Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
-		acpDescription: "Toggle fast mode",
-		acpInputHint: "[on|ultra|off|status]",
-		subcommands: [
-			{ name: "on", description: "Enable fast mode (priority tier)" },
-			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex and relay models that offer it)" },
-			{ name: "off", description: "Disable fast mode" },
-			{ name: "status", description: "Show fast mode status" },
-		],
-		allowArgs: true,
-		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
-		handle: async (command, runtime) => {
-			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.session);
-			if (message === undefined) return usage(FAST_USAGE, runtime);
-			await runtime.output(message);
-			return commandConsumed();
-		},
-		handleTui: (command, runtime) => {
-			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
-			refreshStatusLine(runtime.ctx);
-			runtime.ctx.showStatus(message ?? FAST_USAGE);
-			clearSubmittedText(runtime);
-		},
-	},
+	speedToggle("fast", "Toggle fast service (priority tier)"),
+	speedToggle("ultrafast", "Toggle Ultrafast service on supported OpenAI-family models"),
 	{
 		name: "slow",
 		icon: "fast",
@@ -653,46 +609,13 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "computer",
 		icon: "computer",
-		description: "Toggle the native computer-use eval prelude for this session",
-		acpDescription: "Toggle computer use",
-		acpInputHint: "[on|off|status]",
-		subcommands: [
-			{ name: "on", description: "Enable computer use for this session" },
-			{ name: "off", description: "Disable computer use for this session" },
-			{ name: "status", description: "Show computer use status" },
-		],
+		description: "Toggle computer use for this session",
 		allowArgs: true,
-		getTuiAutocompleteDescription: runtime =>
-			`Computer: ${cfgComputerEnabled.get(runtime.ctx.session.settings) ? "on" : "off"}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg === "status") {
-				await runtime.output(formatComputerUseStatus(runtime.session));
-				return commandConsumed();
-			}
-			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
-				const enable = arg === "off" ? false : arg === "on" || !cfgComputerEnabled.get(runtime.session.settings);
-				await runtime.output(applyComputerUseToggle(runtime.session, enable));
-				return commandConsumed();
-			}
-			return usage("Usage: /computer [on|off|status]", runtime);
-		},
-		handleTui: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg === "status") {
-				runtime.ctx.showStatus(formatComputerUseStatus(runtime.ctx.session));
-				clearSubmittedText(runtime);
-				return;
-			}
-			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
-				const enable =
-					arg === "off" ? false : arg === "on" || !cfgComputerEnabled.get(runtime.ctx.session.settings);
-				runtime.ctx.showStatus(applyComputerUseToggle(runtime.ctx.session, enable));
-				clearSubmittedText(runtime);
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /computer [on|off|status]");
-			clearSubmittedText(runtime);
+			const message = applyComputerUseCommand(command.args, runtime.session);
+			if (message === undefined) return usage("Usage: /computer [on|off]\nCheck status with /session info.", runtime);
+			await runtime.output(message);
+			return commandConsumed();
 		},
 	},
 	{

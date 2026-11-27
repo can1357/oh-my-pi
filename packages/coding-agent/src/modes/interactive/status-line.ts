@@ -613,6 +613,12 @@ export class SessionStatusLine implements StatusLineModel {
 		const turnStartedAt = this.#meter().since;
 		const activeMs = this.activeMs(now);
 		this.#syncPricingTimer(segments.includes("cost") ? model?.cost : undefined, now);
+		const fastTier =
+			model && session.isFastModeActive()
+				? session.effectiveServiceTier(model) === "ultrafast"
+					? "ultrafast"
+					: "priority"
+				: undefined;
 
 		return {
 			...(model
@@ -631,7 +637,7 @@ export class SessionStatusLine implements StatusLineModel {
 			...(session.isAutoThinking && session.autoResolvedThinkingLevel()
 				? { autoResolvedLevel: session.autoResolvedThinkingLevel() }
 				: {}),
-			...(session.isFastModeActive() ? { fastMode: true } : {}),
+			...(fastTier ? { fastTier } : {}),
 			...(advisorStatuses.length > 0
 				? {
 						advisor: {

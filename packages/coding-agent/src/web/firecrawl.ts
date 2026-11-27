@@ -4,6 +4,9 @@
  * Endpoint and credential configuration for Firecrawl web search and the
  * native reader backend, including self-hosted base URL overrides.
  */
+import { getEnvApiKey } from "@oh-my-pi/pi-ai";
+import type { AgentStorageApi } from "../session/agent-storage";
+import { findCredential } from "./search/providers/utils";
 
 const FIRECRAWL_DEFAULT_BASE_URL = "https://api.firecrawl.dev/v2";
 
@@ -40,4 +43,8 @@ export function resolveFirecrawlUrl(endpoint: "/search" | "/scrape"): string {
 	if (!/\/v[12]$/i.test(basePath)) basePath += "/v2";
 	url.pathname = basePath + endpoint;
 	return url.toString();
+}
+
+export function findFirecrawlApiKey(storage: AgentStorageApi | null | undefined): Promise<string | null> {
+	return findCredential(storage, getEnvApiKey("firecrawl"), "firecrawl");
 }

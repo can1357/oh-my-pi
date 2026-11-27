@@ -442,7 +442,7 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 type AnthropicOpaqueClientAnchor = ProviderSessionState & {
 	stores: WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>;
 	/**
-	 * Bumped once per `/fast on` re-arm. Anchored states carry the value they
+	 * Bumped once per fast-mode re-arm. Anchored states carry the value they
 	 * last observed in `fastModeRearmGeneration`; a mismatch is a re-arm they
 	 * have not picked up yet. Never reset by `close()`: the sweep discards the
 	 * states themselves, so a monotone counter needs no second reset path.

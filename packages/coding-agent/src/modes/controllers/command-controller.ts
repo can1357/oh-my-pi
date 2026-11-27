@@ -45,6 +45,7 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { continuesConversation } from "../utils/conversation-position";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildSessionContextView } from "../../session/context-view";
+import { sessionModeRows } from "../../slash-commands/helpers/session-modes";
 import { buildToolsMarkdown } from "../../slash-commands/helpers/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../view-model/overlays/job-tree";
@@ -620,6 +621,10 @@ export class CommandController {
 		}
 		if (!sameRuntimeIdentity(builds[builds.length - 1], running)) {
 			info += `${currentTheme().fg("dim", "Running:")} ${replaceTabs(sanitizeText(formatRuntimeIdentity(running)))}\n`;
+		}
+		info += `\n${bold("Modes")}\n`;
+		for (const [label, value] of sessionModeRows(this.ctx.session)) {
+			info += `${currentTheme().fg("dim", `${label}:`)} ${replaceTabs(sanitizeText(value))}\n`;
 		}
 		info += `\n${bold("Provider")}\n`;
 		const model = this.ctx.session.model;

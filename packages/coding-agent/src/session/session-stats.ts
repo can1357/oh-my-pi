@@ -7,7 +7,6 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
 import { type } from "@oh-my-pi/omptype";
-import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 
@@ -510,14 +509,11 @@ export class SessionStatsTracker {
 	ingestProviderUsageHeaders(response: ProviderResponseMetadata, model?: Model): void {
 		const provider = model?.provider;
 		if (!provider) return;
-		const recorded = this.#host.modelRegistry.authStorage.usage.ingestHeaders(provider, response.headers, {
+		this.#host.modelRegistry.authStorage.usage.ingestHeaders(provider, response.headers, {
 			sessionId: this.#host.agent.sessionId,
 			baseUrl: this.#host.modelRegistry.getProviderBaseUrl?.(provider),
 			responseStatus: response.status,
 		});
-		if (typeof recorded !== "boolean") {
-			void recorded.catch(() => logger.debug("Could not record provider usage headers", { provider }));
-		}
 	}
 }
 

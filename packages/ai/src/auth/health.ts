@@ -96,39 +96,34 @@ export class CredentialHealth implements HealthApi {
 	 */
 	async model(provider: Provider, options: ModelUsageHealthOptions): Promise<ModelUsageHealth> {
 		options.signal?.throwIfAborted();
-		if (providerPauseReason(provider) !== undefined) return { state: "unknown", accounts: [] };
-		const { sessionId } = options;
-		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
-		if (restricted && this.#deps.overrides.suppressesOAuth(provider, restricted)) {
-			return { state: "unknown", accounts: [] };
-		}
-		const originKind = restricted ? "oauth" : this.#deps.keys.source(provider)?.kind;
-		if (originKind !== "oauth" && originKind !== "api_key") return { state: "unknown", accounts: [] };
-
-		const stored = this.#deps.pool.entries(provider);
-		const pool: { entry: StoredCredential; index: number }[] = [];
-		for (const [index, entry] of stored.entries()) {
-			const { credential } = entry;
-			if (
-				credential.type === originKind &&
-				(credential.type !== "api_key" || credential.source === "login") &&
-				this.#deps.affinity.allows(provider, sessionId, credential)
-			) {
-				pool.push({ entry, index });
-			}
-		}
-		if (pool.length === 0) return { state: "unknown", accounts: [] };
+		const origin = this.#deps.keys.source(provider);
 		const strategy = this.#deps.strategies(provider);
+		const usageProvider = this.#deps.usage.providerFor(provider);
+		const canFetchOAuthUsage = usageProvider !== undefined || this.#deps.store.getUsageReport !== undefined;
 		if (
-			strategy === undefined &&
-			(originKind !== "oauth" ||
-				(this.#deps.usage.providerFor(provider) === undefined && this.#deps.store.getUsageReport === undefined))
+			!origin ||
+			(origin.kind !== "oauth" && origin.kind !== "api_key") ||
+			(strategy === undefined && (origin.kind !== "oauth" || !canFetchOAuthUsage))
 		) {
 			return { state: "unknown", accounts: [] };
 		}
-		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
+
+		const stored = this.#deps.pool.entries(provider).map((entry, index) => ({
+			entry,
+			index,
+		}));
+		const oauthPool = stored.filter(({ entry }) => entry.credential.type === "oauth");
+		const apiKeyPool = stored.filter(({ entry }) => entry.credential.type === "api_key");
+		const loginApiKeyPool = apiKeyPool.filter(
+			({ entry }) => entry.credential.type === "api_key" && entry.credential.source === "login",
+		);
+		const pool = origin.kind === "oauth" ? oauthPool : loginApiKeyPool;
+		if (pool.length === 0) return { state: "unknown", accounts: [] };
+		const sessionCredential = this.#deps.affinity.get(provider, options.sessionId);
 		const selectedCredentialId =
-			sessionCredential?.type === originKind ? stored[sessionCredential.index]?.id : undefined;
+			sessionCredential?.type === origin.kind
+				? this.#deps.pool.entries(provider)[sessionCredential.index]?.id
+				: undefined;
 
 		const rankingContext: CredentialRankingContext = {
 			modelId: options.modelId,

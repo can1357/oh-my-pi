@@ -38,7 +38,6 @@ import {
 	type MCPStoredOAuthCredential,
 	mcpOAuthCredentialId,
 } from "./oauth-flow";
-import { localAuthOwner } from "../session/auth-daemon-backend";
 import type { AuthStorage } from "../session/auth-storage";
 import type { MCPAuthChallenge, MCPAuthConfig, MCPServerConfig } from "./types";
 
@@ -618,9 +617,7 @@ export async function runMcpOAuthFlow(opts: McpOAuthFlowRunOptions): Promise<OAu
 			scope: flow.grantedScope,
 		};
 
-		const local = await raceAbortSignal(localAuthOwner(opts.authStorage), oauthTimeout.signal, createAbortError);
-		await local.credentials.set(credentialId, oauthCredential);
-		if (local !== opts.authStorage) await opts.authStorage.credentials.reload();
+		await opts.authStorage.credentials.set(credentialId, oauthCredential);
 		opts.onFlowComplete?.();
 
 		return {
@@ -790,15 +787,7 @@ export async function reauthorizeMcpServer(
 	const runtimeAuth = currentAuth ? expandEnvVarsDeep(currentAuth) : undefined;
 	const configuredClientId = runtimeBaseConfig.oauth?.clientId?.trim() || undefined;
 	const configuredClientSecret = runtimeBaseConfig.oauth?.clientSecret;
-	const local = await raceAbortSignal(
-		localAuthOwner(authStorage).then(async owner => {
-			if (owner !== authStorage) await owner.credentials.poll();
-			return owner;
-		}),
-		opts.signal,
-		() => new MCPOAuthCancelledError(),
-	);
-	const existingCredential = lookupMcpOAuthCredentialForServer(local, currentAuth, serverUrl)?.credential;
+	const existingCredential = lookupMcpOAuthCredentialForServer(authStorage, currentAuth, serverUrl)?.credential;
 	const persistedClientId = runtimeAuth?.clientId?.trim() || undefined;
 	const storedClientId = existingCredential?.clientId?.trim() || undefined;
 	const discoveredClientId = oauth.clientId?.trim() || undefined;
@@ -877,9 +866,7 @@ export async function reauthorizeMcpServer(
 	// after success so cancelling the browser step leaves the previous
 	// session signed in.
 	if (currentAuth?.type === "oauth" && currentAuth.credentialId !== oauthResult.credentialId) {
-		const owner = await localAuthOwner(authStorage);
-		const removed = await removeManagedMcpOAuthCredential(owner, currentAuth.credentialId);
-		if (removed && owner !== authStorage) await authStorage.credentials.reload();
+		await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
 	}
 
 	// Definition-only entries resolve through the url-keyed binding alone;

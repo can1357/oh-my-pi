@@ -181,7 +181,7 @@ function providerAvailability(storage: AuthStorage, provider: string): ProviderA
 /** Answer `keys.availability`: see {@link AuthStorageProtocol}. */
 function authAvailability(storage: AuthStorage, providers: readonly string[]): AuthAvailabilityTable {
 	const domain = new Set<string>(getBundledProviders());
-	for (const { provider } of storage.credentials.summaries()) domain.add(provider);
+	for (const provider in storage.credentials.all()) domain.add(provider);
 	for (const provider of providers) domain.add(provider);
 	const table: AuthAvailabilityTable = {};
 	for (const provider of domain) table[provider] = providerAvailability(storage, provider);
@@ -204,7 +204,6 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"credentials.get": (storage, provider) => storage.credentials.get(provider),
 		"credentials.all": storage => storage.credentials.all(),
 		"credentials.list": (storage, provider) => storage.credentials.list(provider),
-		"credentials.summaries": (storage, provider) => storage.credentials.summaries(provider),
 		"credentials.has": (storage, provider) => storage.credentials.has(provider),
 		"credentials.hasOAuth": (storage, provider) => storage.credentials.hasOAuth(provider),
 		"credentials.hasSubscription": (storage, provider) => storage.credentials.hasSubscription(provider),
@@ -247,11 +246,6 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 
 		"sessions.pin": (storage, provider, sessionId, credentialId, options) =>
 			storage.sessions.pin(provider, sessionId, credentialId, options),
-		"sessions.inheritProviders": storage => {
-			const providers = new Set<string>();
-			for (const { provider } of storage.credentials.summaries()) providers.add(provider);
-			return [...providers];
-		},
 		"sessions.inherit": (storage, source, target, table) =>
 			storage.sessions.inherit(
 				source,
@@ -275,7 +269,6 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"sessions.permits": (storage, provider, sessionId, credentialId) =>
 			storage.sessions.permits(provider, sessionId, credentialId),
 		"sessions.release": (storage, provider, sessionId) => storage.sessions.release(provider, sessionId),
-		"sessions.clear": (storage, provider, sessionId) => storage.sessions.clear(provider, sessionId),
 
 		"usage.reports": (storage, options) =>
 			storage.usage.reports({
@@ -315,8 +308,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"limits.rotate": (storage, provider, sessionId, options) => storage.limits.rotate(provider, sessionId, options),
 		"limits.markServiceTierUnavailable": (storage, provider, options) =>
 			storage.limits.markServiceTierUnavailable(provider, options),
-		"limits.rearmServiceTier": (storage, provider, serviceTier, modelId, sessionId) =>
-			storage.limits.rearmServiceTier(provider, serviceTier, modelId, sessionId),
+		"limits.rearmServiceTier": (storage, provider, serviceTier, modelId) =>
+			storage.limits.rearmServiceTier(provider, serviceTier, modelId),
 		"limits.invalidateMatching": (storage, provider, apiKey, options) =>
 			storage.limits.invalidateMatching(provider, apiKey, options),
 

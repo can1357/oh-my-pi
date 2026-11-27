@@ -15,56 +15,72 @@
  * Returns null when no broker URL is configured — caller falls back to the
  * local SQLite store.
  *
- * Session discovery takes broker connection values and encryption from the
- * persisted global Settings layer, and account routing from effective Settings.
+ * Session discovery uses the already-loaded main config for the connection
+ * and encryption, and effective Settings for account routing.
  */
 
 import * as path from "node:path";
+import { AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker/client";
 import {
 	type AuthAccountPolicyConfig,
-	AuthBrokerError,
-	loadAuthAccountPolicyConfig,
-} from "@oh-my-pi/pi-ai/auth-broker";
-import {
 	type AuthBrokerClientConfig,
 	type AuthBrokerStartupRetry,
-	type AuthStoreConfigSnapshot,
+	AuthBrokerStartupError,
 	type DiscoverAuthStorageOptions,
-	discoverAuthStorage as discoverAuthStorageShared,
+	discoverAuthStorageWithConfig,
 	getAuthBrokerTokenFilePath,
+	loadAuthAccountPolicyConfig,
 	openAuthCredentialStore,
-	readAuthStoreConfigSnapshot,
+	type PersistedAuthSettings,
+	readPersistedAuthSettings,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
-	resolveLocalAuthEncryption,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
-import type { AuthBrokerProviderPool } from "@oh-my-pi/pi-ai/auth-broker/remote-store";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
 import { providerDeviceBound } from "@oh-my-pi/pi-catalog/compat/auth";
-import { getAgentDbPath, getAgentDir, isBunTestRuntime, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { combine, effectsSettings, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
-import {
-	authDaemonStoreKey,
-	type ManagedLocalOwnerHooks,
-	managedAuth,
-	openManagedAuthStorage,
-} from "./auth-daemon-backend";
-import {
-	type AuthDaemonBindingOptions,
-	requiresLocalAuthOwnership,
-	resolveAuthDaemonBinding,
-} from "./auth-daemon-binding";
-import type { AuthDaemonBinding } from "./auth-daemon-contract";
-import { AuthDaemonBindingError, openAuthDaemonLink } from "./auth-daemon-link";
+import type { AuthStorage } from "./auth-storage";
 
 import { cfgAuthAccountPolicies, cfgOperatorUnpausedProviders } from "../config/model-settings";
 import { cfgRetryUsageReservePct } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
+
+type AuthDiscoveryOptions = Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">;
+
+interface OpenedAuthConfig {
+	agentDir: string;
+	brokerConfig: AuthBrokerClientConfig | null;
+	persistedSettings?: PersistedAuthSettings;
+	storeOptions?: Pick<AuthDiscoveryOptions, "accountPool" | "cachePath" | "sourceLabel">;
+}
+
+const AUTH_OPEN_CONFIG = Symbol("auth.openConfig");
+
+interface DiscoveredAuthStorage extends AuthStorage {
+	[AUTH_OPEN_CONFIG]?: OpenedAuthConfig;
+}
+
+/** Never let an injected scope or a child overlay redirect a different agent directory's credentials. */
+function persistedRoot(settings: Settings, agentDir: string): Settings | undefined {
+	const parent = settings.overlayParent();
+	if (parent) return persistedRoot(parent, agentDir);
+	return path.resolve(settings.getAgentDir()) === path.resolve(agentDir) ? settings : undefined;
+}
+
+function readAuthSettings(root: Settings | undefined): PersistedAuthSettings | undefined {
+	const raw = root?.getPersistedGlobalSettings();
+	return raw && readPersistedAuthSettings(raw);
+}
+
+function sameBrokerSettings(previous: PersistedAuthSettings | undefined, next: PersistedAuthSettings | undefined) {
+	return previous?.url === next?.url && previous?.token === next?.token;
+}
 
 /** Where auth discovery reads effective settings from; see {@link loadEffectiveAuthAccountPolicyConfig}. */
 export interface EffectiveSettingsScope {
@@ -151,9 +167,7 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
  * agent.db without a broker, for a `device-bound` provider, or for a provider the broker would
  * not serve (see `HybridAuthCredentialStore`).
  */
-export async function credentialStoreLabel(provider: string, authStorage?: AuthStorage): Promise<string> {
-	const managed = authStorage && managedAuth(authStorage);
-	if (managed) return managed.credentialDestination(provider);
+export async function credentialStoreLabel(provider: string): Promise<string> {
 	const broker = await resolveAuthBrokerConfig();
 	if (!broker || providerDeviceBound(provider)) return getAgentDbPath();
 	const local = await SqliteAuthCredentialStore.open(getAgentDbPath());
@@ -198,9 +212,9 @@ export interface AuthStorageSettingsSync {
  * - `auth.unpausedProviders` (operator layers only) re-applies which paused providers are back
  *   on — loaded credential pools refilter on their next read — and refreshes `modelRegistry`'s
  *   catalog for each newly unpaused provider, as a login does.
- * - `auth.broker.url` / `auth.broker.token` re-resolve the broker with startup
- *   precedence (env → persisted global layer → token file) and swap the
- *   credential store when the effective connection changed.
+ * - On main-config `auth.broker.url` / `auth.broker.token` edits, flush staged
+ *   writes and resolve the connection from the adopted global layer. Project,
+ *   `--config` and runtime layers never redirect credentials.
  *
  * Changes apply in order (broker, then policies, then paused providers within one change); a failing
  * change is logged and leaves the current configuration active.
@@ -211,58 +225,54 @@ export function createAuthStorageSettingsSync(
 	modelRegistry?: Pick<ModelRegistry, "refreshProvider">,
 ): AuthStorageSettingsSync {
 	const settings = "settings" in scope ? scope.settings : scope;
-	const agentDir = settings.getAgentDir();
-	let configSnapshot = readAuthStoreConfigSnapshot(settings.getGlobalSettings());
-	const resolveBroker = (snapshot: AuthStoreConfigSnapshot) =>
-		resolveAuthBrokerConfigShared({ agentDir, configSnapshot: snapshot, configValueResolver: resolveConfigValue });
-	// A daemon-owned storage follows a change by binding again: the daemon holds the store and
-	// its policy view. The new lease serves only once it is bound and holds the session's
-	// restrictions and pins; a refused binding leaves the current one in place.
-	const managed = managedAuth(authStorage);
-	const rebind = async (snapshot: AuthStoreConfigSnapshot) => {
-		const bound = (authStorage as SessionAuthStorage)[kBindingOptions];
-		await managed?.rebind(
-			await resolveAuthDaemonBinding(settings, {
-				...bound,
-				configSnapshot: snapshot,
-				retryUnreachableBroker: false,
-			}),
-		);
-	};
-	// Snapshot the connection `authStorage` was opened with, before any edit lands.
-	let activeBroker = managed ? Promise.resolve(null) : resolveBroker(configSnapshot).catch(() => null);
+	const opened = (authStorage as DiscoveredAuthStorage)[AUTH_OPEN_CONFIG];
+	const agentDir = opened?.agentDir ?? settings.getAgentDir();
+	const root = persistedRoot(settings, agentDir);
+	const initialSettings = readAuthSettings(root);
+	let attemptedSettings = opened?.persistedSettings ?? initialSettings;
+	let observedSettings = attemptedSettings;
+	let activeBroker = opened?.brokerConfig;
 	let pending: Promise<void> = Promise.resolve();
 
 	const applyPolicies = async () => {
 		try {
-			if (managed) await rebind(configSnapshot);
-			else authStorage.setAccountPolicies(await loadEffectiveAuthAccountPolicyConfig({ settings }));
+			authStorage.setAccountPolicies(await loadEffectiveAuthAccountPolicyConfig({ settings }));
 		} catch (error) {
 			logger.warn("Account policy change not applied; keeping the previous policy", { error: String(error) });
 		}
 	};
 
-	const applyBroker = async (snapshot: AuthStoreConfigSnapshot) => {
-		const previous = await activeBroker;
+	const applyBroker = async (source: Settings) => {
 		try {
-			// Standalone CLI helpers still read main YAML; let them see the persisted edit.
-			await settings.flush();
+			// Persist a staged edit before using it. Flush may adopt newer disk values.
+			await source.flush();
+			const persistedSettings = readAuthSettings(source);
+			if (!persistedSettings || sameBrokerSettings(attemptedSettings, persistedSettings)) return;
+			attemptedSettings = persistedSettings;
+			// Drop the standalone CLI memo so later lookups see the committed edit.
 			cachedConfigPromise = null;
 			cachedConfigKey = null;
-			if (managed) {
-				await rebind(snapshot);
-				logger.info("Daemon auth rebound after broker settings change");
+			const next = await resolveAuthBrokerConfigShared({
+				agentDir,
+				persistedSettings,
+				configValueResolver: resolveConfigValue,
+			});
+			if (activeBroker !== undefined && activeBroker?.url === next?.url && activeBroker?.token === next?.token) {
+				if (opened) opened.persistedSettings = persistedSettings;
 				return;
 			}
-			const next = await resolveBroker(snapshot);
-			if (previous?.url === next?.url && previous?.token === next?.token) return;
 			const { store, sourceLabel } = await openAuthCredentialStore({
+				...opened?.storeOptions,
 				brokerConfig: next,
 				agentDir,
-				encrypt: await resolveLocalAuthEncryption({ configSnapshot: snapshot }),
+				persistedSettings,
 			});
 			await authStorage.replaceStore(store, { sourceLabel });
-			activeBroker = Promise.resolve(next);
+			activeBroker = next;
+			if (opened) {
+				opened.brokerConfig = next;
+				opened.persistedSettings = persistedSettings;
+			}
 			logger.info("Auth credential store switched after broker settings change", { source: sourceLabel });
 		} catch (error) {
 			logger.warn("Auth broker change not applied; keeping the current credential store", {
@@ -281,27 +291,25 @@ export function createAuthStorageSettingsSync(
 		}
 	};
 
-	// A global edit is significant even if a project or runtime layer masks it.
 	let active = true;
-	let queued = false;
-	const queueBrokerChange = () => {
-		if (queued) return;
-		queued = true;
+	let brokerCheckQueued = false;
+	const queueBrokerCheck = () => {
+		if (!root || brokerCheckQueued) return;
+		brokerCheckQueued = true;
 		queueMicrotask(() => {
-			queued = false;
+			brokerCheckQueued = false;
 			if (!active) return;
-			const next = readAuthStoreConfigSnapshot(settings.getGlobalSettings());
-			const changed = next.url !== configSnapshot.url || next.token !== configSnapshot.token;
-			configSnapshot = next;
-			if (changed) pending = pending.then(() => applyBroker(next));
+			const next = readAuthSettings(root);
+			if (sameBrokerSettings(observedSettings, next)) return;
+			observedSettings = next;
+			pending = pending.then(() => applyBroker(root));
 		});
 	};
-	const stopLayers: Array<() => void> = [];
-	for (let layer: Settings | undefined = settings; layer; layer = layer.overlayParent()) {
-		stopLayers.push(layer.onLayersChange(queueBrokerChange));
-	}
+	// Watch the global layer even when a higher layer masks its effective setting value.
+	const stopLayers = initialSettings ? root?.onLayersChange(queueBrokerCheck) : undefined;
+	if (!sameBrokerSettings(observedSettings, initialSettings)) queueBrokerCheck();
 
-	const stopSettings = cfgAuthStorageSettings.listen(settings, (next, previous) => {
+	const stopPolicies = cfgAuthStorageSettings.listen(settings, (next, previous) => {
 		const policiesChanged =
 			next.usageReservePct !== previous.usageReservePct ||
 			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
@@ -315,8 +323,8 @@ export function createAuthStorageSettingsSync(
 	});
 	const stop = () => {
 		active = false;
-		for (const unsubscribe of stopLayers) unsubscribe();
-		stopSettings();
+		stopLayers?.();
+		stopPolicies();
 	};
 	if ("settings" in scope) scope.addDisposer?.(stop);
 	return { settled: () => pending, stop };
@@ -332,18 +340,30 @@ export function createAuthStorageSettingsSync(
  * fails at once when the broker is unreachable rather than hold the user for the
  * startup retry window; every other host retries and says so once on stderr.
  */
-export function discoverAuthStorage(
+export async function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
-	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">,
+	options?: AuthDiscoveryOptions,
 ): Promise<AuthStorage> {
 	const interactive = isInteractiveHost();
-	return discoverAuthStorageShared({
+	const { storage, brokerConfig } = await discoverAuthStorageWithConfig({
 		retryUnreachableBroker: !interactive,
 		onBrokerRetry: interactive ? undefined : authBrokerWaitNotice(),
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
 	});
+	const config: OpenedAuthConfig = {
+		agentDir,
+		brokerConfig,
+		persistedSettings: options?.persistedSettings,
+		storeOptions: options && {
+			accountPool: options.accountPool,
+			cachePath: options.cachePath,
+			sourceLabel: options.sourceLabel,
+		},
+	};
+	Object.defineProperty(storage, AUTH_OPEN_CONFIG, { value: config });
+	return storage;
 }
 
 /**
@@ -362,150 +382,22 @@ export function discoverAuthStorage(
  * instance, else a read-only load for `options.cwd`; explicit option values win.
  */
 export async function discoverSessionAuthStorage(
-	agentDir?: string,
-	options: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver"> &
-		Omit<EffectiveSettingsScope, "agentDir"> = {},
+	agentDir: string = getAgentDir(),
+	options: Omit<AuthDiscoveryOptions, "persistedSettings"> & Omit<EffectiveSettingsScope, "agentDir"> = {},
 ): Promise<AuthStorage> {
 	const { settings, cwd, ...discoveryOptions } = options;
 	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
 	applyUnpausedProviders(effective);
-	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
-	return discoverAuthStorage(agentDir ?? effective.getAgentDir(), {
+	return discoverAuthStorage(agentDir, {
 		...discoveryOptions,
-		configSnapshot: discoveryOptions.configSnapshot ?? readAuthStoreConfigSnapshot(effective.getGlobalSettings()),
-		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
+		persistedSettings: readAuthSettings(persistedRoot(effective, agentDir)),
+		accountPolicies: discoveryOptions.accountPolicies ?? cfgAuthAccountPolicies.get(effective),
 		authStorageOptions: {
 			...discoveryOptions.authStorageOptions,
-			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+			defaultReservePct:
+				discoveryOptions.authStorageOptions?.defaultReservePct ?? cfgRetryUsageReservePct.get(effective),
 		},
 	});
-}
-
-/** Binding inputs a daemon-owned storage was opened with; a settings change binds again from them. */
-const kBindingOptions = Symbol("auth.bindingOptions");
-type SessionAuthStorage = AuthStorage & { [kBindingOptions]?: AuthDaemonBindingOptions };
-
-/** Options of {@link openManagedSessionAuthStorage}. */
-export interface ManagedSessionAuthOptions extends Omit<
-	DiscoverAuthStorageOptions,
-	"agentDir" | "configValueResolver"
-> {
-	/** Already-resolved broker snapshot cache TTL; omit to consult the environment. */
-	snapshotTtlMs?: number;
-	/**
-	 * Who owns the credential store. Default: the daemon when it offers native auth, otherwise
-	 * this process; under the test runtime always this process. `"local"` keeps it here.
-	 * `"daemon"` requires the daemon and fails without it.
-	 */
-	ownership?: "local" | "daemon";
-}
-
-/** Open the credential store `binding` names, with nothing re-read from settings or the environment. */
-function openBoundCredentialStore(binding: AuthDaemonBinding, agentDir: string) {
-	const { broker } = binding;
-	let accountPool: Map<string, AuthBrokerProviderPool> | null = null;
-	if (broker && broker.accountPool.length > 0) {
-		accountPool = new Map();
-		for (const { provider, accounts, apiKeys } of broker.accountPool) {
-			accountPool.set(provider, { accounts: accounts === undefined ? undefined : new Set(accounts), apiKeys });
-		}
-	}
-	return openAuthCredentialStore({
-		brokerConfig: broker && { url: broker.url, token: broker.token },
-		agentDir,
-		dbPath: binding.dbPath,
-		encrypt: binding.encrypt,
-		requireUnlocked: true,
-		cachePath: broker?.cachePath,
-		snapshotTtlMs: broker?.ttlMs,
-		accountPool,
-		retryUnreachableBroker: false,
-	});
-}
-
-/**
- * How a daemon-owned storage opens its local owner: a real `AuthStorage` on exactly the store
- * and account policies of the daemon binding. It serves what must run in this process (OAuth
- * login callbacks, extension OAuth providers, MCP grants that need a local secret) and is
- * opened on first such use, never at startup.
- */
-export function boundLocalAuthOwner(agentDir: string): ManagedLocalOwnerHooks {
-	return {
-		async open(binding) {
-			const { store, sourceLabel } = await openBoundCredentialStore(binding, agentDir);
-			const owner = new AuthStorage(store, {
-				accountPolicies: binding.accountPolicies,
-				defaultReservePct: binding.defaultReservePct,
-				sourceLabel,
-				configValueResolver: resolveConfigValue,
-			});
-			try {
-				await owner.credentials.reload();
-			} catch (error) {
-				owner.close();
-				throw error;
-			}
-			return owner;
-		},
-		async retarget(owner, binding, previous) {
-			if (authDaemonStoreKey(binding) !== authDaemonStoreKey(previous)) {
-				const { store, sourceLabel } = await openBoundCredentialStore(binding, agentDir);
-				await owner.replaceStore(store, { sourceLabel });
-			}
-			owner.setAccountPolicies({
-				accountPolicies: binding.accountPolicies,
-				defaultReservePct: binding.defaultReservePct,
-			});
-		},
-	};
-}
-
-/**
- * Create the `AuthStorage` of a stock session (CLI main, SDK without an injected storage).
- *
- * The daemon owns the credential store when it offers native auth: this process binds a
- * private tunnel with its resolved configuration, reads credential metadata once, and never
- * opens or unlocks the store at startup. Stored keys and tokens are requested one at a time.
- *
- * This process owns the store instead (the {@link discoverSessionAuthStorage} path) only for
- * a reason known before binding: `ownership: "local"`, caller auth hooks that cannot cross a
- * process boundary (see `requiresLocalAuthOwnership`), the test runtime, or a daemon without
- * native auth. Once binding was attempted, a refusal or a lost tunnel is an error
- * ({@link AuthDaemonBindingError}); the local store is not a fallback for it.
- *
- * Standalone commands that administer the store keep using {@link discoverSessionAuthStorage}.
- */
-export async function openManagedSessionAuthStorage(
-	settings: Settings,
-	options: ManagedSessionAuthOptions = {},
-): Promise<AuthStorage> {
-	const { ownership, snapshotTtlMs, ...discovery } = options;
-	const bindingOptions: AuthDaemonBindingOptions = { ...discovery, snapshotTtlMs };
-	const agentDir = settings.getAgentDir();
-	let local: string | undefined;
-	if (ownership === "local") local = "requested";
-	else if (requiresLocalAuthOwnership(bindingOptions)) local = "caller auth hooks";
-	else if (ownership === undefined && isBunTestRuntime()) local = "test runtime";
-	if (local === undefined) {
-		applyUnpausedProviders(settings);
-		const binding = await resolveAuthDaemonBinding(settings, bindingOptions);
-		const link = await openAuthDaemonLink(binding);
-		if (link) {
-			// Bound. From here a failure is an error, never a reason to open the local store.
-			const storage: SessionAuthStorage = await openManagedAuthStorage({
-				binding,
-				link,
-				configValueResolver: resolveConfigValue,
-				localOwner: boundLocalAuthOwner(agentDir),
-			});
-			storage[kBindingOptions] = bindingOptions;
-			return storage;
-		}
-		local = "daemon offers no native auth";
-	}
-	if (ownership === "daemon") throw new Error(`Daemon-owned auth storage is not available: ${local}`);
-	logger.debug("Session auth storage is owned by this process", { reason: local });
-	return discoverSessionAuthStorage(agentDir, { ...discovery, settings });
 }
 
 /** Print the first retry of one startup to stderr; the retry is otherwise only in the log file. */
@@ -538,21 +430,8 @@ export async function describeAuthBrokerStartupError(error: unknown): Promise<st
 		// env var / config key / token-file path to set.
 		return error.message;
 	}
-	if (error instanceof AuthDaemonBindingError && error.kind !== "broker") {
-		return (
-			`${error.message}. The omp daemon owns the credential store for this session, ` +
-			"and omp will not fall back to opening it directly."
-		);
-	}
-	if (!(error instanceof AuthBrokerError) && !(error instanceof AuthDaemonBindingError)) return null;
-	let url: string | undefined;
-	try {
-		url = (await resolveAuthBrokerConfig())?.url;
-	} catch {
-		// Config resolution itself failed (e.g. token vanished); fall back to a
-		// URL-less message rather than masking the original broker failure.
-	}
-	const target = url ? ` at ${url}` : "";
+	if (!(error instanceof AuthBrokerError)) return null;
+	const target = error instanceof AuthBrokerStartupError ? ` at ${error.url}` : "";
 	return (
 		`Auth broker${target} is unreachable (${error.message}). ` +
 		"omp is configured to use this broker for credentials and will not fall back to local credentials automatically.\n" +

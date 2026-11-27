@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- `/fast`, `/ultrafast`, and `/computer` toggle without arguments and accept explicit `on` or `off`. Check their status with `/session info`. The legacy `/fast ultra` still enables Ultrafast.
 - Snapcompact uses one installed font for the whole transcript. If no installed font covers it, automatic and default manual compaction try the next configured method, and inline content stays as text. The `silver16-bw` frame layout is now `cjk16-bw`.
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
 - Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
@@ -75,7 +76,7 @@
 
 ### Changed
 
-- Sessions share built-in credential storage and refreshes through the local daemon. Environment keys and custom sign-in callbacks still run in the session.
+- Interactive startup loads fewer modules, and reading settings or caches no longer unlocks stored credentials.
 - Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@p2p:` includes local agents and peers from every project, labeled with their folder when different, while plain `@` searches only this folder's peers
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
 - The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
@@ -119,6 +120,13 @@
 ### Fixed
 
 - Restored automatic discovery of the Windows Chrome relay from WSL2 with mirrored networking ([#20809](https://github.com/can1357/oh-my-pi/pull/20809) by [@taibenvenuti](https://github.com/taibenvenuti)).
+- The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
+- `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
+- Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
+- Fixed `tui.autoGraph` charts not appearing below numeric tables in graphics-capable terminals outside Tern ([#20842](https://github.com/can1357/oh-my-pi/issues/20842)).
+- `tui.spinnerInterval` (`--spinner-interval`) and `tui.motion` apply to every spinner in the terminal UI again, not only the terminal title; `tui.motion: reduced`/`none` also stops decorative blink, fade, and pulse ([#20844](https://github.com/can1357/oh-my-pi/issues/20844))
+- Once-mode TTSR rules can fire again after `/new` or RPC `new_session` without restarting omp ([#20851](https://github.com/can1357/oh-my-pi/issues/20851)).
+- The shared daemon no longer balloons to gigabytes when an LSP file watcher over a very large tree (such as a directory of many git worktrees) loses changes: the rescan checks files directory by directory instead of holding every path below the watched base at once ([#20853](https://github.com/can1357/oh-my-pi/issues/20853))
 - Extensions whose `.tsx`/`.jsx` files use `/** @jsxImportSource @oh-my-pi/pi-tui */` load in the compiled omp binary instead of failing with `Cannot find package '@oh-my-pi/pi-tui'` ([#20840](https://github.com/can1357/oh-my-pi/issues/20840))
 - Fixed web search with GitHub Copilot Claude models: it now uses the Copilot login's token and endpoint (Enterprise included) and sends the same Copilot and session headers as chat, so replies are no longer rejected or blocked ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
 - Session mentions whose title carries a card icon no longer show a second session icon in front of it

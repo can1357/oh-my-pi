@@ -628,8 +628,8 @@ export interface ExecutorOptions {
 	/**
 	 * Parent session's live per-family service tiers, the source of truth for a
 	 * subagent whose `tier.subagent` is `"inherit"`. `null` = the parent
-	 * explicitly has no tier (e.g. `/fast off`); omitted = no live session, so
-	 * inherit falls back to the subagent's configured `tier.*` settings.
+	 * explicitly has no tier; omitted = no live session, so inherit falls back
+	 * to the subagent's configured `tier.*` settings.
 	 */
 	parentServiceTier?: ServiceTierByFamily | null;
 	/**

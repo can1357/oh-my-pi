@@ -40,6 +40,8 @@ export interface TestTerminalOptions {
 	readonly copyOnSelect?: TermBackendOptions["copyOnSelect"];
 	readonly wheelLines?: TermBackendOptions["wheelLines"];
 	readonly scrollbar?: TermBackendOptions["scrollbar"];
+	readonly spinnerInterval?: TermBackendOptions["spinnerInterval"];
+	readonly reduceMotion?: TermBackendOptions["reduceMotion"];
 	/** Drive this surface (an app shell's) instead of one built from the template. */
 	readonly surface?: Surface;
 }
@@ -183,6 +185,8 @@ export function createTestTerminal(template: () => SurfaceTemplate, options: Tes
 		...(options.copyOnSelect ? { copyOnSelect: options.copyOnSelect } : {}),
 		...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
 		...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
+		...(options.spinnerInterval === undefined ? {} : { spinnerInterval: options.spinnerInterval }),
+		...(options.reduceMotion ? { reduceMotion: options.reduceMotion } : {}),
 	});
 	backend.start();
 	const input = (event: InputEvent): void => {
