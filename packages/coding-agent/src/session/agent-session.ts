@@ -10338,8 +10338,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!command) return undefined;
 		onRouted?.();
 
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this.#extensionRunner.createCommandContext();
+		const ctx = this.#extensionRunner.createCommandContext(command.extensionPath);
 
 		try {
 			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
