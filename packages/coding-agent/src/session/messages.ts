@@ -11,6 +11,7 @@ import {
 	type BashExecutionMessage,
 	type PythonExecutionMessage,
 	type CustomMessage,
+	LIVE_DELEGATION_MESSAGE_TYPE,
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
@@ -26,6 +27,7 @@ export {
 	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 	DEFAULT_CUSTOM_MESSAGE_TYPE,
 	LIVE_DELEGATION_MESSAGE_TYPE,
+	LIVE_ENDED_MESSAGE_TYPE,
 	type CustomMessageContent,
 	type CustomMessagePayload,
 	type NormalizedCustomMessagePayload,
@@ -63,6 +65,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
+import voiceRequestTemplate from "../live/prompts/voice-request.md" with { type: "text" };
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
@@ -1223,6 +1226,14 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 						timestamp: m.timestamp,
 					},
 				];
+			}
+			// A spoken request: the model sees how its answer will reach the user; transcripts keep the request alone.
+			if (m.customType === LIVE_DELEGATION_MESSAGE_TYPE && typeof m.content === "string") {
+				const converted = convertMessageToLlm({
+					...m,
+					content: prompt.render(voiceRequestTemplate, { request: m.content }),
+				});
+				return converted ? [converted] : [];
 			}
 			const split = convertImageBearingCustomMessage(m);
 			if (split) return split;

@@ -33,6 +33,7 @@ import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { errorMessage, formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { isManagedMCPOAuthCredentialId } from "../mcp/oauth-flow";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
@@ -609,10 +610,22 @@ function formatReloginDeadline(
 
 /**
  * Tombstones worth a row in `omp usage`: OAuth credentials torn down
- * automatically (refresh failure, upstream invalidation). Rows the user
- * replaced or deleted deliberately are lifecycle noise, not lost capacity.
+ * automatically (refresh failure, upstream invalidation) and not since
+ * restored. Rows the user replaced or deleted deliberately are lifecycle
+ * noise, not lost capacity.
+ *
+ * `activeAccounts` MUST be every active stored credential, not only the
+ * usage-reportable ones: a re-login restores a tombstone whether or not its
+ * provider has a usage endpoint (e.g. `mcp_oauth:*` servers).
  */
-function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
+export function actionableDisables(
+	disabled: DisabledCredentialSummary[],
+	activeAccounts: UsageAccountIdentity[],
+): DisabledCredentialSummary[] {
+	return disabled.filter(summary => isActionableDisable(summary, activeAccounts));
+}
+
+function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[]): boolean {
 	if (summary.type !== "oauth") return false;
 	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
 
@@ -621,13 +634,21 @@ function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts:
 	const summaryEmail = summary.email?.toLowerCase();
 	const summaryAccountId = summary.accountId?.toLowerCase();
 	const summaryOrgId = summary.orgId?.toLowerCase();
+	// A managed MCP OAuth provider id names one server login, so an identity-less
+	// tombstone there is restored by any identity-less login of that provider.
+	// Elsewhere identity-less logins can coexist (e.g. two Devin browser logins)
+	// and a sibling is not a re-login.
+	const anonymousRestorable =
+		!summaryEmail && !summaryAccountId && !summaryOrgId && isManagedMCPOAuthCredentialId(summary.provider);
 
 	const matchesActive = activeAccounts.some(account => {
-		if (account.provider !== summary.provider) return false;
+		if (account.provider !== summary.provider || account.type !== "oauth") return false;
 
 		const accountEmail = account.email?.toLowerCase();
 		const accountAccountId = account.accountId?.toLowerCase();
 		const accountOrgId = account.orgId?.toLowerCase();
+
+		if (anonymousRestorable && !accountEmail && !accountAccountId && !accountOrgId) return true;
 
 		// If email or accountId match, it's the same identity
 		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
@@ -865,7 +886,8 @@ function formatResetExpiryBanner(
 /**
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
- * each provider section as "no usage data" rows.
+ * each provider section as "no usage data" rows. `disabled` is rendered as
+ * given; filter it through {@link actionableDisables} first.
  */
 export function formatUsageBreakdown(
 	reports: UsageReport[],
@@ -893,7 +915,6 @@ export function formatUsageBreakdown(
 	}
 	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
 	for (const summary of disabled) {
-		if (!isActionableDisable(summary, accounts)) continue;
 		const list = disabledByProvider.get(summary.provider) ?? [];
 		list.push(summary);
 		disabledByProvider.set(summary.provider, list);
@@ -1771,7 +1792,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		// missing. Best-effort: a broker predating the endpoint yields [].
 		let disabled: DisabledCredentialSummary[] = [];
 		try {
-			disabled = await authStorage.credentials.listDisabled();
+			disabled = actionableDisables(await authStorage.credentials.listDisabled(), storedAccounts);
 		} catch {
 			// Usage output must not fail because tombstone listing did.
 		}
@@ -1812,7 +1833,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
-			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
+			let disabledForJson = disabled;
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,

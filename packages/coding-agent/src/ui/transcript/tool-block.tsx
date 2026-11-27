@@ -41,6 +41,7 @@ import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { type AgentActivityStatus, toolCallSummary } from "../../modes/view-model/overlays/agent-activity";
+import { readImageHeaderDimensions } from "../../utils/image-resize";
 import { readMediaPath } from "../../session/transcript/tool-execution";
 import { type ShellInspectorSource, shellVizEventAction } from "../apps/shell-visualizer/model";
 import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
@@ -521,14 +522,10 @@ export function imagePlaceholder(block: { readonly data?: string; readonly mimeT
 	return `[Image: [${mime}]${size ? ` ${size.w}x${size.h}` : ""}]`;
 }
 
-/** Pixel size of a base64 PNG/GIF/JPEG, when its header says. */
+/** Pixel size of a base64 PNG/GIF/JPEG/WebP, when its header says. */
 export function imageSize(base64: string): { w: number; h: number } | undefined {
-	const bytes = Buffer.from(base64.slice(0, 64), "base64");
-	if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50)
-		return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) };
-	if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49)
-		return { w: bytes.readUInt16LE(6), h: bytes.readUInt16LE(8) };
-	return undefined;
+	const size = readImageHeaderDimensions(Buffer.from(base64, "base64"));
+	return size ? { w: size.width, h: size.height } : undefined;
 }
 
 /** Call view then result view: the result's head facts win; bodies stack. */

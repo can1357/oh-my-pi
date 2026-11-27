@@ -52,7 +52,9 @@ import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
+import { applyModelPresetOverrides, applyPresetLaunchThinkingLevel } from "./config/model-presets";
 import { formatModelSelectorValue } from "./config/model-selector";
+import { type ConfiguredThinkingLevel, sanitizeDisplayWarnings } from "./utils/render-utils";
 import {
 	disabledProviderIds,
 	expandRoleAlias,
@@ -145,7 +147,6 @@ import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking/levels";
 import type { LspStartupServerInfo } from "./tools";
-import { sanitizeDisplayWarnings } from "./utils/render-utils";
 import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
@@ -2222,6 +2223,25 @@ export async function runRootCommand(
 		// Initialize discovery system with settings for provider persistence
 		logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);
 
+		// Apply --preset first. A later --smol/--slow/--plan flag overrides the
+		// preset's value for that role (ephemeral).
+		let presetThinkingLevel: ConfiguredThinkingLevel | undefined;
+		if (parsedArgs.preset !== undefined) {
+			const presetResult = applyModelPresetOverrides(settingsInstance, parsedArgs.preset);
+			if (presetResult.kind !== "applied") {
+				const rawMessage =
+					presetResult.kind === "missing"
+						? `Model preset not found: ${parsedArgs.preset}`
+						: `Model preset "${parsedArgs.preset}" is malformed: ${presetResult.reason}`;
+				// Both the flag value and a malformed project-config role key reach this
+				// line verbatim, so strip terminal controls and stray whitespace before it
+				// reaches the terminal.
+				process.stderr.write(`${chalk.red(sanitizeDisplayWarnings([rawMessage])[0] ?? rawMessage)}\n`);
+				process.exit(1);
+			}
+			presetThinkingLevel = presetResult.defaultThinkingLevel;
+		}
+
 		// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 		const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
 		const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
@@ -2861,6 +2881,13 @@ export async function runRootCommand(
 			if (isInteractive)
 				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
 			if (!isInteractive) session.validateRetryFallbackChains();
+			// The preset's thinking level seeds the session the way `/modelpreset switch`
+			// applies it, past the model's own default. An explicit `--thinking` or selector
+			// level already set `sessionOptions.thinkingLevel`; a resumed, imported or
+			// auto-resumed session keeps the effort it saved. Seed only a fresh session.
+			if (presetThinkingLevel !== undefined && !explicitSessionSelection && !autoResumed) {
+				applyPresetLaunchThinkingLevel(session, presetThinkingLevel, sessionOptions.thinkingLevel);
+			}
 
 			const sessionToolNames = session.getAllToolNames();
 			try {

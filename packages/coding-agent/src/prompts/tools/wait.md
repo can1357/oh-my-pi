@@ -12,7 +12,7 @@ Nothing you started running and no answer owed? Returns at once; so does a wait 
 - A wait on your own jobs/services returns only once one finishes or a message arrives.
 - A wait for a reply returned with nothing new and nothing else is left? Call `wait` right away with no other tool call.
 {{else if ladder}}
-- A wait returned with nothing new and nothing else is left? Call `wait` right away with no other tool call: it then blocks up to {{longest}}, longer for a reply.
+- A wait returned with nothing new and nothing else is left? Call `wait` right away with no other tool call: it then blocks up to {{longest}}, longer with a long-lived prompt cache.
 {{else}}
 - A wait returned with nothing new and nothing else is left? Call `wait` right away with no other tool call: it then blocks up to {{longest}} on your jobs/services.
 {{/if}}

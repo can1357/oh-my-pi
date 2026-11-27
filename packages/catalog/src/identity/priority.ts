@@ -6,6 +6,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"openai",
 	"google",
 	"google-vertex",
+	"kimi-code-global",
 	"kimi-code",
 	"moonshot",
 	"qwen-portal",

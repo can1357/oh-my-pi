@@ -31,10 +31,11 @@ export function synchronizedOutputDefault(env: Env, id: TerminalId): boolean {
 	if (override !== null) return override;
 	// Herdr renders panes in its own grid and implements 2026 itself.
 	if (hasMultiplexerSession("herdr", env)) return true;
-	// TERM_FEATURES is a run of capability tokens (`ClSyTc`); `Sy` advertises 2026.
-	if (env.TERM_FEATURES?.match(/[A-Z][a-z0-9]*/g)?.includes("Sy")) return true;
 	const mux = classifyMultiplexer(env);
 	if ((mux !== null && mux !== "orca") || termFamilyIsMux(env)) return false;
+	// Outer-terminal hints are inherited into mux panes, so they are only trusted outside one.
+	// TERM_FEATURES is a run of capability tokens (`ClSyTc`); `Sy` advertises 2026.
+	if (env.TERM_FEATURES?.match(/[A-Z][a-z0-9]*/g)?.includes("Sy")) return true;
 	// A local Windows Terminal has its own profile; this covers a `WT_SESSION` forwarded over SSH.
 	if (env.WT_SESSION && (id === "trueColor" || id === "base")) {
 		return !env.TERM_PROGRAM || env.TERM_PROGRAM === "Windows_Terminal";
