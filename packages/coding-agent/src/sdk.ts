@@ -1959,7 +1959,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? [options.modelPattern.trim()]
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
-	const hydrateStartupModelCaches = options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
+	const hydrateStartupModelCaches =
+		options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
 	const startStartupModelCacheHydration = (providers?: ReadonlySet<string>) => {
 		const hydration = hydrateStartupModelCaches(providers);
 		// A worker's owner call may reject before we reach the first reader.
@@ -2265,7 +2266,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await hydrateFullStartupModelCaches();
 		} else {
 			if (startupProvider) providers.delete(startupProvider);
-			await Promise.all([startupProviderHydration, providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined]);
+			await Promise.all([
+				startupProviderHydration,
+				providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined,
+			]);
 		}
 	}
 
@@ -5493,7 +5497,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
 		// Settings can opt into a synchronous startup reader while other setup yields.
-		if (!fullStartupModelCaches && (cfgAdvisorEnabled.get(settings) || modelGrantAdvertisementNeedsCatalog(settings))) {
+		if (
+			!fullStartupModelCaches &&
+			(cfgAdvisorEnabled.get(settings) || modelGrantAdvertisementNeedsCatalog(settings))
+		) {
 			await hydrateFullStartupModelCaches();
 		}
 		// Advisor spend recorded before this resume is restored off the critical

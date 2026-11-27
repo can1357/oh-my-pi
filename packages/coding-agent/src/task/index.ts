@@ -1020,7 +1020,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	/** Start or reuse discovery of the agents a TaskTool will offer for this session scope. */
-	static async discoverAgents(session: Pick<ToolSession, "cwd" | "effectiveExtensionRoots">): Promise<AgentDefinition[]> {
+	static async discoverAgents(
+		session: Pick<ToolSession, "cwd" | "effectiveExtensionRoots">,
+	): Promise<AgentDefinition[]> {
 		return (await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.())).agents;
 	}
 

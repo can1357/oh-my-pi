@@ -127,9 +127,7 @@ export default function(pi) {
 			const mod = (await loadLegacyPiModule(entry)) as { total: number };
 			expect(mod.total).toBe(12);
 			expect(reads.get(bridge)).toBe(1);
-			const sharedDirs = resolve.mock.calls
-				.filter(([specifier]) => specifier === "./shared")
-				.map(([, dir]) => dir);
+			const sharedDirs = resolve.mock.calls.filter(([specifier]) => specifier === "./shared").map(([, dir]) => dir);
 			expect(sharedDirs.sort()).toEqual([root, nested].sort());
 		} finally {
 			resolve.mockRestore();

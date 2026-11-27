@@ -148,17 +148,17 @@ export async function discoverAgents(
 
 	// Extension-package agents use the same effective root set as sibling
 	// skills/hooks/tools, threaded whole so explicit roots and mode survive.
-	const packageRoots = sources & PluginAgentSources.OmpPackages
-		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
-		: [];
+	const packageRoots =
+		sources & PluginAgentSources.OmpPackages
+			? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
+			: [];
 	for (const root of packageRoots) {
 		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
 	}
 
 	// Load agents from marketplace plugins (respects disabledProviders).
-	const { roots: pluginRoots } = sources & PluginAgentSources.ClaudeMarketplace
-		? await listClaudePluginRoots(home, resolvedCwd)
-		: { roots: [] };
+	const { roots: pluginRoots } =
+		sources & PluginAgentSources.ClaudeMarketplace ? await listClaudePluginRoots(home, resolvedCwd) : { roots: [] };
 	const sortedPluginRoots = [...pluginRoots].sort((a, b) => {
 		if (a.scope === b.scope) return 0;
 		return a.scope === "project" ? -1 : 1;

@@ -186,9 +186,9 @@ describe("ModelRegistry lazy bundled composition", () => {
 	test("leaves native-judge API overrides and unreadable cache contents to the full resolver", async () => {
 		const overridden = await startupJudgeFixture({ nativeOverride: true });
 		expect(await overridden.registry.canRuleOutNativeJudgeAtStartup(isJudgmentApi)).toBe(false);
-		expect(
-			overridden.registry.getAvailable("all").find(model => model.provider === overridden.provider)?.api,
-		).toBe("typesafe");
+		expect(overridden.registry.getAvailable("all").find(model => model.provider === overridden.provider)?.api).toBe(
+			"typesafe",
+		);
 
 		const unreadable = await startupJudgeFixture({ unreadableCache: true });
 		expect(await unreadable.registry.canRuleOutNativeJudgeAtStartup(isJudgmentApi)).toBe(false);
@@ -308,7 +308,10 @@ describe("ModelRegistry lazy bundled composition", () => {
 			JSON.stringify({
 				providers: {
 					[provider]: config,
-					[competitor]: { ...config, models: [{ id: reason === "literal-id" ? pattern : "other", name: "Other" }] },
+					[competitor]: {
+						...config,
+						models: [{ id: reason === "literal-id" ? pattern : "other", name: "Other" }],
+					},
 				},
 			}),
 		);

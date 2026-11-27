@@ -2640,7 +2640,12 @@ export async function runRootCommand(
 				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
 				const launchKey =
 					mode === "acp"
-						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance, hydrateLaunchModelCaches)
+						? await resolveAcpApiKeyProvider(
+								parsedArgs,
+								modelRegistry,
+								settingsInstance,
+								hydrateLaunchModelCaches,
+							)
 						: { error: API_KEY_REQUIRES_MODEL };
 				if ("error" in launchKey) {
 					process.stderr.write(`${chalk.red(launchKey.error)}\n`);
@@ -2656,7 +2661,10 @@ export async function runRootCommand(
 		// Keep SDK evaluation off argv error paths and defer it to `session/new` in ACP.
 		let startupSessionCreator: Promise<typeof createAgentSession> | undefined;
 		const loadStartupSessionCreator = () =>
-			(startupSessionCreator ??= logger.time("loadStartupSdk", async () => (await import("./sdk")).createAgentSession));
+			(startupSessionCreator ??= logger.time(
+				"loadStartupSdk",
+				async () => (await import("./sdk")).createAgentSession,
+			));
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const createAgentSessionImpl = deps.createAgentSession ?? (await loadStartupSessionCreator());
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);

@@ -573,7 +573,11 @@ describe("pickElectronTarget", () => {
 		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
 		const existing = await spawnDisposableExecutable([`--remote-debugging-port=${cdp.port}`]);
 		const reuse = async (argv?: string[], insecure?: boolean) => {
-			const kind = await resolveBrowserKind({ action: "open", app: existing.path, argv, insecure }, makeSession(), {});
+			const kind = await resolveBrowserKind(
+				{ action: "open", app: existing.path, argv, insecure },
+				makeSession(),
+				{},
+			);
 			if (kind.kind !== "spawned") throw new Error("Expected an executable app");
 			return findReusableCdp(kind.path, { appArgs: kind.args });
 		};
