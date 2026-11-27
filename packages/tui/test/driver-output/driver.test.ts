@@ -283,6 +283,19 @@ describe("createTerminalDriver terminal quirks", () => {
 		}
 	});
 
+	// Herdr toggles its scrollbar gutter on an alternate-screen switch, resizing the pane again (#8433).
+	it("repaints a settled resize in place inside Herdr instead of replaying history", async () => {
+		const replays: Record<string, boolean | undefined> = {};
+		for (const multiplexer of ["tmux", "herdr"] as const) {
+			const { driver } = setup({ multiplexer }, {}, { PI_TUI_RESIZE_SCROLLBACK: "rebuild" });
+			driver.onReplay(() => {});
+			await driver.start();
+			replays[multiplexer] = driver.replaysOnResize?.();
+			await driver.stop();
+		}
+		expect(replays).toEqual({ tmux: true, herdr: false });
+	});
+
 	it("hands the terminal back once when it goes away, and reports why", async () => {
 		const { driver, input, output } = setup();
 		await driver.start();

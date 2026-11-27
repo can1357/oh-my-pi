@@ -71,7 +71,12 @@ export interface EditArgs {
 	}[];
 }
 
-type EditDiffPreview = { readonly diff?: string; readonly firstChangedLine?: number; readonly error?: string };
+type EditDiffPreview = {
+	readonly diff?: string;
+	readonly firstChangedLine?: number;
+	readonly error?: string;
+	readonly notice?: string;
+};
 
 /** What the transcript threads to an edit call (the host's preview computations). */
 interface EditContext {
@@ -400,13 +405,14 @@ function contextOf(state: ToolViewState, defaultMode: EditMode | undefined): Edi
 	const only = files[0];
 	if (only?.diff)
 		return { ...context, mode, editDiffPreview: { diff: only.diff, firstChangedLine: only.firstChangedLine } };
-	return only?.error ? { ...context, mode, editDiffPreview: { error: only.error } } : { ...context, mode };
+	if (only?.error) return { ...context, mode, editDiffPreview: { error: only.error } };
+	return only?.notice ? { ...context, mode, editDiffPreview: { notice: only.notice } } : { ...context, mode };
 }
 
-/** Per-file previews worth showing (several files, some with a diff or an error). */
+/** Per-file previews worth showing (several files, some with a diff, an error or a notice). */
 function multiPreview(context: EditContext): readonly PerFileDiffPreview[] | undefined {
 	const multi = context.perFileDiffPreview;
-	return multi && multi.length > 1 && multi.some(p => p.diff || p.error) ? multi : undefined;
+	return multi && multi.length > 1 && multi.some(p => p.diff || p.error || p.notice) ? multi : undefined;
 }
 
 function hasPayload(args: EditArgs, context: EditContext): boolean {
@@ -495,6 +501,7 @@ function callView(args: EditArgs, state: ToolViewState, defaultMode: EditMode | 
 		else if (replacement) body.push({ k: "text", text: replacement });
 		else if (context.editStreamingFallback) body.push({ k: "raw", text: context.editStreamingFallback });
 		else if (context.editDiffPreview?.error) body.push({ k: "error", text: context.editDiffPreview.error });
+		else if (context.editDiffPreview?.notice) body.push({ k: "note", text: context.editDiffPreview.notice });
 		else if (context.editDiffPreview?.diff) {
 			body.push({ k: "stream", diff: context.editDiffPreview.diff, path: facts.rawPath });
 			footer = "preview";
@@ -538,6 +545,8 @@ function callView(args: EditArgs, state: ToolViewState, defaultMode: EditMode | 
 				>
 					{preview.error ? (
 						<ErrorText message={preview.error} />
+					) : preview.notice ? (
+						<NoteText message={preview.notice} />
 					) : (
 						<DiffNode diff={preview.diff ?? ""} path={preview.path} />
 					)}
@@ -559,6 +568,7 @@ function callView(args: EditArgs, state: ToolViewState, defaultMode: EditMode | 
 		} else if (context.editDiffPreview) {
 			const preview = context.editDiffPreview;
 			if (preview.error) body.push(<ErrorText message={preview.error} />);
+			else if (preview.notice) body.push(<NoteText message={preview.notice} />);
 			else if (preview.diff) {
 				diffText = preview.diff;
 				line = preview.firstChangedLine;
