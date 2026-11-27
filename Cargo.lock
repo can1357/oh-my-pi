@@ -6060,11 +6060,13 @@ dependencies = [
 name = "omp-voice"
 version = "19.2.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "flume",
  "libc",
  "opus",
  "parking_lot",
+ "rtc",
  "tokio",
  "webrtc",
  "windows-sys 0.61.2",
