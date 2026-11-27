@@ -32,10 +32,7 @@
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
 		},
-		"./ar": {
-			"types": "./src/ar/index.ts",
-			"import": "./src/ar/index.ts"
-		},
+		"./ar": "./src/ar/index.ts",
 		"./*": {
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"

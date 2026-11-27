@@ -2939,10 +2939,12 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 }
 
 async function importLegacyPiModule(entryRealPath: string, reload: boolean): Promise<unknown> {
-	// The entry is imported by its real path, so that is the one Bun must read.
-	if (!isBundledVirtualSpecifier(entryRealPath)) await assertBunCanImport(entryRealPath);
-	await ensureLegacyPiOverridesReady();
-	const pendingSources = await ensureExtensionGraphHook(entryRealPath, reload);
+	const pendingSources = await logger.time("prepareModule", async () => {
+		// The entry is imported by its real path, so that is the one Bun must read.
+		if (!isBundledVirtualSpecifier(entryRealPath)) await assertBunCanImport(entryRealPath);
+		await ensureLegacyPiOverridesReady();
+		return ensureExtensionGraphHook(entryRealPath, reload);
+	});
 	try {
 		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
 		// Use the raw filesystem path so Bun keys the `?mtime` suffix as part of
@@ -2951,8 +2953,8 @@ async function importLegacyPiModule(entryRealPath: string, reload: boolean): Pro
 		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
-		if (!reload) return await import(entrySpecifier);
-		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag(entryRealPath)}`);
+		const specifier = reload ? `${entrySpecifier}?mtime=${nextLegacyPiLoadTag(entryRealPath)}` : entrySpecifier;
+		return await logger.time("importModule", () => import(specifier));
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only
 		// reached by lazy dynamic imports must be read from disk at their actual

@@ -6,10 +6,11 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { litellmModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { parseModelPattern, tryResolveStartupModelRole } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 const probePath = path.join(import.meta.dir, "fixtures", "model-registry-construction-build-probe.ts");
 
@@ -84,6 +85,44 @@ describe("ModelRegistry lazy bundled composition", () => {
 		expect(registry.find("litellm", "cached-fixture")).toBeUndefined();
 		await registry.hydrateCredentialScopedModelCaches();
 		expect(registry.find("litellm", "cached-fixture")?.name).toBe("Cached Fixture");
+	});
+
+	test.each(["literal-id", "registration"] as const)("startup role fallback identifies %s", async reason => {
+		const tempDir = TempDir.createSync("@model-registry-role-fallback-");
+		tempDirs.push(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorages.push(authStorage);
+		const provider = "role-fixture";
+		const competitor = "other-fixture";
+		const pattern = `${provider}/example:high`;
+		const configPath = path.join(tempDir.path(), "models.yml");
+		const config = {
+			api: "openai-completions" as const,
+			baseUrl: "https://example.invalid/v1",
+			auth: "none" as const,
+			models: [{ id: "example", name: "Example" }],
+		};
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				providers: {
+					[provider]: config,
+					[competitor]: { ...config, models: [{ id: reason === "literal-id" ? pattern : "other", name: "Other" }] },
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, configPath, { settings: Settings.isolated() });
+		if (reason === "registration") registry.registerProvider(competitor, { baseUrl: config.baseUrl });
+		const timing = spyOn(logger, "time");
+		spies.push(timing);
+		const result = await tryResolveStartupModelRole({ provider, pattern }, registry, undefined, () =>
+			registry.hydrateCredentialScopedModelCaches(new Set([competitor])),
+		);
+		expect(result).toBeUndefined();
+		const label = reason === "literal-id" ? "collision:literal-id" : "conservative:registration";
+		expect(timing).toHaveBeenCalledWith(`resolveDefaultModelRole:scope:${label}:${competitor}`);
+		const pool = registry.getAvailableForProviders(new Set([provider, competitor]));
+		expect(parseModelPattern(pattern, pool).model?.provider).toBe(reason === "literal-id" ? competitor : provider);
 	});
 
 	test("scoped snapshots retain live availability and cannot be mutated through returned arrays", async () => {

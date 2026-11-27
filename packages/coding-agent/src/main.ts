@@ -39,16 +39,16 @@ import {
 	validateToolNames,
 } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
-import { processFileArguments } from "./cli/file-processor";
+import type * as FileProcessor from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { KeybindingsManager } from "./config/keybindings/keybindings";
 import { formatKeyHint } from "./ui/keys/hints";
 import type { SessionPickerOptions } from "./modes/view-model/apps/session-picker";
-import { fetchBuild } from "./cli/build-service";
+import type * as BuildService from "./cli/build-service";
+import type * as AutoUpdate from "./cli/auto-update";
+import type * as UpdateCli from "./cli/update-cli";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { runAutoUpdate } from "./cli/auto-update";
-import { managedInstallName } from "./cli/managed-install";
-import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
+import { isSourceCheckout, managedInstallName } from "./cli/managed-install";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { type HydrateStartupModelCaches, ModelRegistry } from "./config/model-registry";
@@ -124,12 +124,7 @@ import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import { SessionModelRestoreError } from "./session/model-restore-error";
 import { resolvePrewalkTarget } from "./session/prewalk-target";
-import {
-	createForeignSessionStore,
-	foreignSessionInfoToSessionInfo,
-	foreignSessionSourceName,
-	persistForeignSession,
-} from "./session/foreign-session-import";
+import type * as ForeignSessionImport from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import {
 	findSessionContinuation,
@@ -159,7 +154,7 @@ import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForD
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
-import { scheduleGcAutoCompress } from "./cli/gc-auto-compress";
+import type * as GcAutoCompress from "./cli/gc-auto-compress";
 import { cfgGcAutoCompress } from "./cli/gc-settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
@@ -306,9 +301,14 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		const channel = cfgUpdateChannel.get(settings);
 		// A compiled binary updates from the build service; naming the running
 		// version lets the service prepare the patch `omp update` will then use.
-		const { version } = isCompiledBinary()
-			? await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion })
-			: await getLatestRelease({ timeoutMs: 5_000, channel });
+		let version: string;
+		if (isCompiledBinary()) {
+			const { fetchBuild } = require("./cli/build-service") as typeof BuildService;
+			({ version } = await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion }));
+		} else {
+			const { getLatestRelease } = require("./cli/update-cli") as typeof UpdateCli;
+			({ version } = await getLatestRelease({ timeoutMs: 5_000, channel }));
+		}
 		return Bun.semver.order(version, currentVersion) > 0 ? version : undefined;
 	} catch {
 		return undefined;
@@ -880,6 +880,7 @@ async function runInteractiveMode(
 			if (cfgStartupCheckUpdate.get(settings)) mode.showNewVersionNotification(newVersion);
 		};
 		if (cfgUpdateAuto.get(settings)) {
+			const { runAutoUpdate } = require("./cli/auto-update") as typeof AutoUpdate;
 			void runAutoUpdate(checkedVersionPromise, {
 				show: update => mode.showVersionUpdate(update),
 				notify: notifyNewVersion,
@@ -2345,6 +2346,12 @@ export async function runRootCommand(
 				if (isProtocolMode) {
 					throw new SessionResolutionError(`--from-${foreignSource} is not supported in ${mode} mode`);
 				}
+				const {
+					createForeignSessionStore,
+					foreignSessionInfoToSessionInfo,
+					foreignSessionSourceName,
+					persistForeignSession,
+				} = require("./session/foreign-session-import") as typeof ForeignSessionImport;
 				const sourceName = foreignSessionSourceName(foreignSource);
 				const store = (deps.createForeignSessionStore ?? createForeignSessionStore)(foreignSource);
 				let foreignSessions: ForeignSessionInfo[];
@@ -2782,11 +2789,12 @@ export async function runRootCommand(
 			}
 			const processedFiles =
 				initialArgs.fileArgs.length > 0
-					? await logger.time("processFileArguments", () =>
-							processFileArguments(initialArgs.fileArgs, {
+					? await logger.time("processFileArguments", () => {
+							const { processFileArguments } = require("./cli/file-processor") as typeof FileProcessor;
+							return processFileArguments(initialArgs.fileArgs, {
 								autoResizeImages: cfgImagesAutoResize.get(settingsInstance),
-							}),
-						)
+							});
+						})
 					: undefined;
 			const { initialMessage, initialImages } = buildInitialMessage({
 				parsed: initialArgs,
@@ -3004,6 +3012,7 @@ export async function runRootCommand(
 				}
 				void startBackgroundModelDiscovery?.();
 				if (cfgGcAutoCompress.get(settingsInstance)) {
+					const { scheduleGcAutoCompress } = require("./cli/gc-auto-compress") as typeof GcAutoCompress;
 					void scheduleGcAutoCompress(getAgentDir()).catch(error =>
 						logger.warn("Background session compression failed to start", { error: String(error) }),
 					);

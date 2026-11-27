@@ -519,24 +519,25 @@ export interface ContextWindowTiers {
 }
 
 /** Input spellings that can survive composition as a literal ID or register a global wire alias. */
-function couldShadowModelRole(
-	model: Pick<ModelSpec<Api>, "id" | "requestModelId" | "thinking">,
+function startupRoleRowCollision(
+	rows: readonly Pick<ModelSpec<Api>, "provider" | "id" | "requestModelId" | "thinking">[],
 	selectors: ReadonlySet<string>,
-): boolean {
-	if (
-		selectors.has(model.id.trim().toLowerCase()) ||
-		(model.requestModelId && selectors.has(model.requestModelId.toLowerCase()))
-	) {
-		return true;
-	}
-	const routes: Readonly<Record<string, string | undefined>> | undefined = model.thinking?.effortRouting;
-	if (routes) {
-		for (const effort in routes) {
-			const id = routes[effort];
-			if (id && selectors.has(id.toLowerCase())) return true;
+	competes?: (provider: string) => boolean,
+): string | undefined {
+	for (const model of rows) {
+		if (competes && !competes(model.provider)) continue;
+		if (selectors.has(model.id.trim().toLowerCase())) return `collision:literal-id:${model.provider}`;
+		if (model.requestModelId && selectors.has(model.requestModelId.toLowerCase())) {
+			return `collision:wire-alias:${model.provider}`;
+		}
+		const routes: Readonly<Record<string, string | undefined>> | undefined = model.thinking?.effortRouting;
+		if (routes) {
+			for (const effort in routes) {
+				const id = routes[effort];
+				if (id && selectors.has(id.toLowerCase())) return `collision:wire-alias:${model.provider}`;
+			}
 		}
 	}
-	return false;
 }
 
 /** Rows of a registry layer owned by `providerFilter`, or the whole layer when unfiltered. */
@@ -4583,23 +4584,28 @@ export class ModelRegistry {
 	 * Read a startup role's provider-local pool when no other available roster
 	 * can contribute a literal ID. Even an unavailable roster can register a
 	 * global bare variant alias; inspect its unkeyed sources without composing
-	 * them. Returns undefined when the full hydration and matcher are needed.
+	 * them. A string identifies the first check requiring broader hydration.
 	 * @internal
 	 */
-	async withStartupModelRoleCatalog<T>(
+	async withStartupModelRoleCatalog<T extends object>(
 		provider: string,
 		selectorIds: ReadonlySet<string>,
 		resolve: (models: Model<Api>[]) => T,
-	): Promise<T | undefined> {
+	): Promise<T | string> {
 		// A newly adopted login could also have invalidated the startup cache
 		// scope that landed the named provider; let the full pass revalidate it.
-		if (this.#owner || (await this.#pollStartupCacheCredentials()) !== false) return undefined;
-		if (this.#runtimeRegistrations.length > 0 || this.#hasFullSnapshot) return undefined;
+		if (this.#owner) return "conservative:mirror";
+		const changed = await this.#pollStartupCacheCredentials();
+		if (changed !== false) return changed ? "conservative:credentials-changed" : "conservative:credential-poll-failed";
+		if (this.#runtimeRegistrations.length) return `conservative:registration:${this.#runtimeRegistrations[0].name}`;
+		if (this.#hasFullSnapshot) return "conservative:full-snapshot";
 		const isAvailable = this.#createProviderAvailabilityCheck();
 		const otherAvailable = new Set<string>();
 		for (const other of this.#knownStaticProviders()) {
 			if (other.toLowerCase() === provider || !isAvailable(other)) continue;
-			if (getBundledModelSlice(other).some(model => modelKind(model) === "chat")) return undefined;
+			if (getBundledModelSlice(other).some(model => modelKind(model) === "chat")) {
+				return `conservative:available-roster:${other}`;
+			}
 			otherAvailable.add(other);
 		}
 
@@ -4613,38 +4619,39 @@ export class ModelRegistry {
 			) {
 				continue;
 			}
-			if (isAvailable(other) || this.#hasStartupDiscoveryAuth(other)) return undefined;
+			if (isAvailable(other) || this.#hasStartupDiscoveryAuth(other)) return `conservative:credential-scoped:${other}`;
 			const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === other);
 			if (!descriptor) {
 				// Special managers require a key. Catalog-only managers may
 				// still have an offline source.
 				if (!BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[other] && MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[other]) {
-					return undefined;
+					return `conservative:offline-catalog:${other}`;
 				}
 				continue;
 			}
 			if (!this.#canUseDescriptorWithoutAuth(descriptor)) continue;
 			const table = reviewedCollapseTable(other);
-			if (table && (table.families.length > 0 || table.templates?.length)) return undefined;
+			if (table && (table.families.length > 0 || table.templates?.length)) return `conservative:reviewed-table:${other}`;
 			const options = this.#createDescriptorModelManagerOptions(descriptor, undefined);
 			// Without a reviewed collapse table the offline roster contributes
 			// only input IDs and recorded wire IDs as aliases. Read persisted
 			// rows directly, not the manager's merge, policies, or landing.
-			if ((options.staticModels ?? getBundledModelSlice(other)).some(model => couldShadowModelRole(model, selectorIds))) {
-				return undefined;
-			}
+			const staticCollision = startupRoleRowCollision(options.staticModels ?? getBundledModelSlice(other), selectorIds);
+			if (staticCollision) return staticCollision;
 			const cache = readModelCache(
 				options.cacheProviderId ?? other,
 				options.cacheTtlMs ?? BUILT_IN_DISCOVERY_CACHE_TTL_MS,
 				Date.now,
 				this.#cacheDbPath,
 			);
-			if (cache?.models.some(model => couldShadowModelRole(model, selectorIds))) return undefined;
+			const cachedCollision = cache && startupRoleRowCollision(cache.models, selectorIds);
+			if (cachedCollision) return cachedCollision;
 		}
 
 		// Keyless built-ins include runners and optional local endpoints with
 		// no bundled chat rows. Their cached/configured rows can still be chat.
-		if (otherAvailable.size > 0 && this.getAvailableForProviders(otherAvailable).length > 0) return undefined;
+		const other = otherAvailable.size ? this.getAvailableForProviders(otherAvailable)[0] : undefined;
+		if (other) return `conservative:available-roster:${other.provider}`;
 		return resolve(this.getAvailableForProviders(new Set([provider])));
 	}
 
@@ -4653,31 +4660,32 @@ export class ModelRegistry {
 	 * contributed their discovery aliases. Check the inputs of the *available*
 	 * composition for remaining literal/alias shadows without projecting their
 	 * windows, overrides and metrics merely to select a role in another provider.
-	 * False proves absence; an uncertain or stale source takes the ordinary matcher.
+	 * Undefined proves absence; otherwise return the first collision or conservative
+	 * rejection for the startup trace. Never log a selector, cache namespace or key.
 	 * @internal
 	 */
-	mayShadowHydratedStartupRole(provider: string, selectors: ReadonlySet<string>): boolean {
-		if (this.#owner || this.#runtimeRegistrations.length || this.#hasFullSnapshot || hasRuntimeProviderRules()) {
-			return true;
-		}
+	hydratedStartupRoleBlocker(provider: string, selectors: ReadonlySet<string>): string | undefined {
+		if (this.#owner) return "conservative:mirror";
+		if (this.#runtimeRegistrations.length) return `conservative:registration:${this.#runtimeRegistrations[0].name}`;
+		if (this.#hasFullSnapshot) return "conservative:full-snapshot";
+		if (hasRuntimeProviderRules()) return "conservative:runtime-provider-rules";
 		const isAvailable = this.#createProviderAvailabilityCheck();
 		const competes = (other: string) => other.toLowerCase() !== provider && isAvailable(other);
-		const shadow = (model: Pick<ModelSpec<Api>, "id" | "requestModelId" | "thinking">) =>
-			couldShadowModelRole(model, selectors);
 		for (const rows of [
 			this.#customModelOverlays,
 			this.#runtimeModelOverlays,
 			this.#cachedDiscoverableModels,
 			this.#runtimeDiscoveredModels,
 		]) {
-			if (rows.some(row => competes(row.provider) && shadow(row))) return true;
+			const collision = startupRoleRowCollision(rows, selectors, competes);
+			if (collision) return collision;
 		}
 		const pending: string[] = [];
 		for (const other of this.#knownStaticProviders()) {
 			if (other.toLowerCase() === provider) {
 				// A lookup snapshot groups case variants, while availability is
 				// keyed by the registered spelling. Let the full pool separate them.
-				if (!isAvailable(other)) return true;
+				if (!isAvailable(other)) return `conservative:provider-spelling:${other}`;
 				continue;
 			}
 			if (!isAvailable(other)) continue;
@@ -4685,24 +4693,23 @@ export class ModelRegistry {
 			// overrides can contribute spellings beyond those on the input rows.
 			// Ordinary derived thinking pairs only combine two existing IDs.
 			const table = reviewedCollapseTable(other);
-			if (
-				other === "cursor" ||
-				table?.families.length ||
-				table?.templates?.length ||
-				this.#modelOverrides.has(other)
-			) {
-				return true;
-			}
-			if (getBundledModelSlice(other).some(shadow) || this.#cachedStandardModelsByProvider.get(other)?.some(shadow)) {
-				return true;
-			}
+			if (other === "cursor") return "conservative:synthesized-families:cursor";
+			if (table?.families.length || table?.templates?.length) return `conservative:reviewed-table:${other}`;
+			if (this.#modelOverrides.has(other)) return `conservative:model-overrides:${other}`;
+			const bundledCollision = startupRoleRowCollision(getBundledModelSlice(other), selectors);
+			if (bundledCollision) return bundledCollision;
+			const cached = this.#cachedStandardModelsByProvider.get(other);
+			const cachedCollision = cached && startupRoleRowCollision(cached, selectors);
+			if (cachedCollision) return cachedCollision;
 			if (this.#pendingStandardCacheProviders.has(other)) {
 				pending.push(this.#resolveStartupModelCacheProviderId(other));
 			}
 		}
 		const caches = readModelCaches<Api>(pending, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
-		for (const cache of caches.values()) if (cache.models.some(shadow)) return true;
-		return false;
+		for (const cache of caches.values()) {
+			const collision = startupRoleRowCollision(cache.models, selectors);
+			if (collision) return collision;
+		}
 	}
 
 	/**

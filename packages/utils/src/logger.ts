@@ -23,6 +23,7 @@ import { isPromise } from "node:util/types";
 import { getLogsDir, localDay } from "./dirs";
 import { RotatingFileSink } from "./logger/rotating-file";
 import { isPidAlive } from "./pid";
+import { sanitizeText } from "./sanitize-text";
 import { setStderrRedirectTarget } from "./stderr-guard";
 import { drainModuleLoadEvents, type ModuleLoadEvent, stopModuleLoadTiming, timingModeIncludes } from "./timing-buffer";
 import { isRecord } from "./type-guards";
@@ -678,7 +679,8 @@ export function printTimings(endpoint = "report snapshot"): void {
 		"--- Startup timings (wall clock; overlapping rows are not additive) ---",
 		`Before app timing: ${fmtMs(root.start)} (not attributed)`,
 	];
-	for (const child of root.children) printSpan(child, snapshot, 0, lines);
+	const minimum = timingModeIncludes("full") ? 0 : LOGGED_TIMING_THRESHOLD_MS;
+	for (const child of root.children) printSpan(child, snapshot, minimum, 0, lines);
 
 	const window = snapshot - root.start;
 	const covered = descendantCoverage(root, snapshot);
@@ -712,12 +714,15 @@ export function startTiming(): void {
 	gRecordTimings = true;
 }
 
-function shortenLoadPath(p: string): string {
-	const cwd = process.cwd();
-	if (p.startsWith(`${cwd}/`)) return p.slice(cwd.length + 1);
-	const home = process.env.HOME;
-	if (home && p.startsWith(`${home}/`)) return `~/${p.slice(home.length + 1)}`;
-	return p;
+/** Single-line path label for a startup span; project and home paths do not expose their absolute prefixes. */
+export function timingPath(file: string, cwd = process.cwd()): string {
+	const home = os.homedir();
+	const label = file.startsWith(`${cwd}${path.sep}`)
+		? file.slice(cwd.length + 1)
+		: file.startsWith(`${home}${path.sep}`)
+			? `~${file.slice(home.length)}`
+			: file;
+	return JSON.stringify(sanitizeText(label));
 }
 
 /**
@@ -793,21 +798,21 @@ function fmtMs(ms: number): string {
 	return `${ms.toFixed(0)}ms`;
 }
 
-function printSpan(span: Span, snapshot: number, depth: number, lines: string[]): void {
+function printSpan(span: Span, snapshot: number, minimum: number, depth: number, lines: string[]): void {
 	const indent = "  ".repeat(depth);
 	if (span.point) {
 		lines.push(`${indent}• ${span.op} @${fmtMs(span.start)}`);
 		return;
 	}
 	const duration = (span.end ?? snapshot) - span.start;
-	if (duration < LOGGED_TIMING_THRESHOLD_MS && span.end !== undefined && span.children.length === 0) return;
+	if (duration < minimum && span.end !== undefined && span.children.length === 0) return;
 	const unmarked = span.children.length
 		? ` (${fmtMs(duration - descendantCoverage(span, snapshot))} outside child spans)`
 		: "";
 	const overlap = isParallel(span, snapshot) ? " [overlaps sibling]" : "";
 	const open = span.end === undefined ? " [open at snapshot]" : "";
 	lines.push(`${indent}${span.op}: ${fmtMs(duration)}${unmarked}${overlap}${open} @${fmtMs(span.start)}`);
-	for (const child of span.children) printSpan(child, snapshot, depth + 1, lines);
+	for (const child of span.children) printSpan(child, snapshot, minimum, depth + 1, lines);
 }
 
 const MODULE_TOP = 10;
@@ -826,7 +831,7 @@ function printModuleTimings(events: readonly ModuleLoadEvent[], lines: string[])
 	for (let i = 0; i < limit; i++) {
 		const event = ranked[i];
 		lines.push(
-			`  ${shortenLoadPath(event.path)}: eval ${fmtMs(event.bodyEnd - event.bodyStart)}, read ${fmtMs(event.readEnd - event.readStart)}`,
+			`  ${timingPath(event.path)}: eval ${fmtMs(event.bodyEnd - event.bodyStart)}, read ${fmtMs(event.readEnd - event.readStart)}`,
 		);
 	}
 	if (limit < ranked.length) lines.push(`  … ${ranked.length - limit} more (PI_TIMING=full to show all)`);

@@ -2560,6 +2560,11 @@ export function getStartupModelRoleSelector(
 	return provider ? { provider, pattern } : undefined;
 }
 
+function rejectStartupRoleScope(reason: string): undefined {
+	logger.time(`resolveDefaultModelRole:scope:${reason}`);
+	return undefined;
+}
+
 /**
  * Resolve a startup role without widening its catalog. A provider reference wins
  * outright; for a suffix/pin, the ordinary matcher must first rule out literal
@@ -2606,43 +2611,35 @@ export async function tryResolveStartupModelRole(
 	let parsed = await registry.withStartupModelRoleCatalog(provider, shadowSelectors, models =>
 		parseModelPattern(pattern, models, preferences),
 	);
-	if (!parsed && hydrateRemaining) {
+	let hydratedModels: Model<Api>[] | undefined;
+	if (typeof parsed === "string") {
+		if (!hydrateRemaining) return rejectStartupRoleScope(`hydration-unavailable:${parsed}`);
 		await hydrateRemaining();
 		// Hydration can replace the named provider's rows and register aliases
 		// from unkeyed providers. Never reuse the pre-hydration match.
-		const models = registry.getAvailableForProviders(providerScope);
-		const candidate = parseModelPattern(pattern, models, preferences);
-		if (candidate.model && !candidate.warning && models.length > 0) {
-			shadowSelectors.clear();
-			for (const spelling of spellings) {
-				// A provider-qualified reference wins before all bare-ID phases,
-				// even over an aggregator carrying the base as a literal ID.
-				if (!findExactModelReferenceMatch(spelling, models)) shadowSelectors.add(spelling.toLowerCase());
-			}
-			let couldMatchBare = false;
-			for (const id of shadowSelectors) {
-				if (
-					// Only an intact, known provider prefix forbids cross-provider
-					// fuzzy matches (including matches against display names).
-					!id.startsWith(`${provider}/`) ||
-					resolveBareVariantSelector(id) ||
-					stripThinkingVariantSuffix(id) ||
-					BEDROCK_INFERENCE_PROFILE_ARN.test(id)
-				) {
-					couldMatchBare = true;
-					break;
-				}
-			}
-			if (!couldMatchBare && !registry.mayShadowHydratedStartupRole(provider, shadowSelectors)) parsed = candidate;
+		hydratedModels = registry.getAvailableForProviders(providerScope);
+		parsed = parseModelPattern(pattern, hydratedModels, preferences);
+	}
+	if (!parsed.model || hydratedModels?.length === 0) return rejectStartupRoleScope(`candidate-missing:${provider}`);
+	if (parsed.warning) return rejectStartupRoleScope(`candidate-warning:${provider}`);
+	if (hydratedModels) {
+		shadowSelectors.clear();
+		for (const spelling of spellings) {
+			// A provider-qualified reference wins before all bare-ID phases,
+			// even over an aggregator carrying the base as a literal ID.
+			if (!findExactModelReferenceMatch(spelling, hydratedModels)) shadowSelectors.add(spelling.toLowerCase());
 		}
-	}
-	if (!parsed) {
-		logger.time("resolveDefaultModelRole:scope:possible-catalog-shadow");
-		return undefined;
-	}
-	if (!parsed.model || parsed.warning) {
-		logger.time("resolveDefaultModelRole:scope:unresolved-suffix");
-		return undefined;
+		for (const id of shadowSelectors) {
+			// Only an intact, known provider prefix forbids cross-provider
+			// fuzzy matches (including matches against display names).
+			if (!id.startsWith(`${provider}/`)) return rejectStartupRoleScope("conservative:unqualified-spelling");
+			const alias = resolveBareVariantSelector(id);
+			if (alias) return rejectStartupRoleScope(`collision:registered-alias:${alias.providers.join(",")}`);
+			if (stripThinkingVariantSuffix(id)) return rejectStartupRoleScope("conservative:thinking-variant");
+			if (BEDROCK_INFERENCE_PROFILE_ARN.test(id)) return rejectStartupRoleScope("conservative:bedrock-profile");
+		}
+		const blocker = registry.hydratedStartupRoleBlocker(provider, shadowSelectors);
+		if (blocker) return rejectStartupRoleScope(blocker);
 	}
 	logger.time("resolveDefaultModelRole:scope:suffix-or-route");
 	return toResolvedRoleValue(parsed.model, parsed, 0);
