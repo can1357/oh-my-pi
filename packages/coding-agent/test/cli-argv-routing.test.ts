@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resolveCliArgv } from "@oh-my-pi/pi-coding-agent/cli-commands";
+import { parseReviewLaunch } from "@oh-my-pi/pi-coding-agent/commands/review";
 
 describe("resolveCliArgv routes subcommands hidden behind leading global flags", () => {
 	test("`--approval-mode=yolo acp` dispatches the acp subcommand with the flag preserved", () => {
@@ -60,6 +61,49 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 	test("routes the review subcommand without launch-flag rewriting", () => {
 		expect(resolveCliArgv(["review", "--base", "main", "commit", "handling"])).toEqual({
 			argv: ["review", "--base", "main", "commit", "handling"],
+		});
+	});
+
+	test("forwards launch flags before the review subcommand", () => {
+		expect(resolveCliArgv(["--model", "anthropic/opus", "--max-time", "600", "review", "--base", "main"])).toEqual({
+			argv: ["review", "--model", "anthropic/opus", "--max-time", "600", "--base", "main"],
+		});
+	});
+
+	test("keeps forwarded launch flags and forces the headless review contract", () => {
+		const review = parseReviewLaunch([
+			"--model",
+			"anthropic/opus",
+			"--max-time",
+			"600",
+			"--base",
+			"main",
+			"--head",
+			"HEAD",
+			"focus",
+		]);
+		expect(review).toEqual({
+			base: "main",
+			head: "HEAD",
+			focus: "focus",
+			launchArgv: ["--print", "--allow-home", "--wait-async", "--model", "anthropic/opus", "--max-time", "600"],
+		});
+		expect(parseArgs(review.launchArgv).waitAsync).toBe(true);
+	});
+
+	test("rejects an explicitly empty or missing review head", () => {
+		expect(() => parseReviewLaunch(["--base", "main", "--head"])).toThrow("--head requires a non-empty ref.");
+		expect(() => parseReviewLaunch(["--base", "main", "--head="])).toThrow("--head requires a non-empty ref.");
+		expect(() => parseReviewLaunch(["--base", "main", "--head", "HEAD", "--head"])).toThrow(
+			"--head requires a non-empty ref.",
+		);
+	});
+
+	test("keeps option-looking focus text after the separator", () => {
+		expect(parseReviewLaunch(["--base", "main", "--", "check the --head flag"])).toEqual({
+			base: "main",
+			focus: "check the --head flag",
+			launchArgv: ["--print", "--allow-home", "--wait-async"],
 		});
 	});
 
