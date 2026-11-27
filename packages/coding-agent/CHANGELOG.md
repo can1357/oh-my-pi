@@ -172,6 +172,7 @@
 - RPC mode now writes a `notice` frame with `source: "session-model-restore"` before exiting when a startup `--continue`/`--resume` cannot restore the saved model, so hosts can tell the fail-closed exit from a crash and rebind via `open_session`/`switch_session` with an explicit model ([#17611](https://github.com/can1357/oh-my-pi/issues/17611))
 - Corrected the theme docs: markdown code fences render as `mdCodeBlockBorder`-colored fence rows, not `boxRound.*` frames ([#20111](https://github.com/can1357/oh-my-pi/issues/20111))
 - Fixed routine absolute-path `rm -f` and `rm -r` commands ignoring the bash allow policy in `write` mode; home directories and protected system roots still require approval ([#20241](https://github.com/can1357/oh-my-pi/issues/20241), [#20244](https://github.com/can1357/oh-my-pi/pull/20244) by [@roboomp](https://github.com/roboomp))
+- `omp usage` no longer reports a disabled MCP OAuth login as `re-login to restore` after the server has been logged into again ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
 
 ### Removed
 
