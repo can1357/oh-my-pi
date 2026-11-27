@@ -1602,6 +1602,20 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
+/**
+ * The interactive TUI switched the session it shows: focused a subagent, hopped to another one,
+ * or returned to the main session. Fires on the main session once the new view is attached.
+ */
+export interface AgentViewChangedEvent {
+	type: "agent_view_changed";
+	/** Agent now shown; undefined for the main session. */
+	agentId: string | undefined;
+	/** Agent shown before; undefined for the main session. */
+	previousAgentId: string | undefined;
+	/** Session id of the session now shown. */
+	sessionId: string;
+}
+
 interface ToolEventIdentity {
 	toolCallId: string;
 	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
@@ -1786,7 +1800,8 @@ export type ExtensionEvent =
 	| ToolApprovalResolvedEvent
 	| PlanReviewRequestedEvent
 	| PlanReviewResolvedEvent
-	| ModeChangedEvent;
+	| ModeChangedEvent
+	| AgentViewChangedEvent;
 
 // ============================================================================
 // Event Results
@@ -2041,6 +2056,7 @@ export interface ExtensionAPI {
 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
+	on(event: "agent_view_changed", handler: ExtensionHandler<AgentViewChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
