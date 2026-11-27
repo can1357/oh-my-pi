@@ -88,7 +88,9 @@ try {
 	console.log("\n--- diagnostics, WITH deferred channel (short inline wait, then late) ---");
 	for (let i = 30; i <= 34; i++) {
 		const { handle } = makeDeferred(`write #${i - 29}`);
-		await timeCall(`write #${i - 29} (inline)`, () => wtDiag(target, body(i), undefined, undefined, () => handle));
+		await timeCall(`write #${i - 29} (inline)`, () =>
+			wtDiag(target, body(i), undefined, undefined, undefined, () => handle),
+		);
 	}
 	// Give any in-flight late fetches a moment to land before teardown.
 	await Bun.sleep(6000);

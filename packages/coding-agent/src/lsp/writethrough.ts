@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import { isEnoent, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import type { BunFile } from "bun";
 import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-write-fallback";
 import {
 	beginPendingDiskWrite,
@@ -134,6 +135,8 @@ export type WritethroughCallback = (
 	dst: string,
 	content: string,
 	signal?: AbortSignal,
+	/** Retained for SDK callers; the worker writes to `dst`. */
+	file?: BunFile,
 	batch?: LspWritethroughBatchRequest,
 	getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 	onCommitted?: WritethroughCommitHook,
@@ -143,12 +146,13 @@ export type WritethroughCallback = (
 export async function writethroughNoop(
 	dst: string,
 	content: string,
-	_signal?: AbortSignal,
+	signal?: AbortSignal,
+	_file?: BunFile,
 	_batch?: LspWritethroughBatchRequest,
 	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 	onCommitted?: WritethroughCommitHook,
 ): Promise<WritethroughResult> {
-	await writeFileWithFallback(dst, content);
+	await writeFileWithFallback(dst, content, signal);
 	await onCommitted?.(content);
 	return { finalContent: content };
 }
@@ -417,14 +421,22 @@ async function runLspWritethrough(
 	// Bytes this operation has committed to disk; `undefined` until they land
 	// there (the caller already wrote `content` when `contentAlreadyWritten`).
 	let diskContent = contentAlreadyWritten ? content : undefined;
+	let submitted: { content: string; promise: Promise<void> } | undefined;
 	const writeContent = async (value: string) => {
-		await writeFileWithFallback(dst, value);
-		diskContent = value;
+		if (diskContent === value) return;
+		// Keep the actual disk operation, including its failure, available to
+		// the budget fallback. The LSP timeout does not cancel the tool write.
+		if (submitted?.content !== value) {
+			submitted = {
+				content: value,
+				promise: writeFileWithFallback(dst, value, signal).then(() => {
+					diskContent = value;
+				}),
+			};
+		}
+		await submitted.promise;
 	};
-	/** Commit {@link finalContent} unless those exact bytes are already on disk. */
-	const commitWrite = async () => {
-		if (diskContent !== finalContent) await writeContent(finalContent);
-	};
+	const commitWrite = () => writeContent(finalContent);
 	let committed: Promise<void> | undefined;
 	/**
 	 * Commit the final bytes, then run the caller's `onCommitted` hook on them, once. A budget
@@ -480,7 +492,6 @@ async function runLspWritethrough(
 	let diagnostics: FileDiagnosticsResult | undefined;
 	let timedOut = false;
 	let synced = false;
-	let operationSignal: AbortSignal | undefined;
 	// The overlay leads disk from the first sync below until the write commits;
 	// bar disk-reconciliation for the file so a concurrent semantic query cannot
 	// revert the server to pre-write content.
@@ -494,7 +505,7 @@ async function runLspWritethrough(
 			},
 			{ once: true },
 		);
-		operationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		const operationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		await untilAborted(operationSignal, async () => {
 			if (enableDiagnostics) {
 				// The target overlay leads disk until commit; reconcile only other
@@ -506,14 +517,17 @@ async function runLspWritethrough(
 					}),
 				);
 			}
+			operationSignal.throwIfAborted();
 			if (useCustomFormatter) {
 				// Custom linters operate on on-disk input; the shared pre-write also
 				// supports implementations that inspect the file before formatting.
-				if (diskContent !== content) await writeContent(content);
+				await writeContent(content);
+				operationSignal.throwIfAborted();
 				const [formattedContent, capturedVersions] = await Promise.all([
 					formatContent(dst, content, cwd, customLinterServers, operationSignal),
 					minVersionsPromise,
 				]);
+				operationSignal.throwIfAborted();
 				finalContent = formattedContent.content;
 				minVersions = capturedVersions;
 				if (formattedContent.failed) {
@@ -524,6 +538,7 @@ async function runLspWritethrough(
 					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
 				}
 				await commitFinalWrite();
+				operationSignal.throwIfAborted();
 				await notifyWriteCommitted(operationSignal);
 				if (changeType === FileChangeType.Created) {
 					await reloadTypeScriptProjectsAfterCreate(cwd, lspServers, operationSignal, {
@@ -538,6 +553,7 @@ async function runLspWritethrough(
 				// dependent's cached missing-module resolution indefinitely.
 				if (changeType === FileChangeType.Created) {
 					await commitWrite();
+					operationSignal.throwIfAborted();
 					await notifyWriteCommitted(operationSignal);
 					await reloadTypeScriptProjectsAfterCreate(cwd, lspServers, operationSignal);
 				}
@@ -548,6 +564,7 @@ async function runLspWritethrough(
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
 					const formatted = await formatContent(dst, content, cwd, lspServers, operationSignal);
+					operationSignal.throwIfAborted();
 					finalContent = formatted.content;
 					if (formatted.failed) {
 						formatter = FileFormatResult.FAILED;
@@ -563,9 +580,11 @@ async function runLspWritethrough(
 					await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal);
 				}
 
+				operationSignal.throwIfAborted();
 				// 4. Write to disk. A formatter-altered body is the only thing left to
 				// commit when the create already landed above; the hook runs either way.
 				await commitFinalWrite();
+				operationSignal.throwIfAborted();
 				await notifyWriteCommitted(operationSignal);
 			}
 
@@ -578,6 +597,7 @@ async function runLspWritethrough(
 		});
 		synced = true;
 	} catch {
+		signal?.throwIfAborted();
 		// The commit (and its hook) precedes the late fetch below, so that fetch
 		// cannot lint the file before the bytes and their metadata are final.
 		await commitFinalWrite();
@@ -717,6 +737,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		dst: string,
 		content: string,
 		signal?: AbortSignal,
+		_file?: BunFile,
 		batch?: LspWritethroughBatchRequest,
 		getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 		onCommitted?: WritethroughCommitHook,

@@ -398,15 +398,16 @@ async function classifyWriteFailure(dst: string, error: unknown): Promise<WriteF
 	return { kind: "retry" };
 }
 
-export async function writeFileWithFallback(dst: string, content: string): Promise<void> {
+export async function writeFileWithFallback(dst: string, content: string, signal?: AbortSignal): Promise<void> {
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,
 	// which bounds the loop at two writes.
 	for (let attempt = 0; ; attempt++) {
 		try {
-			await writeLocalFile(dst, content);
+			await writeLocalFile(dst, content, signal);
 			return;
 		} catch (error) {
+			signal?.throwIfAborted();
 			if (fallbackHandlers.length === 0) throw error;
 			// On the second attempt a `retry` verdict can no longer change the
 			// outcome, so skip the probe and let the error stand unless it is a
@@ -437,6 +438,7 @@ export async function writeFileWithFallback(dst: string, content: string): Promi
 					// session, so the request names the one that issued it.
 					const sessionId = mutationSessionStorage.getStore();
 					for (const handler of Array.from(fallbackHandlers)) {
+						signal?.throwIfAborted();
 						try {
 							if (await handler({ dst: target, content, cause: failure.cause, sessionId })) return;
 						} catch (handlerError) {

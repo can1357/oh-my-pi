@@ -193,6 +193,7 @@ async function runSmokeTest(): Promise<void> {
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	const { smokeTestFileWriteWorker } = await import("./tools/file-write-io");
 	// Every smoke that reaches the daemon must start this build's own, never the user's live one.
 	const cleanupDaemon = await isolateDaemonForSmokeTest();
 	try {
@@ -200,6 +201,7 @@ async function runSmokeTest(): Promise<void> {
 		await smokeTestSpotlightWorker();
 		await smokeTestStatsActivityWorker();
 		await smokeTestTranscriptIndexWorker();
+		await smokeTestFileWriteWorker();
 
 		const statsServer = await startServer(0);
 		try {

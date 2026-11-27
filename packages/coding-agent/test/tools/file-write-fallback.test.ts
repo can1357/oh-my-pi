@@ -10,6 +10,7 @@ import {
 	withFileMutationSession,
 	writeFileWithFallback,
 } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import * as fileWriteIo from "../../src/tools/file-write-io";
 
 /** Mimics a Node/Bun filesystem error with a structured `code`, without touching a real fs. */
@@ -55,6 +56,19 @@ describe("writeFileWithFallback", () => {
 	const disposers: Array<() => void> = [];
 	afterEach(() => {
 		for (const dispose of disposers.splice(0)) dispose();
+	});
+
+	it("does not overwrite a user save when an aborted write leaves the worker inbox", async () => {
+		await using dir = await TempDir.create("@omp-queued-write-");
+		const proc = Bun.spawn({
+			cmd: [process.execPath, path.resolve(import.meta.dir, "../fixtures/queued-file-write.ts"), dir.path()],
+			stdout: "ignore",
+			stderr: "pipe",
+			timeout: 4_000,
+			killSignal: "SIGKILL",
+		});
+		const [status, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+		expect(status, stderr).toBe(0);
 	});
 
 	function denyWrite(error: unknown): void {

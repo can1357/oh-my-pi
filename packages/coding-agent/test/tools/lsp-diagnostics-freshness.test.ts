@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
 import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
@@ -22,6 +23,7 @@ import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type ptree, TempDir } from "@oh-my-pi/pi-utils";
+import * as fileWriteIo from "../../src/tools/file-write-io";
 
 const TEST_SERVER: ServerConfig = {
 	command: "test-lsp",
@@ -141,6 +143,51 @@ describe("LSP diagnostics freshness", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		tempDir.removeSync();
+	});
+
+	it("joins the pending disk write when the LSP budget expires without replaying it", async () => {
+		const filePath = tempDir.join("slow.ts");
+		const budget = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(AbortSignal, "timeout").mockReturnValue(budget.signal);
+		const format = vi.fn(async () => "formatted\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", createFormatter(format)]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+		const write = fileWriteIo.writeLocalFile;
+		const writes = vi.spyOn(fileWriteIo, "writeLocalFile").mockImplementationOnce(async (dst, content, signal) => {
+			started.resolve();
+			await release.promise;
+			await write(dst, content, signal);
+		});
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true });
+		const output = writethrough(filePath, "committed\n");
+		await started.promise;
+		try {
+			budget.abort();
+			await setImmediate();
+			expect(writes).toHaveBeenCalledTimes(1);
+		} finally {
+			release.resolve();
+			await output;
+		}
+		expect(await Bun.file(filePath).text()).toBe("committed\n");
+		expect(format).not.toHaveBeenCalled();
+	});
+
+	it("formats an SDK call that passes a BunFile in the fourth argument", async () => {
+		const filePath = tempDir.join("sdk.ts");
+		const formatted = "export const value = 1;\n";
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", createFormatter(async () => formatted)]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true });
+
+		const result = await writethrough(filePath, "export const value=1;\n", undefined, Bun.file(filePath));
+
+		expect(result.finalContent).toBe(formatted);
+		expect(await Bun.file(filePath).text()).toBe(formatted);
 	});
 
 	it("announces watched-file creates even when no server owns the file type", async () => {
@@ -461,8 +508,8 @@ describe("LSP diagnostics freshness", () => {
 			enableFormat: false,
 			enableDiagnostics: true,
 		});
-		await writethrough(stylesPath, ".section {}\n", undefined, { id: "batch", flush: false });
-		const result = await writethrough(tsPath, 'import styles from "./probe.module.scss";\n', undefined, {
+		await writethrough(stylesPath, ".section {}\n", undefined, undefined, { id: "batch", flush: false });
+		const result = await writethrough(tsPath, 'import styles from "./probe.module.scss";\n', undefined, undefined, {
 			id: "batch",
 			flush: true,
 		});
@@ -605,6 +652,7 @@ describe("LSP diagnostics freshness", () => {
 			"export const value: number = 'x';\n",
 			undefined,
 			undefined,
+			undefined,
 			() => handle,
 		);
 
@@ -698,6 +746,7 @@ describe("LSP diagnostics freshness", () => {
 			"export const value: number = 'x';\n",
 			undefined,
 			undefined,
+			undefined,
 			() => handle,
 		);
 		deferredController.abort();
@@ -748,6 +797,7 @@ describe("LSP diagnostics freshness", () => {
 		const inline = await writethrough(
 			filePath,
 			"export const value: number = 'x';\n",
+			undefined,
 			undefined,
 			undefined,
 			() => handle,

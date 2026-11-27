@@ -1041,7 +1041,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
 			if (existing) {
 				try {
-					await assertLocalFileNotHeldOpen(absolutePath);
+					await assertLocalFileNotHeldOpen(absolutePath, signal);
 				} catch (error) {
 					throw new ToolError(`Cannot write '${path}': ${(error as Error).message}`);
 				}
@@ -1122,6 +1122,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				absolutePath,
 				writeContent,
 				signal,
+				undefined,
 				batchRequest,
 				dst => deferred?.begin(dst),
 				async committed => {

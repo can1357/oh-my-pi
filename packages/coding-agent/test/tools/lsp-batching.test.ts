@@ -52,7 +52,7 @@ describe("createLspWritethrough batching", () => {
 		const fileB = path.join(tempDir.path(), "b.ts");
 		const batchId = `batch-${Date.now()}`;
 
-		const firstResult = await writethrough(fileA, "const a = 1;\n", undefined, {
+		const firstResult = await writethrough(fileA, "const a = 1;\n", undefined, undefined, {
 			id: batchId,
 			flush: false,
 		});
@@ -62,7 +62,7 @@ describe("createLspWritethrough batching", () => {
 		expect(loadConfigSpy).toHaveBeenCalledTimes(0);
 		expect(await Bun.file(fileA).text()).toBe("const a = 1;\n");
 
-		const secondResult = await writethrough(fileB, "const b = 2;\n", undefined, {
+		const secondResult = await writethrough(fileB, "const b = 2;\n", undefined, undefined, {
 			id: batchId,
 			flush: true,
 		});
@@ -82,13 +82,13 @@ describe("createLspWritethrough batching", () => {
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
 		const batchId = `external-change-${Date.now()}`;
-		await writethrough(fileA, "const value = 'tool';\n", undefined, {
+		await writethrough(fileA, "const value = 'tool';\n", undefined, undefined, {
 			id: batchId,
 			flush: false,
 		});
 
 		await Bun.write(fileA, "const value = 'external';\n");
-		await writethrough(fileB, "const other = true;\n", undefined, {
+		await writethrough(fileB, "const other = true;\n", undefined, undefined, {
 			id: batchId,
 			flush: true,
 		});
@@ -105,13 +105,13 @@ describe("createLspWritethrough batching", () => {
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
 		const batchId = `external-delete-${Date.now()}`;
-		await writethrough(fileA, "const removed = true;\n", undefined, {
+		await writethrough(fileA, "const removed = true;\n", undefined, undefined, {
 			id: batchId,
 			flush: false,
 		});
 
 		await Bun.file(fileA).unlink();
-		await writethrough(fileB, "const survivor = true;\n", undefined, {
+		await writethrough(fileB, "const survivor = true;\n", undefined, undefined, {
 			id: batchId,
 			flush: true,
 		});
@@ -132,11 +132,11 @@ describe("createLspWritethrough batching", () => {
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
 		const batchId = `bom-${Date.now()}`;
-		await writethrough(fileA, "\uFEFFconst value=1\n", undefined, {
+		await writethrough(fileA, "\uFEFFconst value=1\n", undefined, undefined, {
 			id: batchId,
 			flush: false,
 		});
-		const result = await writethrough(fileB, "const other=1\n", undefined, {
+		const result = await writethrough(fileB, "const other=1\n", undefined, undefined, {
 			id: batchId,
 			flush: true,
 		});
@@ -158,11 +158,11 @@ describe("createLspWritethrough batching", () => {
 		});
 
 		const batchId = "formatter-failure";
-		await writethrough(path.join(tempDir.path(), "a.ts"), "const a=1\n", undefined, {
+		await writethrough(path.join(tempDir.path(), "a.ts"), "const a=1\n", undefined, undefined, {
 			id: batchId,
 			flush: false,
 		});
-		const result = await writethrough(path.join(tempDir.path(), "b.ts"), "const b=1\n", undefined, {
+		const result = await writethrough(path.join(tempDir.path(), "b.ts"), "const b=1\n", undefined, undefined, {
 			id: batchId,
 			flush: true,
 		});
@@ -180,14 +180,14 @@ describe("createLspWritethrough batching", () => {
 		const fileA = path.join(tempDir.path(), "a.ts");
 		const fileB = path.join(tempDir.path(), "b.ts");
 		const batchId = `final-write-failure-${Date.now()}`;
-		await writethrough(fileA, "const applied = true;\n", undefined, {
+		await writethrough(fileA, "const applied = true;\n", undefined, undefined, {
 			id: batchId,
 			flush: false,
 		});
 		vi.spyOn(fileWriteIo, "writeLocalFile").mockRejectedValueOnce(new Error("ENOSPC"));
 
 		await expect(
-			writethrough(fileB, "const failed = true;\n", undefined, {
+			writethrough(fileB, "const failed = true;\n", undefined, undefined, {
 				id: batchId,
 				flush: true,
 			}),
@@ -264,8 +264,8 @@ describe.skipIf(process.getuid?.() === 0)("createLspWritethrough batching with a
 
 		const sibling = path.join(root, "sibling.ts");
 		const batchId = `brokered-${Date.now()}`;
-		await writethrough(opaque, "const after = true;\n", undefined, { id: batchId, flush: false });
-		await writethrough(sibling, "const other = true;\n", undefined, { id: batchId, flush: true });
+		await writethrough(opaque, "const after = true;\n", undefined, undefined, { id: batchId, flush: false });
+		await writethrough(sibling, "const other = true;\n", undefined, undefined, { id: batchId, flush: true });
 
 		expect(brokered).toEqual([{ dst: opaque, content: "const after = true;\n" }]);
 		expect(await Bun.file(sibling).text()).toBe("const other = true;\n");
