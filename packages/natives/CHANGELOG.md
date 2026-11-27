@@ -22,6 +22,7 @@
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
 - Fixed Wayland capture crashing on unreadable portal frame buffers while preserving capture from readable shared-memory frames on older PipeWire versions ([#19647](https://github.com/can1357/oh-my-pi/issues/19647))
 - Fixed `Shell.abort()` sometimes doing nothing to a `Shell.run` that was queued behind another run on the same shell, leaving the command and its child processes running ([#17105](https://github.com/can1357/oh-my-pi/issues/17105))
+- Fixed the bash tool's built-in `rsync --timeout=N` skipping a keepalive while its sender waited on a quiet peer on a busy machine, which could end a healthy transfer with `rsync: [sender] io timeout after N seconds -- exiting` (code 30) ([#20763](https://github.com/can1357/oh-my-pi/pull/20763) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.2.1] - 2026-11-25
 
