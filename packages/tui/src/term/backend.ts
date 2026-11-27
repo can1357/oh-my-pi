@@ -796,25 +796,25 @@ export class TermBackend {
 
 	/**
 	 * The dock's blocks at `width`, first painted at their remembered fit heights. Each covering
-	 * block gets the rows left by the non-covering dock and earlier covers. A changed budget
-	 * repaints its subtree so its last paint describes the block composed on screen.
+	 * block gets the rows every other block actually takes, so earlier covers shrink first. A
+	 * changed budget repaints its subtree so its last paint describes the block composed on screen.
 	 */
 	#paintDock(width: number, height: number): Block[] {
 		const nodes = this.#surface.dock();
 		const blocks = nodes.map(node => this.#paint(node, width, this.#dockFit.get(node)));
-		const nonCovering = blocks.reduce((sum, block) => sum + (block.covering ? 0 : block.rows.length), 0);
-		let used = 0;
+		let total = blocks.reduce((sum, block) => sum + block.rows.length, 0);
 		for (let i = 0; i < blocks.length; i++) {
 			const node = nodes[i]!;
 			const block = blocks[i]!;
 			if (!block.covering) continue;
-			const budget = Math.max(1, height - nonCovering - used);
+			const budget = Math.max(1, height - (total - block.rows.length));
 			if (budget !== this.#dockFit.get(node)) {
 				releasePaintTree(node);
-				blocks[i] = this.#paint(node, width, budget);
+				const fitted = this.#paint(node, width, budget);
+				total += fitted.rows.length - block.rows.length;
+				blocks[i] = fitted;
 				this.#dockFit.set(node, budget);
 			}
-			used += blocks[i]!.rows.length;
 		}
 		return blocks;
 	}

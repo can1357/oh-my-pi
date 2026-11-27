@@ -502,6 +502,53 @@ describe("TermBackend main surface", () => {
 		}
 	});
 
+	it("keeps both covers and the composer on screen, giving the later cover the remaining rows", () => {
+		defineRolePainter("rows", "test.cover", (node, cx) => {
+			// Both test covers supply their row labels through the rows node's lines prop.
+			const props = node.props() as { lines: readonly string[] };
+			const rows = props.lines.slice(0, cx.height);
+			return { rows, covering: rows.length };
+		});
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			dock: () => [
+				<rows key="report" role="test.cover" lines={lines("r", 5)} />,
+				<rows key="ask" role="test.cover" lines={lines("a", 5)} />,
+				<rows key="composer" lines={[">"]} />,
+			],
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		try {
+			backend.renderNow();
+			expect(driver.viewport.slice(-driver.rows)).toEqual(["r0", ...lines("a", 4), ">"]);
+			expect(driver.viewport.length).toBe(driver.rows);
+		} finally {
+			backend.stop();
+		}
+	});
+
+	it("fits a cover above later covering rows whose painter ignores the height budget", () => {
+		defineRolePainter("rows", "test.cover", (_node, cx) => {
+			const rows = lines("c", Math.min(5, cx.height ?? 5));
+			return { rows, covering: rows.length };
+		});
+		defineRolePainter("rows", "test.popup", () => ({ rows: ["p0", "p1", ">"], covering: 2 }));
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			dock: () => [<rows key="cover" role="test.cover" />, <rows key="composer" role="test.popup" />],
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		try {
+			backend.renderNow();
+			expect(driver.viewport.slice(-driver.rows)).toEqual([...lines("c", 3), "p0", "p1", ">"]);
+			expect(driver.viewport.length).toBe(driver.rows);
+		} finally {
+			backend.stop();
+		}
+	});
+
 	it("retires under a cover only what the screen without it cannot fit", () => {
 		const b = signal(lines("b", 2));
 		const { driver, backend, show, screen } = covered({
