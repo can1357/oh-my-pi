@@ -121,7 +121,6 @@ function apiFamily(api?: Api): ApiFamily {
 		case "azure-openai-responses":
 			return "openai";
 		case "google-generative-ai":
-		case "google-gemini-cli":
 		case "google-vertex":
 			return "google";
 		default:

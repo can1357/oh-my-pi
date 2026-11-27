@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from robomp.db import Database
-from robomp.github_client import IssueIndexEntry
-from robomp.issue_index import IssueIndexSync, ingest_webhook_payload, parse_search_query
+from robomp.github_client import IssueIndexEntry, IssueInfo
+from robomp.issue_index import IssueIndexSync, duplicate_candidates, ingest_webhook_payload, parse_search_query
 
 
 def _entry(number: int, **overrides) -> IssueIndexEntry:
@@ -60,6 +60,39 @@ def test_search_issue_index_matches_body_text_and_ranks(db: Database) -> None:
     # body-only terms also hit
     found = db.search_issue_index("octo/widget", keywords=("overlay",))
     assert [e.number for e in found] == [1]
+
+
+def test_search_issue_index_ranks_partial_matches_instead_of_dropping_them(db: Database) -> None:
+    """A term no row contains must not empty the result: duplicates were missed
+    when every keyword had to match. Title hits outrank body-only hits."""
+    db.upsert_issue_index(_entry(1, title="unrelated", body="the wait tool hangs on idle jobs"))
+    db.upsert_issue_index(_entry(2, title="wait tool hangs", body="details"))
+    db.upsert_issue_index(_entry(3, title="docs typo", body="readme"))
+    found = db.search_issue_index("octo/widget", keywords=("wait", "hangs", "stalls"))
+    assert [e.number for e in found] == [2, 1]
+
+
+def test_duplicate_candidates_rank_original_first_and_skip_self(db: Database) -> None:
+    db.upsert_issue_index(_entry(10, title="Ctrl+C kills subagents mid-task", body="pressing ctrl c in the tui"))
+    db.upsert_issue_index(_entry(11, title="Add dark theme", body="please add a dark theme"))
+    db.upsert_issue_index(_entry(12, title="subagents die when I press Ctrl+C", body="ctrl c stops every subagent"))
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=12,
+        title="subagents die when I press Ctrl+C",
+        body="ctrl c stops every subagent",
+        state="open",
+        author="bob",
+        labels=(),
+        is_pull_request=False,
+    )
+
+    assert duplicate_candidates(db, issue) is None  # index never backfilled: unknown, not "no matches"
+    db.set_issue_index_watermark("octo/widget", "2026-07-01T00:00:00Z")
+    found = duplicate_candidates(db, issue)
+    assert found is not None
+    assert [e.number for e in found][0] == 10
+    assert 12 not in [e.number for e in found]
 
 
 def test_search_issue_index_filters(db: Database) -> None:

@@ -30,6 +30,7 @@ Behavior notes:
 - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
+- A startup resume (`--continue`, `--resume`) whose saved models can no longer be resolved (a provider was renamed or removed, a model id changed, or credentials are missing) fails closed rather than send the transcript to another model: the process writes `{ type: "notice", level: "error", message: "Could not restore model <provider/id>", source: "session-model-restore" }` to stdout, then exits with code `1` without a `ready` frame. `--model` at startup picks the model explicitly and skips the check. A host that needs to recover in-process should start without `--continue`/`--resume` and bind the session with [`open_session`](#open_session-payload) or `switch_session`, which fail as a recoverable command error on the same condition and accept an explicit `provider`/`modelId`.
 - Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
@@ -139,6 +140,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "abort_and_deliver_queue" }`
 - `{ id?, type: "resume" }`
 - `{ id?, type: "new_session", parentSession?: string }`
+- `{ id?, type: "clear_context" }` — clears the conversation in place like the TUI's `/clear`: session ID, title, model, settings and transcript file are kept, a reset boundary is appended, and extensions receive `session_clear`. On success, earlier queued input does not run in the cleared conversation and outstanding prompts settle. Returns `{ droppedCount }`; fails with `session_busy` while a response streams or a foreground bash/eval runs.
 - `{ id?, type: "open_session", sessionDir: string, provider?: string, modelId?: string }`
 
 ### Protocol
@@ -1746,6 +1748,7 @@ Failures are `success: false` with string `error`.
 - Empty `set_session_name` is rejected (`Session name cannot be empty`).
 - Extension UI responses and valid host-tool/host-URI updates/results with unknown `id` are ignored. These side-channel frames do not receive command response frames.
 - Normal termination occurs on stdin close or extension-triggered shutdown. Output/spool failures and unrecovered session-persistence failures are fatal.
+- A startup resume whose saved model cannot be restored is fatal before `ready`; its `notice` frame has `source: "session-model-restore"` (see [Startup](#startup)).
 - Session-persistence errors emit an unfiltered `{ type: "notice", level: "error", message, source: "session-persistence" }` frame and a stderr mirror. A recovered failure can still shut down normally; a failure still latched during disposal exits with code `1` after draining stdout.
 
 ## Compact Command Flows

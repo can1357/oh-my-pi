@@ -3,6 +3,8 @@
  * A side-question note in the transcript (native face): the topic head
  * (`btw` tag, question, copy/fold tools), one column per turn, and the
  * latest turn's status; folded, a one-line topic that opens on click.
+ * Only a click on the head points the composer at the note: a click in an
+ * answer (reading, selecting) leaves the composer where it is.
  *
  * The host supplies the right-click menu, how each turn's `<inject>` block
  * shows, and runs presses. Host answers are read when the note renders:
@@ -120,14 +122,10 @@ export function BtwNote(props: BtwNoteProps): JSXNode {
 				<col
 					role={active ? "omp.btw.note.active" : "omp.btw.note"}
 					gap="sm"
-					actions={
-						active
-							? { click: "btw-focus", menu, hold: menu, outside: "btw-blur" }
-							: { click: "btw-focus", menu, hold: menu }
-					}
+					actions={active ? { menu, hold: menu, outside: "btw-blur" } : { menu, hold: menu }}
 					onAction={run}
 				>
-					<row key="head" role="omp.btw.note.head" align="start" gap="sm">
+					<row key="head" role="omp.btw.note.head" align="start" gap="sm" actions={{ click: "btw-focus" }}>
 						<text role="omp.btw.note.tag" spans={[{ s: "accent", t: "btw" }]} />
 						<md role="omp.btw.note.question" text={topic} />
 						<row role="omp.btw.note.tools" align="center" gap="xs">

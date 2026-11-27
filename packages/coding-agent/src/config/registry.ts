@@ -25,6 +25,7 @@
  */
 import { parseFlag } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { settingValuesEqual } from "./raw-settings";
 import type { AnyUiMetadata, SubmenuOption, UiBase } from "./settings-defs";
 import type { SettingProvenance, Settings } from "./settings";
 
@@ -339,39 +340,6 @@ export abstract class Derived<T> {
 		if ("settings" in scope) scope.addDisposer?.(unsubscribe);
 		return unsubscribe;
 	}
-}
-
-/**
- * Deep equality of setting values that, unlike `Bun.deepEquals`, also compares the key order of
- * plain objects: record order breaks ties between equal-length model patterns (`edit.modelVariants`,
- * `systemPromptTemplates`), so a reorder is a change. Values other than plain objects and arrays
- * compare with `Bun.deepEquals`.
- */
-export function settingValuesEqual(a: unknown, b: unknown): boolean {
-	if (Object.is(a, b)) return true;
-	if (isArray(a) && isArray(b)) {
-		if (a.length !== b.length) return false;
-		for (let i = 0; i < a.length; i++) if (!settingValuesEqual(a[i], b[i])) return false;
-		return true;
-	}
-	if (!isPlainObject(a) || !isPlainObject(b)) return Bun.deepEquals(a, b);
-	// Positional key comparison needs `b`'s keys materialized; `a` streams.
-	const otherKeys = Object.keys(b);
-	let index = 0;
-	for (const key in a) {
-		if (key !== otherKeys[index++] || !settingValuesEqual(a[key], b[key])) return false;
-	}
-	return index === otherKeys.length;
-}
-
-function isArray(value: unknown): value is readonly unknown[] {
-	return Array.isArray(value);
-}
-
-function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
-	if (typeof value !== "object" || value === null) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
 }
 
 function sameInputs(a: readonly unknown[], b: readonly unknown[]): boolean {

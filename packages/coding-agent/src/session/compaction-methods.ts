@@ -6,16 +6,21 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import type { CompactionMethod } from "./compaction-method-ids";
 import type { CompactionSettings } from "./context-settings";
 
-import {
-	COMPACTION_METHOD_CHOICES,
-	type CompactionMethod,
-	DEFAULT_COMPACTION_METHOD_ORDER,
-	isCompactionMethod,
-} from "./compaction-method-defs";
+const COMPACTION_METHODS: Record<CompactionMethod, true> = {
+	remote: true,
+	snapcompact: true,
+	handoff: true,
+	soft: true,
+	shake: true,
+};
 
-export { COMPACTION_METHOD_CHOICES, type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER, isCompactionMethod };
+/** Whether an unknown configuration value names a supported compaction method. */
+export function isCompactionMethod(value: unknown): value is CompactionMethod {
+	return typeof value === "string" && Object.hasOwn(COMPACTION_METHODS, value);
+}
 
 /**
  * Filter malformed entries and preserve first occurrence order from a configured

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported shape variant metadata from `@oh-my-pi/snapcompact/shape-variants` so settings can read shape names without loading the snapcompact runtime engine ([#20737](https://github.com/can1357/oh-my-pi/pull/20737) by [@Quantum-Quasar](https://github.com/Quantum-Quasar))
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

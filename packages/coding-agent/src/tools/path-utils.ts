@@ -19,10 +19,12 @@ import {
 	isEnotdir,
 	isRecord,
 	isWsl,
+	prompt,
 	stripWindowsExtendedLengthPathPrefix,
 	windowsPathToWslMount,
 } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../internal-urls";
+import rootSearchRefusedTemplate from "../prompts/tools/root-search-refused.md" with { type: "text" };
 import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "./tool-errors";
@@ -112,6 +114,11 @@ function stripFileUrl(filePath: string): string {
 export { expandTilde };
 
 export function expandPath(filePath: string): string {
+	// Untyped callers (browser helpers fed from eval code) can pass any value; name the contract
+	// instead of failing on `filePath.startsWith is not a function`.
+	if (typeof filePath !== "string") {
+		throw new ToolError(`Expected a file path string; got ${filePath === null ? "null" : typeof filePath}.`);
+	}
 	// Some models intermittently prefix an otherwise-valid path with a stray
 	// `:` (e.g. `:/abs/path`, `:../rel`, or the Windows forms `:C:\repo\file`
 	// and `:.\src`). No real path starts with `:` and it never begins a
@@ -544,6 +551,26 @@ export function formatPathRelativeToCwd(
  */
 export function stripOuterDoubleQuotes(input: string): string {
 	return input.startsWith('"') && input.endsWith('"') && input.length > 1 ? input.slice(1, -1) : input;
+}
+
+/**
+ * Refuses search roots that name a filesystem root (`/.`, `/usr/..`, a `../..` climbing to `/`, `C:\`):
+ * a whole-disk walk visits every file on the machine and runs for hours. Called by `grep`, `ast_grep`,
+ * `ast_edit` (via {@link resolveToolSearchScope}) and `glob`; the shell builtins' `root_guard` applies
+ * the same rule. A bare `/` never reaches here, since {@link resolveToCwd} aliases it to the workspace.
+ * Internal URLs are never whole disks.
+ *
+ * @throws {ToolError} naming the root and what to search instead.
+ */
+export function assertNotFilesystemRoot(searchPaths: Iterable<string>): void {
+	const router = InternalUrlRouter.instance();
+	for (const searchPath of searchPaths) {
+		if (router.canHandle(searchPath)) continue;
+		const resolved = path.resolve(searchPath);
+		if (path.dirname(resolved) === resolved) {
+			throw new ToolError(prompt.render(rootSearchRefusedTemplate, { root: resolved }));
+		}
+	}
 }
 
 /** Search root for a parsed base path: a registered internal URL as spelled (single-slash alias normalized), else {@link resolveToCwd}. */
@@ -1609,6 +1636,9 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		}
 		scopePath = multiSearchPath.scopePath;
 	}
+	// Fanned-out targets are the walk roots; otherwise the single base is (for a
+	// multi-path union it is itself one of the requested scopes).
+	assertNotFilesystemRoot(multiTargets ? multiTargets.map(target => target.basePath) : [searchPath]);
 
 	let isDirectory: boolean;
 	try {

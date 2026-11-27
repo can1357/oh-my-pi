@@ -65,4 +65,34 @@ describe("startup composer prepaint graph", () => {
 		expectGraphExcludes(await importedModules("src/sdk.ts"), featureOnly);
 		expectGraphExcludes(await importedModules("src/cursor.ts"), [/coding-agent\/src\/(sdk|tools\/index)\.ts$/]);
 	});
+
+	it("registers all settings without pulling streaming, snapcompact, daemon-client, or UI runtime engines", async () => {
+		const probe = `const { orderedSettings } = await import(${JSON.stringify(path.join(pkgRoot, "src/config/all-settings.ts"))});
+			const reg = typeof Loader !== "undefined" && Loader.registry ? [...Loader.registry.keys()] : Object.keys(require.cache);
+			console.log(JSON.stringify({ count: orderedSettings().length, modules: reg }));`;
+		const proc = Bun.spawn([process.execPath, "-e", probe], { cwd: pkgRoot, stdout: "pipe", stderr: "pipe" });
+		const [out, err, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(code, err).toBe(0);
+		const result: { count: number; modules: string[] } = JSON.parse(out.trim().split("\n").at(-1)!);
+		const modules = result.modules.map(module => module.replaceAll("\\", "/"));
+
+		// Positive controls: settings registration ran and loaded the settings registry.
+		expect(result.count).toBeGreaterThan(0);
+		expect(modules.some(module => module.endsWith("/src/config/all-settings.ts"))).toBe(true);
+		expect(modules.some(module => module.endsWith("/src/config/registry.ts"))).toBe(true);
+		expectGraphExcludes(modules, [
+			/packages\/ai\/src\/(?:index|stream)\.ts$/,
+			/packages\/ai\/src\/registry\/oauth\/index\.ts$/,
+			/packages\/snapcompact\/src\/snapcompact\.ts$/,
+			/packages\/tui\/src\/index\.ts$/,
+			/coding-agent\/src\/daemon\/client\.ts$/,
+			/coding-agent\/src\/session\/compaction-methods\.ts$/,
+			/coding-agent\/src\/ui\/transcript\/messages\/image\.tsx$/,
+			/coding-agent\/src\/modes\/view-model\/prompt\/word-completion\.ts$/,
+		]);
+	});
 });

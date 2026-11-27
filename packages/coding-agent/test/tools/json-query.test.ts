@@ -6,6 +6,7 @@ import { Settings } from "../../src/config/settings";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
 import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
 import { ReadTool } from "../../src/tools/read";
+import { DEFAULT_MAX_BYTES } from "../../src/tools/streaming-output";
 
 type ToolTextResult = {
 	content: Array<{ type: string; text?: string }>;
@@ -133,6 +134,21 @@ describe("JSON query in read tool", () => {
 		const tool = wrapToolWithMetaNotice(new ReadTool(session));
 		const result = await tool.execute("call_large_pretty", { path: `${largeJsonlFile}?q=.&limit=8` });
 		expect(getText(result)).toBe('{\n  "id": 0,\n\n[Showing lines 1-2 of 8 (50.0KB limit). Use :3- to continue]');
+	});
+
+	it("returns a byte prefix with a partial-line notice when one output line exceeds the display limit", async () => {
+		const value = "x".repeat(DEFAULT_MAX_BYTES * 2);
+		const bigFile = path.join(tempDir, "big-value.json");
+		await fs.writeFile(bigFile, JSON.stringify({ value }), "utf-8");
+
+		const result = await readTool.execute("call_big", { path: `${bigFile}?q=.value&raw=true` });
+
+		expect(getText(result)).toBe(value.slice(0, DEFAULT_MAX_BYTES));
+		expect(result.details?.meta?.truncation).toMatchObject({
+			partialLine: true,
+			outputBytes: DEFAULT_MAX_BYTES,
+			totalBytes: value.length,
+		});
 	});
 
 	it("fails cleanly with descriptive error on invalid jq syntax", async () => {

@@ -6,8 +6,8 @@
  *   color-blind mode (the `effect(...)` registrations in `modes/settings.ts`
  *   call {@link setThemeSlot}, {@link setSymbolPreset}, {@link setColorBlindMode}).
  *   Values that arrive before {@link initTheme} are remembered and used by it.
- * - The terminal drives auto mode and color depth: {@link followTerminal}
- *   feeds driver capabilities (appearance, color support) to the controller.
+ * - The terminal drives auto mode, color depth and emoji glyph forms: {@link followTerminal}
+ *   feeds driver capabilities (appearance, color support, emoji support) to the controller.
  *   Before a driver runs, the environment's capabilities stand in.
  * - Explicit switches ({@link setTheme}) leave auto mode until
  *   {@link enableAutoTheme}; the theme picker previews with
@@ -23,22 +23,21 @@ import * as path from "node:path";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import { capabilitiesFromEnv, isWsl } from "@oh-my-pi/pi-tui/driver/caps/env";
 import { detectTerminalId } from "@oh-my-pi/pi-tui/driver/caps/identity";
-import type { TerminalCapabilities, TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
+import type { TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
 import { colorHex, isLightColor, paletteHex } from "@oh-my-pi/pi-tui/theme/color";
 import { builtinThemes, listThemes, loadTheme, loadThemeJson, loadThemeJsonSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { untrack } from "@oh-my-pi/pi-tui/reactive";
 import {
 	currentTheme,
 	setCurrentTheme,
+	type ThemeCapabilities,
 	type ThemeChangeCause,
 	ThemeController,
 	type ThemeResult,
 } from "@oh-my-pi/pi-tui/theme/runtime";
+export type { ThemeCapabilities } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { ColorValue, SymbolPreset, ThemeJson } from "@oh-my-pi/pi-tui/theme/schema";
 import { type ResolvedTheme, resolveColorValue } from "@oh-my-pi/pi-tui/theme/theme";
-
-/** Capabilities the theme follows: color support and the background's appearance. */
-export type ThemeCapabilities = Pick<TerminalCapabilities, "truecolor" | "colors" | "dark">;
 
 /** Theme preferences (the `theme.dark`, `theme.light`, `symbolPreset` and `colorBlindMode` settings). */
 export interface ThemePreferences {
@@ -102,6 +101,7 @@ function publish(theme: ResolvedTheme, cause: ThemeChangeCause): void {
 /** Capabilities the environment implies (before, or without, a terminal driver). */
 function environmentCapabilities(): ThemeCapabilities {
 	const env = Bun.env;
+	// Includes `emoji`: the profile's (and multiplexer's) static answer, so CLI output follows the terminal too.
 	return capabilitiesFromEnv(env, {
 		id: detectTerminalId(env),
 		platform: process.platform,
@@ -153,8 +153,8 @@ export function isAutoTheme(): boolean {
 }
 
 /**
- * Follow a terminal driver: its color depth and, in auto mode, its
- * appearance. Returns a function that stops following.
+ * Follow a terminal driver: its color depth, emoji support and, in auto mode,
+ * its appearance. Returns a function that stops following.
  */
 export function followTerminal(driver: Pick<TerminalDriver, "capabilities" | "onCapabilities">): () => void {
 	void applyTerminalCapabilities(driver.capabilities);
@@ -165,7 +165,7 @@ export function followTerminal(driver: Pick<TerminalDriver, "capabilities" | "on
 
 /**
  * Follow capabilities reported outside a driver (embedders, tests). Resolves
- * true when they changed the theme (depth, or the auto slot).
+ * true when they changed the theme (depth, emoji support, or the auto slot).
  */
 export async function applyTerminalCapabilities(capabilities: ThemeCapabilities): Promise<boolean> {
 	ensureTheme();
