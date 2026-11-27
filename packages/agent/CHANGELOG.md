@@ -17,6 +17,8 @@
 ### Changed
 
 - `resolveThresholdTokens()` caps the reserve-based default trigger at `DEFAULT_THRESHOLD_CEILING_TOKENS` (690,000), so 1M-class windows compact at 690K instead of 85% of the window; a configured percentage, fixed trigger, or `baseWindowTokens` is not capped
+- Fixed the context figure that the status line and compaction read leaving out `$` Python output, `@file` mentions and a `!` command's terminal images, and counting `!!` output that no request carries
+- Fixed token counting throwing on a stored custom message whose content is neither text nor blocks
 
 ## [19.2.1] - 2026-11-25
 
