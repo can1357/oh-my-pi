@@ -17,7 +17,7 @@ import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-j
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveInlineByteCapBudget } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { resolveArtifactSpillThreshold } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -81,7 +81,7 @@ describe("ExtensionContext.asyncJobs", () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	async function extensionContext(): Promise<ExtensionContext> {
+	async function extensionContext(settings = Settings.isolated()): Promise<ExtensionContext> {
 		const authStorage = createInMemoryAuthStorage();
 		authStorages.push(authStorage);
 		let seen: ExtensionContext | undefined;
@@ -90,7 +90,7 @@ describe("ExtensionContext.asyncJobs", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
-			settings: Settings.isolated(),
+			settings,
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			extensions: [
@@ -221,7 +221,7 @@ describe("ExtensionContext.asyncJobs", () => {
 		await bothDelivered.promise;
 		const manager = session!.asyncJobManager!;
 		for (const text of [manager.getJob(done)!.resultText!, manager.getJob(failed)!.errorText!]) {
-			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(resolveInlineByteCapBudget(undefined));
+			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(resolveArtifactSpillThreshold(undefined));
 			expect(text).toStartWith("remote output line 0\n");
 			expect(text).toContain("elided");
 			expect(text).toContain("remote output line 49999");
@@ -229,6 +229,25 @@ describe("ExtensionContext.asyncJobs", () => {
 			const artifactPath = await session!.sessionManager.getArtifactPath(artifactId!);
 			expect(await Bun.file(artifactPath!).text()).toBe(output);
 		}
+	});
+
+	it("caps a result at the configured spill threshold itself, which no output sink applied first", async () => {
+		const ctx = await extensionContext(Settings.isolated({ "tools.artifactSpillThreshold": 1 }));
+		const delivered = Promise.withResolvers<void>();
+		const enqueue = session!.yieldQueue.enqueueWithReceipt.bind(session!.yieldQueue);
+		vi.spyOn(session!.yieldQueue, "enqueueWithReceipt").mockImplementation((kind, entry) => {
+			if (kind !== "async-result") return enqueue(kind, entry);
+			delivered.resolve();
+			return Promise.resolve();
+		});
+		// About 2 KB: over a 1 KB threshold, under the threshold plus the slack `bash` adds.
+		const output = Array.from({ length: 100 }, (_, line) => `remote output line ${line}`).join("\n");
+		const jobId = ctx.asyncJobs!.register("remote build", async () => output);
+
+		await delivered.promise;
+		const text = session!.asyncJobManager!.getJob(jobId)!.resultText!;
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(1024);
+		expect(text).toContain("elided");
 	});
 
 	it("aborts the job's signal when the agent cancels it", async () => {

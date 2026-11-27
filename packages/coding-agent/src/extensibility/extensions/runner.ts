@@ -47,7 +47,7 @@ import { registerExternalAgent } from "../../registry/external-agents";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
-import { resolveInlineByteCapBudget } from "../../tools/output-meta";
+import { resolveArtifactSpillThreshold } from "../../tools/output-meta";
 import { type InlineByteCapOptions, truncateTail } from "../../tools/streaming-output";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
@@ -616,12 +616,13 @@ function extensionJobText(text: string): string {
 }
 
 /**
- * The cap on an extension job's result or failure before the session keeps and delivers it: `bash`'s inline
- * budget, with the full text saved as a session artifact the cap's `[raw output: …]` footer links.
+ * The cap on an extension job's result or failure before the session keeps and delivers it: the spill threshold
+ * itself, without the slack `bash` adds for output its sink already bounded, and the full text saved as a session
+ * artifact the cap's `[raw output: …]` footer links.
  */
 function extensionJobResultCap(settings: Settings | undefined, sessionManager: SessionManager): InlineByteCapOptions {
 	return {
-		maxBytes: resolveInlineByteCapBudget(settings),
+		maxBytes: resolveArtifactSpillThreshold(settings),
 		saveArtifact: full => sessionManager.saveArtifact(full).catch(() => undefined),
 	};
 }
