@@ -1,10 +1,10 @@
-import { logger, toError } from "@oh-my-pi/pi-utils";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
-import { SessionWriteConflictError } from "./session-storage";
+import { processLocalStoreKey, SessionWriteConflictError, type SessionStoreIdentity } from "./session-storage";
+import { eexist } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
@@ -20,12 +20,8 @@ export interface RedisSessionStorageClient {
 	strlen(key: string): Promise<number>;
 	set(key: string, value: string): Promise<unknown>;
 	append(key: string, value: string): Promise<number>;
-	del(...keys: string[]): Promise<number>;
-	rename(src: string, dst: string): Promise<unknown>;
 	scan(cursor: string, ...args: string[]): Promise<[string, string[]]>;
-	hset(key: string, field: string, value: string): Promise<unknown>;
 	hgetall(key: string): Promise<Record<string, string>>;
-	hdel(key: string, ...fields: string[]): Promise<unknown>;
 }
 
 export interface RedisSessionStorageOptions {
@@ -42,6 +38,14 @@ export interface RedisSessionStorageOptions {
 	 * Default 500.
 	 */
 	scanCount?: number;
+	/**
+	 * The server and database the client is connected to, for naming the store
+	 * (with the prefix) to data derived from it, such as the transcript index:
+	 * every process that names the same server, database and prefix shares that
+	 * data. Never put a credential here. Omitted, the store is named by the
+	 * client object, so its derived data is this process's own.
+	 */
+	server?: { host: string; port?: number; db?: number };
 }
 
 const DEFAULT_PREFIX = "omp:sessions:";
@@ -76,6 +80,76 @@ const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
 redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
 return 1`;
+
+// One script, so the key, its mtime and its title move together: no client's
+// write to either path can land between them. With ARGV[4] == "1" a taken
+// destination leaves everything as it was (returns 0).
+const MOVE_SCRIPT = `-- OMP_MOVE
+if ARGV[4] == "1" and redis.call("EXISTS", KEYS[2]) == 1 then
+	return 0
+end
+redis.call("RENAME", KEYS[1], KEYS[2])
+redis.call("HDEL", KEYS[3], ARGV[1])
+redis.call("HSET", KEYS[3], ARGV[2], ARGV[3])
+local title = redis.call("HGET", KEYS[4], ARGV[1])
+redis.call("HDEL", KEYS[4], ARGV[1])
+if title then
+	redis.call("HSET", KEYS[4], ARGV[2], title)
+else
+	redis.call("HDEL", KEYS[4], ARGV[2])
+end
+return 1`;
+
+// One script, so finding the keys under a directory, deleting them and
+// deleting their mtime and title run with no other client's command between:
+// a child set after the scan cannot survive, and a replacement written after
+// the delete keeps its metadata. ARGV[1] is the file-key prefix, ARGV[2] a
+// SCAN pattern for the directory ("" for none), ARGV[3..] explicit paths.
+const REMOVE_SCRIPT = `-- OMP_REMOVE
+local prefix = ARGV[1]
+local paths = {}
+for i = 3, #ARGV do
+	paths[#paths + 1] = ARGV[i]
+end
+if ARGV[2] ~= "" then
+	local cursor = "0"
+	repeat
+		local reply = redis.call("SCAN", cursor, "MATCH", ARGV[2], "COUNT", 1000)
+		cursor = reply[1]
+		for _, key in ipairs(reply[2]) do
+			paths[#paths + 1] = string.sub(key, #prefix + 1)
+		end
+	until cursor == "0"
+end
+for _, path in ipairs(paths) do
+	redis.call("DEL", prefix .. path)
+	redis.call("HDEL", KEYS[1], path)
+	redis.call("HDEL", KEYS[2], path)
+end
+return #paths`;
+
+// Size and bytes from one read, so an append between them cannot pair a size
+// with other content. ARGV[1] is the byte offset, ARGV[2] the most bytes to
+// return ("" for the rest); a missing key returns nil.
+const READ_FROM_SCRIPT = `-- OMP_READ_FROM
+if redis.call("EXISTS", KEYS[1]) == 0 then
+	return false
+end
+local size = redis.call("STRLEN", KEYS[1])
+local from = tonumber(ARGV[1])
+local take = size - from
+if ARGV[2] ~= "" then
+	take = math.min(take, tonumber(ARGV[2]))
+end
+if take <= 0 then
+	return {size, ""}
+end
+return {size, redis.call("GETRANGE", KEYS[1], from, from + take - 1)}`;
+
+/** A `SCAN MATCH` glob for the keys starting with `prefix`, its glob characters escaped. */
+function keysStartingWith(prefix: string): string {
+	return `${prefix.replace(/[*?[\]\\]/g, "\\$&")}*`;
+}
 
 function encodeTitleMeta(title: SessionTitleUpdate): string {
 	return JSON.stringify(title);
@@ -124,11 +198,17 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 	readonly #client: RedisSessionStorageClient;
 	readonly #prefix: string;
 	readonly #scanCount: number;
+	/** The keyspace: the named server and database, else the client object, with the prefix. */
+	readonly identity: SessionStoreIdentity;
 
 	constructor(options: RedisSessionStorageOptions) {
 		this.#client = options.client;
 		this.#prefix = options.prefix ?? DEFAULT_PREFIX;
 		this.#scanCount = options.scanCount ?? DEFAULT_SCAN_COUNT;
+		const server = options.server;
+		this.identity = server
+			? { key: `redis:${server.host}:${server.port ?? 6379}/${server.db ?? 0}:${this.#prefix}`, shared: true }
+			: { key: `redis:${processLocalStoreKey(options.client)}:${this.#prefix}`, shared: false };
 	}
 
 	init(): Promise<void> {
@@ -141,19 +221,7 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		const titleRaw = await this.#client.hgetall(this.#titleMetaKey());
 		const meta: Record<string, string> = metaRaw ?? {};
 		const titles: Record<string, string> = titleRaw ?? {};
-		const seen = new Set<string>();
-		let cursor = "0";
-		do {
-			const [next, batch] = await this.#client.scan(
-				cursor,
-				"MATCH",
-				`${filePrefix}*`,
-				"COUNT",
-				String(this.#scanCount),
-			);
-			cursor = next;
-			for (const key of batch) seen.add(key);
-		} while (cursor !== "0");
+		const seen = await this.#scanFileKeys(filePrefix);
 
 		const fallbackMtimeMs = Date.now();
 		return Promise.all(
@@ -184,6 +252,18 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		const head = prefixBytes > 0 ? this.#client.getrange(key, 0, prefixBytes - 1) : Promise.resolve("");
 		const tail = suffixBytes > 0 ? this.#client.getrange(key, -suffixBytes, -1) : Promise.resolve("");
 		return Promise.all([head, tail]);
+	}
+
+	async readFrom(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number } | null> {
+		const result = await this.#client.send("EVAL", [
+			READ_FROM_SCRIPT,
+			"1",
+			this.#fileKey(path),
+			String(Math.max(0, Math.trunc(offset))),
+			maxBytes === undefined ? "" : String(Math.max(0, Math.trunc(maxBytes))),
+		]);
+		if (!Array.isArray(result)) return null;
+		return { size: Number(result[0]), text: String(result[1] ?? "") };
 	}
 
 	async writeFull(
@@ -242,29 +322,46 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		await this.writeFull(path, "", mtimeMs);
 	}
 
-	async remove(paths: string[]): Promise<void> {
-		if (paths.length === 0) return;
-		await this.#client.del(...paths.map(path => this.#fileKey(path)));
-		await this.#client.hdel(this.#metaKey(), ...paths);
-		await this.#client.hdel(this.#titleMetaKey(), ...paths);
+	async remove(paths: string[], dir?: string): Promise<void> {
+		if (paths.length === 0 && dir === undefined) return;
+		await this.#client.send("EVAL", [
+			REMOVE_SCRIPT,
+			"2",
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			this.#fileKey(""),
+			dir === undefined ? "" : keysStartingWith(this.#fileKey(dir)),
+			...paths,
+		]);
 	}
 
-	async move(src: string, dst: string, mtimeMs: number): Promise<void> {
-		await this.#client.rename(this.#fileKey(src), this.#fileKey(dst));
-		try {
-			const titleMeta = await this.#client.hgetall(this.#titleMetaKey());
-			await this.#client.hdel(this.#metaKey(), src);
-			await this.#client.hset(this.#metaKey(), dst, String(mtimeMs));
-			await this.#client.hdel(this.#titleMetaKey(), src);
-			const title = titleMeta[src];
-			if (title !== undefined) await this.#client.hset(this.#titleMetaKey(), dst, title);
-		} catch (err) {
-			logger.warn("Redis session storage meta rename failed", {
-				src,
-				dst,
-				error: toError(err).message,
-			});
-		}
+	async move(src: string, dst: string, mtimeMs: number, noReplace = false): Promise<void> {
+		const moved = await this.#client.send("EVAL", [
+			MOVE_SCRIPT,
+			"4",
+			this.#fileKey(src),
+			this.#fileKey(dst),
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			src,
+			dst,
+			String(mtimeMs),
+			noReplace ? "1" : "0",
+		]);
+		if (Number(moved) !== 1) throw eexist(dst);
+	}
+
+	/** Every file key starting with `keyPrefix`. */
+	async #scanFileKeys(keyPrefix: string): Promise<Set<string>> {
+		const pattern = keysStartingWith(keyPrefix);
+		const keys = new Set<string>();
+		let cursor = "0";
+		do {
+			const [next, batch] = await this.#client.scan(cursor, "MATCH", pattern, "COUNT", String(this.#scanCount));
+			cursor = next;
+			for (const key of batch) keys.add(key);
+		} while (cursor !== "0");
+		return keys;
 	}
 
 	#fileKey(path: string): string {

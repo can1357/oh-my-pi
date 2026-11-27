@@ -64,6 +64,11 @@ import {
 	formatSessionWorktreeSummary,
 	runSessionWorktreeHook,
 } from "../../session/session-worktree";
+import {
+	assertSessionsOnDisk,
+	SessionStorageUnsupportedError,
+	STATS_DISK_ONLY_REASON,
+} from "../../session/session-storage-config";
 import type { SessionWorktree } from "../../worktree/backend";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import {
@@ -400,6 +405,13 @@ export class CommandController {
 		const sessionFile = this.ctx.session.sessionFile;
 		if (!sessionFile) {
 			this.ctx.showWarning("No session file yet — send a message first.");
+			return;
+		}
+		try {
+			assertSessionsOnDisk(this.ctx.sessionManager.getStorage(), "/trace", STATS_DISK_ONLY_REASON);
+		} catch (error) {
+			if (!(error instanceof SessionStorageUnsupportedError)) throw error;
+			this.ctx.showError(error.message);
 			return;
 		}
 		try {
@@ -1570,9 +1582,13 @@ export class CommandController {
 			return;
 		}
 		const sourceSessionFile = path.resolve(sessionFile);
+		let transcriptStored: boolean;
 		try {
-			await fs.access(sourceSessionFile);
+			transcriptStored = await this.ctx.sessionManager.getStorage().exists(sourceSessionFile);
 		} catch {
+			transcriptStored = false;
+		}
+		if (!transcriptStored) {
 			this.ctx.showError("Cannot open a fork in another terminal: the persisted session transcript is unavailable.");
 			return;
 		}

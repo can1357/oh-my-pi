@@ -7,7 +7,7 @@
  * full chat-rebuild path through a real JSONL session file and an isolated
  * agent registry.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -41,7 +41,8 @@ function makeSubagentRegistry(sessions: ObservableSession[]) {
 	} as unknown as import("@oh-my-pi/pi-coding-agent/task/session-observer-registry").SessionObserverRegistry;
 }
 
-function makeViewer(sessionFile: string, observed: ObservableSession[]): LayerTerminal {
+/** A viewer over `sessionFile` whose first transcript read has landed. */
+async function openViewer(sessionFile: string, observed: ObservableSession[]): Promise<LayerTerminal> {
 	const agents = new AgentRegistry();
 	agents.register({
 		id: SESSION_ID,
@@ -52,6 +53,7 @@ function makeViewer(sessionFile: string, observed: ObservableSession[]): LayerTe
 		sessionFile,
 		status: "parked",
 	});
+	const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 	const model = new AgentTranscriptViewerModel({
 		transcript: agentTranscriptSource,
 		agentId: SESSION_ID,
@@ -67,6 +69,8 @@ function makeViewer(sessionFile: string, observed: ObservableSession[]): LayerTe
 		columns: 120,
 		rows: 40,
 	});
+	await reads.mock.results[0]?.value;
+	reads.mockRestore();
 	return {
 		...viewer,
 		dispose() {
@@ -90,7 +94,7 @@ describe("Agent hub silent-abort regression", () => {
 		removeSyncWithRetries(tmpDir);
 	});
 
-	it("renders no error line for silent-abort assistant messages with empty content", () => {
+	it("renders no error line for silent-abort assistant messages with empty content", async () => {
 		const sessionFile = makeJsonlSessionFile(tmpDir, [
 			{
 				type: "session",
@@ -137,7 +141,7 @@ describe("Agent hub silent-abort regression", () => {
 			},
 		]);
 
-		const viewer = makeViewer(sessionFile, [
+		const viewer = await openViewer(sessionFile, [
 			{
 				id: SESSION_ID,
 				kind: "subagent",
@@ -152,13 +156,14 @@ describe("Agent hub silent-abort regression", () => {
 		viewer.dispose();
 		const renderedText = rendered.join("\n");
 
+		expect(renderedText).toContain("hello");
 		// The sentinel MUST NOT appear verbatim in any rendered line
 		expect(renderedText).not.toContain(SILENT_ABORT_MARKER);
 		// No error line at all for a silent abort
 		expect(renderedText).not.toContain("Error:");
 	});
 
-	it("renders no error line for bit-classified silent aborts without marker text", () => {
+	it("renders no error line for bit-classified silent aborts without marker text", async () => {
 		const sessionFile = makeJsonlSessionFile(tmpDir, [
 			{
 				type: "session",
@@ -205,7 +210,7 @@ describe("Agent hub silent-abort regression", () => {
 			},
 		]);
 
-		const viewer = makeViewer(sessionFile, [
+		const viewer = await openViewer(sessionFile, [
 			{
 				id: SESSION_ID,
 				kind: "subagent",
@@ -218,10 +223,11 @@ describe("Agent hub silent-abort regression", () => {
 
 		const rendered = viewer.render(120);
 		viewer.dispose();
+		expect(rendered.join("\n")).toContain("hello");
 		expect(rendered.join("\n")).not.toContain("Error:");
 	});
 
-	it("renders normal error messages with an Error: line", () => {
+	it("renders normal error messages with an Error: line", async () => {
 		const sessionFile = makeJsonlSessionFile(tmpDir, [
 			{
 				type: "session",
@@ -268,7 +274,7 @@ describe("Agent hub silent-abort regression", () => {
 			},
 		]);
 
-		const viewer = makeViewer(sessionFile, [
+		const viewer = await openViewer(sessionFile, [
 			{
 				id: SESSION_ID,
 				kind: "subagent",

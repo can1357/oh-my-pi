@@ -13,6 +13,7 @@ import { isAdvisorTranscriptName } from "../advisor/transcript-names";
 import { getAgentTombstonePath } from "../registry/agent-tombstone";
 import { resolveSessionLeafId, type SessionEntry, type SessionHeader } from "./session-entries";
 import { loadSessionFile, parseSessionContent, type SessionLoadResult } from "./session-loader";
+import { defaultSessionStorage, FileSessionStorage, type SessionStorage } from "./session-storage";
 
 const utf8Decoder = new TextDecoder();
 
@@ -53,6 +54,8 @@ export interface SubSessionScope {
 	includeAdvisors?: boolean;
 	/** Include gc-compressed transcripts for read-only exports. */
 	includeCompressed?: boolean;
+	/** Storage holding the transcripts; defaults to {@link defaultSessionStorage}. */
+	storage?: SessionStorage;
 }
 
 /** Read-only discovery scope and malformed-transcript reporting for child collectors. */
@@ -73,8 +76,9 @@ export async function collectSubSessions(
 	options: CollectSubSessionsOptions = {},
 ): Promise<Record<string, SubSession>> {
 	const result: Record<string, SubSession> = {};
-	for (const found of await listSubSessionFiles(sessionFile, options)) {
-		const loaded = await loadCollectedSession(found.file);
+	const storage = options.storage ?? defaultSessionStorage();
+	for (const found of await listSubSessionFiles(sessionFile, { ...options, storage })) {
+		const loaded = await loadCollectedSession(found.file, storage);
 		if (!loaded) continue;
 		const { entries: fileEntries, malformedRecords, invalidHeader } = loaded;
 		// Empty files load as [] and are skipped; a corrupt or missing header is reported so exports do
@@ -100,7 +104,8 @@ export async function collectSubSessions(
 
 /**
  * Child transcript files stored next to a session file, each before its own
- * children, siblings by name. Reads directories only. Advisors and compressed
+ * children, siblings by name. Lists `scope.storage` (default: the configured
+ * session storage) only, never a transcript's content. Advisors and compressed
  * transcripts are opt-in, as in {@link collectSubSessions}.
  */
 export async function listSubSessionFiles(sessionFile: string, scope: SubSessionScope = {}): Promise<SubSessionFile[]> {
@@ -108,13 +113,14 @@ export async function listSubSessionFiles(sessionFile: string, scope: SubSession
 	const transcriptName =
 		scope.includeCompressed && sessionFile.endsWith(".jsonl.gz") ? sessionFile.slice(0, -3) : sessionFile;
 	if (!transcriptName.endsWith(".jsonl")) return found;
-	await listSubSessionDir(transcriptName.slice(0, -6), null, found, scope);
+	const storage = scope.storage ?? defaultSessionStorage();
+	await listSubSessionDir(transcriptName.slice(0, -6), null, found, scope, storage);
 	return found;
 }
 
 /** Decompress archives before handing their JSONL to the central session parser. */
-async function loadCollectedSession(file: string): Promise<SessionLoadResult | null> {
-	if (!file.endsWith(".jsonl.gz")) return loadSessionFile(file);
+async function loadCollectedSession(file: string, storage: SessionStorage): Promise<SessionLoadResult | null> {
+	if (!file.endsWith(".jsonl.gz")) return loadSessionFile(file, storage);
 	try {
 		return parseSessionContent(utf8Decoder.decode(Bun.gunzipSync(await Bun.file(file).bytes())));
 	} catch (err) {
@@ -124,17 +130,96 @@ async function loadCollectedSession(file: string): Promise<SessionLoadResult | n
 	}
 }
 
+/** One subagent transcript stored directly in a subagent directory, in name order. */
+interface StoredSubSessionFile {
+	/** Transcript stem, e.g. "ToolAsk"; its own children live under the directory of that name. */
+	agentId: string;
+	/** Path the storage holds the file under. */
+	file: string;
+	/** A gc-compressed `.jsonl.gz` archive; its live transcript is gone. */
+	compressed: boolean;
+	/** An advisor transcript (`__advisor*.jsonl`). */
+	advisor: boolean;
+	/** The subagent was explicitly killed: a tombstone sits beside its transcript or its archive. */
+	aborted: boolean;
+	/** The directory named after the stem may hold that subagent's own children. */
+	descend: boolean;
+}
+
+/** What one storage knows about a directory; {@link subSessionFiles} applies the rules to it. */
+interface ListedDirectory {
+	/** Each file stored directly in the directory, by name and stored path. */
+	files: ReadonlyArray<{ name: string; file: string }>;
+	/** Whether a tombstone exists at `tombstone`. */
+	hasTombstone(tombstone: string): boolean | Promise<boolean>;
+	/** Whether the directory named after `agentId` may hold that subagent's own children. */
+	mayHoldChildren(agentId: string): boolean;
+}
+
+/**
+ * The subagent transcripts of one listed directory, in name order. Both listers
+ * call this, so the rules exist once: only `.jsonl` and `.jsonl.gz` names count
+ * and `.bak` copies never do; a live transcript wins over its archive during gc;
+ * a tombstone beside the transcript name or the archive name marks the subagent
+ * killed.
+ */
+async function subSessionFiles(listed: ListedDirectory): Promise<StoredSubSessionFile[]> {
+	const byName = new Map(listed.files.map(({ name, file }) => [name, file]));
+	const transcripts: Array<{ name: string; file: string; compressed: boolean; transcriptName: string }> = [];
+	for (const name of [...byName.keys()].sort()) {
+		const compressed = name.endsWith(".jsonl.gz");
+		const transcriptName = compressed ? name.slice(0, -3) : name;
+		if (!transcriptName.endsWith(".jsonl") || name.includes(".bak")) continue;
+		// A live transcript wins over an archive of the same session during gc.
+		if (compressed && byName.has(transcriptName)) continue;
+		transcripts.push({ name, file: byName.get(name)!, compressed, transcriptName });
+	}
+	return Promise.all(
+		transcripts.map(async ({ file, compressed, transcriptName }) => {
+			const agentId = transcriptName.slice(0, -6);
+			const transcriptFile = compressed ? file.slice(0, -3) : file;
+			return {
+				agentId,
+				file,
+				compressed,
+				advisor: isAdvisorTranscriptName(transcriptName),
+				aborted:
+					(await listed.hasTombstone(getAgentTombstonePath(transcriptFile))) ||
+					(compressed && (await listed.hasTombstone(getAgentTombstonePath(file)))),
+				descend: listed.mayHoldChildren(agentId),
+			};
+		}),
+	);
+}
+
 async function listSubSessionDir(
 	dir: string,
 	parentKey: string | null,
 	out: SubSessionFile[],
 	scope: SubSessionScope,
+	storage: SessionStorage,
 ): Promise<void> {
+	const files =
+		storage instanceof FileSessionStorage ? await listDirectoryFiles(dir) : await listStoredFiles(dir, storage);
+	for (const { agentId, file, compressed, advisor, aborted, descend } of files) {
+		if ((compressed && !scope.includeCompressed) || (advisor && !scope.includeAdvisors)) continue;
+		const key = parentKey ? `${parentKey}/${agentId}` : agentId;
+		out.push({ key, agentId, parent: parentKey, file, aborted });
+		if (descend) await listSubSessionDir(path.join(dir, agentId), key, out, scope, storage);
+	}
+}
+
+/**
+ * Files in an on-disk subagent directory. Only real child directories are
+ * descended into: a transcript stem such as "." or ".." would revisit an
+ * ancestor, and symlinked directories can loop back into the tree.
+ */
+async function listDirectoryFiles(dir: string): Promise<StoredSubSessionFile[]> {
 	let dirents: fs.Dirent[];
 	try {
 		dirents = await fs.promises.readdir(dir, { withFileTypes: true });
 	} catch (err) {
-		if (isEnoent(err) || (err as NodeJS.ErrnoException).code === "ENOTDIR") return;
+		if (isEnoent(err) || (err as NodeJS.ErrnoException).code === "ENOTDIR") return [];
 		throw err;
 	}
 	const fileNames = new Set<string>();
@@ -143,33 +228,24 @@ async function listSubSessionDir(
 		if (dirent.isFile()) fileNames.add(dirent.name);
 		else if (dirent.isDirectory()) childDirectories.add(dirent.name);
 	}
-	for (const name of [...fileNames].sort()) {
-		const compressed = name.endsWith(".jsonl.gz");
-		if (compressed && !scope.includeCompressed) continue;
-		const transcriptName = compressed ? name.slice(0, -3) : name;
-		if (
-			!transcriptName.endsWith(".jsonl") ||
-			name.includes(".bak") ||
-			(!scope.includeAdvisors && isAdvisorTranscriptName(transcriptName))
-		)
-			continue;
-		// A live transcript wins over an archive of the same session during gc.
-		if (compressed && fileNames.has(transcriptName)) continue;
-		const agentId = transcriptName.slice(0, -6);
-		const key = parentKey ? `${parentKey}/${agentId}` : agentId;
-		out.push({
-			key,
-			agentId,
-			parent: parentKey,
-			file: path.join(dir, name),
-			aborted:
-				fileNames.has(getAgentTombstonePath(transcriptName)) ||
-				(compressed && fileNames.has(getAgentTombstonePath(name))),
-		});
-		// Only descend into real child directories: a transcript stem such as "." or ".."
-		// would revisit an ancestor, and symlinked directories can loop back into the tree.
-		if (childDirectories.has(agentId)) {
-			await listSubSessionDir(path.join(dir, agentId), key, out, scope);
-		}
-	}
+	return subSessionFiles({
+		files: [...fileNames].map(name => ({ name, file: path.join(dir, name) })),
+		hasTombstone: tombstone => fileNames.has(path.basename(tombstone)),
+		mayHoldChildren: agentId => childDirectories.has(agentId),
+	});
+}
+
+/**
+ * Transcripts a key-indexed storage holds directly under `dir`. It has no
+ * directories, so every stem is searched for children unless its directory is
+ * not strictly inside `dir`: the stems "", "." and ".." would revisit `dir` or
+ * its parent. Kill tombstones are written beside the transcript path on local
+ * disk whatever the storage.
+ */
+async function listStoredFiles(dir: string, storage: SessionStorage): Promise<StoredSubSessionFile[]> {
+	return subSessionFiles({
+		files: storage.listFilesSync(dir, "*.jsonl").map(file => ({ name: path.basename(file), file })),
+		hasTombstone: tombstone => Bun.file(tombstone).exists(),
+		mayHoldChildren: agentId => path.dirname(path.join(dir, agentId)) === path.join(dir),
+	});
 }

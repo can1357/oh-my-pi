@@ -3,10 +3,13 @@
  * prelude: recent projects, their sessions with idle recaps, prompt history,
  * and session search over titles, recaps, and transcripts.
  *
- * Sources: session JSONL files under the sessions root (stat-ordered; only the
- * listed files get a bounded header/tail scan, never a full transcript read),
- * history.db (prompt history, the title index, and the recap journal), and
- * the transcript index (transcripts.db).
+ * Sources: sessions through the configured session storage (the JSONL files
+ * under the sessions root, or the rows of a `session.storage: sql` table),
+ * stat-ordered; only the listed sessions are read: a bounded header and tail,
+ * a line scan (a SQL row in read windows) when those lack the first prompt or
+ * a reply, and a windowed count where the index has none; history.db (prompt
+ * history, the title index, and the recap journal), and the transcript index
+ * (transcripts.db, or one per SQL store).
  * Each view returns plain records and a compact text rendering the prelude
  * prints. Records carry every declared key: an absent value is `null`, never
  * a missing key, so Python callers can index them directly.
@@ -33,6 +36,12 @@ import {
 	sessionDisplayName,
 } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
+import {
+	defaultSessionStorage,
+	FileSessionStorage,
+	readSessionLineWindows,
+	type SessionStorage,
+} from "../session/session-storage";
 import { localMinute, type TimeWindow } from "../session/time-window";
 import { syncTranscripts } from "../daemon/modules/transcripts";
 import {
@@ -255,13 +264,15 @@ async function searchSessions(words: WordQuery, scope: ArchiveScope): Promise<Ar
  * Brings the transcript index up to date, off this thread, unless a sync
  * completed within {@link TRANSCRIPT_FRESH_MS}; waits up to
  * {@link TRANSCRIPT_SYNC_WAIT_MS}. False while the sync still runs (here or in
- * another process) or after it failed; true when there is no index to sync.
+ * another process), after it failed, or when it could not read a session
+ * through; true when there is no index to sync.
  */
 async function transcriptsCaughtUp(): Promise<boolean> {
 	if (isTranscriptIndexFresh(TRANSCRIPT_FRESH_MS)) return true;
 	const wait = AbortSignal.timeout(TRANSCRIPT_SYNC_WAIT_MS);
 	try {
-		return (await syncTranscripts(wait)).outcome !== "busy";
+		const { outcome } = await syncTranscripts(wait);
+		return outcome === "synced" || outcome === "unavailable";
 	} catch (error) {
 		if (!wait.aborted) logger.warn("Transcript index sync failed", { error: String(error) });
 		return false;
@@ -369,14 +380,21 @@ export async function resolveSessionFile(idOrFile: string): Promise<string> {
 const MESSAGE_RECORD_LINE = Buffer.from('\n{"type":"message"');
 const messageCountCache = new Map<string, { size: number; mtimeMs: number; count: number }>();
 
-/** Message records in a whole session file; listings only parse a bounded prefix. Cached by size and mtime. */
-async function countSessionMessages(file: string, size: number, mtimeMs: number): Promise<number> {
+/** Message records in a whole session transcript; listings only parse a bounded prefix. Cached by size and mtime. */
+async function countSessionMessages(
+	file: string,
+	size: number,
+	mtimeMs: number,
+	storage: SessionStorage,
+): Promise<number> {
 	const cached = messageCountCache.get(file);
 	if (cached && cached.size === size && cached.mtimeMs === mtimeMs) return cached.count;
 	let count = 0;
 	// The previous chunk's last bytes, so a record line split across chunks still matches once.
 	let carry: Buffer = Buffer.from("\n");
-	for await (const chunk of Bun.file(file).stream()) {
+	const chunks =
+		storage instanceof FileSessionStorage ? Bun.file(file).stream() : readSessionLineWindows(storage, file);
+	for await (const chunk of chunks) {
 		const window = Buffer.concat([carry, chunk]);
 		for (let at = window.indexOf(MESSAGE_RECORD_LINE); at !== -1; at = window.indexOf(MESSAGE_RECORD_LINE, at + 1)) {
 			count++;
@@ -387,21 +405,28 @@ async function countSessionMessages(file: string, size: number, mtimeMs: number)
 	return count;
 }
 
-/** `sessions` with whole-file message counts: the transcript index's where it is current, else a file read. */
+/**
+ * `sessions` with whole-transcript message counts: the transcript index's where
+ * it is current, else a read of the transcript. Session files are counted
+ * together; a key-indexed store's transcripts one after another, so one window
+ * of one transcript is in memory at a time.
+ */
 async function withExactMessageCounts(sessions: SessionInfo[]): Promise<SessionInfo[]> {
+	const storage = defaultSessionStorage();
 	const indexed = indexedMessageCounts(sessions.map(session => ({ path: session.path, size: session.size })));
-	return await Promise.all(
-		sessions.map(async session => {
-			try {
-				const messageCount =
-					indexed.get(session.path) ??
-					(await countSessionMessages(session.path, session.size, session.modified.getTime()));
-				return { ...session, messageCount };
-			} catch {
-				return session;
-			}
-		}),
-	);
+	const withCount = async (session: SessionInfo): Promise<SessionInfo> => {
+		try {
+			const messageCount =
+				indexed.get(session.path) ??
+				(await countSessionMessages(session.path, session.size, session.modified.getTime(), storage));
+			return { ...session, messageCount };
+		} catch {
+			return session;
+		}
+	};
+	if (storage instanceof FileSessionStorage) return await Promise.all(sessions.map(withCount));
+	// Each mapped value is awaited before the next is mapped.
+	return await Array.fromAsync(sessions, session => withCount(session));
 }
 
 /** Shown after a listing answered while the transcript index still syncs. */

@@ -3,7 +3,7 @@
  * subagent's edit tool read them in (the parent's settings resolved for the model that wrote
  * each reply), so cards name their target files instead of `…`.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -60,7 +60,7 @@ describe("Agent hub transcript viewer edit cards", () => {
 		removeSyncWithRetries(tmpDir);
 	});
 
-	it("names each reply's edit target in the mode its model selects", () => {
+	it("names each reply's edit target in the mode its model selects", async () => {
 		// Default `edit.mode` is hashline; the GPT reply's model variant writes sloppy envelopes.
 		cfgEditModelVariants.set(settings, { "gpt-5": "sloppy" });
 		const sessionFile = path.join(tmpDir, "session.jsonl");
@@ -80,6 +80,7 @@ describe("Agent hub transcript viewer edit cards", () => {
 			sessionFile,
 			status: "parked",
 		});
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const model = new AgentTranscriptViewerModel({
 			transcript: agentTranscriptSource,
 			agentId: AGENT_ID,
@@ -92,6 +93,8 @@ describe("Agent hub transcript viewer edit cards", () => {
 			settings,
 		});
 		const viewer = mountLayer(() => AgentTranscriptViewer({ model }), { columns: 120, rows: 40 });
+		await reads.mock.results[0]?.value;
+		reads.mockRestore();
 		try {
 			const heads = viewer
 				.render(120)

@@ -48,7 +48,9 @@ const assistant = (id: string, text: string) =>
 	});
 
 const transcript = {
-	fs,
+	stat: (file: string) => fs.statSync(file),
+	readFrom: async (file: string, offset: number) =>
+		(await fs.promises.readFile(file)).subarray(offset).toString("utf-8"),
 	parseEntries: (text: string) =>
 		text
 			.split("\n")

@@ -2,6 +2,7 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runCleanseCommand } from "../cleanse";
 import { cleanseHelp as commandHelp } from "../cli/command-help";
+import { installSessionStorageForCommand } from "../cli/session-arg";
 import { CliUsageError } from "../cli/usage-error";
 
 export default class Cleanse extends Command {
@@ -48,6 +49,8 @@ export default class Cleanse extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Cleanse);
 		if (flags.agents <= 0) throw new CliUsageError("--agents must be a positive integer");
+		if (!(await installSessionStorageForCommand())) return;
+
 		const result = await runCleanseCommand({
 			maxAgents: flags.agents,
 			model: flags.model,

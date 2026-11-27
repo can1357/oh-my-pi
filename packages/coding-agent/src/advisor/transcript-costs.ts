@@ -1,7 +1,7 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import {
 	ADVISOR_TRANSCRIPT_FILENAME,
 	ADVISOR_TRANSCRIPT_STEM,
@@ -28,6 +28,12 @@ export interface LoadAdvisorTranscriptCostsOptions {
 	 * scan (#10129).
 	 */
 	providersBySlug?: Map<string, Set<string>>;
+	/**
+	 * Storage the transcripts are read from: the owning session's, where its
+	 * {@link AdvisorTranscriptRecorder}s write them. Omitted: the default
+	 * session storage.
+	 */
+	storage?: SessionStorage;
 }
 
 interface AdvisorTranscriptCostFileSnapshot {
@@ -48,28 +54,43 @@ interface AdvisorTranscriptCostFileSnapshot {
  * Only the session's own advisors count: subagent advisors write to
  * `<session>/<SubId>/__advisor.jsonl`, and their spend belongs to the subagent,
  * not to this roster. Hence the scan stays at the top level of the directory.
+ *
+ * The transcripts are read where {@link AdvisorTranscriptRecorder} writes them:
+ * the session's storage (`options.storage`), which keeps them as rows rather
+ * than files under `session.storage: sql`.
  */
 export async function loadAdvisorTranscriptCosts(
 	sessionFile: string | undefined,
 	options: LoadAdvisorTranscriptCostsOptions = {},
 ): Promise<Map<string, number>> {
 	await options.beforeSnapshot;
+	const storage = options.storage ?? defaultSessionStorage();
 	const snapshots: AdvisorTranscriptCostFileSnapshot[] = [];
 	if (sessionFile?.endsWith(JSONL_SUFFIX)) {
 		const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
-		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-		for (const dirent of dirents) {
+		await storage.refresh?.();
+		let names: string[] = [];
+		try {
+			// Regular files only, as the `Dirent.isFile()` this replaced required.
+			names = storage
+				.listEntriesSync(directory)
+				.filter(entry => entry.isFile)
+				.map(entry => entry.name);
+		} catch (err) {
+			logger.debug("advisor transcript listing failed", { err: String(err) });
+		}
+		for (const name of names) {
 			if (options.shouldContinue?.() === false) break;
-			if (!dirent.isFile() || !isAdvisorTranscriptName(dirent.name)) continue;
-			const file = path.join(directory, dirent.name);
+			const file = path.join(directory, name);
+			if (!isAdvisorTranscriptName(name)) continue;
 			try {
 				snapshots.push({
 					file,
 					slug:
-						dirent.name === ADVISOR_TRANSCRIPT_FILENAME
+						name === ADVISOR_TRANSCRIPT_FILENAME
 							? ""
-							: dirent.name.slice(`${ADVISOR_TRANSCRIPT_STEM}.`.length, -JSONL_SUFFIX.length),
-					maxBytes: (await fs.stat(file)).size,
+							: name.slice(`${ADVISOR_TRANSCRIPT_STEM}.`.length, -JSONL_SUFFIX.length),
+					maxBytes: storage.statSync(file).size,
 				});
 			} catch {}
 		}
@@ -106,7 +127,7 @@ export async function loadAdvisorTranscriptCosts(
 						}
 					}
 				},
-				{ maxBytes: snapshot.maxBytes, shouldContinue: options.shouldContinue },
+				{ maxBytes: snapshot.maxBytes, shouldContinue: options.shouldContinue, storage },
 			);
 		} catch (err) {
 			logger.debug("advisor transcript cost read failed", { file: path.basename(snapshot.file), err: String(err) });

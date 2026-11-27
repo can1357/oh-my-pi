@@ -96,6 +96,7 @@ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
 import type { CompletionJournal } from "../session/model-usage-journal";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import { truncateTail } from "../tools/streaming-output";
 import {
 	AUTO_THINKING,
@@ -585,6 +586,12 @@ export interface ExecutorOptions {
 	invokedAt?: number;
 	acquiredAt?: number;
 	sessionFile?: string | null;
+	/**
+	 * Storage the child's transcript is opened in, read from, and revived from:
+	 * the parent session's ({@link sessionTreeStorage}). Omitted: the
+	 * default session storage.
+	 */
+	sessionStorage?: SessionStorage;
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
 	eventBus?: EventBus;
@@ -4522,11 +4529,15 @@ function trackSubagentIrcRoster(session: AgentSession, inputs: SubagentPromptInp
 	});
 }
 
-/** Re-resolves the IRC roster root a subagent's prompt scopes its peer rows to. */
+/**
+ * Re-resolves the IRC roster root a subagent's prompt scopes its peer rows to,
+ * scanning the persisted roster in `storage`, where the tree's transcripts live.
+ */
 async function refreshSubagentIrcRoot(
 	inputs: SubagentPromptInputs,
 	sessionManager: SessionManager,
 	sessionFile: string | null,
+	storage: SessionStorage,
 ): Promise<void> {
 	if (!inputs.ircEnabled) return;
 	const registry = AgentRegistry.global();
@@ -4536,6 +4547,7 @@ async function refreshSubagentIrcRoot(
 			sessionFile ??
 			registry.get(inputs.id)?.sessionFile ??
 			registry.get(MAIN_AGENT_ID)?.sessionFile,
+		storage,
 	);
 }
 
@@ -4559,6 +4571,8 @@ function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 /** Everything the lifecycle reviver of a kept-alive subagent needs, captured explicitly. */
 interface WarmReviveCapture {
 	sessionFile: string;
+	/** Storage {@link sessionFile} lives in; the revive reopens it there. */
+	storage: SessionStorage;
 	spec: SubagentSessionSpec;
 	/** A per-call worker never switches models; its warm revive keeps only the exact saved model. */
 	perCallModel: boolean;
@@ -4618,7 +4632,7 @@ export async function replayRevivedAgentStart(session: AgentSession): Promise<vo
 function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 	return async expectedAgentRef => {
 		const { id } = capture.spec.prompt;
-		const reopened = await SessionManager.open(capture.sessionFile, undefined, undefined, {
+		const reopened = await SessionManager.open(capture.sessionFile, undefined, capture.storage, {
 			suppressBreadcrumb: true,
 			throwIfMissing: true,
 		});
@@ -4638,7 +4652,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		if (capture.pendingCacheCandidate !== undefined) {
 			reopened.setTaskSiblingCandidate(capture.pendingCacheCandidate);
 		}
-		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile);
+		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile, capture.storage);
 		const mcpManager = capture.spec.options.mcpManager;
 		// The revived session reopens its own view, keeping the tools its earlier requests rendered.
 		const mcpFollower = mcpManager
@@ -4727,7 +4741,8 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  * read from `options.settings`; a call without settings runs here.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
-	const pool = isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
+	const pool =
+		isMainThread() && options.settings ? subagentWorkerPool(options.settings, options.sessionStorage) : undefined;
 	return pool ? runSubprocessPlaced(pool, options, runSubprocessOnThisThread) : runSubprocessOnThisThread(options);
 }
 
@@ -5165,8 +5180,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
+			const sessionStorage = options.sessionStorage ?? defaultSessionStorage();
 			const sessionManagerPromise = sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
+				? SessionManager.open(sessionFile, undefined, sessionStorage, {
 						initialCwd: effectiveCwd,
 						parentSession: options.sessionFile ?? undefined,
 						suppressBreadcrumb: true,
@@ -5393,7 +5409,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
-			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
+			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile, sessionStorage);
 
 			const hasExistingModelRole = sessionManager.getLastModelChangeRole() !== undefined;
 			// Subscribe before the builder mints proxies so a manager change during
@@ -5505,6 +5521,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (sessionFile !== null) {
 				const reviveCapture: WarmReviveCapture = {
 					sessionFile,
+					storage: sessionStorage,
 					spec: sessionSpec,
 					perCallModel: perCallModelGrants !== undefined,
 					settings: captureSubagentSettings(settings, subagentSettings),

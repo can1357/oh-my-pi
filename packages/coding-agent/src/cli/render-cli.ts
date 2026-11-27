@@ -30,6 +30,7 @@ import { AgentSession } from "../session/agent-session";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import { resolveSessionFileArg } from "./session-arg";
 import { SessionManager } from "../session/session-manager";
+import { defaultSessionStorage, FileSessionStorage } from "../session/session-storage";
 import { initTheme } from "../ui/theme/service";
 
 export interface RenderCommandArgs {
@@ -75,8 +76,9 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 	const settings = await Settings.init({ cwd });
 	initTheme();
 
+	const storage = defaultSessionStorage();
 	const sourcePath = await resolveSessionFileArg(args.session, cwd);
-	const sourceSize = (await fs.stat(sourcePath)).size;
+	const sourceSize = storage.statSync(sourcePath).size;
 
 	// Copy before opening: SessionManager.open takes the single-writer lock and
 	// session teardown appends a session_exit entry — neither may touch a live
@@ -90,7 +92,10 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 	let session: AgentSession | undefined;
 	let mode: InteractiveMode | undefined;
 	try {
-		await fs.copyFile(sourcePath, workingCopy);
+		// The copy goes into the same storage the original came from, because
+		// that is where `SessionManager.open` below reads it.
+		if (storage instanceof FileSessionStorage) await fs.copyFile(sourcePath, workingCopy);
+		else await storage.writeText(workingCopy, await storage.readText(sourcePath));
 		const openStart = performance.now();
 		const sessionManager = await SessionManager.open(workingCopy, undefined, undefined, {
 			suppressBreadcrumb: true,
@@ -181,6 +186,18 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 			await session?.dispose();
 		} catch (err) {
 			logger.debug("omp render teardown failed", { error: String(err) });
+		}
+		// Removing the directory reclaims a file copy; a copy the storage holds
+		// as a row is removed from the storage. Only the row: the copy carries the
+		// original's session id, so `deleteSessionWithArtifacts` would purge the
+		// original's history.db rows (prompts, recap, title) by that id. Its tool
+		// artifacts are local files under `tempDir`, removed below.
+		if (!(storage instanceof FileSessionStorage)) {
+			try {
+				await storage.unlink(workingCopy);
+			} catch (err) {
+				logger.debug("omp render working copy cleanup failed", { error: String(err) });
+			}
 		}
 		tempDir.removeSync();
 	}

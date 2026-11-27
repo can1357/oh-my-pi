@@ -20,6 +20,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as nameGenerator from "@oh-my-pi/pi-coding-agent/task/name-generator";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -166,6 +167,7 @@ function createContext(overrides?: {
 	const getSessionId = vi.fn(() => "parent-local-session");
 	const sessionManager = {
 		getHeader: vi.fn(() => undefined),
+		getStorage: vi.fn(() => defaultSessionStorage()),
 		getSessionFile: vi.fn(() => parentFile),
 		getCwd: vi.fn(() => tempDir.path()),
 		getSessionDir: vi.fn(() => tempDir.path()),
@@ -301,7 +303,7 @@ describe("TanCommandController", () => {
 			harness.parentFile,
 			harness.tempDir.path(),
 			harness.parentFile.slice(0, -6),
-			undefined,
+			defaultSessionStorage(),
 			{
 				copyArtifacts: false,
 				suppressBreadcrumb: true,

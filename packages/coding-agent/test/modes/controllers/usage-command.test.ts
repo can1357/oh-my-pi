@@ -4,6 +4,7 @@ import { AuthStorage, type UsageReport } from "@oh-my-pi/pi-ai";
 import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type JSXNode, type KeyEvent, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
@@ -391,6 +392,7 @@ describe("interactive /usage account visibility", () => {
 				fetchUsageReports,
 				getUsageReportingModelSelectors: () => [],
 			},
+			sessionManager: { getStorage: defaultSessionStorage },
 			shell,
 			showWarning: (message: string) => {
 				warnings.push(message);

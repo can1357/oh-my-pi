@@ -45,6 +45,7 @@ import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSche
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "./task-details";
 import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
+import { sessionTreeStorage } from "../session/session-storage";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
@@ -918,6 +919,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (!manager) {
 			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null), {
 				settings: this.session.settings,
+				storage: sessionTreeStorage(this.session),
 			});
 			this.session.agentOutputManager = manager;
 		}
@@ -1503,7 +1505,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const isolated = spawnParams.isolated === true;
 			// A failed or killed run may never have written the transcript a revival
 			// reads, so a resumable-looking ref alone does not make it messageable.
-			const transcriptAvailable = await hasResolvableTranscript(agentId);
+			const transcriptAvailable = await hasResolvableTranscript(agentId, sessionTreeStorage(this.session));
 			const ref = AgentRegistry.global().get(agentId);
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,

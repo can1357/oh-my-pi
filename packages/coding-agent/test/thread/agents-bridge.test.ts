@@ -1,4 +1,7 @@
+import { SQL } from "bun";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -12,6 +15,8 @@ import type { AgentSessionHandle } from "../../src/session/agent-session-handle"
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { defaultSessionStorage, setDefaultSessionStorage } from "../../src/session/session-storage";
+import { SqlSessionStorage } from "../../src/session/sql-session-storage";
 import { collectIrcPeerRoster } from "../../src/task/executor";
 import { cfgTaskAgentModelOverrides } from "../../src/task/settings";
 import type { AgentDefinition } from "../../src/task/types";
@@ -20,6 +25,7 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { WriteTool } from "../../src/tools/write";
 import type { AgentsProbe, AgentsProbeGlobals } from "../fixtures/agents-bridge-worker";
 
@@ -365,5 +371,51 @@ describe("agent bridging across subagent workers", () => {
 		expect(liveRef("W1").session).toBe(revived);
 		expect(liveRef("W1").status).toBe("idle");
 		expect(worker.load).toBe(1);
+	});
+
+	// A worker run is file-backed and no storage crosses the RPC, so main records file storage for every
+	// ref a worker registers. Under a SQL default (an SDK host with a file-backed parent), the kill of a
+	// worker agent whose transcript directory is gone then fails as file storage does.
+	describe("the kill of a worker agent whose transcript directory is gone, under a SQL default", () => {
+		async function sqlDefault(): Promise<void> {
+			const client = new SQL("sqlite::memory:");
+			cleanups.push(() => client.end());
+			const previous = defaultSessionStorage();
+			setDefaultSessionStorage(await SqlSessionStorage.create({ client }));
+			cleanups.push(() => setDefaultSessionStorage(previous));
+		}
+
+		async function killResult(id: string): Promise<{ ok: boolean } | { code: string | undefined }> {
+			try {
+				return { ok: await AgentLifecycleManager.global().release(id, liveRef(id), { tombstone: true }) };
+			} catch (error) {
+				return { code: (error as NodeJS.ErrnoException).code };
+			}
+		}
+
+		for (const [route, register] of [
+			["registered", (probe: AgentsProbe, id: string, sessionFile: string) => probe.open(id, { sessionFile })],
+			[
+				"registered by a spawn",
+				(probe: AgentsProbe, id: string, sessionFile: string) => probe.openAvailable(id, { sessionFile }),
+			],
+		] as const) {
+			it(`fails as file storage does for an agent ${route} on the worker`, async () => {
+				await sqlDefault();
+				const dir = TempDir.createSync("@omp-worker-kill-");
+				cleanups.push(() => dir.removeSync());
+				const sessionFile = dir.join("gone", "Worker-Kill.jsonl");
+				const { probe } = await startWorker();
+				await register(probe, "Worker-Kill", sessionFile);
+
+				const result = await killResult("Worker-Kill");
+
+				expect({
+					result,
+					dirMade: fs.existsSync(path.dirname(sessionFile)),
+					status: liveRef("Worker-Kill").status,
+				}).toEqual({ result: { code: "ENOENT" }, dirMade: false, status: "aborted" });
+			}, 90_000);
+		}
 	});
 });

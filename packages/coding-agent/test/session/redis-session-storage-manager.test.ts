@@ -72,6 +72,22 @@ function createFakeRedis(): FakeRedis {
 				getHash(titleKey).set(filePath, title);
 				return 1;
 			}
+			if (script.includes("OMP_REMOVE")) {
+				const [metaKey, titleKey] = keys;
+				const [filePrefix, pattern, ...paths] = argv;
+				if (pattern) {
+					const keyPrefix = pattern.slice(0, -1).replace(/\\(.)/g, "$1");
+					for (const key of strings.keys()) {
+						if (key.startsWith(keyPrefix)) paths.push(key.slice(filePrefix.length));
+					}
+				}
+				for (const filePath of paths) {
+					strings.delete(filePrefix + filePath);
+					getHash(metaKey).delete(filePath);
+					getHash(titleKey).delete(filePath);
+				}
+				return paths.length;
+			}
 			throw new Error("Unsupported Redis script");
 		},
 		async get(key) {
@@ -98,19 +114,6 @@ function createFakeRedis(): FakeRedis {
 			strings.set(key, next);
 			return Buffer.byteLength(next, "utf-8");
 		},
-		async del(...keys) {
-			let n = 0;
-			for (const k of keys) {
-				if (strings.delete(k)) n += 1;
-			}
-			return n;
-		},
-		async rename(src, dst) {
-			if (!strings.has(src)) throw new Error("ERR no such key");
-			strings.set(dst, strings.get(src) as string);
-			strings.delete(src);
-			return "OK";
-		},
 		async scan(_cursor, ...rest) {
 			let pattern = "*";
 			for (let i = 0; i < rest.length; i++) {
@@ -122,25 +125,12 @@ function createFakeRedis(): FakeRedis {
 			const matches = Array.from(strings.keys()).filter(k => regex.test(k));
 			return ["0", matches];
 		},
-		async hset(key, field, value) {
-			getHash(key).set(field, value);
-			return 1;
-		},
 		async hgetall(key) {
 			const h = hashes.get(key);
 			if (!h) return {};
 			const out: Record<string, string> = {};
 			for (const [k, v] of h) out[k] = v;
 			return out;
-		},
-		async hdel(key, ...fields) {
-			const h = hashes.get(key);
-			if (!h) return 0;
-			let n = 0;
-			for (const f of fields) {
-				if (h.delete(f)) n += 1;
-			}
-			return n;
 		},
 	};
 }
@@ -277,16 +267,19 @@ describe("SessionManager + RedisSessionStorage", () => {
 	});
 
 	it("does not count a session as resumable while its Redis removal is in flight", async () => {
-		// remove() deletes the file key before the metadata HDEL; an exit-time resume hint read
-		// while the HDEL is stalled would advertise a session whose content is already gone.
+		// The removal script has run on the server but its reply has not arrived; an exit-time
+		// resume hint read meanwhile would advertise a session whose content is already gone.
 		const redis = createFakeRedis();
 		const hdelStarted = Promise.withResolvers<void>();
 		const allowHdel = Promise.withResolvers<void>();
-		const hdel = redis.hdel.bind(redis);
-		redis.hdel = async (key, ...fields) => {
-			hdelStarted.resolve();
-			await allowHdel.promise;
-			return hdel(key, ...fields);
+		const send = redis.send.bind(redis);
+		redis.send = async (command, args) => {
+			const result = await send(command, args);
+			if (args[0]?.includes("OMP_REMOVE")) {
+				hdelStarted.resolve();
+				await allowHdel.promise;
+			}
+			return result;
 		};
 		const storage = await RedisSessionStorage.create({ client: redis });
 		const manager = SessionManager.create("/cwd", path.join(sessionRoot, "removing"), storage);
@@ -306,16 +299,19 @@ describe("SessionManager + RedisSessionStorage", () => {
 	});
 
 	it("keeps a session unconfirmed after a Redis removal fails past its file delete", async () => {
-		// remove() deletes the file key, then the metadata HDEL rejects: the rollback restores the
-		// index entry, but the content is gone, so an exit-time resume hint must not offer it.
+		// The removal script ran, then its reply was lost: the rollback restores the index entry,
+		// but the content is gone, so an exit-time resume hint must not offer it.
 		const redis = createFakeRedis();
 		const storage = await RedisSessionStorage.create({ client: redis });
 		const manager = SessionManager.create("/cwd", path.join(sessionRoot, "failed-removal"), storage);
 		await manager.ensureOnDisk();
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected session file");
-		redis.hdel = async () => {
-			throw new Error("connection lost");
+		const send = redis.send.bind(redis);
+		redis.send = async (command, args) => {
+			const result = await send(command, args);
+			if (args[0]?.includes("OMP_REMOVE")) throw new Error("connection lost");
+			return result;
 		};
 
 		await expect(manager.dropSession(sessionFile)).rejects.toThrow("connection lost");

@@ -5,6 +5,7 @@ import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { startMemoryStartupTask } from "@oh-my-pi/pi-coding-agent/memories";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	claimStage1Jobs,
 	clearMemoryData,
@@ -217,6 +218,9 @@ describe("memories/storage", () => {
 		const settled = deferred();
 		const session = {
 			sessionManager: {
+				// The startup task reads the thread's transcripts through the
+				// session's storage; a double without it never reaches a phase.
+				getStorage: () => defaultSessionStorage(),
 				getSessionFile: () => currentSessionFile,
 				getSessionDir: () => sessionDir,
 				getSessionId: () => "current-thread",

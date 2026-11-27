@@ -4,6 +4,7 @@ import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, JSONL_SUFFIX } from "./transcript-names";
 import { SessionManager } from "../session/session-manager";
+import type { SessionStorage } from "../session/session-storage";
 import { fingerprintMessage } from "./message-fingerprint";
 
 export {
@@ -56,6 +57,8 @@ export class AdvisorTranscriptRecorder {
 	#replayCursor = 0;
 	/** Target file {@link #replayWindow} belongs to; a switch starts a fresh window. */
 	#windowFile: string | undefined;
+	/** Storage the transcript is written to; `undefined` opens it in the default session storage. */
+	readonly #storage: SessionStorage | undefined;
 
 	/**
 	 * @param filename Transcript filename within the session dir. Defaults to
@@ -64,14 +67,18 @@ export class AdvisorTranscriptRecorder {
 	 * @param after Optional barrier the queue starts behind — used on the advisor
 	 *   on→off→on toggle so a fresh recorder's first `open` waits for the prior
 	 *   recorder's `close` and the two never hold the same file at once.
+	 * @param storage Storage of the owning session, which holds its transcript
+	 *   tree; {@link loadAdvisorTranscriptCosts} reads the spend back from it.
 	 */
 	constructor(
 		private readonly resolveSessionFile: () => string | undefined,
 		private readonly resolveCwd: () => string,
 		filename: string = ADVISOR_TRANSCRIPT_FILENAME,
 		after?: Promise<unknown>,
+		storage?: SessionStorage,
 	) {
 		this.#filename = filename;
+		this.#storage = storage;
 		this.#queue = after
 			? after.then(
 					() => {},
@@ -138,7 +145,7 @@ export class AdvisorTranscriptRecorder {
 		this.#enqueue(async () => {
 			if (file !== this.#file) {
 				await this.#closeManager();
-				this.#manager = await SessionManager.open(file, undefined, undefined, {
+				this.#manager = await SessionManager.open(file, undefined, this.#storage, {
 					initialCwd: cwd,
 					suppressBreadcrumb: true,
 				});

@@ -15,7 +15,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Settings } from "../config/settings";
 import { worktreeFamily } from "../worktree/worktrees";
-import type { SessionStorage } from "./session-storage";
+import { defaultSessionStorage, isStoredFile, type SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
 
@@ -224,11 +224,17 @@ export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessions
 	return path.join(sessionsRoot, getDefaultSessionDirName(cwd).encodedDirName);
 }
 
-/** Session buckets for both backends, including removed worktrees whose sessions can be resumed. */
+/**
+ * Session buckets for both backends, including removed worktrees whose
+ * sessions can be resumed. The bucket names come from `options.storage`
+ * (default: the process-wide session storage): a key-indexed one
+ * (`session.storage: sql`) keeps a bucket as a key prefix with no directory
+ * on disk.
+ */
 export async function worktreeSessionDirs(
 	cwd: string,
 	sessionDir: string,
-	options: { settings?: Settings; stranded?: boolean } = {},
+	options: { settings?: Settings; stranded?: boolean; storage?: SessionStorage } = {},
 ): Promise<string[]> {
 	const sessionsRoot = resolveManagedSessionRoot(sessionDir, cwd);
 	if (!sessionsRoot) return [];
@@ -236,7 +242,9 @@ export async function worktreeSessionDirs(
 		const family = await worktreeFamily(cwd, options.settings);
 		if (!family) return [];
 		const { primary, prefix, locations } = family;
-		const dirs = new Set(managedWorktreeSessionDirs(primary, prefix, sessionsRoot));
+		const storage = options.storage ?? defaultSessionStorage();
+		await storage.refresh?.();
+		const dirs = new Set(managedWorktreeSessionDirs(primary, prefix, sessionsRoot, storage));
 		for (const location of locations) {
 			const dir = sessionDirForCwd(path.resolve(location.root, prefix), sessionsRoot);
 			if (options.stranded && location.offline) dirs.delete(dir);
@@ -258,9 +266,16 @@ const WORKTREE_NAME_PROBE = "{worktree}";
  * the repository at `primaryRoot`, matched by directory name. Those worktrees
  * live at `<worktree base>/<slug>-<hashPath(primaryRoot)>[-<n>]` (see
  * `createSessionWorktree` and `resolveAvailableWorktreePath`), so the match
- * needs no git metadata and survives the worktree's removal.
+ * needs no git metadata and survives the worktree's removal. The bucket names
+ * come from `storage`: a key-indexed one (`session.storage: sql`) keeps a
+ * bucket as a key prefix with no directory on disk.
  */
-function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, sessionsRoot: string): string[] {
+function managedWorktreeSessionDirs(
+	primaryRoot: string,
+	prefix: string,
+	sessionsRoot: string,
+	storage: SessionStorage,
+): string[] {
 	// Encode against the canonical base: a live worktree's directory was named
 	// from its realpath, and the probe path does not exist to be resolved.
 	const probe = path.join(resolveEquivalentPath(getWorktreesDir()), WORKTREE_NAME_PROBE, prefix);
@@ -272,7 +287,11 @@ function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, session
 	const name = new RegExp(`^[\\w.-]+-(?:${[...hashes].join("|")})(?:-\\d+)?$`);
 	let entries: string[];
 	try {
-		entries = fs.readdirSync(sessionsRoot);
+		// Every name the sessions root holds, as the `readdirSync` this replaced
+		// returned: `listDirsSync` keeps only real directories, which drops a
+		// session bucket that is a symlink to one — and this listing matches
+		// names, it does not descend, so there is no loop to guard against.
+		entries = storage.listEntriesSync(sessionsRoot).map(entry => entry.name);
 	} catch {
 		return [];
 	}
@@ -520,9 +539,12 @@ export interface TerminalBreadcrumb {
  * A missing target file yields `null` UNLESS the breadcrumb is a `fresh`
  * boundary — a lazy session whose JSONL was never written — in which case the
  * entry is returned with `exists:false` so the caller can distinguish it from a
- * genuinely stale/deleted breadcrumb.
+ * genuinely stale/deleted breadcrumb. The target is looked up in `storage`,
+ * the store the caller resumes from.
  */
-export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb | null> {
+export async function readTerminalBreadcrumbEntry(
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<TerminalBreadcrumb | null> {
 	const terminalId = getTerminalId();
 	if (!terminalId) return null;
 
@@ -532,8 +554,15 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 		if (!parsed) return null;
 		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
 
-		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
-		const exists = stat?.isFile() === true;
+		// Through the caller's storage: under `session.storage: sql` the target
+		// is a row, and a filesystem check would drop every breadcrumb.
+		// A shared store may hold a row another client committed since this one
+		// loaded its view: another omp process wrote the session this terminal
+		// last ran. A regular file only: `existsSync` also accepts a directory
+		// named `*.jsonl`, and continuing one fails the launch with EISDIR
+		// instead of ignoring the breadcrumb.
+		await storage.refresh?.();
+		const exists = isStoredFile(sessionFile, storage);
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
 		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };

@@ -63,7 +63,8 @@ import type { SessionEntry, SessionTreeNode } from "../../session/session-entrie
 import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
-import { FileSessionStorage } from "../../session/session-storage";
+import { defaultSessionStorage } from "../../session/session-storage";
+import { assertSessionsOnDisk, STATS_DISK_ONLY_REASON } from "../../session/session-storage-config";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import { connectedProviderName } from "../view-model/chrome/format";
 import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
@@ -505,6 +506,7 @@ export class SelectorController {
 			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
 			: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
+		const storage = this.ctx.sessionManager.getStorage();
 		const menu = this.#claimMenu(kind);
 		const size = this.ctx.shell.size;
 		const dashboard = new UsageDashboardModel({
@@ -520,16 +522,19 @@ export class SelectorController {
 					usageModelSelectors,
 					unavailableAccounts,
 				),
-			// A rejection leaves the dashboard up with "History unavailable" in place of the heatmap.
-			loadActivity: async (push, signal) => {
-				try {
-					await loadDailyActivity(push, signal);
-				} catch (error) {
+			// The heatmap reads the stats store, which ingests session files: under
+			// `session.storage: sql` it says why it is empty while the quotas still show.
+			// The refusal throws before the load starts, so the dashboard shows it when
+			// it is built. Any other rejection leaves the dashboard up with "History
+			// unavailable" in place of the heatmap.
+			loadActivity: (push, signal) => {
+				assertSessionsOnDisk(storage, "/usage activity heatmap", STATS_DISK_ONLY_REASON);
+				return loadDailyActivity(push, signal).catch((error: unknown) => {
 					logger.warn("Usage activity history unavailable", {
 						error: error instanceof Error ? error.message : String(error),
 					});
 					throw error;
-				}
+				});
 			},
 			refresh: () => this.ctx.session.fetchUsageReports(),
 			terminalRows: () => size().rows,
@@ -2052,7 +2057,7 @@ export class SelectorController {
 					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
 						return false;
 					}
-					const storage = new FileSessionStorage();
+					const storage = defaultSessionStorage();
 					try {
 						await storage.deleteSessionWithArtifacts(session.path);
 						return true;
@@ -2071,8 +2076,10 @@ export class SelectorController {
 						// a sibling and still report success, leaving the
 						// row here pointing at the old path. Claim the
 						// lease up front and refuse while it is held by
-						// someone else.
-						const claim = new FileSessionStorage().claimSession(session.id, session.path);
+						// someone else. A storage with no lease (SQL)
+						// has no other owner to refuse for.
+						const storage = this.ctx.sessionManager.getStorage();
+						const claim = storage.claimSession ? storage.claimSession(session.id, session.path) : () => {};
 						if (!claim) {
 							throw new Error("Failed to rename session: it is currently in use by another omp process");
 						}
@@ -2256,7 +2263,9 @@ export class SelectorController {
 	/**
 	 * Move a session stranded under the current folder (see
 	 * {@link SessionManager.isStrandedIn}) into it before resuming: its recorded
-	 * directory is gone and cannot be entered.
+	 * directory is gone and cannot be entered. A storage that cannot refuse the
+	 * move while another omp process writes the session
+	 * ({@link SessionManager.relocatesUnasked}) resumes it where it is stored.
 	 * Returns the session file to switch to.
 	 * @throws when the move fails, e.g. another omp process writes the session.
 	 */
@@ -2269,6 +2278,7 @@ export class SelectorController {
 		const info = await readSessionInfo(sessionPath);
 		if (!info || !(await SessionManager.isStrandedIn(info, cwd, sessionDir, this.ctx.settings)))
 			return { sessionPath };
+		if (!SessionManager.relocatesUnasked(sessionManager.getStorage())) return { sessionPath };
 		try {
 			const relocated = await SessionManager.openRelocated(sessionPath, info.cwd, cwd, sessionDir);
 			const movedPath = relocated.getSessionFile() ?? sessionPath;
@@ -2290,7 +2300,7 @@ export class SelectorController {
 		}
 
 		// Check if session file exists (may not exist for brand new sessions)
-		const storage = new FileSessionStorage();
+		const storage = defaultSessionStorage();
 		const fileExists = await storage.exists(sessionFile);
 		if (!fileExists) {
 			this.ctx.showError("Session has not been saved yet");
@@ -2713,6 +2723,7 @@ export class SelectorController {
 			registry: this.ctx.collabGuest?.agentRegistry,
 			remote,
 			sessionFile,
+			storage: this.ctx.sessionManager.getStorage(),
 		});
 		const size = this.ctx.shell.size;
 		let cancelled = false;

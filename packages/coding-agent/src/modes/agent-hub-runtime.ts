@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import type { AgentRecordLike } from "../registry/agent-hub-types";
 import { type AgentCostSnapshot, aggregateCost } from "./view-model/overlays/agent-hub-projection";
@@ -12,21 +11,37 @@ import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isSessionTreeRef, registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
+import { defaultSessionStorage, readSessionLinesFrom, type SessionStorage } from "../session/session-storage";
 import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
 
-/** Filesystem and parser used by local and host-backed transcript viewers. */
-export const agentTranscriptSource: AgentTranscriptSource = {
-	fs,
-	parseEntries: text => {
-		const entries = parseSessionEntries(text).filter(
-			entry => entry.type === "message" || entry.type === "model_change",
-		);
-		for (const entry of entries) {
-			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
-		}
-		return entries;
-	},
-};
+/**
+ * Transcript reads and parser used by local and host-backed transcript viewers.
+ * Reads go through `storage()`, the session storage holding the transcripts:
+ * under `session.storage: sql` a transcript is a row with no file behind it.
+ * Each read is a window of at most 8 MiB (more only for a longer line), which
+ * the viewer reads on from.
+ */
+function transcriptSource(storage: () => SessionStorage): AgentTranscriptSource {
+	return {
+		stat: file => {
+			const stat = storage().statSync(file);
+			return { size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino };
+		},
+		readFrom: async (file, offset) => (await readSessionLinesFrom(storage(), file, offset)).text,
+		parseEntries: text => {
+			const entries = parseSessionEntries(text).filter(
+				entry => entry.type === "message" || entry.type === "model_change",
+			);
+			for (const entry of entries) {
+				if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
+			}
+			return entries;
+		},
+	};
+}
+
+/** {@link transcriptSource} over the default session storage, for viewers without a session at hand. */
+export const agentTranscriptSource: AgentTranscriptSource = transcriptSource(defaultSessionStorage);
 
 /** Host services the Agent Hub reads (registry, lifecycle, IRC, activity), plus the transcript source its viewer reads. */
 export function createAgentHubRuntime(
@@ -38,12 +53,15 @@ export function createAgentHubRuntime(
 		remote?: AgentHubRemote;
 		settings?: Settings;
 		sessionFile?: string | null;
+		/** Storage the session's subagent tree lives in (its session manager's); default: the default session storage. */
+		storage?: SessionStorage;
 	} = {},
 ): Pick<
 	AgentHubProps<AgentRef>,
 	"registry" | "inSession" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "loadPersisted" | "getRoleInfo"
 > & { transcript: AgentTranscriptSource } {
 	const registry = options.registry ?? AgentRegistry.global();
+	const { storage } = options;
 	const rootSessionFile = options.sessionFile?.endsWith(".jsonl") ? options.sessionFile : undefined;
 	const copied = new Set<AgentRecordLike>();
 	return {
@@ -56,12 +74,13 @@ export function createAgentHubRuntime(
 				: undefined,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
 		irc: options.irc ?? IrcBus.global(),
-		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote }),
+		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote, storage }),
 		manageActivityLive: !options.activity,
-		transcript: agentTranscriptSource,
+		transcript: storage ? transcriptSource(() => storage) : agentTranscriptSource,
 		loadPersisted: shouldContinue =>
 			registerPersistedSubagents(registry, options.sessionFile, {
 				shouldContinue,
+				storage,
 				onCopiedRef: ref => copied.add(ref),
 			}),
 		getRoleInfo: options.settings ? role => getRoleInfo(role, options.settings!) : undefined,

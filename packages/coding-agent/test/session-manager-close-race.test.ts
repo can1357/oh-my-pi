@@ -31,6 +31,7 @@ import {
 	type SessionStorage,
 	type SessionStorageWriter,
 	type WriteTextAtomicOptions,
+	type SessionStorageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
@@ -93,6 +94,12 @@ class CloseHoldingStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		return this.#inner.listFilesSync(dir, pattern);
 	}
+	listDirsSync(dir: string): string[] {
+		return this.#inner.listDirsSync(dir);
+	}
+	listEntriesSync(dir: string): SessionStorageEntry[] {
+		return this.#inner.listEntriesSync(dir);
+	}
 	exists(p: string): Promise<boolean> {
 		return this.#inner.exists(p);
 	}
@@ -105,11 +112,17 @@ class CloseHoldingStorage implements SessionStorage {
 	writeText(p: string, content: string): Promise<void> {
 		return this.#inner.writeText(p, content);
 	}
+	writeTextNoReplace(p: string, content: string): Promise<void> {
+		return this.#inner.writeTextNoReplace(p, content);
+	}
 	writeTextAtomic(p: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		return this.#inner.writeTextAtomic(p, content, options);
 	}
 	rename(p: string, nextPath: string): Promise<void> {
 		return this.#inner.rename(p, nextPath);
+	}
+	renameNoReplace(p: string, nextPath: string): Promise<void> {
+		return this.#inner.renameNoReplace(p, nextPath);
 	}
 	unlink(p: string): Promise<void> {
 		return this.#inner.unlink(p);

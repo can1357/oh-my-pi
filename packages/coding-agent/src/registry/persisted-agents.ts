@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { defaultSessionStorage, isStoredFile, type SessionStorage } from "../session/session-storage";
 import { type AgentRef, type AgentRegistryApi, MAIN_AGENT_ID } from "./agent-registry";
 
 export interface PersistedScanOptions {
@@ -12,6 +13,8 @@ export interface PersistedScanOptions {
 	 * against, bounded by this root's own transcript tree.
 	 */
 	owned?: Map<string, string>;
+	/** Storage holding the transcripts; defaults to the configured one. */
+	storage?: SessionStorage;
 	/** Observe refs already registered from a different root whose transcript is also present in this root. */
 	onCopiedRef?: (ref: AgentRef) => void;
 }
@@ -75,7 +78,11 @@ function latchOwnershipValid(registry: AgentRegistryApi, owned: Map<string, stri
 	return true;
 }
 
-async function resolveRootSessionFile(registry: AgentRegistryApi, hint?: string | null): Promise<string | undefined> {
+function resolveRootSessionFile(
+	registry: AgentRegistryApi,
+	storage: SessionStorage,
+	hint?: string | null,
+): string | undefined {
 	const mainFile = registry.get(MAIN_AGENT_ID)?.sessionFile;
 	const candidate =
 		typeof hint === "string" && hint.endsWith(".jsonl")
@@ -90,7 +97,10 @@ async function resolveRootSessionFile(registry: AgentRegistryApi, hint?: string 
 	// top-level siblings invisible to deep children.
 	for (;;) {
 		const parentFile: string = `${path.dirname(current)}.jsonl`;
-		if (parentFile === current || !(await Bun.file(parentFile).exists())) return current;
+		// A regular file, as the `Bun.file(...).exists()` this replaced reported:
+		// `existsSync` also accepts a directory named `*.jsonl`, which would make
+		// the climb mistake it for a parent transcript.
+		if (parentFile === current || !isStoredFile(parentFile, storage)) return current;
 		current = parentFile;
 	}
 }
@@ -145,10 +155,11 @@ export function isCurrentSessionRosterRef(
 export async function ensurePersistedRoster(
 	registry: AgentRegistryApi,
 	sessionFileHint?: string | null,
+	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<string | undefined> {
 	let root: string | undefined;
 	try {
-		root = await resolveRootSessionFile(registry, sessionFileHint);
+		root = resolveRootSessionFile(registry, storage, sessionFileHint);
 	} catch (error) {
 		logger.warn("Persisted agent roster root resolution failed; using in-memory peers", {
 			error: rosterScanError(error),
@@ -205,7 +216,7 @@ export async function ensurePersistedRoster(
 	const latch: PersistedRosterLatch = { pending: undefined!, settled: false, owned: new Map() };
 	const tail = taggedRegistry[kPersistedRosterScanTail] ?? Promise.resolve();
 	const scan = tail.then(() =>
-		registerPersistedSubagents(registry, root, { hydrateHistory: false, owned: latch.owned }),
+		registerPersistedSubagents(registry, root, { hydrateHistory: false, owned: latch.owned, storage }),
 	);
 	taggedRegistry[kPersistedRosterScanTail] = scan.then(
 		() => {},

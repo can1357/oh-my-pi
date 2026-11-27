@@ -2,14 +2,13 @@
  * State of the Agent Hub transcript viewer: a parked subagent's, an
  * advisor's or a collab guest's transcript (no live in-view session).
  *
- * Local transcripts tail append-only growth: an unchanged file identity and
- * matching sentinel windows mean only new JSONL is parsed and appended; a
- * rewrite, truncation or rotation reloads the whole file. Remote (collab
- * guest) transcripts read the host's byte-capped increments. The message
- * draft revives a parked agent (or steers a live one) on send; advisors are
- * read-only.
+ * Local transcripts are read through the host's session storage and tail
+ * append-only growth: while the text just before the rendered end is
+ * unchanged, only new JSONL is parsed and appended; a rewrite, truncation or
+ * rotation reloads the whole transcript. Remote (collab guest) transcripts
+ * read the host's byte-capped increments. The message draft revives a parked
+ * agent (or steers a live one) on send; advisors are read-only.
  */
-import type * as fs from "node:fs";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, signal, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger } from "@oh-my-pi/pi-utils";
@@ -19,6 +18,7 @@ import type { AgentHubRemote } from "../../../modes/view-model/overlays/agent-hu
 import type {
 	AgentTranscriptEntry,
 	AgentTranscriptSource,
+	AgentTranscriptStat,
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
 import { imageContent, type SessionMessageEntryLike, textContent } from "../../../session/transcript/transcript-entry";
@@ -138,61 +138,83 @@ export type ViewerBlock =
 	| { readonly kind: "branch"; readonly id: string; readonly summary: string };
 
 const POLL_MS = 250;
-/** Every Nth idle poll re-reads the sentinels (rewrites that keep size and mtime). */
-const SENTINEL_CHECK_EVERY = 5;
-const SENTINEL_BYTES = 4096;
-
-interface Sentinel {
-	readonly offset: number;
-	readonly bytes: Buffer;
-}
+/** Every Nth idle poll re-reads the anchor, catching a rewrite of the tail that keeps size and mtime. */
+const IDLE_VERIFY_EVERY = 5;
+/**
+ * Every Nth idle poll re-reads the whole transcript and compares what was
+ * rendered, catching a rewrite *before* the anchor — an edit to an early
+ * message that keeps the file's size and restores its mtime changes nothing
+ * the cheaper checks look at. Rarer than the anchor check because it costs a
+ * full read.
+ */
+const FULL_VERIFY_EVERY = 20;
+/** UTF-16 units of rendered text a tail read must find unchanged before it appends. */
+const ANCHOR_CHARS = 4096;
 
 interface LocalState {
 	readonly path: string;
-	readonly dev: number;
-	readonly ino: number;
-	readonly size: number;
-	readonly mtimeMs: number;
-	/** Bytes after the last complete line. */
-	readonly pending: string;
-	readonly sentinels: readonly Sentinel[];
+	/** The stat the last read answered; an unchanged stat makes a poll idle. */
+	readonly seen: AgentTranscriptStat;
+	/** Byte offset just past the last complete line rendered. */
+	readonly offset: number;
+	/** The rendered text that ends at {@link offset}, starting at byte {@link anchorOffset}. */
+	readonly anchor: string;
+	readonly anchorOffset: number;
+	/** The rendered text's hash and length in UTF-16 units, for the whole-transcript verify. */
+	readonly rendered: RenderedHash;
 }
 
-function readRange(source: AgentTranscriptSource["fs"], file: string, offset: number, length: number): Buffer {
-	const buffer = Buffer.alloc(Math.max(0, length));
-	if (length <= 0) return buffer;
-	const fd = source.openSync(file, "r");
-	try {
-		let read = 0;
-		while (read < length) {
-			const n = source.readSync(fd, buffer, read, length - read, offset + read);
-			if (n <= 0) break;
-			read += n;
-		}
-		return read === length ? buffer : buffer.subarray(0, read);
-	} finally {
-		source.closeSync(fd);
-	}
+/**
+ * A polynomial hash of rendered transcript text, in a form that can be
+ * extended by an append as cheaply as it can be recomputed whole:
+ * `H(a + b) = H(a) * base^|b| + H(b)`. A plain digest would have to re-hash
+ * the entire rendered prefix on every append, which is quadratic over a
+ * session; this costs the length of the append.
+ */
+const HASH_BASE = 131n;
+const HASH_MOD = 2305843009213693951n; // 2^61 - 1, a Mersenne prime
+
+interface RenderedHash {
+	readonly value: bigint;
+	readonly length: number;
 }
 
-/** The head and tail windows of the first `size` bytes. */
-function sentinelWindows(size: number): number[] {
-	if (size <= 0) return [];
-	const tail = Math.max(0, size - SENTINEL_BYTES);
-	return tail === 0 ? [0] : [0, tail];
+function hashRendered(text: string): RenderedHash {
+	let value = 0n;
+	for (let i = 0; i < text.length; i++) value = (value * HASH_BASE + BigInt(text.charCodeAt(i) + 1)) % HASH_MOD;
+	return { value, length: text.length };
 }
 
-function sentinelsOf(data: Buffer): Sentinel[] {
-	return sentinelWindows(data.byteLength).map(offset => ({
-		offset,
-		bytes: Buffer.from(data.subarray(offset, Math.min(data.byteLength, offset + SENTINEL_BYTES))),
-	}));
+function concatRendered(a: RenderedHash, b: RenderedHash): RenderedHash {
+	let shift = 1n;
+	for (let i = 0; i < b.length; i++) shift = (shift * HASH_BASE) % HASH_MOD;
+	return { value: (a.value * shift + b.value) % HASH_MOD, length: a.length + b.length };
+}
+
+/** The last {@link ANCHOR_CHARS} of `text`, rendered text that ends at byte `offset`, and the byte it starts at. */
+function anchorAt(text: string, offset: number): { anchor: string; anchorOffset: number } {
+	let start = Math.max(0, text.length - ANCHOR_CHARS);
+	// Start on a character: a low surrogate continues the pair before it.
+	const unit = text.charCodeAt(start);
+	if (unit >= 0xdc00 && unit <= 0xdfff) start++;
+	const anchor = text.slice(start);
+	return { anchor, anchorOffset: offset - Buffer.byteLength(anchor, "utf-8") };
 }
 
 /** Complete JSONL lines of `text` and the partial line after them. */
 function splitComplete(text: string): { complete: string; pending: string } {
 	const at = text.lastIndexOf("\n");
 	return at < 0 ? { complete: "", pending: text } : { complete: text.slice(0, at + 1), pending: text.slice(at + 1) };
+}
+
+/**
+ * `stat` with its size cut to the end of `text`, read from byte `from`: the
+ * stat that read answers for. A read that stops short of the size `stat` saw (a
+ * window of a long transcript) then leaves the next poll a larger size to read
+ * on to, instead of an unchanged stat that idles it with the tail unread.
+ */
+function answeredStat(stat: AgentTranscriptStat, from: number, text: string): AgentTranscriptStat {
+	return { ...stat, size: Math.min(stat.size, from + Buffer.byteLength(text, "utf-8")) };
 }
 
 export class AgentTranscriptViewerModel {
@@ -237,14 +259,15 @@ export class AgentTranscriptViewerModel {
 	constructor(readonly deps: AgentTranscriptViewerDeps) {
 		this.revealEntry = deps.initialEntryId;
 		this.#meta = this.#metaSignature();
-		this.#refresh(false);
+		// The first read starts now; polls re-stat the transcript for growth.
+		this.#refresh();
 		this.#poll = setInterval(() => this.poll(), deps.pollMs ?? POLL_MS);
 		this.#poll.unref?.();
 	}
 
 	/** Re-read the transcript, and show registry or progress changes. */
 	poll(): void {
-		this.#refresh(true);
+		this.#refresh();
 		const meta = this.#metaSignature();
 		if (meta === this.#meta) return;
 		this.#meta = meta;
@@ -289,7 +312,10 @@ export class AgentTranscriptViewerModel {
 			if (this.remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
-		return this.ref()?.sessionFile ? "No messages yet." : "No session file available yet.";
+		if (!this.ref()?.sessionFile) return "No session file available yet.";
+		// Until the first read lands there is neither a transcript nor a reason it is missing.
+		if (!this.#local && !this.#localUnavailable) return "Loading transcript…";
+		return "No messages yet.";
 	}
 
 	/** The error shown above the draft: a send failure, else a remote read error under shown messages. */
@@ -310,7 +336,7 @@ export class AgentTranscriptViewerModel {
 
 	// ─── Loading ──────────────────────────────────────────────────────────
 
-	#refresh(allowAsync: boolean): void {
+	#refresh(): void {
 		if (this.#disposed) return;
 		if (this.deps.remote) {
 			this.#fetchRemote();
@@ -322,27 +348,34 @@ export class AgentTranscriptViewerModel {
 			this.#clearLocal("none");
 			return;
 		}
-		let stat: fs.Stats;
+		let stat: AgentTranscriptStat;
 		try {
-			stat = this.deps.transcript.fs.statSync(file);
+			stat = this.deps.transcript.stat(file);
 		} catch {
 			this.#clearLocal("missing");
 			return;
 		}
 		const state = this.#local;
-		if (state && state.path === file && state.dev === stat.dev && state.ino === stat.ino) {
-			if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) {
-				if (++this.#idlePolls < SENTINEL_CHECK_EVERY) return;
-				this.#idlePolls = 0;
-				if (!this.#sentinelsHold(file, state)) this.#loadFull(file, stat, allowAsync);
-				return;
-			}
-			if (stat.size > state.size && this.#sentinelsHold(file, state)) {
-				this.#appendLocal(file, stat, state, allowAsync);
-				return;
-			}
+		if (
+			!state ||
+			state.path !== file ||
+			stat.size < state.offset ||
+			// A different file at the same path: rotation, which no content check
+			// can see because the content may be identical.
+			(stat.dev !== undefined && stat.dev !== state.seen.dev) ||
+			(stat.ino !== undefined && stat.ino !== state.seen.ino)
+		) {
+			// A new transcript, one cut below what is rendered, or a rotation: rebuild.
+			this.#readLocal(file, stat, undefined);
+			return;
 		}
-		this.#loadFull(file, stat, allowAsync);
+		// Idle fast path: an unchanged size and mtime costs one stat; the anchor is
+		// re-read only every Nth idle poll so a rewrite that keeps both is still noticed.
+		const idle = stat.size === state.seen.size && stat.mtimeMs === state.seen.mtimeMs;
+		if (idle && ++this.#idlePolls % IDLE_VERIFY_EVERY !== 0) return;
+		const full = !idle || this.#idlePolls % FULL_VERIFY_EVERY === 0;
+		if (!idle) this.#idlePolls = 0;
+		this.#readLocal(file, stat, state, full && idle);
 	}
 
 	#clearLocal(reason: string): void {
@@ -353,77 +386,114 @@ export class AgentTranscriptViewerModel {
 		this.#rebuild([]);
 	}
 
-	#sentinelsHold(file: string, state: LocalState): boolean {
-		try {
-			return state.sentinels.every(sentinel =>
-				readRange(this.deps.transcript.fs, file, sentinel.offset, sentinel.bytes.byteLength).equals(sentinel.bytes),
-			);
-		} catch {
-			return false;
-		}
-	}
-
-	#loadFull(file: string, stat: fs.Stats, allowAsync: boolean): void {
-		const promises = allowAsync ? this.deps.transcript.fs.promises : undefined;
-		if (promises) {
-			this.#loading = true;
-			promises
-				.readFile(file)
-				.then(data => {
-					this.#loading = false;
-					if (!this.#disposed) this.#applyFull(file, stat, data);
-				})
-				.catch((error: unknown) => {
-					// The state stays: the next poll retries.
-					this.#loading = false;
-					logger.debug("transcript viewer: read failed", { error: String(error) });
-				});
+	/**
+	 * Read the transcript from the anchor of `state` and append what follows the
+	 * rendered end. Without a state, or when the anchor text changed (a rewrite,
+	 * not an append), read it from the start and rebuild. A read may answer only
+	 * a window of a long transcript; the state then records the end of that
+	 * window as the size seen, so the next poll reads on from it.
+	 */
+	#readLocal(file: string, stat: AgentTranscriptStat, state: LocalState | undefined, verifyWhole = false): void {
+		this.#loading = true;
+		if (verifyWhole && state) {
+			void this.#verifyLocal(file, stat, state);
 			return;
 		}
+		const from = state?.anchorOffset ?? 0;
+		this.deps.transcript
+			.readFrom(file, from)
+			.then(text => {
+				this.#loading = false;
+				if (this.#disposed) return;
+				const answered = answeredStat(stat, from, text);
+				if (state && text.startsWith(state.anchor))
+					this.#appendLocal(state, answered, text.slice(state.anchor.length));
+				else if (from > 0) this.#readLocal(file, stat, undefined);
+				else this.#applyFull(file, answered, text);
+			})
+			.catch((error: unknown) => {
+				// The state stays: the next poll retries.
+				this.#loading = false;
+				logger.debug("transcript viewer: read failed", { error: String(error) });
+			});
+	}
+
+	/**
+	 * The whole-transcript verify: whether the transcript still starts with the
+	 * rendered text of `state`, by its hash. A read may answer one window of a
+	 * long transcript, so the rendered text is hashed window by window from byte
+	 * 0 until a window reaches its end; no window is compared as if it held the
+	 * whole of it. Unchanged, what follows the rendered end in that window is
+	 * appended; changed, the view is rebuilt from the first window.
+	 */
+	async #verifyLocal(file: string, stat: AgentTranscriptStat, state: LocalState): Promise<void> {
 		try {
-			this.#applyFull(file, stat, this.deps.transcript.fs.readFileSync(file));
+			const first = await this.deps.transcript.readFrom(file, 0);
+			let text = first;
+			let at = 0;
+			let hashed: RenderedHash = { value: 0n, length: 0 };
+			for (;;) {
+				if (this.#disposed) return;
+				const remaining = state.rendered.length - hashed.length;
+				if (text.length >= remaining) {
+					const whole = concatRendered(hashed, hashRendered(text.slice(0, remaining)));
+					this.#loading = false;
+					if (whole.value === state.rendered.value) {
+						this.#appendLocal(state, answeredStat(stat, at, text), text.slice(remaining));
+					} else this.#applyFull(file, answeredStat(stat, 0, first), first);
+					return;
+				}
+				// A window short of the rendered end: hash its complete lines and read on after them.
+				const { complete } = splitComplete(text);
+				if (!complete) {
+					// The transcript ends before the rendered text does.
+					this.#loading = false;
+					this.#applyFull(file, answeredStat(stat, 0, first), first);
+					return;
+				}
+				hashed = concatRendered(hashed, hashRendered(complete));
+				at += Buffer.byteLength(complete, "utf-8");
+				text = await this.deps.transcript.readFrom(file, at);
+			}
 		} catch (error) {
+			// The state stays: the next poll retries.
+			this.#loading = false;
 			logger.debug("transcript viewer: read failed", { error: String(error) });
 		}
 	}
 
-	#applyFull(file: string, stat: fs.Stats, data: Buffer): void {
-		// Identity and mtime after the read: the file may have grown since the stat.
-		let after = stat;
-		try {
-			after = this.deps.transcript.fs.statSync(file);
-		} catch {}
-		const { complete, pending } = splitComplete(data.toString("utf-8"));
+	#applyFull(file: string, stat: AgentTranscriptStat, text: string): void {
+		// A read that lands mid-append ends in a partial line (no terminating
+		// newline). It stays unrendered past the offset; the next read starts
+		// before the offset and takes it whole once its newline arrives. The
+		// offset counts the bytes read, not `stat.size`, so growth between the
+		// stat and the read is never rendered twice.
+		const { complete } = splitComplete(text);
+		const offset = Buffer.byteLength(complete, "utf-8");
 		this.#localUnavailable = "";
 		this.#local = {
 			path: file,
-			dev: after.dev,
-			ino: after.ino,
-			size: data.byteLength,
-			mtimeMs: after.mtimeMs,
-			pending,
-			sentinels: sentinelsOf(data),
+			seen: { size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino },
+			offset,
+			rendered: hashRendered(complete),
+			...anchorAt(complete, offset),
 		};
 		this.model = undefined;
 		this.#rebuild(this.#messages(this.deps.transcript.parseEntries(complete)));
 	}
 
-	#appendLocal(file: string, stat: fs.Stats, state: LocalState, allowAsync: boolean): void {
-		let chunk: string;
-		let sentinels: Sentinel[];
-		try {
-			chunk = readRange(this.deps.transcript.fs, file, state.size, stat.size - state.size).toString("utf-8");
-			sentinels = sentinelWindows(stat.size).map(offset => ({
-				offset,
-				bytes: readRange(this.deps.transcript.fs, file, offset, Math.min(SENTINEL_BYTES, stat.size - offset)),
-			}));
-		} catch (error) {
-			logger.debug("transcript viewer: tail read failed", { error: String(error) });
-			this.#loadFull(file, stat, allowAsync);
-			return;
-		}
-		const { complete, pending } = splitComplete(state.pending + chunk);
-		this.#local = { ...state, size: stat.size, mtimeMs: stat.mtimeMs, pending, sentinels };
+	/** Render the complete lines of `rest`, the text that follows the rendered end of `state`. */
+	#appendLocal(state: LocalState, stat: AgentTranscriptStat, rest: string): void {
+		const { complete } = splitComplete(rest);
+		const offset = state.offset + Buffer.byteLength(complete, "utf-8");
+		this.#local = {
+			path: state.path,
+			seen: { size: stat.size, mtimeMs: stat.mtimeMs, dev: stat.dev, ino: stat.ino },
+			offset,
+			rendered: concatRendered(state.rendered, hashRendered(complete)),
+			// A long append holds the whole anchor; a short one extends the previous one.
+			...anchorAt(complete.length >= ANCHOR_CHARS ? complete : state.anchor + complete, offset),
+		};
 		const previousModel = this.model;
 		const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
 		if (parsed.length > 0) this.#append(parsed);

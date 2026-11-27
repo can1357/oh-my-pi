@@ -10,11 +10,12 @@ import {
 	tryAcquireFileLock,
 	withFileLockSync,
 } from "@oh-my-pi/pi-utils/file-lock";
-import { type FsError, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { type FsError, hasFsCode, isEexist, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase, withLoopPhase } from "@oh-my-pi/pi-utils/loop-phase";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
+import { eexist } from "./session-storage-errors";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { readSessionHeaderIdSync } from "./session-header-id";
@@ -24,6 +25,11 @@ import { purgeDeletedSessionRows } from "./session-db-purge";
 /** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
 const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
 const utf8Decoder = new TextDecoder("utf-8");
+
+/** A listing of a directory that does not exist (or is a file): empty, not a fault. */
+function isMissingDirectory(err: unknown): boolean {
+	return isEnoent(err) || hasFsCode(err, "ENOTDIR");
+}
 
 /**
  * Basename of a rewrite staged by {@link sessionStagingPath}; group 1 is the
@@ -61,6 +67,26 @@ export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
 	mtime: Date;
+	/**
+	 * Creation time, when the backend records one. File storage reports the
+	 * filesystem's; key-indexed backends store no birth time and omit it, so
+	 * callers fall back to the transcript's own header timestamp.
+	 */
+	birthtimeMs?: number;
+	/**
+	 * A regular file, following symlinks, as `fs.stat().isFile()` reports it.
+	 * A key-indexed backend holds nothing but files, so it reports `true`;
+	 * file storage reports what the filesystem says, which is `false` for a
+	 * directory and `true` for a symlink to a regular file.
+	 */
+	isFile: boolean;
+	/**
+	 * Filesystem identity, when the backend has one. A change in either is a
+	 * different file at the same path, which no comparison of size, time or
+	 * content can see; a key-indexed backend has no identity and omits both.
+	 */
+	dev?: number;
+	ino?: number;
 }
 
 export interface SessionStorageWriter {
@@ -149,7 +175,22 @@ export interface WriteTextAtomicOptions extends SessionStorageWriteOptions {
 	commitGuard?: () => boolean;
 }
 
+/** One entry directly inside a directory, as {@link SessionStorage.listEntriesSync} reports it. */
+export interface SessionStorageEntry {
+	name: string;
+	isDirectory: boolean;
+	/**
+	 * A regular file. Not the complement of {@link isDirectory}: a directory
+	 * listing is three-valued, and a symlink, a dangling symlink, a FIFO, a
+	 * socket or a device node is neither. A transcript walk must skip those —
+	 * reading a FIFO blocks until EOF, which never comes.
+	 */
+	isFile: boolean;
+}
+
 export interface SessionStorage {
+	/** A worker may use its own file-storage default for these same transcripts; omitted means keep runs inline. */
+	readonly crossesWorkerBoundary?: boolean;
 	/**
 	 * `true` when synchronous writes ({@link writeTextSync} and a writer's
 	 * {@link SessionStorageWriter.appendSync}) have reached the backing store by
@@ -160,6 +201,13 @@ export interface SessionStorage {
 	 * advances that size.
 	 */
 	readonly defersSyncPublish?: boolean;
+	/**
+	 * Names the store a key-indexed storage reads, so data derived per store
+	 * (the transcript index) never mixes two stores. The JSONL tree under the
+	 * agent directory omits it, and so may a storage that cannot name its
+	 * store; data derived from such a store is this process's own.
+	 */
+	readonly storeIdentity?: SessionStoreIdentity;
 	/**
 	 * Resolve once every write this storage queued for `path` has been confirmed
 	 * by, or rejected by, the backing store. In-body backends never queue, so
@@ -195,7 +243,61 @@ export interface SessionStorage {
 	 */
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;
+	/**
+	 * Paths of the files directly inside `dir` (or, for a two-segment pattern
+	 * such as `"*\/*.jsonl"`, one directory below it) whose names match
+	 * `pattern`. A missing `dir` lists as empty; any other fault (EACCES, EIO,
+	 * EMFILE) throws, so a failed scan is never mistaken for an empty one.
+	 *
+	 * File storage answers this with `Bun.Glob`, so it hides dot-named entries
+	 * and follows symlinks. **Which enumerators may use it is a rule, stated
+	 * here once:** a listing of *sessions* by pattern may, because that is what
+	 * the glob scans it replaced did. An enumerator of one *session's subagent
+	 * tree* may not — those read a directory and took regular files only, so a
+	 * symlink, a FIFO or a device node named `*.jsonl` was never a transcript
+	 * and a dot-named one always was. Those use {@link listEntriesSync} with an
+	 * `isFile` filter: `sessionFilesFromDisk`, `collectSubSessions`, the
+	 * persisted-roster scan and the advisor transcript listing all do.
+	 */
 	listFilesSync(dir: string, pattern: string): string[];
+	/**
+	 * Names of the directories holding session files directly inside `dir` —
+	 * the directory half of {@link listFilesSync}. A recursive transcript walk
+	 * (a session's subagent tree) needs both, and only the backend knows how
+	 * its keys nest: file backends read the directory, key-indexed backends
+	 * derive the names from the keys below `dir`. A missing `dir` lists as
+	 * empty; any other fault throws, as in {@link listFilesSync}.
+	 */
+	listDirsSync(dir: string): string[];
+	/**
+	 * Everything directly inside `dir`, files and directories together, in one
+	 * ordered pass. {@link listFilesSync} and {@link listDirsSync} answer "which
+	 * files" and "which directories"; this answers "in what order", which a walk
+	 * that must prefer whichever of `Worker.jsonl` and `Z/Worker.jsonl` comes
+	 * first needs and cannot reconstruct from two separate listings. A file
+	 * backend reads the directory, so its order and its dotfiles are the
+	 * directory's own; key-indexed backends derive the entries from the keys
+	 * below `dir` and return them in name order. A missing `dir` lists as empty;
+	 * any other fault throws, as in {@link listFilesSync}.
+	 */
+	listEntriesSync(dir: string): SessionStorageEntry[];
+	/**
+	 * Bring the synchronous view ({@link existsSync}, {@link statSync}, the
+	 * listings) up to date with writes other processes made to a shared
+	 * backend since this storage loaded it. Listing and lookup entry points
+	 * call it before they read that view. File and memory backends read the
+	 * live state already and omit it.
+	 */
+	refresh?(): Promise<void>;
+	/**
+	 * Every path the store holds, at any depth and under any root (custom
+	 * `--session` paths included). Only key-indexed backends implement it:
+	 * their keys are a finite index, while a file backend's "every path" is
+	 * the whole filesystem. A caller that must see every transcript before it
+	 * deletes something (blob gc) reads these through the storage, because a
+	 * key-indexed store never puts them on the local filesystem.
+	 */
+	listAllSync?(): string[];
 
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
@@ -208,6 +310,13 @@ export interface SessionStorage {
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
+	 * The UTF-8 text from byte `offset` to the end, and the size in bytes the
+	 * read observed; an offset at or past the end reads as `""`. Optional:
+	 * {@link readSessionTextFrom} falls back to a whole read on backends that
+	 * cannot read from an offset.
+	 */
+	readTextFrom?(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number }>;
+	/**
 	 * Feed each line of the file to `visit`, in order, until it returns true or
 	 * the file ends. Lets callers find records that fall between the bounded
 	 * {@link readTextSlices} windows. Optional: backends without cheap full scans
@@ -215,10 +324,26 @@ export interface SessionStorage {
 	 */
 	scanLines?(path: string, visit: (line: string) => boolean): Promise<void>;
 	writeText(path: string, content: string): Promise<void>;
+	/**
+	 * {@link writeText} that never replaces: when `path` is taken, including
+	 * by another client of a shared store between a caller's check and this
+	 * write, it rejects with `EEXIST` naming `path` and writes nothing. A tree
+	 * copy needs this rather than `exists()` then `writeText`, which loses the
+	 * destination a concurrent writer published in between.
+	 */
+	writeTextNoReplace(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
 	writeLinesAtomic?(path: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
+	/**
+	 * {@link rename} that never replaces: when `nextPath` is taken, including
+	 * by another client of a shared store while the rename runs, it rejects
+	 * with `EEXIST` naming `nextPath` and changes neither path. A tree move
+	 * needs this rather than `exists()` then `rename`, which silently
+	 * replaces a destination published between the two calls.
+	 */
+	renameNoReplace(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(
 		sessionPath: string,
@@ -738,6 +863,8 @@ async function writeLinesToFile(target: string, lines: readonly string[]): Promi
 }
 
 export class FileSessionStorage implements SessionStorage {
+	readonly crossesWorkerBoundary = true;
+
 	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
 		let actualSize: number | null;
@@ -1087,20 +1214,65 @@ export class FileSessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
-		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
+		return {
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			mtime: stats.mtime,
+			birthtimeMs: stats.birthtimeMs,
+			isFile: stats.isFile(),
+			dev: stats.dev,
+			ino: stats.ino,
+		};
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		try {
 			// Bun.Glob walks no symlink unless asked, and a transcript placed in
 			// a session directory as one — a launcher's, a supervisor's — is a
-			// transcript like any other (#15878)
+			// transcript like any other (#15878). Dotfiles stay hidden, as
+			// Bun.Glob has them by default: a hidden copy of a transcript beside
+			// the real one would otherwise be listed as a session of its own and,
+			// being newer, win `--continue`. Subagent discovery is the one place
+			// a dot-named transcript counts, and it reads the directory itself
+			// (`sub-sessions.ts`), not this glob.
 			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
 				path.join(dir, name),
 			);
-		} catch {
-			return [];
+		} catch (err) {
+			if (isMissingDirectory(err)) return [];
+			throw err;
 		}
+	}
+
+	listEntriesSync(dir: string): SessionStorageEntry[] {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch (err) {
+			if (isMissingDirectory(err)) return [];
+			throw err;
+		}
+		// The directory's own order, dotfiles included: a walk that reproduces
+		// what a plain readdir walk chose depends on both.
+		return entries.map(entry => ({
+			name: entry.name,
+			isDirectory: entry.isDirectory(),
+			isFile: entry.isFile(),
+		}));
+	}
+
+	listDirsSync(dir: string): string[] {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch (err) {
+			if (isMissingDirectory(err)) return [];
+			throw err;
+		}
+		// Real directories only: a transcript stem such as "." or ".." would
+		// revisit an ancestor, and a symlinked directory can loop back into the
+		// tree a walk is descending.
+		return entries.filter(entry => entry.isDirectory()).map(entry => entry.name);
 	}
 
 	async exists(path: string): Promise<boolean> {
@@ -1119,6 +1291,17 @@ export class FileSessionStorage implements SessionStorage {
 
 	readTextSync(path: string): string {
 		return fs.readFileSync(path, "utf8");
+	}
+
+	async readTextFrom(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number }> {
+		const { size } = await fsp.stat(path);
+		if (offset >= size) return { text: "", size };
+		// Never past the size this call reported. A caller advances its cursor by
+		// the `size` it is given, so bytes appended between the stat and the read
+		// would be returned once here and again from the next read — the fd read
+		// this replaced was bounded by the same stat.
+		const limit = maxBytes === undefined ? size : Math.min(size, offset + Math.max(0, maxBytes));
+		return { text: await Bun.file(path).slice(offset, limit).text(), size };
 	}
 
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
@@ -1141,6 +1324,37 @@ export class FileSessionStorage implements SessionStorage {
 
 	async writeText(path: string, content: string): Promise<void> {
 		await Bun.write(path, content, { createPath: true });
+	}
+
+	async writeTextNoReplace(fpath: string, content: string): Promise<void> {
+		await fs.promises.mkdir(path.resolve(fpath, ".."), { recursive: true });
+		// `wx` is the kernel's own check-and-create: no window between asking
+		// whether the path is taken and taking it.
+		await fs.promises.writeFile(fpath, content, { flag: "wx" });
+	}
+
+	/**
+	 * `link(2)` refuses an existing target where `rename(2)` silently replaces
+	 * it, so a destination another writer published since the caller looked
+	 * wins. Where hard links are unavailable an exclusive copy keeps the same
+	 * guarantee. The source is unlinked once the destination exists; a source
+	 * that cannot be removed has still been placed, so the move succeeded.
+	 */
+	async renameNoReplace(fpath: string, nextPath: string): Promise<void> {
+		await fs.promises.mkdir(path.resolve(nextPath, ".."), { recursive: true });
+		try {
+			await fs.promises.link(fpath, nextPath);
+		} catch (err) {
+			if (isEexist(err)) throw err;
+			await fs.promises.copyFile(fpath, nextPath, fs.constants.COPYFILE_EXCL);
+		}
+		try {
+			await fs.promises.unlink(fpath);
+		} catch (err) {
+			if (!isEnoent(err)) {
+				logger.debug("Transcript placed but its source copy could not be removed", { fpath, nextPath });
+			}
+		}
 	}
 
 	async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
@@ -1458,7 +1672,17 @@ export class FileSessionStorage implements SessionStorage {
 		// newest stale backup (#11499). Best-effort — a locked file warns
 		// instead of failing the delete the user asked for.
 		const base = path.basename(sessionPath);
-		for (const bak of this.listFilesSync(path.dirname(sessionPath), "*.bak")) {
+		let backups: string[];
+		try {
+			backups = this.listFilesSync(path.dirname(sessionPath), "*.bak");
+		} catch (err) {
+			logger.warn("Failed to list stale session backups during delete", {
+				dir: path.dirname(sessionPath),
+				error: toError(err).message,
+			});
+			return;
+		}
+		for (const bak of backups) {
 			if (!path.basename(bak).startsWith(`${base}.`)) continue;
 			try {
 				await fsp.unlink(bak);
@@ -1472,7 +1696,171 @@ export class FileSessionStorage implements SessionStorage {
 	}
 }
 
-function matchesPattern(name: string, pattern: string): boolean {
+let defaultStorage: SessionStorage | undefined;
+
+/**
+ * The storage every session factory, listing, resume, and maintenance path
+ * falls back to when the caller passes none. Lazily a {@link FileSessionStorage}
+ * (stateless, so one shared instance is safe); {@link setDefaultSessionStorage}
+ * replaces it with the configured storage before the first session is opened,
+ * so `--resume`, the resume picker, `--continue`, and listing all read the same
+ * store the session is written to.
+ */
+export function defaultSessionStorage(): SessionStorage {
+	defaultStorage ??= new FileSessionStorage();
+	return defaultStorage;
+}
+
+/** Install the process-wide default storage. Call before any session is opened. */
+export function setDefaultSessionStorage(storage: SessionStorage): void {
+	defaultStorage = storage;
+}
+
+/**
+ * The storage holding a session's transcript tree: where its subagents' and
+ * advisors' transcripts are written, read, and revived. A session that
+ * persists keeps them in its own manager's storage; one without a session file
+ * (in-memory) hands its children a temporary directory, which the default
+ * session storage holds.
+ */
+export function sessionTreeStorage(session: {
+	getSessionFile(): string | null;
+	sessionManager?: { getStorage?(): SessionStorage };
+}): SessionStorage {
+	return (session.getSessionFile() ? session.sessionManager?.getStorage?.() : undefined) ?? defaultSessionStorage();
+}
+
+/**
+ * Whether `file` is a regular file in `storage`; false for a directory, a
+ * missing path, or any fault. Follows symlinks, as a filesystem `stat` does: a
+ * transcript reached through a symlink is readable.
+ */
+export function isStoredFile(file: string, storage: SessionStorage): boolean {
+	try {
+		return storage.statSync(file).isFile;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The name data derived from a key-indexed store (the transcript index) is
+ * kept under. `key` names the store and holds no credential. `shared` says
+ * every process that opens the store computes the same key, as for a table on
+ * a database server or in a database file; otherwise the key holds only in
+ * this process (an in-memory database, a client that hides its connection),
+ * and so does the data derived under it.
+ */
+export interface SessionStoreIdentity {
+	readonly key: string;
+	readonly shared: boolean;
+}
+
+const processLocalStoreSerials = new WeakMap<object, number>();
+let lastProcessLocalStoreSerial = 0;
+
+/**
+ * A store key that `owner` (a client or a storage object) keeps for its life
+ * and no other object in this process gets: the key of a store that cannot
+ * name itself across processes.
+ */
+export function processLocalStoreKey(owner: object): string {
+	let serial = processLocalStoreSerials.get(owner);
+	if (serial === undefined) {
+		serial = ++lastProcessLocalStoreSerial;
+		processLocalStoreSerials.set(owner, serial);
+	}
+	return `local#${serial}`;
+}
+
+/**
+ * Bytes of a key-indexed transcript read at a time by passes over a whole
+ * transcript (the transcript index, message counts, the listing's line scan),
+ * so memory follows the window, not the transcript; a window widens when one
+ * record is longer.
+ */
+export const SESSION_READ_WINDOW_BYTES = 1024 * 1024;
+
+/**
+ * The UTF-8 text of `filePath` in `storage` from byte `offset` to the end, or
+ * at most `maxBytes` of it, with the full size the read observed:
+ * {@link SessionStorage.readTextFrom} where the backend has it, else a whole
+ * read cut at `offset`. A caller tailing a transcript (RPC subagent reads,
+ * collab transcript pages) passes back the byte where its last complete line
+ * ended, so the start never splits a character; a capped read may end inside
+ * one (decoded as U+FFFD), so such a caller keeps text only through the last
+ * newline.
+ */
+export async function readSessionTextFrom(
+	storage: SessionStorage,
+	filePath: string,
+	offset: number,
+	maxBytes?: number,
+): Promise<{ text: string; size: number }> {
+	if (storage.readTextFrom) return storage.readTextFrom(filePath, offset, maxBytes);
+	const bytes = Buffer.from(await storage.readText(filePath), "utf8");
+	if (offset >= bytes.length) return { text: "", size: bytes.length };
+	const end = maxBytes === undefined ? undefined : offset + Math.max(0, maxBytes);
+	return { text: bytes.subarray(offset, end).toString("utf8"), size: bytes.length };
+}
+
+/** Bytes {@link readSessionLinesFrom} reads at once, unless one line needs more. */
+const TRANSCRIPT_WINDOW_BYTES = 8 * 1024 * 1024;
+
+/**
+ * {@link readSessionTextFrom} of a window of at most 8 MiB from `offset`, for a
+ * caller that tails a transcript: it keeps the complete lines and reads on from
+ * where they end, so a long transcript is never held whole. A window that stops
+ * short of the end with no newline in its second half is doubled until it has
+ * one, so the caller moves forward even when it starts up to half a window
+ * before the lines it has not seen (the Agent Hub viewer re-reads the end of
+ * what it rendered); only a line longer than half a window makes a window larger.
+ */
+export async function readSessionLinesFrom(
+	storage: SessionStorage,
+	filePath: string,
+	offset: number,
+): Promise<{ text: string; size: number }> {
+	for (let window = TRANSCRIPT_WINDOW_BYTES; ; window *= 2) {
+		const read = await readSessionTextFrom(storage, filePath, offset, window);
+		if (offset + window >= read.size || read.text.lastIndexOf("\n") >= read.text.length / 2) return read;
+	}
+}
+
+/**
+ * The bytes of `filePath` in `storage`, in windows of
+ * {@link SESSION_READ_WINDOW_BYTES} read one after another, each kept through
+ * its last newline, where its bytes are exactly the stored ones (a window
+ * holding no newline widens), and the rest of the transcript last. A storage
+ * that cannot read from an offset gives the whole transcript at once. A
+ * missing transcript raises ENOENT.
+ */
+export async function* readSessionLineWindows(storage: SessionStorage, filePath: string): AsyncGenerator<Uint8Array> {
+	const encoder = new TextEncoder();
+	if (!storage.readTextFrom) {
+		yield encoder.encode(await storage.readText(filePath));
+		return;
+	}
+	let offset = 0;
+	let span = SESSION_READ_WINDOW_BYTES;
+	for (;;) {
+		const { text, size } = await storage.readTextFrom(filePath, offset, span);
+		const bytes = encoder.encode(text);
+		// A window that reaches the end holds whole characters only.
+		const last = offset + span >= size;
+		const end = last ? bytes.length : bytes.lastIndexOf(0x0a) + 1;
+		if (end > 0) yield bytes.subarray(0, end);
+		if (last) return;
+		if (end === 0) {
+			span *= 2;
+		} else {
+			offset += end;
+			span = SESSION_READ_WINDOW_BYTES;
+		}
+	}
+}
+
+function matchesPatternSegment(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
 	if (pattern.startsWith("*.")) {
 		return name.endsWith(pattern.slice(1));
@@ -1481,15 +1869,93 @@ function matchesPattern(name: string, pattern: string): boolean {
 }
 
 /**
- * Name of `key` when it sits directly inside `resolvedDir` (a `path.resolve`d
- * directory), else `undefined`. Key-indexed storages keep whatever spelling
- * callers wrote, so both sides are resolved: on Windows `/sessions/x` and the
- * `path.join`-built `\sessions\x\…` keys must list as the same directory.
+ * Name of `key` relative to `resolvedDir` (a `path.resolve`d directory),
+ * slash-joined, when it sits exactly `segments` levels inside it; else
+ * `undefined`. Key-indexed storages keep whatever spelling callers wrote, so
+ * both sides are resolved: on Windows `/sessions/x` and the `path.join`-built
+ * `\sessions\x\…` keys must list as the same directory.
  */
-export function directChildKeyName(resolvedDir: string, key: string): string | undefined {
-	const name = path.basename(key);
-	if (!name || name.includes("/") || name.includes("\\")) return undefined;
-	return path.resolve(path.dirname(key)) === resolvedDir ? name : undefined;
+export function childKeyName(resolvedDir: string, key: string, segments: number): string | undefined {
+	const names: string[] = [];
+	let parent = key;
+	for (let i = 0; i < segments; i++) {
+		const name = path.basename(parent);
+		if (!name || name.includes("/") || name.includes("\\")) return undefined;
+		names.unshift(name);
+		parent = path.dirname(parent);
+	}
+	return path.resolve(parent) === resolvedDir ? names.join("/") : undefined;
+}
+
+/**
+ * The directory names that `keys` imply directly inside `resolvedDir` (a
+ * `path.resolve`d directory): the first segment of every key that sits at
+ * least two levels inside it. Key-indexed storages hold no directory entries,
+ * so a directory exists exactly while a key lives below it — which is what
+ * makes a subagent tree walkable on those backends.
+ */
+/**
+ * Every direct child of `resolvedDir` among `keys`, files and directories
+ * together, in name order. A key exactly one level inside is a file; a key
+ * deeper than that contributes its next segment as a directory. The order is
+ * the backend's contract, not an accident: a walk preferring whichever of
+ * `Worker.jsonl` and `Z/Worker.jsonl` it meets first must be reproducible.
+ */
+export function childEntryNames(resolvedDir: string, keys: Iterable<string>): SessionStorageEntry[] {
+	const entries = new Map<string, boolean>();
+	for (const key of keys) {
+		const name = childKeyName(resolvedDir, key, 1);
+		if (name !== undefined) {
+			entries.set(name, false);
+			continue;
+		}
+		let child = path.dirname(key);
+		let parent = path.dirname(child);
+		while (parent !== child) {
+			if (parent === resolvedDir) {
+				if (!entries.has(path.basename(child))) entries.set(path.basename(child), true);
+				break;
+			}
+			child = parent;
+			parent = path.dirname(child);
+		}
+	}
+	return [...entries]
+		.map(([name, isDirectory]) => ({ name, isDirectory, isFile: !isDirectory }))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function childDirNames(resolvedDir: string, keys: Iterable<string>): string[] {
+	const names = new Set<string>();
+	for (const key of keys) {
+		let child = path.dirname(key);
+		for (;;) {
+			const parent = path.dirname(child);
+			if (parent === child) break;
+			const name = path.basename(child);
+			if (!name || name.includes("/") || name.includes("\\")) break;
+			if (path.resolve(parent) === resolvedDir) {
+				names.add(name);
+				break;
+			}
+			child = parent;
+		}
+	}
+	return [...names];
+}
+
+/**
+ * Match a slash-joined path remainder against a pattern of the same shape
+ * (a single segment such as `"*.jsonl"`, or a wildcard project directory
+ * followed by `"*.jsonl"` for the one-level cross-project case). Segment
+ * counts must agree, so a direct child never matches a two-segment pattern
+ * and a nested key never matches a one-segment one.
+ */
+function matchesPattern(name: string, pattern: string): boolean {
+	const nameParts = name.split("/");
+	const patternParts = pattern.split("/");
+	if (nameParts.length !== patternParts.length) return false;
+	return nameParts.every((part, i) => matchesPatternSegment(part, patternParts[i]));
 }
 
 class MemorySessionStorageWriter implements SessionStorageWriter {
@@ -1738,22 +2204,37 @@ export class MemorySessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const entry = this.#requireEntry(path);
+		// A key-indexed backend holds nothing but files.
 		return {
 			size: entry.size,
 			mtimeMs: entry.mtimeMs,
 			mtime: new Date(entry.mtimeMs),
+			isFile: true,
 		};
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		const resolvedDir = path.resolve(dir);
 		const files: string[] = [];
+		const segments = pattern.split("/").length;
 		for (const key of this.#files.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
+			const name = childKeyName(resolvedDir, key, segments);
 			if (name === undefined || !matchesPattern(name, pattern)) continue;
 			files.push(key);
 		}
 		return files;
+	}
+
+	listEntriesSync(dir: string): SessionStorageEntry[] {
+		return childEntryNames(path.resolve(dir), this.#files.keys());
+	}
+
+	listDirsSync(dir: string): string[] {
+		return childDirNames(path.resolve(dir), this.#files.keys());
+	}
+
+	listAllSync(): string[] {
+		return [...this.#files.keys()];
 	}
 
 	exists(path: string): Promise<boolean> {
@@ -1791,6 +2272,12 @@ export class MemorySessionStorage implements SessionStorage {
 		return Promise.resolve();
 	}
 
+	writeTextNoReplace(path: string, content: string): Promise<void> {
+		if (this.existsSync(path)) return Promise.reject(eexist(path));
+		this.writeTextSync(path, content);
+		return Promise.resolve();
+	}
+
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		if (options?.commitGuard && !options.commitGuard()) return Promise.resolve();
 		this.writeTextSync(path, content, { expectedSize: options?.expectedSize });
@@ -1803,6 +2290,11 @@ export class MemorySessionStorage implements SessionStorage {
 		this.#files.set(nextPath, entry);
 		this.#files.delete(path);
 		return Promise.resolve();
+	}
+
+	renameNoReplace(path: string, nextPath: string): Promise<void> {
+		if (this.#files.has(nextPath)) return Promise.reject(eexist(nextPath));
+		return this.rename(path, nextPath);
 	}
 
 	unlink(path: string): Promise<void> {

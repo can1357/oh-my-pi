@@ -211,7 +211,7 @@ export async function revivePersistedPlaced(
 	const placement = await pool.acquire();
 	try {
 		if (!placement.worker) return await reviveHere(spec, expected);
-		return await placement.worker.link.call("revivePersisted", spec, expected);
+		return await placement.worker.link.call("revivePersisted", { ...spec, storage: undefined }, expected);
 	} finally {
 		// A worker-homed revived session's open mirror retains its worker from here on.
 		placement.release();

@@ -23,6 +23,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
@@ -34,16 +35,27 @@ import {
 	type AgentRegistryApi,
 	MAIN_AGENT_ID,
 	type RegistryEvent,
+	refSessionStorage,
 } from "./agent-registry";
+import { defaultSessionStorage, FileSessionStorage, type SessionStorage } from "../session/session-storage";
 import { getAgentTombstonePath } from "./agent-tombstone";
 
 export type AgentReviver = (expected: AgentRef) => Promise<AgentSessionHandle>;
 
 const AGENT_RELEASE_GRACE_MS = 5000;
 
-async function persistAgentTombstone(sessionFile: string): Promise<void> {
+async function persistAgentTombstone(sessionFile: string, storage: SessionStorage): Promise<void> {
+	const tombstone = getAgentTombstonePath(sessionFile);
 	try {
-		await fs.writeFile(getAgentTombstonePath(sessionFile), "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+		// The sidecar is a local file in every storage mode. When `storage` (the
+		// one holding the transcript) keeps it as a row, the directory beside it
+		// may not exist yet. Under file storage the transcript's own directory
+		// holds it; a missing one means the transcript is gone, and the write
+		// fails as it always has.
+		if (!(storage instanceof FileSessionStorage)) {
+			await fs.mkdir(path.dirname(tombstone), { recursive: true });
+		}
+		await fs.writeFile(tombstone, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 	}
@@ -723,7 +735,12 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			}
 		}
 		try {
-			if (options?.tombstone && ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
+			if (options?.tombstone && ref.sessionFile) {
+				// The live session's storage, else the one the ref was registered or
+				// scanned with; the process default only when neither is known.
+				const storage = live?.sessionManager?.getStorage?.() ?? refSessionStorage(ref) ?? defaultSessionStorage();
+				await persistAgentTombstone(ref.sessionFile, storage);
+			}
 		} finally {
 			// Detaching removes the registry's only route to the live session. Always
 			// dispose the captured session, even when tombstone persistence fails.

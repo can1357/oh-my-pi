@@ -41,6 +41,12 @@ import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "tex
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import {
+	defaultSessionStorage,
+	isStoredFile,
+	type SessionStorage,
+	sessionTreeStorage,
+} from "../session/session-storage";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
 	InternalResource,
@@ -105,6 +111,8 @@ interface OutputTarget {
 	remoteStatus?: string;
 	/** Transcript-backed progress source for a peer, including retained agents. */
 	remoteProgress?: () => Promise<ProgressSource | undefined>;
+	/** The caller's session tree storage, which holds a registered agent's retained transcript. */
+	storage?: SessionStorage;
 }
 
 /** Upper bound on the ids a `Not found` error suggests. */
@@ -392,7 +400,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			};
 		}
 		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+			{ registry, senderId, sessionFileHint: session.getSessionFile?.(), storage: sessionTreeStorage(session) },
 			{ to, message: content, progress, remote },
 		);
 		const toLabel = remote ? agentMesh()?.label(pid.address) : undefined;
@@ -425,6 +433,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			segments: pid ? pid.segments : url.pathname.split("/").filter(Boolean).map(decodeSegment),
 			dirs: await this.#outputDirs(context),
 			registry,
+			storage: context?.storage,
 		});
 	}
 
@@ -445,16 +454,27 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	/** An agent of another omp instance, read from that instance's session files. */
+	/** An agent of another omp instance, read from that instance's transcripts in this process's session storage. */
 	async #resolvePeer(url: InternalUrl, target: PidTarget): Promise<InternalResource> {
 		const { pid, id } = target.address;
 		const peer = agentMesh()?.peer(pid);
 		if (!peer) throw new Error(`No omp instance with pid ${pid} in this project. List them with agent://peers`);
 		const sessionFile = peer.sessionFile;
 		if (!sessionFile) throw new Error(`Instance ${pid} has no session file; its agents cannot be read.`);
+		// The instances of one project share a configuration, so the peer keeps
+		// its transcripts where this process does: files, or `session.storage: sql` rows.
+		const storage = defaultSessionStorage();
+		// The peer writes through its own client: a shared store holds rows it
+		// committed after this process last loaded its view.
+		await storage.refresh?.();
 		if (!id) {
 			if (target.segments.length > 0) throw new Error(`agent://${pid} is a main agent; it has no JSON output.`);
-			return this.#resolveProgress(url, { id: String(pid), status: peer.status, session: null, sessionFile }, false);
+			return this.#resolveProgress(
+				url,
+				{ id: String(pid), status: peer.status, session: null, sessionFile },
+				false,
+				storage,
+			);
 		}
 		const dir = sessionFile.slice(0, -".jsonl".length);
 		const agent = peer.agents.find(agent => agent.id === id);
@@ -467,8 +487,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			segments: target.segments,
 			dirs: [dir],
 			remoteStatus: agent?.status,
+			storage,
 			remoteProgress: async () => {
-				const exists = await Bun.file(transcript).exists();
+				const exists = isStoredFile(transcript, storage);
 				if (!exists && !agent) return undefined;
 				return {
 					id: formatPeerAddress(target.address),
@@ -490,7 +511,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			// registry `write agent://<id>` delivers to: answer with its progress.
 			const ref = registry?.get(outputId);
 			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
-			if (progress) return this.#resolveProgress(url, progress, extraction);
+			if (progress)
+				return this.#resolveProgress(url, progress, extraction, target.storage ?? defaultSessionStorage());
 			if (!scan) throw new Error("No session - agent outputs unavailable");
 			if (!scan.anyDirExists) throw new Error("No artifacts directory found");
 			const registered =
@@ -509,7 +531,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!extraction && !rawContent.trim()) {
 			const ref = registry?.get(outputId);
 			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
-			if (progress) return this.#resolveProgress(url, progress, false, true);
+			if (progress)
+				return this.#resolveProgress(url, progress, false, target.storage ?? defaultSessionStorage(), true);
 		}
 		const notes: string[] = target.remoteStatus === undefined ? [] : [`Status: ${target.remoteStatus}`];
 		let content = rawContent.trim()
@@ -587,12 +610,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * Progress view of a registered agent that has not published `<id>.md`:
 	 * its status, every accepted `yield` (non-terminal sections included), and
 	 * its latest assistant text. Reads the live session's messages, else the
-	 * retained session file. JSON-path extraction needs the published output.
+	 * retained session file in the caller's session tree `storage`. JSON-path
+	 * extraction needs the published output.
 	 */
 	async #resolveProgress(
 		url: InternalUrl,
 		ref: ProgressSource,
 		extraction: boolean,
+		storage: SessionStorage,
 		publishedEmpty = false,
 	): Promise<InternalResource> {
 		if (extraction) {
@@ -606,7 +631,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			messages = ref.session.messages;
 			source = "live session";
 		} else if (ref.sessionFile) {
-			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
+			messages = await loadSessionMessagesReadOnly(ref.sessionFile, storage);
 			source = "session file (read-only)";
 		}
 		const sections = yieldSections(messages);
@@ -643,7 +668,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
 		const rootSessionFile = context?.sessionFile
-			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
+			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile, context.storage)
 			: undefined;
 		return artifactsDirsFromRegistry(rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined);
 	}

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { syncTranscripts } from "@oh-my-pi/pi-coding-agent/daemon/modules/transcripts";
 import { wordQuery } from "@oh-my-pi/pi-coding-agent/session/search-query";
 import {
 	closeTranscriptIndex,
@@ -10,7 +11,13 @@ import {
 	syncTranscriptIndex,
 	transcriptSessionIds,
 } from "@oh-my-pi/pi-coding-agent/session/transcript-index";
-import { getConfigRootDir, getSessionsDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	getConfigRootDir,
+	getSessionsDir,
+	getTranscriptIndexDbPath,
+	removeSyncWithRetries,
+	setAgentDir,
+} from "@oh-my-pi/pi-utils";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let root: string;
@@ -113,4 +120,56 @@ it("indexes user and assistant text as session files grow, shrink, and vanish", 
 	await syncTranscriptIndex();
 	expect(sessionsMatching("fresh")).toEqual([]);
 	expect(sessionsMatching("widget")).toEqual(["s2"]);
+});
+
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+	"skips a session file this user cannot read, so the index stays fresh sync after sync",
+	async () => {
+		fs.writeFileSync(
+			path.join(bucket, "2024-01-01T00-00-00-000Z_ok.jsonl"),
+			header("ok") + line(message("user", "readable widget")),
+		);
+		const locked = path.join(bucket, "2024-01-02T00-00-00-000Z_locked.jsonl");
+		fs.writeFileSync(locked, header("locked") + line(message("user", "locked widget")));
+		fs.chmodSync(locked, 0o000);
+		try {
+			const passes: Array<[string, boolean]> = [];
+			for (let i = 0; i < 3; i++) {
+				const { outcome } = await syncTranscriptIndex();
+				passes.push([outcome, isTranscriptIndexFresh(60_000)]);
+			}
+			expect(passes).toEqual([
+				["synced", true],
+				["synced", true],
+				["synced", true],
+			]);
+			expect(sessionsMatching("widget")).toEqual(["ok"]);
+		} finally {
+			fs.chmodSync(locked, 0o600);
+		}
+	},
+);
+
+it("never opens or syncs the user's index from a test that chose no agent directory", async () => {
+	// The agent dir a test that set none would resolve: the user's own.
+	const user = path.join(root, "user-agent");
+	setAgentDir(user);
+	delete process.env.PI_CODING_AGENT_DIR;
+	fs.mkdirSync(path.join(getSessionsDir(), "--proj--"), { recursive: true });
+	fs.writeFileSync(
+		path.join(getSessionsDir(), "--proj--", "2024-01-01T00-00-00-000Z_s1.jsonl"),
+		header("s1") + line(message("user", "private widget")),
+	);
+
+	// Neither a direct sync nor the archive's sync of the JSONL tree (on a worker of this process).
+	expect(await syncTranscriptIndex()).toEqual({ outcome: "unavailable", files: 0, messages: 0 });
+	expect(await syncTranscripts()).toEqual({ outcome: "unavailable", files: 0, messages: 0 });
+	expect(isTranscriptIndexFresh(60_000)).toBe(false);
+	expect(fs.existsSync(getTranscriptIndexDbPath())).toBe(false);
+
+	// The same calls once the test has chosen that directory open and sync it.
+	process.env.PI_CODING_AGENT_DIR = user;
+	expect(await syncTranscripts()).toEqual({ outcome: "synced", files: 1, messages: 1 });
+	expect(fs.existsSync(getTranscriptIndexDbPath())).toBe(true);
+	expect(await syncTranscriptIndex()).toEqual({ outcome: "synced", files: 0, messages: 0 });
 });

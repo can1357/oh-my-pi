@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import tanNamePrompt from "../../prompts/system/tan-name.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -12,6 +12,7 @@ import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE, buildTitleDriftTurns } from "../.
 import { isHiddenUserCompanion } from "../../session/queued-messages";
 import { TAN_FORK_BOUNDARY_CUSTOM_TYPE } from "../../session/session-entries";
 import { SessionManager } from "../../session/session-manager";
+import type { SessionStorage } from "../../session/session-storage";
 import { createSubagentSettings, followMCPTools } from "../../task/executor";
 import { generateTaskName } from "../../task/name-generator";
 import { AgentOutputManager } from "../../task/output-manager";
@@ -95,11 +96,42 @@ function extractAssistantText(message: AssistantMessage | undefined): string {
 		.trim();
 }
 
-async function removeCloneSession(cloneFile: string): Promise<void> {
-	await Promise.allSettled([
-		fs.rm(cloneFile, { force: true }),
-		fs.rm(cloneFile.slice(0, -6), { recursive: true, force: true }),
-	]);
+/**
+ * Remove a clone whose dispatch failed. Its manager is sealed first, so
+ * closing it writes nothing more and only gives up the clone's ownership lease
+ * and writer. Then its transcript goes from the storage the fork wrote it to
+ * (the parent session's; a row under `session.storage: sql`), with its local
+ * artifacts directory. A fork that failed before writing leaves only the
+ * directory, if anything.
+ *
+ * Both removals are always attempted, as the pair of `fs.rm` calls this
+ * replaced were: a transcript the storage refuses to delete must not also
+ * strand the clone's artifacts directory on disk.
+ */
+async function removeCloneSession(
+	cloneFile: string,
+	clone: SessionManager | undefined,
+	storage: SessionStorage,
+): Promise<void> {
+	if (clone) {
+		clone.seal();
+		await clone.close().catch((error: unknown) => {
+			logger.warn("/tan: failed to close the clone of a failed dispatch", { cloneFile, error: String(error) });
+		});
+	}
+	let artifactsRemoved = false;
+	try {
+		await storage.deleteSessionWithArtifacts(cloneFile);
+		artifactsRemoved = true;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("/tan: failed to remove the clone of a failed dispatch", { cloneFile, error: String(error) });
+		}
+	}
+	if (artifactsRemoved) return;
+	await fs.rm(cloneFile.slice(0, -".jsonl".length), { recursive: true, force: true }).catch(error => {
+		logger.warn("/tan: failed to remove the clone's artifacts", { cloneFile, error: String(error) });
+	});
 }
 
 export class TanCommandController {
@@ -188,18 +220,21 @@ export class TanCommandController {
 		await this.ctx.sessionManager.ensureOnDisk();
 		await this.ctx.sessionManager.flush();
 
+		// The clone lives where this session lives, so a failed dispatch removes it from there.
+		const parentStorage = this.ctx.sessionManager.getStorage();
 		// The clone's transcript nests beside the parent's task subagents, so its id
 		// comes from the same allocator; registry ids cover agents not yet on disk.
 		const name = (await naming) ?? generateTaskName();
 		const ids =
-			session.agentOutputManager ?? new AgentOutputManager(() => sessionDir, { settings: this.ctx.settings });
+			session.agentOutputManager ??
+			new AgentOutputManager(() => sessionDir, { settings: this.ctx.settings, storage: parentStorage });
 		await ids.reserve(agentRegistry.list().map(ref => ref.id));
 		const cloneId = await ids.allocate(name);
 		const cloneFile = path.join(sessionDir, `${cloneId}.jsonl`);
-
 		let jobId = "";
+		let forkedClone: SessionManager | undefined;
 		try {
-			const cloneManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, undefined, {
+			const cloneManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, parentStorage, {
 				copyArtifacts: false,
 				suppressBreadcrumb: true,
 				sessionFile: cloneFile,
@@ -213,6 +248,7 @@ export class TanCommandController {
 				// parent's in-flight call as its own pending work (issue #11118).
 				repairInterruptedTail: true,
 			});
+			forkedClone = cloneManager;
 			cloneManager.appendCustomEntry(TAN_FORK_BOUNDARY_CUSTOM_TYPE, cloneManager.getSessionId());
 
 			jobId = manager.register(
@@ -418,7 +454,7 @@ export class TanCommandController {
 				{ ownerId, agentId: cloneId, request: trimmedWork },
 			);
 		} catch (error) {
-			if (cloneFile) await removeCloneSession(cloneFile);
+			await removeCloneSession(cloneFile, forkedClone, parentStorage);
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 			return false;
 		}

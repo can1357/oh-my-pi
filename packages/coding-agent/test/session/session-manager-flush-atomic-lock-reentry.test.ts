@@ -30,6 +30,7 @@ import {
 	type SessionStorageWriteOptions,
 	type SessionStorageWriter,
 	type WriteTextAtomicOptions,
+	type SessionStorageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 /**
@@ -74,10 +75,18 @@ class BackgroundFailureStorage implements SessionStorage {
 	statSync(path: string): SessionStorageStat {
 		const content = this.#files.get(path);
 		if (content === undefined) throw new Error(`File not found: ${path}`);
-		return { size: Buffer.byteLength(content, "utf8"), mtimeMs: Date.now(), mtime: new Date() };
+		return { size: Buffer.byteLength(content, "utf8"), mtimeMs: Date.now(), mtime: new Date(), isFile: true };
 	}
 
 	listFilesSync(): string[] {
+		return [];
+	}
+
+	listDirsSync(): string[] {
+		return [];
+	}
+
+	listEntriesSync(): SessionStorageEntry[] {
 		return [];
 	}
 
@@ -99,6 +108,11 @@ class BackgroundFailureStorage implements SessionStorage {
 		this.writeTextSync(path, content);
 	}
 
+	async writeTextNoReplace(path: string, content: string): Promise<void> {
+		if (this.#files.has(path)) throw Object.assign(new Error(`EEXIST: ${path}`), { code: "EEXIST" });
+		this.writeTextSync(path, content);
+	}
+
 	async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		if (options?.commitGuard && !options.commitGuard()) return;
 		this.writeTextSync(path, content, { expectedSize: options?.expectedSize });
@@ -109,6 +123,11 @@ class BackgroundFailureStorage implements SessionStorage {
 		if (content === undefined) throw new Error(`File not found: ${path}`);
 		this.#files.delete(path);
 		this.#files.set(nextPath, content);
+	}
+
+	async renameNoReplace(path: string, nextPath: string): Promise<void> {
+		if (this.#files.has(nextPath)) throw Object.assign(new Error(`EEXIST: ${nextPath}`), { code: "EEXIST" });
+		await this.rename(path, nextPath);
 	}
 
 	async unlink(path: string): Promise<void> {

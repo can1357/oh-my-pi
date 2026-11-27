@@ -70,6 +70,9 @@ export interface DebugHost {
 	showDebugSelector(): Promise<void>;
 }
 
+/** Tool artifacts last modified longer ago than this are removed by "Clear artifact cache". */
+const ARTIFACT_CACHE_MAX_AGE_DAYS = 30;
+
 /** Debug menu options. */
 const DEBUG_MENU_ITEMS = [
 	{ id: "open-artifacts", label: "Open: artifact folder", detail: "Open session artifacts in file manager" },
@@ -240,6 +243,7 @@ export class DebugTools {
 				const cpuProfile = await session.stop();
 				return createReportBundle({
 					sessionFile: this.#host.sessionManager.getSessionFile(),
+					storage: this.#host.sessionManager.getStorage(),
 					settings: this.#resolvedSettings(),
 					rawSseText: this.#rawSseText(),
 					cpuProfile,
@@ -273,6 +277,7 @@ export class DebugTools {
 			const result = await this.#working("Creating report bundle…", () =>
 				createReportBundle({
 					sessionFile: this.#host.sessionManager.getSessionFile(),
+					storage: this.#host.sessionManager.getStorage(),
 					settings: this.#resolvedSettings(),
 					rawSseText: this.#rawSseText(),
 				}),
@@ -290,6 +295,7 @@ export class DebugTools {
 				setLabel("Creating report bundle…");
 				return createReportBundle({
 					sessionFile: this.#host.sessionManager.getSessionFile(),
+					storage: this.#host.sessionManager.getStorage(),
 					settings: this.#resolvedSettings(),
 					rawSseText: this.#rawSseText(),
 					memoryStats,
@@ -470,24 +476,27 @@ export class DebugTools {
 
 	async #clearCache(): Promise<void> {
 		const sessionsDir = getSessionsDir();
-		const stats = await getArtifactCacheStats(sessionsDir);
+		// The same artifacts the clear below would remove.
+		const stats = await getArtifactCacheStats(sessionsDir, ARTIFACT_CACHE_MAX_AGE_DAYS);
 		if (stats.count === 0) {
-			this.#host.showStatus("Artifact cache is empty.");
+			this.#host.showStatus(`No artifacts older than ${ARTIFACT_CACHE_MAX_AGE_DAYS} days.`);
 			return;
 		}
 		const sizeStr = formatBytes(stats.totalSize);
 		const oldestStr = stats.oldestDate ? stats.oldestDate.toLocaleDateString() : "unknown";
 		const confirmed = await this.#host.showHookConfirm(
 			"Clear Artifact Cache",
-			`Found ${stats.count} artifact files (${sizeStr})\nOldest: ${oldestStr}\n\nRemove artifacts older than 30 days?`,
+			`Found ${stats.count} artifact files older than ${ARTIFACT_CACHE_MAX_AGE_DAYS} days (${sizeStr})\nOldest: ${oldestStr}\n\nRemove them? Transcripts are kept.`,
 		);
 		if (!confirmed) {
 			this.#host.showStatus("Cache clear cancelled.");
 			return;
 		}
 		try {
-			const result = await this.#working("Clearing artifact cache…", () => clearArtifactCache(sessionsDir, 30));
-			const line: TspSpan[] = [{ s: "success", t: `- Cleared ${result.removed} artifact directories` }];
+			const result = await this.#working("Clearing artifact cache…", () =>
+				clearArtifactCache(sessionsDir, ARTIFACT_CACHE_MAX_AGE_DAYS),
+			);
+			const line: TspSpan[] = [{ s: "success", t: `- Cleared ${result.removed} artifact files` }];
 			// A terminal separates blocks by a blank row; Tern gets the line's own spacer over a wrapped text.
 			this.#host.present(
 				() => () =>

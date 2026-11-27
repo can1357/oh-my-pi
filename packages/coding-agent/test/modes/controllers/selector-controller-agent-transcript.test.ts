@@ -12,6 +12,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { AgentHubRemote } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
@@ -109,7 +110,7 @@ async function openHub() {
 		collabGuest: { agentRegistry: agents, hubRemote: remote },
 		focusAgentSession: async () => {},
 		session: {},
-		sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null },
+		sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null, getStorage: defaultSessionStorage },
 	} as unknown as InteractiveModeContext;
 	new SelectorController(ctx).showAgentHub(new SessionObserverRegistry(), undefined, {
 		prompt: (act, text, timestamp) => void acted.prompts.push([act, text, timestamp]),

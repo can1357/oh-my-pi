@@ -8,6 +8,7 @@
  * represented by a proxy with the same surface. The TUI's focused-subagent
  * view additionally reads {@link AgentViewSession}.
  */
+import type { SessionStorage } from "./session-storage";
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort, ImageContent, Model, ServiceTier, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
@@ -62,6 +63,8 @@ export interface AgentSessionManagerHandle {
 	getSessionFile(): string | undefined;
 	/** Artifacts directory, or null when the session is not persisted. */
 	getArtifactsDir(): string | null;
+	/** Storage holding the session's transcript tree. */
+	getStorage?(): SessionStorage;
 	/** Cumulative usage, including off-transcript model calls and nested task results. */
 	getUsageStatistics(): UsageStatistics;
 }

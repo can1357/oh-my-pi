@@ -5,6 +5,7 @@ import type { Extension, TodoBackendDefinition } from "@oh-my-pi/pi-coding-agent
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { type JSXNode, type KeyEvent, signal, type TextEdit, type UiNode } from "@oh-my-pi/pi-tui";
 import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
@@ -280,6 +281,7 @@ describe("single-instance menus", () => {
 					},
 				},
 			},
+			sessionManager: { getStorage: defaultSessionStorage },
 		});
 		const controller = new SelectorController(ctx);
 		const reports = [{ provider: "anthropic", fetchedAt: Date.now(), limits: [] }];

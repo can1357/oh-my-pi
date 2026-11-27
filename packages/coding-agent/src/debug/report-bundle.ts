@@ -4,13 +4,15 @@
  * Creates a .tar.gz archive with session data, logs, system info, and optional profiling data.
  */
 
-import type { Dirent } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, localDay, logger } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { readSessionHeaderId } from "../session/session-loader";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
+import { listTranscriptTree } from "../session/session-transcript-tree";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
@@ -45,6 +47,11 @@ async function readLastLines(filePath: string, n: number, maxBytes = MAX_LOG_BYT
 export interface ReportBundleOptions {
 	/** Session file path */
 	sessionFile: string | undefined;
+	/**
+	 * Storage {@link sessionFile} and its subagent transcripts live in: the
+	 * session's. Omitted: the default session storage.
+	 */
+	storage?: SessionStorage;
 	/** Settings to include */
 	settings?: Record<string, unknown>;
 	/** CPU profile (for performance reports) */
@@ -119,21 +126,39 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		files.push("raw-sse.txt");
 	}
 
-	// Session file
+	// Session file and its artifacts subtree (same path without .jsonl). The
+	// transcripts (this session's and its nested subagents') are read through
+	// the session's storage, which the session and its task executor write
+	// them to: files under `session.storage: file`, rows under
+	// `session.storage: sql`. The tool artifacts beside them are local files.
+	// Staying inside this session's own subtree keeps unrelated co-located
+	// sessions in the sessions root out of the bundle (#8648).
 	if (options.sessionFile) {
-		try {
-			const sessionContent = await Bun.file(options.sessionFile).text();
+		const storage = options.storage ?? defaultSessionStorage();
+		await storage.refresh?.();
+		const sessionContent = await readTranscript(storage, options.sessionFile);
+		if (sessionContent !== undefined) {
 			data["session.jsonl"] = sessionContent;
 			files.push("session.jsonl");
-		} catch {
-			// Session file might not exist yet
 		}
 
-		// Artifacts subtree (same path without .jsonl). Recursing captures the
-		// current session's nested subagent transcripts and their artifacts while
-		// staying inside this session's own directory — unrelated co-located
-		// sessions in the sessions root are never touched (#8648).
 		const artifactsDir = options.sessionFile.slice(0, -6);
+		// Tolerant, as the local walk this supplements always was: an artifacts
+		// directory that cannot be listed (EACCES, EIO) costs the bundle its
+		// transcripts, never the bundle itself.
+		let transcripts: string[] = [];
+		try {
+			transcripts = listTranscriptTree(storage, artifactsDir);
+		} catch (err) {
+			logger.debug("report bundle: transcript listing failed", { err: String(err) });
+		}
+		for (const transcript of transcripts) {
+			const content = await readTranscript(storage, transcript);
+			if (content === undefined) continue;
+			const archivePath = `artifacts/${path.relative(artifactsDir, transcript).split(path.sep).join("/")}`;
+			data[archivePath] = content;
+			files.push(archivePath);
+		}
 		await addDirectoryToArchive(data, files, artifactsDir, "artifacts");
 	}
 
@@ -142,7 +167,10 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	// the crashed process's log, so read all of today's files, not just our own.
 	// Every record those files hold for this session or its subagents goes to
 	// session-logs.txt, however far back in the file it sits.
-	const { tails, sessionLines } = await collectSameDayLogs(1000, await collectSessionIds(options.sessionFile));
+	const { tails, sessionLines } = await collectSameDayLogs(
+		1000,
+		await collectSessionIds(options.sessionFile, options.storage ?? defaultSessionStorage()),
+	);
 	if (tails) {
 		data["logs.txt"] = tails;
 		files.push("logs.txt");
@@ -184,7 +212,16 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	return { path: outputPath, files };
 }
 
-/** Recursively add every file under a directory to the archive. */
+/** A transcript's text, or `undefined` when it does not exist (yet) or cannot be read. */
+async function readTranscript(storage: SessionStorage, transcript: string): Promise<string | undefined> {
+	try {
+		return await storage.readText(transcript);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Recursively add every local file under a directory not already in the archive. */
 async function addDirectoryToArchive(
 	data: Record<string, string | Uint8Array>,
 	files: string[],
@@ -205,7 +242,8 @@ async function addDirectoryToArchive(
 			await addDirectoryToArchive(data, files, entryPath, archivePath);
 			continue;
 		}
-		if (!entry.isFile()) continue;
+		// A transcript the storage listing already added.
+		if (!entry.isFile() || archivePath in data) continue;
 		try {
 			data[archivePath] = await Bun.file(entryPath).text();
 			files.push(archivePath);
@@ -226,12 +264,12 @@ export async function getLogText(): Promise<string> {
  * Ids of the session and its subagents, found the way `/export` finds subagent
  * transcripts, so other JSONL artifacts never pull in an unrelated session.
  */
-async function collectSessionIds(sessionFile: string | undefined): Promise<Set<string>> {
+async function collectSessionIds(sessionFile: string | undefined, storage: SessionStorage): Promise<Set<string>> {
 	const ids = new Set<string>();
 	if (!sessionFile) return ids;
-	const ownId = await readSessionHeaderId(sessionFile).catch(() => undefined);
+	const ownId = await readSessionHeaderId(sessionFile, storage).catch(() => undefined);
 	if (ownId) ids.add(ownId);
-	const subSessions = await collectSubSessions(sessionFile).catch(() => ({}));
+	const subSessions = await collectSubSessions(sessionFile, { storage }).catch(() => ({}));
 	for (const sub of Object.values(subSessions)) if (sub.header) ids.add(sub.header.id);
 	return ids;
 }
@@ -373,73 +411,167 @@ export async function createDebugLogSource(): Promise<DebugLogSource> {
 	};
 }
 
-/** Calculate total size of artifact cache */
+/** A tool artifact file old enough for {@link clearArtifactCache} to remove. */
+interface ExpiredArtifact {
+	path: string;
+	size: number;
+	mtime: Date;
+	/** Identity the walk saw, so a removal can refuse a file replaced since. */
+	dev: number;
+	ino: number;
+}
+
+/**
+ * A tool artifact's file name: `<id>.<tool>.log`, as `ArtifactManager`
+ * allocates it (the tool segment is sanitized to `[A-Za-z0-9_-]`). Nothing
+ * else in a session's artifacts tree is a cache: transcripts and their
+ * sidecars, `/btw` conversations, the unsent prompt draft and annotation
+ * drafts are user data.
+ */
+const TOOL_ARTIFACT_NAME = /^\d+\.[A-Za-z0-9_-]+\.log$/;
+
+/** Entries of `dir`, or none when it is missing or unreadable. */
+async function readEntries(dir: string): Promise<Dirent[]> {
+	try {
+		return await fs.readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * A real directory (not a symlink, not replaced by one) that resolves to the
+ * place the walk expects: `expected` is the real sessions root joined with the
+ * path below it, so a directory swapped for a symlink after the walk read it
+ * resolves elsewhere and is refused.
+ */
+async function isExpectedDirectory(dir: string, expected: string): Promise<boolean> {
+	try {
+		const stat = await fs.lstat(dir);
+		return stat.isDirectory() && (await fs.realpath(dir)) === expected;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Visit every tool artifact ({@link TOOL_ARTIFACT_NAME}) under the sessions
+ * root last modified before `cutoff`: a regular file inside a session's
+ * artifacts tree (`<sessions>/<project>/<session>/…`, at any depth), reached
+ * without following a symlink. Never a file directly in the sessions root or
+ * in a project directory: under `session.storage: file` the project
+ * directories hold the session transcripts themselves.
+ */
+async function visitExpiredArtifacts(
+	sessionsDir: string,
+	cutoff: Date,
+	visit: (artifact: ExpiredArtifact, expectedDir: string) => Promise<void> | void,
+): Promise<void> {
+	let realRoot: string;
+	try {
+		realRoot = await fs.realpath(sessionsDir);
+	} catch {
+		return;
+	}
+	const expectedOf = (dir: string): string => path.join(realRoot, path.relative(sessionsDir, dir));
+	const walk = async (dir: string): Promise<void> => {
+		if (!(await isExpectedDirectory(dir, expectedOf(dir)))) return;
+		for (const entry of await readEntries(dir)) {
+			const entryPath = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				await walk(entryPath);
+				continue;
+			}
+			if (!entry.isFile() || !TOOL_ARTIFACT_NAME.test(entry.name)) continue;
+			let stat: Stats;
+			try {
+				stat = await fs.lstat(entryPath);
+			} catch {
+				continue;
+			}
+			if (!stat.isFile() || stat.mtime >= cutoff) continue;
+			await visit(
+				{ path: entryPath, size: stat.size, mtime: stat.mtime, dev: stat.dev, ino: stat.ino },
+				expectedOf(dir),
+			);
+		}
+	};
+	for (const project of await readEntries(sessionsDir)) {
+		if (!project.isDirectory()) continue;
+		const projectDir = path.join(sessionsDir, project.name);
+		if (!(await isExpectedDirectory(projectDir, expectedOf(projectDir)))) continue;
+		for (const session of await readEntries(projectDir)) {
+			if (session.isDirectory()) await walk(path.join(projectDir, session.name));
+		}
+	}
+}
+
+/** Count and size of the tool artifacts {@link clearArtifactCache} would remove for the same `daysOld`. */
 export async function getArtifactCacheStats(
 	sessionsDir: string,
+	daysOld: number,
 ): Promise<{ count: number; totalSize: number; oldestDate: Date | null }> {
+	const cutoff = new Date();
+	cutoff.setDate(cutoff.getDate() - daysOld);
 	let count = 0;
 	let totalSize = 0;
 	let oldestDate: Date | null = null;
-
-	try {
-		const sessions = await fs.readdir(sessionsDir, { withFileTypes: true });
-
-		for (const session of sessions) {
-			// Artifact directories don't have .jsonl extension
-			if (session.isDirectory()) {
-				const dirPath = path.join(sessionsDir, session.name);
-				try {
-					const stat = await fs.stat(dirPath);
-					const files = await fs.readdir(dirPath);
-					for (const file of files) {
-						const filePath = path.join(dirPath, file);
-						const fileStat = await fs.stat(filePath);
-						if (fileStat.isFile()) {
-							count++;
-							totalSize += fileStat.size;
-						}
-					}
-					if (!oldestDate || stat.mtime < oldestDate) {
-						oldestDate = stat.mtime;
-					}
-				} catch {
-					// Skip inaccessible directories
-				}
-			}
-		}
-	} catch {
-		// Directory doesn't exist
-	}
-
+	await visitExpiredArtifacts(sessionsDir, cutoff, artifact => {
+		count++;
+		totalSize += artifact.size;
+		if (!oldestDate || artifact.mtime < oldestDate) oldestDate = artifact.mtime;
+	});
 	return { count, totalSize, oldestDate };
 }
 
-/** Clear artifact cache older than N days */
-export async function clearArtifactCache(sessionsDir: string, daysOld: number = 30): Promise<{ removed: number }> {
+/**
+ * Remove the tool artifacts last modified more than `daysOld` days ago (see
+ * {@link visitExpiredArtifacts}), then the directories inside a session's
+ * artifacts tree that the removal left empty. Nothing but `<id>.<tool>.log`
+ * files is removed, and never a session or project directory, whatever
+ * `session.storage` holds the transcripts.
+ *
+ * Right before each removal the file's directory must still resolve to where
+ * the walk found it and the file must still be the one it saw (same device,
+ * inode and mtime, still older than the cutoff), so a directory swapped for a
+ * symlink or a file replaced since the walk is left alone. Node offers no
+ * `unlinkat`, so the check and the removal remain two calls; the window
+ * between them is what is left. Returns the number of files removed.
+ */
+export async function clearArtifactCache(sessionsDir: string, daysOld: number): Promise<{ removed: number }> {
 	const cutoff = new Date();
 	cutoff.setDate(cutoff.getDate() - daysOld);
 	let removed = 0;
-
-	try {
-		const sessions = await fs.readdir(sessionsDir, { withFileTypes: true });
-
-		for (const session of sessions) {
-			if (session.isDirectory()) {
-				const dirPath = path.join(sessionsDir, session.name);
-				try {
-					const stat = await fs.stat(dirPath);
-					if (stat.mtime < cutoff) {
-						await fs.rm(dirPath, { recursive: true, force: true });
-						removed++;
-					}
-				} catch {
-					// Skip inaccessible directories
-				}
-			}
+	const emptied = new Map<string, string>();
+	await visitExpiredArtifacts(sessionsDir, cutoff, async (artifact, expectedDir) => {
+		const dir = path.dirname(artifact.path);
+		try {
+			if (!(await isExpectedDirectory(dir, expectedDir))) return;
+			const now = await fs.lstat(artifact.path);
+			const same = now.isFile() && now.dev === artifact.dev && now.ino === artifact.ino;
+			if (!same || now.mtime.getTime() !== artifact.mtime.getTime() || now.mtime >= cutoff) return;
+			await fs.unlink(artifact.path);
+		} catch {
+			return; // Removed or replaced since the walk listed it.
 		}
-	} catch {
-		// Directory doesn't exist
+		removed++;
+		// Ancestors below the session's own artifacts directory, which a live
+		// session keeps writing into: `<sessions>/<project>/<session>/<dir>…`.
+		let ancestor = dir;
+		let expected = expectedDir;
+		while (path.relative(sessionsDir, ancestor).split(path.sep).length > 2) {
+			emptied.set(ancestor, expected);
+			ancestor = path.dirname(ancestor);
+			expected = path.dirname(expected);
+		}
+	});
+	// Deepest first, so a parent is tried after its emptied children.
+	for (const [dir, expected] of [...emptied].sort(([a], [b]) => b.length - a.length)) {
+		try {
+			if (await isExpectedDirectory(dir, expected)) await fs.rmdir(dir);
+		} catch {
+			// Not empty (it holds a transcript or a newer artifact), or already gone.
+		}
 	}
-
 	return { removed };
 }

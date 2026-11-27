@@ -11,6 +11,7 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
 import { type KeyEvent, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { bubbleKey, pathTo } from "@oh-my-pi/pi-tui/dispatch";
@@ -72,7 +73,11 @@ function setup(
 		collabGuest: { agentRegistry: agents, hubRemote: undefined },
 		focusAgentSession: options.focusAgent ?? (async () => {}),
 		session: {},
-		sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => options.sessionFile ?? null },
+		sessionManager: {
+			getCwd: () => TEST_CWD,
+			getSessionFile: () => options.sessionFile ?? null,
+			getStorage: defaultSessionStorage,
+		},
 	} as unknown as InteractiveModeContext;
 	const controller = new SelectorController(ctx);
 	return {

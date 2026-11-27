@@ -7,6 +7,8 @@
  * window, and, with `subagents`, the subagent transcripts of those sessions);
  * the native scanner (`transcriptCalls` and friends in pi-natives) reads them
  * in parallel off the JS thread and filters records by time, tool, and regex.
+ * The scanner reads files on disk only, so under `session.storage: sql` every
+ * view here refuses by name rather than answer from no transcripts.
  */
 import * as fs from "node:fs";
 import {
@@ -28,6 +30,8 @@ import { previewLine, shortenPath } from "../utils/render-utils";
 import { formatCount, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { listStatedSessionFiles, parseSessionFileName } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
+import { defaultSessionStorage } from "../session/session-storage";
+import { assertSessionsOnDisk } from "../session/session-storage-config";
 import { listSubSessionFiles } from "../session/sub-sessions";
 import type { TimeWindow } from "../session/time-window";
 import { parseCallArgs, type TranscriptKind } from "../session/transcript-view";
@@ -138,6 +142,12 @@ const LISTED_RECORDS = 30;
 const PREVIEW_WIDTH = 160;
 /** Session directories read at once while listing subagent transcripts. */
 const SUBAGENT_LISTING_CONCURRENCY = 32;
+/** Why every view here refuses under `session.storage: sql`. */
+const SCANNER_DISK_ONLY_REASON =
+	"the native transcript scanner reads session files on disk, and this store keeps sessions as database rows";
+
+/** A view the native scanner backs, by its prelude name. */
+type ScannedView = "calls" | "grep" | "stats" | "messages" | "transcript";
 
 const SOURCE: Record<GrepSource, TranscriptSource> = {
 	user: TranscriptSource.User,
@@ -162,7 +172,7 @@ export async function archiveCalls(
 	scope: ActivityScope,
 	signal?: AbortSignal,
 ): Promise<ArchiveView<ArchiveCall[]>> {
-	const transcripts = await transcriptsInScope(scope);
+	const transcripts = await transcriptsInScope(scope, "calls");
 	const found = await transcriptCalls({ ...transcripts, ...scope.window, filter, flags, limit: scope.limit, signal });
 	const origin = originOf(transcripts, found.headers, scope);
 	const calls = found.calls.map((call): ArchiveCall => ({
@@ -198,7 +208,7 @@ export async function archiveGrep(
 	scope: ActivityScope,
 	signal?: AbortSignal,
 ): Promise<ArchiveView<ArchiveGrepHit[]>> {
-	const transcripts = await transcriptsInScope(scope);
+	const transcripts = await transcriptsInScope(scope, "grep");
 	const found = await transcriptGrep({
 		...transcripts,
 		...scope.window,
@@ -238,7 +248,7 @@ export async function archiveStats(
 	scope: ActivityScope,
 	signal?: AbortSignal,
 ): Promise<ArchiveView<ArchiveStat[]>> {
-	const transcripts = await transcriptsInScope(scope);
+	const transcripts = await transcriptsInScope(scope, "stats");
 	const perTranscript: Record<ArchiveStatsKey, TranscriptStatsKey> = {
 		tool: TranscriptStatsKey.Tool,
 		day: TranscriptStatsKey.Day,
@@ -296,12 +306,13 @@ export async function archiveStats(
  * first: a session by id prefix, or any transcript file (subagents included).
  *
  * @throws {ToolError} when no session or several match, or the file is not readable.
+ * @throws {SessionStorageUnsupportedError} under `session.storage: sql`.
  */
 export async function archiveMessages(
 	idOrFile: string,
 	options: TranscriptReadOptions,
 ): Promise<ArchiveView<ArchiveMessage[]>> {
-	const { file, records: found } = await readTranscript(idOrFile, options);
+	const { file, records: found } = await readTranscript(idOrFile, options, "messages");
 	const records = found.map((record): ArchiveMessage => ({
 		entry: record.entry ?? null,
 		at: isoTime(record.at),
@@ -341,14 +352,17 @@ export interface TranscriptReadOptions {
 /**
  * The newest `limit` records of one transcript, oldest first, with the file
  * they came from: a session by id prefix, or any transcript file. Backs
- * `archive.messages` and `archive.transcript`.
+ * `archive.messages` and `archive.transcript`, which `view` names.
  *
  * @throws {ToolError} when no session or several match, or the file is not readable.
+ * @throws {SessionStorageUnsupportedError} under `session.storage: sql`.
  */
 export async function readTranscript(
 	idOrFile: string,
 	options: TranscriptReadOptions,
+	view: "messages" | "transcript",
 ): Promise<{ file: string; records: TranscriptRecord[] }> {
+	assertSessionsOnDisk(defaultSessionStorage(), `archive.${view}`, SCANNER_DISK_ONLY_REASON);
 	const file = await resolveSessionFile(idOrFile);
 	try {
 		await fs.promises.stat(file);
@@ -372,8 +386,11 @@ export async function readTranscript(
  * window opened and created before it closed, plus, with `subagents`, the
  * subagent transcripts of those sessions written since it opened. The scanner
  * filters each record by its own time.
+ *
+ * @throws {SessionStorageUnsupportedError} under `session.storage: sql`, naming `view`.
  */
-async function transcriptsInScope(scope: ActivityScope): Promise<Transcripts> {
+async function transcriptsInScope(scope: ActivityScope, view: ScannedView): Promise<Transcripts> {
+	assertSessionsOnDisk(defaultSessionStorage(), `archive.${view}`, SCANNER_DISK_ONLY_REASON);
 	const since = scope.window?.since;
 	const until = scope.window?.until;
 	const transcripts: Transcripts = { files: [], origins: [] };
