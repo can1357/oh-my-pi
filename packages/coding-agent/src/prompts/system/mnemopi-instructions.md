@@ -6,7 +6,7 @@ This agent has local Mnemopi long-term memory.
 - Use `retain` to store durable facts (decisions, preferences, project context) the agent should remember in future sessions.
 - Use `reflect` for questions that need a synthesised answer over many memories.
 {{#if autoRetain}}
-- Completed turns are also retained automatically.
+- Automatic retention of completed turns is enabled for this session.
 {{else}}
 - Turns are not retained automatically: a memory is kept only when it is stored on purpose, as with `retain`.
 {{/if}}

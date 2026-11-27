@@ -322,11 +322,13 @@ export interface MnemopiSessionStateApi {
 }
 
 /**
- * The memory instructions. They say completed turns are retained automatically only
- * when they are: `mnemopi.autoRetain` is on and the session is top-level. A subagent
+ * The memory instructions. They say automatic retention of completed turns is enabled
+ * only when it is: `mnemopi.autoRetain` is on and the session is top-level. A subagent
  * aliases its parent's banks and retains nothing of its own
- * ({@link MnemopiSessionState.maybeRetainOnAgentEnd}). Read from the settings, not from
- * a Mnemopi state: a session renders its first system prompt before its state exists.
+ * ({@link MnemopiSessionState.maybeRetainOnAgentEnd}). The line states the policy, not
+ * that a turn was saved: retention runs every `mnemopi.retainEveryNTurns` turns, and a
+ * backend that failed to start retains nothing. Read from the settings, not from a
+ * Mnemopi state: a session renders its first system prompt before its state exists.
  * A live `mnemopi.*` edit re-applies the backend, so the state's config agrees with the settings.
  */
 export function renderMnemopiInstructions(settings: Settings, subagent: boolean): string {

@@ -1,9 +1,10 @@
 /**
- * The Mnemopi memory instructions tell the model whether its completed turns are
- * retained automatically. That is true only when `mnemopi.autoRetain` is on and the
- * session is top-level: a subagent aliases its parent's banks and retains nothing of
- * its own. A session renders its first system prompt before its Mnemopi state exists,
- * so these tests read the line in the system prompt each real request carries.
+ * The Mnemopi memory instructions tell the model whether automatic retention of its
+ * completed turns is enabled. It is only when `mnemopi.autoRetain` is on and the session
+ * is top-level: a subagent aliases its parent's banks and retains nothing of its own. The
+ * line states that policy, not that a turn was saved. A session renders its first system
+ * prompt before its Mnemopi state exists, so these tests read the line in the system
+ * prompt each real request carries.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -28,11 +29,15 @@ afterEach(() => {
 	AgentRegistry.resetGlobalForTests();
 });
 
-/** What one request's system prompt says about automatic retention. */
-function retentionClaim(systemPrompt: readonly string[]): "retained" | "not retained" | "silent" {
+/**
+ * What one request's system prompt says about automatic retention: that the session's
+ * policy is on, that it is off, or a promise that turns are retained.
+ */
+function retentionClaim(systemPrompt: readonly string[]): "enabled" | "off" | "promised" | "silent" {
 	const text = systemPrompt.join("\n");
-	if (/\bnot retained automatically\b/.test(text)) return "not retained";
-	if (/\bretained automatically\b/.test(text)) return "retained";
+	if (/\bnot retained automatically\b/.test(text)) return "off";
+	if (/\bretained automatically\b/.test(text)) return "promised";
+	if (/\bAutomatic retention of completed turns is enabled for this session\b/.test(text)) return "enabled";
 	return "silent";
 }
 
@@ -131,7 +136,7 @@ async function promptAndRetain(session: AgentSession, text: string): Promise<voi
 }
 
 describe("Mnemopi memory instructions in the system prompt a real session sends", () => {
-	it("say turns are retained automatically in a top-level session with the default settings", async () => {
+	it("say automatic retention is enabled in a top-level session with the default settings", async () => {
 		using dir = TempDir.createSync("@mnemopi-instructions-");
 		const harness = await sdkHarness(dir, {});
 		try {
@@ -143,7 +148,7 @@ describe("Mnemopi memory instructions in the system prompt a real session sends"
 			await session.refreshBaseSystemPrompt();
 			await promptAndRetain(session, "Say ok again.");
 			// The first request's prompt was built before the Mnemopi state existed, the second after it.
-			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["retained", "retained"]);
+			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["enabled", "enabled"]);
 		} finally {
 			await harness.close();
 		}
@@ -157,7 +162,7 @@ describe("Mnemopi memory instructions in the system prompt a real session sends"
 			await harness.started(0);
 			await promptAndRetain(session, "Say ok.");
 			expect(getMnemopiSessionState(session)?.lastRetainedTurn).toBe(0);
-			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["not retained"]);
+			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["off"]);
 		} finally {
 			await harness.close();
 		}
@@ -173,7 +178,7 @@ describe("Mnemopi memory instructions in the system prompt a real session sends"
 			await harness.started(1);
 			expect(getMnemopiSessionState(child)?.aliasOf).toBe(getMnemopiSessionState(parent));
 			await child.prompt("Say ok.");
-			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["not retained"]);
+			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["off"]);
 		} finally {
 			await harness.close();
 		}
