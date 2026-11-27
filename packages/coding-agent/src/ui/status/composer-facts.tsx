@@ -17,6 +17,7 @@ import { type Accessor, computed, For, type JSXNode, Show } from "@oh-my-pi/pi-t
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspMeterMark, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { StatusLineSegmentId } from "../../config/status-line-schema";
+import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
 import { sanitizeStatusText } from "../../modes/view-model/chrome/shared";
 import type { PromptCacheStatus } from "../../modes/view-model/status-line/host";
 import { promptCacheBrief } from "../../modes/view-model/status-line/prompt-cache";
@@ -94,6 +95,10 @@ interface Fact {
 	readonly motion?: SegMotion;
 }
 
+function sanitizeStatusSpans(spans: readonly TspSpan[] | undefined): TspSpan[] | undefined {
+	return spans?.map(span => ({ ...span, t: sanitizeDisplaySingleLine(span.t) }));
+}
+
 function cacheFactProps(
 	cache: PromptCacheStatus,
 	now: number,
@@ -147,7 +152,13 @@ export function composerFacts(props: {
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]) => {
 			ids.forEach((id, index) => {
 				if (HOMED[id]) return;
-				const view = segmentView(id, state, settings);
+				const view = segmentView(
+					id,
+					id === "status" && state.hookStyles
+						? { ...state, hooks: state.hooks.filter((_, i) => !state.hookStyles?.[i]) }
+						: state,
+					settings,
+				);
 				if (!view) return;
 				const order = side === "left" ? ids.length - index : index + 1;
 				const action = FACT_ACTIONS[id];
@@ -167,11 +178,18 @@ export function composerFacts(props: {
 		collect("left", settings.leftSegments);
 		collect("right", settings.rightSegments);
 		const ids = [...settings.leftSegments, ...settings.rightSegments];
-		if ((settings.showHookStatus ?? true) && !ids.includes("status")) {
+		if ((settings.showHookStatus ?? true) || ids.includes("status")) {
 			state.hooks.forEach((status, index) => {
+				const style = state.hookStyles?.[index];
+				if (!style && ids.includes("status")) return;
 				const text = sanitizeStatusText(status);
 				if (text)
-					out.push({ key: `hook-${index}`, role: "omp.composer.fact", priority: 0, spans: dim([{ t: text }]) });
+					out.push({
+						key: `hook-${index}`,
+						role: style?.role ?? "omp.composer.fact",
+						priority: 0,
+						spans: dim(sanitizeStatusSpans(style?.spans) ?? [{ t: text }]),
+					});
 			});
 		}
 		return out;
@@ -369,7 +387,13 @@ export function StatusBarPreview(props: {
 			<col role="omp.status.panel">
 				{bar}
 				{state.hooks.map((status, index) => (
-					<text key={`hook-${index}`} role="omp.status.hook" text={sanitizeStatusText(status)} wrap="none" />
+					<text
+						key={`hook-${index}`}
+						role={state.hookStyles?.[index]?.role ?? "omp.status.hook"}
+						text={state.hookStyles?.[index]?.spans ? undefined : sanitizeStatusText(status)}
+						spans={sanitizeStatusSpans(state.hookStyles?.[index]?.spans)}
+						wrap="none"
+					/>
 				))}
 			</col>
 		);

@@ -11,6 +11,7 @@ import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type { AutocompleteProvider, SlashCommand } from "../autocomplete/autocomplete";
 import type { KeyId } from "../config/keybindings/key-id";
+import type { ExtensionStatusOptions } from "../extensibility/extensions/render-types";
 
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import { stopAgentRun } from "../async/job-control";
@@ -8650,8 +8651,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.setHookWidget(key, content, options);
 	}
 
-	setHookStatus(key: string, text: string | undefined): void {
-		this.#extensionUiController.setHookStatus(key, text);
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void {
+		this.#extensionUiController.setHookStatus(key, text, options);
 	}
 
 	showHookSelector(

@@ -7,3 +7,4 @@ export * from "./reactive";
 export * from "./surface";
 export * from "./types";
 export * from "./host";
+export * from "./input";

@@ -12,6 +12,7 @@ import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
 	ExtensionRender,
+	ExtensionStatusOptions,
 	ExtensionTheme,
 	ExtensionUiFactory,
 	ExtensionUiHost,
@@ -23,6 +24,9 @@ export type {
 	AssistantThinkingRenderer,
 	ExtensionRender,
 	ExtensionRows,
+	ExtensionLiveBlock,
+	ExtensionLiveUi,
+	ExtensionStatusOptions,
 	ExtensionTheme,
 	ExtensionUiFactory,
 	ExtensionUiHost,
@@ -461,7 +465,7 @@ export interface ExtensionUIContext {
 	getLinkClicksAvailable(): boolean;
 
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
-	setStatus(key: string, text: string | undefined): void;
+	setStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;

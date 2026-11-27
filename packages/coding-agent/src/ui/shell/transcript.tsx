@@ -19,6 +19,8 @@
  */
 import {
 	type Accessor,
+	computed,
+	createRoot,
 	createContext,
 	effect,
 	getOwner,
@@ -27,12 +29,13 @@ import {
 	onCleanup,
 	type Owner,
 	provide,
+	resolveChildren,
 	runWithOwner,
 	type Signal,
 	settle,
 	signal,
 	type UiHandlers,
-	type UiNode,
+	UiNode,
 	untrack,
 	useContext,
 } from "@oh-my-pi/pi-tui";
@@ -133,11 +136,14 @@ export class Transcript {
 	/** Where edits go: the shown list, or a staged one while a rebuild builds off-screen. */
 	readonly #target = signal(this.#shown);
 	readonly #byNode = new WeakMap<UiNode, TranscriptBlock>();
+	readonly #byNative = new WeakMap<UiNode, TranscriptBlock>();
 	readonly #holds = new WeakMap<UiNode, BlockHolds>();
 	/** Native wrappers of compact runs, keyed by the run's first member. */
 	#wrappers = new Map<UiNode, CompactRun>();
 	#host: TranscriptHost | undefined;
 	#insertionPoint: TranscriptBlock | undefined;
+	readonly #decorators = signal<readonly Accessor<readonly UiNode[] | undefined>[]>([]);
+	readonly #decorationRevision = signal(0);
 
 	/** A `select` no handler inside its block took: an extension link label clicked in Markdown (its href). */
 	onSelect: ((item: string) => void) | undefined;
@@ -149,6 +155,39 @@ export class Transcript {
 
 	/** The blocks' nodes, as the terminal draws them (reactive). */
 	readonly nodes: Accessor<readonly UiNode[]> = this.#shown.nodes;
+
+	/** Blocks currently on screen; staged rebuilds are not visible until committed. */
+	readonly shownBlocks: Accessor<readonly TranscriptBlock[]> = this.#shown.entries;
+
+	/** Replace the native main region. The most recently registered transform takes precedence. */
+	decorateNative(transform: (blocks: readonly TranscriptBlock[]) => readonly UiNode[] | undefined): () => void {
+		const view = untrack(() =>
+			createRoot(dispose => ({
+				dispose,
+				nodes: computed(() => {
+					this.#decorationRevision();
+					return transform(this.#shown.entries());
+				}),
+			})),
+		);
+		this.#decorators.update(list => [...list, view.nodes]);
+		this.invalidateNative();
+		let removed = false;
+		const remove = (): void => {
+			if (removed) return;
+			removed = true;
+			this.#decorators.update(list => list.filter(other => other !== view.nodes));
+			view.dispose();
+			this.invalidateNative();
+		};
+		if (getOwner()) onCleanup(remove);
+		return remove;
+	}
+
+	/** Recompute decorations; native watchers describe only roots whose content actually changed. */
+	invalidateNative(): void {
+		this.#decorationRevision.update(value => value + 1);
+	}
 
 	get #blocks(): ViewList<TranscriptBlock> {
 		return this.#target.peek();
@@ -328,19 +367,28 @@ export class Transcript {
 	 * last member.
 	 */
 	readonly nativeNodes: Accessor<readonly UiNode[]> = () => {
+		const nodes = this.#decorators().at(-1)?.() ?? this.#shown.entries().flatMap(block => block.native());
 		const out: UiNode[] = [];
 		const runs = new Map<UiNode, CompactRun>();
-		let run: TranscriptBlock[] = [];
+		let run: UiNode[] = [];
+		let first: TranscriptBlock | undefined;
+		let multiple = false;
 		const flush = (): void => {
-			if (run.length === 1) out.push(...run[0]!.native());
-			else if (run.length > 1) out.push(this.#wrap(run, runs));
+			if (multiple) out.push(this.#wrap(first!.node, run, runs));
+			else out.push(...run);
 			run = [];
+			first = undefined;
+			multiple = false;
 		};
-		for (const block of this.#shown.entries()) {
-			if (block.compact()) run.push(block);
-			else {
+		for (const node of nodes) {
+			const block = this.#nativeBlock(node);
+			if (block?.compact()) {
+				if (!first) first = block;
+				else if (first !== block) multiple = true;
+				run.push(node);
+			} else {
 				flush();
-				out.push(...block.native());
+				out.push(node);
 			}
 		}
 		flush();
@@ -349,13 +397,18 @@ export class Transcript {
 		return out;
 	};
 
-	#wrap(run: readonly TranscriptBlock[], runs: Map<UiNode, CompactRun>): UiNode {
-		const first = run[0]!.node;
-		const members = run.flatMap(block => block.native());
+	/** Decoration ownership is explicit, never guessed from returned positions or keys. */
+	#nativeBlock(node: UiNode): TranscriptBlock | undefined {
+		const block = this.#byNative.get(node);
+		if (block) return block;
+		const source = node.source;
+		return source && typeof source !== "function" ? this.#nativeBlock(source) : undefined;
+	}
+
+	#wrap(first: UiNode, members: readonly UiNode[], runs: Map<UiNode, CompactRun>): UiNode {
 		let wrapper = this.#wrappers.get(first);
 		if (wrapper) wrapper.members.set(members);
 		else wrapper = compactRun(members);
-		if (run.every(block => isSettled(block.node))) settle(wrapper.node);
 		runs.set(first, wrapper);
 		return wrapper.node;
 	}
@@ -406,7 +459,10 @@ export class Transcript {
 			...(options?.prompt ? { prompt: true } : {}),
 			native: () => {
 				const nodes = native();
-				for (const node of nodes) this.#fallback(node);
+				for (const node of nodes) {
+					this.#fallback(node);
+					this.#byNative.set(node, block);
+				}
 				return nodes;
 			},
 		};
@@ -487,11 +543,18 @@ function compactRun(initial: readonly UiNode[]): CompactRun {
 	// Members belong to their blocks; the wrapper only lists them, so it is built outside the
 	// region's reactive scope (a recompute must not dispose it).
 	const entry = mountNode(
-		() => (
-			<col role="omp.compact" gap="none">
-				{members}
-			</col>
-		),
+		() => {
+			const children = resolveChildren(members);
+			const props = { role: "omp.compact", gap: "none" } as const;
+			return new UiNode("col", {}, undefined, {
+				props: () => props,
+				children,
+				key: () => undefined,
+				reveal: () => undefined,
+				scroll: () => undefined,
+				source: children,
+			});
+		},
 		"A compact run",
 	);
 	return { node: entry.node, members, dispose: entry.dispose };

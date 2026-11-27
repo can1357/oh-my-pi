@@ -42,8 +42,14 @@ export function settle(node: UiNode): void {
 	settledSignal(node).set(true);
 }
 
-/** Whether `node` was settled (reactive). */
+/** Whether `node` or its explicit lifecycle source was settled (reactive). */
 export function isSettled(node: UiNode): boolean {
+	const source = node.source;
+	if (source) {
+		if (typeof source !== "function") return isSettled(source);
+		const members = source();
+		return members.length > 0 && members.every(isSettled);
+	}
 	return settledSignal(node)();
 }
 

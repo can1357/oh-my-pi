@@ -200,6 +200,19 @@
 - Fixed Gemini planning behavior so long tool-free reasoning is not repeatedly interrupted.
 - Fixed ACP and RPC `/mcp` commands to honor project-server precedence, enable/disable overrides, and the session working directory.
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
+- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
+- omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
+### Added
+
+- Added `ExtensionUiHost.live` for interactive transcript widgets: native-only retained decorators, stable block handles, action and fold routing, focus-aware overlays, and explicit invalidation without changing session messages.
+- Extension statuses accept optional native roles and styled spans while retaining their plain text for terminal and RPC clients.
+
+### Fixed
+
+- Native transcript decorations preserve compact grouping and avoid redrawing unchanged or evicted blocks ([#20635](https://github.com/can1357/oh-my-pi/pull/20635) by [@BenjaminEriksen95](https://github.com/BenjaminEriksen95)).
+- The compiled extension module registry locates the current `packages/tui` workspace, retaining the canonical modern pi-tui root and shared reactive runtime for extension imports.
+- Passive extension overlays no longer block composer shortcuts or keyboard link hints.
+- Styled extension statuses preserve spaces between spans in the native composer and status preview ([#20635](https://github.com/can1357/oh-my-pi/pull/20635) by [@BenjaminEriksen95](https://github.com/BenjaminEriksen95)).
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
 

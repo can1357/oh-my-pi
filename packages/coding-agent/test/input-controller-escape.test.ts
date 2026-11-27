@@ -106,7 +106,7 @@ function createContext(): {
 		shell: {
 			focused: () => editor.field,
 			host: { replayHistory: resetDisplay, driver: { writeRaw: vi.fn() } },
-			overlays: { open: () => false },
+			overlays: { open: () => false, blocking: () => false },
 		},
 		working: undefined,
 		session: {

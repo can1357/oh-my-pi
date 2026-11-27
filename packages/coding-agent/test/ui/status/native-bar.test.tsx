@@ -9,7 +9,7 @@ import { createRoot, isUiNode, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
-import { StatusBarPreview } from "../../../src/ui/status/composer-facts";
+import { composerFacts, StatusBarPreview } from "../../../src/ui/status/composer-facts";
 import type { StatusFacts } from "../../../src/ui/status/facts";
 import { effectiveStatusSettings, segmentView } from "../../../src/ui/status/segments";
 import { corpusStatusFacts } from "./fixture";
@@ -58,6 +58,39 @@ describe("status bar preview for Tern", () => {
 			const [bar, hook] = root.children();
 			expect(bar?.kind).toBe("status");
 			expect(hook?.props()).toMatchObject({ role: "omp.status.hook", text: "lint ok" });
+		} finally {
+			dispose();
+		}
+	});
+});
+
+describe("structured native extension statuses", () => {
+	test("keeps the role and styled spans in composer extras without duplicating the configured status segment", () => {
+		createRoot(dispose => {
+			try {
+				const spans = [{ t: "NORMAL", s: "strong accent" }, { t: " 1/3", s: "mono" }];
+				const facts = signal<StatusFacts>({ ...corpusStatusFacts(), hooks: ["tests passing", "NORMAL 1/3"], hookStyles: [undefined, { role: "extension.navigation", spans }] });
+				const { extras } = composerFacts({ settings: () => ({ preset: "custom", leftSegments: ["status"], rightSegments: [], showHookStatus: false }), facts, click: () => undefined });
+				if (!isUiNode(extras)) throw new Error("Expected composer extras");
+				const children = extras.children();
+				expect(children).toHaveLength(2);
+				const plain = children[0]!.props();
+				expect("spans" in plain && plain.spans).toEqual(segmentView("status", { ...facts(), hooks: ["tests passing"] }, effectiveStatusSettings({ preset: "custom", leftSegments: ["status"], rightSegments: [] }))?.spans);
+				expect(children[1]?.props()).toMatchObject({ role: "extension.navigation", spans });
+				facts.set({ ...facts(), hooks: ["tests passing"], hookStyles: [undefined] });
+				expect(extras.children()).toHaveLength(1);
+			} finally {
+				dispose();
+			}
+		});
+	});
+
+	test("preserves native styling in the status preview while plain statuses stay plain", () => {
+		const spans = [{ t: "NORMAL", s: "strong accent" }, { t: " 1/3", s: "mono" }];
+		const { root, dispose } = preview({ ...corpusStatusFacts(), hooks: ["tests passing", "NORMAL 1/3"], hookStyles: [undefined, { role: "extension.navigation", spans }] });
+		try {
+			expect(root.children()[1]?.props()).toMatchObject({ role: "omp.status.hook", text: "tests passing" });
+			expect(root.children()[2]?.props()).toMatchObject({ role: "extension.navigation", spans });
 		} finally {
 			dispose();
 		}

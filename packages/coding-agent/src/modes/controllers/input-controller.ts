@@ -640,7 +640,7 @@ export class InputController {
 			void this.handleImagePaste();
 			return true;
 		}
-		if (this.ctx.shell.overlays.open()) return false;
+		if (this.ctx.shell.overlays.blocking()) return false;
 		if (km.matches(key, "app.thinking.toggle")) {
 			this.toggleThinkingBlockVisibility();
 			return true;
@@ -973,7 +973,7 @@ export class InputController {
 	 */
 	#handleLinkHintInput(event: InputEvent): boolean {
 		// Overlays and editor-area dialogs (ask, selectors, hook input) own the keyboard.
-		const composerFocused = () => !this.ctx.shell.overlays.open() && this.#composerFocused();
+		const composerFocused = () => !this.ctx.shell.overlays.blocking() && this.#composerFocused();
 		if (!this.ctx.linkHintsActive) {
 			if (event.type !== "key" || !this.ctx.keybindings.matches(event.key, "app.links.hint")) return false;
 			if (!composerFocused()) return false;

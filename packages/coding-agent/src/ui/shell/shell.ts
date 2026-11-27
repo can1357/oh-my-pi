@@ -44,7 +44,7 @@ let terminalStylesLoaded = false;
  * surfaces render in the terminal itself and never consult terminal painters,
  * keeping the ~330 style modules off native startup.
  */
-function ensureTerminalStylesLoaded(): void {
+export function ensureTerminalStylesLoaded(): void {
 	if (terminalStylesLoaded) return;
 	terminalStylesLoaded = true;
 	require("../styles");

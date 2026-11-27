@@ -1076,6 +1076,35 @@ alternate screen; `onHandle` receives `{ closed, close() }`. The factory's `ui`
 argument offers `requestRender()` (repaint rows objects), `size()` and
 `suspend(run)` (hand the terminal to an external editor while `run` settles).
 
+#### Retained transcript widgets
+
+Interactive main-transcript widget factories also receive `ui.live` (`ExtensionLiveUi`).
+It is absent from custom-dialog factories and non-interactive modes. Check `live.native`
+before installing native transcript decoration; plain terminal messages are unchanged.
+
+- `blocks()`: the currently shown blocks, including streamed content. A staged rebuild appears only after it commits. Each `ExtensionLiveBlock` is stable until that underlying block is replaced; `id` is an opaque per-instance string, not a TSP wire id.
+- `block.node`: the stable terminal wrapper. `block.native()` returns the actual native roots, which can differ from that wrapper. Return those roots unchanged for blocks you do not decorate: do not clone them or substitute `block.node`.
+- `block.render(width)`: rows from the existing terminal renderer with the current theme.
+- `decorate(transform)`: replace the native transcript roots with the transform's returned nodes. Signal, node-prop and child-list reads in the transform are reactive, so streamed changes repaint without a timer. The most recently registered transform takes precedence; its idempotent removal restores the previous transform or the original native transcript. Nodes built by a transform belong to its scope; original block nodes still belong to their transcript blocks. A failed transform is reported and falls back to the normal undecorated transcript, including gapless compact runs.
+- Replacement roots must retain their source explicitly: `derivedNode(original, map)` does this automatically; custom replacement trees pass `source: original` in `new UiNode(kind, handlers, undefined, { source: original, props, children, key, reveal, scroll })`'s resolved-source descriptor. Source provenance follows replacement chains and preserves compact grouping, settlement and native eviction, including when decoration is installed after eviction. A grouped view may supply `source: () => members` to settle only when all members settle; evicted members stay absent while live members remain visible. Do not infer ownership from list position or keys. Disposing a replacement never settles or disposes its source.
+- `invalidate()`: recompute decoration for state that is not held in signals. Only changed native roots are described again; unchanged roots keep their identities and retained descriptions.
+- `block.setExpanded(expanded)`: route all changed collapsible tool and thought folds through their existing toggle handlers; it does not edit session messages.
+- `block.dispatchAction(path, action)`: resolve a path below a single native root (the root is `""`), or below a synthetic column over multiple roots, then bubble the action as native input does. Escape `%`, `/`, `~` and `^` as `%25`, `%2F`, `%7E` and `%5E`; repeated sibling keys use `~1`, `~2` and so on. Missing paths return `false`; handler errors propagate.
+- `focused()`: the node currently holding keyboard focus.
+- `promptConsumesEscape()`: whether autocomplete or the built-in Vim layer currently handles Escape, so a transcript navigation mode should leave that key with the prompt.
+- `showOverlay(factory, { passive? })`: mount a supplied pi-tui node in the shell's overlay stack and return an idempotent `hide()`. A passive view neither steals keyboard focus nor becomes modal. Active views restore prior focus when closed.
+
+Registrations and overlays created inside a widget's owned scope are removed when it is
+disposed. Keep the returned removal and `hide` functions for early teardown; do not mutate
+host methods or session messages. Import nodes and signals from the canonical
+`@oh-my-pi/pi-tui` root to share the host's retained runtime.
+
+`ctx.ui.setStatus(key, text, options?)` accepts optional native styling:
+`{ role?: string, spans?: readonly { t: string, s?: string }[] }`. The text remains the
+plain-terminal and RPC status. Native composer extras preserve the role and styled spans
+without replacing other extensions' statuses. Passing `undefined` as the text clears both.
+
+
 #### Launching terminal commands
 
 `ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a

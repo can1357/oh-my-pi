@@ -2,8 +2,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
 	createSurface,
+	derivedNode,
 	For,
 	type JSXNode,
+	resolveChildren,
 	type Reveal,
 	type ScrollRequest,
 	Show,
@@ -12,7 +14,7 @@ import {
 	settle,
 	signal,
 	type UiEvent,
-	type UiNode,
+	UiNode,
 } from "@oh-my-pi/pi-tui";
 import { parseTspApc } from "@oh-my-pi/pi-tui/native/apc";
 import { NativeBackend } from "@oh-my-pi/pi-tui/native/backend";
@@ -575,6 +577,74 @@ describe("native reconciler", () => {
 		]);
 		keep.set(false);
 		h.settle();
+		expect(h.tern.errors).toEqual([]);
+	});
+
+	it("settles replacement chains with their source and never revives them after native eviction", async () => {
+		let source!: UiNode;
+		let last!: UiNode;
+		const shown = signal<readonly UiNode[]>([]);
+		const h = await mount(() => {
+			source = resolveChildren(<card key="old" title="Old"><text>Reply</text></card>)()[0]!;
+			last = resolveChildren(<text key="last">Last</text>)()[0]!;
+			shown.set([derivedNode(derivedNode(source, props => ({ ...props, tone: "accent" })), props => ({ ...props, mark: "pick" })), last]);
+			return { main: shown };
+		});
+		settle(source);
+		h.settle();
+		const doc = h.tern.doc("s:t");
+		expect(doc.settled.has("main/old")).toBe(true);
+		expect(doc.apply([["del", "main/old"]])).toEqual([]);
+		h.tern.event({ ev: "gone", sf: "s:t", ids: ["main/old"] });
+		h.settle();
+		h.ops();
+		shown.set([derivedNode(source, props => ({ ...props, tone: "muted" })), last]);
+		h.settle();
+		expect(regions(h, "main")).toEqual([{ k: "text", p: { text: "Last" } }]);
+		expect(h.ops()).toEqual([]);
+		shown.set([source, last]);
+		h.settle();
+		expect(regions(h, "main")).toEqual([{ k: "text", p: { text: "Last" } }]);
+		expect(h.ops()).toEqual([]);
+		expect(h.tern.errors).toEqual([]);
+	});
+
+	it("keeps live grouped members visible when decoration starts after a source was evicted", async () => {
+		let first!: UiNode;
+		let second!: UiNode;
+		let group!: UiNode;
+		const shown = signal<readonly UiNode[]>([]);
+		const members = signal<readonly UiNode[]>([]);
+		const h = await mount(() => {
+			first = resolveChildren(<text key="old">Old</text>)()[0]!;
+			second = resolveChildren(<text key="live">Live</text>)()[0]!;
+			members.set([first, second]);
+			group = new UiNode("col", {}, undefined, { source: members, props: () => ({}), children: members, key: () => "group", reveal: () => undefined, scroll: () => undefined });
+			shown.set([first]);
+			return { main: shown };
+		});
+		settle(first);
+		h.settle();
+		const doc = h.tern.doc("s:t");
+		expect(doc.apply([["del", "main/old"]])).toEqual([]);
+		h.tern.event({ ev: "gone", sf: "s:t", ids: ["main/old"] });
+		h.settle();
+		shown.set([group]);
+		h.settle();
+		expect(doc.nodes.has("main/group/old")).toBe(false);
+		expect(doc.nodes.get("main/group/live")?.p.text).toBe("Live");
+		expect(doc.settled.has("main/group")).toBe(false);
+		settle(second);
+		h.settle();
+		expect(doc.settled.has("main/group")).toBe(true);
+		expect(doc.apply([["del", "main/group"]])).toEqual([]);
+		h.tern.event({ ev: "gone", sf: "s:t", ids: ["main/group"] });
+		h.settle();
+		h.ops();
+		shown.set([first, second]);
+		h.settle();
+		expect(regions(h, "main")).toEqual([]);
+		expect(h.ops()).toEqual([]);
 		expect(h.tern.errors).toEqual([]);
 	});
 
