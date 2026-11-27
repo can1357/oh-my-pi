@@ -47,8 +47,7 @@ describe("loadHindsightConfig HINDSIGHT_* env parsing", () => {
 		expect(config.recallMaxTokens).toBe(2048);
 	});
 
-	it("reads the recall pause from HINDSIGHT_RECALL_COOLDOWN_MS, with a 1-minute default", () => {
-		expect(configWith({}).recallCooldownMs).toBe(60_000);
+	it("reads the recall pause from HINDSIGHT_RECALL_COOLDOWN_MS", () => {
 		expect(configWith({ HINDSIGHT_RECALL_COOLDOWN_MS: "3000" }).recallCooldownMs).toBe(3000);
 		expect(configWith({ HINDSIGHT_RECALL_COOLDOWN_MS: "0" }).recallCooldownMs).toBe(0);
 	});

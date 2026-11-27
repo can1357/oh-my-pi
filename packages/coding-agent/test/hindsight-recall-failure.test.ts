@@ -16,6 +16,9 @@ import {
 import { HINDSIGHT_NOTICE_SOURCE, HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { type RemoteObject, RpcClosedError, RpcTimeoutError } from "@oh-my-pi/pi-coding-agent/thread/rpc";
+import type { HindsightSessionStateProtocol } from "@oh-my-pi/pi-coding-agent/thread/services/memory-protocol";
+import { RemoteHindsightSessionState } from "@oh-my-pi/pi-coding-agent/thread/services/memory-remote";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -304,8 +307,6 @@ describe("Hindsight automatic recall after a failure", () => {
 		const first = await state.beforeAgentStartPrompt(PROMPT);
 		const second = await state.beforeAgentStartPrompt("And the staging host?");
 
-		// Printed so that a run on older code shows how many requests it made.
-		console.log(JSON.stringify({ recallRequests }));
 		expect(first).toBeUndefined();
 		expect(second).toBeUndefined();
 		expect(recallRequests).toBe(1);
@@ -690,5 +691,77 @@ describe("Hindsight automatic recall after a failure", () => {
 
 		expect(await promptAt(primary.state, T0 + 1_000)).toBeUndefined();
 		expect(client.calls).toBe(1);
+	});
+
+	it("a recall saved in the transcript is still used while recall is paused", async () => {
+		setSystemTime(T0);
+		const manager = newSessionManager();
+		const client = new CountingRecallApi();
+		client.answer = answerWith("The deploy host is alpha-7.");
+		const { state } = start(manager, client, shippedConfig());
+		const first = await state.beforeAgentStartPrompt(PROMPT);
+		expect(first?.commit()).toBe(true);
+		const savedFile = await writeTurn(manager);
+
+		// `/new`: the fresh transcript's first-turn recall fails, which starts the pause.
+		await manager.newSession();
+		state.resetConversationTracking();
+		client.answer = failWithBoom;
+		expect(await state.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+		expect(client.calls).toBe(2);
+
+		// `/resume` of the first transcript during the pause: its saved recall needs no request.
+		setSystemTime(T0 + 10_000);
+		await manager.setSessionFile(savedFile);
+		state.resetConversationTracking();
+		const resumed = await state.beforeAgentStartPrompt(PROMPT);
+		expect(resumed?.context).toContain("alpha-7");
+		expect(client.calls).toBe(2);
+	});
+
+	it("a negative setting turns the pause off", async () => {
+		const client = new CountingRecallApi();
+		const { state } = start(newSessionManager(), client, shippedConfig({ "hindsight.recallCooldownMs": -60_000 }));
+		await promptAt(state, T0);
+		await promptAt(state, T0 + 1_000);
+
+		expect(client.calls).toBe(2);
+	});
+});
+
+describe("Hindsight recall in a subagent worker that lost its link to the main thread", () => {
+	it.each([
+		["closed", () => new RpcClosedError("link closed")],
+		["timed out", () => new RpcTimeoutError("no reply in time")],
+	] as const)("a compaction recall still runs when the link is %s", async (_kind, linkError) => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const lostLink = {
+			id: 1,
+			call: () => Promise.reject(linkError()),
+			callSync: () => {
+				throw linkError();
+			},
+			notify: () => {},
+		} as RemoteObject<HindsightSessionStateProtocol>;
+		const client = new CountingRecallApi();
+		client.answer = answerWith("We chose alpha-7.");
+		const { session } = noticeSession(newSessionManager());
+		const alias = new HindsightSessionState({
+			sessionId: session.sessionId,
+			client,
+			bankId: "b",
+			config: shippedConfig(),
+			session,
+			banksSet: new Set(),
+			hasRecalledForFirstTurn: true,
+			aliasOf: new RemoteHindsightSessionState(lostLink),
+		});
+		states.push(alias);
+
+		expect(await alias.recallForCompaction([{ role: "user", content: "what did we decide?" }])).toContain("alpha-7");
+		expect(client.calls).toBe(1);
+		expect(warn.mock.calls.map(([message]) => message)).toContain(
+			"Hindsight: recall pause not read from the main thread; the recall runs",
+		);
 	});
 });
