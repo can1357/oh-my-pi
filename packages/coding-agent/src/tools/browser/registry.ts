@@ -129,7 +129,9 @@ export function browserKey(kind: BrowserKind): string {
 		case "connected":
 			return `connected:${kind.cdpUrl}`;
 		case "relay":
-			return `relay:${kind.cdpUrl}`;
+			return kind.windowsInstance === undefined
+				? `relay:${kind.cdpUrl}`
+				: `relay-windows:${kind.cdpUrl}:${kind.windowsInstance}`;
 		case "cmux":
 			return `cmux:${kind.socketPath}`;
 		case "tern":
@@ -319,7 +321,17 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			);
 		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 		// The omp extension's native host serves the relay while Chrome runs; nothing here starts it.
-		let outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		const { windowsInstance } = kind;
+		let outcome = await waitForRelayExtension(cdpUrl, opts.signal, { windowsInstance });
+		if (windowsInstance !== undefined && outcome !== "ready") {
+			const reason =
+				outcome === "unreachable"
+					? "the verified Windows relay did not answer from WSL"
+					: outcome === "no-extension"
+						? "the Windows relay has not heard from Chrome"
+						: "the Windows relay or Chrome extension is incompatible";
+			throw new ToolError(`Cannot connect to the Windows omp browser relay at ${cdpUrl}: ${reason}.`);
+		}
 		// A host from an older omp keeps serving across upgrades. Restart an incompatible one from the installed omp,
 		// and a compatible older one only while no CDP client uses it; an older one that stays is still usable.
 		if ((outcome === "outdated-relay" || outcome === "idle-older-relay") && opts.restartRelay !== false) {
@@ -347,7 +359,9 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		}
 		const puppeteer = await loadPuppeteer();
 		const browser = await connectPuppeteer(puppeteer, {
-			browserURL: cdpUrl,
+			...(windowsInstance === undefined
+				? { browserURL: cdpUrl }
+				: { browserWSEndpoint: `ws://${new URL(cdpUrl).host}/cdp` }),
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 		});

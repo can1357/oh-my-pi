@@ -119,6 +119,7 @@
 
 ### Fixed
 
+- Restored automatic discovery of the Windows Chrome relay from WSL2 with mirrored networking ([#20809](https://github.com/can1357/oh-my-pi/pull/20809) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
