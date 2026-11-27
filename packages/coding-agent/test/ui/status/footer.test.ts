@@ -80,6 +80,32 @@ describe("footer symbols", () => {
 			}
 		});
 	});
+
+	test("marks AI credits as a lower bound once a turn sent no billing frame, even before any credit is reported", () => {
+		const theme = loadThemeSync("dark", { symbolPreset: "unicode" });
+		setCurrentTheme(theme);
+		const statsRow = (usage: Partial<FooterFacts["usage"]>): string =>
+			createRoot(dispose => {
+				try {
+					const facts = footerFacts({
+						model: { id: "model", contextWindow: 200_000, thinking: true },
+						auto: false,
+						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0, ...usage },
+						sub: false,
+					});
+					const [footer] = resolveChildren(jsx(Footer, { facts: () => facts }))();
+					if (!footer) throw new Error("Expected the footer");
+					return Bun.stripANSI(paintNode(staticEnvironment(theme), footer, 100).rows[1] ?? "");
+				} finally {
+					dispose();
+				}
+			});
+
+		expect(statsRow({ aiuNano: 436_590_000 })).toContain("0.44 cr");
+		expect(statsRow({ aiuNano: 436_590_000, aiuUnreportedTurns: 1 })).toContain("0.44+ cr");
+		expect(statsRow({ aiuUnreportedTurns: 2 })).toContain("0.00+ cr");
+		expect(statsRow({})).not.toContain(" cr");
+	});
 });
 
 stagedSuite("composer/footer", corpusCase => {

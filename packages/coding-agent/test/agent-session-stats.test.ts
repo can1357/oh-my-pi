@@ -158,6 +158,36 @@ describe("AgentSession session stats", () => {
 		expect(session.getSessionStats().aiu).toBeUndefined();
 	});
 
+	it("counts an aborted Copilot turn that streamed tokens but not one aborted before its first byte", () => {
+		const target = getCopilotModel();
+		const aborted = (totalTokens: number): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text: "partial" }],
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			timestamp: Date.now(),
+			stopReason: "aborted",
+			usage: {
+				input: totalTokens,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		// The footer reads the entry index; a resumed session's agent state drops aborted turns, so stats do not.
+		const unreportedFor = (totalTokens: number): number | undefined => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage(aborted(totalTokens));
+			return sessionManager.getUsageStatistics().aiuUnreportedTurns;
+		};
+		expect(unreportedFor(0)).toBeUndefined();
+		// Tokens streamed before the abort, so the frame at the end of the stream was lost: spend is unknown.
+		expect(unreportedFor(12)).toBe(1);
+	});
+
 	it("counts Copilot side requests and subagent turns without a billing frame as unreported", () => {
 		const target = getCopilotModel();
 		const sessionManager = SessionManager.inMemory();
@@ -193,6 +223,7 @@ describe("AgentSession session stats", () => {
 		session = createStatsSession(sessionManager, target);
 
 		expect(session.getSessionStats().aiu).toEqual({ nano: 12_000_000, unreportedTurns: 3 });
+		expect(sessionManager.getUsageStatistics()).toMatchObject({ aiuNano: 12_000_000, aiuUnreportedTurns: 3 });
 	});
 
 	it("tells a subagent with only missing frames from one whose frame reported zero", () => {
@@ -218,15 +249,21 @@ describe("AgentSession session stats", () => {
 			});
 			session = createStatsSession(sessionManager, target);
 			const stats = session.getSessionStats();
-			return { aiu: stats.aiu, aiuNano: sessionManager.getUsageStatistics().aiuNano };
+			const index = sessionManager.getUsageStatistics();
+			return { aiu: stats.aiu, aiuNano: index.aiuNano, aiuUnreportedTurns: index.aiuUnreportedTurns };
 		};
 
-		// No frame ever arrived: spend is unknown, so no credits are reported at all.
-		expect(statsFor({ usage, results: [{ aiuUnreportedTurns: 2 }] })).toEqual({ aiu: undefined, aiuNano: undefined });
+		// No frame ever arrived: nothing is known to be spent, but the unknown turns are still reported.
+		expect(statsFor({ usage, results: [{ aiuUnreportedTurns: 2 }] })).toEqual({
+			aiu: { nano: 0, unreportedTurns: 2 },
+			aiuNano: undefined,
+			aiuUnreportedTurns: 2,
+		});
 		// A frame that reported zero is a known zero.
 		expect(statsFor({ usage: { ...usage, aiu: { nano: 0 } }, results: [] })).toEqual({
 			aiu: { nano: 0, unreportedTurns: 0 },
 			aiuNano: 0,
+			aiuUnreportedTurns: undefined,
 		});
 	});
 
@@ -262,6 +299,7 @@ describe("AgentSession session stats", () => {
 
 		expect(session.getSessionStats().aiu).toEqual({ nano: 4_000_000, unreportedTurns: 1 });
 		expect(sessionManager.getUsageStatistics().aiuNano).toBe(4_000_000);
+		expect(sessionManager.getUsageStatistics().aiuUnreportedTurns).toBe(1);
 	});
 
 	it("does not count a reset fork's copied Copilot turns as missing frames of its own", () => {
@@ -298,6 +336,8 @@ describe("AgentSession session stats", () => {
 		session = createStatsSession(sessionManager, target);
 
 		expect(session.getSessionStats().aiu).toEqual({ nano: 9_000_000, unreportedTurns: 1 });
+		// The footer reads the entry index, which must apply the same header reset.
+		expect(sessionManager.getUsageStatistics()).toMatchObject({ aiuNano: 9_000_000, aiuUnreportedTurns: 1 });
 	});
 
 	it("reports no AI credits when no turn carried a billing frame", () => {

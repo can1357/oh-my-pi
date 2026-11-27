@@ -123,6 +123,7 @@ export interface StatusLineSession {
 			orchestrationCacheRead: number;
 			premiumRequests: number;
 			aiuNano?: number;
+			aiuUnreportedTurns?: number;
 			cost: number;
 			/** Portion of `cost` carried by completed subagent task results. */
 			subagentCost?: number;

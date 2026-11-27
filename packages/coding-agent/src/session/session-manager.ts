@@ -30,8 +30,9 @@ import {
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
 
+import { isInheritedBilling, isMissingAiuBillingFrame } from "./aiu-billing";
 import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu, forEachJobControlAiu, jobControlJobs } from "./async-result";
-import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
+import { isTaskToolDetails, sumAiuUnreportedTurns, type StructuredSubagentSchemaMode } from "../task/task-details";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import { isUserRequestEntry } from "./transcript/transcript-entry";
 import type { SessionTreePosition } from "../modes/view-model/status-line/host";
@@ -615,6 +616,10 @@ export class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	// Turns that declared an AI-credit frame and got none: counted apart from the totals because a reset
+	// fork's copied turns (decided by the header's `billingResetAt`, unknown here) must not count.
+	#aiuUnreported = 0;
+	#aiuUnreportedTurnTimes: Array<number | string> = [];
 	// Branch memo: getBranch() walks leaf-to-root per call (array + Set +
 	// reverse) on per-frame/per-turn paths. The branch only changes on
 	// insert/rebuild/setLeaf, so cache the array keyed on (leaf, generation).
@@ -639,6 +644,8 @@ export class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#aiuUnreported = 0;
+		this.#aiuUnreportedTurnTimes = [];
 		this.#generation++;
 		this.#branchCache = undefined;
 	}
@@ -711,6 +718,31 @@ export class SessionEntryIndex {
 			forEachJobControlAiu(entry.message.details, nano => {
 				this.#usage.aiuNano = (this.#usage.aiuNano ?? 0) + nano;
 			});
+		}
+		this.#countUnreportedAiu(entry);
+	}
+
+	/** Count what `entry` adds to the lower-bound marker of the AI-credit total; mirrors `getSessionStats`. */
+	#countUnreportedAiu(entry: SessionEntry): void {
+		if (entry.type === "model_usage") {
+			if (isMissingAiuBillingFrame(entry, entry.usage)) this.#aiuUnreportedTurnTimes.push(entry.timestamp);
+			return;
+		}
+		if (entry.type !== "message") return;
+		const message = entry.message;
+		if (message.role === "assistant") {
+			if (message.usage && isMissingAiuBillingFrame(message, message.usage)) {
+				this.#aiuUnreportedTurnTimes.push(message.timestamp);
+			}
+		} else if (message.role === "toolResult") {
+			if (message.toolName === "task") {
+				this.#aiuUnreported += sumAiuUnreportedTurns(
+					isRecord(message.details) ? message.details.results : undefined,
+				);
+			}
+			this.#aiuUnreported += sumAiuUnreportedTurns(jobControlJobs(message.details));
+		} else if (message.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE) {
+			this.#aiuUnreported += sumAiuUnreportedTurns(isRecord(message.details) ? message.details.jobs : undefined);
 		}
 	}
 
@@ -822,8 +854,16 @@ export class SessionEntryIndex {
 		return this.#labels.entries();
 	}
 
-	usageSnapshot(): UsageStatistics {
-		return { ...this.#usage };
+	/**
+	 * Running totals. `billingResetAt` (the session header's) excludes turns a reset fork copied from its
+	 * parent from the unreported-frame count: their charge was stripped on purpose.
+	 */
+	usageSnapshot(billingResetAt?: number): UsageStatistics {
+		const snapshot = { ...this.#usage };
+		let unreported = this.#aiuUnreported;
+		for (const at of this.#aiuUnreportedTurnTimes) if (!isInheritedBilling(billingResetAt, at)) unreported++;
+		if (unreported > 0) snapshot.aiuUnreportedTurns = unreported;
+		return snapshot;
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -3362,7 +3402,7 @@ export class SessionManager {
 	}
 
 	getUsageStatistics(): UsageStatistics {
-		return this.#index.usageSnapshot();
+		return this.#index.usageSnapshot(this.#header.billingResetAt);
 	}
 
 	/**

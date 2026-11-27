@@ -306,7 +306,9 @@ export class SessionStatsTracker {
 						},
 					}
 				: undefined),
-			...(aiuNano !== undefined ? { aiu: { nano: aiuNano, unreportedTurns: aiuUnreportedTurns } } : undefined),
+			...(aiuNano !== undefined || aiuUnreportedTurns > 0
+				? { aiu: { nano: aiuNano ?? 0, unreportedTurns: aiuUnreportedTurns } }
+				: undefined),
 			...(Object.keys(routedModels).length > 0 ? { routedModels } : undefined),
 			...(Object.keys(editRejections).length > 0 ? { editRejections } : undefined),
 			contextUsage: this.getContextUsage(),

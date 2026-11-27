@@ -461,6 +461,7 @@ function costSeg(input: SegInput): SegView | null {
 			usingSubscription: facts.usingSubscription,
 			premiumRequests: facts.usage.premiumRequests,
 			aiuNano: facts.usage.aiuNano,
+			aiuUnreportedTurns: facts.usage.aiuUnreportedTurns,
 			digits: 2,
 			pricingPeriod: facts.pricingPeriod,
 			advisor: facts.advisorCost,

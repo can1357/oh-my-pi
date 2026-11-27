@@ -71,6 +71,7 @@ export function footerSegs(facts: FooterFacts): FooterSeg[] {
 			usingSubscription: facts.usingSubscription,
 			premiumRequests: usage.premiumRequests,
 			aiuNano: usage.aiuNano,
+			aiuUnreportedTurns: usage.aiuUnreportedTurns,
 			digits: 3,
 		},
 		symbols,

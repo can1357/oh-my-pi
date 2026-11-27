@@ -62,6 +62,8 @@ export interface Billing {
 	readonly premiumRequests: number;
 	/** Server-reported AI credits (nano-AIU), shown beside the premium-request count: the two are separate meters. */
 	readonly aiuNano?: number;
+	/** Turns whose billing frame never arrived: the AI-credit total is a lower bound (`+`), possibly all unknown. */
+	readonly aiuUnreportedTurns?: number;
 	/** Decimals of the amounts (status line 2, footer 3). */
 	readonly digits: number;
 	readonly pricingPeriod?: "peak" | "off-peak";
@@ -76,7 +78,11 @@ export interface Billing {
  * and advisor spend. Undefined when there is nothing to bill.
  */
 export function billingSummary(billing: Billing, symbols: SymbolSet): string | undefined {
-	const aiuCredits = billing.aiuNano === undefined ? undefined : billing.aiuNano / NANO_AIU_PER_CREDIT;
+	// Credits show once any turn reported one, or once a turn is known to have missed its frame (then only a floor).
+	const aiuCredits =
+		billing.aiuNano === undefined && !billing.aiuUnreportedTurns
+			? undefined
+			: (billing.aiuNano ?? 0) / NANO_AIU_PER_CREDIT;
 	const premium = normalizePremiumRequests(billing.premiumRequests);
 	const advisorCost = billing.advisor?.cost ?? 0;
 	const subagentCost = billing.subagentCost ?? 0;
@@ -106,7 +112,7 @@ export function billingSummary(billing: Billing, symbols: SymbolSet): string | u
 	if (subagentCost) parts.push(`(+${subagentCost.toFixed(billing.digits)})`);
 	if (billing.pricingPeriod) parts.push(billing.pricingPeriod === "peak" ? "↑" : "↓");
 	if (premium) parts.push(`★ ${formatNumber(premium)}`);
-	if (aiuCredits !== undefined) parts.push(`${aiuCredits.toFixed(2)} cr`);
+	if (aiuCredits !== undefined) parts.push(`${aiuCredits.toFixed(2)}${billing.aiuUnreportedTurns ? "+" : ""} cr`);
 	if (advisorCost && billing.advisor) {
 		const usingSubscription = billing.advisor.usingSubscription;
 		const unit = shown === usingSubscription ? "" : usingSubscription ? subscriptionUnit : "$";

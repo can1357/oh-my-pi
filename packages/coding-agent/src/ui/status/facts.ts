@@ -41,6 +41,8 @@ export interface StatusUsage {
 	readonly premiumRequests: number;
 	/** Server-reported Copilot AI credits in nano-AIU; undefined while no turn has reported one. */
 	readonly aiuNano?: number;
+	/** Turns whose declared billing frame never arrived; positive values make `aiuNano` a lower bound. */
+	readonly aiuUnreportedTurns?: number;
 	/** Spend, including completed subagent task results. */
 	readonly cost: number;
 	/** Part of `cost` carried by completed subagent task results. */

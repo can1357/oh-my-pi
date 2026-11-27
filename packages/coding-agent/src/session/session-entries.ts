@@ -522,6 +522,8 @@ export interface UsageStatistics {
 	premiumRequests: number;
 	/** Server-reported Copilot AI credits in nano-AIU; undefined until a turn reports one (unknown, not zero). */
 	aiuNano?: number;
+	/** Turns whose declared AI-credit frame never arrived; positive values make {@link aiuNano} a lower bound. */
+	aiuUnreportedTurns?: number;
 	cost: number;
 	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
 	subagentCost: number;
