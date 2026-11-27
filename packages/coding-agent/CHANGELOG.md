@@ -175,6 +175,7 @@
 - `omp usage` no longer reports a disabled MCP OAuth login as `re-login to restore` after the server has been logged into again ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
 - Fixed extensions importing an old-API `@oh-my-pi/pi-tui` subpath (e.g. `@oh-my-pi/pi-tui/prompt/custom-editor`) failing with a misleading `Cannot find package` error, sometimes naming `@oh-my-pi/pi-natives`; the load error now names the unsupported import and the pi-tui migration guide ([#20517](https://github.com/can1357/oh-my-pi/issues/20517))
 - Fixed JPEG and WebP tool-result images (e.g. browser screenshots, auto-resized reads) rendering as `[Image: …]` placeholders instead of inline images ([#20636](https://github.com/can1357/oh-my-pi/issues/20636))
+- Fixed an LSP watched-files crash when a file watcher reports an event without a filename; the watcher now rescans instead of throwing ([#20372](https://github.com/can1357/oh-my-pi/issues/20372))
 
 ### Removed
 
