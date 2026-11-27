@@ -22,9 +22,21 @@ export const EVAL_TIMEOUT_PAUSE_OP = "timeout-pause";
 /** Synthetic status op emitted when a bridge call returns control to the runtime. */
 export const EVAL_TIMEOUT_RESUME_OP = "timeout-resume";
 
+/**
+ * Synthetic status op carrying the billing of a background job a bridge call consumed
+ * (`{ jobId, usage?, aiuUnreportedTurns? }`). The eval tool folds it into the call's
+ * `consumedJobs`; like the timeout events it is never rendered as cell output.
+ */
+export const EVAL_JOB_BILLING_OP = "job-billing";
+
 /** Whether a status event is pure eval-timeout control and should not render. */
 export function isEvalTimeoutControlEvent(event: JsStatusEvent): boolean {
 	return event.op === EVAL_TIMEOUT_PAUSE_OP || event.op === EVAL_TIMEOUT_RESUME_OP;
+}
+
+/** Whether a status event is eval control traffic (timeout pause/resume, job billing) and should not render. */
+export function isEvalControlEvent(event: JsStatusEvent): boolean {
+	return isEvalTimeoutControlEvent(event) || event.op === EVAL_JOB_BILLING_OP;
 }
 
 /** Optional behavior for a timeout pause around a host bridge call. */

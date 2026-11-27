@@ -8,28 +8,35 @@ import { isPersistedUsage } from "../task/task-details";
  */
 export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 
+/** Visit the server-reported AI-credit charge (nano-AIU) of each row that carries persisted usage. */
+function forEachRowAiu(rows: unknown, visit: (nano: number) => void): void {
+	if (!Array.isArray(rows)) return;
+	for (const row of rows) {
+		if (isRecord(row) && isPersistedUsage(row.usage) && row.usage.aiu) visit(row.usage.aiu.nano);
+	}
+}
+
 /**
  * Visit the server-reported AI-credit charge (nano-AIU) of each delivered
  * background job that carries one. Only credits roll up into session totals:
  * background-job tokens and dollars were never part of them.
  */
 export function forEachAsyncResultAiu(details: unknown, visit: (nano: number) => void): void {
-	if (!isRecord(details) || !Array.isArray(details.jobs)) return;
-	for (const job of details.jobs) {
-		if (isRecord(job) && isPersistedUsage(job.usage) && job.usage.aiu) visit(job.usage.aiu.nano);
-	}
+	if (isRecord(details)) forEachRowAiu(details.jobs, visit);
 }
 
 /**
- * Details of a `wait`/`cancel` snapshot (the `op` marker `buildJobResult` stamps) whose rows
- * can carry the child usage of a job that snapshot took over from its async push.
+ * Rows of a tool result that took background jobs over from their async push, each able to carry
+ * the child usage of its job: a `wait`/`cancel` snapshot (the `op` marker `buildJobResult` stamps,
+ * rows in `jobs`) or an eval call (rows in `consumedJobs`, from `wait()` on its agent handles).
  */
 export function jobControlJobs(details: unknown): unknown[] | undefined {
-	if (!isRecord(details) || (details.op !== "wait" && details.op !== "cancel")) return undefined;
-	return Array.isArray(details.jobs) ? details.jobs : undefined;
+	if (!isRecord(details)) return undefined;
+	const rows = details.op === "wait" || details.op === "cancel" ? details.jobs : details.consumedJobs;
+	return Array.isArray(rows) ? rows : undefined;
 }
 
-/** {@link forEachAsyncResultAiu} for the jobs a `wait`/`cancel` snapshot consumed. */
+/** {@link forEachAsyncResultAiu} for the jobs a tool result consumed ({@link jobControlJobs}). */
 export function forEachJobControlAiu(details: unknown, visit: (nano: number) => void): void {
-	if (jobControlJobs(details)) forEachAsyncResultAiu(details, visit);
+	forEachRowAiu(jobControlJobs(details), visit);
 }

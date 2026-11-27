@@ -12,7 +12,7 @@ import {
 	resolveOutputSinkArtifactMaxBytes,
 	resolveOutputSinkHeadBytes,
 } from "../../tools/output-meta";
-import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
+import { isEvalControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext, hasLiveVmContext } from "./context-manager";
@@ -184,10 +184,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {
-						// Timeout-control events drive the eval watchdog only; never
-						// store or render them as cell output.
+						// Control events (timeout pause/resume, job billing) feed the eval tool only;
+						// never store or render them as cell output.
 						options.onStatus?.(output.event);
-						if (isEvalTimeoutControlEvent(output.event)) return;
+						if (isEvalControlEvent(output.event)) return;
 					}
 					display.push(output);
 				},

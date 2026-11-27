@@ -1,4 +1,4 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import type { OutputMeta } from "../output-meta-format";
 import { type ConfiguredThinkingLevel } from "../../utils/render-utils";
 
@@ -61,6 +61,18 @@ export interface EvalCellResult {
 	statusEventsElided?: number;
 }
 
+/**
+ * Billing of a background job whose result an eval cell's `wait()` took over from its async push.
+ * Carried by the call that consumed it, so the session counts the job's credits exactly once.
+ */
+export interface EvalConsumedJob {
+	jobId: string;
+	/** Child usage of the job. */
+	usage?: Usage;
+	/** Child turns of the job whose expected billing frame was missing. */
+	aiuUnreportedTurns?: number;
+}
+
 /** Tool result detail object surfaced to the UI/transcript. */
 export interface EvalToolDetails {
 	cells?: EvalCellResult[];
@@ -74,6 +86,8 @@ export interface EvalToolDetails {
 	statusEventsElided?: number;
 	/** Text the cell's tool calls sent to `out://`, oldest first; transcripts draw each as a reply after the call. */
 	replies?: string[];
+	/** Background jobs the cells' `wait()` calls consumed, with the billing their results carry. */
+	consumedJobs?: EvalConsumedJob[];
 	isError?: boolean;
 	meta?: OutputMeta;
 	/** First backend that produced cells. Kept for transcript compatibility. */

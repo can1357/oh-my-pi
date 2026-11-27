@@ -15,7 +15,7 @@ import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
-import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
+import { EVAL_JOB_BILLING_OP, EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
 import {
 	type EvalPreludeDefinition,
@@ -28,12 +28,20 @@ import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { EvalShadowCellSession } from "../eval/speculation/cell-session";
 import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
-import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails, EvalViewEntry } from "./details/eval";
+import type {
+	EvalCellResult,
+	EvalConsumedJob,
+	EvalLanguage,
+	EvalStatusEvent,
+	EvalToolDetails,
+	EvalViewEntry,
+} from "./details/eval";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { type EvalToolDescriptionOptions, evalTemplateContext, getEvalDocTopics } from "./eval-doc-topics";
 import { DEFAULT_MAX_BYTES, findColumnCapped, OutputSink, type OutputSummary, TailBuffer } from "./streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { canSpawnAtDepth } from "../task/types";
+import { isPersistedUsage } from "../task/task-details";
 import { webpExclusionForModel } from "../utils/image-input";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
@@ -268,6 +276,15 @@ function formatEvalInputLanguage(value: string): string {
 	if (value === "py" || value === "python") return "python";
 	if (value === "js" || value === "javascript") return "javascript";
 	return value;
+}
+
+/** The billing a `job-billing` control event carries; undefined when the event holds nothing to count. */
+function consumedJobFromEvent(event: EvalStatusEvent): EvalConsumedJob | undefined {
+	if (typeof event.jobId !== "string") return undefined;
+	const job: EvalConsumedJob = { jobId: event.jobId };
+	if (isPersistedUsage(event.usage)) job.usage = event.usage;
+	if (typeof event.aiuUnreportedTurns === "number") job.aiuUnreportedTurns = event.aiuUnreportedTurns;
+	return job.usage || job.aiuUnreportedTurns !== undefined ? job : undefined;
 }
 
 export class EvalTool implements AgentTool<typeof evalSchema> {
@@ -771,6 +788,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const images: ImageContent[] = [];
 			const replies: string[] = [];
+			const consumedJobs: EvalConsumedJob[] = [];
 
 			const cellResults: EvalCellResult[] = cells.map(cell => ({
 				index: cell.index,
@@ -804,6 +822,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				}
 				if (replies.length > 0) {
 					details.replies = [...replies];
+				}
+				if (consumedJobs.length > 0) {
+					details.consumedJobs = [...consumedJobs];
 				}
 				if (notice) {
 					details.notice = notice;
@@ -911,6 +932,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						},
 						onReply,
 						onStatus: event => {
+							if (event.op === EVAL_JOB_BILLING_OP) {
+								const job = consumedJobFromEvent(event);
+								if (job) {
+									consumedJobs.push(job);
+									pushUpdate();
+								}
+								return;
+							}
 							if (event.op === EVAL_TIMEOUT_PAUSE_OP) {
 								idle?.pause();
 								return;
@@ -1023,6 +1052,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						languages,
 						cells: cellResults,
 						replies: replies.length > 0 ? replies : undefined,
+						consumedJobs: consumedJobs.length > 0 ? consumedJobs : undefined,
 						isError: true,
 					};
 					if (notice) details.notice = notice;
@@ -1053,6 +1083,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				languages,
 				cells: cellResults,
 				replies: replies.length > 0 ? replies : undefined,
+				consumedJobs: consumedJobs.length > 0 ? consumedJobs : undefined,
 			};
 			if (notice) details.notice = notice;
 

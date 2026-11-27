@@ -1,10 +1,11 @@
 import { isRecord, truncate } from "@oh-my-pi/pi-utils";
 import { type AsyncJob, type AsyncJobManagerApi, agentProgress } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { backgroundTaskBilling } from "../session/async-job-delivery";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "../tools/tool-errors";
-import { withBridgeTimeoutPause } from "./bridge-timeout";
+import { EVAL_JOB_BILLING_OP, withBridgeTimeoutPause } from "./bridge-timeout";
 import { type CompletionAttempt, getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
 
@@ -278,7 +279,10 @@ export async function runEvalWait(
 				refresh(handle);
 				emitLatestProgress(handle);
 			}
-			if (outcome === "aborted") {
+			// Commit point: settlement may have won the race, then the signal aborted during the final progress
+			// emissions above. Nothing below awaits before the claim, so a result is taken over only while the
+			// call is still live; an aborted call leaves it with its async delivery.
+			if (outcome === "aborted" || options.signal?.aborted) {
 				for (const handle of resolved) cancelResolved(handle, options.signal?.reason);
 				await Promise.allSettled(
 					resolved.map(handle => ("job" in handle ? handle.job.promise : handle.completion.promise)),
@@ -290,7 +294,22 @@ export async function runEvalWait(
 				.filter(handle => "job" in handle && handle.job.status !== "running")
 				.map(handle => handle.ref.id);
 			const manager = options.session.asyncJobManager;
-			if (manager && settledAgentIds.length > 0) manager.consumeJobResults(settledAgentIds);
+			if (manager && settledAgentIds.length > 0) {
+				// A result this wait takes over is never pushed as an `async-result`, so the job's child
+				// usage must reach the session through the eval call's details. The consumed set makes the
+				// hand-off once-only: a job a push or an earlier wait already took reads as consumed here
+				// and carries nothing.
+				const takenOver = [...new Set(settledAgentIds)].filter(id => !manager.isJobResultConsumed(id));
+				manager.consumeJobResults(settledAgentIds);
+				for (const id of takenOver) {
+					if (!manager.isJobResultConsumed(id)) continue;
+					const handle = resolved.find(entry => entry.ref.id === id);
+					const job = manager.getJob(id) ?? (handle && "job" in handle ? handle.job : undefined);
+					const billing = backgroundTaskBilling(job);
+					if (!billing.usage && billing.aiuUnreportedTurns === undefined) continue;
+					options.emitStatus?.({ op: EVAL_JOB_BILLING_OP, jobId: id, ...billing });
+				}
+			}
 			return { items: snapshots };
 		},
 		resolved.some(handle => "job" in handle) ? { deferExternalAbort: true } : undefined,

@@ -514,10 +514,10 @@ function resetTaskResultBilling(details: unknown): void {
 	}
 }
 
-/** Clear billing carried by delivered background jobs on an inherited fork. */
-function resetAsyncResultBilling(details: unknown): void {
-	if (!isRecord(details) || !Array.isArray(details.jobs)) return;
-	for (const job of details.jobs) {
+/** Clear billing carried by background-job rows (delivered, or consumed by a wait/cancel/eval call) on an inherited fork. */
+function resetJobRowsBilling(rows: unknown): void {
+	if (!Array.isArray(rows)) return;
+	for (const job of rows) {
 		if (!isRecord(job)) continue;
 		resetUsageCost(taskUsageFrom(job));
 		job.aiuUnreportedTurns = undefined;
@@ -4526,10 +4526,10 @@ export class SessionManager {
 				entry.message.role === "custom" &&
 				entry.message.customType === ASYNC_RESULT_MESSAGE_TYPE
 			) {
-				resetAsyncResultBilling(entry.message.details);
+				resetJobRowsBilling(isRecord(entry.message.details) ? entry.message.details.jobs : undefined);
 			}
-			if (entry.type === "message" && entry.message.role === "toolResult" && jobControlJobs(entry.message.details)) {
-				resetAsyncResultBilling(entry.message.details);
+			if (entry.type === "message" && entry.message.role === "toolResult") {
+				resetJobRowsBilling(jobControlJobs(entry.message.details));
 			}
 		}
 	}
