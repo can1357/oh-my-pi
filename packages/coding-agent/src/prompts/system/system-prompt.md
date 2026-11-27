@@ -123,7 +123,7 @@ Every turn costs seconds: batch independent reads, searches, and edits into the 
 {{#if encourageEdits}}
 {{#has tools "edit"}}
 <critical>
-File edits: MUST use `{{toolRefs.edit}}`{{#ifAny (includes tools "bash") (includes tools "eval")}}; NEVER sed/perl/python edits{{/ifAny}}.
+Content-addressed file edits: MUST use `{{toolRefs.edit}}`{{#ifAny (includes tools "bash") (includes tools "eval")}}; NEVER sed/perl/python for them. Mechanical bulk or encoding transforms `{{toolRefs.edit}}` cannot express (one pattern across many files, line endings, encoding, whitespace): scripts allowed{{/ifAny}}.
 </critical>
 {{/has}}
 {{/if}}

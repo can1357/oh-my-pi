@@ -194,6 +194,7 @@
 - Fixed self-hosted FTP/FTPS blob uploads hanging publication forever on a stalled server; the curl upload is now killed after `options.timeoutMs` (default 120s) ([#19684](https://github.com/can1357/oh-my-pi/issues/19684))
 - `commit` refuses colocated Jujutsu workspaces and points to `jj`, instead of advancing Git HEAD and leaving a duplicate of jj's working-copy change ([#19815](https://github.com/can1357/oh-my-pi/issues/19815))
 - Fixed `omp skill publish` producing different package integrities for the same files on macOS and Linux ([#19402](https://github.com/can1357/oh-my-pi/issues/19402))
+- The `encourageEdits` rule now applies only to content-addressed edits and permits scripts for mechanical bulk or encoding transforms (cross-file patterns, line endings, whitespace) that `edit` cannot express ([#19350](https://github.com/can1357/oh-my-pi/issues/19350))
 
 ### Removed
 
