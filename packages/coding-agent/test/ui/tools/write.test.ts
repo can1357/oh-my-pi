@@ -68,3 +68,19 @@ test("default-preset broadcasts run the quote rail into the receipt branches", (
 	expect(row("Keep proofs admitted")[spine]).toBe("│");
 	expect(row("1 more recipients").indexOf("└─")).toBe(spine);
 });
+
+test("default-preset messages without receipt branches keep the quote border", () => {
+	const env = staticEnvironment(loadThemeSync("dark"));
+	const call = new ToolCall({
+		id: "irc-one",
+		name: "write",
+		presenter: writePresenter,
+		args: { path: "agent://Reviewer", content: "Take a look" },
+	});
+	call.setExecutionStarted();
+	call.updateResult(
+		{ content: [], details: { message: { to: "Reviewer", receipts: [{ to: "Reviewer", outcome: "injected" }] } } },
+		false,
+	);
+	expect(plainToolRows(call, env)).toContain("  ▏ Take a look");
+});

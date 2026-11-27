@@ -208,13 +208,15 @@ function looseSpans(theme: Theme, spans: readonly TspSpan[]): string {
 }
 
 /**
- * A message quoted behind a dim rail: the tree spine the receipt and
- * cancelled-job branches continue, so the rail and `├─` stay one line. A
- * peer message (`width` given) shows whole and wrapped once expanded, its
- * collapsed rows cut to the card; a process input keeps a fixed budget.
+ * A message quoted behind a dim rail. When receipt branches follow (`spine`),
+ * the rail is the tree spine they continue, so the rail and `├─` stay one
+ * line; otherwise it is the preset's quote border. A peer message (`width`
+ * given) shows whole and wrapped once expanded, its collapsed rows cut to the
+ * card; a process input keeps a fixed budget.
  */
-function quoteRows(theme: Theme, body: string, expanded: boolean, width?: number): string[] {
-	const prefix = `  ${theme.fg("dim", theme.symbols.symbol("tree.vertical"))} `;
+function quoteRows(theme: Theme, body: string, spine: boolean, expanded: boolean, width?: number): string[] {
+	const rail = theme.symbols.symbol(spine ? "tree.vertical" : "md.quoteBorder");
+	const prefix = `  ${theme.fg("dim", rail)} `;
 	const source = body.split("\n").filter(line => line.trim());
 	const whole = expanded && width !== undefined;
 	const shown = whole ? source : source.slice(0, expanded ? QUOTE_EXPANDED : QUOTE_COLLAPSED);
@@ -316,6 +318,7 @@ function paintCard(node: UiNode, cx: PaintContext): Block {
 	const rows = [head];
 	// The transcript's expand state: a live call stays unfolded natively while its body streams.
 	const expanded = props.term?.expanded === true;
+	const spine = node.children().some(child => child.kind === "list");
 	for (const child of node.children()) {
 		const childProps = child.props() as {
 			role?: string;
@@ -325,7 +328,7 @@ function paintCard(node: UiNode, cx: PaintContext): Block {
 			rows.push(...cancelledRows(cx, child));
 		else if (child.kind === "list") rows.push(...receiptRows(theme, child, expanded));
 		else if (childProps.role === "omp.tool.proc.preview")
-			rows.push(...quoteRows(theme, nodePlain(child), expanded, message ? cx.width : undefined));
+			rows.push(...quoteRows(theme, nodePlain(child), spine, expanded, message ? cx.width : undefined));
 		else if (childProps.role === "omp.tool.error") rows.push(errorDetail(theme, nodePlain(child)));
 		else if (nodeStyle(child) === "muted" && childProps.spans?.length === 1)
 			rows.push(theme.fg("muted", nodePlain(child)));
