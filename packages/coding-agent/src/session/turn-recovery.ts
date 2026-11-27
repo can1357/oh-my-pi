@@ -2060,7 +2060,9 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+		// An explicitly supplied pin (even undefined) belongs to a separate owner, e.g. an advisor;
+		// never inherit the main session's active fallback role for it.
+		const pinned = options && "pinnedRole" in options ? options.pinnedRole : this.#activeRetryFallback?.role;
 		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];
