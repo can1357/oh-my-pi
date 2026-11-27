@@ -1663,8 +1663,12 @@ const streamOpenAICompletionsOnce = (
 					// Some endpoints return reasoning in reasoning_content (llama.cpp),
 					// or reasoning (other openai compatible endpoints). Use the first
 					// non-empty reasoning field to avoid duplication when a chunk carries
-					// multiple aliases for the same reasoning text.
-					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+					// multiple aliases for the same reasoning text. When opaque replay is
+					// enabled, prefer `reasoning_text` so a mirrored alias does not erase
+					// the replay summary source marker.
+					const reasoningFields = reasoningOpaqueReplay
+						? ["reasoning_text", "reasoning_content", "reasoning"]
+						: ["reasoning_content", "reasoning", "reasoning_text"];
 					const deltaRecord = choice.delta as Record<string, unknown>;
 					if (reasoningOpaqueReplay) {
 						const opaque = deltaRecord.reasoning_opaque;

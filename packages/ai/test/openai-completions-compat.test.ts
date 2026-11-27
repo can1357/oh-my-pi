@@ -1303,9 +1303,17 @@ describe("openai-completions compatibility", () => {
 			getPayloadMessages(await captureOpenAICompletionsPayload(target, history)).find(
 				message => message.role === "assistant",
 			);
-		expect(JSON.stringify(await replay(model))).toBe(
-			`{"role":"assistant","content":"","tool_calls":[{"id":"call_first","type":"function","function":{"name":"read","arguments":"{}"}},{"id":"call_second","type":"function","function":{"name":"read","arguments":"{}"}}],"reasoning_opaque":"latest-state"${replayText === undefined ? "" : `,"reasoning_text":${JSON.stringify(replayText)}`}}`,
-		);
+		const expectedReplay: Record<string, unknown> = {
+			role: "assistant",
+			content: "",
+			tool_calls: [
+				{ id: "call_first", type: "function", function: { name: "read", arguments: "{}" } },
+				{ id: "call_second", type: "function", function: { name: "read", arguments: "{}" } },
+			],
+			reasoning_opaque: "latest-state",
+		};
+		if (replayText !== undefined) expectedReplay.reasoning_text = replayText;
+		expect(await replay(model)).toEqual(expectedReplay);
 		for (const target of [
 			buildModel({ ...copilotGeminiSpec, id: "gemini-4-hydrogen" }),
 			buildModel({ ...copilotGeminiSpec, provider: "openai", baseUrl: "https://api.openai.com/v1" }),
@@ -1354,7 +1362,50 @@ describe("openai-completions compatibility", () => {
 		expect(assistant?.content).toBe("Answer");
 		expect(assistant?.reasoning_opaque).toBe(base ? undefined : "prior-state");
 		const signature = next.content.find(block => block.type === "thinking")?.thinkingSignature;
-		expect(signature).toBe(base ? "reasoning_text" : '{"reasoningOpaque":"next-state","field":"reasoning_text"}');
+		if (base) {
+			expect(signature).toBe("reasoning_text");
+		} else {
+			expect(JSON.parse(signature ?? "null")).toEqual({ reasoningOpaque: "next-state", field: "reasoning_text" });
+		}
+	});
+
+	it("preserves reasoning_text summary when an opaque-replay delta also mirrors reasoning_content", async () => {
+		const model = buildModel(copilotGeminiSpec);
+		const fetchMock = createMockFetch([
+			{
+				choices: [
+					{
+						index: 0,
+						delta: {
+							reasoning_content: "Mirrored summary",
+							reasoning_text: "Mirrored summary",
+							reasoning_opaque: "mirrored-state",
+							content: "Answer",
+						},
+					},
+				],
+			},
+			{ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+			"[DONE]",
+		]);
+		const context = baseContext();
+		const result = await streamOpenAICompletions(model, context, { apiKey: "test-key", fetch: fetchMock }).result();
+		const thinking = result.content.find(block => block.type === "thinking");
+		expect(thinking?.thinking).toBe("Mirrored summary");
+		expect(JSON.parse(thinking?.thinkingSignature ?? "null")).toEqual({
+			field: "reasoning_text",
+			reasoningOpaque: "mirrored-state",
+		});
+
+		const assistant = getPayloadMessages(
+			await captureOpenAICompletionsPayload(model, { messages: [...context.messages, result] }),
+		).find(message => message.role === "assistant");
+		expect(assistant).toEqual({
+			role: "assistant",
+			content: "Answer",
+			reasoning_opaque: "mirrored-state",
+			reasoning_text: "Mirrored summary",
+		});
 	});
 
 	it.each([
