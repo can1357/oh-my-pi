@@ -209,6 +209,42 @@ fn missing_input_file_is_reported_and_skipped() {
 }
 
 #[test]
+fn newline_records_keep_carriage_returns() {
+	// Default printing must not silently convert CRLF to LF.
+	assert_eq!(run("1", "a\r\nb\r\n"), "a\r\nb\r\n");
+	assert_eq!(run("{ print length }", "a\r\nb\r"), "2\n2\n");
+}
+
+#[test]
+fn paragraph_records_keep_carriage_returns() {
+	// A CR-only line is not a blank line and must not split the paragraph.
+	assert_eq!(
+		run(r#"BEGIN { RS = "" } { printf "[%s]", $0 }"#, "\r\na\r\n\r\nb\r\n\nc\r\n"),
+		"[\r\na\r\n\r\nb\r][c\r]",
+	);
+}
+
+#[test]
+fn explicit_separators_keep_carriage_returns() {
+	// Only the matched separator bytes should be removed.
+	assert_eq!(run(r#"BEGIN { RS = ";" } 1"#, "a\r;b\r;"), "a\r\nb\r\n");
+	assert_eq!(run(r#"BEGIN { RS = "[0-9]+" } 1"#, "a\r12b\r345c\r"), "a\r\nb\r\nc\r\n");
+}
+
+#[test]
+fn getline_keeps_carriage_returns() {
+	// Both getline sources must return CR as part of the record.
+	let input = "a\r\nb\r";
+	let expected = "a\r\nb\r\n";
+	assert_eq!(run("BEGIN { while ((getline x) > 0) print x }", input), expected);
+	let dir = tempfile::tempdir().unwrap();
+	std::fs::write(dir.path().join("input.txt"), input).unwrap();
+	let prog = r#"BEGIN { while ((getline x < "input.txt") > 0) print x }"#;
+	let (code, out, err) = awk_in(dir.path(), &[prog], "");
+	assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""));
+}
+
+#[test]
 fn program_files() {
 	let dir = tempfile::tempdir().unwrap();
 	std::fs::write(dir.path().join("prog.awk"), "{ print NR \": \" $0 }\n").unwrap();

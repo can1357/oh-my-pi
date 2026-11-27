@@ -109,6 +109,13 @@ pub struct ProcessingContext {
 	pub line_sources:         HashMap<PathBuf, Rc<RefCell<LineSource>>>,
 }
 
+impl ProcessingContext {
+	/// Return the record separator for this invocation.
+	pub(super) fn separator(&self) -> u8 {
+		if self.null_data { 0 } else { b'\n' }
+	}
+}
+
 #[derive(Clone, Debug)]
 /// Elements that shall be appended at the end of each command processing cycle
 pub enum AppendElement {
@@ -138,7 +145,7 @@ impl LineSource {
 	}
 
 	/// Returns the next line with its terminator, or `None` at end of file or if the file can't be read.
-	pub fn next_line(&mut self, host: &Host) -> io::Result<Option<Vec<u8>>> {
+	pub fn next_line(&mut self, host: &Host, separator: u8) -> io::Result<Option<Vec<u8>>> {
 		if matches!(self.reader, LineSourceState::Unopened) {
 			self.reader = if self.stdin {
 				LineSourceState::Open(Box::new(BufReader::new(host.stdin.file().clone())))
@@ -153,7 +160,7 @@ impl LineSource {
 			return Ok(None);
 		};
 		let mut line = Vec::new();
-		if reader.read_until(b'\n', &mut line)? == 0 {
+		if reader.read_until(separator, &mut line)? == 0 {
 			self.reader = LineSourceState::Closed;
 			return Ok(None);
 		}
@@ -170,8 +177,8 @@ impl fmt::Debug for LineSource {
 #[derive(Clone, Debug, Default, PartialEq)]
 /// Owned hold space, with the line terminator stored separately.
 pub struct ByteSpace {
-	pub content:     Vec<u8>, // Line content without newline
-	pub has_newline: bool,   // True if \n-terminated
+	pub content:    Vec<u8>, // Content without the record separator
+	pub terminated: bool,    // True if a separator followed the content
 }
 
 #[derive(Debug)]
@@ -395,6 +402,8 @@ pub struct InputAction {
 	pub next_command: Option<Rc<RefCell<Command>>>,
 	/// Data to prepend to the read contents
 	pub prepend:      Vec<u8>,
+	/// Whether the pending pattern space had a trailing separator.
+	pub terminated:   bool,
 }
 
 #[cfg(test)]
@@ -5200,8 +5209,9 @@ use crate::host::Host;
 /// Cursor for zero-copy iteration over an in-memory file snapshot.
 #[cfg(unix)]
 pub struct SliceLineCursor<'a> {
-	data: &'a [u8], // Snapshot data
-	pos:  usize,    // Position within the data
+	data:      &'a [u8], // Snapshot data
+	pos:       usize,
+	separator: u8,
 }
 
 #[cfg(unix)]
@@ -5213,8 +5223,8 @@ pub struct NextSliceLine<'a> {
 
 #[cfg(unix)]
 impl<'a> SliceLineCursor<'a> {
-	fn new(data: &'a [u8]) -> Self {
-		Self { data, pos: 0 }
+	fn new(data: &'a [u8], separator: u8) -> Self {
+		Self { data, pos: 0, separator }
 	}
 
 	/// Return the next line, if available, or None.
@@ -5225,25 +5235,14 @@ impl<'a> SliceLineCursor<'a> {
 
 		let start = self.pos;
 
-		let mut end = if let Some(pos) = memchr(b'\n', &self.data[start..]) {
-			pos + start
-		} else {
-			self.data.len()
-		};
-
-		if end < self.data.len() {
-			end += 1; // include \n in full span
-		}
-
+		let content_end = memchr(self.separator, &self.data[start..])
+			.map_or(self.data.len(), |pos| start + pos);
+		let end = content_end + usize::from(content_end < self.data.len());
 		self.pos = end;
-		let full_span = &self.data[start..end];
-		let content = if full_span.ends_with(b"\n") {
-			&full_span[..full_span.len() - 1]
-		} else {
-			full_span
-		};
-
-		Ok(Some(NextSliceLine { content, full_span }))
+		Ok(Some(NextSliceLine {
+			content: &self.data[start..content_end],
+			full_span: &self.data[start..end],
+		}))
 	}
 
 	/// Return true if the previously returned line was the last one.
@@ -5252,31 +5251,34 @@ impl<'a> SliceLineCursor<'a> {
 	}
 }
 
-/// Buffered line reader from any BufRead input.
+/// Streaming record reader with a reusable pattern buffer.
 pub struct ReadLineCursor {
-	reader: Box<dyn BufRead>,
-	buffer: Vec<u8>,
+	reader:    BufReader<Box<dyn Read>>,
+	buffer:    Vec<u8>,
+	separator: u8,
 }
 
 impl ReadLineCursor {
 	/// Construct from anything that implements `Read`.
-	fn new<R: Read + 'static>(r: R) -> Self {
-		let buf = BufReader::new(r);
-		Self { reader: Box::new(buf), buffer: Vec::new() }
+	fn new(r: impl Read + 'static, separator: u8, unbuffered: bool) -> Self {
+		let r: Box<dyn Read> = Box::new(r);
+		// A one-byte capacity avoids read-ahead on pipes under -u.
+		let reader = if unbuffered { BufReader::with_capacity(1, r) } else { BufReader::new(r) };
+		Self { reader, buffer: Vec::new(), separator }
 	}
 
 
-	/// If a line is available, return it and its \n termination.
+	/// If a record is available, return it and whether it was terminated.
 	fn get_line(&mut self) -> io::Result<Option<(Vec<u8>, bool)>> {
 		self.buffer.clear();
-		if self.reader.read_until(b'\n', &mut self.buffer)? == 0 {
+		if self.reader.read_until(self.separator, &mut self.buffer)? == 0 {
 			return Ok(None);
 		}
-		let has_newline = self.buffer.last() == Some(&b'\n');
-		if has_newline {
+		let terminated = self.buffer.last() == Some(&self.separator);
+		if terminated {
 			self.buffer.pop();
 		}
-		Ok(Some((std::mem::take(&mut self.buffer), has_newline)))
+		Ok(Some((std::mem::take(&mut self.buffer), terminated)))
 	}
 
 	/// Return true if the previously returned line was the last one.
@@ -5304,9 +5306,9 @@ impl<'a> IOChunk<'a> {
 	pub fn clear(&mut self) {
 		self.utf8_valid.set(Some(true));
 		match &mut self.content {
-			IOChunkContent::Owned { content, has_newline, .. } => {
+			IOChunkContent::Owned { content, terminated, .. } => {
 				content.clear();
-				*has_newline = false;
+				*terminated = false;
 			},
 			#[cfg(unix)]
 			_ => {
@@ -5320,18 +5322,12 @@ impl<'a> IOChunk<'a> {
 		self.content.len() == 0
 	}
 
-	/// Return true if the content ends with a newline.
-	pub fn is_newline_terminated(&self) -> bool {
+	/// Return true if the content was followed by a record separator.
+	pub fn is_terminated(&self) -> bool {
 		match &self.content {
-			IOChunkContent::Owned { has_newline, .. } => *has_newline,
+			IOChunkContent::Owned { terminated, .. } => *terminated,
 			#[cfg(unix)]
-			IOChunkContent::SliceInput { full_span, .. } => {
-				if let Some(&last) = full_span.last() {
-					last == b'\n'
-				} else {
-					false
-				}
-			},
+			IOChunkContent::SliceInput { content, full_span } => content.len() < full_span.len(),
 		}
 	}
 
@@ -5342,25 +5338,25 @@ impl<'a> IOChunk<'a> {
 	}
 
 	/// Replace the pattern space, reusing an owned buffer when possible.
-	pub fn copy_bytes(&mut self, bytes: &[u8], has_newline: bool) {
+	pub fn copy_bytes(&mut self, bytes: &[u8], terminated: bool) {
 		self.utf8_valid.set(None);
 		match &mut self.content {
-			IOChunkContent::Owned { content, has_newline: newline, .. } => {
+			IOChunkContent::Owned { content, terminated: old_terminated, .. } => {
 				content.clear();
 				content.extend_from_slice(bytes);
-				*newline = has_newline;
+				*old_terminated = terminated;
 			},
 			#[cfg(unix)]
 			IOChunkContent::SliceInput { .. } => {
-				self.content = IOChunkContent::new_owned(bytes.to_vec(), has_newline);
+				self.content = IOChunkContent::new_owned(bytes.to_vec(), terminated);
 			},
 		}
 	}
 
 	/// Replace the pattern space with raw bytes.
-	pub fn set_bytes(&mut self, content: Vec<u8>, has_newline: bool) {
+	pub fn set_bytes(&mut self, content: Vec<u8>, terminated: bool) {
 		self.utf8_valid.set(None);
-		self.content = IOChunkContent::new_owned(content, has_newline);
+		self.content = IOChunkContent::new_owned(content, terminated);
 	}
 
 	/// Borrow UTF-8 text only if the original bytes are valid.
@@ -5392,11 +5388,11 @@ impl<'a> IOChunk<'a> {
 	pub fn fields_mut(&mut self) -> (&mut Vec<u8>, &mut bool) {
 		#[cfg(unix)]
 		if let IOChunkContent::SliceInput { content, full_span } = &self.content {
-			self.content = IOChunkContent::new_owned(content.to_vec(), full_span.ends_with(b"\n"));
+			self.content = IOChunkContent::new_owned(content.to_vec(), content.len() < full_span.len());
 		}
 		self.utf8_valid.set(None);
 		match &mut self.content {
-			IOChunkContent::Owned { content, has_newline, .. } => (content, has_newline),
+			IOChunkContent::Owned { content, terminated, .. } => (content, terminated),
 			#[cfg(unix)]
 			_ => unreachable!("pattern space is owned after conversion"),
 		}
@@ -5411,12 +5407,12 @@ impl<'a> IOChunk<'a> {
 enum IOChunkContent<'a> {
 	#[cfg(unix)]
 	SliceInput {
-		content:   &'a [u8], // Line without newline
-		full_span: &'a [u8], // Line including original newline, if any
+		content:   &'a [u8], // Record without its separator
+		full_span: &'a [u8], // Record with its original separator, if any
 	},
 	Owned {
-		content:     Vec<u8>, // Line content without newline
-		has_newline: bool,   // True if \n-terminated
+		content:    Vec<u8>, // Record without its separator
+		terminated: bool,
 		#[cfg(not(unix))]
 		_phantom:    PhantomData<&'a ()>, // Silence E0392 warning
 	},
@@ -5424,14 +5420,14 @@ enum IOChunkContent<'a> {
 
 impl IOChunkContent<'_> {
 	/// Construct a new Owned chunk.
-	pub fn new_owned(content: Vec<u8>, has_newline: bool) -> Self {
+	pub fn new_owned(content: Vec<u8>, terminated: bool) -> Self {
 		#[cfg(unix)]
-		return IOChunkContent::Owned { content, has_newline };
+		return IOChunkContent::Owned { content, terminated };
 
 		#[cfg(not(unix))]
 		return IOChunkContent::Owned {
 			content,
-			has_newline,
+			terminated,
 			// Avoid E0063 missing _phantom initialization errors
 			_phantom: std::marker::PhantomData,
 		};
@@ -5465,29 +5461,28 @@ pub enum LineReader<'a> {
 	_Phantom(std::marker::PhantomData<&'a ()>),
 }
 
-/// Return a LineReader that uses the ReadInput method fot the specified file.
-fn line_reader_read_input(file: impl Read + 'static) -> io::Result<LineReader<'static>> {
-	Ok(LineReader::ReadInput(ReadLineCursor::new(file)))
+/// Stream an open input using the specified record separator.
+fn line_reader_read_input(file: impl Read + 'static, separator: u8, unbuffered: bool) -> LineReader<'static> {
+	LineReader::ReadInput(ReadLineCursor::new(file, separator, unbuffered))
 }
 
 /// Return a LineReader that serves all of `file`, read into memory up front.
 #[cfg(unix)]
-fn line_reader_slice_input(mut file: impl Read) -> io::Result<LineReader<'static>> {
+fn line_reader_slice_input(mut file: impl Read, separator: u8) -> io::Result<LineReader<'static>> {
 	let mut data = Vec::new();
 	file.read_to_end(&mut data)?;
 	// SAFETY: the heap buffer of `data` is never mutated or reallocated, and it
 	// lives in the same variant as the cursor borrowing it.
 	let slice: &'static [u8] = unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
-	Ok(LineReader::SliceInput { _data: data, cursor: SliceLineCursor::new(slice) })
+	Ok(LineReader::SliceInput { _data: data, cursor: SliceLineCursor::new(slice, separator) })
 }
 
 impl<'a> LineReader<'a> {
 	/// Open the specified file for line input.
 	// Use "-" to read from the standard input.
-	pub fn open_with_host(path: &PathBuf, host: &mut Host) -> io::Result<Self> {
+	pub fn open_with_host(path: &PathBuf, host: &Host, separator: u8, unbuffered: bool) -> io::Result<Self> {
 		if path.as_os_str() == "-" {
-			// read the context stdin.
-			return line_reader_read_input(host.stdin.file().clone());
+			return Ok(line_reader_read_input(host.stdin.file().clone(), separator, unbuffered));
 		}
 
 		// input file operands resolve
@@ -5499,25 +5494,25 @@ impl<'a> LineReader<'a> {
 		// SIGBUS and kills the host. Provider files and non-regular host files
 		// (pipes, process substitution) stream.
 		#[cfg(unix)]
-		if file.native().is_some() && file.metadata().is_ok_and(|meta| meta.is_file()) {
-			return line_reader_slice_input(file);
+		if !unbuffered && file.native().is_some() && file.metadata().is_ok_and(|meta| meta.is_file()) {
+			return line_reader_slice_input(file, separator);
 		}
 
-		line_reader_read_input(file)
+		Ok(line_reader_read_input(file, separator, unbuffered))
 	}
 
 	/// Opens a file directly for unit tests.
 	#[cfg(test)]
 	pub fn open(path: &PathBuf) -> io::Result<Self> {
-		let (mut host, _) = Host::for_test("sed", "", ".");
-		Self::open_with_host(path, &mut host)
+		let (host, _) = Host::for_test("sed", "", ".");
+		Self::open_with_host(path, &host, b'\n', false)
 	}
 
 	/// Open the specified file to read as a stream.
 	#[cfg(test)]
 	pub fn open_stream(path: &PathBuf) -> io::Result<Self> {
 		let file = std::fs::File::open(path)?;
-		line_reader_read_input(file)
+		Ok(line_reader_read_input(file, b'\n', false))
 	}
 
 	/// Return the next line, if available.
@@ -5535,8 +5530,8 @@ impl<'a> LineReader<'a> {
 			},
 
 			LineReader::ReadInput(cursor) => {
-				if let Some((line, has_newline)) = cursor.get_line()? {
-					let chunk = IOChunk::from_content(IOChunkContent::new_owned(line, has_newline));
+				if let Some((line, terminated)) = cursor.get_line()? {
+					let chunk = IOChunk::from_content(IOChunkContent::new_owned(line, terminated));
 					Ok(Some(chunk))
 				} else {
 					Ok(None)
@@ -5545,6 +5540,14 @@ impl<'a> LineReader<'a> {
 
 			#[cfg(not(unix))]
 			LineReader::_Phantom(_) => unreachable!("_Phantom should never be constructed"),
+		}
+	}
+
+	/// Return the number of unread bytes fetched by a streaming input.
+	pub fn unread_bytes(&self) -> usize {
+		match self {
+			Self::ReadInput(cursor) => cursor.reader.buffer().len(),
+			_ => 0,
 		}
 	}
 
@@ -5599,9 +5602,9 @@ pub struct OutputBuffer {
 	                                                               * flushing */
 	#[cfg(unix)]
 	slice_chunk:       Option<SliceOutput>, // Chunk to write
-	// True when the last write didn't end with \n; the \n is deferred so
-	// that commands like `p` don't emit a spurious newline under -n.
-	pending_newline:   bool,
+	separator:         u8,
+	// Defer a missing terminator until the next output record.
+	pending_separator: bool,
 	#[cfg(test)]
 	low_level_flushes: usize, // Number of system call flushes
 }
@@ -5619,34 +5622,23 @@ const MIN_DIRECT_WRITE: usize = 4 * 1024;
 const MAX_PENDING_WRITE_NON_FILE: usize = 64 * 1024;
 
 impl OutputBuffer {
-	#[cfg(not(unix))]
-	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
+	/// Create buffered output with the invocation's record separator.
+	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool, separator: u8) -> Self {
 		Self {
 			out: BufWriter::new(w),
 			line_buffered,
-			pending_newline: false,
-			#[cfg(test)]
-			low_level_flushes: 0,
-		}
-	}
-
-	#[cfg(unix)]
-	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
-		Self {
-			out: BufWriter::new(w),
-			line_buffered,
-			max_pending_write: if line_buffered {
-				MAX_PENDING_WRITE_NON_FILE
-			} else {
-				usize::MAX
-			},
+			#[cfg(unix)]
+			max_pending_write: if line_buffered { MAX_PENDING_WRITE_NON_FILE } else { usize::MAX },
+			#[cfg(unix)]
 			slice_chunk: None,
-			pending_newline: false,
+			separator,
+			pending_separator: false,
 			#[cfg(test)]
 			low_level_flushes: 0,
 		}
 	}
 
+	#[cfg(test)]
 	/// Schedule script text for output.
 	pub fn write_str(&mut self, s: impl AsRef<str>) -> io::Result<()> {
 		self.write_bytes(s.as_ref().as_bytes())
@@ -5654,29 +5646,48 @@ impl OutputBuffer {
 
 	/// Schedule bytes for output without converting or taking ownership of them.
 	pub fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
-		if let Some(content) = bytes.strip_suffix(b"\n") {
+		if let Some(content) = bytes.strip_suffix(&[self.separator]) {
 			self.write_owned_content(content, true)
 		} else {
 			self.write_owned_content(bytes, false)
 		}
 	}
 
-	pub(super) fn write_owned_content(&mut self, content: &[u8], has_newline: bool) -> io::Result<()> {
-		if content.is_empty() && !has_newline {
+	/// Write the parsed text of `i` or `c`, replacing its final script newline.
+	pub(super) fn write_script_text(&mut self, text: &str) -> io::Result<()> {
+		match text.strip_suffix('\n') {
+			Some(content) => self.write_owned_content(content.as_bytes(), true),
+			None => self.write_owned_content(text.as_bytes(), false),
+		}
+	}
+
+	/// Write the current input record number and the output separator.
+	pub(super) fn write_line_number(&mut self, number: usize) -> io::Result<()> {
+		#[cfg(unix)]
+		self.flush_slice(WriteRange::Complete)?;
+		self.flush_pending_separator()?;
+		write!(self.out, "{number}")?;
+		self.out.write_all(&[self.separator])?;
+		self.flush_completed_line()
+	}
+
+	/// Write record content, preserving whether it originally had a terminator.
+	pub(super) fn write_owned_content(&mut self, content: &[u8], terminated: bool) -> io::Result<()> {
+		if content.is_empty() && !terminated {
 			return Ok(());
 		}
 		#[cfg(unix)]
 		self.flush_slice(WriteRange::Complete)?;
-		if self.pending_newline {
-			self.out.write_all(b"\n")?;
+		if self.pending_separator {
+			self.out.write_all(&[self.separator])?;
 			self.flush_completed_line()?;
 		}
 		self.out.write_all(content)?;
-		if has_newline {
-			self.out.write_all(b"\n")?;
+		if terminated {
+			self.out.write_all(&[self.separator])?;
 			self.flush_completed_line()?;
 		}
-		self.pending_newline = !has_newline;
+		self.pending_separator = !terminated;
 		Ok(())
 	}
 
@@ -5693,6 +5704,7 @@ impl OutputBuffer {
 			return Ok(());
 		};
 
+		self.flush_pending_separator()?;
 		let mut reader = BufReader::new(file);
 		if self.line_buffered {
 			let mut buf = [0; 8 * 1024];
@@ -5702,7 +5714,7 @@ impl OutputBuffer {
 					break;
 				}
 				self.out.write_all(&buf[..len])?;
-				if buf[..len].contains(&b'\n') {
+				if buf[..len].contains(&self.separator) || buf[..len].contains(&b'\n') {
 					self.flush_completed_line()?;
 				}
 			}
@@ -5712,16 +5724,16 @@ impl OutputBuffer {
 		Ok(())
 	}
 
-	/// Write bytes exactly as given, like `r` file contents: no newline is added or deferred.
+	/// Write raw output without adding or deferring a separator for it.
 	pub fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
 		if bytes.is_empty() {
 			return Ok(());
 		}
-		self.flush_pending_newline()?;
+		self.flush_pending_separator()?;
 		#[cfg(unix)]
 		self.flush_slice(WriteRange::Complete)?;
 		self.out.write_all(bytes)?;
-		if bytes.contains(&b'\n') {
+		if bytes.contains(&self.separator) || bytes.contains(&b'\n') {
 			self.flush_completed_line()?;
 		}
 		Ok(())
@@ -5764,17 +5776,17 @@ enum WriteRange {
 impl OutputBuffer {
 	/// Schedule the specified output chunk for eventual output
 	pub fn write_chunk(&mut self, new_chunk: &IOChunk) -> io::Result<()> {
-		if let IOChunkContent::Owned { content, has_newline, .. } = &new_chunk.content {
-			return self.write_owned_content(content, *has_newline);
+		if let IOChunkContent::Owned { content, terminated, .. } = &new_chunk.content {
+			return self.write_owned_content(content, *terminated);
 		}
-		if new_chunk.is_empty() && !new_chunk.is_newline_terminated() {
+		if new_chunk.is_empty() && !new_chunk.is_terminated() {
 			return Ok(());
 		}
 
-		if self.pending_newline {
+		if self.pending_separator {
 			self.flush_slice(WriteRange::Complete)?;
-			self.out.write_all(b"\n")?;
-			self.pending_newline = false;
+			self.out.write_all(&[self.separator])?;
+			self.pending_separator = false;
 			self.flush_completed_line()?;
 		}
 
@@ -5813,13 +5825,13 @@ impl OutputBuffer {
 				if reset {
 					self.slice_chunk = Some(SliceOutput { out_ptr: new_ptr, len: new_len });
 				}
-				self.pending_newline = !new_chunk.is_newline_terminated();
+				self.pending_separator = !new_chunk.is_terminated();
 			},
 
 			IOChunkContent::Owned { .. } => unreachable!("owned content handled above"),
 		}
 
-		if self.line_buffered && new_chunk.is_newline_terminated() {
+		if self.line_buffered && new_chunk.is_terminated() {
 			// Snapshot output reaches the BufWriter only here; file-backed
 			// output is block-buffered, so this cannot affect its fast path.
 			self.flush_slice(WriteRange::Complete)?;
@@ -5835,26 +5847,23 @@ impl OutputBuffer {
 	// irrelevant and every flush writes the complete pending span.
 	#[cfg(unix)]
 	fn flush_slice(&mut self, _cover: WriteRange) -> io::Result<()> {
-		if let Some(chunk) = self.slice_chunk.as_mut() {
+		if let Some(chunk) = self.slice_chunk.take() {
 			#[cfg(test)]
 			if chunk.len >= MIN_DIRECT_WRITE {
 				self.low_level_flushes += 1;
 			}
 			let slice = unsafe { std::slice::from_raw_parts(chunk.out_ptr, chunk.len) };
 			self.out.write_all(slice)?;
-			let written = slice.len();
-			chunk.len -= written;
-			unsafe { chunk.out_ptr = chunk.out_ptr.add(written) };
 		}
 		Ok(())
 	}
 
 	/// Write a deferred newline if the last output didn't end with one.
-	pub fn flush_pending_newline(&mut self) -> io::Result<()> {
-		if self.pending_newline {
+	pub fn flush_pending_separator(&mut self) -> io::Result<()> {
+		if self.pending_separator {
 			self.flush_slice(WriteRange::Complete)?;
-			self.out.write_all(b"\n")?;
-			self.pending_newline = false;
+			self.out.write_all(&[self.separator])?;
+			self.pending_separator = false;
 			self.flush_completed_line()?;
 		}
 		Ok(())
@@ -5871,14 +5880,14 @@ impl OutputBuffer {
 impl OutputBuffer {
 	/// Schedule the specified output chunk for eventual output
 	pub fn write_chunk(&mut self, chunk: &IOChunk) -> io::Result<()> {
-		self.write_owned_content(chunk.as_bytes(), chunk.is_newline_terminated())
+		self.write_owned_content(chunk.as_bytes(), chunk.is_terminated())
 	}
 
 	/// Write a deferred newline if the last output didn't end with one.
-	pub fn flush_pending_newline(&mut self) -> io::Result<()> {
-		if self.pending_newline {
-			self.out.write_all(b"\n")?;
-			self.pending_newline = false;
+	pub fn flush_pending_separator(&mut self) -> io::Result<()> {
+		if self.pending_separator {
+			self.out.write_all(&[self.separator])?;
+			self.pending_separator = false;
 			self.flush_completed_line()?;
 		}
 		Ok(())
@@ -5923,7 +5932,7 @@ mod tests {
 		let tmp = NamedTempFile::new()?;
 		{
 			let file = tmp.reopen()?;
-			let mut out = OutputBuffer::new(Box::new(file), false);
+			let mut out = OutputBuffer::new(Box::new(file), false, b'\n');
 			out.write_str("foo\n")?;
 			out.write_str("bar\n")?;
 			out.flush()?;
@@ -5958,7 +5967,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = std::fs::File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)), false);
+		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)), false, b'\n');
 
 		// Drain reader → writer
 		while let Some(chunk) = reader.get_line()? {
@@ -5993,7 +6002,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(out_file), false);
+		let mut out = OutputBuffer::new(Box::new(out_file), false, b'\n');
 
 		// Read the first snapshot line ("zero\n") and write it
 		if let Some(chunk) = reader.get_line()? {
@@ -6047,7 +6056,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file), false);
+		let mut out = OutputBuffer::new(Box::new(out_file), false, b'\n');
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6086,7 +6095,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file), false);
+		let mut out = OutputBuffer::new(Box::new(out_file), false, b'\n');
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6121,7 +6130,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file), false);
+		let mut out = OutputBuffer::new(Box::new(out_file), false, b'\n');
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6156,7 +6165,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file), false);
+		let mut out = OutputBuffer::new(Box::new(out_file), false, b'\n');
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6186,25 +6195,25 @@ mod tests {
 
 		// Verify the reader's operation
 		if let Some(IOChunk {
-			content: IOChunkContent::Owned { content, has_newline, .. },
+			content: IOChunkContent::Owned { content, terminated, .. },
 			utf8_valid,
 			..
 		}) = reader.get_line()?
 		{
 			assert_eq!(content, b"first line");
 			assert_eq!(content.len(), 10);
-			assert!(has_newline);
+			assert!(terminated);
 			assert_eq!(utf8_valid.get(), None);
 			assert!(!reader.last_line().unwrap());
 		} else {
 			panic!("Expected IOChunkContent::Owned");
 		}
 
-		if let Some(IOChunk { content: IOChunkContent::Owned { content, has_newline, .. }, .. }) =
+		if let Some(IOChunk { content: IOChunkContent::Owned { content, terminated, .. }, .. }) =
 			reader.get_line()?
 		{
 			assert_eq!(content, b"second line");
-			assert!(has_newline);
+			assert!(terminated);
 			assert!(!reader.last_line().unwrap());
 		} else {
 			panic!("Expected IOChunkContent::Owned");
@@ -6303,25 +6312,25 @@ mod tests {
 		Ok(())
 	}
 
-	// is_newline_terminated, is_empty
+	// is_terminated, is_empty
 	#[test]
 	fn test_owned_newline_terminated_non_empty() {
 		let chunk = IOChunk::from_content(IOChunkContent::new_owned(b"line".to_vec(), true));
-		assert!(chunk.is_newline_terminated());
+		assert!(chunk.is_terminated());
 		assert!(!chunk.is_empty());
 	}
 
 	#[test]
 	fn test_owned_newline_terminated_empty() {
 		let chunk = IOChunk::from_content(IOChunkContent::new_owned(Vec::new(), true));
-		assert!(chunk.is_newline_terminated());
+		assert!(chunk.is_terminated());
 		assert!(chunk.is_empty());
 	}
 
 	#[test]
 	fn test_owned_not_newline_terminated() {
 		let chunk = IOChunk::from_content(IOChunkContent::new_owned(b"line".to_vec(), false));
-		assert!(!chunk.is_newline_terminated());
+		assert!(!chunk.is_terminated());
 	}
 
 	#[cfg(unix)]
@@ -6330,7 +6339,7 @@ mod tests {
 		let content = b"line";
 		let full_span = b"line\n";
 		let chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
-		assert!(chunk.is_newline_terminated());
+		assert!(chunk.is_terminated());
 	}
 
 	#[cfg(unix)]
@@ -6339,7 +6348,7 @@ mod tests {
 		let content = b"line";
 		let full_span = b"line";
 		let chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
-		assert!(!chunk.is_newline_terminated());
+		assert!(!chunk.is_terminated());
 	}
 
 	#[cfg(unix)]
@@ -6348,7 +6357,7 @@ mod tests {
 		let content = b"";
 		let full_span = b"";
 		let chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
-		assert!(!chunk.is_newline_terminated());
+		assert!(!chunk.is_terminated());
 	}
 
 	// fields_mut
@@ -6416,7 +6425,8 @@ mod tests {
 			max_pending_write: 8,
 			#[cfg(unix)]
 			slice_chunk: None,
-			pending_newline: false,
+			separator: b'\n',
+			pending_separator: false,
 			low_level_flushes: 0,
 		};
 		(buf, file)
@@ -6424,7 +6434,8 @@ mod tests {
 
 	#[cfg(unix)]
 	fn make_slice_chunk(bytes: &'static [u8]) -> IOChunk<'static> {
-		IOChunk::from_content(IOChunkContent::SliceInput { content: bytes, full_span: bytes })
+		let content = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+		IOChunk::from_content(IOChunkContent::SliceInput { content, full_span: bytes })
 	}
 
 	fn make_owned_chunk(s: &str, has_nl: bool) -> IOChunk<'_> {
@@ -6432,7 +6443,7 @@ mod tests {
 			utf8_valid: Cell::new(Some(true)),
 			content:       IOChunkContent::Owned {
 				content:                    s.as_bytes().to_vec(),
-				has_newline:                has_nl,
+				terminated:                has_nl,
 				#[cfg(not(unix))]
 				_phantom:                   std::marker::PhantomData,
 			},
@@ -6494,8 +6505,8 @@ mod tests {
 
 		buf.write_chunk(&c1).unwrap();
 		buf.write_chunk(&c2).unwrap();
-		// After a flush triggered by exceeding max_pending_write
-		assert_eq!(buf.slice_chunk.as_ref().unwrap().len, 0);
+		// Exceeding max_pending_write flushes and clears the saved snapshot span.
+		assert!(buf.slice_chunk.is_none());
 	}
 
 	#[test]
@@ -6526,7 +6537,7 @@ mod tests {
 		assert_eq!(out, "world\n");
 	}
 
-	// pending_newline is injected between two no-newline chunks
+	// pending_separator is injected between two no-newline chunks
 	#[test]
 	fn pending_newline_injected_between_chunks() {
 		let (mut buf, mut file) = new_for_test();
@@ -6539,14 +6550,14 @@ mod tests {
 		assert_eq!(out, "first\nsecond\n");
 	}
 
-	// flush_pending_newline emits the deferred newline
+	// flush_pending_separator emits the deferred newline
 	#[test]
 	fn flush_pending_newline_emits_newline() {
 		let (mut buf, mut file) = new_for_test();
 		buf.write_chunk(&make_owned_chunk("foo", false)).unwrap();
-		assert!(buf.pending_newline);
-		buf.flush_pending_newline().unwrap();
-		assert!(!buf.pending_newline);
+		assert!(buf.pending_separator);
+		buf.flush_pending_separator().unwrap();
+		assert!(!buf.pending_separator);
 		buf.out.flush().unwrap();
 		file.seek(SeekFrom::Start(0)).unwrap();
 		let mut out = String::new();
@@ -6554,12 +6565,12 @@ mod tests {
 		assert_eq!(out, "foo\n");
 	}
 
-	// write_str strips trailing newline and sets pending_newline correctly
+	// write_str strips trailing newline and sets pending_separator correctly
 	#[test]
 	fn write_str_with_trailing_newline() {
 		let (mut buf, mut file) = new_for_test();
 		buf.write_str("bar\n").unwrap();
-		assert!(!buf.pending_newline);
+		assert!(!buf.pending_separator);
 		buf.out.flush().unwrap();
 		file.seek(SeekFrom::Start(0)).unwrap();
 		let mut out = String::new();
@@ -6571,8 +6582,8 @@ mod tests {
 	fn write_str_without_trailing_newline() {
 		let (mut buf, mut file) = new_for_test();
 		buf.write_str("baz").unwrap();
-		assert!(buf.pending_newline);
-		buf.flush_pending_newline().unwrap();
+		assert!(buf.pending_separator);
+		buf.flush_pending_separator().unwrap();
 		buf.out.flush().unwrap();
 		file.seek(SeekFrom::Start(0)).unwrap();
 		let mut out = String::new();
@@ -7354,6 +7365,8 @@ pub struct InPlace {
 	/// Whether stdout is a regular file (block-buffered) rather than a pipe
 	/// or stream (line-buffered); classified once by the host.
 	stdout_is_file:      bool,
+	unbuffered:          bool,
+	separator:           u8,
 	fs:                  BlockingFs,
 	pub output:          OutputBuffer,
 	pub in_place:        bool,
@@ -7369,9 +7382,15 @@ impl InPlace {
 	/// editing, backup the original file, or follow symlinks.
 	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile, stdout_is_file: bool) -> Self {
 		Self {
-			output: stdout_output(&stdout, stdout_is_file),
+			output: OutputBuffer::new(
+				Box::new(stdout.clone()),
+				context.unbuffered || !stdout_is_file,
+				context.separator(),
+			),
 			stdout,
 			stdout_is_file,
+			unbuffered: context.unbuffered,
+			separator: context.separator(),
 			fs: context.paths.fs().clone(),
 			in_place: context.in_place,
 			in_place_suffix: context.in_place_suffix,
@@ -7407,7 +7426,6 @@ impl InPlace {
 	/// to the context settings.
 	fn begin_resolved(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		if !self.in_place {
-			self.output = stdout_output(&self.stdout, self.stdout_is_file);
 			return Ok(&mut self.output);
 		}
 
@@ -7437,7 +7455,7 @@ impl InPlace {
 		}
 
 		let writer = temp_file.file.as_ref().expect("temporary file open").try_clone()?;
-		self.output = OutputBuffer::new(Box::new(writer), false);
+		self.output = OutputBuffer::new(Box::new(writer), self.unbuffered, self.separator);
 		self.temp_file = Some(temp_file);
 		self.original_path = Some(file_name.to_path_buf());
 
@@ -7458,7 +7476,11 @@ impl InPlace {
 
 		// Release the output's handle, then close the last one to surface
 		// deferred write errors before the file replaces the original.
-		self.output = stdout_output(&self.stdout, self.stdout_is_file);
+		self.output = OutputBuffer::new(
+			Box::new(self.stdout.clone()),
+			self.unbuffered || !self.stdout_is_file,
+			self.separator,
+		);
 		temp.close()
 			.map_err_context(|| format!("error writing temporary file {}", temp.path.quote()))?;
 
@@ -7493,10 +7515,6 @@ impl InPlace {
 	}
 }
 
-/// Sed's standard output, line-buffered unless it is a regular file.
-fn stdout_output(stdout: &OpenFile, stdout_is_file: bool) -> OutputBuffer {
-	OutputBuffer::new(Box::new(stdout.clone()), !stdout_is_file)
-}
 
 #[cfg(test)]
 mod tests {
@@ -7670,7 +7688,10 @@ use std::{
 use crate::openfile::{DescriptorPath, STDERR_FD, STDOUT_FD};
 use omp_vfs::{File, OpenOptions};
 use crate::host::{Host, ShellPaths};
-use crate::sed::fast_io::OutputBuffer;
+use crate::sed::{
+	command::ProcessingContext,
+	fast_io::{IOChunk, OutputBuffer},
+};
 
 use uucore::display::Quotable;
 use crate::sed::error_handling::SedResult;
@@ -7700,9 +7721,10 @@ enum Target {
 /// Writer that tracks its file name for better error messages
 pub struct NamedWriter {
 	/// The file name as the script spelled it.
-	pub path: PathBuf,
-	target:   Target,
-	location: ScriptLocation,
+	pub path:          PathBuf,
+	target:            Target,
+	location:          ScriptLocation,
+	pending_separator: bool,
 }
 
 impl NamedWriter {
@@ -7733,28 +7755,27 @@ impl NamedWriter {
 			},
 		};
 
-		let writer = Rc::new(RefCell::new(NamedWriter { path, target, location }));
+		let writer = Rc::new(RefCell::new(NamedWriter { path, target, location, pending_separator: false }));
 
 		FLUSH_LIST.with(|list| list.borrow_mut().push(Rc::clone(&writer)));
 		Ok(writer)
 	}
 
-	/// Write a line to the file with a newline, returning descriptive errors.
-	///
-	/// `output` is sed's current output: stdout, or the temporary file under
-	/// `-i`, in which case `/dev/stdout` still means the real stdout.
+	/// Write a pattern record to the destination, preserving its terminator.
 	pub fn write_line(
 		&mut self,
-		line: &[u8],
+		pattern: &IOChunk,
 		output: &mut OutputBuffer,
-		in_place: bool,
+		context: &ProcessingContext,
 		host: &mut Host,
 	) -> SedResult<()> {
 		let result = match &mut self.target {
-			Target::File(writer) => write_line_to(writer, line),
-			Target::Stdout if in_place => write_line_to(&mut host.stdout, line),
-			Target::Stdout => output.write_owned_content(line, true),
-			Target::Stderr => write_line_to(&mut host.stderr, line),
+			Target::File(writer) => write_line_to(writer, pattern, context, &mut self.pending_separator),
+			Target::Stdout if context.in_place => {
+				write_line_to(&mut host.stdout, pattern, context, &mut self.pending_separator)
+			},
+			Target::Stdout => output.write_chunk(pattern),
+			Target::Stderr => write_line_to(&mut host.stderr, pattern, context, &mut self.pending_separator),
 			Target::Closed => Err(std::io::Error::other("file already closed")),
 		};
 		result.map_err(|e| {
@@ -7785,9 +7806,26 @@ impl NamedWriter {
 	}
 }
 
-fn write_line_to(writer: &mut impl Write, line: &[u8]) -> std::io::Result<()> {
-	writer.write_all(line)?;
-	writer.write_all(b"\n")
+/// Write to a `w` destination other than sed's current output stream.
+fn write_line_to(
+	writer: &mut impl Write,
+	pattern: &IOChunk,
+	context: &ProcessingContext,
+	pending_separator: &mut bool,
+) -> std::io::Result<()> {
+	let separator = [context.separator()];
+	if *pending_separator {
+		writer.write_all(&separator)?;
+	}
+	writer.write_all(pattern.as_bytes())?;
+	if pattern.is_terminated() {
+		writer.write_all(&separator)?;
+	}
+	*pending_separator = !pattern.is_terminated();
+	if context.unbuffered {
+		writer.flush()?;
+	}
+	Ok(())
 }
 
 /// Flush buffered content to the files and close them, returning
@@ -7823,8 +7861,13 @@ pub mod processor {
 // file that was distributed with this source code.
 
 use std::{
-	cell::RefCell, fmt::Write as _, io, ops::ControlFlow, path::PathBuf,
-	process::Command as ProcessCommand, rc::Rc,
+	cell::RefCell,
+	fmt::Write as _,
+	io::{self, SeekFrom},
+	ops::ControlFlow,
+	path::PathBuf,
+	process::Command as ProcessCommand,
+	rc::Rc,
 };
 
 use memchr::memchr;
@@ -8131,19 +8174,19 @@ fn substitute(
 		return Ok(());
 	}
 	result.extend_from_slice(&text[last_end..]);
-	pattern.set_bytes(result, pattern.is_newline_terminated());
+	pattern.set_bytes(result, pattern.is_terminated());
 
 	if sub.execute {
 		let mut shell_out = shell_output(pattern.as_bytes(), command, context, host)?;
 		trim_line_end(&mut shell_out);
-		pattern.set_bytes(shell_out, pattern.is_newline_terminated());
+		pattern.set_bytes(shell_out, pattern.is_terminated());
 	}
 
 	if sub.print_flag {
 		write_chunk(output, context, pattern)?;
 	}
 	if let Some(writer) = &sub.write_file {
-		writer.borrow_mut().write_line(pattern.as_bytes(), output, context.in_place, host)?;
+		writer.borrow_mut().write_line(pattern, output, context, host)?;
 	}
 	context.substitution_made = true;
 	Ok(())
@@ -8172,7 +8215,7 @@ fn transliterate(pattern: &mut IOChunk, trans: &Transliteration) {
 	}
 	if last_end != 0 {
 		result.extend_from_slice(&bytes[last_end..]);
-		pattern.set_bytes(result, pattern.is_newline_terminated());
+		pattern.set_bytes(result, pattern.is_terminated());
 	}
 }
 
@@ -8181,7 +8224,7 @@ fn flush_appends(output: &mut OutputBuffer, context: &mut ProcessingContext) -> 
 	for elem in &context.append_elements {
 		match elem {
 			AppendElement::Text(text) => {
-				output.write_str(&**text)?;
+				output.write_raw(text.as_bytes())?;
 			},
 			AppendElement::Path(path) => {
 				output.copy_file(context.paths.fs(), path)?;
@@ -8191,22 +8234,25 @@ fn flush_appends(output: &mut OutputBuffer, context: &mut ProcessingContext) -> 
 			},
 		}
 	}
+	if context.unbuffered && !context.append_elements.is_empty() {
+		output.flush()?;
+	}
 	context.append_elements.clear();
 	Ok(())
 }
 
 /// List the passed pattern space in unambiguous form.
-fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize) -> SedResult<()> {
-	if line.is_empty() && !line.is_newline_terminated() {
+fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize, null_data: bool) -> SedResult<()> {
+	if line.is_empty() && !line.is_terminated() {
 		return Ok(());
 	}
 
 	let mut buffer = String::new();
 	let mut escape = String::new();
 	let mut push = |unit: Result<char, u8>| -> io::Result<()> {
-		if unit == Ok('\n') {
-			buffer.push_str("$\n");
-			output.write_str(&buffer)?;
+		if !null_data && unit == Ok('\n') {
+			buffer.push('$');
+			output.write_owned_content(buffer.as_bytes(), true)?;
 			buffer.clear();
 			return Ok(());
 		}
@@ -8214,6 +8260,7 @@ fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize) -> SedResul
 		match unit {
 			Ok('\x07') => escape.push_str(r"\a"),
 			Ok('\x08') => escape.push_str(r"\b"),
+			Ok('\n') => escape.push_str(r"\n"),
 			Ok('\x0b') => escape.push_str(r"\v"),
 			Ok('\x0c') => escape.push_str(r"\f"),
 			Ok('\\') => escape.push_str(r"\\"),
@@ -8227,8 +8274,8 @@ fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize) -> SedResul
 		}
 
 		if buffer.len() + escape.len() + 1 > max_width {
-			buffer.push_str("\\\n");
-			output.write_str(&buffer)?;
+			buffer.push('\\');
+			output.write_owned_content(buffer.as_bytes(), true)?;
 			buffer.clear();
 		}
 		buffer.push_str(&escape);
@@ -8244,8 +8291,8 @@ fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize) -> SedResul
 			push(if byte.is_ascii() { Ok(char::from(byte)) } else { Err(byte) })?;
 		}
 	}
-	buffer.push_str("$\n");
-	output.write_str(buffer)?;
+	buffer.push('$');
+	output.write_owned_content(buffer.as_bytes(), true)?;
 	Ok(())
 }
 
@@ -8287,6 +8334,7 @@ fn process_file(
 	host: &mut Host,
 ) -> SedResult<()> {
 	process_address_0(commands.clone(), output, context.paths.fs())?;
+	let separator = context.separator();
 
 	// Loop over the input lines as pattern space.
 	'lines: while let Some(mut pattern) = reader.get_line()? {
@@ -8303,10 +8351,10 @@ fn process_file(
 			if let Some(action) = context.input_action.take() {
 				// Continue processing the `N` command.
 				let mut combined_lines = action.prepend;
-				combined_lines.push(b'\n');
+				combined_lines.push(separator);
 				combined_lines.extend_from_slice(pattern.as_bytes());
 
-				pattern.set_bytes(combined_lines, pattern.is_newline_terminated());
+				pattern.set_bytes(combined_lines, pattern.is_terminated());
 				action.next_command
 			} else {
 				// Start from the script top.
@@ -8357,7 +8405,7 @@ fn process_file(
 					pattern.clear();
 					if command.addr2.is_none() || context.last_address || reader.last_line()? {
 						let text = extract_variant!(command, Text);
-						output.write_str(text.as_ref())?;
+						output.write_script_text(text)?;
 					}
 					break;
 				},
@@ -8372,7 +8420,7 @@ fn process_file(
 						// Replace the pattern space with the output of running it.
 						let mut shell_out = shell_output(pattern.as_bytes(), &command, context, host)?;
 						trim_line_end(&mut shell_out);
-						pattern.set_bytes(shell_out, pattern.is_newline_terminated());
+						pattern.set_bytes(shell_out, pattern.is_terminated());
 					} else {
 						// Output the command's output before the end-of-cycle print.
 						let shell_out = shell_output(shell_cmd.as_bytes(), &command, context, host)?;
@@ -8380,8 +8428,8 @@ fn process_file(
 					}
 				},
 				'D' => {
-					// Delete up to \n and start a new cycle without new input.
-					if let Some(pos) = memchr(b'\n', pattern.as_bytes()) {
+					// Delete the first record and restart without reading input.
+					if let Some(pos) = memchr(separator, pattern.as_bytes()) {
 						let (s, _) = pattern.fields_mut();
 						s.drain(..=pos);
 						current.clone_from(&commands);
@@ -8393,43 +8441,43 @@ fn process_file(
 				},
 				'g' => {
 					// Replace pattern with the contents of the hold space.
-					pattern.copy_bytes(&context.hold.content, context.hold.has_newline);
+					pattern.copy_bytes(&context.hold.content, context.hold.terminated);
 				},
 				'G' => {
-					// Append to pattern \n followed by hold space contents.
-					let (pat_content, pat_has_newline) = pattern.fields_mut();
-					pat_content.push(b'\n');
+					// Append a separator followed by hold space contents.
+					let (pat_content, pat_terminated) = pattern.fields_mut();
+					pat_content.push(separator);
 					pat_content.extend_from_slice(&context.hold.content);
-					*pat_has_newline = context.hold.has_newline;
+					*pat_terminated = context.hold.terminated;
 				},
 				'h' => {
 					// Replace hold with the contents of the pattern space, reusing
 					// the hold buffer.
 					context.hold.content.clear();
 					context.hold.content.extend_from_slice(pattern.as_bytes());
-					context.hold.has_newline = pattern.is_newline_terminated();
+					context.hold.terminated = pattern.is_terminated();
 				},
 				'H' => {
-					// Append to hold \n followed by pattern space contents.
-					context.hold.content.push(b'\n');
+					// Append a separator followed by the pattern space contents.
+					context.hold.content.push(separator);
 					context.hold.content.extend_from_slice(pattern.as_bytes());
-					context.hold.has_newline = pattern.is_newline_terminated();
+					context.hold.terminated = pattern.is_terminated();
 				},
 				'i' => {
 					// Write text to standard output.
 					let text = extract_variant!(command, Text);
-					output.write_str(text.as_ref())?;
+					output.write_script_text(text)?;
 				},
 				'l' => {
 					let width = *extract_variant!(command, Number);
-					list(output, &pattern, width)?;
+					list(output, &pattern, width, context.null_data)?;
 				},
 				'n' => {
 					break;
 				},
 				'N' => {
 					flush_appends(output, context)?;
-					// Append to pattern `\n` and the next line
+					// Append a separator and the next record.
 					// Rather than reading input here, which would result
 					// in a double borrow on reader, modify the action
 					// to perform when the next line is read. This cycle's
@@ -8437,6 +8485,7 @@ fn process_file(
 					// copying the accumulated pattern space each time.
 					context.input_action = Some(InputAction {
 						next_command: command.next.clone(),
+						terminated:   pattern.is_terminated(),
 						prepend:      std::mem::take(pattern.fields_mut().0),
 					});
 					continue 'lines;
@@ -8446,8 +8495,8 @@ fn process_file(
 				},
 				'P' => {
 					let line = pattern.as_bytes();
-					if let Some(pos) = memchr(b'\n', line) {
-						output.write_bytes(&line[..=pos])?;
+					if let Some(pos) = memchr(separator, line) {
+						output.write_owned_content(&line[..pos], true)?;
 					} else {
 						write_chunk(output, context, &pattern)?;
 					}
@@ -8459,11 +8508,10 @@ fn process_file(
 					break;
 				},
 				'Q' => {
-					// Quit immediatelly.
+					// Quit without printing the pattern space or queued appends.
 					host.fail(*extract_variant!(command, Number) as i32);
 					context.stop_processing = true;
-					context.quiet = true;
-					break;
+					return Ok(());
 				},
 				'r' => {
 					// Copy the file to standard output at a later point.
@@ -8475,7 +8523,7 @@ fn process_file(
 				'R' => {
 					// Queue the file's next line, if any, for output at the end of the cycle.
 					let source = extract_variant!(command, LineSource);
-					if let Some(line) = source.borrow_mut().next_line(host)? {
+					if let Some(line) = source.borrow_mut().next_line(host, separator)? {
 						context.append_elements.push(AppendElement::Line(line));
 					}
 				},
@@ -8499,15 +8547,15 @@ fn process_file(
 				'w' => {
 					// Append the pattern space to the specified file.
 					let writer = extract_variant!(command, NamedWriter);
-					writer.borrow_mut().write_line(pattern.as_bytes(), output, context.in_place, host)?;
+					writer.borrow_mut().write_line(&pattern, output, context, host)?;
 				},
 				'x' => {
 					// Exchange the contents of the pattern and hold spaces.
-					let (pat_content, pat_has_newline) = pattern.fields_mut();
+					let (pat_content, pat_terminated) = pattern.fields_mut();
 
-					// Swap newline if hold space is logically non-empty.
-					if !context.hold.content.is_empty() || context.hold.has_newline {
-						std::mem::swap(pat_has_newline, &mut context.hold.has_newline);
+					// Swap terminators if hold space is logically non-empty.
+					if !context.hold.content.is_empty() || context.hold.terminated {
+						std::mem::swap(pat_terminated, &mut context.hold.terminated);
 					}
 					std::mem::swap(pat_content, &mut context.hold.content);
 				},
@@ -8516,16 +8564,16 @@ fn process_file(
 					transliterate(&mut pattern, trans);
 				},
 				'z' => {
-					// Clear the pattern contents, but preserve newline state
+					// Clear the pattern contents, but preserve termination state
 					// so automatic printing still emits an empty record.
-					pattern.copy_bytes(b"", pattern.is_newline_terminated());
+					pattern.copy_bytes(b"", pattern.is_terminated());
 				},
 				':' => {
 					// Branch target; do nothing.
 				},
 				'=' => {
 					// Output current line number.
-					output.write_str(format!("{}\n", context.line_number))?;
+					output.write_line_number(context.line_number)?;
 				},
 				// The compilation should supply only valid codes.
 				_ => panic!("invalid command code"),
@@ -8542,22 +8590,19 @@ fn process_file(
 		reader.recycle(pattern);
 
 		if context.stop_processing {
-			output.flush_pending_newline()?;
 			break;
 		}
 	}
 
-	// Handle any N command remains.
-	if context.separate
+	Ok(())
+}
+
+/// Finish a pending `N` when there is no next record.
+fn finish_pending_input(output: &mut OutputBuffer, context: &mut ProcessingContext) -> SedResult<()> {
+	if let Some(action) = context.input_action.take()
 		&& !context.quiet
-		&& let Some(action) = context.input_action.take()
 	{
-		let mut pending = action.prepend;
-		pending.push(b'\n');
-		output.write_bytes(&pending)?;
-		if context.unbuffered {
-			output.flush()?;
-		}
+		output.write_owned_content(&action.prepend, action.terminated)?;
 	}
 
 	Ok(())
@@ -8583,9 +8628,10 @@ fn reset_latched_address_ranges(range_commands: &mut [Rc<RefCell<Command>>]) {
 fn open_next_input<'p>(
 	paths: &mut std::slice::Iter<'p, PathBuf>,
 	host: &mut Host,
+	context: &ProcessingContext,
 ) -> Option<(&'p PathBuf, LineReader<'static>)> {
 	for path in paths.by_ref() {
-		match LineReader::open_with_host(path, host) {
+		match LineReader::open_with_host(path, host, context.separator(), context.unbuffered) {
 			Ok(reader) => return Some((path, reader)),
 			Err(e) => host.error(format_args!("can't read {}: {}", path.display(), strip_errno(&e)), 2),
 		}
@@ -8610,12 +8656,12 @@ pub fn process_all_files(
 	// last line; per-file processing opens each file only when it is reached.
 	let lookahead = !context.separate && !context.in_place;
 	let mut paths = files.iter();
-	let mut next = open_next_input(&mut paths, host);
+	let mut next = open_next_input(&mut paths, host, context);
 	let mut first = true;
 
 	while let Some((path, mut reader)) = next.take() {
 		if lookahead {
-			next = open_next_input(&mut paths, host);
+			next = open_next_input(&mut paths, host, context);
 			context.last_file = next.is_none();
 		} else {
 			context.last_file = paths.len() == 0;
@@ -8630,21 +8676,22 @@ pub fn process_all_files(
 
 			// Reset hold space for separate file processing
 			context.hold.content.clear();
-			context.hold.has_newline = true;
+			context.hold.terminated = true;
 		}
 
 		context.input_name = path.quote().to_string();
 		process_file(commands.clone(), &mut reader, output, context, host)?;
 
-		// Handle any N command remains.
-		if context.last_file
-			&& !context.separate
-			&& !context.quiet
-			&& let Some(action) = context.input_action.take()
-		{
-			let mut pending = action.prepend;
-			pending.push(b'\n');
-			output.write_bytes(&pending)?;
+		if context.stop_processing && path.as_os_str() == "-" {
+			let unread = reader.unread_bytes();
+			if unread != 0 {
+				// The shared stdin offset must point just past the last
+				// consumed record. Pipes cannot return buffered bytes.
+				let _ = host.stdin.file().seek(SeekFrom::Current(-(unread as i64)));
+			}
+		}
+		if context.last_file || context.separate {
+			finish_pending_input(output, context)?;
 		}
 
 		in_place.end()?;
@@ -8653,7 +8700,7 @@ pub fn process_all_files(
 			break;
 		}
 		if !lookahead {
-			next = open_next_input(&mut paths, host);
+			next = open_next_input(&mut paths, host, context);
 		}
 	}
 
@@ -9437,7 +9484,7 @@ fn build_context(matches: &ArgMatches, paths: &ShellPaths) -> ProcessingContext 
 		stop_processing:      false,
 		saved_regex:          None,
 		input_action:         None,
-		hold:                 ByteSpace { content: Vec::new(), has_newline: true },
+		hold:                 ByteSpace { content: Vec::new(), terminated: true },
 		parsed_block_nesting: 0,
 		label_to_command_map: HashMap::new(),
 		range_commands:       Vec::new(),
@@ -9869,9 +9916,47 @@ mod tests {
 
 	#[test]
 	fn builtin_supports_null_records() {
-		let (code, capture) = crate::host::run_util::<Sed>(&["-z", "s/a/X/"], "a\0b\0", "/");
-		assert_eq!(code, 0);
-		assert_eq!(capture.stdout(), b"X\0b\0");
+		// Without NUL input splitting only the first record gets a prefix.
+		let dir = tempfile::tempdir().unwrap();
+		let input = "\0a\0b";
+		std::fs::write(dir.path().join("input"), input).unwrap();
+		for (args, stdin) in [
+			(&["-z", "s/^/>/"][..], input),
+			(&["-z", "s/^/>/", "input"][..], ""),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, dir.path());
+			assert_eq!(code, 0, "{}", capture.err());
+			assert_eq!(capture.stdout(), b">\0>a\0>b", "{args:?}");
+		}
+
+		// Newlines inside the one unterminated record are available to the script.
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&["-z", r"s/\n/,/g"], "1\n2\n3\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.stdout(), b"1,2,3,");
+	}
+
+	#[test]
+	fn builtin_null_record_commands_use_the_record_separator() {
+		// Embedded newlines must not split pattern spaces, and generated output
+		// must not append a newline (except for the raw text of `a`).
+		for (script, expected) in [
+			("N;s/^/>/", ">a\nA\0b\0tail"),
+			("N;P;D", "a\nA\0b\0tail"),
+			("=", concat!("1\0a\nA\0", "2\0b\0", "3\0tail")),
+			("l", "a\\nA$\0a\nA\0b$\0b\0tail$\0tail"),
+			("N;l", "a\\nA\\000b$\0a\nA\0b\0tail"),
+			("$s/^/last:/", "a\nA\0b\0last:tail"),
+			("G", "a\nA\0\0b\0\0tail\0\0"),
+			("h;G", "a\nA\0a\nA\0b\0b\0tail\0tail"),
+			("i before", "before\0a\nA\0before\0b\0before\0tail"),
+			("a after", "a\nA\0after\nb\0after\ntail\0after\n"),
+			("c changed", "changed\0changed\0changed\0"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&["-z", script], "a\nA\0b\0tail", "/");
+			assert_eq!(code, 0, "{script}: {}", capture.err());
+			assert_eq!(capture.stdout(), expected.as_bytes(), "{script}");
+		}
 	}
 
 	#[test]

@@ -10,7 +10,7 @@
 use std::{
 	ffi::{OsStr, OsString},
 	fmt,
-	io::{self, Write},
+	io::{self, SeekFrom, Write},
 	path::{Path, PathBuf},
 	sync::{
 		Arc,
@@ -23,9 +23,7 @@ use globset::{Glob, GlobMatcher};
 use grep_matcher::{LineTerminator, Matcher};
 use omp_xfs::grep::pcre::RegexMatcherBuilder as PcreMatcherBuilder;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{
-	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
-};
+use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch};
 use omp_xfs::{
 	FileType,
 	exec,
@@ -34,7 +32,7 @@ use omp_xfs::{
 	walk,
 };
 use crate::bre;
-use crate::host::{AsyncUtility, Host, StdoutFile, strip_errno};
+use crate::host::{AsyncUtility, Host, StdoutFile, StreamWriter, strip_errno};
 use crate::root_guard;
 use crate::stdio;
 
@@ -375,6 +373,7 @@ struct GrepArgs {
 	line_buffered: bool,
 
 	/// Use binary I/O where the platform distinguishes it.
+	#[allow(dead_code, reason = "the host always reads raw bytes")]
 	#[arg(short = 'U', long = "binary")]
 	binary_io: bool,
 
@@ -480,6 +479,7 @@ struct Options {
 	files_with_matches:  bool,
 	files_without_match: bool,
 	only_matching:       bool,
+	max_count:           Option<u64>,
 	before:              usize,
 	after:               usize,
 	no_messages:         bool,
@@ -675,9 +675,7 @@ fn resolve_follow_links(cli: &GrepArgs, matches: &ArgMatches) -> bool {
 }
 
 fn resolve_binary_files(cli: &GrepArgs, matches: &ArgMatches) -> BinaryFiles {
-	// Preserve the builtin's historical byte-transparent default. Explicit
-	// GNU/BSD binary controls opt into detection.
-	let mut selected = (0, BinaryFiles::Text);
+	let mut selected = (0, BinaryFiles::Binary);
 	choose_latest(&mut selected, last_index(matches, "text"), BinaryFiles::Text);
 	choose_latest(
 		&mut selected,
@@ -687,7 +685,6 @@ fn resolve_binary_files(cli: &GrepArgs, matches: &ArgMatches) -> BinaryFiles {
 	if let Some(mode) = cli.binary_files {
 		choose_latest(&mut selected, last_index(matches, "binary_files"), mode);
 	}
-	choose_latest(&mut selected, last_index(matches, "binary_io"), BinaryFiles::Binary);
 	selected.1
 }
 
@@ -855,18 +852,80 @@ fn build_matcher(
 		.map_err(|error| engine_error_message(&error))
 }
 
+/// The selected records and any binary-match notice for one input.
+#[derive(Default)]
+struct SearchResult {
+	count:        u64,
+	last_end:     Option<u64>,
+	binary_match: bool,
+}
+
+impl SearchResult {
+	fn report_binary(&self, err: &mut impl Write, display: &[u8]) -> io::Result<()> {
+		if self.binary_match {
+			err.write_all(b"grep: ")?;
+			err.write_all(display)?;
+			err.write_all(b": binary file matches\n")?;
+		}
+		Ok(())
+	}
+}
+
+/// A chunk's output with explicit record boundaries, including `-Z` names.
+#[derive(Default)]
+struct Records {
+	bytes: Vec<u8>,
+	ends: Vec<usize>,
+}
+
+/// The synchronous sink marks boundaries for the asynchronous output drain.
+struct RecordWriter<'a>(&'a parking_lot::Mutex<Records>);
+
+impl Write for RecordWriter<'_> {
+	fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+		self.0.lock().bytes.extend_from_slice(bytes);
+		Ok(bytes.len())
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		let mut records = self.0.lock();
+		let end = records.bytes.len();
+		records.ends.push(end);
+		Ok(())
+	}
+}
+
+/// Delivers each complete line to the real destination before the next read.
+struct RecordDelivery<'a, W> {
+	pending: &'a parking_lot::Mutex<Records>,
+	out: &'a mut W,
+}
+
+impl<W: Write> RecordDelivery<'_, W> {
+	async fn drain(&mut self, host: &Host) -> io::Result<()> {
+		let mut records = std::mem::take(&mut *self.pending.lock());
+		let mut start = 0;
+		for end in records.ends.drain(..) {
+			self.out.write_all(&records.bytes[start..end])?;
+			self.out.flush()?;
+			host.sync_output().await?;
+			start = end;
+		}
+		records.bytes.clear();
+		*self.pending.lock() = records;
+		Ok(())
+	}
+}
+
 /// A search sink that renders GNU-compatible records and tracks selection.
 struct GrepSink<'a, M: Matcher, W: Write> {
-	out:         &'a mut W,
-	matcher:     &'a M,
-	display:     &'a [u8],
-	opts:        &'a Options,
-	match_count: u64,
-	any_match:   bool,
-	binary:      bool,
-	/// Byte offset just past the last match printed, for
-	/// [`Options::zero_context_groups`].
-	last_end:    Option<u64>,
+	out:        &'a mut W,
+	matcher:    &'a M,
+	display:    &'a [u8],
+	opts:       &'a Options,
+	binary:     &'a AtomicBool,
+	result:     SearchResult,
+	after_left: usize,
 }
 
 impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
@@ -933,9 +992,32 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 	}
 
 	fn binary_summary(&self) -> bool {
-		self.binary
-			&& self.opts.binary_files == BinaryFiles::Binary
+		self.opts.binary_files == BinaryFiles::Binary
+			&& self.binary.load(Ordering::Relaxed)
 			&& !self.normal_output_is_suppressed()
+	}
+
+	/// The user-supplied limit counts selected records, not context records.
+	fn limit_reached(&self) -> bool {
+		self.opts.max_count == Some(self.result.count)
+	}
+
+	/// Writes context and stops once the trailing context at the match limit is complete.
+	fn print_context(&mut self, bytes: &[u8], line_number: Option<u64>, offset: u64) -> io::Result<bool> {
+		// The searcher can hand over one more record after a sink asked it to
+		// stop (inverted matches at the limit); it is past the context.
+		if self.limit_reached() && self.after_left == 0 {
+			return Ok(false);
+		}
+		if !self.normal_output_is_suppressed() && !self.opts.only_matching && !self.binary_summary() {
+			self.write_prefix(line_number, offset, b'-')?;
+			self.write_record(bytes)?;
+		}
+		if !self.limit_reached() {
+			return Ok(true);
+		}
+		self.after_left -= 1;
+		Ok(self.after_left != 0)
 	}
 
 	fn write_group_separator(&mut self) -> io::Result<()> {
@@ -952,63 +1034,48 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 	type Error = io::Error;
 
 	fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
-		if self.binary && self.opts.binary_files == BinaryFiles::WithoutMatch {
+		if self.opts.binary_files == BinaryFiles::WithoutMatch && self.binary.load(Ordering::Relaxed) {
 			return Ok(false);
 		}
-		self.any_match = true;
-		self.match_count += 1;
-		if self.opts.quiet
-			|| self.opts.files_with_matches
-			|| self.opts.files_without_match
-			|| self.binary_summary()
-		{
+		let start = mat.absolute_byte_offset();
+		if self.limit_reached() {
+			return self.print_context(mat.bytes(), mat.line_number(), start);
+		}
+		let previous = self.result.last_end.replace(start + mat.bytes().len() as u64);
+		self.result.count += 1;
+		if self.binary_summary() {
+			self.result.binary_match = true;
+			return Ok(false);
+		}
+		if self.opts.quiet || self.opts.files_with_matches || self.opts.files_without_match {
 			return Ok(false);
 		}
 		if self.opts.count {
-			return Ok(true);
+			return Ok(!self.limit_reached());
 		}
-		if self.opts.zero_context_groups {
-			let start = mat.absolute_byte_offset();
-			if self.last_end.is_some_and(|end| end != start) {
-				self.write_group_separator()?;
-			}
-			self.last_end = Some(start + mat.bytes().len() as u64);
+		if self.opts.zero_context_groups && previous.is_some_and(|end| end != start) {
+			self.write_group_separator()?;
 		}
 		if self.opts.only_matching {
-			self.print_only_matching(mat.bytes(), mat.line_number(), mat.absolute_byte_offset())?;
+			self.print_only_matching(mat.bytes(), mat.line_number(), start)?;
 		} else {
-			self.write_prefix(mat.line_number(), mat.absolute_byte_offset(), b':')?;
+			self.write_prefix(mat.line_number(), start, b':')?;
 			self.write_record(mat.bytes())?;
 		}
-		Ok(true)
+		Ok(!self.limit_reached() || self.after_left != 0)
 	}
 
 	fn context(&mut self, _searcher: &Searcher, ctx: &SinkContext<'_>) -> Result<bool, io::Error> {
-		if self.normal_output_is_suppressed() || self.opts.only_matching || self.binary_summary() {
-			return Ok(true);
-		}
-		self.write_prefix(ctx.line_number(), ctx.absolute_byte_offset(), b'-')?;
-		self.write_record(ctx.bytes())?;
-		Ok(true)
+		self.print_context(ctx.bytes(), ctx.line_number(), ctx.absolute_byte_offset())
 	}
 
 	fn context_break(&mut self, _searcher: &Searcher) -> Result<bool, io::Error> {
-		if !self.normal_output_is_suppressed() && !self.opts.only_matching && !self.binary_summary() {
+		if !self.normal_output_is_suppressed()
+			&& !self.opts.only_matching
+			&& !self.binary_summary()
+			&& !self.limit_reached()
+		{
 			self.write_group_separator()?;
-		}
-		Ok(true)
-	}
-
-	fn binary_data(
-		&mut self,
-		_searcher: &Searcher,
-		_binary_byte_offset: u64,
-	) -> Result<bool, io::Error> {
-		self.binary = true;
-		if self.opts.binary_files == BinaryFiles::WithoutMatch {
-			self.any_match = false;
-			self.match_count = 0;
-			return Ok(false);
 		}
 		Ok(true)
 	}
@@ -1017,26 +1084,22 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 		if self.opts.quiet {
 			return Ok(());
 		}
-		if self.binary_summary() && self.any_match {
-			self.out.write_all(b"Binary file ")?;
-			self.out.write_all(self.display)?;
-			self.out.write_all(b" matches")?;
-			self.out.write_all(&[self.opts.record.terminator])?;
-			return self.flush_record();
+		if self.opts.binary_files == BinaryFiles::WithoutMatch && self.binary.load(Ordering::Relaxed) {
+			self.result = SearchResult::default();
 		}
 		if self.opts.files_with_matches {
-			if self.any_match {
+			if self.result.count != 0 {
 				self.write_path_record()?;
 			}
 		} else if self.opts.files_without_match {
-			if !self.any_match {
+			if self.result.count == 0 {
 				self.write_path_record()?;
 			}
 		} else if self.opts.count {
 			self.opts.record.write_count_record(
 				self.out,
 				self.opts.prefix_filename.then_some(self.display),
-				self.match_count,
+				self.result.count,
 			)?;
 			self.flush_record()?;
 		}
@@ -1094,6 +1157,20 @@ struct FileSearch {
 	matched:   io::Result<bool>,
 }
 
+impl FileSearch {
+	/// Delivers a completed file's buffered output and tracks its errors.
+	fn publish(self, host: &mut Host, out: &mut StreamWriter, had_error: &mut bool) -> io::Result<bool> {
+		if !self.out.is_empty() {
+			out.write_all(&self.out)?;
+		}
+		if !self.err.is_empty() {
+			let _ = host.stderr.write_all(&self.err);
+		}
+		*had_error |= self.had_error;
+		self.matched
+	}
+}
+
 /// What one search worker reuses across files: its searcher, read buffer, output buffer, and the opener of a native tree's files.
 struct Worker {
 	searcher: Searcher,
@@ -1134,6 +1211,133 @@ impl Input {
 			},
 			Self::Source(source) => source.read(buf).await,
 		}
+	}
+}
+
+/// A scan's input, with a host only when output can be delivered immediately.
+enum ScanInput<'a> {
+	Stdin(&'a mut Host),
+	File {
+		input: &'a mut Input,
+		halt: &'a Halt,
+		host: Option<&'a mut Host>,
+	},
+}
+
+impl ScanInput<'_> {
+	async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		match self {
+			Self::Stdin(host) => host.read_stdin(buf).await,
+			Self::File { input, halt, .. } => {
+				if halt.raised() {
+					return Err(omp_vfs::cancelled());
+				}
+				input.read(buf).await
+			},
+		}
+	}
+
+	fn host(&self) -> Option<&Host> {
+		match self {
+			Self::Stdin(host) => Some(host),
+			Self::File { host, .. } => host.as_deref(),
+		}
+	}
+}
+
+/// Searches raw reads and drains any live output before awaiting more input.
+async fn scan<M: Matcher, W: Write>(
+	input: &mut ScanInput<'_>,
+	searcher: &mut Searcher,
+	matcher: &M,
+	opts: &Options,
+	display: &[u8],
+	buf: &mut [u8],
+	out: &mut W,
+) -> io::Result<SearchResult> {
+	let binary = AtomicBool::new(false);
+	if opts.line_buffered {
+		let pending = parking_lot::Mutex::new(Records::default());
+		let mut writer = RecordWriter(&pending);
+		let sink = GrepSink {
+			out: &mut writer,
+			matcher,
+			display,
+			opts,
+			binary: &binary,
+			result: SearchResult::default(),
+			after_left: opts.after,
+		};
+		scan_into(input, searcher, sink, buf, Some(RecordDelivery { pending: &pending, out })).await
+	} else {
+		let sink = GrepSink {
+			out,
+			matcher,
+			display,
+			opts,
+			binary: &binary,
+			result: SearchResult::default(),
+			after_left: opts.after,
+		};
+		scan_into::<_, _, W>(input, searcher, sink, buf, None).await
+	}
+}
+
+/// Classifies each raw buffer before matching even its first complete line.
+async fn scan_into<M: Matcher, W: Write, D: Write>(
+	input: &mut ScanInput<'_>,
+	searcher: &mut Searcher,
+	mut sink: GrepSink<'_, M, W>,
+	buf: &mut [u8],
+	mut delivery: Option<RecordDelivery<'_, D>>,
+) -> io::Result<SearchResult> {
+	let terminator = bound_terminator(searcher, sink.matcher);
+	let binary = sink.binary;
+	let mode = sink.opts.binary_files;
+	let detect = mode != BinaryFiles::Text && sink.opts.record.terminator != b'\0';
+	let mut search = searcher.search_push(sink.matcher, &mut sink);
+	let mut run = 0;
+	loop {
+		let read = input.read(buf).await?;
+		if read == 0 {
+			break;
+		}
+		let chunk = &mut buf[..read];
+		if detect && let Some(first) = memchr::memchr(0, chunk) {
+			binary.store(true, Ordering::Relaxed);
+			if mode == BinaryFiles::WithoutMatch {
+				break;
+			}
+			// In binary mode GNU searches each NUL-separated piece as a line.
+			for byte in &mut chunk[first..] {
+				if *byte == 0 {
+					*byte = b'\n';
+				}
+			}
+		}
+		check_run(terminator, &mut run, chunk)?;
+		let more = search.push(chunk)?;
+		deliver_scan_output(input.host(), delivery.as_mut()).await?;
+		if !more {
+			break;
+		}
+	}
+	search.finish()?;
+	deliver_scan_output(input.host(), delivery.as_mut()).await?;
+	Ok(sink.result)
+}
+
+/// Drains queued records individually, or delivers a plain stdout batch.
+async fn deliver_scan_output<W: Write>(
+	host: Option<&Host>,
+	delivery: Option<&mut RecordDelivery<'_, W>>,
+) -> io::Result<()> {
+	let Some(host) = host else {
+		return Ok(());
+	};
+	match delivery {
+		Some(delivery) => delivery.drain(host).await,
+		None => host.flush_output().await,
 	}
 }
 
@@ -1189,11 +1393,14 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 	}
 
 	/// Classifies one file's search result; a broken pipe stops the search, any other error is reported per file.
-	fn finish(&self, display_path: &Path, searched: io::Result<bool>, out: Vec<u8>) -> FileSearch {
+	fn finish(&self, display_path: &Path, searched: io::Result<SearchResult>, out: Vec<u8>) -> FileSearch {
 		let mut err = Vec::new();
 		let mut had_error = false;
 		let matched = match searched {
-			Ok(matched) => Ok(matched),
+			Ok(result) => {
+				let _ = result.report_binary(&mut err, display_path.as_os_str().as_encoded_bytes());
+				Ok(result.count != 0)
+			},
 			// Propagate BrokenPipe to stop the search; the host maps its status.
 			Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
 			Err(error) => {
@@ -1205,44 +1412,6 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 			},
 		};
 		FileSearch { out, err, had_error, matched }
-	}
-
-	/// Pushes `input` through the worker's searcher into its output buffer, failing with the cancellation error once the halt is raised.
-	async fn push_input(
-		&self,
-		input: &mut Input,
-		display: &[u8],
-		worker: &mut Worker,
-	) -> io::Result<bool> {
-		let Worker { searcher, buf, out, .. } = worker;
-		let terminator = bound_terminator(searcher, &self.matcher);
-		let mut sink = GrepSink {
-			out,
-			matcher: &self.matcher,
-			display,
-			opts: &self.opts,
-			match_count: 0,
-			any_match: false,
-			binary: false,
-			last_end: None,
-		};
-		let mut search = searcher.search_push(&self.matcher, &mut sink);
-		let mut run = 0;
-		loop {
-			if self.halt.raised() {
-				return Err(omp_vfs::cancelled());
-			}
-			let read = input.read(buf).await?;
-			if read == 0 {
-				break;
-			}
-			check_run(terminator, &mut run, &buf[..read])?;
-			if !search.push(&buf[..read])? {
-				break;
-			}
-		}
-		search.finish()?;
-		Ok(sink.any_match)
 	}
 
 	/// Opens `path`: a listed file of a native tree through the worker's
@@ -1260,7 +1429,12 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 
 	/// Searches the `index`th listed file, its paths built in the worker's
 	/// buffers.
-	async fn search_listed(&self, worker: &mut Worker, index: usize) -> FileSearch {
+	async fn search_listed(
+		&self,
+		worker: &mut Worker,
+		index: usize,
+		stream: Option<(&mut Host, &mut StreamWriter)>,
+	) -> FileSearch {
 		let listed = self.listed.as_ref().expect("a directory search lists its files");
 		let rel = listed.files.get(index).path;
 		let (mut path, mut display) = (std::mem::take(&mut worker.path), std::mem::take(&mut worker.display));
@@ -1270,14 +1444,19 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 		} else {
 			display = display_path_for_operand(&self.operand, &self.resolved, &path);
 		}
-		let found = self.search_at(worker, &path, &display).await;
+		let found = self.search_at(worker, &path, &display, stream).await;
 		(worker.path, worker.display) = (path, display);
 		found
 	}
 
-	async fn search(&self, worker: &mut Worker, path: &Path) -> FileSearch {
+	async fn search(
+		&self,
+		worker: &mut Worker,
+		path: &Path,
+		stream: Option<(&mut Host, &mut StreamWriter)>,
+	) -> FileSearch {
 		let display_path = display_path_for_operand(&self.operand, &self.resolved, path);
-		self.search_at(worker, path, &display_path).await
+		self.search_at(worker, path, &display_path, stream).await
 	}
 
 	/// The search of a file that is also the file stdout lands in, refused
@@ -1310,15 +1489,30 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 		}
 	}
 
-	async fn search_at(&self, worker: &mut Worker, path: &Path, display_path: &Path) -> FileSearch {
+	async fn search_at(
+		&self,
+		worker: &mut Worker,
+		path: &Path,
+		display_path: &Path,
+		stream: Option<(&mut Host, &mut StreamWriter)>,
+	) -> FileSearch {
 		match self.open(worker, path).await {
 			Ok(mut input) => {
 				if self.opts.refuse_output_file && self.is_output_file(&input).await {
 					return self.refused(display_path);
 				}
-				let searched = self
-					.push_input(&mut input, display_path.as_os_str().as_encoded_bytes(), worker)
-					.await;
+				let display = display_path.as_os_str().as_encoded_bytes();
+				let Worker { searcher, buf, out, .. } = worker;
+				let searched = match stream {
+					Some((host, output)) => {
+						let mut input = ScanInput::File { input: &mut input, halt: &self.halt, host: Some(host) };
+						scan(&mut input, searcher, &self.matcher, &self.opts, display, buf, output).await
+					},
+					None => {
+						let mut input = ScanInput::File { input: &mut input, halt: &self.halt, host: None };
+						scan(&mut input, searcher, &self.matcher, &self.opts, display, buf, out).await
+					},
+				};
 				self.finish(display_path, searched, worker.take_out())
 			},
 			Err(error) => {
@@ -1335,7 +1529,7 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 /// Recursively searches a directory operand ([`exec::adaptive`]: inline, then on parallel workers), pruning
 /// excluded directories and writing each file's output in path order.
 #[allow(clippy::too_many_arguments)]
-async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>(
+async fn search_dir<M: Matcher + Clone + Send + Sync + 'static>(
 	host: &mut Host,
 	operand: &OsStr,
 	resolved: &Path,
@@ -1345,7 +1539,7 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 	rules: &PathRules,
 	follow_links: bool,
 	outer: &Arc<AtomicBool>,
-	out: &mut W,
+	out: &mut StreamWriter,
 	had_error: &mut bool,
 ) -> io::Result<bool> {
 	let vfs = host.vfs();
@@ -1383,7 +1577,7 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 		}
 	}
 	let count = files.len();
-	let workers = if opts.line_buffered { 1 } else { walk_opts.parallelism(&layer) };
+	let workers = walk_opts.parallelism(&layer);
 	let shared = Arc::new(DirSearch {
 		fs:       vfs.clone(),
 		listed:   Some(Listed { layer, files }),
@@ -1396,6 +1590,19 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 		stdout:   host.stdout_file(),
 	});
 	let mut any = false;
+	if opts.line_buffered {
+		let mut worker = shared.worker();
+		for index in 0..count {
+			let found = shared.search_listed(&mut worker, index, Some((host, out))).await;
+			any |= found.publish(host, out, had_error)?;
+			host.sync_output().await?;
+			if opts.quiet && any {
+				break;
+			}
+		}
+		return Ok(any);
+	}
+
 	let mut failed = None;
 	let mut pace = host.output_pace();
 	let mut results = exec::adaptive(0..count, workers, exec::INLINE_BUDGET, || shared.worker(), {
@@ -1403,26 +1610,20 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 		move |mut worker: Worker, index: usize| {
 			let shared = Arc::clone(&shared);
 			async move {
-				let found = shared.search_listed(&mut worker, index).await;
+				let found = shared.search_listed(&mut worker, index, None).await;
 				(worker, found)
 			}
 		}
 	});
 	while let Some(found) = results.next().await {
-		// Most files print nothing; their empty writes are skipped.
-		if !found.out.is_empty() {
-			let written = out
-				.write_all(&found.out)
-				.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
-			if let Err(error) = written {
+		match found.publish(host, out, had_error) {
+			Ok(matched) => any |= matched,
+			Err(error) => {
 				failed = Some(error);
 				break;
-			}
+			},
 		}
-		if !found.err.is_empty() {
-			let _ = host.stderr.write_all(&found.err);
-		}
-		let delivered = if opts.line_buffered || !results.next_ready() {
+		let delivered = if !results.next_ready() {
 			host.flush_output().await
 		} else {
 			host.pace_output(&mut pace).await
@@ -1430,14 +1631,6 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 		if let Err(error) = delivered {
 			failed = Some(error);
 			break;
-		}
-		*had_error |= found.had_error;
-		match found.matched {
-			Ok(matched) => any |= matched,
-			Err(error) => {
-				failed = Some(error);
-				break;
-			},
 		}
 		if opts.quiet && any {
 			break;
@@ -1643,22 +1836,14 @@ pub(crate) async fn read_pattern_file(fs: &omp_vfs::Fs, path: &Path) -> io::Resu
 	}
 }
 
-fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> SearcherBuilder {
-	let binary_detection = if cli.null_data || opts.binary_files == BinaryFiles::Text {
-		BinaryDetection::none()
-	} else if opts.binary_files == BinaryFiles::WithoutMatch {
-		BinaryDetection::quit(b'\0')
-	} else {
-		BinaryDetection::convert(b'\0')
-	};
+fn build_searcher(cli: &GrepArgs, opts: &Options) -> SearcherBuilder {
 	let mut builder = SearcherBuilder::new();
 	builder
 		.line_number(opts.line_number)
 		.before_context(opts.before)
 		.after_context(opts.after)
 		.invert_match(cli.invert)
-		.binary_detection(binary_detection)
-		.max_matches(max_count)
+		.bom_sniffing(false)
 		.heap_limit(Some(SEARCH_HEAP_LIMIT));
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
@@ -1666,46 +1851,35 @@ fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Sea
 	builder
 }
 
-/// Searches stdin chunk by chunk, flushing output after each chunk so matches
-/// are visible before end of input.
-async fn search_stdin<M: Matcher + Clone + Send + Sync + 'static>(
+/// Searches stdin and restores a seekable offset after a reached match limit.
+async fn search_stdin<M: Matcher>(
 	host: &mut Host,
 	matcher: &M,
 	builder: &SearcherBuilder,
-	display: Vec<u8>,
+	display: &[u8],
 	opts: &Options,
-	out: &mut impl Write,
-) -> io::Result<bool> {
-	let mut searcher = builder.build();
-	let terminator = bound_terminator(&searcher, matcher);
-	let mut sink = GrepSink {
-		out,
-		matcher,
-		display: &display,
-		opts,
-		match_count: 0,
-		any_match: false,
-		binary: false,
-		last_end: None,
-	};
-	let mut search = searcher.search_push(matcher, &mut sink);
+	out: &mut StreamWriter,
+) -> io::Result<SearchResult> {
+	let limit = opts.max_count.filter(|_| !opts.quiet && !opts.files_with_matches && !opts.files_without_match);
+	let start = limit.and_then(|_| host.stdin.file().seek(SeekFrom::Current(0)).ok());
 	let mut buf = vec![0u8; READ_CHUNK];
-	let mut run = 0;
-	loop {
-		let read = host.read_stdin(&mut buf).await?;
-		if read == 0 {
-			break;
-		}
-		check_run(terminator, &mut run, &buf[..read])?;
-		let more = search.push(&buf[..read])?;
-		host.flush_output().await?;
-		if !more {
-			break;
-		}
+	let result = scan(
+		&mut ScanInput::Stdin(host),
+		&mut builder.build(),
+		matcher,
+		opts,
+		display,
+		&mut buf,
+		out,
+	)
+	.await?;
+	// Trailing context is printed, but belongs to the next reader as well.
+	if limit == Some(result.count)
+		&& let (Some(start), Some(end)) = (start, result.last_end)
+	{
+		host.stdin.file().seek(SeekFrom::Start(start + end))?;
 	}
-	search.finish()?;
-	host.flush_output().await?;
-	Ok(sink.any_match)
+	Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1718,9 +1892,11 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 	follow_links: bool,
 	rules: &PathRules,
 	opts: &Options,
-	max_count: Option<u64>,
 ) -> i32 {
-	let builder = build_searcher(cli, opts, max_count);
+	if opts.max_count == Some(0) {
+		return 1;
+	}
+	let builder = build_searcher(cli, opts);
 	let fs = host.vfs();
 	let (_guard, outer) = HaltGuard::new();
 	let mut out = host.stdout_writer();
@@ -1751,8 +1927,11 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 				continue;
 			}
 			let display = input_name.as_encoded_bytes();
-			match search_stdin(host, matcher, &builder, display.to_vec(), opts, &mut out).await {
-				Ok(matched) => any_match |= matched,
+			match search_stdin(host, matcher, &builder, display, opts, &mut out).await {
+				Ok(result) => {
+					any_match |= result.count != 0;
+					let _ = result.report_binary(&mut host.stderr, display);
+				},
 				// Abort remaining work; the host maps the BrokenPipe status.
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
 					return crate::host::SIGPIPE_EXIT_CODE;
@@ -1820,32 +1999,26 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 					opts:     opts.clone(),
 					stdout:   host.stdout_file(),
 				};
-				// Its own task, so dropping this body (cancellation) raises the
-				// halt flag the search checks between reads.
-				let path = resolved.clone();
-				let found = match tokio::spawn(async move {
-					let mut worker = shared.worker();
-					shared.search(&mut worker, &path).await
-				})
-				.await
-				{
-					Ok(found) => found,
-					Err(join) => std::panic::resume_unwind(join.into_panic()),
+				let found = if opts.line_buffered {
+					shared.search(&mut shared.worker(), &resolved, Some((host, &mut out))).await
+				} else {
+					// Dropping this body raises the halt flag the search checks between reads.
+					match tokio::spawn(async move {
+						let mut worker = shared.worker();
+						shared.search(&mut worker, &resolved, None).await
+					})
+					.await
+					{
+						Ok(found) => found,
+						Err(join) => std::panic::resume_unwind(join.into_panic()),
+					}
 				};
-				let written = out
-					.write_all(&found.out)
-					.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
-				if written.is_err() {
-					return crate::host::SIGPIPE_EXIT_CODE;
-				}
-				let _ = host.stderr.write_all(&found.err);
-				if host.flush_output().await.is_err() {
-					return crate::host::SIGPIPE_EXIT_CODE;
-				}
-				had_error |= found.had_error;
-				match found.matched {
+				match found.publish(host, &mut out, &mut had_error) {
 					Ok(matched) => any_match |= matched,
 					Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
+				}
+				if host.flush_output().await.is_err() {
+					return crate::host::SIGPIPE_EXIT_CODE;
 				}
 			},
 			Err(error) => {
@@ -1975,6 +2148,7 @@ impl AsyncUtility for Grep {
 		files_with_matches,
 		files_without_match,
 		only_matching: cli.only_matching,
+		max_count,
 		before,
 		after,
 		no_messages: cli.no_messages,
@@ -2004,7 +2178,6 @@ impl AsyncUtility for Grep {
 			follow_links,
 			&rules,
 			&opts,
-			max_count,
 		)
 		.await,
 		Engine::Pcre(matcher) => execute_search(
@@ -2016,7 +2189,6 @@ impl AsyncUtility for Grep {
 			follow_links,
 			&rules,
 			&opts,
-			max_count,
 		)
 		.await,
 	}
@@ -2132,11 +2304,54 @@ mod tests {
 		assert_eq!(snapshot.lock().as_slice(), b"hit\n");
 	}
 
+	/// A NUL-bearing buffer emitted raw matches, including lines before its NUL.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn binary_detection_applies_to_the_whole_read() {
+		let input = "x\na\0b\n";
+		let notice = "grep: (standard input): binary file matches\n";
+		for (args, code, out, err) in [
+			(&["a"][..], 0, "", notice),
+			(&["-n", "x"], 0, "", notice),
+			(&["-o", "a"], 0, "", notice),
+			(&["-s", "a"], 0, "", notice),
+			(&["z"], 1, "", ""),
+			(&["-a", "a"], 0, "a\0b\n", ""),
+			(&["--text", "a"], 0, "a\0b\n", ""),
+			(&["--binary-files=without-match", "x"], 1, "", ""),
+			(&["-I", "a"], 1, "", ""),
+			(&["-c", "a"], 0, "1\n", ""),
+			(&["-cI", "a"], 1, "0\n", ""),
+			(&["-l", "a"], 0, "(standard input)\n", ""),
+			(&["-lI", "a"], 1, "", ""),
+			(&["-q", "a"], 0, "", ""),
+			(&["-qI", "a"], 1, "", ""),
+			(&["-oI", "a"], 1, "", ""),
+		] {
+			let actual = run(args, input).await;
+			assert_eq!((actual.0, actual.1.as_str(), actual.2.as_str()), (code, out, err), "{args:?}");
+		}
+	}
+
+	/// A binary match used to send data to stdout instead of naming the file on stderr.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn binary_file_reports_its_operand_on_stderr() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("data"), b"x\na\0b\n").unwrap();
+		let (code, capture) = run_async_util::<Grep>(&["-n", "x", "data"], "", tree.path()).await;
+		assert_eq!(code, 0);
+		assert!(capture.out().is_empty());
+		assert_eq!(capture.err(), "grep: data: binary file matches\n");
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn max_count_and_no_match_statuses_are_gnu_compatible() {
 		let (code, out, err) = run(&["-m1", "hit"], "hit\nmiss\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
+		// Other matching lines within trailing context use the context prefix
+		// and don't count toward the limit.
+		let (code, out, err) = run(&["-n", "-m1", "-A2", "hit"], "hit\nhit\nctx\nhit\n").await;
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "1:hit\n2-hit\n3-ctx\n", ""));
 		let (code, out, _) = run(&["absent"], "hit\n").await;
 		assert_eq!(code, 1);
 		assert!(out.is_empty());
@@ -2196,7 +2411,7 @@ mod tests {
 	async fn line_longer_than_the_limit_is_a_file_error_not_unbounded_memory() {
 		let tree = tree_with_sparse_file();
 
-		let (code, capture) = run_async_util::<Grep>(&["-rl", "needle", "."], "", tree.path()).await;
+		let (code, capture) = run_async_util::<Grep>(&["-arl", "needle", "."], "", tree.path()).await;
 
 		assert_eq!(code, 2, "an unreadable file makes the status 2, as in GNU grep");
 		assert_eq!(capture.out(), "./small\n");
