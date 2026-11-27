@@ -115,6 +115,22 @@ describe("AuthStorage config-override apiKey", () => {
 		});
 	});
 
+	test("usage probes a provider whose only key is its models.yml config override", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const probedKeys: (string | undefined)[] = [];
+		authStorage.usage.setProvider("configured-usage", {
+			id: "configured-usage",
+			async fetchUsage(params) {
+				probedKeys.push(params.credential.apiKey);
+				return null;
+			},
+		});
+		authStorage.keys.setConfig("configured-usage", "sk-configured");
+
+		await authStorage.usage.reports({ provider: "configured-usage" });
+		expect(probedKeys).toEqual(["sk-configured"]);
+	});
+
 	test("describeCredentialSource reports config override", async () => {
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
 			if (!authStorage) throw new Error("test setup failed");

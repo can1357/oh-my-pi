@@ -14,6 +14,7 @@
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
 
 ### Fixed
+- Fixed `/usage` showing nothing for a provider whose only API key is its `models.yml` `apiKey` ([#16081](https://github.com/can1357/oh-my-pi/issues/16081), [#19943](https://github.com/can1357/oh-my-pi/pull/19943) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 - Fixed authentication-gateway requests so configured authorization headers are honored regardless of capitalization, with API-key fallback when the header is missing or empty.
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
