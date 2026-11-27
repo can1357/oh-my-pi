@@ -4,7 +4,8 @@
 
 ### Breaking Changes
 
-- `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
+- The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
+- Removed unused `parse*Args` and `print*Help` exports from the CLI configuration, grep, plugin, setup, shell, web-search, and update modules.
 
 ### Added
 
@@ -20,26 +21,51 @@
 - On Linux the tool guard also refuses heavy work started while the host is strained ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
 - User-level TTSR gate rules accept `command:`, a check run in your shell before each matching tool call; a nonzero exit refuses the call ([#20216](https://github.com/can1357/oh-my-pi/pull/20216) by [@Xytronix](https://github.com/Xytronix))
+- Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
+- Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
+- Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.
+- Updated `/fast` to switch Devin models to their fast lanes; use `tier.devin: priority` to start sessions in fast mode.
+- Improved glob tool output with clearer search patterns and highlighted wildcards, character classes, and brace alternations.
+- Added `<mark>` highlighting and preserved rich text styling in terminal and Tern ask forms.
+- Added an opt-in GitLab integration (`gitlab.enabled`) for project, file, issue, merge request, discussion, search, worktree, and CI workflows, along with expanded `mr://` resources for merge request listings, cached overviews, and diff slices.
+- Included `tool_approvals` in `omp gc` session statistics and purge handling.
+- Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
+- Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
 
 ### Changed
 
-- Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
-- URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
-- URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
-- Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
-- Ask form table cells, field labels and option rows keep their `<strong>`, `<em>`, `<code>` and `<mark>` styling in the terminal instead of showing plain text ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-
-### Changed
-
-- `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
-- When `bash.patterns` allow rules can skip an approval prompt, the bash tool's description tells the agent which shell syntax (unquoted operators, `$`/backtick expansions) disqualifies them ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
+- Redesigned the `/live` call panel in Tern: your voice as a moving wave in the call's color, the transcript as a caption, and the call's status beside Mute and End call.
+- Redesigned the composer's dictation control in Tern: while recording it shows a live wave of your voice and the time recorded beside a stop button.
+- Bash can now load approved `.envrc` files and opt-in `.env` files without requiring `direnv`, using the exact approved file contents.
+- URL reading now preserves cookies across redirects, follows meta refreshes, falls back to the headless browser when plain fetching is blocked, and uses the native reader for X, YouTube, docs.rs, Discourse, and Mastodon while raw reads bypass site-specific rendering.
+- Expanded `bash.gitGuard` protection in shared checkouts to cover more history-changing Git operations, including rebase, merge, pull, cherry-pick, revert, amend, and non-dry-run clean operations.
+- Improved bash approval guidance by explaining which shell syntax prevents a `bash.patterns` rule from bypassing approval prompts.
+- Exiting or restarting no longer flashes a "Closing session…" toast; a status appears only when closing takes longer than 3 seconds.
+- Local dictation now defaults to Fluid Speech Pro (`local/fluid-speech-pro`), a further-trained Parakeet TDT 0.6B v3 that stays accurate with noise or music in the room. `local/parakeet-tdt-0.6b-v3` roles and fallback chains migrate to it automatically.
+- Live voice mode now uses Codex's `gpt-live-1.1-codex` realtime model.
+- Updated the local speech runtimes to sherpa-onnx 2.0.3 and Transformers.js 4.3.2; they reinstall on first use.
+- Shortened and bracketed bash's notices, e.g. `[next call: cwd → …, set -e off]`, `[timeout clamped: 7200s → 3600s]`, `[backgrounded as bg_3, killed at 300s total; …]`, `[took 1.23s]`, `[exit code 3]`, `[timed out after 30s]`, `[cancelled]`; eval's notices follow suit, e.g. `[Python kernel restarted; earlier state gone]`, `[timed out after 30s; kernel interrupted, state kept]`.
+- `cfg://` writes to map settings such as `modelRoles` now change only the entries they name (`null` removes one), so approval prompts and transcripts show just those entries instead of the whole map, and saving one entry keeps the others in your config.
 
 ### Fixed
 
+- A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"
+- Browser helper calls (`tab.goto`, `tab.click`, `tab.evaluate`, etc.) and tab reuse on Tern, WebKit, and cmux tabs no longer queue behind another tab's long-running `tab.run()`, and queued `tab.run()` timeouts now name the tab and agent holding the queue
+- The resume picker's **All projects** scope shows each session's folder in rows and the preview, and search matches folder paths there ([#20746](https://github.com/can1357/oh-my-pi/issues/20746))
+- The completion popup keeps the selected entry visible when descriptions wrap and hides its scrollbar when all entries fit ([#20731](https://github.com/can1357/oh-my-pi/issues/20731))
+- Turning an extension off in `/extensions` hides its editor widgets; turning it back on restores them ([#20725](https://github.com/can1357/oh-my-pi/issues/20725)).
+- On Windows, closing the terminal that first started the shared omp daemon no longer kills the daemon and the services of other sessions, as long as the terminal's job object allows breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
+- `edit` on `ssh://` files no longer contacts the host before the call is approved, and refuses to overwrite a file that changed on the host after the edit fetched it. Writable RPC host URIs get the same check as a read just before the write, so a change landing between that read and the write is not caught ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
+- `edit` refuses `ssh://` symbolic links instead of replacing them with a regular file, and refuses creating, deleting or moving `ssh://` files before its preview ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
+- `read` and `edit` give `ssh://host/~/x` and its absolute spelling one tag, and `read` shows `ssh://` notebooks as cells like local ones ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - A todo update no longer hides the rest of a long turn: tool output after it stays in terminal scrollback instead of vanishing behind a one-row todo line and a clipped empty card frame ([#20705](https://github.com/can1357/oh-my-pi/pull/20705) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `/tree` opens on long sessions instead of failing with "Maximum call stack size exceeded" ([#20702](https://github.com/can1357/oh-my-pi/pull/20702) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `/copy` and `/rewind` open quickly on long sessions with few prompts: they draw the turns within the last 600 entries instead of reaching back to the prompt before them, often the whole session; `a` or a rewind filter query loads the rest ([#20703](https://github.com/can1357/oh-my-pi/pull/20703) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- The rewind, copy and tree pickers show "Loading the session history…" in the composer's hint while a long session's history draws, instead of seeming to ignore `/rewind`, `/copy`, `/tree` or Esc Esc until they appear ([#20704](https://github.com/can1357/oh-my-pi/pull/20704) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Pasting text that ends in an `@name` no longer opens the file completion list, so the next Enter sends the message instead of replacing the name with a file ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
 - `lsp` tool calls with `new_name: null` or `line: null` no longer crash the TUI while rendering ([#20663](https://github.com/can1357/oh-my-pi/issues/20663)).
+- IRC message cards draw the quoted message's rail and the recipient branches as one continuous line instead of a rail two cells right of the branches, and cancelled-job branches on `proc://` cards sit two cells in to match ([#20715](https://github.com/can1357/oh-my-pi/pull/20715) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Rebuilding the transcript now removes replaced blocks in one update instead of updating the view for each block ([#20658](https://github.com/can1357/oh-my-pi/pull/20658) by [@H4vC](https://github.com/H4vC))
 - Output after a running background task remains accessible in terminal scrollback when omp rebuilds the transcript. ([#20656](https://github.com/can1357/oh-my-pi/pull/20656) by [@loishi](https://github.com/loishi))
 - `/plugins` (and `/plugins list`) shows installed plugins in an "Installed Plugins" report with one plugin per line, like `/mcp list`, instead of a status line that ran them together ([#20653](https://github.com/can1357/oh-my-pi/issues/20653)).
@@ -83,6 +109,20 @@
 ### Removed
 
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+- Fixed an empty toast with only a checkmark appearing in Tern each time dictation finished transcribing.
+- Fixed `bash` running its command approval analysis in yolo mode without `bash.patterns` rules, which failed every command when the native addon was out of date.
+- Fixed garbled live dictation (stray words like "Yeah. Oh. Hey.") with quiet microphones or background music: recordings are now split at pauses by the Silero voice activity detector instead of a loudness threshold that chopped speech into sub-second pieces. A recording with no detected speech, such as a song, is transcribed in one pass when recording stops.
+- Fixed terminal completion, focus, scrolling, and keyboard handling across prompts, ask forms, plugin and agent views, debugger and plan review screens, session management, and external editors.
+- Fixed transcript rebuilding so compaction, shaking, display changes, forks, and worktree operations remain responsive while preserving terminal scrollback and background-task status.
+- Fixed rendering of images and rich content in the terminal, including image sizing, edge placement, WebP and GIF embeds, annotated pasted images, Markdown styling, and syntax-highlighted paths.
+- Fixed crashes and rendering errors for LSP calls with null fields and for resumed or rewound sessions containing cancelled task results.
+- Fixed session and service lifecycle issues, including restarting after a deleted working directory, cleaning up descendant processes, reloading advisor rules, and restoring the correct session state after resume.
+- Fixed MCP connectivity for HTTP servers that reject discovery with HTTP 415, and restored OpenCode Go quota windows in `/usage`.
+- Fixed bash behavior for tab completion, read-only Perl commands, complex approval patterns, and benign command flags; long wildcard rules no longer freeze sessions.
+- Fixed model reference handling in `/prewalk`, `/switch`, and related commands when using provider/model/level completion.
+- Fixed Gemini planning behavior so long tool-free reasoning is not repeatedly interrupted.
+- Fixed ACP and RPC `/mcp` commands to honor project-server precedence, enable/disable overrides, and the session working directory.
+- Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
 
 ## [19.2.1] - 2026-11-25
 

@@ -903,7 +903,7 @@ describe("ModelHub", () => {
 		test("a model with no reasoning surface is assigned without a thinking strip", () => {
 			// inherit/off/auto are all no-ops for an STT/TTS/image model, so the
 			// assignment completes instead of parking on a dead strip (#13111).
-			const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+			const model = makeModel("local", "fluid-speech-pro", 128_000, undefined, "stt");
 			const { hub, onAssign } = createHub({ models: [model], scoped: true });
 
 			hub.handleInput("\n"); // Sidebar → model list.
@@ -919,9 +919,9 @@ describe("ModelHub", () => {
 			expect(footer).not.toContain("auto");
 		});
 		test("t and its hint stay inert on a role row whose model cannot reason", () => {
-			const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+			const model = makeModel("local", "fluid-speech-pro", 128_000, undefined, "stt");
 			const settings = Settings.isolated({
-				modelRoles: { dictation: "local/parakeet-tdt-0.6b-v3" },
+				modelRoles: { dictation: "local/fluid-speech-pro" },
 			});
 			const { hub } = createHub({ models: [model], scoped: true, settings });
 

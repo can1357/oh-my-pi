@@ -20,7 +20,25 @@ provider "deepinfra" {
 			limits
 			supports-tools #false
 		}
+		// Speech rows bill per input character, which ModelCost cannot represent.
+		// Each row serves DeepInfra's `openai-tts` schema with an optional voice
+		// (omp's tts tool omits it by default). Qwen3-TTS-VoiceDesign is not
+		// seeded: its voice is a required natural-language description.
 		model "hexgrad/Kokoro-82M" name="Kokoro-82M" api="openai-speech" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "Qwen/Qwen3-TTS" name="Qwen3-TTS" api="openai-speech" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "sesame/csm-1b" name="CSM-1B" api="openai-speech" {
 			reasoning #false
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -32,7 +50,7 @@ provider "deepinfra" {
 	models "black-forest-labs/FLUX-2-pro" {
 		kind "image"
 	}
-	models "hexgrad/Kokoro-82M" {
+	models "hexgrad/Kokoro-82M" "Qwen/Qwen3-TTS" "sesame/csm-1b" {
 		kind "tts"
 	}
 }
