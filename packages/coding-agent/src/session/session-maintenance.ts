@@ -5174,11 +5174,11 @@ export class SessionMaintenance {
 			firstKeptEntryId: result.firstKeptEntryId,
 			preserveData: result.preserveData,
 		});
-		// A text-only rebuild is safe only if the full source fits the recovery target.
+		// A text-only rebuild is safe only if the full source fits the recovery target; an unknown window cannot show that.
 		const ctxWindow = model.contextWindow;
 		if (
 			rebuilt.frames.length === 0 &&
-			tokensAfter > COMPACTION_RECOVERY_BAND * resolveThresholdTokens(ctxWindow, settings)
+			(!ctxWindow || tokensAfter > COMPACTION_RECOVERY_BAND * resolveThresholdTokens(ctxWindow, settings))
 		)
 			return undefined;
 
