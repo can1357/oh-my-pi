@@ -1269,6 +1269,10 @@ export interface BeforeSubagentSpawnEvent {
 	patterns: string[];
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	/** ID of the `task` tool call that dispatched this child; absent for eval and direct SDK spawns. */
+	parentToolCallId?: string;
+	/** Position of this child's item in that call's `tasks[]` (0 for the flat shape); set with `parentToolCallId`. */
+	itemIndex?: number;
 }
 
 export type {

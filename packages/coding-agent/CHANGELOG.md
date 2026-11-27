@@ -57,6 +57,7 @@
 - Copilot sessions show server-reported AI credits (`cr`) in the footer, status line, `/session`, `/usage` and the RPC `get_session_stats` result, with a `+` when some calls carried no billing frame; subagent credits (persisted ones included after a resume) roll up into the session the same way their dollars do ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 - Security scan results record the scan's reported AI credits as `metrics.aiuNano` and calls without a billing frame as `metrics.aiuUnknownCalls` ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 - Attempts a retry discards after an empty or failed reply are now journaled as their own usage entries, so their tokens, cost and AI credits count toward the session and `omp stats`; attempts that billed nothing and advisor retries are not ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
+- Added `parentToolCallId` and `itemIndex` to `before_subagent_spawn` events for children dispatched by the `task` tool, so extensions can tie a spawn to the exact `task` call and `tasks[]` item that requested it ([#19807](https://github.com/can1357/oh-my-pi/issues/19807))
 
 ### Changed
 

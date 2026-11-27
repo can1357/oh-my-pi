@@ -653,6 +653,9 @@ async function applySpawnHook(
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
+			...(request.parentToolCallId !== undefined
+				? { parentToolCallId: request.parentToolCallId, itemIndex: request.index ?? 0 }
+				: {}),
 		},
 		request.signal,
 	);
