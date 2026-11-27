@@ -456,6 +456,18 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"cache-write-rate": { key: "cacheWriteRate", set: "catalog", shape: "scalar" },
 	/**
+	 * The host's long-context tier bills cache reads and writes at the same
+	 * multiple of the row it derives from as its input price. GitHub Copilot
+	 * discovery applies it to the cache legs `billing.token_prices` omits on a
+	 * synthesized `-1m` row; a reported `cache_price` wins.
+	 */
+	"tier-cache-follows-input": {
+		key: "tierCacheFollowsInput",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	/**
 	 * How the model line bills a replayed signed thinking block as input:
 	 * `output` bills the reasoning its signature carries, at the size the turn
 	 * billed as output, and not the signature's bytes. Unassigned: estimated

@@ -11,11 +11,12 @@ import {
 	modelLimitsFor,
 } from "../compat/behavior";
 import { resolveAnthropicApiVersion } from "../compat/anthropic";
+import { AmbiguousOverlapError } from "../compat/cascade";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
-import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
+import { hasModelScopedEffortLadder, resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
 import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../compat/providers";
-import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
+import { AmbiguousIdentityError, billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 	fetchOpenAICompatibleModels,
@@ -6957,16 +6958,30 @@ function isCopilotSelectableModel(entry: OpenAICompatibleModelRecord): boolean {
 	return typeof type !== "string" || type === "chat";
 }
 
+/**
+ * Price a Copilot tier. `token_prices` reports no per-tier cache-write price and often no
+ * `cache_price`; an omitted leg is unknown, not free, so it carries over from the row the tier
+ * derives from: the bundled Copilot row, else the cross-provider bare-id reference for the same
+ * id, the same source the cache-write leg and unbilled rows always took their prices from.
+ * `scaleCacheWithInput` (the `tier-cache-follows-input` KDL axis) scales the
+ * carried legs by the tier's input-price ratio. A reported `cache_price` wins here, though the
+ * bundled-model merge still replaces a reported zero on a bundled id.
+ */
 function copilotTierCost(
 	tier: CopilotTokenPriceTier | undefined,
-): Omit<ModelSpec<Api>["cost"], "cacheWrite"> | undefined {
+	inherited: ModelSpec<Api>["cost"],
+	scaleCacheWithInput: boolean,
+): ModelSpec<Api>["cost"] | undefined {
 	if (tier?.inputPrice === undefined || tier.outputPrice === undefined) {
 		return undefined;
 	}
+	const input = tier.inputPrice / 100;
+	const ratio = scaleCacheWithInput && inherited.input > 0 ? input / inherited.input : 1;
 	return {
-		input: tier.inputPrice / 100,
+		input,
 		output: tier.outputPrice / 100,
-		cacheRead: (tier.cachePrice ?? 0) / 100,
+		cacheRead: tier.cachePrice !== undefined ? tier.cachePrice / 100 : inherited.cacheRead * ratio,
+		cacheWrite: inherited.cacheWrite * ratio,
 	};
 }
 
@@ -6993,18 +7008,43 @@ function createCopilotLongContextVariant(
 	if (base.contextWindow === null || variantWindow <= base.contextWindow) {
 		return undefined;
 	}
-	const longCost = copilotTierCost(longContext);
-	return {
+	const variant: ModelSpec<Api> = {
 		...base,
 		id: `${base.id}${COPILOT_LONG_CONTEXT_ID_SUFFIX}`,
 		requestModelId: base.id,
 		name: `${base.name}${COPILOT_LONG_CONTEXT_NAME_SUFFIX}`,
 		contextWindow: variantWindow,
-		// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
-		// the default boundary). cacheWrite is not reported per tier; inherit.
-		...(longCost && { cost: { ...longCost, cacheWrite: base.cost.cacheWrite } }),
 		contextPromotionTarget: undefined,
 	};
+	// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
+	// the default boundary); see copilotTierCost for the cache legs.
+	const scaleCache = copilotTierCacheFollowsInput(variant);
+	// The rule tree cannot build this row: synthesize none, so the base row
+	// promotes nowhere instead of naming a sibling discovery would then drop.
+	if (scaleCache === undefined) return undefined;
+	const longCost = copilotTierCost(longContext, base.cost, scaleCache);
+	if (longCost) {
+		variant.cost = longCost;
+	}
+	return variant;
+}
+
+/**
+ * The `tier-cache-follows-input` axis of a synthesized long-context row; undefined when this build's
+ * rule tree cannot place the row (an equal-rank rule overlap or identity tie), which would otherwise
+ * throw out of the `/models` mapper and reject every live row rather than this one.
+ */
+function copilotTierCacheFollowsInput(variant: ModelSpec<Api>): boolean | undefined {
+	try {
+		return resolveCatalogAxes(variant).tierCacheFollowsInput === true;
+	} catch (error) {
+		if (!(error instanceof AmbiguousOverlapError || error instanceof AmbiguousIdentityError)) throw error;
+		logger.warn("Copilot discovery skipped a long-context tier the rules cannot place", {
+			model: variant.id,
+			error: error.message,
+		});
+		return undefined;
+	}
 }
 
 export function githubCopilotModelManagerOptions(config?: GithubCopilotModelManagerConfig): ModelManagerOptions<Api> {
@@ -7194,10 +7234,9 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								delete base.thinking.effortRouting;
 							}
 						}
-						const defaultCost = copilotTierCost(tokenPrices.defaultTier);
+						const defaultCost = copilotTierCost(tokenPrices.defaultTier, base.cost, false);
 						if (defaultCost) {
-							// Cache writes are not reported per tier; retain the bundled provider rate.
-							base.cost = { ...defaultCost, cacheWrite: base.cost.cacheWrite };
+							base.cost = defaultCost;
 						}
 						const variant = createCopilotLongContextVariant(
 							base,
