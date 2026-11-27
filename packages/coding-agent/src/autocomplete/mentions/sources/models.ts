@@ -338,14 +338,9 @@ export class ModelsMentionSource implements MentionSource {
 				const browserItem = itemBySelector.get(selector);
 				if (browserItem && !roleMatchedSelectors.has(selector)) {
 					roleMatchedSelectors.add(selector);
-					const configuredEffort =
-						assignment.thinkingLevel !== AUTO_THINKING &&
-						getSupportedEfforts(browserItem.model).includes(assignment.thinkingLevel as Effort)
-							? (assignment.thinkingLevel as Effort)
-							: undefined;
-					roleItems.push(
-						buildModelItem(browserItem, MATCH_TIER.Exact, scope.roles, this.#host.source, configuredEffort),
-					);
+					// The role names the model only: like every default mention it inherits thinking,
+					// so `@opus` with `opus: claude-opus-5-5:high` inserts the bare model.
+					roleItems.push(buildModelItem(browserItem, MATCH_TIER.Exact, scope.roles, this.#host.source));
 				}
 			}
 		}
