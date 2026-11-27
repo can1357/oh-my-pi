@@ -23,6 +23,8 @@
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
 - The `logout` RPC response carries `signOutError` when the provider could not confirm revoking the login; the login is removed regardless
+- Copilot sessions show server-reported AI credits in the footer, status line, `/session` and `/usage` quota dashboard as a separate session-spend row with a `+` when some turns carried no billing frame; detached and nested subagent spend, including side requests, rolls up into the parent session, background jobs add their AI credits only (their tokens and dollars are not added to session totals) whether their result arrived as a follow-up or was taken over by `wait`, a cancel or an eval cell's `wait()`, and Copilot turns do not add a premium-request count ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
+- Security scan results record the session's reported AI credits as `metrics.aiuNano` and missing frames as `metrics.aiuUnreportedTurns`, next to independent `premiumRequests` ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Changed
 
@@ -47,6 +49,7 @@
 - Fixed a handoff model that never stops streaming holding automatic compaction indefinitely: handoff output is now capped like a summary, and the new `compaction.handoffTimeoutSeconds` setting (off by default) fails a handoff that runs too long so automatic compaction moves on to the next method and `/handoff` reports the timeout ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
 - Fixed the tool-call loop guard never stopping a model that keeps calling nonexistent tools (`wri`, `ed`, `ba`) with varying names or arguments; it now redirects after `model.toolCallLoopGuard.threshold` such turns in a row, while a single typo followed by a valid call is unaffected ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
 - Fixed eval `sh()` running commands the bash interceptor (`bashInterceptor.patterns`) redirects to dedicated tools; it now fails with the same guidance as the bash tool ([#20033](https://github.com/can1357/oh-my-pi/issues/20033))
+- Copilot-hosted Claude web searches now send the conversation's `X-Client-Session-Id`, so Copilot Business no longer answers them with a blocked, billing-free reply ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 - `hideThinkingBlock: true` now hides thinking blocks from the moment the TUI starts, instead of showing them until the first streamed reasoning arrives ([#17369](https://github.com/can1357/oh-my-pi/issues/17369))
 - Alt+L (reset terminal display), Ctrl+T, Ctrl+R, Ctrl+G and Ctrl+Shift+O work again while an ask form or ask dialog holds focus ([#20771](https://github.com/can1357/oh-my-pi/issues/20771))
 - A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"

@@ -13,6 +13,8 @@
 - Added the `connected-name` and `active-notice` auth nodes: what a provider is called once an account is signed in, and the transcript line shown when a session starts using one of its models
 - Added `window-ms` to hook-refreshed logins (`refresh hook="…" { window-ms … }`), so their access tokens can renew earlier than the 60-second default
 - Added the `device-bound` auth node (logins that depend on a key only this machine holds stay out of the auth broker) and the `sign-out hook="…"` node (forgets a removed login's secrets kept outside `agent.db` and revokes it upstream)
+- Added the `reasoning-summary-default` compat axis (`reasoningSummaryDefault`): the `reasoning.summary` level a Responses host gets when the caller names none; GitHub Copilot resolves it to `detailed` for `gpt-6.2-sol` ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
+- Extended the `session-header` compat axis to Anthropic Messages hosts with the `x-client-session-id` value; GitHub Copilot resolves it, replacing the provider check in the Anthropic transport ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Changed
 
@@ -22,6 +24,7 @@
 
 ### Fixed
 
+- Fixed GitHub Copilot `-1m` long-context rows pricing cache reads at $0 and cache writes at the default-tier rate, which understated dollar estimates against the server-reported AI credits ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 - Fixed Antigravity model display and pricing: models now appear as included with the Google AI plan, can serve as the cheapest configured vision fallback, and report zero cost in OTLP telemetry.
 - Fixed `google-vertex` Claude Fable 5.1+ requests failing their first attempt with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#20765](https://github.com/can1357/oh-my-pi/issues/20765))
 

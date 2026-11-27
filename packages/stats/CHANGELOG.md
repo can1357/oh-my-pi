@@ -5,10 +5,12 @@
 ### Added
 
 - Added queryable tracking of tool approval requests and outcomes across sessions in the stats database.
+- `omp stats` shows server-reported GitHub Copilot AI credits in the overview, models, providers, request details and `--summary` output, and shows "unknown" instead of 0 when no request reported any; new Copilot requests no longer add a premium-request count, and stored counts are kept ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Fixed
 
 - Fixed live updates and synchronization in the `omp stats` dashboard when session directories are inaccessible or agents are continuously writing.
+- Fixed `omp stats` losing a Copilot turn's AI credits when a `/tan` fork is ingested first and later rewritten, and ensured charge-only syncs refresh open dashboards ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 
 ## [19.1.1] - 2026-11-23
 

@@ -8,11 +8,15 @@
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
 - Added a `sign-out` provider hook and `OAuthApi.signOut`: removing a login runs the hook, which deletes the account's secrets kept outside the credential store and revokes the grant at the provider
+- GitHub Copilot Claude (Messages) and GPT (Responses) replies now record the server-reported AI-credit charge (`copilot_usage.total_nano_aiu` with its per-token-type split) on `usage.aiu`; a reply without a billing frame leaves it unset instead of 0 ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Changed
 
 - Expanded xAI text-to-speech support with configurable playback speed, PCM output, and inputs up to 60,000 characters.
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
+- GitHub Copilot quota reports now label the allowance "AI Credits" (unit `credits`, overage in credits) when GitHub flags the account as usage-billed (`token_based_billing`); request-billed accounts keep "Premium Requests" ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
+- GitHub Copilot replies no longer carry a local premium-request estimate (`usage.premiumRequests`, derived from the model multiplier and `X-Initiator`); GitHub bills per token, so the estimate was a fraction of the real charge. Stored sessions keep the counts they already recorded, and providers that bill per request keep theirs ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
+- GitHub Copilot Responses requests for `gpt-6.2-sol` now default to `reasoning.summary: "detailed"` instead of `"auto"`; an explicit summary level still wins ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Fixed
 
@@ -22,6 +26,8 @@
 - Fixed authentication-gateway requests so configured authorization headers are honored regardless of capitalization, with API-key fallback when the header is missing or empty.
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.
+- GitHub Copilot Claude replies no longer come back blocked with no usage on Copilot Business: Messages requests now carry the conversation id as `X-Client-Session-Id`, and a caller-set value still wins ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
+- GitHub Copilot replies that were silently retried after an empty response no longer lose the credits billed for the discarded attempt; they are added to the reply that is delivered ([#20719](https://github.com/can1357/oh-my-pi/pull/20719) by [@wapenshaw](https://github.com/wapenshaw))
 - Corrected Claude usage reporting to label Team premium seats as “Team 5x” rather than “Max 5x”.
 
 ### Removed
