@@ -190,6 +190,7 @@
 - Documented that extension `getThinkingLevel()` returns `undefined` when the model has no concrete effort (e.g. off/auto-only models on `auto`) ([#20128](https://github.com/can1357/oh-my-pi/issues/20128))
 - Fixed Hindsight mental models being truncated when the complete block fits the render cap, and redistributed unused space from short models to longer ones ([#19857](https://github.com/can1357/oh-my-pi/issues/19857))
 - Fixed `context_notes` rejecting writes with "session branch changed" when the same session branch advanced while the notebook was being saved, such as after resuming a session that called `new_context` ([#19802](https://github.com/can1357/oh-my-pi/issues/19802))
+- Fixed self-hosted FTP/FTPS blob uploads hanging publication forever on a stalled server; the curl upload is now killed after `options.timeoutMs` (default 120s) ([#19684](https://github.com/can1357/oh-my-pi/issues/19684))
 
 ### Removed
 
