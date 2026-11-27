@@ -275,11 +275,11 @@ export const KEYBINDINGS = {
 		description: "Copy selected fullscreen transcript text",
 	},
 	"app.transcript.lineUp": {
-		defaultKeys: [],
+		defaultKeys: ["ctrl+shift+up", "ctrl+up"],
 		description: "Scroll the fullscreen transcript up one line",
 	},
 	"app.transcript.lineDown": {
-		defaultKeys: [],
+		defaultKeys: ["ctrl+shift+down", "ctrl+down"],
 		description: "Scroll the fullscreen transcript down one line",
 	},
 	"app.transcript.top": {

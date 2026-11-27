@@ -58,7 +58,7 @@ app.history.search: []
 | `app.transcript.pageDown`    | `PageDown`                                                            | Scroll the fullscreen transcript down a page; at the end it follows new output again                                                                   |
 | `app.transcript.top`         | `Ctrl+Home`                                                           | Scroll the fullscreen transcript to its start                                                                                                          |
 | `app.transcript.bottom`      | `Ctrl+End`                                                            | Scroll the fullscreen transcript to its end and follow new output                                                                                      |
-| `app.transcript.lineUp` / `lineDown` | Unbound | Scroll the fullscreen transcript by one line. |
+| `app.transcript.lineUp` / `lineDown` | `Ctrl+Shift+Up` / `Ctrl+Shift+Down`, `Ctrl+Up` / `Ctrl+Down` | Scroll the fullscreen transcript by one line, like a terminal's own scrollback keys (which cannot reach the alternate screen). Inline, these keys reach the editor. |
 | `app.transcript.halfPageUp` / `halfPageDown` | Unbound | Scroll by half the fullscreen transcript window. |
 | `app.transcript.previousPrompt` / `nextPrompt` | `Alt+PageUp` / `Alt+PageDown` | Go to the previous or next user prompt. |
 | `app.transcript.search` | `Alt+/` | Find text without replacing the draft. Enter / Shift+Enter step through results; Escape cancels and returns to the original position; Ctrl+Enter closes at the match. |
