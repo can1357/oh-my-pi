@@ -8,6 +8,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AdvisorOutputQuarantinedError, AdvisorRuntime } from "@oh-my-pi/pi-coding-agent/advisor/runtime";
 import { runAnonymizeCommand } from "@oh-my-pi/pi-coding-agent/cli/anonymize-cli";
+import { TRANSCRIPT_READ_CAP } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -470,6 +471,61 @@ describe("AgentSession per-turn prune persistence", () => {
 		expect(records).toHaveLength(2);
 		expect(await rebuiltResultText()).toBe(USELESS_NOTICE);
 		expect(await rebuiltResultText(secondCallId)).toBe(USELESS_NOTICE);
+	});
+
+	it("writes a pruned result too long for the collab transcript fetch inline", async () => {
+		// Regression: the record landed after the pruned result's original line.
+		// A collab guest fetches the file in TRANSCRIPT_READ_CAP-byte windows and
+		// stops at a longer line, so a cold guest never reached the record. Each
+		// block stays under the per-string persistence limit; their number makes
+		// the line long.
+		const longCallId = "call-long-useless";
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: longCallId, name: "mcp_search", arguments: { query: "LONG" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: longCallId,
+			toolName: "mcp_search",
+			content: Array.from({ length: 11 }, (_, block) => ({
+				type: "text" as const,
+				text: `block ${block}\n${"long match\n".repeat(36_000)}`,
+			})),
+			isError: false,
+			useless: true,
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		await sessionManager.flush();
+		const longestLineBytes = (): number =>
+			Math.max(
+				...fs
+					.readFileSync(persistedSessionFile(), "utf8")
+					.split("\n")
+					.map(line => Buffer.byteLength(line, "utf8") + 1),
+			);
+		expect(longestLineBytes()).toBeGreaterThan(TRANSCRIPT_READ_CAP);
+
+		await endTurn();
+		await sessionManager.flush();
+
+		expect(liveResultText(longCallId)).toBe(USELESS_NOTICE);
+		expect(longestLineBytes()).toBeLessThanOrEqual(TRANSCRIPT_READ_CAP);
+		expect(await rebuiltResultText(longCallId)).toBe(USELESS_NOTICE);
 	});
 
 	describe("advisor across the per-turn prune", () => {

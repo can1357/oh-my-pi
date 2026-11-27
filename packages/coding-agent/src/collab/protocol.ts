@@ -56,6 +56,14 @@ export type AgentSnapshot = WireAgentSnapshot;
 export type { CollabSessionState };
 
 /**
+ * Max bytes the host serves per `fetch-transcript` reply; the guest re-requests
+ * from `newSize`. A transcript line longer than this ends the fetch with a
+ * terminal error, so a prune never leaves such a line in place ahead of its
+ * record (`SessionManager.appendToolResultPrunes`).
+ */
+export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
+
+/**
  * Encrypted payload frames (inside AES-GCM, JSON). The wire package pins the
  * JSON skeleton (`WireFrame`); host-side frames carry the rich session types
  * that serialize into those shapes.

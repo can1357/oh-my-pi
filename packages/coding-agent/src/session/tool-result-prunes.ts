@@ -18,7 +18,10 @@
  * beside it, so their clients can apply it.
  *
  * A later full rewrite folds the blanked content inline and keeps the records;
- * replaying a record over already-blanked content changes nothing.
+ * replaying a record over already-blanked content changes nothing. A pass that
+ * blanks a result whose original line could exceed the collab transcript fetch
+ * cap does that rewrite at once: a reader that fetches the file in byte-capped
+ * windows cannot read past that line to the record.
  */
 import { blankToolResult, type ToolResultPrune } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -29,7 +32,8 @@ export const TOOL_RESULT_PRUNE_CUSTOM_TYPE = "tool_result_prune";
 
 /**
  * One blanked tool result as persisted in a prune record: the fields of
- * agent-core's {@link ToolResultPrune} that replay needs.
+ * agent-core's {@link ToolResultPrune} that replay needs. The replaced content
+ * never reaches disk.
  */
 export type ToolResultPruneRecord = Pick<ToolResultPrune, "entryId" | "notice" | "prunedAt">;
 
@@ -39,9 +43,9 @@ export interface ToolResultPruneData {
 }
 
 /**
- * The `data` to persist for one prune pass. Copies each field explicitly, so a
- * field added to agent-core's in-memory {@link ToolResultPrune} does not
- * silently become part of the on-disk record.
+ * The `data` to persist for one prune pass. Copies each field explicitly, so
+ * the replaced content, or a field added to agent-core's in-memory
+ * {@link ToolResultPrune} later, does not become part of the on-disk record.
  */
 export function toToolResultPruneData(pruned: readonly ToolResultPrune[]): ToolResultPruneData {
 	return { results: pruned.map(({ entryId, notice, prunedAt }) => ({ entryId, notice, prunedAt })) };

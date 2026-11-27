@@ -48,6 +48,7 @@ import {
 	formatCollabWebLink,
 	generateRoomId,
 	parseCollabLink,
+	TRANSCRIPT_READ_CAP,
 } from "./protocol";
 import {
 	type CollabAccess,
@@ -136,8 +137,6 @@ function progressKey(data: unknown): string | undefined {
 	return `bus-progress:${data.progress.id}`;
 }
 const CONNECT_TIMEOUT_MS = 15_000;
-/** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
-export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
 const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fetch cap (${TRANSCRIPT_READ_CAP} bytes)`;
 /**
  * Soft byte cap per `snapshot-chunk` frame. The first MB of a snapshot takes

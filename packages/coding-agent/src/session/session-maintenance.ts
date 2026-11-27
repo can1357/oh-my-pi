@@ -822,7 +822,9 @@ export class SessionMaintenance {
 	/**
 	 * Commit a prune pass: append its `tool_result_prune` record, whose size
 	 * follows the pruned results rather than the transcript, then rebuild the
-	 * state derived from the pruned history. Resume and file-based forks
+	 * state derived from the pruned history. A result whose original line may
+	 * exceed the collab transcript fetch cap is written inline by a full rewrite
+	 * instead (`SessionManager.appendToolResultPrunes`). Resume and file-based forks
 	 * (`/fork`, `/tan`) replay the record, so they rebuild the live prefix and
 	 * keep the provider prompt cache warm.
 	 */

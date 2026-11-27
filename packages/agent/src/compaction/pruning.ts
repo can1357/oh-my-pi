@@ -89,6 +89,8 @@ export interface ToolResultPrune {
 	readonly notice: string;
 	/** {@link ToolResultMessage.prunedAt} stamped by the pass. */
 	readonly prunedAt: number;
+	/** The content the notice replaced, for a caller that sizes what the pass removed. Replay does not need it. */
+	readonly replaced: ToolResultMessage["content"];
 }
 
 export interface PruneResult {
@@ -531,8 +533,9 @@ export function pruneSupersededToolResults(
 	const prunedAt = Date.now();
 	const pruned = toPrune.map(candidate => {
 		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+		const replaced = candidate.message.content;
 		blankToolResult(candidate.message, candidate.notice, prunedAt);
-		return { entryId: candidate.entry.id, notice: candidate.notice, prunedAt };
+		return { entryId: candidate.entry.id, notice: candidate.notice, prunedAt, replaced };
 	});
 	return { prunedCount: pruned.length, tokensSaved, pruned };
 }
@@ -662,8 +665,10 @@ export function pruneToolOutputs(
 			: candidate.useless
 				? USELESS_NOTICE
 				: createPrunedNotice(candidate.tokens);
-		blankToolResult(candidate.entry.message as ToolResultMessage, notice, prunedAt);
-		return { entryId: candidate.entry.id, notice, prunedAt };
+		const message = candidate.entry.message as ToolResultMessage;
+		const replaced = message.content;
+		blankToolResult(message, notice, prunedAt);
+		return { entryId: candidate.entry.id, notice, prunedAt, replaced };
 	});
 
 	return { prunedCount: pruned.length, tokensSaved, pruned };

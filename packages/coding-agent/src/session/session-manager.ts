@@ -146,6 +146,7 @@ import {
 } from "./session-workspace";
 import { recordSessionRecap, recordSessionTitle } from "./session-index";
 import { applyToolResultPrunes, TOOL_RESULT_PRUNE_CUSTOM_TYPE, toToolResultPruneData } from "./tool-result-prunes";
+import { TRANSCRIPT_READ_CAP } from "../collab/protocol";
 import type { ToolResultPrune } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
@@ -3880,10 +3881,34 @@ export class SessionManager {
 	 * rewriting the file. Bumps {@link bodyRevision} as {@link rewriteEntries}
 	 * does, so readers that mirror entries resend the blanked ones; the file
 	 * keeps the original result lines until a later full rewrite.
+	 *
+	 * When a blanked result's original line could exceed
+	 * {@link TRANSCRIPT_READ_CAP}, the record lands through that full rewrite
+	 * instead: a collab guest fetches the file in windows of that size and
+	 * cannot read past such a line to the record.
 	 */
 	appendToolResultPrunes(pruned: readonly ToolResultPrune[]): string {
 		this.#bodyRevision++;
+		if (pruned.some(prune => this.#replacedLineMayExceedFetchCap(prune))) this.#rewriteRequired = true;
 		return this.appendCustomEntry(TOOL_RESULT_PRUNE_CUSTOM_TYPE, toToolResultPruneData(pruned));
+	}
+
+	/**
+	 * Whether the result line `prune` blanked could have exceeded
+	 * {@link TRANSCRIPT_READ_CAP}. Measures the entry with its replaced content
+	 * as plain JSON, an upper bound: persistence shortens long strings and moves
+	 * images to the blob store. A result that cannot be measured counts as long.
+	 */
+	#replacedLineMayExceedFetchCap({ entryId, replaced }: ToolResultPrune): boolean {
+		const entry = this.#index.get(entryId);
+		if (entry?.type !== "message") return false;
+		try {
+			const json = stringifyJson({ ...entry, message: { ...entry.message, content: replaced } }) ?? "";
+			// The line is this JSON and a newline: at TRANSCRIPT_READ_CAP bytes of JSON the newline misses the window.
+			return Buffer.byteLength(json, "utf8") >= TRANSCRIPT_READ_CAP;
+		} catch {
+			return true;
+		}
 	}
 
 	/**
