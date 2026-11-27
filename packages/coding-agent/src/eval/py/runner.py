@@ -1189,8 +1189,8 @@ _SHELL_OUTPUT_MAX_LINES = 3000
 _SHELL_RESULT_CAPTURE_BYTES = _SHELL_OUTPUT_MAX_BYTES
 _PIP_LINE_SCAN_CHARS = 64 * 1024
 _SHELL_TRUNCATION_NOTICE = (
-    f"[output truncated: shell helper exceeded {_SHELL_OUTPUT_MAX_BYTES} bytes "
-    f"or {_SHELL_OUTPUT_MAX_LINES} lines; remaining output discarded]\n"
+    f"[shell output truncated: over {_SHELL_OUTPUT_MAX_BYTES} bytes "
+    f"or {_SHELL_OUTPUT_MAX_LINES} lines]\n"
 )
 
 
