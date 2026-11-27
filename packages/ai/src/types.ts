@@ -790,6 +790,7 @@ export interface StreamOptions {
 	 * Receives each attempt a replay-safe retry discards (an empty completion, a
 	 * transient provider error) before the replacement request is sent. The
 	 * provider may have billed it; the delivered result never carries its usage.
+	 * Attempts with no tokens and no billing frame (a bare 429 or 5xx) are not reported.
 	 */
 	onDiscardedAttempt?: (message: AssistantMessage, reason: DiscardedAttemptReason) => void;
 	/**

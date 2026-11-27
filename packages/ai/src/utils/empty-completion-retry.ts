@@ -193,10 +193,11 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 					return;
 				}
 				// The discarded attempt reached the provider and may be billed; report it before replacing
-				// it. Accounting never fails the request it accounts for.
+				// it. One that carried no token and no billing frame (a bare 429 or 5xx) billed nothing.
+				// Accounting never fails the request it accounts for.
 				const discarded = retryEmpty ? completedMessage : failedMessage;
 				try {
-					if (discarded)
+					if (discarded && ((discarded.usage?.totalTokens ?? 0) > 0 || discarded.usage?.aiu !== undefined))
 						options?.onDiscardedAttempt?.(discarded, retryEmpty ? "empty-completion" : "provider-error");
 				} catch {}
 				continue;

@@ -527,6 +527,8 @@ describe("withReplaySafeStreamRetry", () => {
 		const failed = assistant();
 		failed.stopReason = "error";
 		failed.errorMessage = "The socket connection was closed unexpectedly";
+		failed.usage.input = 12;
+		failed.usage.totalTokens = 12;
 		const stream = withReplaySafeStreamRetry(
 			{},
 			CTX,
@@ -570,5 +572,37 @@ describe("withReplaySafeStreamRetry", () => {
 		await drain(aborted);
 		// The aborted backoff delivers the attempt as the result, so it is not reported a second time.
 		expect(delivered).toEqual([]);
+	});
+
+	it("skips a discarded attempt that billed nothing, but reports a tokenless one that carried a charge", async () => {
+		const failure = (aiuNano?: number): AssistantMessage => {
+			const message = assistant();
+			message.stopReason = "error";
+			message.errorMessage = "The socket connection was closed unexpectedly";
+			if (aiuNano !== undefined) message.usage.aiu = { nano: aiuNano };
+			return message;
+		};
+		const bare = failure();
+		const charged = failure(5_000);
+		const discarded: AssistantMessage[] = [];
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {}, onDiscardedAttempt: message => void discarded.push(message) },
+			() => {
+				attempts++;
+				const failed = attempts === 1 ? bare : attempts === 2 ? charged : undefined;
+				if (!failed) return contentAttempt();
+				return streamFromEvents([
+					{ type: "start", partial: failed },
+					{ type: "error", reason: "error", error: failed },
+				]);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+		);
+		await drain(stream);
+		expect(attempts).toBe(3);
+		expect(discarded).toEqual([charged]);
 	});
 });
