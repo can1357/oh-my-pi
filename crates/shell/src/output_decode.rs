@@ -495,8 +495,10 @@ impl LineDecoder {
 fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 	(1..=bytes.len().min(3))
 		.find(|&len| {
-			str::from_utf8(&bytes[bytes.len() - len..])
-				.is_err_and(|err| err.valid_up_to() == 0 && err.error_len().is_none())
+			matches!(
+				xutf::decode(&bytes[bytes.len() - len..]),
+				Err(DecodeError::Incomplete { valid_prefix: "", .. })
+			)
 		})
 		.unwrap_or(0)
 }
