@@ -34,6 +34,7 @@
 - Clicks in Tern now show their effect while Tern is slow to acknowledge frames: an ask form you submit leaves the screen at once instead of staying with a Submit button that no longer responds.
 - Fixed inverse video styling leaking into padding and borders at wrapped line endings.
 - Fixed win32 input-mode key records being inserted as literal composer text in certain timing conditions.
+- Fixed pastes on Windows Terminal arriving as raw `[Vk;Sc;Uc;…_` key records instead of the pasted text, CJK and line breaks included ([#20718](https://github.com/can1357/oh-my-pi/issues/20718))
 - Fixed SIXEL and iTerm2 images losing their bottom cell row in terminals that clear image cells on line erase, such as xterm.js ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 - Fixed code blocks drawn with `codeIndent: 0` putting their ``` fence rows one column right of the code; fences now sit at column 0 with it, so copying the whole block yields its markdown ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 
