@@ -44,4 +44,13 @@ test("service results paint the preset's compact PID marker in the footer", () =
 	expect(plainToolRows(call, env).findLast(Boolean)).toContain("51234");
 });
 
+test.each(["local://7.log", "local://7.log:raw"])("moves a persisted %s spill notice into the footer", url => {
+	const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "nerd" }));
+	const call = new ToolCall({ id: "bash-1", name: "bash", presenter: bashPresenter, args: { command: "ls" } });
+	call.updateResult({ content: [{ type: "text", text: `output\n[raw output: ${url}]` }] }, false);
+	const rows = plainToolRows(call, env);
+	expect(rows.join("\n")).not.toContain("[raw output:");
+	expect(rows.findLast(Boolean)).toContain("local://7.log");
+});
+
 export type { BashArgs };

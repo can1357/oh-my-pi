@@ -80,7 +80,7 @@ function paintRead(node: UiNode, cx: PaintContext): Block {
 	if (term?.summarySpans !== undefined)
 		title += ` (summary: ${term.summarySpans} elided span${term.summarySpans === 1 ? "" : "s"})`;
 	if (term?.conflicts)
-		title += ` ${theme.fg("warning", `(⚠ ${term.conflicts} conflict${term.conflicts === 1 ? "" : "s"})`)}`;
+		title += ` ${theme.fg("warning", `(${theme.symbols.symbol("status.warning")} ${term.conflicts} conflict${term.conflicts === 1 ? "" : "s"})`)}`;
 	const output = warnings.length > 0 ? warnings.join("\n") : undefined;
 	if (phase === "markdown") {
 		const md = node.children().find(child => child.kind === "md");

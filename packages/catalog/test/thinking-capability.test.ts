@@ -58,7 +58,6 @@ describe("unknown reasoning capability", () => {
 			"anthropic-messages",
 			"google-generative-ai",
 			"google-vertex",
-			"google-gemini-cli",
 		];
 		for (const api of supported) {
 			const model = buildModel({ ...spec(), api, compat: undefined });

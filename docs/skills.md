@@ -68,7 +68,7 @@ Current runtime behavior:
 - `name` defaults to the skill directory name
 - `description` is required for:
    - native `.omp` provider skill discovery (`requireDescription: true`)
-   - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
+   - `omp-plugins` extension-package skills, which also pass `requireDescription: true`
    - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (non-recursive)
 - the claude/codex/agents/opencode/claude-plugins providers can load skills without description
 - `agent-plugins` validates required `name` and `description` against the Agent Skills specification
@@ -99,8 +99,7 @@ Current registered skill providers:
    - `agents`
    - `codex`
 7. `opencode` (priority 55)
-8. `github` (priority 30) — `.github/skills/<name>/SKILL.md` (GitHub Agent Skills layout, project-only)
-9. `omp-managed` (priority 5) — auto-learn skills under `~/.omp/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill
+8. `omp-managed` (priority 5) — auto-learn skills under `~/.omp/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill. Each carries `x-omp-provenance` frontmatter (writing tool, created/updated, contributing sessions and projects); `/skills learned` lists them with that provenance, including shadowed ones, and `/skills forget <name>` deletes one
 
 Capability dedup key is skill name; the first item with a given name wins in the deduped `items` view. `loadSkills()` resolves same-name collisions itself (see "Collision and duplicate handling").
 
@@ -108,7 +107,7 @@ Capability dedup key is skill name; the first item with a given name wins in the
 
 `loadSkills()` applies these controls:
 
-- source toggles: `enableCodexUser`, `enableClaudeUser`, `enableClaudeProject`, `enablePiUser`, `enablePiProject`, `enableAgentsUser`, `enableAgentsProject`
+- source toggles: `enableClaudeProject`, `enablePiUser`, `enablePiProject`, `enableAgentsUser`, `enableAgentsProject`
 - `disabledExtensions` entries with `skill:<name>`
 - `ignoredSkills` (exclude; glob patterns)
 - `includeSkills` (include allowlist; glob patterns; empty means include all)
@@ -120,7 +119,7 @@ Filter order is:
 3. not ignored
 4. included (if include list present)
 
-The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Foreign user-level providers are opt-in through `enabledProviders`; their project roots still load by default. Native OMP sources and marketplace plugins registered under `~/.omp/plugins` also load by default. For `claude-plugins`, the opt-in controls only plugins from Claude Code's own user registry.
+The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Claude, Codex, and OpenCode skills load only from project roots (`.claude/skills`, `.codex/skills`, `.opencode/skills`); their home-directory skills are never read. Native OMP sources and marketplace plugins registered under `~/.omp/plugins` load by default.
 
 ### Manual-only skills
 

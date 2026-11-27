@@ -5,6 +5,8 @@
  * - Hidden activity paints nothing (handled by the paint cache).
  * - An extension presenter's compact line (`term.compact`): the status glyph
  *   and the label, then the presenter's rows; a bare one says what runs.
+ * - A concise row (`display.toolActivity: concise`): the Agent Hub's
+ *   recent-activity row (clock, status, tool, intent) and the elapsed time.
  * - A viewport allocation (the transcript paints the block at a fixed
  *   height): 2 rows open a frame edge with the title, 1 row is the status
  *   line, 0 rows nothing.
@@ -17,13 +19,15 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
-import { truncate } from "@oh-my-pi/pi-tui/text/width";
+import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { formatDuration } from "@oh-my-pi/pi-utils";
 import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { imageLabel, paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import { terminalPaddingX } from "../terminal-padding";
 import { tint, tintRow } from "./default";
 import { imageLink, resultPictures } from "./file-common";
 import { bodySpans, paintPresenterRows } from "../figures/presented";
+import { type HubRecentLine, recentActivityRow } from "../pickers/agent-hub";
 import { lookFor, type ToolProps, toolProps } from "./look";
 
 /** `cx` with some fields replaced (its getters keep reading the paint environment). */
@@ -111,9 +115,28 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 	};
 }
 
+/**
+ * A concise row: the recent-activity row, then how long the call has run (whole seconds, ticking)
+ * or ran, when the transcript saw it run.
+ */
+function paintConcise(props: ToolProps, line: HubRecentLine, cx: PaintContext): Block {
+	const term = props.term;
+	const elapsed =
+		term?.running && term.startedAt !== undefined
+			? `${Math.max(0, Math.floor((cx.now() - term.startedAt) / 1000))}s`
+			: props.took !== undefined
+				? formatDuration(props.took)
+				: undefined;
+	const tail = elapsed ? cx.theme.fg("dim", ` ${elapsed}`) : "";
+	const row = recentActivityRow(cx.theme, line, Math.max(1, cx.width - visibleWidth(tail)));
+	return { rows: cx.height === 0 ? [] : [truncate(`${row}${tail}`, cx.width)] };
+}
+
 /** An extension presenter's compact presentation: glyph and label (or the summary), then its rows. */
 function paintCompact(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
+	const line = props.term?.activityLine;
+	if (props.term?.compact === "concise" && line) return paintConcise(props, line, cx);
 	const glyph = compactGlyph(node, props, cx);
 	const withLabel = props.term?.compact === "label";
 	const shown = withLabel ? styledText(cx.theme, props.target) : compactText(props, cx);

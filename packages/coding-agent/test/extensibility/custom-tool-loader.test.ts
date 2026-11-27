@@ -201,7 +201,7 @@ describe("custom tool loader", () => {
 	});
 
 	it("restores host stdin after a tool hijacks it at import time (#5618)", async () => {
-		// A ~/.claude/tools MCP server attaches a stdin consumer at module top
+		// A custom tool wrapping an MCP server attaches a stdin consumer at module top
 		// level (a bare `resume()` here stands in for `new StdioServerTransport()`).
 		// Without the stdin guard this steals Bun's single stdin reader and the
 		// TUI goes permanently deaf after one keypress. The tool also exports a

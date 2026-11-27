@@ -5,7 +5,7 @@
  */
 
 import { toBoolean, toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { COPILOT_GITHUB_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { COPILOT_GITHUB_HEADERS, readCopilotTokenBilling } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import * as AIError from "../error";
 import type {
 	UsageAmount,
@@ -30,6 +30,8 @@ type CopilotQuotaDetail = {
 	quota_remaining: number;
 	remaining: number;
 	unlimited: boolean;
+	/** Usage-based (AI credit) metering; false on legacy request-billed plans and when the server omits it. */
+	token_based_billing: boolean;
 };
 
 type CopilotQuotaSnapshots = {
@@ -42,6 +44,8 @@ type CopilotUsageResponse = {
 	copilot_plan: string;
 	quota_reset_date: string;
 	quota_snapshots: CopilotQuotaSnapshots;
+	/** Account-level usage-based billing flag, mirrored on each quota snapshot. */
+	token_based_billing?: boolean;
 };
 
 type BillingUsageItem = {
@@ -63,7 +67,12 @@ type BillingUsageResponse = {
 function resolveGitHubApiBaseUrl(params: UsageFetchParams): string {
 	const baseUrl = params.baseUrl?.replace(/\/$/, "");
 	if (baseUrl && !baseUrl.includes("githubcopilot.com")) return baseUrl;
-	const enterpriseUrl = params.credential.enterpriseUrl?.trim();
+	return githubApiBaseUrlFor(params.credential.enterpriseUrl);
+}
+
+/** The GitHub REST API host for a Copilot login: public GitHub, or its GitHub Enterprise host. */
+export function githubApiBaseUrlFor(enterpriseUrlRaw: string | undefined): string {
+	const enterpriseUrl = enterpriseUrlRaw?.trim();
 	if (!enterpriseUrl) return "https://api.github.com";
 	if (enterpriseUrl.startsWith("http://") || enterpriseUrl.startsWith("https://")) {
 		return enterpriseUrl.replace(/\/$/, "");
@@ -137,6 +146,7 @@ function parseQuotaDetail(value: unknown): CopilotQuotaDetail | null {
 		quota_id: quotaId,
 		quota_remaining: quotaRemaining,
 		remaining,
+		token_based_billing: toBoolean(value.token_based_billing) ?? false,
 		unlimited,
 	};
 }
@@ -217,23 +227,25 @@ async function fetchBillingUsage(
 
 function buildLimitFromQuota(
 	key: string,
-	label: string,
+	labels: { requests: string; credits: string },
 	quota: CopilotQuotaDetail,
+	credits: boolean,
 	plan: string,
 	window: UsageWindow | undefined,
 	accountId?: string,
 ): UsageLimit {
 	const used = quota.unlimited ? undefined : Math.max(0, quota.entitlement - quota.remaining);
 	const limit = quota.unlimited ? undefined : quota.entitlement;
-	const amount = buildAmount(used, limit, "requests");
+	const amount = buildAmount(used, limit, credits ? "credits" : "requests");
 	const notes: string[] = [];
 	if (quota.unlimited) notes.push("Unlimited");
 	if (quota.overage_count > 0) {
-		notes.push(`Overage requests: ${quota.overage_count}`);
+		// GitHub reports a bare `overage_count`; only the request-billed unit is established.
+		notes.push(credits ? `Overage: ${quota.overage_count}` : `Overage requests: ${quota.overage_count}`);
 	}
 	return {
 		id: `copilot:${key}`,
-		label,
+		label: credits ? labels.credits : labels.requests,
 		scope: {
 			provider: "github-copilot",
 			accountId,
@@ -254,17 +266,49 @@ function normalizeQuotaSnapshots(
 	const window = buildWindow(data.quota_reset_date);
 	const snapshots = data.quota_snapshots ?? {};
 	const limits: UsageLimit[] = [];
+	// GitHub flags usage-based metering on the account and on each snapshot. The account-level flag was observed
+	// to apply to premium interactions; chat and completions follow only their own snapshot flag.
 	const premium = parseQuotaDetail(snapshots.premium_interactions);
 	if (premium) {
-		limits.push(buildLimitFromQuota("premium", "Premium Requests", premium, data.copilot_plan, window, accountId));
+		limits.push(
+			buildLimitFromQuota(
+				"premium",
+				{ requests: "Premium Requests", credits: "AI Credits" },
+				premium,
+				readCopilotTokenBilling(data) === true,
+				data.copilot_plan,
+				window,
+				accountId,
+			),
+		);
 	}
 	const chat = parseQuotaDetail(snapshots.chat);
 	if (chat && !chat.unlimited) {
-		limits.push(buildLimitFromQuota("chat", "Chat Requests", chat, data.copilot_plan, window, accountId));
+		limits.push(
+			buildLimitFromQuota(
+				"chat",
+				{ requests: "Chat Requests", credits: "Chat AI Credits" },
+				chat,
+				chat.token_based_billing,
+				data.copilot_plan,
+				window,
+				accountId,
+			),
+		);
 	}
 	const completions = parseQuotaDetail(snapshots.completions);
 	if (completions && !completions.unlimited) {
-		limits.push(buildLimitFromQuota("completions", "Completions", completions, data.copilot_plan, window, accountId));
+		limits.push(
+			buildLimitFromQuota(
+				"completions",
+				{ requests: "Completions", credits: "Completion AI Credits" },
+				completions,
+				completions.token_based_billing,
+				data.copilot_plan,
+				window,
+				accountId,
+			),
+		);
 	}
 	return { limits, window };
 }
@@ -354,6 +398,15 @@ function rethrowAuthRejection(failures: unknown[]): void {
 	if (failures.length > 0 && rejected) throw failures.at(-1);
 }
 
+/**
+ * The account's billing mode as report metadata (`tokenBasedBilling`); the
+ * auth layer copies it onto the stored credential for request-time use.
+ */
+function billingMetadata(usage: CopilotUsageResponse): { tokenBasedBilling?: boolean } {
+	const tokenBasedBilling = readCopilotTokenBilling(usage);
+	return tokenBasedBilling === undefined ? {} : { tokenBasedBilling };
+}
+
 export const githubCopilotUsageProvider: UsageProvider = {
 	id: "github-copilot",
 	supports: ({ provider, credential }) => {
@@ -424,6 +477,7 @@ export const githubCopilotUsageProvider: UsageProvider = {
 							accountId: username,
 							plan: usage.copilot_plan,
 							quotaResetDate: usage.quota_reset_date,
+							...billingMetadata(usage),
 						},
 						raw: usage,
 					};
@@ -463,6 +517,7 @@ export const githubCopilotUsageProvider: UsageProvider = {
 						email: params.credential.email,
 						plan: usage.copilot_plan,
 						quotaResetDate: usage.quota_reset_date,
+						...billingMetadata(usage),
 					},
 					raw: usage,
 				};

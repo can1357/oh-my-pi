@@ -846,7 +846,10 @@ const PI_TUI_SPECIFIER = new RegExp(
 /** Docs section describing the pi-tui → pi-tui migration. */
 export const PI_TUI_MIGRATION_DOC = "docs/extensions.md#migrating-from-pi-tui";
 
-/** An extension module imports upstream pi-tui, whose API omp no longer provides. */
+/**
+ * An extension module imports upstream pi-tui, or an `@oh-my-pi/pi-tui` subpath of the old API the
+ * host package no longer provides, either way an API omp no longer has.
+ */
 export class PiTuiImportError extends Error {
 	constructor(
 		readonly specifier: string,
@@ -866,6 +869,17 @@ export class PiTuiImportError extends Error {
 /** Throw {@link PiTuiImportError} when `specifier` names upstream pi-tui. */
 function assertNoPiTuiImport(specifier: string, importerPath: string): void {
 	if (PI_TUI_SPECIFIER.test(specifier)) throw new PiTuiImportError(specifier, importerPath);
+}
+
+const HOST_PI_TUI_SUBPATH_PREFIX = `${CANONICAL_PI_SCOPE}/pi-tui/`;
+
+/**
+ * Throw {@link PiTuiImportError} when the host failed to resolve `remappedSpecifier`, an
+ * `@oh-my-pi/pi-tui` subpath. Falling through to the extension's own resolution would load an
+ * alternate (old-API) pi-tui copy or surface a raw resolver error naming an unrelated package.
+ */
+function assertHostPiTuiSubpathResolved(remappedSpecifier: string, specifier: string, importerPath: string): void {
+	if (remappedSpecifier.startsWith(HOST_PI_TUI_SUBPATH_PREFIX)) throw new PiTuiImportError(specifier, importerPath);
 }
 
 const PI_SCOPE_ALTERNATION = PI_SCOPE_ALIASES.join("|");
@@ -1211,6 +1225,7 @@ async function rewriteLegacyExtensionSource(
 			} catch {
 				// Compiled fallback may be absent from a malformed build. Continue to
 				// the extension's on-disk peer dependency resolution below.
+				assertHostPiTuiSubpathResolved(remappedSpecifier, specifier, importerPath);
 			}
 		}
 		if (!replacement && TYPEBOX_SHIM_PATH && (specifier === "typebox" || specifier === "@sinclair/typebox")) {
@@ -1988,6 +2003,7 @@ async function resolveExtensionCommonJsRequire(
 		} catch {
 			// A malformed compiled registry can still fall through to an
 			// extension-installed legacy peer dependency.
+			assertHostPiTuiSubpathResolved(remappedSpecifier, specifier, importerPath);
 		}
 		if (resolved) {
 			if (isBundledVirtualSpecifier(resolved)) {

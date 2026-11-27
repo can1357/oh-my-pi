@@ -37,7 +37,13 @@ use omp_xfs::glob::Selector;
 use omp_diff::{HunkLine, diff_line_tokens, line_tokens_str, structured_patch_hunk_rows};
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{AsyncUtility, Host};
+use crate::{
+	host::{AsyncUtility, Host},
+	root_guard,
+};
+
+/// ast-grep's spelling of the [`root_guard`] escape hatch; it has no depth cap.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "--allow-root", depth: None };
 
 mod scaffold;
 mod verify;
@@ -295,6 +301,10 @@ struct Input {
 	/// Set the approximate number of threads to use.
 	#[arg(short = 'j', long, default_value = "0", value_name = "NUM")]
 	threads: usize,
+
+	/// Permit searching a filesystem root such as /.
+	#[arg(long)]
+	allow_root: bool,
 }
 
 /// ast-grep's `--debug-query` formats.
@@ -875,6 +885,12 @@ impl Input {
 	/// `Some(lang)` also keeps names that map to none, skipping other
 	/// languages' files (ast-grep's `walk_lang`).
 	async fn walk(&self, host: &mut Host, lang: Option<SupportLang>, hidden: bool) -> Result<Vec<Candidate>, i32> {
+		if !self.allow_root
+			&& let Err(refusal) = root_guard::check(self.paths.iter().map(|path| host.resolve(path)), None, ROOT_FLAGS)
+		{
+			let _ = writeln!(host.stderr, "ERROR: {refusal}");
+			return Err(2);
+		}
 		let (include, exclude) = match glob_selectors(&self.globs) {
 			Ok(selectors) => selectors,
 			Err(error) => {
@@ -2497,6 +2513,16 @@ mod tests {
 	async fn run(tree: &tempfile::TempDir, args: &[&str]) -> (i32, String, String) {
 		let (code, capture) = run_async_util::<AstGrep>(args, "", tree.path()).await;
 		(code, capture.out(), capture.err())
+	}
+
+	/// Failure mode: `ast-grep run -p X /` walked the whole disk for hours.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn refuses_to_search_the_filesystem_root() {
+		let tree = tree();
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "/"]).await;
+		assert_eq!((code, out.as_str()), (2, ""));
+		assert!(err.starts_with("ERROR: refusing") && err.contains("--allow-root"), "stderr: {err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

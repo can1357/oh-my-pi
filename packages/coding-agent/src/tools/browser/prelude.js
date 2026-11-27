@@ -329,6 +329,21 @@
 		"values",
 		"with",
 	];
+	// Playwright and Puppeteer names a tab does not have: calling one says what does the job here, instead of
+	// failing with "tab.wait is not a function".
+	const waitInstead =
+		'pause with await Bun.sleep(ms); wait for the page with tab.waitFor(selector), tab.waitForText(text) or tab.waitForUrl(pattern); for network idle pass { waitUntil: "networkidle0" } to tab.goto(url, …) or wait_until to browser.open';
+	const missingTabMembers = {
+		wait: waitInstead,
+		waitForTimeout: waitInstead,
+		waitForLoadState: waitInstead,
+		waitForURL: "did you mean tab.waitForUrl(pattern)?",
+		navigate: "did you mean tab.goto(url)?",
+		$: "act on a selector directly (tab.click(selector), tab.text(selector), tab.count(selector)), or use page.$(selector) inside tab.run",
+		$$: "act on a selector directly (tab.click(selector), tab.text(selector), tab.count(selector)), or use page.$$(selector) inside tab.run",
+		on: "a tab emits no events; read what the page did with tab.console(), tab.errors() and tab.requests(), or wait with tab.waitForText(text) or tab.waitForUrl(pattern)",
+		setExtraHTTPHeaders: "did you mean tab.emulate({ headers })?",
+	};
 	const captureResult = (method, result) => {
 		if (result === null || typeof result !== "object" || !Array.isArray(result.entries)) return result;
 		const readEntries = member =>
@@ -391,6 +406,14 @@
 				callValue(name, [{ method, args: encodeArgs("tab helper argument", args) }]).then(result =>
 					captureResult(method, result),
 				);
+		}
+		for (const member in missingTabMembers) {
+			const hint = missingTabMembers[member];
+			Object.defineProperty(tab, member, {
+				value: () => {
+					throw new TypeError(`tab.${member}() does not exist; ${hint}`);
+				},
+			});
 		}
 		tab.id = id => makeElement(name, "id", encodeArgs("tab helper argument", [id]));
 		tab.ref = id => makeElement(name, "ref", encodeArgs("tab helper argument", [id]));

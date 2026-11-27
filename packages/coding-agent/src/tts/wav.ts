@@ -144,3 +144,27 @@ function readAscii(view: DataView, offset: number): string {
 function writeAscii(view: DataView, offset: number, text: string): void {
 	for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
 }
+
+/**
+ * Linearly resample mono Float32 PCM from `fromRate` to `toRate`. Speech only
+ * needs this when a mid-utterance fail-over lands on a model with another rate,
+ * so plain interpolation (no anti-aliasing filter) is enough. Returns `pcm`
+ * itself when the rates match.
+ */
+export function resamplePcm(pcm: Float32Array, fromRate: number, toRate: number): Float32Array {
+	if (fromRate === toRate || pcm.length === 0) return pcm;
+	const out = new Float32Array(Math.max(1, Math.round((pcm.length * toRate) / fromRate)));
+	const step = fromRate / toRate;
+	const last = pcm.length - 1;
+	for (let i = 0; i < out.length; i += 1) {
+		const position = i * step;
+		const lower = Math.floor(position);
+		if (lower >= last) {
+			out[i] = pcm[last]!;
+			continue;
+		}
+		const fraction = position - lower;
+		out[i] = pcm[lower]! + (pcm[lower + 1]! - pcm[lower]!) * fraction;
+	}
+	return out;
+}
