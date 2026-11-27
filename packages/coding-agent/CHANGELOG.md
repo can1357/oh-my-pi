@@ -206,6 +206,7 @@
 - Fixed OpenRouter rejecting every request with `403 Request blocked: prompt injection patterns detected` on accounts with a blocking prompt-injection guardrail: system prompts and tool text no longer contain the role-tag-like `<tool>` placeholder ([#18756](https://github.com/can1357/oh-my-pi/issues/18756))
 - Fixed MCP OAuth discovery, token exchange and refresh ignoring a `NODE_EXTRA_CA_CERTS` CA loaded after startup, which broke reauth behind TLS-inspecting proxies ([#18609](https://github.com/can1357/oh-my-pi/issues/18609))
 - Fixed the `ask` form duplicating and shifting rows when a field `placeholder` spans several lines; its line breaks now collapse to spaces ([#18605](https://github.com/can1357/oh-my-pi/issues/18605))
+- A task's `effort` hint no longer overrides an explicit `:level` on the same spawn's per-call `model`; e.g. `model: "anthropic/claude-opus-5-5:xhigh"` with `effort: "hi"` now runs at `xhigh` instead of `max` ([#18597](https://github.com/can1357/oh-my-pi/issues/18597))
 
 ### Removed
 
