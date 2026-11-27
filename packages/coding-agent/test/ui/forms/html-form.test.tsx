@@ -197,6 +197,60 @@ test.each(["radio", "checkbox"])("keeps a long %s Other answer visible and edita
 	}
 });
 
+test("keeps a full-width option note caret visible with the draft warning", () => {
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><label><input type="radio" name="r" value="keep" checked> Keep</label></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const warning = "Sending your message skips these questions";
+	const term = createTestTerminal(
+		() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 10} skipNotice={() => warning} /> }),
+		{ columns: 42, rows: 10 },
+	);
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("n");
+		term.type("x".repeat(33));
+		const screen = term.screen().join("\n");
+		expect(screen).toContain("questions");
+		expect(screen).toContain("▏");
+	} finally {
+		term.dispose();
+	}
+});
+
+const LONG_NOTE = "Use the marked trail past the river and meet at sunrise.";
+
+test("wraps a long option note and keeps its caret on screen", () => {
+	const model = new HtmlFormModel(
+		parseHtmlForm(
+			`<form><label><input type="radio" name="r" value="keep" checked> Keep</label><label><input type="radio" name="r" value="drop"> Drop</label></form>`,
+		),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 24} /> }), {
+		columns: 42,
+		rows: 24,
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("n");
+		term.type(LONG_NOTE);
+		const screen = term.screen().join("\n");
+		expect(screen).toContain("Use the marked trail");
+		expect(screen).toContain("at sunrise.▏");
+
+		term.press("home");
+		for (let i = 0; i < 10; i++) term.press("right");
+		const editing = term.screen().join("\n");
+		expect(editing).toContain("Use the marked trail");
+		expect(editing).toContain("at sunrise.");
+		expect(model.note()?.line.text).toBe(LONG_NOTE);
+	} finally {
+		term.dispose();
+	}
+});
+
 test("keeps a long ordinary input visible and editable at both ends", () => {
 	const onSubmit = vi.fn();
 	const model = new HtmlFormModel(parseHtmlForm(`<form><label>Route <input name="route"></label></form>`), {
@@ -250,6 +304,38 @@ test("places the masked password caret after one bullet for an emoji", () => {
 		term.type("x");
 		term.press("enter");
 		expect(onSubmit).toHaveBeenCalledWith({ code: "😀xab" }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("wraps a long note on a dropdown option too", () => {
+	const model = new HtmlFormModel(
+		parseHtmlForm(
+			`<form><label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label></form>`,
+		),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 24} /> }), {
+		columns: 42,
+		rows: 24,
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("space");
+		term.press("down");
+		expect(term.screen().join("\n")).toContain("EU");
+		term.press("alt+n");
+		expect(term.screen().join("\n")).toContain("Note for EU");
+		term.type(LONG_NOTE);
+		const screen = term.screen().join("\n");
+		expect(screen).toContain("Use the marked trail");
+		expect(screen).toContain("at sunrise.▏");
+
+		term.paste(" Follow the river past the old bridge.".repeat(24) + " Bring the map.");
+		expect(term.screen().join("\n")).toContain("the map.▏");
+		term.press("home");
+		expect(term.screen().join("\n")).toContain("Use the marked trail");
 	} finally {
 		term.dispose();
 	}

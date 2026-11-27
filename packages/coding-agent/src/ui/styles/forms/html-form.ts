@@ -195,6 +195,32 @@ function caretLine(
 	return caretViewport(theme, line, width, visibleWidth(before) + caretWidth, caretWidth);
 }
 
+/** Paint the caret after wrapping so moving it cannot change word breaks. */
+function paintEditorRow(theme: Theme, text: string, row: EditorRow, caret: number | undefined): string {
+	const part = text.slice(row.start, row.textEnd);
+	if (caret === undefined) return theme.fgResolved("text", part);
+	if (caret >= row.textEnd) return theme.fgResolved("text", `${part}▏`);
+	const at = caret - row.start;
+	const ch = String.fromCodePoint(part.codePointAt(at)!);
+	return theme.fgResolved("text", `${part.slice(0, at)}${theme.style("inverse", ch)}${part.slice(at + ch.length)}`);
+}
+
+/** Add an indented note, returning the row after its caret for viewport anchoring. */
+function appendNoteRows(
+	lines: string[],
+	theme: Theme,
+	{ text, cursor }: NonNullable<View["note"]>,
+	width: number,
+): number {
+	const rows = layoutText(text, textareaWrap(width));
+	const caretRow = rowOf(rows, cursor);
+	const focusEnd = lines.length + caretRow + 1;
+	for (let i = 0; i < rows.length; i++) {
+		lines.push(`    ${paintEditorRow(theme, text, rows[i]!, i === caretRow ? cursor : undefined)}`);
+	}
+	return focusEnd;
+}
+
 // ─── Content blocks ─────────────────────────────────────────────────────────
 
 function blockLines(cx: PaintContext, block: FormBlock, width: number, media: MediaState | undefined): string[] {
@@ -383,10 +409,7 @@ function optionRows(
 		if (view.note && view.note.field === index && view.note.option === row) {
 			const label = flattenLine(spansText(field.options[row]!.label));
 			lines.push(clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width));
-			lines.push(
-				`    ${theme.fgResolved("text", `${view.note.text.slice(0, view.note.cursor)}▏${view.note.text.slice(view.note.cursor)}`)}`,
-			);
-			column.focusEnd = lines.length;
+			column.focusEnd = appendNoteRows(lines, theme, view.note, width);
 		}
 	}
 }
@@ -435,7 +458,7 @@ function dropdownRows(
 	return out;
 }
 
-/** Cells a textarea's rows wrap at in a column `width` wide: past its bar, a cell short for the caret after a full row. */
+/** Text columns past the textarea bar or note indent, leaving one cell for the caret at row end. */
 function textareaWrap(width: number): number {
 	return Math.max(1, width - 5);
 }
@@ -479,13 +502,9 @@ function openFieldLines(
 		column.focusEnd = lines.length;
 		if (view.note && view.note.field === index) {
 			const label = flattenLine(spansText(field.options[view.note.option]!.label));
-			column.overlay = {
-				at: lines.length,
-				rows: [
-					clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width),
-					`    ${theme.fgResolved("text", `${view.note.text.slice(0, view.note.cursor)}▏${view.note.text.slice(view.note.cursor)}`)}`,
-				],
-			};
+			const rows = [clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width)];
+			column.focusEnd = lines.length + appendNoteRows(rows, theme, view.note, width);
+			column.overlay = { at: lines.length, rows };
 		} else if (view.dropdown !== undefined) column.overlay = { at: lines.length, rows: [] };
 	} else {
 		lines.push(labelLine(theme, model, field, view, width));
@@ -500,20 +519,9 @@ function openFieldLines(
 			const shown = Math.max(4, rows.length);
 			for (let r = 0; r < shown; r++) {
 				const row = rows[r];
-				const part = row ? text.slice(row.start, row.textEnd) : "";
-				let content = theme.fgResolved("text", part);
-				// The caret: a bar after the row's text, else the character under it inverted.
-				if (row && r === caretRow && view.focused) {
-					const at = cursor - row.start;
-					if (cursor >= row.textEnd) content = theme.fgResolved("text", `${part}▏`);
-					else {
-						const ch = String.fromCodePoint(part.codePointAt(at)!);
-						content = theme.fgResolved(
-							"text",
-							`${part.slice(0, at)}${theme.style("inverse", ch)}${part.slice(at + ch.length)}`,
-						);
-					}
-				}
+				let content = row
+					? paintEditorRow(theme, text, row, r === caretRow && view.focused ? cursor : undefined)
+					: theme.fgResolved("text", "");
 				if (r === 0 && text === "") {
 					// The placeholder sits at the right edge, a cell in from it; it goes when it does not fit.
 					const placeholder = field.placeholder ?? "";
@@ -625,6 +633,11 @@ function buildColumn(
 		),
 	);
 	if (view.active === "submit") column.focusEnd = lines.length;
+	// Apply the note at its overlay position before counting rows. The picker itself needs the viewport height.
+	if (column.overlay) {
+		const { at, rows } = column.overlay;
+		for (let i = 0; i < rows.length; i++) lines[at + i] = rows[i]!;
+	}
 	return column;
 }
 
@@ -691,15 +704,15 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	const limit = Math.max(1, Math.floor(look.terminalRows * HEIGHT_RATIO) - CHROME_ROWS);
 	const layouts: TextareaLayouts = new Map();
 	let column = buildColumn(cx, look, view, inner, layouts);
-	let body = Math.min(tallest(cx, look, inner, view, layouts), limit);
-	const overflow = column.lines.length > body;
+	// The notice takes its rows from the body, so measure the column against what it leaves.
+	let rows = Math.min(tallest(cx, look, inner, view, layouts), limit) - skip.length;
+	const overflow = column.lines.length > rows;
 	if (overflow) {
 		column = buildColumn(cx, look, view, inner - 1, layouts);
-		body = Math.min(tallest(cx, look, inner - 1, view, layouts), limit);
+		rows = Math.min(tallest(cx, look, inner - 1, view, layouts), limit) - skip.length;
 	}
 	// Up/Down in a textarea step through the rows drawn here.
 	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
-	const rows = body - skip.length;
 	const lines = column.lines;
 	if (column.overlay) {
 		const at = column.overlay.at;
