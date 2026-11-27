@@ -1,17 +1,27 @@
 import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 
-export const ADVISOR_REVIEW_MODES = ["turn", "agent-end"] as const;
+import {
+	ADVISOR_REVIEW_MODES,
+	ADVISOR_SESSION_SCOPES,
+	ADVISOR_SEVERITIES,
+	ADVISOR_SYNC_BACKLOG_MODES,
+	type AdvisorReviewMode,
+	type AdvisorSessionScope,
+	type AdvisorSeverity,
+	type AdvisorSyncBacklog,
+} from "./advisor-constants";
 
-export const ADVISOR_SYNC_BACKLOG_MODES = ["off", "1", "3", "5", "strict"] as const;
-
-export const ADVISOR_SESSION_SCOPES = ["main", "subagent", "all"] as const;
-
-export type AdvisorReviewMode = (typeof ADVISOR_REVIEW_MODES)[number];
-
-export type AdvisorSyncBacklog = (typeof ADVISOR_SYNC_BACKLOG_MODES)[number];
-
-export type AdvisorSessionScope = (typeof ADVISOR_SESSION_SCOPES)[number];
+export {
+	ADVISOR_REVIEW_MODES,
+	ADVISOR_SESSION_SCOPES,
+	ADVISOR_SEVERITIES,
+	ADVISOR_SYNC_BACKLOG_MODES,
+	type AdvisorReviewMode,
+	type AdvisorSessionScope,
+	type AdvisorSeverity,
+	type AdvisorSyncBacklog,
+};
 
 /** One advisor declared in `WATCHDOG.yml`; its instructions specialize the shared baseline. */
 export interface AdvisorConfig {

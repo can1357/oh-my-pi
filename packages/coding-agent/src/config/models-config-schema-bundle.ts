@@ -7,7 +7,7 @@ import {
 	MAX_CONFIGURED_FRAME_SIZE,
 	MIN_CONFIGURED_FRAME_SIZE,
 	SHAPE_VARIANT_NAMES,
-} from "@oh-my-pi/snapcompact";
+} from "@oh-my-pi/snapcompact/shape-variants";
 
 /**
  * Input modalities the catalog can express (`input-modalities` axis). A
