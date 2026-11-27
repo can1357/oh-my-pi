@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed transient working memory growing past its limit, and a memory row with no text id never ageing out, when a database holds such a row (as SQLite's `.recover` can write): the trim now removes rows by rowid
+- Fixed working memory growing past its configured limit and keeping expired memories in some recovered memory databases ([#20808](https://github.com/can1357/oh-my-pi/pull/20808) by [@sjawhar](https://github.com/sjawhar))
 
 ### Removed
 

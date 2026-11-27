@@ -2,10 +2,11 @@
  * The TTL and overflow trim of transient working memory addresses rows by rowid, not by `id`.
  *
  * `id TEXT PRIMARY KEY` on a rowid table admits NULL, and a database rebuilt by SQLite's `.recover`
- * can hold such a row. By id the trim could not remove one, because `id NOT IN (keep set)` is NULL,
- * never true, for the row itself. While such a row was among the newest `workingMemoryLimit` rows,
- * the keep set held a NULL, which made the test NULL for every other row too, so the overflow half
- * trimmed nothing until newer writes pushed the row out of that window.
+ * can hold such a row. Addressed by id, the trim has two defects: `id NOT IN (keep set)` is unknown,
+ * never true, for the row itself, so the row is never trimmed; and while the row is among the newest
+ * `workingMemoryLimit` rows, the NULL in the keep set makes the test unknown for every other row, so
+ * the overflow half trims nothing. These tests hold that such a row is trimmed like any other, stops
+ * no other trim, and leaves no search entry behind.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -16,8 +17,8 @@ import type { BeamConfig, BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam
 import { openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 
 const SESSION = "session-a";
-// A row as SQLite's `.recover` rebuilt one: a page of an fts5 index read back as a working_memory
-// record, keeping that page's rowid ((10 << 37) + 1, segment 10 page 1) and its NULL id.
+// A row as SQLite's `.recover` rebuilds one: a page of an fts5 index read back as a working_memory
+// record, with that page's rowid ((10 << 37) + 1, segment 10 page 1) and a NULL id.
 const RECOVERED_ROWID = 10 * 2 ** 37 + 1;
 // A rowid a JS number cannot hold: 2^53 + 1 reads back as 2^53 unless it stays text.
 const HUGE_ROWID = "9007199254740993";
@@ -87,6 +88,12 @@ function count(state: BeamMemoryState): number {
 	return (state.db.query("SELECT COUNT(*) AS n FROM working_memory").get() as { n: number }).n;
 }
 
+function searchIds(state: BeamMemoryState): (string | null)[] {
+	return (state.db.query("SELECT id FROM fts_working ORDER BY rowid").all() as { id: string | null }[]).map(
+		row => row.id,
+	);
+}
+
 const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
 
 describe("working-memory trim with a row that has no id", () => {
@@ -108,8 +115,8 @@ describe("working-memory trim with a row that has no id", () => {
 	});
 
 	it("still trims the oldest rows when a row with no id is inside the newest N", () => {
-		// By id, one such row in the keep set made the whole anti-join NULL, so this write trimmed
-		// nothing and five rows stayed under a limit of two.
+		// Addressed by id, the NULL in the keep set makes `id NOT IN (keep set)` unknown for every row,
+		// so this write trims nothing and five rows stay under a limit of two.
 		const state = makeState(2);
 		for (const id of ["wm-1", "wm-2", "wm-3"]) addMemory(state, id, hoursAgo(2));
 		addRecoveredRow(state, RECOVERED_ROWID, hoursAgo(0));
@@ -147,5 +154,23 @@ describe("working-memory trim with a row that has no id", () => {
 		remember(state, "the write that runs the trim");
 		expect(state.db.query("SELECT 1 FROM memory_embeddings WHERE memory_id = 'wm-old'").get()).toBeNull();
 		expect(state.db.query("SELECT 1 FROM annotations WHERE memory_id = 'wm-old'").get()).toBeNull();
+	});
+
+	it("removes the search entry of a trimmed row with no id", () => {
+		// The wm_ad trigger removes a search entry by id, which cannot match a NULL id.
+		const state = makeState(1000);
+		addRecoveredRow(state, RECOVERED_ROWID, hoursAgo(72));
+		const kept = remember(state, "the write that runs the trim");
+		expect(searchIds(state)).toEqual([kept]);
+	});
+
+	it("removes one search entry per trimmed row with no id and keeps a kept row's entry", () => {
+		// Two rows with no id and the same text: the one past the TTL is trimmed, the other is kept.
+		const state = makeState(1000);
+		addRecoveredRow(state, RECOVERED_ROWID, hoursAgo(72));
+		addRecoveredRow(state, RECOVERED_ROWID + 1, hoursAgo(1));
+		const kept = remember(state, "the write that runs the trim");
+		expect(ids(state)).toEqual([null, kept]);
+		expect(searchIds(state)).toEqual([null, kept]);
 	});
 });

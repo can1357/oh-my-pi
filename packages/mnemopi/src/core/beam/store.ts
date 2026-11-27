@@ -233,17 +233,13 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
  * are treated as durable and never trimmed, and trimmed rows cascade all linked
  * artifacts via `purgeWorkingMemoryArtifacts`.
  *
- * The trim addresses each row by its rowid, never by `id`. `id TEXT PRIMARY KEY`
- * on a rowid table admits NULL, and a database rebuilt by SQLite's `.recover` can
- * hold such a row. By id, `id NOT IN (keep set)` is NULL, never true, for that row,
- * so it was never trimmed. While the row was among the newest `workingMemoryLimit`
- * rows, the keep set held a NULL and the test was NULL for every other row as well,
- * so the overflow half trimmed nothing until enough newer writes pushed the row out,
- * and never again if its timestamp sorted above every later write. Rows past the TTL
- * were still removed. The rowid of a rowid table is never NULL, and it is read and
- * bound as decimal text because it is a signed 64-bit integer that a JS number would
- * round past 2^53. Only text ids go to `purgeWorkingMemoryArtifacts`, which keys every
- * artifact by the memory id.
+ * Rows are addressed by rowid, not `id`: `id TEXT PRIMARY KEY` admits NULL (a
+ * database rebuilt by SQLite's `.recover` can hold such rows), and one NULL id in
+ * the keep set makes `id NOT IN (...)` unknown for every row. A rowid is never
+ * NULL. It is read and bound as decimal text because it can exceed 2^53. Only
+ * string ids reach `purgeWorkingMemoryArtifacts`. The `wm_ad` trigger removes a
+ * search entry by id, which cannot match a NULL id, so for each trimmed row with
+ * no id the trim removes one `fts_working` entry with no id and the same text.
  */
 function trimWorkingMemory(beam: BeamMemoryState): void {
 	const limit = beam.config.workingMemoryLimit;
@@ -252,7 +248,9 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 	const cutoff = toUtcIso(new Date(Date.now() - ttlHours * 3_600_000));
 	transaction(beam.db, () => {
 		using selectStatement = beam.db.prepare(`
-			SELECT CAST(rowid AS TEXT) AS rowid, id FROM working_memory
+			SELECT CAST(rowid AS TEXT) AS row_key, id,
+				CASE WHEN id IS NULL THEN COALESCE(embed_text, content) END AS unkeyed_text
+			FROM working_memory
 			WHERE session_id = ?
 			  AND consolidated_at IS NULL
 			  AND trust_tier IS NOT 'IMPORTED'
@@ -267,16 +265,24 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 			  )
 		`);
 		const trimmed = selectStatement.all(beam.sessionId, cutoff, beam.sessionId, limit) as {
-			rowid: string;
+			row_key: string;
 			id: unknown;
+			unkeyed_text: string | Uint8Array | null;
 		}[];
 		if (trimmed.length === 0) return;
-		const rowids = trimmed.map(row => row.rowid);
-		const placeholders = rowids.map(() => "?").join(", ");
+		const rowKeys = trimmed.map(row => row.row_key);
+		const placeholders = rowKeys.map(() => "?").join(", ");
 		beam.db.run(`DELETE FROM working_memory WHERE rowid IN (${placeholders}) AND session_id = ?`, [
-			...rowids,
+			...rowKeys,
 			beam.sessionId,
 		]);
+		const unkeyed = trimmed.filter(row => row.id === null);
+		if (unkeyed.length > 0) {
+			using searchStatement = beam.db.prepare(
+				"DELETE FROM fts_working WHERE rowid = (SELECT rowid FROM fts_working WHERE id IS NULL AND content = ? LIMIT 1)",
+			);
+			for (const row of unkeyed) searchStatement.run(row.unkeyed_text);
+		}
 		purgeWorkingMemoryArtifacts(
 			beam.db,
 			trimmed.map(row => row.id).filter(id => typeof id === "string"),
