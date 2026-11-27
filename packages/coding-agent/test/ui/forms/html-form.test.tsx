@@ -6,7 +6,7 @@
 import { expect, test, vi } from "bun:test";
 import { nativeShell } from "../../helpers/native-shell";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import { createRoot, resolveChildren, signal } from "@oh-my-pi/pi-tui";
+import { batch, createRoot, resolveChildren, signal } from "@oh-my-pi/pi-tui";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { styledSpans } from "@oh-my-pi/pi-tui/text/styled-spans";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
@@ -308,6 +308,48 @@ test("Up at the top of a question taller than the card scrolls up through its te
 		// With its text all shown, Up leaves for the question above.
 		term.press("up");
 		expect(model.active()).toBe(0);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("keys that arrive before the next frame scroll and move the ask form as if each were drawn", () => {
+	const context = Array.from({ length: 12 }, (_, i) => `<p>second context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form>
+			<fieldset><legend>First question</legend>
+				<label><input type="radio" name="a" value="alpha" checked> Alpha</label>
+			</fieldset>
+			<fieldset><legend>Second question</legend>${context}
+				<label><input type="radio" name="b" value="gamma" checked> Gamma</label>
+				<label><input type="radio" name="b" value="delta"> Delta</label>
+			</fieldset>
+		</form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	/** Dispatches the keys in one reactive batch, so the card paints only after the last of them. */
+	const burst = (...ids: string[]) => {
+		batch(() => {
+			for (const id of ids) term.backend.dispatch({ type: "key", key: { id, kind: "press", raw: "" } });
+		});
+		term.render();
+	};
+	const shows = (text: string) => term.screen().some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		// The short first question was drawn last; Up right after PageDown scrolls the tall second one instead of leaving it.
+		burst("pageDown", "up");
+		expect(model.active()).toBe(1);
+		// Scroll until the highlighted option just leaves the card: one Down brings it back, the next moves it.
+		for (let presses = 0; presses < 60 && shows("Gamma"); presses++) term.press("up");
+		expect(shows("Gamma")).toBe(false);
+		burst("down", "down");
+		expect(model.active()).toBe(1);
+		expect(model.row()).toBe(1);
 	} finally {
 		term.dispose();
 	}

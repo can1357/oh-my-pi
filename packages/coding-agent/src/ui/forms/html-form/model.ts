@@ -160,10 +160,11 @@ export class HtmlFormModel {
 	/** Rows the card is asked to scroll up past the highlight: Up at the top of a group taller than the card scrolls through the text above it. */
 	readonly scrollBack = signal(0);
 	/**
-	 * The card as the terminal last drew it: rows of the open group above it, rows it sits scrolled up
-	 * past the highlight, and whether the highlight is below it. Zeros before that paint and in Tern.
+	 * The card as the terminal last drew it, for the field and row it drew: how far it can scroll up
+	 * (to the top of the open group), and how far up it can scroll with the highlight still on it.
+	 * Undefined before the first paint and in Tern, where Up never scrolls.
 	 */
-	painted = { above: 0, scrolled: 0, highlightBelow: false };
+	painted: { active: Active; row: number; maxScroll: number; reveal: number } | undefined;
 	/** Set by a key that scrolled the card up or stopped at the top of the form: the scroll stays. */
 	#keepScroll = false;
 	/**
@@ -517,8 +518,12 @@ export class HtmlFormModel {
 			const group = this.layout.groups.find(g => g.fields.includes(active));
 			if (delta < 0 && group?.fields.find(i => this.#reachable(i)) === active) {
 				// Up scrolls through the text above the group first; at the top of the form the scroll stays.
-				if (this.painted.above > 0) this.scrollBack.set(untrack(this.scrollBack) + 1);
-				this.#keepScroll = this.painted.above > 0 || this.#fieldFrom(active, -1) === undefined;
+				// Drawn for another field or row (keys ahead of the frame): scroll, which the painter clamps, rather than skip unseen text.
+				const here = this.#paintedHere();
+				const scroll = untrack(this.scrollBack);
+				const more = this.painted !== undefined && (!here || scroll < here.maxScroll);
+				if (more) this.scrollBack.set(scroll + 1);
+				this.#keepScroll = more || this.#fieldFrom(active, -1) === undefined;
 				if (this.#keepScroll) return;
 			}
 		}
@@ -664,13 +669,15 @@ export class HtmlFormModel {
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
 		// A key release neither scrolls nor drops the scroll.
 		if (key.kind === "release") return this.#key(routed);
-		// The scroll actually on screen: a resize may have shrunk it, and keys between paints have already spent some.
-		const scrolled = Math.min(untrack(this.scrollBack), this.painted.scrolled);
+		const painted = this.#paintedHere();
+		const scroll = untrack(this.scrollBack);
+		// The scroll actually on screen (a resize may have shrunk what fits), against the most that keeps the highlight on it.
+		const scrolled = painted ? Math.min(scroll, painted.maxScroll) : scroll;
 		const box = this.#activeBox();
 		const mode = box && this.vim(box)?.mode;
 		const down = listKeyId(routed) === "down" || (key.id === "j" && mode !== undefined && untrack(mode) === "normal");
 		// Down (Vim `j` in a text box too) scrolls back until the highlight shows, then moves it.
-		if (scrolled > 0 && this.painted.highlightBelow && down) {
+		if (scrolled > Math.max(0, painted?.reveal ?? 0) && down) {
 			this.scrollBack.set(scrolled - 1);
 			return true;
 		}
@@ -678,6 +685,12 @@ export class HtmlFormModel {
 		const handled = this.#key(routed);
 		if (!this.#keepScroll) this.scrollBack.set(0);
 		return handled;
+	}
+
+	/** {@link painted} when it is of the open field and row; keys since the last frame may have moved on. */
+	#paintedHere(): HtmlFormModel["painted"] {
+		const painted = this.painted;
+		return painted?.active === untrack(this.active) && painted.row === untrack(this.row) ? painted : undefined;
 	}
 
 	/**

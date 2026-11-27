@@ -722,13 +722,13 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 				? column.focusStart
 				: column.focusEnd - rows;
 	offset = Math.max(0, Math.min(offset, maxOffset));
-	const scrolled = Math.min(model.scrollBack(), Math.max(0, offset - column.groupStart));
-	offset -= scrolled;
 	model.painted = {
-		above: Math.max(0, offset - column.groupStart),
-		scrolled,
-		highlightBelow: column.focusEnd > offset + rows,
+		active: view.active,
+		row: view.row,
+		maxScroll: Math.max(0, offset - column.groupStart),
+		reveal: offset + rows - column.focusEnd,
 	};
+	offset -= Math.min(model.scrollBack(), model.painted.maxScroll);
 	const content: string[] = [];
 	const scrolls = lines.length > rows;
 	const thumb = scrolls ? Math.max(1, Math.floor((rows * rows) / lines.length)) : 0;
