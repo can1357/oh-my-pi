@@ -190,10 +190,10 @@ const RETAINED_STALE_LOG_DAYS = 5;
  * touched. The calendar-day boundary preserves daily diagnostic coverage while
  * bounding completed-process storage and scans.
  */
-function pruneStaleProcessLogs(dir: string): void {
+async function pruneStaleProcessLogs(dir: string): Promise<void> {
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
+		entries = await fs.promises.readdir(dir, { withFileTypes: true });
 	} catch {
 		return;
 	}
@@ -205,53 +205,54 @@ function pruneStaleProcessLogs(dir: string): void {
 	cutoff.setHours(0, 0, 0, 0);
 	const cutoffMs = cutoff.getTime();
 
-	const staleLogsByProcessDay = new Map<string, Array<{ path: string; rollover: number }>>();
+	// A lone in-window log survives regardless of PID liveness. Only probe a PID or
+	// stat its files when there is something we might actually delete.
+	const logsByProcessDay = new Map<string, string | string[]>();
 	for (const entry of entries) {
 		if (!entry.isFile()) continue;
-		const entryPath = path.join(dir, entry.name);
-		const legacyMatch = LEGACY_LOG_PATTERN.exec(entry.name);
-		if (legacyMatch?.[1]) {
-			if (legacyMatch[1] < cutoffDate) removeBestEffort(entryPath);
+		const name = entry.name;
+		const log = PROCESS_LOG_PATTERN.exec(name);
+		if (log) {
+			const day = log[1]!;
+			if (day < cutoffDate || day > currentDate) {
+				if (!isPidAlive(Number(log[2]))) await removeBestEffort(path.join(dir, name));
+				continue;
+			}
+			const base = log[3] ? name.slice(0, -log[3].length - 1) : name;
+			const previous = logsByProcessDay.get(base);
+			if (previous === undefined) logsByProcessDay.set(base, name);
+			else if (typeof previous === "string") logsByProcessDay.set(base, [previous, name]);
+			else previous.push(name);
 			continue;
 		}
-		if (LEGACY_AUDIT_PATTERN.test(entry.name)) {
+		const audit = PROCESS_AUDIT_PATTERN.exec(name);
+		if (audit) {
+			if (!isPidAlive(Number(audit[1]))) await removeBestEffort(path.join(dir, name));
+			continue;
+		}
+		const legacy = LEGACY_LOG_PATTERN.exec(name);
+		if (legacy) {
+			if (legacy[1]! < cutoffDate) await removeBestEffort(path.join(dir, name));
+		} else if (LEGACY_AUDIT_PATTERN.test(name)) {
+			const file = path.join(dir, name);
 			try {
-				if (fs.statSync(entryPath).mtimeMs < cutoffMs) removeBestEffort(entryPath);
+				if ((await fs.promises.stat(file)).mtimeMs < cutoffMs) await removeBestEffort(file);
 			} catch {
 				// Another process may have pruned the same legacy audit.
 			}
-			continue;
 		}
-		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
-		const auditMatch = PROCESS_AUDIT_PATTERN.exec(entry.name);
-		const pidText = logMatch?.[2] ?? auditMatch?.[1];
-		if (!pidText || isPidAlive(Number(pidText))) continue;
-
-		if (auditMatch) {
-			removeBestEffort(entryPath);
-			continue;
-		}
-		if (!logMatch?.[1]) continue;
-		if (logMatch[1] < cutoffDate || logMatch[1] > currentDate) {
-			removeBestEffort(entryPath);
-			continue;
-		}
-
-		const key = `${pidText}:${logMatch[1]}`;
-		const staleLogs = staleLogsByProcessDay.get(key) ?? [];
-		staleLogs.push({
-			path: entryPath,
-			rollover: Number(logMatch[3] ?? 0),
-		});
-		staleLogsByProcessDay.set(key, staleLogs);
 	}
 
-	for (const staleLogs of staleLogsByProcessDay.values()) {
-		if (staleLogs.length <= RETAINED_STALE_LOGS_PER_PROCESS_DAY) continue;
+	for (const [base, names] of logsByProcessDay) {
+		if (typeof names === "string" || names.length <= RETAINED_STALE_LOGS_PER_PROCESS_DAY) continue;
+		const pid = Number(PROCESS_LOG_PATTERN.exec(base)![2]);
+		if (isPidAlive(pid)) continue;
 		const ranked: Array<{ path: string; mtimeMs: number; rollover: number }> = [];
-		for (const stale of staleLogs) {
+		for (const name of names) {
+			const file = path.join(dir, name);
 			try {
-				ranked.push({ ...stale, mtimeMs: fs.statSync(stale.path).mtimeMs });
+				const { mtimeMs } = await fs.promises.stat(file);
+				ranked.push({ path: file, mtimeMs, rollover: Number(name.slice(base.length + 1)) });
 			} catch {
 				// Another process may have pruned the same stale namespace.
 			}
@@ -259,13 +260,16 @@ function pruneStaleProcessLogs(dir: string): void {
 		ranked.sort(
 			(a, b) => b.mtimeMs - a.mtimeMs || b.rollover - a.rollover || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
 		);
-		for (const stale of ranked.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) removeBestEffort(stale.path);
+		for (let i = RETAINED_STALE_LOGS_PER_PROCESS_DAY; i < ranked.length; i++) {
+			if (isPidAlive(pid)) break;
+			await removeBestEffort(ranked[i]!.path);
+		}
 	}
 }
 
-function removeBestEffort(filePath: string): void {
+async function removeBestEffort(filePath: string): Promise<void> {
 	try {
-		fs.rmSync(filePath, { force: true });
+		await fs.promises.unlink(filePath);
 	} catch {
 		// Retention is best-effort; another process may have pruned the same file.
 	}
@@ -277,9 +281,12 @@ const scheduledPruneDirs = new Set<string>();
 function schedulePruneStaleProcessLogs(dir: string): void {
 	if (scheduledPruneDirs.has(dir)) return;
 	scheduledPruneDirs.add(dir);
-	const immediate = setImmediate(() => {
-		scheduledPruneDirs.delete(dir);
-		pruneStaleProcessLogs(dir);
+	const immediate = setImmediate(async () => {
+		try {
+			await pruneStaleProcessLogs(dir);
+		} finally {
+			scheduledPruneDirs.delete(dir);
+		}
 	});
 	immediate.unref();
 }

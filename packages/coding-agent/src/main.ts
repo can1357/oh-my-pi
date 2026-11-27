@@ -674,7 +674,10 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			if (nextOptions.model) bindApiKey(nextOptions.model.provider, apiKey);
 		}
 
-		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
+		const nextSessionManager = SessionManager.create(
+			cwd,
+			args.sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd)),
+		);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
 		// host can open `session/new` for any client-supplied workspace, so

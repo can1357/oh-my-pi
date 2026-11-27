@@ -2444,9 +2444,10 @@ export class ModelRegistry {
 				bundledFingerprint !== undefined &&
 				cache.staticFingerprint !== bundledFingerprint &&
 				!cache.staticFingerprint.startsWith(`${bundledFingerprint}:drop:`);
-			const bundledById = bundledModels
-				? new Map(bundledModels.map(bundledModel => [bundledModel.id, bundledModel]))
-				: undefined;
+			const bundledById =
+				bundledModels && (omittedHeaderIds.size > 0 || additiveSharedCatalogProvider)
+					? new Map(bundledModels.map(bundledModel => [bundledModel.id, bundledModel]))
+					: undefined;
 			const models: Model<Api>[] = [];
 			for (const cachedModel of cache.models) {
 				// Shared catalog rows can be projected under another provider id.

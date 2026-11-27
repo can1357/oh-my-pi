@@ -122,6 +122,27 @@ describe("model cache write churn", () => {
 		expect(refreshRows?.count).toBe(0);
 	});
 
+	it("revalidates header provenance even when the model payload is unchanged", () => {
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		const before = readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath);
+		expect(before?.headerOmittedModelIds).toEqual([]);
+		const db = new Database(dbPath);
+		try {
+			const update = db.query(
+				"UPDATE model_cache SET header_omitted_model_ids = ? WHERE provider_id = 'rewrite-test'",
+			);
+			update.run('["a"]');
+			const after = readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath);
+			expect(after?.models).toBe(before?.models);
+			expect(after?.headerOmittedModelIds).toEqual(["a"]);
+			update.run("invalid");
+			expect(readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath)).toBeNull();
+			expect(payloadRow(dbPath, "rewrite-test")).toBeNull();
+		} finally {
+			db.close();
+		}
+	});
+
 	it("ignores a side row left behind by a payload another writer replaced", () => {
 		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
 		writeModelCache("rewrite-test", 5_000, [model("a")], true, "fp", dbPath);

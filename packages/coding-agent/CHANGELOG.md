@@ -81,6 +81,7 @@
 - OTLP export runs on OpenTelemetry JS SDK 3; `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*` and the span limit variables are no longer read (the documented `OTEL_*` variables work as before)
 - On public sites, browser `tab.console()` and `tab.errors()` record from the first call on a tab (the result's `captureStartedAt` marks when), so pages cannot detect the capture; local and dev pages still record from load
 - Interactive startup loads fewer modules, and reading settings or caches no longer unlocks stored credentials.
+- Startup no longer blocks the event loop while scanning session folders, relay endpoints, or old logs.
 - Startup loads the selected or saved model’s provider first when possible and reuses matching local catalog entries between launch and session setup.
 - Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@p2p:` includes local agents and peers from every project, labeled with their folder when different, while plain `@` searches only this folder's peers
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)

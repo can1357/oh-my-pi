@@ -83,7 +83,8 @@ interface CacheRowMeta {
 }
 
 interface CacheRow extends CacheRowMeta {
-	models: string;
+	/** NULL only when the query recognized the reader's already-validated payload hash. */
+	models: string | null;
 }
 
 /**
@@ -127,23 +128,20 @@ const MAX_POLICIES_PER_PROVIDER = 3;
  * matches the payload row's `updated_at`, so a rewritten payload silently
  * invalidates it.
  */
-const CACHE_ROW_FROM = `
-	FROM model_cache m
-	LEFT JOIN model_cache_freshness f
-		ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy
-	WHERE m.provider_id = ? AND m.materialization_policy = ?
-`;
 const CACHE_ROW_FRESHNESS_COLUMNS = `
 		f.payload_updated_at AS freshness_payload_updated_at,
 		f.updated_at AS freshness_updated_at,
 		f.authoritative AS freshness_authoritative`;
-const SELECT_CACHE_ROW = `SELECT m.*, ${CACHE_ROW_FRESHNESS_COLUMNS} ${CACHE_ROW_FROM}`;
-/** Scalar columns plus `models_hash`: validates a memoized parse without reading the multi-MB payload. */
-const SELECT_CACHE_ROW_META = `
+// Keep SQLite's overflow pages and the multi-MB JS string off the read path
+// when only freshness or header provenance changed. NULL never matches a hash.
+const SELECT_CACHE_ROW = `
 	SELECT m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
-		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids,
-		m.unrestorable_header_model_ids, m.header_restore_version, ${CACHE_ROW_FRESHNESS_COLUMNS}
-	${CACHE_ROW_FROM}
+		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids, m.unrestorable_header_model_ids,
+		m.header_restore_version, ${CACHE_ROW_FRESHNESS_COLUMNS},
+		CASE WHEN m.models_hash = ? THEN NULL ELSE m.models END AS models
+	FROM model_cache m LEFT JOIN model_cache_freshness f
+		ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy
+	WHERE m.provider_id = ? AND m.materialization_policy = ? AND m.version = ${CACHE_SCHEMA_VERSION}
 `;
 
 /** Cumulative model-cache write counters for this process. */
@@ -771,11 +769,15 @@ function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
 function parseMaterializedModels<TApi extends Api>(serialized: string): Model<TApi>[] | null {
 	try {
 		const parsed: unknown = JSON.parse(serialized);
-		if (!Array.isArray(parsed) || !parsed.every(isMaterializedModel)) return null;
-		return parsed.map(model => ({
-			...model,
-			supportsComputerUseConfig: model.supportsComputerUseConfig ?? undefined,
-		})) as Model<TApi>[];
+		if (!Array.isArray(parsed)) return null;
+		for (const model of parsed) {
+			if (!isMaterializedModel(model)) return null;
+			// JSON.parse owns these rows; restore the optional value in place rather
+			// than copying every property of every model into a second array.
+			const restoring: { supportsComputerUseConfig?: boolean | null } = model;
+			if (restoring.supportsComputerUseConfig === null) restoring.supportsComputerUseConfig = undefined;
+		}
+		return parsed as Model<TApi>[];
 	} catch {
 		return null;
 	}
@@ -791,7 +793,10 @@ function parsePayload<TApi extends Api>(serialized: string, hash: string): Model
 	return models;
 }
 
-function parseModelIds(serialized: string): string[] | null {
+const noModelIds: readonly string[] = Object.freeze([]);
+
+function parseModelIds(serialized: string): readonly string[] | null {
+	if (serialized === "[]") return noModelIds;
 	try {
 		const parsed: unknown = JSON.parse(serialized);
 		return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === "string") ? parsed : null;
@@ -822,32 +827,17 @@ export function readModelCache<TApi extends Api>(
 				// cached row's updatedAt so a long-lived process goes stale.
 				return withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
 			}
-			// Any commit (to any provider's row) bumps data_version. Validate the
-			// memoized parse against the row's scalar columns and payload hash
-			// first; only a changed payload pays for the multi-MB `models` read.
-			let entry: CacheEntry<TApi> | null = null;
-			let meta: CacheRowMeta | null = null;
-			if (cached?.entry && cached.meta) {
-				meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
-				if (meta && cacheRowsEqual(cached.meta, meta)) {
-					// Payload unchanged; only side-table freshness may have moved.
-					entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
-				} else {
-					meta = null;
-				}
-			}
-			if (entry === null) {
-				// One statement reads payload and scalars from the same snapshot.
-				const row = queryRow<CacheRow>(db, SELECT_CACHE_ROW, providerId);
-				entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
-				if (entry !== null && row !== null) {
-					// Drop the payload so the memo never pins the multi-MB `models` string.
-					const { models: _models, ...rowScalars } = row;
-					meta = rowScalars;
-				}
-			}
+			// Any commit (to any provider) bumps data_version. Revalidate the
+			// scalars and fetch the payload only on a hash miss, in one snapshot.
+			const previous = cached?.entry as CacheEntry<TApi> | null | undefined;
+			const row = queryRow(db, providerId, cached?.meta?.models_hash || null);
+			const entry =
+				row?.models === null && previous && cached?.meta && cacheRowsEqual(cached.meta, row)
+					? withFreshness(withRowState(previous, row), ttlMs, now)
+					: parseCacheRow(db, providerId, row, ttlMs, now, previous?.models);
+			if (row) row.models = null; // Never pin the serialized payload in the memo.
 			if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
-			readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
+			readRowCache.set(key, { dataVersion, meta: entry ? row : null, entry: entry as CacheEntry<Api> | null });
 			return entry;
 		});
 	} catch {
@@ -856,10 +846,10 @@ export function readModelCache<TApi extends Api>(
 }
 
 /** This build's row for `providerId`; rows of other materialization policies are invisible. */
-function queryRow<T>(db: Database, sql: string, providerId: string): T | null {
-	const stmt = db.query<T, [string, string]>(sql);
+function queryRow(db: Database, providerId: string, knownHash: string | null): CacheRow | null {
+	const stmt = db.query<CacheRow, [string | null, string, string]>(SELECT_CACHE_ROW);
 	try {
-		return stmt.get(providerId, materializationPolicy());
+		return stmt.get(knownHash, providerId, materializationPolicy());
 	} finally {
 		stmt.finalize();
 	}
@@ -909,13 +899,17 @@ function parseCacheRow<TApi extends Api>(
 	row: CacheRow | null,
 	ttlMs: number,
 	now: () => number,
+	knownModels: Model<TApi>[] | undefined,
 ): CacheEntry<TApi> | null {
-	if (!row || row.version !== CACHE_SCHEMA_VERSION) {
-		return null;
-	}
-	const models = parsePayload<TApi>(row.models, row.models_hash);
+	if (!row) return null;
 	const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
 	const unrestorableHeaderModelIds = parseModelIds(row.unrestorable_header_model_ids);
+	const models =
+		row.models === null
+			? (knownModels ?? null)
+			: headerOmittedModelIds && unrestorableHeaderModelIds
+				? parsePayload<TApi>(row.models, row.models_hash)
+				: null;
 	if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
 		// Fail closed on corrupt header provenance: treating malformed
 		// markers as empty could return a model with required credentials

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	computeDefaultSessionDir,
+	computeDefaultSessionDirAsync,
 	hasPositiveMovedProjectEvidence,
 	readCwdIdentity,
 	writeTerminalBreadcrumb,
@@ -42,9 +43,53 @@ afterEach(() => {
 });
 
 describe("legacy session directory migration", () => {
+	test("concurrent startup lookups await one home sweep, including merges in other buckets", async () => {
+		const sessionsRoot = makeTempDir("omp-session-root-");
+		const cwd = makeTempDir("omp-session-cwd-");
+		const oldDir = legacySessionDir(sessionsRoot, path.join(os.homedir(), "other-project"));
+		const newDir = path.join(sessionsRoot, "-other-project");
+		fs.mkdirSync(oldDir);
+		fs.mkdirSync(newDir);
+		fs.writeFileSync(path.join(oldDir, "saved.jsonl"), "saved\n");
+		fs.writeFileSync(path.join(newDir, "active.jsonl"), "active\n");
+		const storage = new FileSessionStorage();
+		const read = vi.spyOn(fs.promises, "readdir");
+		const syncRead = vi.spyOn(fs, "readdirSync");
+		try {
+			const lookups = [cwd, path.join(cwd, "nested")].map(async project => {
+				const dir = await computeDefaultSessionDirAsync(project, storage, sessionsRoot);
+				expect(fs.statSync(dir).isDirectory()).toBe(true);
+				expect(fs.readFileSync(path.join(newDir, "saved.jsonl"), "utf8")).toBe("saved\n");
+			});
+			await Promise.all(lookups);
+			expect(read.mock.calls.filter(([dir]) => dir === sessionsRoot)).toHaveLength(1);
+			expect(read.mock.calls.some(([dir]) => dir === oldDir)).toBe(true);
+			expect(syncRead).not.toHaveBeenCalled();
+			expect(fs.existsSync(oldDir)).toBe(false);
+			expect(fs.readFileSync(path.join(newDir, "active.jsonl"), "utf8")).toBe("active\n");
+		} finally {
+			syncRead.mockRestore();
+			read.mockRestore();
+		}
+	});
+
+	test("a synchronous factory can complete an in-flight startup migration", async () => {
+		const root = makeTempDir("omp-session-root-");
+		const cwd = path.join(os.homedir(), "legacy-project");
+		const legacy = legacySessionDir(root, cwd);
+		fs.mkdirSync(legacy);
+		fs.writeFileSync(path.join(legacy, "saved.jsonl"), "saved\n");
+		const storage = new FileSessionStorage();
+		const pending = computeDefaultSessionDirAsync(cwd, storage, root);
+		const dir = computeDefaultSessionDir(cwd, storage, root);
+		expect(fs.readFileSync(path.join(dir, "saved.jsonl"), "utf8")).toBe("saved\n");
+		expect(await pending).toBe(dir);
+		expect(fs.existsSync(legacy)).toBe(false);
+	});
+
 	test.each([false, true])(
 		"recovers hashed home-scoped sessions when the temp root is inside home (collision: %s)",
-		withCollision => {
+		async withCollision => {
 			const root = makeTempDir("omp-shadowed-home-");
 			const home = path.join(root, "home");
 			const tempRoot = path.join(home, "tmp");
@@ -67,7 +112,7 @@ describe("legacy session directory migration", () => {
 			try {
 				const tempMock = vi.spyOn(os, "tmpdir").mockReturnValue(tempRoot);
 				try {
-					const destination = computeDefaultSessionDir(cwd, new FileSessionStorage(), sessionsRoot);
+					const destination = await computeDefaultSessionDirAsync(cwd, new FileSessionStorage(), sessionsRoot);
 					expect(destination).toBe(canonicalDir);
 					expect(fs.readFileSync(path.join(destination, "saved.jsonl"))).toEqual(transcript);
 					if (withCollision) {

@@ -79,7 +79,7 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 }
 
 const bundledSlices = new Map<string, readonly Model<Api>[]>();
-const sharedSlices = new WeakSet<object>();
+const kSliceProvider = Symbol("bundledSlice.provider");
 const emptySlice: readonly Model<Api>[] = Object.freeze([]);
 
 /** Stable read-only view for consumers that reuse a bundled provider's content identity. */
@@ -88,15 +88,27 @@ export function getBundledModelSlice(provider: GeneratedProvider): readonly Mode
 	if (cached) return cached;
 	const models = getProviderModels(provider);
 	if (!models) return emptySlice;
-	const slice = Object.freeze(Array.from(models.values()));
+	const slice = Array.from(models.values());
+	Object.defineProperty(slice, kSliceProvider, { value: provider });
+	Object.freeze(slice);
 	bundledSlices.set(provider, slice);
-	sharedSlices.add(slice);
 	return slice;
+}
+
+function bundledSliceProvider(models: readonly unknown[]): string | undefined {
+	const provider = kSliceProvider in models ? models[kSliceProvider] : undefined;
+	return typeof provider === "string" && bundledSlices.get(provider) === models ? provider : undefined;
 }
 
 /** Only catalog-owned slices have immutable membership and shared read-only rows. */
 export function isBundledModelSlice(models: readonly unknown[]): boolean {
-	return sharedSlices.has(models);
+	return bundledSliceProvider(models) !== undefined;
+}
+
+/** Only unmodified generator-materialized slices have a precomputed content digest. */
+export function getBundledModelSliceHash(models: readonly unknown[]): string | undefined {
+	const provider = bundledSliceProvider(models);
+	return provider === undefined ? undefined : catalog.data.providerHashes?.[provider];
 }
 
 /** Resolve display semantics without mistaking an absent rate card for a free model. */

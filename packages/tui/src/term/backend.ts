@@ -23,6 +23,7 @@
  * focused kind's widget (an editor turns them into `edit` events); clicks
  * resolve through the last frame's hit regions.
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type {
 	FramePlan,
 	HistoryRowMark,
@@ -302,7 +303,7 @@ function sliceAfter(text: string, column: number): string {
 	// Re-measured by the writer; styles of the cut prefix are reset above.
 	let col = 0;
 	let index = 0;
-	for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(Bun.stripANSI(text))) {
+	for (const { segment } of segmentGraphemes(Bun.stripANSI(text))) {
 		if (col >= column) break;
 		col += Bun.stringWidth(segment);
 		index += segment.length;

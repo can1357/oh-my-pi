@@ -50,6 +50,7 @@ import {
 import { lineStart, nextBoundary } from "@oh-my-pi/pi-tui/term/widgets/editor";
 import { flattenLine, stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { isSingleGrapheme } from "@oh-my-pi/pi-utils/graphemes";
 import type { TspEditorDecoration, TspEffect, TspPickerLevel, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import "../styles/composer";
@@ -1627,7 +1628,7 @@ export class Composer {
 			!event.paste &&
 			event.from === event.to &&
 			event.cursor === event.from + event.text.length &&
-			[...new Intl.Segmenter().segment(event.text)].length === 1;
+			isSingleGrapheme(event.text);
 		const force = this.#forceFiles;
 		const previous = event.from === this.#cursor() ? this.#completion.peek() : null;
 		this.#change(event.from, event.to, event.text, event.cursor, typed ? "type" : "edit");
