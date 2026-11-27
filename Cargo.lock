@@ -1633,7 +1633,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3760,7 +3760,7 @@ checksum = "e148af16ed31893495bae2ccb7caf8fab26f50f7244a491fca9f9233dedf3619"
 dependencies = [
  "bstr",
  "grep-matcher",
- "grep-searcher 0.1.18",
+ "grep-searcher",
  "log",
  "serde",
  "serde_json",
@@ -3782,7 +3782,7 @@ dependencies = [
 
 [[package]]
 name = "grep-searcher"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "bstr",
  "encoding_rs",
@@ -3793,21 +3793,6 @@ dependencies = [
  "memchr",
  "memmap2",
  "regex",
-]
-
-[[package]]
-name = "grep-searcher"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10863a5777b86c61ef2b19bd5f34b9983d5093af1758c7f88036e88c3134bf28"
-dependencies = [
- "bstr",
- "encoding_rs",
- "encoding_rs_io",
- "grep-matcher",
- "log",
- "memchr",
- "memmap2",
 ]
 
 [[package]]
@@ -5796,7 +5781,7 @@ dependencies = [
  "grep-matcher",
  "grep-printer",
  "grep-regex",
- "grep-searcher 0.1.17",
+ "grep-searcher",
  "hex",
  "icu_collator",
  "icu_decimal",
@@ -6113,7 +6098,7 @@ dependencies = [
  "globset",
  "grep-matcher",
  "grep-regex",
- "grep-searcher 0.1.17",
+ "grep-searcher",
  "hashbrown 0.17.2",
  "ignore",
  "libc",
