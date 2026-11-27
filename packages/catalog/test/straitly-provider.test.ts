@@ -61,6 +61,54 @@ const STRAITLY_ROWS: Record<string, unknown>[] = [
 		pricing: { prompt: "0.0000005", completion: "0.0000015" },
 	},
 	{
+		id: "full-sampling-and-penalties",
+		name: "Full Sampling Model",
+		context_length: 128_000,
+		architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+		top_provider: { context_length: 128_000, max_completion_tokens: 16_384 },
+		supported_parameters: [
+			"max_tokens",
+			"temperature",
+			"top_p",
+			"top_k",
+			"min_p",
+			"presence_penalty",
+			"repetition_penalty",
+			"frequency_penalty",
+			"stop",
+		],
+		reasoning: null,
+		pricing: { prompt: "0.0000005", completion: "0.0000015" },
+	},
+	{
+		id: "custom-model-thinking",
+		name: "Optional Thinking Variant",
+		context_length: 200_000,
+		architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+		top_provider: { context_length: 200_000, max_completion_tokens: 16_384 },
+		supported_parameters: ["max_tokens", "reasoning", "reasoning_effort", "tool_choice", "tools"],
+		reasoning: {
+			mandatory: false,
+			default_enabled: true,
+			supported_efforts: ["low", "medium", "high"],
+			default_effort: "medium",
+		},
+		pricing: { prompt: "0.000001", completion: "0.000003" },
+	},
+	{
+		id: "optional-fallback-thinking",
+		name: "Optional Fallback Thinking Variant",
+		context_length: 200_000,
+		architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+		top_provider: { context_length: 200_000, max_completion_tokens: 16_384 },
+		supported_parameters: ["max_tokens", "reasoning", "reasoning_effort", "tool_choice", "tools"],
+		reasoning: {
+			mandatory: false,
+			default_enabled: true,
+		},
+		pricing: { prompt: "0.000001", completion: "0.000003" },
+	},
+	{
 		id: "mandatory-reasoner",
 		name: "Mandatory Reasoner",
 		context_length: 262_144,
@@ -152,10 +200,10 @@ describe("Straitly provider", () => {
 		expect(sonnet?.cost.cacheRead).toBeCloseTo(0.1, 6);
 		expect(sonnet?.cost.cacheWrite).toBeCloseTo(1.25, 6);
 		expect(sonnet?.thinking?.defaultLevel).toBe(Effort.High);
-		expect(sonnet?.thinking?.requiresEffort).not.toBe(true);
+		expect(sonnet?.thinking?.requiresEffort).toBe(false);
 		expect(sonnet?.compat?.reasoningDisableMode).toBe("cline-enabled-false");
 		expect(sonnet?.compat?.supportsSamplingParams).toBe(false);
-		expect(sonnet?.compat?.supportsPenaltyAndStopParams).toBe(true);
+		expect(sonnet?.compat?.supportsPenaltyAndStopParams).toBe(false);
 
 		const deepseek = models.find(model => model.id === "deepseek/deepseek-v4-1-flash-1017");
 		expect(deepseek?.reasoning).toBe(true);
@@ -164,16 +212,32 @@ describe("Straitly provider", () => {
 		expect(deepseek?.maxTokens).toBe(1_048_576);
 		expect(deepseek?.supportsTools).not.toBe(false);
 		expect(deepseek?.compat?.supportsReasoningEffort).toBe(false);
-		expect(deepseek?.compat?.supportsSamplingParams).toBe(true);
-		expect(deepseek?.compat?.supportsPenaltyAndStopParams).toBe(true);
+		expect(deepseek?.compat?.supportsSamplingParams).toBe(false);
+		expect(deepseek?.compat?.supportsPenaltyAndStopParams).toBe(false);
 
 		const textOnly = models.find(model => model.id === "text-only-no-tools");
 		expect(textOnly?.reasoning).toBe(false);
 		expect(textOnly?.input).toEqual(["text"]);
 		expect(textOnly?.supportsTools).toBe(false);
 		expect(textOnly?.compat?.supportsToolChoice).toBe(false);
-		expect(textOnly?.compat?.supportsSamplingParams).toBe(true);
+		expect(textOnly?.compat?.supportsSamplingParams).toBe(false);
 		expect(textOnly?.compat?.supportsPenaltyAndStopParams).toBe(false);
+
+		const fullSampling = models.find(model => model.id === "full-sampling-and-penalties");
+		expect(fullSampling?.compat?.supportsSamplingParams).toBe(true);
+		expect(fullSampling?.compat?.supportsPenaltyAndStopParams).toBe(true);
+
+		const optionalThinking = models.find(model => model.id === "custom-model-thinking");
+		expect(optionalThinking?.reasoning).toBe(true);
+		expect(optionalThinking?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(optionalThinking?.thinking?.defaultLevel).toBe(Effort.Medium);
+		expect(optionalThinking?.thinking?.requiresEffort).toBe(false);
+		expect(optionalThinking?.compat?.reasoningDisableMode).toBe("cline-enabled-false");
+
+		const optionalFallbackThinking = models.find(model => model.id === "optional-fallback-thinking");
+		expect(optionalFallbackThinking?.reasoning).toBe(true);
+		expect(optionalFallbackThinking?.thinking?.requiresEffort).toBe(false);
+		expect(optionalFallbackThinking?.compat?.reasoningDisableMode).toBe("cline-enabled-false");
 
 		const mandatory = models.find(model => model.id === "mandatory-reasoner");
 		expect(mandatory?.reasoning).toBe(true);

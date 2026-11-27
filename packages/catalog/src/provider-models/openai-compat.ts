@@ -9090,7 +9090,7 @@ function mapStraitlyThinking(
 ): ThinkingConfig | undefined {
 	const reasoning = entry.reasoning;
 	if (!isRecord(reasoning)) return undefined;
-	const requiresEffort = reasoning.mandatory === true;
+	const requiresEffort = typeof reasoning.mandatory === "boolean" ? reasoning.mandatory : undefined;
 	const supportedEfforts = reasoning.supported_efforts;
 	const defaultLevel =
 		typeof reasoning.default_effort === "string"
@@ -9103,16 +9103,16 @@ function mapStraitlyThinking(
 			mode: "effort",
 			efforts,
 			...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
-			...(requiresEffort ? { requiresEffort: true } : {}),
+			...(requiresEffort !== undefined ? { requiresEffort } : {}),
 		};
 	}
-	if (!requiresEffort && defaultLevel === undefined) return undefined;
+	if (requiresEffort === undefined && defaultLevel === undefined) return undefined;
 	const ladder = spec.thinking ?? resolveModelPolicy({ ...spec, reasoning: true, thinking: undefined }).thinking;
 	if (!ladder) return undefined;
 	return {
 		...ladder,
 		...(defaultLevel !== undefined && ladder.efforts.includes(defaultLevel) ? { defaultLevel } : {}),
-		...(requiresEffort ? { requiresEffort: true } : {}),
+		...(requiresEffort !== undefined ? { requiresEffort } : {}),
 	};
 }
 
@@ -9142,18 +9142,21 @@ function mapStraitlyModel(
 	const thinking = mapStraitlyThinking(entry, defaults);
 	const supportsTools = params !== undefined ? params.includes("tools") : undefined;
 	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
+	// `supportsSamplingParams` and `supportsPenaltyAndStopParams` are coarse gates
+	// in `openai-completions.ts`: only leave each enabled when every field that
+	// gate can emit is advertised in `supported_parameters`.
 	const supportsSamplingParams =
 		params !== undefined
-			? params.includes("temperature") ||
-				params.includes("top_p") ||
-				params.includes("top_k") ||
+			? params.includes("temperature") &&
+				params.includes("top_p") &&
+				params.includes("top_k") &&
 				params.includes("min_p")
 			: true;
 	const supportsPenaltyAndStopParams =
 		params !== undefined
-			? params.includes("presence_penalty") ||
-				params.includes("repetition_penalty") ||
-				params.includes("frequency_penalty") ||
+			? params.includes("presence_penalty") &&
+				params.includes("repetition_penalty") &&
+				params.includes("frequency_penalty") &&
 				params.includes("stop")
 			: true;
 	const compatPatch: OpenAICompat = {
