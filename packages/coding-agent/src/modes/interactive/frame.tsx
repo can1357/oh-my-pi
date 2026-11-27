@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { ResizeScrollback, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import type { ScreenMode, SelectionMotion, TranscriptScroll } from "@oh-my-pi/pi-tui/term/backend";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { setSymbolPreset } from "../../ui/theme/service";
@@ -59,6 +60,30 @@ import { composerShape, type StatusAttachment } from "../../ui/styles/composer/s
 import { welcomeTip } from "../../ui/welcome/tips";
 import { Welcome, WelcomeModel } from "../../ui/welcome/welcome";
 import type { DockModels, StatusLineView } from "../types";
+
+/** Fullscreen transcript scroll actions and the scroll each asks for. */
+const TRANSCRIPT_SCROLL_KEYS: readonly (readonly [Keybinding, TranscriptScroll])[] = [
+	["app.transcript.pageUp", "page-up"],
+	["app.transcript.pageDown", "page-down"],
+	["app.transcript.halfPageUp", "half-up"],
+	["app.transcript.halfPageDown", "half-down"],
+	["app.transcript.previousPrompt", "previous-prompt"],
+	["app.transcript.nextPrompt", "next-prompt"],
+	["app.transcript.lineUp", "line-up"],
+	["app.transcript.lineDown", "line-down"],
+	["app.transcript.top", "start"],
+	["app.transcript.bottom", "end"],
+];
+
+const TRANSCRIPT_SELECTION_KEYS: readonly (readonly [Keybinding, SelectionMotion])[] = [
+	["app.transcript.selectLeft", "left"],
+	["app.transcript.selectRight", "right"],
+	["app.transcript.selectUp", "up"],
+	["app.transcript.selectDown", "down"],
+	["app.transcript.selectLineStart", "line-start"],
+	["app.transcript.selectLineEnd", "line-end"],
+	["app.transcript.clearSelection", "clear"],
+];
 
 /** How the frame starts. */
 export interface AppFrameOptions {
@@ -123,6 +148,13 @@ export class AppFrame {
 	readonly hyperlinks: Signal<boolean | undefined> = signal(undefined);
 	/** `tui.textSizing`: sized headings where the terminal supports them. */
 	readonly textSizing: Signal<boolean> = signal(false);
+	/** `tui.screen`: where the terminal renderer draws the session. */
+	readonly screen: Signal<ScreenMode> = signal<ScreenMode>("inline");
+	readonly copyOnSelect: Signal<boolean> = signal(true);
+	readonly wheelLines: Signal<number> = signal(0);
+	readonly scrollbar: Signal<boolean> = signal(true);
+	readonly exitTranscript: Signal<boolean> = signal(true);
+	readonly fullscreenMouse: Signal<boolean> = signal(true);
 	readonly #shape: Signal<string>;
 	readonly #quiet: Signal<boolean>;
 	/** Tip rolls, latched when the frame is built so the tip stays put for the session. */
@@ -155,6 +187,24 @@ export class AppFrame {
 			route(value);
 			return true;
 		});
+		// The fullscreen transcript's scroll keys go ahead of the editor's page keys (the completion
+		// popup keeps its paging; inline no transcript window takes them), and a submitted prompt
+		// brings the transcript back to its live end.
+		this.composer.addKeyHandler(key => {
+			if (key.kind === "release" || this.composer.completing()) return false;
+			if (this.screen.peek() !== "fullscreen" || !this.shell.host || this.shell.host.native) return false;
+			const bindings = getKeybindings();
+			if (bindings.matches(key, "tui.input.submit")) {
+				this.shell.scrollTranscript("end");
+				return false;
+			}
+			if (bindings.matches(key, "app.transcript.search")) return this.shell.host?.openSearch() ?? false;
+			if (bindings.matches(key, "app.transcript.copySelection")) return this.shell.host?.copySelection() ?? false;
+			const by = TRANSCRIPT_SCROLL_KEYS.find(([action]) => bindings.matches(key, action))?.[1];
+			if (by !== undefined) return this.shell.scrollTranscript(by);
+			const motion = TRANSCRIPT_SELECTION_KEYS.find(([action]) => bindings.matches(key, action))?.[1];
+			return motion !== undefined && (this.shell.host?.extendSelection(motion) ?? false);
+		});
 		this.welcome = new WelcomeModel(options.version, { intro: options.intro === true });
 		const todo = new TodoHudModel();
 		const status = new StatusHudModel(todo);
@@ -176,7 +226,7 @@ export class AppFrame {
 
 	/**
 	 * Start rendering on the process terminal, focus resting on the composer; `clearHistory`
-	 * clears the terminal's scrollback first (a fresh screen for the session).
+	 * clears the terminal's scrollback first (a fresh screen for an inline session).
 	 */
 	async start(options: AppFrameStartOptions): Promise<void> {
 		// Before the host starts: keys typed while it probes the terminal are delivered to the focused node.
@@ -194,9 +244,16 @@ export class AppFrame {
 			frameInterval: this.frameInterval,
 			hyperlinks: this.hyperlinks,
 			textSizing: this.textSizing,
+			screen: this.screen,
+			copyOnSelect: this.copyOnSelect,
+			wheelLines: this.wheelLines,
+			scrollbar: this.scrollbar,
+			exitTranscript: this.exitTranscript,
+			fullscreenMouse: this.fullscreenMouse,
 			...(this.#terminal?.clock ? { clock: this.#terminal.clock } : {}),
 		});
-		if (options.clearHistory) this.shell.host?.replayHistory();
+		// A fresh screen is an inline concern: the fullscreen session leaves the shell's scrollback alone.
+		if (options.clearHistory && this.screen.peek() === "inline") this.shell.host?.replayHistory();
 		// Tern draws omp's icons with its own Nerd Font: a native surface always uses those symbols.
 		if (this.shell.native()) await setSymbolPreset("nerd");
 	}

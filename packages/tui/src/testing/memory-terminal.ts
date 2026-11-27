@@ -75,6 +75,8 @@ export interface MemoryTerminalInit {
 	readonly driver?: Omit<TerminalDriverOptions, "sink" | "stdin" | "stdout" | "events" | "env">;
 	/** Also receives every write (a terminal emulator under test). */
 	readonly onWrite?: (data: string) => void;
+	/** Reply to CPR from the attached emulator; otherwise report home. */
+	readonly cursor?: () => { readonly x: number; readonly y: number };
 }
 
 export interface MemoryTerminal {
@@ -111,7 +113,10 @@ export function memoryTerminal(init: MemoryTerminalInit): MemoryTerminal {
 				let replies = "";
 				for (let at = data.indexOf(DA1_QUERY); at !== -1; at = data.indexOf(DA1_QUERY, at + 1))
 					replies += "\x1b[?62c";
-				if (data.includes(CURSOR_QUERY)) replies += "\x1b[1;1R";
+				if (data.includes(CURSOR_QUERY)) {
+					const cursor = init.cursor?.();
+					replies += `\x1b[${(cursor?.y ?? 0) + 1};${(cursor?.x ?? 0) + 1}R`;
+				}
 				if (replies) queueMicrotask(() => feed(replies));
 			},
 			flush: () => Promise.resolve(),

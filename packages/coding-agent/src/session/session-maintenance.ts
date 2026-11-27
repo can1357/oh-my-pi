@@ -2518,16 +2518,16 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		if (contextTokens >= thresholdTokens) return; // real maintenance owns it now
-		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
+		const lead = resolveSpeculationLeadTokens(thresholdTokens);
+		if (thresholdTokens - contextTokens > lead) return;
 		const current = this.#speculation;
 		if (current) {
 			// One run at a time; a bridge result waits for the boundary that commits it.
 			if (!current.armed || current.bridge) return;
-			// Refresh-on-growth: the armed summary's kept tail grows with every
-			// turn; once the growth exceeds the keep-recent budget, a fresh cut
-			// reclaims materially more context at apply time.
+			// Ordinary growth across the lead band shouldn't pay for a second
+			// summary. Branch and headroom checks can still invalidate the cut.
 			const growth = contextTokens - current.armed.contextTokensAtStart;
-			const refreshBudget = Math.max(settings.keepRecentTokens, SPECULATION_LEAD_MIN_TOKENS);
+			const refreshBudget = Math.max(settings.keepRecentTokens, lead);
 			if (
 				(growth <= refreshBudget || isRecord(current.armed.result.preserveData?.anthropicCompaction)) &&
 				this.#armedSpeculationValid(current.armed, contextTokens)

@@ -573,7 +573,12 @@ export interface CompiledDeadGrant {
 /** Refresh-token grant declared for a provider. */
 export type CompiledRefresh =
 	| { kind: "none" }
-	| { kind: "hook"; hook: string }
+	| {
+			kind: "hook";
+			hook: string;
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+	  }
 	| {
 			kind: "request";
 			token: CompiledOAuthRequest;
@@ -611,9 +616,27 @@ export interface CompiledAuthProvider {
 	disabled?: string;
 	/** Account risk a user must accept (by typing "yes") before a new login starts. */
 	loginWarning?: string;
+	/**
+	 * What every surface calls the provider once an account is linked (such as
+	 * "Acme Pro plan"); `name` stays the pre-sign-in `/login` label.
+	 */
+	connectedName?: string;
+	/**
+	 * One transcript line shown when a session starts using one of the provider's
+	 * models (such as "Using your Acme Pro plan").
+	 */
+	activeNotice?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;
+	/**
+	 * Logins are bound to a key that must stay on this machine (such as a DPoP
+	 * key), so they stay in the local `agent.db`: the auth broker neither stores
+	 * nor refreshes them.
+	 */
+	deviceBound?: boolean;
+	/** Runs when a login is removed: `hook` revokes the grant at the provider. */
+	signOut?: { hook: string };
 	apiKeyFormat: "bearer" | "structured";
 	expiry?: "jwt-or-never";
 	/** `api-key`: an OAuth login persists only `credentials.access` as a plain API key. */
@@ -699,6 +722,10 @@ export interface CompiledProvider {
 	automaticDefault?: boolean;
 	/** Env vars consulted, in order, for the runtime API-key fallback. */
 	envVars?: string[];
+	/** The provider's own managed API base URL when its deployment has one (chat, discovery, usages, search). */
+	baseUrl?: string;
+	/** Env var naming an alternate base URL for that deployment; consumers keep override resolution in code. */
+	baseUrlEnv?: string;
 	/** The runtime creates a model manager even without a valid API key. */
 	allowUnauthenticated?: boolean;
 	/** Successful runtime discovery replaces bundled provider models instead of merging. */
