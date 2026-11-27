@@ -6,11 +6,12 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode long shutdown status", () => {
 	let authStorage: AuthStorage;
@@ -36,9 +37,15 @@ describe("InteractiveMode long shutdown status", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
-		mode.ui.terminal.drainInput = async () => {};
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		vi.spyOn(postmortem, "quit").mockResolvedValue(undefined);
 	});
 
@@ -53,7 +60,7 @@ describe("InteractiveMode long shutdown status", () => {
 	});
 
 	it.each(["live command", "BTW history", "main session"] as const)(
-		"shows progress before and during pending %s cleanup",
+		"shows progress only once pending %s cleanup lingers",
 		async pendingCleanup => {
 			vi.useFakeTimers();
 			const showStatus = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
@@ -73,22 +80,21 @@ describe("InteractiveMode long shutdown status", () => {
 			}
 
 			const shutdown = mode.shutdown();
-			// Initial feedback must not wait for even the first cleanup to yield.
-			expect(showStatus).toHaveBeenCalledTimes(1);
 			await entered.promise;
+			expect(showStatus).not.toHaveBeenCalled();
 			expect(postmortem.quit).not.toHaveBeenCalled();
 
 			vi.advanceTimersByTime(2_999);
-			expect(showStatus).toHaveBeenCalledTimes(1);
+			expect(showStatus).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(1);
-			expect(showStatus).toHaveBeenCalledTimes(2);
+			expect(showStatus).toHaveBeenCalledTimes(1);
 			expect(postmortem.quit).not.toHaveBeenCalled();
 
 			release.resolve();
 			await shutdown;
 			expect(postmortem.quit).toHaveBeenCalledTimes(1);
 			vi.advanceTimersByTime(10_000);
-			expect(showStatus).toHaveBeenCalledTimes(2);
+			expect(showStatus).toHaveBeenCalledTimes(1);
 		},
 	);
 
@@ -98,23 +104,23 @@ describe("InteractiveMode long shutdown status", () => {
 		vi.spyOn(session, "dispose").mockResolvedValue(undefined);
 		const draining = Promise.withResolvers<void>();
 		const drained = Promise.withResolvers<void>();
-		vi.spyOn(mode.ui.terminal, "drainInput").mockImplementation(() => {
+		// The shell stops last: its driver drains in-flight keys and restores the terminal.
+		vi.spyOn(mode.shell, "stop").mockImplementation(() => {
 			draining.resolve();
 			return drained.promise;
 		});
 
 		const shutdown = mode.shutdown();
 		await draining.promise;
-		expect(showStatus).toHaveBeenCalledTimes(1);
 		vi.advanceTimersByTime(10_000);
-		expect(showStatus).toHaveBeenCalledTimes(1);
+		expect(showStatus).not.toHaveBeenCalled();
 		expect(postmortem.quit).not.toHaveBeenCalled();
 
 		drained.resolve();
 		await shutdown;
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 		vi.advanceTimersByTime(10_000);
-		expect(showStatus).toHaveBeenCalledTimes(1);
+		expect(showStatus).not.toHaveBeenCalled();
 	});
 
 	it("cancels progress after a BTW flush failure and allows shutdown to retry", async () => {
@@ -132,7 +138,6 @@ describe("InteractiveMode long shutdown status", () => {
 
 		const shutdown = mode.shutdown();
 		await entered.promise;
-		expect(showStatus).toHaveBeenCalledTimes(1);
 		const failure = new Error("history storage unavailable");
 		flush.reject(failure);
 		await shutdown;
@@ -142,13 +147,13 @@ describe("InteractiveMode long shutdown status", () => {
 		expect(stop).not.toHaveBeenCalled();
 		expect(postmortem.quit).not.toHaveBeenCalled();
 		vi.advanceTimersByTime(10_000);
-		expect(showStatus).toHaveBeenCalledTimes(1);
+		expect(showStatus).not.toHaveBeenCalled();
 
 		await mode.shutdown();
 		expect(dispose).toHaveBeenCalledTimes(1);
 		expect(stop).toHaveBeenCalledTimes(1);
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 		vi.advanceTimersByTime(10_000);
-		expect(showStatus).toHaveBeenCalledTimes(2);
+		expect(showStatus).not.toHaveBeenCalled();
 	});
 });

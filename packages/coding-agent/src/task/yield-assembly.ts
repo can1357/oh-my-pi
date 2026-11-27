@@ -1,6 +1,6 @@
 /** Derives per-label output-schema section shapes for incremental yield assembly. */
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import type { YieldSectionShapes } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import type { YieldSectionShapes } from "./yield-sections";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 

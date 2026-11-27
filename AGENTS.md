@@ -14,7 +14,7 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 |`packages/catalog`|Model catalog: bundled models.json, provider descriptors, model identity/classification|
 |`packages/agent`|Agent runtime with tool calling and state management|
 |`packages/coding-agent`|Main CLI application (primary focus)|
-|`packages/tui`|Terminal UI library with differential rendering|
+|`packages/tui`|UI library: reactive JSX nodes, terminal and native (TSP) renderers, terminal driver, text, theme|
 |`packages/natives`|Bindings for native text/image/grep operations|
 |`packages/stats`|Local observability dashboard (`omp stats`)|
 |`packages/omptype`|ArkType-compatible schema validation with a lazy JIT runtime|
@@ -233,10 +233,10 @@ All text displayed in tool renderers must be sanitized. Raw content (file conten
 
 **Rules:**
 
-- **Tabs → spaces** via `replaceTabs()` (from `@oh-my-pi/pi-tui` or `../tools/render-utils`).
-- **Truncate** lines with `truncateToWidth()` / `ui.truncate()`. Use `TRUNCATE_LENGTHS` constants.
-- **Shorten paths** with `shortenPath()` (replaces home with `~`).
-- **Preview limits** from `PREVIEW_LIMITS`. No ad-hoc numbers.
+- **Tabs → spaces** via `replaceTabs()` (from `@oh-my-pi/pi-tui/text/width` or `src/utils/text-width.ts`).
+- **Truncate** lines with `truncate()` (`@oh-my-pi/pi-tui/text/width`) / `truncateToWidth()` (`src/utils/text-width.ts`). Use `TRUNCATE_LENGTHS` constants (`src/utils/render-utils.ts`).
+- **Shorten paths** with `shortenPath()` (`src/utils/render-utils.ts`; replaces home with `~`).
+- **Preview limits** from `PREVIEW_LIMITS` (`src/utils/render-utils.ts`). No ad-hoc numbers.
 
 **Apply to every render path**, not just the happy one:
 
@@ -252,8 +252,8 @@ Tool-call previews can have **multiple render paths**. If you add preview-only f
 For the bash tool specifically:
 
 - The pending preview may need raw `partialJson`, not just parsed `arguments`. Parsed args lag until a JSON object closes, which makes inline env assignments appear only at the end.
-- Preserve preview-only fields (e.g. `__partialJson`) through `event-controller.ts`, transcript rebuilds in `ui-helpers.ts`, and merged call/result rendering in `tool-execution.ts`. Missing one path causes inconsistent previews.
-- `ToolExecutionComponent.#buildRenderContext()` for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
+- Preserve preview-only fields (e.g. `__partialJson`) through `modes/controllers/event-controller.ts`, transcript rebuilds in `modes/utils/ui-helpers.ts`, and merged call/result rendering in `ui/transcript/tool-block.tsx`. Missing one path causes inconsistent previews.
+- `ToolCall.#buildRenderContext()` (`ui/transcript/tool-block.tsx`) for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
 - Verify both live streaming and rebuilt transcript paths after any bash preview change. A fix in one path does not fix the other.
 
 ## Commands

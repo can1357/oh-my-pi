@@ -424,11 +424,11 @@ export interface ContextUsage {
 	percent: number;
 }
 
-/** Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`. */
+/** Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`. Input the agent already took leads its list until the transcript records it. */
 export interface QueuedMessagesState {
 	steering: string[];
 	followUp: string[];
-	/** Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them. */
+	/** Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them. */
 	liveSteered?: number;
 }
 
@@ -559,6 +559,10 @@ export interface BashResult {
 	artifactError?: Record<string, unknown>;
 	minimized?: Record<string, unknown>;
 	workingDir?: string;
+	/** The command ended in another directory than it started in; the next command starts in its own cwd. */
+	movedCwd?: boolean;
+	/** The command ended with `set -e` on; the next command starts with it off. */
+	errexit?: boolean;
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
 	trace?: Record<string, unknown>;
@@ -1107,7 +1111,7 @@ export interface QueueUpdateEvent {
 	type: "queue_update";
 	steering: string[];
 	followUp: string[];
-	/** Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them. */
+	/** Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them. */
 	liveSteered?: number;
 }
 

@@ -22,7 +22,7 @@ function tuiRuntime() {
 	const showWarning = vi.fn();
 	const runtime = {
 		ctx: {
-			editor: { setText } as unknown as InteractiveModeContext["editor"],
+			composer: { setText } as unknown as InteractiveModeContext["composer"],
 			handleCompactCommand,
 			showWarning,
 		} as unknown as InteractiveModeContext,

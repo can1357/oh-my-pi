@@ -7,14 +7,10 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
-import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
-import {
-	replaceTabs,
-	shortenEmbeddedPaths,
-	TRUNCATE_LENGTHS,
-	truncateToWidth,
-} from "@oh-my-pi/pi-tui/render/render-utils";
-import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { formatBackgroundNotice, formatExitCodeNotice, formatTimeoutClampNotice } from "./details/bash";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { parseConfiguredThinkingLevel } from "../thinking/levels";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
@@ -32,35 +28,23 @@ import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { EvalShadowCellSession } from "../eval/speculation/cell-session";
 import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
-import type {
-	EvalCellResult,
-	EvalLanguage,
-	EvalStatusEvent,
-	EvalToolDetails,
-	EvalViewEntry,
-} from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails, EvalViewEntry } from "./details/eval";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { type EvalToolDescriptionOptions, evalTemplateContext, getEvalDocTopics } from "./eval-doc-topics";
-import {
-	DEFAULT_MAX_BYTES,
-	findColumnCapped,
-	OutputSink,
-	type OutputSummary,
-	TailBuffer,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, findColumnCapped, OutputSink, type OutputSummary, TailBuffer } from "./streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { canSpawnAtDepth } from "../task/types";
-import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { webpExclusionForModel } from "../utils/image-input";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveAdvertisedEvalBackends, resolveEvalBackends } from "./eval-backends";
-import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { recordStatusEvent, type StatusEventLog } from "./details/eval";
+import { formatOutputNotice } from "./output-meta-format";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { hasWaitTool } from "./wait";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 import { docTopicsReadable } from "./doc-topics";
@@ -492,7 +476,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const cellTimeoutMs = cellTimeoutSec * 1000;
 		const timeoutNotice =
 			params.timeout !== undefined && params.timeout !== cellTimeoutSec
-				? `Eval timeout clamped from ${params.timeout}s to ${cellTimeoutSec}s.`
+				? formatTimeoutClampNotice(params.timeout, cellTimeoutSec)
 				: undefined;
 		if (timeoutNotice) {
 			onUpdate?.({
@@ -663,7 +647,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			},
 		);
 
-		const backgroundStartResult = (extraNotice?: string) =>
+		const backgroundStartResult = (reason?: string) =>
 			this.#buildBackgroundStartResult(
 				jobId,
 				cells,
@@ -672,7 +656,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				latestText,
 				latestDetails,
 				clampedCellTimeoutSec,
-				extraNotice,
+				reason,
 			);
 		if (startBackgrounded) {
 			return backgroundStartResult();
@@ -703,11 +687,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		autoBgManager.backgroundJob(jobId);
 		// "steer": a queued user/peer message arrived mid-wait — background the
 		// cell (it keeps running) so the message injects promptly.
-		const steerNotice =
-			waitResult.kind === "steer"
-				? "Backgrounded early to handle an incoming message; the cell keeps running."
-				: undefined;
-		return backgroundStartResult(steerNotice);
+		return backgroundStartResult(waitResult.kind === "steer" ? "incoming message" : undefined);
 	}
 
 	/**
@@ -724,7 +704,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		previewText: string,
 		latestDetails: EvalToolDetails | undefined,
 		timeoutSec: number | undefined,
-		extraNotice?: string,
+		reason?: string,
 	): AgentToolResult<EvalToolDetails> {
 		// latestDetails snapshots are per-update copies (buildUpdateDetails), so
 		// tagging the async marker on cannot leak into later job progress.
@@ -748,10 +728,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (trimmedPreview.length > 0) {
 			lines.push(trimmedPreview, "");
 		}
-		if (extraNotice) {
-			lines.push(extraNotice, "");
-		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, reason));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 
@@ -1032,12 +1009,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
-					const exitLine = `Command exited with code ${result.exitCode}`;
-					const outputText = result.cancelled
-						? combinedOutput || result.output || "Command aborted"
-						: combinedOutput
-							? `${combinedOutput}\n\n${exitLine}`
-							: exitLine;
+					const exitCode = result.exitCode;
+					const outputText =
+						result.cancelled || exitCode === undefined
+							? combinedOutput || result.output || "[aborted]"
+							: combinedOutput
+								? `${combinedOutput}\n\n${formatExitCodeNotice(exitCode)}`
+								: formatExitCodeNotice(exitCode);
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					const details: EvalToolDetails = {

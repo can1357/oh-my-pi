@@ -14,7 +14,7 @@ import type {
 	ShapeOutcome,
 	ShapeSink,
 } from "@oh-my-pi/pi-coding-agent/spotlight/types";
-import { rankPartAt, reasonShows } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { rankPartAt, reasonShows } from "@oh-my-pi/pi-coding-agent/tools/details/spotlight";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function context(over: Partial<CallContext> = {}): CallContext {

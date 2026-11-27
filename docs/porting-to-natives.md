@@ -20,8 +20,7 @@ The package has no `packages/natives/src/<module>` wrapper layer. Its entrypoint
 
 The VCS subpath exposes discovery and Git/Jujutsu operations through `git`,
 `repo`, `repoForDisplay`, `require`, `requireGit`, and `jj`, plus metadata,
-clone/detach/patch helpers, error predicates, and a head-change watcher built
-on `VcsRepo.watchTarget()`. `repoForDisplay` prefers Jujutsu on equal-root
+clone/detach/patch helpers, and error predicates. `repoForDisplay` prefers Jujutsu on equal-root
 ties; Git-safe automation uses `repo` instead.
 
 Two commands serve different purposes:
@@ -92,7 +91,7 @@ Do not add a wrapper merely to rename a generated root export.
 
 ### 5. Benchmark representative work
 
-Place a durable benchmark with the owning package (`packages/natives/bench`, `packages/tui/bench`, `packages/coding-agent/bench`, or another existing package bench directory). Run JS and native implementations in the same process on identical prepared input. Separate setup/conversion from the timed operation when callers can reuse that setup.
+Place a durable benchmark with the owning package (`packages/natives/bench`, `packages/coding-agent/bench`, or another existing package bench directory). Run JS and native implementations in the same process on identical prepared input. Separate setup/conversion from the timed operation when callers can reuse that setup.
 
 ```ts
 const ITERATIONS = 2_000;

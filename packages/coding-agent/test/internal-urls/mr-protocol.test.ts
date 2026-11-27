@@ -37,6 +37,7 @@ const ENV_KEYS = [
 	"OAUTH_TOKEN",
 	"GITLAB_HOST",
 	"GITLAB_URI",
+	"GITLAB_URL",
 	"GL_HOST",
 	"GLAB_CONFIG_DIR",
 ] as const;
@@ -120,11 +121,11 @@ describe("mr:// diff family", () => {
 		expect(jsonSpy.mock.calls[0]![1]).toEqual(["repo", "view", "-F", "json"]);
 	});
 
-	it("rejects URLs without a diff suffix, a group/project pair, or a plain host", async () => {
+	it("rejects URLs without a group/project pair, invalid host, or plain host", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 		const router = InternalUrlRouter.instance();
 
-		await expect(router.resolve("mr://gitlab.com/g/p/7")).rejects.toThrow(/Invalid mr:\/\/ URL/);
+		await expect(router.resolve("mr://gitlab.com")).rejects.toThrow(/Invalid mr:\/\/ URL/);
 		await expect(router.resolve("mr://gitlab.com/g/7/diff")).rejects.toThrow(/Invalid mr:\/\/ URL/);
 		await expect(router.resolve("mr://gitlab.com@evil.example/g/p/7/diff")).rejects.toThrow(/Invalid mr:\/\/ URL/);
 		await expect(router.resolve("mr://evil%1B%5D8%3B%3B.example/g/p/7/diff")).rejects.toThrow(/Invalid mr:\/\/ URL/);
@@ -175,5 +176,176 @@ describe("mr:// diff family", () => {
 		delete process.env.GITLAB_TOKEN;
 		const withoutEnvToken = await router.resolve("mr://other.example/a/b/1/diff", context);
 		expect(withoutEnvToken.content).toContain("(2 files)");
+	});
+});
+
+const spyGitlabJson = (handler: (cwd: string, args: string[]) => Promise<unknown>) =>
+	vi.spyOn(gitlab, "json").mockImplementation((cwd, args) => handler(cwd, args) as Promise<never>);
+
+describe("mr:// list and single-MR views", () => {
+	const sampleMr = {
+		id: 1001,
+		iid: 7,
+		title: "Add GitLab MR protocol support",
+		description: "Full overview with discussions.",
+		state: "opened",
+		draft: false,
+		source_branch: "feat/mr",
+		target_branch: "main",
+		detailed_merge_status: "mergeable",
+		has_conflicts: false,
+		blocking_discussions_resolved: false,
+		author: { username: "alice", name: "Alice" },
+		assignees: [{ username: "alice", name: "Alice" }],
+		reviewers: [{ username: "bob", name: "Bob" }],
+		labels: ["enhancement"],
+		head_pipeline: { id: 99, status: "running", web_url: "https://gitlab.example.com/acme/api/-/pipelines/99" },
+		web_url: "https://gitlab.example.com/acme/api/-/merge_requests/7",
+		created_at: "2026-04-01T00:00:00Z",
+		updated_at: "2026-04-02T00:00:00Z",
+	};
+
+	const sampleDiscussions = [
+		{
+			id: "disc1111aaaa2222bbbb3333cccc4444dddd5555",
+			notes: [
+				{
+					id: 10,
+					body: "Please handle empty input.",
+					author: { username: "bob" },
+					created_at: "2026-04-01T10:00:00Z",
+					system: false,
+					resolvable: true,
+					resolved: false,
+					position: { new_path: "src/app.ts", new_line: 42 },
+				},
+			],
+		},
+		{
+			id: "disc2222aaaa2222bbbb3333cccc4444dddd5555",
+			notes: [
+				{
+					id: 11,
+					body: "Looks good now.",
+					author: { username: "bob" },
+					created_at: "2026-04-01T11:00:00Z",
+					system: false,
+					resolvable: true,
+					resolved: true,
+				},
+			],
+		},
+		{
+			id: "disc3333aaaa2222bbbb3333cccc4444dddd5555",
+			notes: [
+				{
+					id: 12,
+					body: "assigned to @alice",
+					author: { username: "alice" },
+					created_at: "2026-04-01T09:00:00Z",
+					system: true,
+				},
+			],
+		},
+	];
+
+	it("resolves mr://<host>/<group>/<project>/<iid>, caches it, and filters ?unresolved=1 from cache", async () => {
+		const jsonSpy = spyGitlabJson(async (_cwd, args) => {
+			const endpoint = args.find(arg => arg.startsWith("projects/"));
+			if (endpoint === "projects/acme%2Fapi/merge_requests/7") return sampleMr;
+			if (endpoint === "projects/acme%2Fapi/merge_requests/7/approvals") {
+				return { approvals_required: 2, approved_by: [{ user: { username: "bob" } }] };
+			}
+			if (endpoint === "projects/acme%2Fapi/merge_requests/7/discussions") return sampleDiscussions;
+			throw new Error(`Unexpected glab json call: ${args.join(" ")}`);
+		});
+
+		const router = InternalUrlRouter.instance();
+		const first = await router.resolve("mr://gitlab.example.com/acme/api/7");
+		expect(first.notes).toContain("Fetched live");
+		expect(first.notes).toContain("Diff: mr://gitlab.example.com/acme/api/7/diff");
+		expect(first.content).toContain("# Merge Request !7: Add GitLab MR protocol support");
+		expect(first.content).toContain("Approvals: 1 / 2 required (@bob)");
+		expect(first.content).toContain("[UNRESOLVED] Discussion `disc1111aaaa2222bbbb3333cccc4444dddd5555` (disc1111)");
+		expect(first.content).toContain("Location: src/app.ts:42");
+		expect(first.content).toContain("[RESOLVED] Discussion `disc2222aaaa2222bbbb3333cccc4444dddd5555`");
+		expect(first.content).not.toContain("assigned to @alice");
+
+		const unresolvedOnly = await router.resolve("mr://gitlab.example.com/acme/api/7?unresolved=1");
+		expect(unresolvedOnly.notes?.[0]).toMatch(/^Cached:/);
+		expect(unresolvedOnly.content).toContain("Please handle empty input.");
+		expect(unresolvedOnly.content).not.toContain("Looks good now.");
+		expect(jsonSpy).toHaveBeenCalledTimes(3);
+	});
+
+	it("skips discussions API when ?comments=0 is passed", async () => {
+		const jsonSpy = spyGitlabJson(async (_cwd, args) => {
+			const endpoint = args.find(arg => arg.startsWith("projects/"));
+			if (endpoint === "projects/acme%2Fapi/merge_requests/7") return sampleMr;
+			if (endpoint === "projects/acme%2Fapi/merge_requests/7/approvals")
+				return { approvals_required: 1, approved_by: [] };
+			throw new Error(`Unexpected glab json call: ${args.join(" ")}`);
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("mr://gitlab.example.com/acme/api/7?comments=0");
+		expect(resource.notes).toContain("Comments disabled");
+		expect(resource.content).not.toContain("## Discussions");
+		expect(jsonSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("lists MRs for bare mr:// and explicit mr://<host>/<group>/<project> with query filters", async () => {
+		const jsonSpy = spyGitlabJson(async (_cwd, args) => {
+			if (args[0] === "repo" && args[1] === "view") {
+				return { web_url: "https://gitlab.example.com/acme/api" };
+			}
+			if (args[0] === "api") {
+				return [sampleMr];
+			}
+			throw new Error(`Unexpected glab json call: ${args.join(" ")}`);
+		});
+
+		const router = InternalUrlRouter.instance();
+		const bare = await router.resolve("mr://", { cwd: tempDir });
+		expect(bare.content).toContain("# Merge Requests in gitlab.example.com/acme/api (opened, up to 30)");
+		expect(bare.content).toContain("mr://gitlab.example.com/acme/api/7");
+
+		const filtered = await router.resolve("mr://gitlab.example.com/acme/api?state=merged&limit=5&author=alice");
+		expect(filtered.content).toContain("# Merge Requests in gitlab.example.com/acme/api (merged, up to 5)");
+		const lastArgs = jsonSpy.mock.calls.at(-1)![1] as string[];
+		expect(lastArgs).toContain("state=merged");
+		expect(lastArgs).toContain("per_page=5");
+		expect(lastArgs).toContain("author_username=alice");
+	});
+
+	it("rejects invalid ?state= on mr:// listing", async () => {
+		await expect(
+			InternalUrlRouter.instance().resolve("mr://gitlab.example.com/acme/api?state=bogus"),
+		).rejects.toThrow(/Invalid mr:\/\/ list state 'bogus'/);
+	});
+
+	it("handles projects named 'diff' for both list and single MR URLs and preserves single-label hosts", async () => {
+		process.env.GITLAB_HOST = "gitlab";
+		const hostsSeen: string[] = [];
+		spyGitlabJson(async (_cwd, args) => {
+			const hostIdx = args.indexOf("--hostname");
+			if (hostIdx >= 0) hostsSeen.push(args[hostIdx + 1]!);
+			const endpoint = args.find(arg => arg.startsWith("projects/")) ?? "";
+			if (endpoint === "projects/acme%2Fdiff/merge_requests") return [sampleMr];
+			if (endpoint.endsWith("/merge_requests/7")) return sampleMr;
+			if (endpoint.endsWith("/approvals")) return { approvals_required: 0, approved_by: [] };
+			if (endpoint.endsWith("/discussions")) return [];
+			throw new Error(`Unexpected glab json call: ${args.join(" ")}`);
+		});
+
+		const router = InternalUrlRouter.instance();
+		const diffList = await router.resolve("mr://gitlab.com/acme/diff");
+		expect(diffList.content).toContain("# Merge Requests in gitlab.com/acme/diff");
+
+		const diffSingle = await router.resolve("mr://gitlab.com/acme/diff/7");
+		expect(diffSingle.content).toContain("# Merge Request !7:");
+
+		const singleLabel = await router.resolve("mr://gitlab/acme/api/7");
+		expect(singleLabel.content).toContain("# Merge Request !7:");
+		expect(hostsSeen).toContain("gitlab");
 	});
 });

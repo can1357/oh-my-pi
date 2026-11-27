@@ -68,7 +68,7 @@ describe("executePython (per-call)", () => {
 
 		expect(result.cancelled).toBe(true);
 		expect(result.exitCode).toBeUndefined();
-		expect(result.output).toContain("Command timed out");
+		expect(result.output).toContain("[timed out");
 	});
 
 	it("returns a cancelled timeout result when the startup budget expires before kernel creation", async () => {
@@ -89,7 +89,7 @@ describe("executePython (per-call)", () => {
 
 		expect(result.cancelled).toBe(true);
 		expect(result.exitCode).toBeUndefined();
-		expect(result.output).toContain("Command timed out");
+		expect(result.output).toContain("[timed out");
 	});
 
 	it("returns a cancelled result when caller aborts during kernel startup", async () => {
@@ -167,7 +167,7 @@ describe("executePython (per-call)", () => {
 		const result = await resultPromise;
 		expect(result.cancelled).toBe(true);
 		expect(result.exitCode).toBeUndefined();
-		expect(result.output).toContain("eval cell timed out after");
+		expect(result.output).toContain("timed out after 2s");
 		expect(shutdownCalls).toBe(1);
 	});
 });

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, ptree, withFileLock, writeRuntimeManifest } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import { trackDownload } from "../../downloads/activity";
 import { resolveExecutablePath } from "../../subprocess/worker-client";
 import { normalizePackageRequirements } from "../package-requirements";
@@ -173,9 +173,7 @@ export async function installJsPackages(options: InstallJsPackagesOptions): Prom
 			options.signal?.throwIfAborted();
 			return {
 				environment,
-				summary:
-					`Bun reconciled ${environment.description}. Current declared dependencies: ${dependencies}. ` +
-					"Lifecycle scripts were disabled, so packages requiring native builds/postinstall may not work.",
+				summary: `[installed into ${environment.description}; deps: ${dependencies}; lifecycle scripts skipped]`,
 			};
 		},
 		{ signal: options.signal, retries: LOCK_ATTEMPTS, retryDelayMs: LOCK_RETRY_MS },

@@ -21,10 +21,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Composer } from "../src/ui/composer/composer";
 
 const ONE_PX_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -32,23 +32,13 @@ const ONE_PX_PNG = Buffer.from(
 );
 
 function createCtx() {
-	const pasteText = vi.fn();
-	const insertText = vi.fn();
-	const insertAtom = vi.fn();
-	const requestRender = vi.fn();
+	const composer = new Composer();
+	const pasteText = vi.spyOn(composer, "insertText");
+	const insertAtom = vi.spyOn(composer, "insertAtom");
 	const showStatus = vi.fn();
-	const pendingImages: ImageContent[] = [];
-	const pendingImageLinks: (string | undefined)[] = [];
 	const ctx = {
-		editor: {
-			pasteText,
-			insertText,
-			insertAtom,
-			imageLinks: undefined,
-			pendingImages,
-			pendingImageLinks,
-		} as unknown as InteractiveModeContext["editor"],
-		ui: { requestRender, getFocused: () => null } as unknown as InteractiveModeContext["ui"],
+		composer,
+		shell: { focused: () => composer.field },
 		sessionManager: {
 			getCwd: () => process.cwd(),
 			putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png" }),
@@ -57,7 +47,13 @@ function createCtx() {
 	} as unknown as InteractiveModeContext;
 	return {
 		ctx,
-		spies: { pasteText, insertText, insertAtom, requestRender, showStatus, pendingImages, pendingImageLinks },
+		spies: {
+			pasteText,
+			insertAtom,
+			showStatus,
+			pendingImages: composer.pendingImages,
+			pendingImageLinks: composer.pendingImageLinks,
+		},
 	};
 }
 

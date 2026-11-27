@@ -1,4 +1,5 @@
 import { vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getActiveProfile, setProfile } from "@oh-my-pi/pi-utils";
@@ -10,7 +11,8 @@ import { AuthStorage } from "../../src/session/auth-storage";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import * as workerClient from "../../src/subprocess/worker-client";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../src/ui/theme/service";
+import { createModeTerminal, transcriptText } from "../helpers/mode-terminal";
 
 if (process.argv[2] === "receive") {
 	const extracted = extractProfileFlags(process.argv.slice(3));
@@ -45,9 +47,29 @@ if (process.argv[2] === "receive") {
 		settings: Settings.isolated(),
 		modelRegistry,
 	});
-	const mode = new InteractiveMode(session, "test");
-	mode.ui.requestRender = () => {};
-	mode.ui.terminal.drainInput = async () => {};
+	const mode = new InteractiveMode(
+		session,
+		"test",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		createModeTerminal().frame,
+	);
 	vi.spyOn(workerClient, "resolveCliEntryCmd").mockReturnValue([process.execPath, import.meta.path, "receive"]);
+	const cwd = process.cwd();
+	const removeCwd = process.argv[2] === "deleted-cwd";
+	if (removeCwd) {
+		const worktree = await fs.mkdtemp(path.join(cwd, "worktree-"));
+		process.chdir(worktree);
+		await fs.rmdir(worktree);
+	}
 	await mode.restart();
+	if (removeCwd) {
+		process.chdir(cwd);
+		const result = { transcript: transcriptText(mode.shell), disposed: session.isDisposed };
+		await session.dispose();
+		authStorage.close();
+		await Bun.write(Bun.stdout, JSON.stringify(result));
+	}
 }

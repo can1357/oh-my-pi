@@ -14,7 +14,7 @@
    - `packages/coding-agent/src/tools/jfind/passages.ts` — byte-bounded windows, sketches, heat-range merging
    - `packages/coding-agent/src/tools/jfind/questions.ts` — the three judgment request shapes; question text in `packages/coding-agent/src/prompts/judge/find.json`
    - `packages/coding-agent/src/judgment/index.ts` — resolves the `judge` model role that answers every question
-   - `packages/tui/src/tools/find.ts` — transcript renderer (score gauges, hyperlinked ranges, live phase progress) and the `FindToolDetails` type
+   - `packages/coding-agent/src/ui/tools/find.tsx` — transcript renderer (score gauges, hyperlinked ranges, live phase progress); `packages/coding-agent/src/tools/details/find.ts` — the `FindToolDetails` type
 
 The cascade follows the semantic-search strategy of [jegrep](https://github.com/can1357/jegrep): lexical pre-ranking, filename judgments, passage sketches, then full-passage verification.
 

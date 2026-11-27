@@ -1,4 +1,4 @@
-import { encodeRankPart, type SpotlightRank, type SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { encodeRankPart, type SpotlightRank, type SpotlightReason } from "../../tools/details/spotlight";
 import type { CallContext, Scorer, ShapeInput, ShapeSink } from "../types";
 import { alignLines, lineIndex } from "./align";
 import type { ShapeState } from "./state";

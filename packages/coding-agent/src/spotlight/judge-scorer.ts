@@ -26,7 +26,7 @@ import { journalJudgmentUsage, resolveJudge } from "../judgment";
 import { sharedJudgmentCache } from "../judgment/cache";
 import type { CostGateApi } from "../session/cost-gate";
 import type { ModelUsageLedger } from "../session/model-usage-journal";
-import type { SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightRequestParams } from "../tools/details/spotlight";
 import questionFile from "../prompts/judge/shape.json" with { type: "json" };
 import { logger } from "@oh-my-pi/pi-utils";
 import type { CallContext, Scorer, ScorerUsage } from "./types";

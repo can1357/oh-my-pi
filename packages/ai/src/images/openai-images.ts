@@ -73,8 +73,10 @@ export async function generateOpenAIImage(
 		// them; OpenAI's multipart edit sends raw bytes and needs them only for
 		// the 404 fallback.
 		const buildEditBody = (): Record<string, unknown> => {
+			if (!isXAI) {
+				return { ...generationBody, images: inputImages.map(image => ({ image_url: toDataUrl(image) })) };
+			}
 			const references = inputImages.map(image => ({ type: "image_url", url: toDataUrl(image) }));
-			if (!isXAI) return { ...generationBody, input_references: references };
 			return references.length === 1
 				? { ...generationBody, image: references[0] }
 				: { ...generationBody, images: references };

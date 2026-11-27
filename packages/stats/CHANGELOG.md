@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added queryable tracking of tool approval requests and outcomes across sessions in the stats database.
+
 ### Fixed
 
+- Fixed live updates and synchronization in the `omp stats` dashboard when session directories are inaccessible or agents are continuously writing.
 - Fixed the Spotlight page counting cuts the `auto` ranker's judge reranked as unranked, and leaving out the judge's cost ([#19906](https://github.com/can1357/oh-my-pi/pull/19906) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.1] - 2026-11-23

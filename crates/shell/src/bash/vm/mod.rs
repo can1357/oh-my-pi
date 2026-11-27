@@ -54,6 +54,11 @@ pub use self::{
 	text::TextKind,
 	zsh::zpattern::Cache as ZshPatternCache,
 };
+
+pub(crate) fn decode_zsh_dollar_quote(s: &[u8]) -> (Vec<u8>, usize) {
+	let k = zsh::text::getkeystring(s, zsh::text::getkey::DOLLARS_QUOTE);
+	(k.text, k.consumed)
+}
 use self::{
 	control::{CANCEL, Ctl, PAUSE, RESUME, SIGNAL, SUSPEND},
 	proc::{Frame, FrameKind, Live, PendingWrite, ScriptKind},
@@ -68,7 +73,7 @@ use crate::bash::{
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
 	host::{EnvView, Host, StdFd, Verdict},
-	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
+	ids::{CallId, CmdTag, Dialect, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	image::Records,
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -218,46 +223,50 @@ impl Default for ShellInit {
 /// A script to run ([`Shell::submit`]).
 pub struct Script {
 	/// Source bytes.
-	pub source:       Arc<[u8]>,
+	pub source:          Arc<[u8]>,
 	/// Where they came from (diagnostic prefixes, events).
-	pub origin:       Origin,
+	pub origin:          Origin,
 	/// Mode to parse and run in; the vproc's mode before the run comes
 	/// back when it ends (`None`: the shell's current mode, which an
 	/// `emulate` in the script changes for later runs too).
-	pub mode:         Option<ModeId>,
+	pub mode:            Option<ModeId>,
 	/// Positional parameters for the script, replacing the inherited current
 	/// positional scope in a new subshell without changing its caller.
-	pub args:         Option<Vec<BString>>,
+	pub args:            Option<Vec<BString>>,
 	/// Which virtual process runs it.
-	pub vproc:        VprocSel,
+	pub vproc:           VprocSel,
 	/// Opaque host tag, echoed in `RunStart`.
-	pub tag:          u64,
+	pub tag:             u64,
 	/// Working directory for the run.
-	pub cwd:          Option<BString>,
+	pub cwd:             Option<BString>,
 	/// Exported variables for the run.
-	pub env:          Vec<(BString, BString)>,
+	pub env:             Vec<(BString, BString)>,
 	/// Changes to inherited non-shell environment entries for a new subshell.
 	/// A `None` name clears them; otherwise `None` removes and `Some` sets.
-	pub foreign_env:  Vec<(Option<BString>, Option<BString>)>,
+	pub foreign_env:     Vec<(Option<BString>, Option<BString>)>,
 	/// Shell variable names whose inherited bindings must not be exported in
 	/// the new subshell, including bindings hidden by local scopes.
-	pub unexport_env: Vec<BString>,
+	pub unexport_env:    Vec<BString>,
+	/// Immutable source input for a new subshell and its children only.
+	/// Host-owned, like its stdio files; not part of a restored image.
+	pub source_snapshot: Option<Arc<omp_builtins::extras::SourceSnapshot>>,
 }
 
 impl Script {
 	/// A command script (`-c` semantics) on the root vproc.
 	pub fn command(source: impl Into<Arc<[u8]>>) -> Self {
 		Self {
-			source:       source.into(),
-			origin:       Origin::Command,
-			mode:         None,
-			args:         None,
-			vproc:        VprocSel::Root,
-			tag:          0,
-			cwd:          None,
-			env:          Vec::new(),
-			foreign_env:  Vec::new(),
-			unexport_env: Vec::new(),
+			source:          source.into(),
+			origin:          Origin::Command,
+			mode:            None,
+			args:            None,
+			vproc:           VprocSel::Root,
+			tag:             0,
+			cwd:             None,
+			env:             Vec::new(),
+			foreign_env:     Vec::new(),
+			unexport_env:    Vec::new(),
+			source_snapshot: None,
 		}
 	}
 }
@@ -343,23 +352,25 @@ pub enum Step {
 #[derive(Clone, Debug)]
 pub struct ToolCall {
 	/// From [`Resolved::Tool`](crate::bash::Resolved::Tool).
-	pub tool:      ToolRef,
+	pub tool:            ToolRef,
 	/// Expanded argv.
-	pub argv:      Vec<BString>,
+	pub argv:            Vec<BString>,
 	/// Calling vproc.
-	pub vpid:      Vpid,
+	pub vpid:            Vpid,
 	/// Output tag of this execution.
-	pub tag:       CmdTag,
+	pub tag:             CmdTag,
 	/// Working directory.
-	pub cwd:       BString,
+	pub cwd:             BString,
 	/// fds 0, 1, 2 (also reachable by number through [`ShellApi`]).
-	pub stdio:     [FdRef; 3],
+	pub stdio:           [FdRef; 3],
 	/// Further open fds.
-	pub extra_fds: Vec<(i32, FdRef)>,
+	pub extra_fds:       Vec<(i32, FdRef)>,
 	/// Environment.
-	pub env:       EnvView,
+	pub env:             EnvView,
 	/// File-creation mask: the shell's `umask`.
-	pub umask:     u32,
+	pub umask:           u32,
+	/// File snapshot available to the source loader, if any.
+	pub source_snapshot: Option<Arc<omp_builtins::extras::SourceSnapshot>>,
 }
 
 /// How a host callout ended.
@@ -523,6 +534,12 @@ pub struct Kernel {
 	pub exec_signals:       HashMap<RunId, i32>,
 	/// Signal death associated with the most recently reported run.
 	pub reported_signal:    Option<(RunId, i32)>,
+	/// Resource usage of submitted subshell runs that ended
+	/// ([`Vproc::usage`] of their vproc), pending their completion report;
+	/// not imaged, as callouts do not survive frame restoration.
+	pub run_usage:          HashMap<RunId, crate::bash::host::ProcUsage>,
+	/// Resource usage of the most recently reported run.
+	pub reported_usage:     Option<(RunId, crate::bash::host::ProcUsage)>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:              Vec<proc::Bang>,
@@ -647,6 +664,8 @@ impl Kernel {
 			exited: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
+			run_usage: HashMap::new(),
+			reported_usage: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
 			pid_owners: Vec::new(),
@@ -1759,6 +1778,38 @@ impl Shell {
 		}
 	}
 
+	/// Whether root option `opt` is on between runs. A store failure reads as
+	/// off and abandons every script at the next scheduler turn.
+	pub(crate) fn root_option(&mut self, store: &mut dyn StateStore, opt: OptId) -> bool {
+		match state::option(&mut self.k.root, store, &self.procs[0], opt) {
+			Ok(on) => on,
+			Err(err) => {
+				self.k.fail(err);
+				false
+			},
+		}
+	}
+
+	/// Turn root option `opt` on or off between runs, as `set -o` / `set +o`
+	/// would; `SHELLOPTS` follows in the bash dialect. Background jobs keep
+	/// the options they forked with. A store failure abandons every script at
+	/// the next scheduler turn.
+	pub(crate) fn set_root_option(&mut self, store: &mut dyn StateStore, opt: OptId, on: bool) {
+		let (root, vp) = (&mut self.k.root, &mut *self.procs[0]);
+		match state::option(root, store, vp, opt) {
+			Ok(current) if current == on => {},
+			Ok(_) => {
+				state::store_record(root, store, vp, KeyBuf::Opt(opt), Some(Record::Opt(on)));
+				if vp.mode.dialect() == Dialect::Bash
+					&& let Err(err) = state::sync_option_vars(root, store, vp)
+				{
+					self.k.fail(err);
+				}
+			},
+			Err(err) => self.k.fail(err),
+		}
+	}
+
 	/// Queue a script; see [`VprocSel`] for where it runs. A new subshell
 	/// starts from the shell's global state: it does not see the locals of
 	/// a function the shell is in the middle of (a host submits between
@@ -1855,6 +1906,7 @@ impl Shell {
 		let parent_lineage = self.procs[parent].lineage;
 		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(Image::default()), true);
 		vp.lineage = lineage.unwrap_or(parent_lineage);
+		vp.source_snapshot = script.source_snapshot;
 		vp.status = status;
 		vp.mode = mode;
 		vp.runs.push_back(run);
@@ -2013,6 +2065,7 @@ impl Shell {
 				self.k.settle_bang(p.vpid, None);
 				self.k.forget_deferral(p.vpid);
 				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status);
+				self.hand_usage(&p);
 				self.k.ctl.notify();
 				self.rr = 0;
 				self.reaped(cx, p.parent, p.vpid, p.status);
@@ -2150,6 +2203,7 @@ impl Shell {
 	fn report(&mut self) -> Option<Step> {
 		if let Some((run, status)) = self.k.done.pop_front() {
 			self.k.reported_signal = self.k.exec_signals.remove(&run).map(|signal| (run, signal));
+			self.k.reported_usage = self.k.run_usage.remove(&run).map(|usage| (run, usage));
 			return Some(Step::Done { run, status });
 		}
 		let (id, call) = self.k.calls_out.pop_front()?;
@@ -2354,8 +2408,12 @@ impl Shell {
 		p.status = status;
 		let runs: Vec<Run> = p.runs.drain(..).collect();
 		let vpid = (p.vpid, p.mode);
+		let usage = p.usage.as_deref().copied().filter(|_| p.transient);
 		for run in &runs {
 			self.k.exec_signals.remove(&run.id);
+			if let Some(usage) = usage {
+				self.k.run_usage.insert(run.id, usage);
+			}
 			if run.started {
 				self
 					.k
@@ -2370,8 +2428,21 @@ impl Shell {
 			self.k.settle_bang(p.vpid, None);
 			self.k.forget_deferral(p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status);
+			self.hand_usage(&p);
 			self.rr = 0;
 			self.reaped(cx, p.parent, p.vpid, status);
+		}
+	}
+
+	/// Ended vproc `child` hands what it used to its parent (when that still
+	/// runs), as a reaped process's usage joins its parent's children
+	/// usage: a `time`d subshell or pipeline counts its stages' programs.
+	fn hand_usage(&mut self, child: &Vproc) {
+		let (Some(usage), Some(parent)) = (child.usage.as_deref(), child.parent) else {
+			return;
+		};
+		if let Some(p) = self.procs.iter_mut().find(|p| p.vpid == parent) {
+			p.count_usage(usage);
 		}
 	}
 
@@ -2658,6 +2729,18 @@ impl Shell {
 			.reported_signal
 			.filter(|(id, _)| *id == run)
 			.map(|(_, signal)| signal)
+	}
+
+	/// Resource usage of the externals submitted subshell `run` waited for,
+	/// itself or through the subshells and pipeline stages it ran
+	/// ([`crate::bash::ProcUsage`]); `None` when it ran none, or for a root
+	/// run. Ask immediately after its [`Step::Done`].
+	pub fn run_usage(&self, run: RunId) -> Option<crate::bash::host::ProcUsage> {
+		self
+			.k
+			.reported_usage
+			.filter(|(id, _)| *id == run)
+			.map(|(_, usage)| usage)
 	}
 
 	/// Number of the root's background jobs that still wait for a running
@@ -3028,6 +3111,8 @@ impl Vproc {
 			restore_opts: Vec::new(),
 			rlimits: Vec::new(),
 			lineage: crate::bash::host::Lineage::default(),
+			source_snapshot: None,
+			usage: None,
 			trace_base: 0,
 			subshell: 0,
 			command: None,
@@ -3126,6 +3211,7 @@ impl Vproc {
 		vp.command.clone_from(&self.command);
 		vp.rlimits.clone_from(&self.rlimits);
 		vp.lineage = self.lineage;
+		vp.source_snapshot.clone_from(&self.source_snapshot);
 		jobctl::inherit(k, vp.vpid, self.vpid);
 		vp.mode = self.mode;
 		vp.zle.clone_from(&self.zle);
