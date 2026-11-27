@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,11 +13,24 @@ from urllib.parse import quote
 
 import httpx
 
+from robomp.search_query import parse_search_query
+
 log = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
 ACCEPT = "application/vnd.github+json"
 API_VERSION = "2022-11-28"
+_DEFAULT_AUTO_LABEL_COLOR = "#cccccc"
+_MAX_LABEL_PAGES = 100
+# Forgejo ListIssues clamps `limit` to 50 per page regardless of the value sent.
+_FORGEJO_SEARCH_PAGE_SIZE = 50
+# Page caps for accumulating loops (comments, reviews, reactions, search).
+# 20 pages covers 2000 items at GitHub's 100/page and 1000 at Forgejo's 50.
+_MAX_COMMENT_PAGES = 20
+_MAX_REVIEW_PAGES = 20
+_MAX_REACTION_PAGES = 10
+_MAX_SEARCH_PAGES = 10
+_MAX_ISSUES_PAGES = 10
 
 
 class GitHubError(RuntimeError):
@@ -226,11 +240,14 @@ class GitHubClient:
         token: str,
         *,
         transport: httpx.BaseTransport | None = None,
+        base_url: str = GITHUB_API,
+        auth_prefix: str = "Bearer",
         platform: str = "github",
     ) -> None:
         self._token = token
+        self._base_url = base_url
         self._headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"{auth_prefix} {token}",
             "Accept": ACCEPT,
             "X-GitHub-Api-Version": API_VERSION,
             "User-Agent": "robomp/0.1",
@@ -238,9 +255,32 @@ class GitHubClient:
         self._transport = transport
         self._platform = platform
 
+    @property
+    def max_page_size(self) -> int:
+        """Largest per-page size the upstream actually honors.
+
+        GitHub honors `per_page` up to 100; Forgejo clamps `limit` to
+        MaxResponseItems (default 50). Callers that test for a short page to
+        detect exhaustion MUST compare against this value, not the size they
+        requested.
+        """
+        return 50 if self._platform == "forgejo" else 100
+
+    @property
+    def platform(self) -> str:
+        """Upstream platform name: ``github`` or ``forgejo``."""
+        return self._platform
+
+    def _page_params(self, page: int, per_page: int | None = None) -> dict[str, Any]:
+        """Paging query params for this platform (limit vs per_page)."""
+        size = per_page or (50 if self._platform == "forgejo" else 100)
+        if self._platform == "forgejo":
+            return {"limit": size, "page": page}
+        return {"per_page": size, "page": page}
+
     def _client(self) -> httpx.Client:
         return httpx.Client(
-            base_url=GITHUB_API,
+            base_url=self._base_url,
             headers=self._headers,
             transport=self._transport,
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -249,7 +289,7 @@ class GitHubClient:
 
     def _async_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=GITHUB_API,
+            base_url=self._base_url,
             headers=self._headers,
             transport=self._transport,  # type: ignore[arg-type]
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -467,10 +507,11 @@ class GitHubClient:
         """Return PR numbers currently linked to issue ``number`` via "Closes"/"Fixes"
         keywords or the Development panel.
 
-        Walks ``GET /repos/{repo}/issues/{N}/timeline`` and computes net
-        ``connected`` − ``disconnected`` events for sources that are pull
-        requests. Only PRs whose timeline source carries ``state == "open"``
-        are returned — a merged or closed PR no longer needs the bot's work.
+        GitHub computes net ``connected`` − ``disconnected`` events from
+        ``GET /repos/{repo}/issues/{N}/timeline``. Forgejo uses ``closes``
+        reference actions whose referenced PR body still closes this issue.
+        Only open PRs are returned — a merged or closed PR no longer needs
+        the bot's work.
 
         Pagination intentionally skipped: a just-opened issue has at most a
         handful of timeline entries, and the bot only consults this on
@@ -479,26 +520,51 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/issues/{number}/timeline",
-            params={"per_page": 100},
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
         )
         linked: set[int] = set()
         states: dict[int, str] = {}
         for event in data or []:
             if not isinstance(event, Mapping):
                 continue
-            ev = event.get("event")
-            source = event.get("source") or {}
-            src_issue = source.get("issue") if isinstance(source, Mapping) else None
-            if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
-                continue
-            pr_number = src_issue.get("number")
-            if not isinstance(pr_number, int):
-                continue
-            states[pr_number] = str(src_issue.get("state") or "open")
-            if ev == "connected":
+            if self._platform == "forgejo":
+                # TimelineComment.ref_action is an XRefAction: none, closes,
+                # reopens, or neutered. Only closes denotes a closing link.
+                if event.get("ref_action") != "closes":
+                    continue
+                ref_issue = event.get("ref_issue")
+                if not isinstance(ref_issue, Mapping) or ref_issue.get("pull_request") is None:
+                    continue
+                pr_number = ref_issue.get("number")
+                if not isinstance(pr_number, int):
+                    continue
+                # A closing reference in a comment is not a closing PR body.
+                # Also reject stale timeline references after a body edit.
+                body = str(ref_issue.get("body") or "")
+                target = rf"(?:{re.escape(repo)})?\#{number}\b"
+                url_target = rf"https?://[^\s]+/{re.escape(repo)}/issues/{number}\b"
+                if not re.search(
+                    rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:{target}|{url_target})",
+                    body,
+                    re.IGNORECASE,
+                ):
+                    continue
                 linked.add(pr_number)
-            elif ev == "disconnected":
-                linked.discard(pr_number)
+                states[pr_number] = str(ref_issue.get("state") or "open")
+            else:
+                ev = event.get("event")
+                source = event.get("source") or {}
+                src_issue = source.get("issue") if isinstance(source, Mapping) else None
+                if not isinstance(src_issue, Mapping) or src_issue.get("pull_request") is None:
+                    continue
+                pr_number = src_issue.get("number")
+                if not isinstance(pr_number, int):
+                    continue
+                states[pr_number] = str(src_issue.get("state") or "open")
+                if ev == "connected":
+                    linked.add(pr_number)
+                elif ev == "disconnected":
+                    linked.discard(pr_number)
         return tuple(sorted(n for n in linked if states.get(n, "open") == "open"))
 
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
@@ -508,15 +574,20 @@ class GitHubClient:
     async def list_pr_files(self, repo: str, pr_number: int) -> list[PullRequestFileInfo]:
         files: list[PullRequestFileInfo] = []
         page = 1
+        # Forgejo clamps limit to MaxResponseItems (default 50), so use
+        # the effective per-page size for the termination check.
+        per_page = 100 if self._platform != "forgejo" else 50
         while True:
             data = await self.request(
                 "GET",
                 f"/repos/{repo}/pulls/{pr_number}/files",
-                params={"per_page": 100, "page": page},
+                params={"per_page": per_page, "page": page}
+                if self._platform != "forgejo"
+                else {"limit": per_page, "page": page},
             )
             batch = [_pr_file_from_payload(item) for item in (data or [])]
             files.extend(batch)
-            if len(batch) < 100:
+            if len(batch) < per_page:
                 return files
             page += 1
 
@@ -529,24 +600,35 @@ class GitHubClient:
     ) -> list[IssueSummary]:
         """List recent issues for `repo`, newest-updated first. Excludes pull requests.
 
-        `state` is one of `open`, `closed`, `all`. `limit` is capped at 100 by the
-        GitHub `per_page`; we don't paginate here — the dashboard browse view shows
-        a recent slice, not every issue ever.
+        `state` is one of `open`, `closed`, `all`. Paginates (platform-aware
+        page size, `_MAX_ISSUES_PAGES` cap) until `limit` is satisfied or the
+        API is exhausted — the dashboard browse view shows a recent slice,
+        not every issue ever.
         """
         if state not in ("open", "closed", "all"):
             raise ValueError(f"invalid state: {state!r}")
-        per_page = max(1, min(int(limit), 100))
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/issues",
-            params={"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"},
-        )
+        limit = max(1, int(limit))
+        per_page = min(limit, self.max_page_size)
         out: list[IssueSummary] = []
-        for item in data or []:
-            if "pull_request" in item:
-                continue  # GitHub's /issues endpoint also returns PRs; skip them.
-            out.append(_summary_from_item(repo, item))
-        return out
+        page = 1
+        while page <= _MAX_ISSUES_PAGES and len(out) < limit:
+            params: dict[str, Any] = {"state": state, "page": page}
+            if self._platform == "forgejo":
+                # Gitea/Forgejo ListIssues has no sort param (created-desc is
+                # the fixed order); sending sort/direction is silently ignored.
+                params["limit"] = per_page
+            else:
+                params.update({"per_page": per_page, "sort": "updated", "direction": "desc"})
+            data = await self.request("GET", f"/repos/{repo}/issues", params=params)
+            batch = data or []
+            for item in batch:
+                if item.get("pull_request") is not None:
+                    continue  # GitHub's /issues endpoint also returns PRs; skip them.
+                out.append(_summary_from_item(repo, item))
+            if len(batch) < per_page:
+                break
+            page += 1
+        return out[:limit]
 
     async def search_issues(self, repo: str, query: str, *, limit: int = 10) -> list[IssueSummary]:
         """Search issues AND pull requests in `repo` using GitHub issue-search syntax.
@@ -556,12 +638,69 @@ class GitHubClient:
         come back in GitHub's best-match order. `limit` is capped at 30 — this
         serves triage lookups (duplicates, prior fixes), not pagination.
         """
-        per_page = max(1, min(int(limit), 30))
-        data = await self.request(
-            "GET",
-            "/search/issues",
-            params={"q": f"repo:{repo} {query}".strip(), "per_page": per_page},
-        )
+        limit = max(1, int(limit))
+        if self._platform == "forgejo":
+            # Forgejo/Gitea ListIssues is repo-scoped and PR-inclusive, so prefer
+            # /repos/{owner}/{repo}/issues over the global /repos/issues/search.
+            parsed = parse_search_query(query)
+            keywords = parsed.keywords
+            type_param = None
+            if parsed.is_pr is True:
+                type_param = "pulls"
+            elif parsed.is_pr is False:
+                type_param = "issues"
+            # The API's `q` is only reliable for a single word (multi-word is an
+            # unranked OR-union), so send the first keyword verbatim and AND the
+            # remaining keywords client-side against title+body.
+            params: dict[str, Any] = {
+                "state": parsed.state or "all",
+                "limit": _FORGEJO_SEARCH_PAGE_SIZE,
+            }
+            if keywords:
+                params["q"] = keywords[0]
+            if type_param:
+                params["type"] = type_param
+            if parsed.label:
+                params["labels"] = parsed.label
+            if parsed.author:
+                params["created_by"] = parsed.author
+
+            def _matches(item: Any) -> bool:
+                text = (str(item.get("title") or "") + "\n" + str(item.get("body") or "")).lower()
+                if not all(k.lower() in text for k in keywords):
+                    return False
+                # `is:merged` has no ListIssues param — filter client-side.
+                if parsed.merged is True:
+                    pull_request = item.get("pull_request")
+                    merged_at = item.get("merged_at") or (
+                        pull_request.get("merged_at") if isinstance(pull_request, Mapping) else None
+                    )
+                    if not merged_at:
+                        return False
+                return True
+
+            out: list[IssueSummary] = []
+            seen: set[int] = set()
+            page = 1
+            while page <= _MAX_SEARCH_PAGES and len(out) < limit:
+                data = await self.request("GET", f"/repos/{repo}/issues", params={**params, "page": page})
+                batch = data if isinstance(data, list) else []
+                for item in batch:
+                    if not _matches(item):
+                        continue
+                    number = item.get("number")
+                    if not isinstance(number, int) or number in seen:
+                        continue
+                    seen.add(number)
+                    out.append(_summary_from_item(repo, item))
+                    if len(out) >= limit:
+                        break
+                if len(batch) < _FORGEJO_SEARCH_PAGE_SIZE:
+                    break
+                page += 1
+            return out
+        params = {"q": f"repo:{repo} {query}".strip(), "per_page": max(1, min(limit, 30))}
+        data = await self.request("GET", "/search/issues", params=params)
         items = (data or {}).get("items") or []
         return [_summary_from_item(repo, item) for item in items]
 
@@ -575,75 +714,207 @@ class GitHubClient:
     ) -> list[IssueIndexEntry]:
         """One page of issues AND PRs (with bodies) for the local search index.
 
-        `since` is GitHub's ISO `updated_at` lower bound; omit for a full
+        `since` is an ISO `updated_at` lower bound; omit for a full
         backfill. Callers page from 1 until a short page comes back.
+
+        Ordering: GitHub gets `sort=updated&direction=asc` (oldest-updated
+        first) so a per-tick page budget resumes at the watermark without
+        gaps. Gitea/Forgejo ListIssues has NO sort param — results are
+        created-desc, not updated-at ordered — so bounded callers must
+        resume page traversal with a fixed `since` window instead of moving
+        an updated-at watermark mid-sweep (see `IssueIndexSync.sync_repo`).
         """
+        page_size = max(1, min(int(per_page), self.max_page_size))
         params: dict[str, Any] = {
             "state": "all",
-            "per_page": max(1, min(int(per_page), 100)),
             "page": max(1, int(page)),
-            "sort": "updated",
-            "direction": "asc",
         }
+        if self._platform == "forgejo":
+            params["limit"] = page_size
+        else:
+            params.update({"per_page": page_size, "sort": "updated", "direction": "asc"})
         if since:
             params["since"] = since
         data = await self.request("GET", f"/repos/{repo}/issues", params=params)
         return [index_entry_from_issue_object(repo, item) for item in (data or [])]
 
     async def list_comments(self, repo: str, number: int) -> list[CommentInfo]:
-        data = await self.request("GET", f"/repos/{repo}/issues/{number}/comments", params={"per_page": 100})
-        return [_comment_from_payload(item) for item in (data or [])]
+        out: list[CommentInfo] = []
+        per_page = self.max_page_size
+        page = 1
+        while page <= _MAX_COMMENT_PAGES:
+            data = await self.request(
+                "GET",
+                f"/repos/{repo}/issues/{number}/comments",
+                params=self._page_params(page, per_page),
+            )
+            batch = data or []
+            out.extend(_comment_from_payload(item) for item in batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+        return out
 
     async def list_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]:
-        """List inline review comments on a PR (the ones attached to a path:line)."""
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/pulls/{pr_number}/comments",
-            params={"per_page": 100},
-        )
+        """List inline review comments on a PR (the ones attached to a path:line).
+
+        On Forgejo the flat comment-list endpoint 404s, so we walk the PR's
+        reviews and fetch each review's comments; `position` is treated as the
+        new-file line.
+        """
+        if self._platform == "forgejo":
+            return await self._list_forgejo_review_comments(repo, pr_number)
         out: list[ReviewCommentInfo] = []
-        for item in data or []:
-            user = item.get("user") or {}
-            line = item.get("line")
-            if not isinstance(line, int):
-                orig = item.get("original_line")
-                line = orig if isinstance(orig, int) else None
-            out.append(
-                ReviewCommentInfo(
-                    id=int(item.get("id") or 0),
-                    author=str(user.get("login") or ""),
-                    body=str(item.get("body") or ""),
-                    path=str(item.get("path") or ""),
-                    line=line,
-                    created_at=str(item.get("created_at") or ""),
-                )
+        per_page = self.max_page_size
+        page = 1
+        while page <= _MAX_COMMENT_PAGES:
+            data = await self.request(
+                "GET",
+                f"/repos/{repo}/pulls/{pr_number}/comments",
+                params=self._page_params(page, per_page),
             )
+            batch = data or []
+            for item in batch:
+                user = item.get("user") or {}
+                line = item.get("line")
+                if not isinstance(line, int):
+                    orig = item.get("original_line")
+                    line = orig if isinstance(orig, int) else None
+                out.append(
+                    ReviewCommentInfo(
+                        id=int(item.get("id") or 0),
+                        author=str(user.get("login") or ""),
+                        body=str(item.get("body") or ""),
+                        path=str(item.get("path") or ""),
+                        line=line,
+                        created_at=str(item.get("created_at") or ""),
+                    )
+                )
+            if len(batch) < per_page:
+                break
+            page += 1
+        return out
+
+    async def _list_forgejo_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]:
+        """Walk a PR's reviews and collect their inline comments (Forgejo-only).
+
+        Each review's comments paginate with `limit` 50 (Forgejo clamps to
+        MaxResponseItems); a review's items are flattened in review order.
+        """
+        per_page = self.max_page_size
+        out: list[ReviewCommentInfo] = []
+        page = 1
+        while page <= _MAX_REVIEW_PAGES:
+            reviews = await self.request(
+                "GET",
+                f"/repos/{repo}/pulls/{pr_number}/reviews",
+                params={"limit": per_page, "page": page},
+            )
+            batch = reviews or []
+            for review in batch:
+                rid = review.get("id")
+                if not isinstance(rid, int):
+                    continue
+                # Forgejo clamps limit to MaxResponseItems (default 50), so use
+                # the effective per-page size for the termination check.
+                comment_page = 1
+                while True:
+                    data = await self.request(
+                        "GET",
+                        f"/repos/{repo}/pulls/{pr_number}/reviews/{rid}/comments",
+                        params={"limit": per_page, "page": comment_page},
+                    )
+                    comment_batch = data or []
+                    for item in comment_batch:
+                        user = item.get("user") or {}
+                        line = item.get("position")
+                        if not isinstance(line, int):
+                            orig = item.get("original_position")
+                            line = orig if isinstance(orig, int) else None
+                        out.append(
+                            ReviewCommentInfo(
+                                id=int(item.get("id") or 0),
+                                author=str(user.get("login") or ""),
+                                body=str(item.get("body") or ""),
+                                path=str(item.get("path") or ""),
+                                line=line,
+                                created_at=str(item.get("created_at") or ""),
+                            )
+                        )
+                    if len(comment_batch) < per_page:
+                        break
+                    comment_page += 1
+            if len(batch) < per_page:
+                break
+            page += 1
         return out
 
     async def list_pr_reviews(self, repo: str, pr_number: int) -> list[PullRequestReviewInfo]:
         """List top-level reviews on a PR. Empty-body reviews are skipped — they
         carry no novel text beyond what the inline comments + merge state convey."""
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/pulls/{pr_number}/reviews",
-            params={"per_page": 100},
-        )
         out: list[PullRequestReviewInfo] = []
-        for item in data or []:
-            user = item.get("user") or {}
-            body = str(item.get("body") or "").strip()
-            if not body:
-                continue
-            out.append(
-                PullRequestReviewInfo(
-                    id=int(item.get("id") or 0),
-                    author=str(user.get("login") or ""),
-                    body=body,
-                    state=str(item.get("state") or ""),
-                    submitted_at=str(item.get("submitted_at") or item.get("created_at") or ""),
-                )
+        per_page = self.max_page_size
+        page = 1
+        while page <= _MAX_REVIEW_PAGES:
+            data = await self.request(
+                "GET",
+                f"/repos/{repo}/pulls/{pr_number}/reviews",
+                params=self._page_params(page, per_page),
             )
+            batch = data or []
+            for item in batch:
+                user = item.get("user") or {}
+                body = str(item.get("body") or "").strip()
+                if not body:
+                    continue
+                out.append(
+                    PullRequestReviewInfo(
+                        id=int(item.get("id") or 0),
+                        author=str(user.get("login") or ""),
+                        body=body,
+                        state=str(item.get("state") or ""),
+                        submitted_at=str(item.get("submitted_at") or item.get("created_at") or ""),
+                    )
+                )
+            if len(batch) < per_page:
+                break
+            page += 1
         return out
+
+    async def list_repo_labels(self, repo: str) -> tuple[str, ...]:
+        """Return the names of all labels defined on the repo.
+
+        Paginates (Forgejo uses `limit`, GitHub `per_page`). Bounded to
+        `_MAX_LABEL_PAGES` pages as a guard against a runaway server; a repo's
+        label set is small in practice. Hitting the bound truncates the result
+        and logs a warning so the guard is observable rather than silent.
+        """
+        # Forgejo clamps limit to MaxResponseItems (default 50), so use
+        # the effective per-page size for the termination check.
+        per_page = 100 if self._platform != "forgejo" else 50
+        names: list[str] = []
+        page = 1
+        while page <= _MAX_LABEL_PAGES:
+            params = (
+                {"limit": per_page, "page": page}
+                if self._platform == "forgejo"
+                else {"per_page": per_page, "page": page}
+            )
+            data = await self.request("GET", f"/repos/{repo}/labels", params=params)
+            batch = data or []
+            if not batch:
+                break
+            names.extend(str(lbl["name"]) for lbl in batch if isinstance(lbl, dict) and lbl.get("name") is not None)
+            if len(batch) < per_page:
+                break
+            page += 1
+        if page > _MAX_LABEL_PAGES:
+            log.warning(
+                "list_repo_labels truncated at %d pages",
+                _MAX_LABEL_PAGES,
+                extra={"repo": repo},
+            )
+        return tuple(names)
 
     async def post_comment(self, repo: str, number: int, body: str) -> CommentInfo:
         data = await self.request(
@@ -652,6 +923,28 @@ class GitHubClient:
             json={"body": body},
         )
         return _comment_from_payload(data)
+
+    async def get_issue_comment(self, repo: str, comment_id: int) -> CommentInfo:
+        """Fetch one conversation comment by id — the canonical text.
+
+        Webhook payloads carry the body as of the `created` event, so a comment
+        edited seconds later (reviewer bots post a placeholder, then rewrite it
+        with the real findings) is stale in the payload. Works on GitHub and
+        Forgejo (same REST path).
+        """
+        data = await self.request("GET", f"/repos/{repo}/issues/comments/{comment_id}")
+        return _comment_from_payload(data)
+
+    async def get_pr_review(self, repo: str, review_id: int, *, pr_number: int) -> PullRequestReviewInfo:
+        """Fetch one PR review (summary) by id — the canonical text.
+
+        Review ids are not issue-comment ids: on Forgejo a review's id 404s on
+        the issues/comments endpoint, on `pulls/comments/{id}`, AND in the
+        per-review comment walk — only `pulls/{pr}/reviews/{id}` resolves a
+        review *summary* body (approve / request-changes verdicts).
+        """
+        data = await self.request("GET", f"/repos/{repo}/pulls/{pr_number}/reviews/{review_id}")
+        return _pr_review_from_payload(data)
 
     async def open_pull_request(
         self,
@@ -703,10 +996,20 @@ class GitHubClient:
         """Append labels to an issue (or PR). Returns the full label set after the add.
 
         Uses `POST /repos/{owner}/{repo}/issues/{n}/labels` which is *additive* —
-        we never remove or overwrite existing labels.
+        we never remove or overwrite existing labels. GitHub auto-creates a label
+        on add; Forgejo silently drops names that do not exist in the repo, so on
+        the Forgejo path we create any missing labels first (best-effort).
+        Concurrent creation is safe: any 409 from the label-create call is
+        swallowed, so a race with another creator (or this client re-adding the
+        same label) degrades to the label already existing.
         """
         if not labels:
             return ()
+        if self._platform == "forgejo":
+            existing = set(await self.list_repo_labels(repo))
+            for name in labels:
+                if name not in existing:
+                    await self._create_label(repo, name)
         data = await self.request(
             "POST",
             f"/repos/{repo}/issues/{number}/labels",
@@ -714,9 +1017,54 @@ class GitHubClient:
         )
         return tuple(str(lbl["name"]) if isinstance(lbl, dict) else str(lbl) for lbl in (data or []))
 
+    async def _create_label(self, repo: str, name: str) -> None:
+        """Create a repo label with a neutral color. Best-effort: ANY 409 from
+        ``POST /repos/{repo}/labels`` is swallowed regardless of the message
+        wording — on that endpoint a 409 means the label already exists (the
+        success case), which makes concurrent creation safe. Any other error is
+        propagated so the failed attach surfaces to the caller."""
+        try:
+            await self.request(
+                "POST",
+                f"/repos/{repo}/labels",
+                json={"name": name, "color": _DEFAULT_AUTO_LABEL_COLOR},
+            )
+        except GitHubError as exc:
+            if exc.status == 409:
+                return
+            raise
+
     async def remove_issue_label(self, repo: str, number: int, label: str) -> None:
-        """Remove one label from an issue (or PR)."""
+        """Remove one label from an issue (or PR).
+
+        GitHub's path parameter is the label *name*; Gitea/Forgejo's is the
+        label's numeric *ID*, so the Forgejo branch resolves name -> ID via
+        the repo label list first. A label that no longer exists (404) is
+        treated as successful cleanup by the callers.
+        """
         if not label:
+            return
+        if self._platform == "forgejo":
+            label_id: int | None = None
+            page = 1
+            per_page = self.max_page_size
+            while page <= _MAX_LABEL_PAGES:
+                data = await self.request(
+                    "GET",
+                    f"/repos/{repo}/labels",
+                    params={"limit": per_page, "page": page},
+                )
+                batch = data or []
+                for lbl in batch:
+                    if isinstance(lbl, dict) and lbl.get("name") == label:
+                        label_id = lbl.get("id")
+                        break
+                if label_id is not None or len(batch) < per_page:
+                    break
+                page += 1
+            if not isinstance(label_id, int):
+                return  # label no longer exists — nothing to remove
+            await self.request("DELETE", f"/repos/{repo}/issues/{number}/labels/{label_id}")
             return
         encoded = quote(label, safe="")
         await self.request(
@@ -769,6 +1117,85 @@ class GitHubClient:
             json={"assignees": assignees},
         )
 
+    async def get_review_comment(self, repo: str, comment_id: int, pr_number: int | None = None) -> ReviewCommentInfo:
+        """Fetch a single inline review comment by id.
+
+        Workaround for Forgejo #7935: `pull_request_review_comment` webhook
+        payloads on Forgejo carry empty `body` — the API returns the actual text.
+        On Forgejo the flat `pulls/comments/{id}` endpoint 404s, and the
+        webhook's `id` is the *review* id, so with `pr_number` given we fetch
+        that review's inline comments and summary. Prefer the review summary
+        body when present, retaining the first inline comment's path and line;
+        use the inline body when the review has no summary.
+        """
+        if self._platform == "forgejo":
+            if pr_number is None:
+                raise GitHubError(
+                    404,
+                    "cannot resolve a Forgejo review comment by bare id — pass pr_number to walk the PR's reviews",
+                )
+            inline: ReviewCommentInfo | None = None
+            try:
+                data = await self.request("GET", f"/repos/{repo}/pulls/{pr_number}/reviews/{comment_id}/comments")
+                for item in data or []:
+                    user = item.get("user") or {}
+                    line = item.get("position")
+                    if not isinstance(line, int):
+                        orig = item.get("original_position")
+                        line = orig if isinstance(orig, int) else None
+                    inline = ReviewCommentInfo(
+                        id=int(item.get("id") or 0),
+                        author=str(user.get("login") or ""),
+                        body=str(item.get("body") or ""),
+                        path=str(item.get("path") or ""),
+                        line=line,
+                        created_at=str(item.get("created_at") or ""),
+                    )
+                    break
+            except (GitHubError, httpx.HTTPError):
+                # A review summary can still contain the canonical body when
+                # the comments endpoint is unavailable.
+                pass
+            try:
+                review = await self.get_pr_review(repo, comment_id, pr_number=pr_number)
+            except (GitHubError, httpx.HTTPError):
+                if inline is not None:
+                    return inline
+                raise
+            if review.body.strip():
+                return ReviewCommentInfo(
+                    id=review.id,
+                    author=review.author or (inline.author if inline else ""),
+                    body=review.body,
+                    path=inline.path if inline else "",
+                    line=inline.line if inline else None,
+                    created_at=review.submitted_at or (inline.created_at if inline else ""),
+                )
+            if inline is not None:
+                return inline
+            return ReviewCommentInfo(
+                id=review.id,
+                author=review.author,
+                body=review.body,
+                path="",
+                line=None,
+                created_at=review.submitted_at,
+            )
+        data = await self.request("GET", f"/repos/{repo}/pulls/comments/{comment_id}")
+        user = data.get("user") or {}
+        line = data.get("line")
+        if not isinstance(line, int):
+            orig = data.get("original_line")
+            line = orig if isinstance(orig, int) else None
+        return ReviewCommentInfo(
+            id=int(data.get("id") or comment_id),
+            author=str(user.get("login") or ""),
+            body=str(data.get("body") or ""),
+            path=str(data.get("path") or ""),
+            line=line,
+            created_at=str(data.get("created_at") or ""),
+        )
+
     async def list_comment_reactions(self, repo: str, comment_id: int) -> tuple[ReactionInfo, ...]:
         """Reactions on an issue comment, filtered server-side to 👎 (`content=-1`).
 
@@ -776,12 +1203,21 @@ class GitHubClient:
         keeps payloads small even on noisy threads. Returns reactions in the
         order GitHub provides (creation order).
         """
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/issues/comments/{comment_id}/reactions",
-            params={"content": "-1", "per_page": 100},
-        )
-        return tuple(_reaction_from_payload(item) for item in (data or []))
+        out: list[ReactionInfo] = []
+        per_page = self.max_page_size
+        page = 1
+        while page <= _MAX_REACTION_PAGES:
+            data = await self.request(
+                "GET",
+                f"/repos/{repo}/issues/comments/{comment_id}/reactions",
+                params={**self._page_params(page, per_page), "content": "-1"},
+            )
+            batch = data or []
+            out.extend(_reaction_from_payload(item) for item in batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+        return tuple(out)
 
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None:
         """Close an issue with `state_reason` (`completed`/`not_planned`/`reopened`)."""
@@ -862,7 +1298,7 @@ def _issue_from_payload(repo: str, data: Mapping[str, Any]) -> IssueInfo:
         state=str(data.get("state") or "open"),
         author=str(user.get("login") or ""),
         labels=labels,
-        is_pull_request="pull_request" in data,
+        is_pull_request=data.get("pull_request") is not None,
     )
 
 
@@ -894,7 +1330,7 @@ def _summary_from_item(repo: str, item: Mapping[str, Any]) -> IssueSummary:
         created_at=str(item.get("created_at") or ""),
         html_url=str(item.get("html_url") or ""),
         state_reason=str(item.get("state_reason") or ""),
-        is_pull_request="pull_request" in item,
+        is_pull_request=item.get("pull_request") is not None,
     )
 
 

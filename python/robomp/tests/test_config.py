@@ -195,3 +195,22 @@ def test_task_timeout_hard_grace_env_parses(monkeypatch: pytest.MonkeyPatch, env
     reset_settings_cache()
     cfg = Settings()  # type: ignore[call-arg]
     assert cfg.task_timeout_hard_grace_seconds == 12.5
+
+
+def test_max_event_history_default_is_200000(env: dict[str, str]) -> None:
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.max_event_history == 200_000
+
+
+def test_max_event_history_env_overrides(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    monkeypatch.setenv("ROBOMP_MAX_EVENT_HISTORY", "500000")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.max_event_history == 500_000
+
+
+def test_max_event_history_below_minimum_rejected(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    monkeypatch.setenv("ROBOMP_MAX_EVENT_HISTORY", "500")
+    reset_settings_cache()
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]

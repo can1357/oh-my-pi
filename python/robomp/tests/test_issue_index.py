@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+import pytest
+
 from robomp.db import Database
-from robomp.github_client import IssueIndexEntry
+from robomp.github_client import GitHubClient, IssueIndexEntry
 from robomp.issue_index import IssueIndexSync, ingest_webhook_payload, parse_search_query
 
 
@@ -152,6 +155,9 @@ def test_ingest_webhook_issue_and_pr_payloads(db: Database) -> None:
 class _FakeBackend:
     """Pages of index entries keyed by page number; records `since` per call."""
 
+    platform = "github"
+    max_page_size = 100
+
     def __init__(self, pages: dict[int, list[IssueIndexEntry]]) -> None:
         self.pages = pages
         self.calls: list[tuple[str | None, int]] = []
@@ -166,6 +172,60 @@ class _FakeBackend:
 class _SyncSettings:
     issue_index_sync_seconds = 900.0
     repo_allowlist = frozenset({"octo/widget"})
+
+
+@pytest.mark.parametrize("watermark", [None, "2025-12-01T00:00:00Z"])
+async def test_sync_forgejo_resumes_created_order_across_capped_ticks(
+    db: Database, monkeypatch: pytest.MonkeyPatch, watermark: str | None
+) -> None:
+    if watermark is not None:
+        db.set_issue_index_watermark("octo/widget", watermark)
+    monkeypatch.setattr("robomp.issue_index._MAX_PAGES_PER_TICK", 2)
+    monkeypatch.setattr("robomp.issue_index._utcnow_iso", lambda: "2026-07-01T00:00:00Z")
+    # Created-desc order deliberately disagrees with updated_at order.
+    items = [
+        {
+            "number": number,
+            "title": f"issue {number}",
+            "updated_at": "2026-06-30T00:00:00Z" if number % 2 else "2026-01-01T00:00:00Z",
+        }
+        for number in range(205, 0, -1)
+    ]
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        calls.append(params)
+        assert request.url.path == "/repos/octo/widget/issues"
+        assert "sort" not in params and "direction" not in params
+        since = params.get("since", "")
+        matching = [item for item in items if item["updated_at"] >= since]
+        offset = (int(params["page"]) - 1) * int(params["limit"])
+        return httpx.Response(200, json=matching[offset : offset + int(params["limit"])])
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    sync = IssueIndexSync(settings=_SyncSettings(), db=db, github=client)  # type: ignore[arg-type]
+    assert await sync.sync_repo("octo/widget") == 100
+    assert db.issue_index_watermark("octo/widget") == watermark
+    assert await sync.sync_repo("octo/widget") == 100
+    assert db.issue_index_watermark("octo/widget") == watermark
+    # Update an already-indexed issue while the backfill is still in flight.
+    items[0]["updated_at"] = "2026-07-01T00:01:00Z"
+    assert await sync.sync_repo("octo/widget") == 5
+    assert [int(call["page"]) for call in calls] == [1, 2, 3, 4, 5]
+    expected_since = "2025-11-30T23:58:00Z" if watermark else None
+    assert all(call.get("since") == expected_since for call in calls)
+    for number in range(1, 206):
+        found = db.search_issue_index("octo/widget", keywords=("issue", str(number)))
+        assert [entry.number for entry in found] == [number]
+    assert db.issue_index_watermark("octo/widget") == "2026-07-01T00:00:00Z"
+
+    # Updates during the sweep must remain in the following incremental window.
+    calls.clear()
+    assert await sync.sync_repo("octo/widget") == 1
+    assert calls == [{"state": "all", "page": "1", "limit": "50", "since": "2026-06-30T23:58:00Z"}]
+    updated = db.search_issue_index("octo/widget", keywords=("issue", "205"))
+    assert updated[0].updated_at == "2026-07-01T00:01:00Z"
 
 
 async def test_sync_repo_backfills_pages_and_sets_watermark(db: Database, tmp_path: Path) -> None:
@@ -187,3 +247,55 @@ async def test_sync_repo_backfills_pages_and_sets_watermark(db: Database, tmp_pa
     backend.pages = {1: []}
     await sync.sync_repo("octo/widget")
     assert backend.calls and backend.calls[0][0] is not None
+
+
+async def test_sync_repo_routes_to_forgejo_backend_when_configured(db: Database, tmp_path: Path) -> None:
+    """sync_repo routes forgejo repos to the forgejo backend."""
+
+    class _FakeForgejoBackend:
+        platform = "forgejo"
+        max_page_size = 50
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def list_issue_index_entries(
+            self, repo: str, *, since: str | None = None, page: int = 1, per_page: int = 100
+        ) -> list[IssueIndexEntry]:
+            self.calls.append(repo)
+            return []
+
+    class _FakeSettings:
+        issue_index_sync_seconds = 900.0
+        repo_allowlist = frozenset({"forgejo-org/fj-repo", "github-org/gh-repo"})
+        forgejo_repos = frozenset({"forgejo-org/fj-repo"})
+
+    gh_backend = _FakeBackend({1: []})
+    fj_backend = _FakeForgejoBackend()
+    sync = IssueIndexSync(settings=_FakeSettings(), db=db, github=gh_backend, forgejo_github=fj_backend)  # type: ignore[arg-type]
+
+    # Forgejo repo → forgejo backend
+    await sync.sync_repo("forgejo-org/fj-repo")
+    assert fj_backend.calls == ["forgejo-org/fj-repo"]
+    assert not gh_backend.calls
+
+    # GitHub repo → default backend
+    fj_backend.calls.clear()
+    await sync.sync_repo("github-org/gh-repo")
+    assert gh_backend.calls, "default backend should have been called"
+    assert not fj_backend.calls
+
+
+async def test_sync_repo_falls_back_to_github_when_no_forgejo_backend(db: Database, tmp_path: Path) -> None:
+    """sync_repo uses default backend when forgejo_github is None, even for forgejo repos."""
+
+    class _FakeSettings:
+        issue_index_sync_seconds = 900.0
+        repo_allowlist = frozenset({"forgejo-org/fj-repo"})
+        forgejo_repos = frozenset({"forgejo-org/fj-repo"})
+
+    backend = _FakeBackend({1: []})
+    sync = IssueIndexSync(settings=_FakeSettings(), db=db, github=backend, forgejo_github=None)  # type: ignore[arg-type]
+
+    await sync.sync_repo("forgejo-org/fj-repo")
+    assert backend.calls, "default backend should have been called"

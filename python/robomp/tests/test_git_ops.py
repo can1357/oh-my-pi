@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 from pathlib import Path
@@ -13,6 +14,48 @@ from robomp import git_ops
 from robomp.git_ops import _TOKEN_SAFE_CONFIG, GitCommandError, _token_url_safe_config, push_release
 
 _AUTH_URL = "https://github.com/octo/widget.git"
+
+
+@pytest.mark.parametrize(
+    ("username", "host", "expected_credentials"),
+    [
+        ("git", "git.example.com", b"git:test-pat"),
+        (None, "github.com", b"x-access-token:test-pat"),
+    ],
+)
+def test_run_git_injects_platform_credentials_only_through_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    username: str | None,
+    host: str,
+    expected_credentials: bytes,
+) -> None:
+    from robomp import git_ops
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "fetched\n", "")
+
+    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    auth_url = f"https://{host}/octo/widget.git"
+    kwargs = {"git_auth_username": username} if username is not None else {}
+    result = git_ops._run_git(["fetch", "origin"], cwd=None, token="test-pat", auth_url=auth_url, **kwargs)
+
+    assert result.returncode == 0
+    assert result.stdout == "fetched\n"
+    env = captured["env"]
+    assert isinstance(env, dict)
+    header = env[git_ops.AUTH_ENV_VAR]
+    assert header.startswith("Authorization: Basic ")
+    assert base64.b64decode(header.removeprefix("Authorization: Basic ")) == expected_credentials
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert f"http.{auth_url}.extraHeader={git_ops.AUTH_ENV_VAR}" in cmd
+    assert "test-pat" not in " ".join(cmd)
+    assert header not in " ".join(cmd)
+    assert env["GIT_ALLOW_PROTOCOL"] == "https"
 
 
 def _token_config_args(auth_url: str) -> list[str]:

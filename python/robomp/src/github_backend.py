@@ -31,6 +31,16 @@ from robomp.github_client import (
 class GitHubBackend(Protocol):
     """Methods every caller in roboomp uses against GitHub."""
 
+    @property
+    def max_page_size(self) -> int:
+        """Largest per-page size the upstream actually honors (100 GitHub, 50 Forgejo)."""
+        ...
+
+    @property
+    def platform(self) -> str:
+        """Upstream platform name: ``github`` or ``forgejo``."""
+        ...
+
     # ---- reads ----
     async def get_repo(self, repo: str) -> RepoInfo: ...
 
@@ -68,7 +78,15 @@ class GitHubBackend(Protocol):
 
     async def list_comments(self, repo: str, number: int) -> list[CommentInfo]: ...
 
+    async def get_issue_comment(self, repo: str, comment_id: int) -> CommentInfo: ...
+
+    async def get_pr_review(self, repo: str, review_id: int, *, pr_number: int) -> PullRequestReviewInfo: ...
+
     async def list_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]: ...
+
+    async def get_review_comment(
+        self, repo: str, comment_id: int, pr_number: int | None = None
+    ) -> ReviewCommentInfo: ...
 
     async def list_pr_reviews(self, repo: str, pr_number: int) -> list[PullRequestReviewInfo]: ...
 

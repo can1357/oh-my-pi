@@ -51,6 +51,7 @@ _GIT_SUBPROCESS_SCRUBBED_ENV_KEYS = (
     AUTH_ENV_VAR,
     "GITHUB_TOKEN",
     "GH_TOKEN",
+    "FORGEJO_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",
     "ROBOMP_GH_PROXY_HMAC_KEY",
@@ -176,14 +177,16 @@ class GitCommandError(RuntimeError):
         super().__init__(f"git {' '.join(self.cmd[1:])} failed: {msg}")
 
 
-def _basic_auth_header(token: str) -> str:
+def _basic_auth_header(token: str, *, username: str = "x-access-token") -> str:
     """Build the `Authorization: Basic …` header value for a PAT.
 
     GitHub accepts `x-access-token:<PAT>` over HTTPS Basic auth; that form
     works for fine-grained tokens, classic PATs, and GitHub App installation
-    tokens alike.
+    tokens alike. Forgejo/Gitea expect the PAT as the *password* paired with
+    the token owner's username (or the literal `git`), so callers thread a
+    real username for the Forgejo platform.
     """
-    raw = f"x-access-token:{token}".encode()
+    raw = f"{username}:{token}".encode()
     return f"Authorization: Basic {base64.b64encode(raw).decode('ascii')}"
 
 
@@ -204,6 +207,7 @@ def _run_git(
     cwd: Path | None,
     token: str | None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     extra_env: Mapping[str, str] | None = None,
     safe_directory: Path | None = None,
     user: int | None = None,
@@ -236,7 +240,7 @@ def _run_git(
 
     cmd: list[str] = ["git", "-c", "protocol.ext.allow=never"]
     if token:
-        env[AUTH_ENV_VAR] = _basic_auth_header(token)
+        env[AUTH_ENV_VAR] = _basic_auth_header(token, username=git_auth_username or "x-access-token")
         if auth_url is not None:
             env["GIT_ALLOW_PROTOCOL"] = _TOKEN_ALLOWED_PROTOCOLS
             env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -495,6 +499,7 @@ def clone(
     default_branch: str,
     token: str | None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
 ) -> None:
     """Fresh `git clone --filter=blob:none` into `target`."""
@@ -508,7 +513,17 @@ def clone(
         clone_url,
         str(target),
     ]
-    _check(_run_git(args, cwd=None, token=token, auth_url=auth_url, safe_directory=safe_directory), ["git", *args])
+    _check(
+        _run_git(
+            args,
+            cwd=None,
+            token=token,
+            auth_url=auth_url,
+            git_auth_username=git_auth_username,
+            safe_directory=safe_directory,
+        ),
+        ["git", *args],
+    )
 
 
 def fetch_prune(
@@ -517,6 +532,7 @@ def fetch_prune(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
 ) -> None:
     """Refresh `refs/remotes/origin/*` on the shared pool clone.
@@ -546,6 +562,7 @@ def fetch_prune(
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=extra_env,
             safe_directory=safe_directory,
         )
@@ -566,6 +583,7 @@ def _backfill_tip_blobs(
     *,
     token: str | None,
     auth_url: str | None,
+    git_auth_username: str | None,
     extra_env: Mapping[str, str] | None,
     safe_directory: Path | None,
 ) -> subprocess.CompletedProcess[str] | None:
@@ -602,6 +620,7 @@ def _backfill_tip_blobs(
         cwd=repo_dir,
         token=token,
         auth_url=auth_url,
+        git_auth_username=git_auth_username,
         extra_env=extra_env,
         safe_directory=safe_directory,
         input="\n".join(missing) + "\n",
@@ -615,6 +634,7 @@ def fetch_ref(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
 ) -> None:
     """Fetch ``<ref>`` from origin AND materialize the blobs of its tree.
@@ -640,6 +660,7 @@ def fetch_ref(
         cwd=repo_dir,
         token=token,
         auth_url=auth_url,
+        git_auth_username=git_auth_username,
         extra_env=extra_env,
         safe_directory=safe_directory,
     )
@@ -651,6 +672,7 @@ def fetch_ref(
                 remote,
                 token=token,
                 auth_url=auth_url,
+                git_auth_username=git_auth_username,
                 extra_env=extra_env,
                 safe_directory=safe_directory,
             )
@@ -694,6 +716,7 @@ def fetch_pr_head(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
     head_ref: str | None = None,
     head_sha: str | None = None,
@@ -766,6 +789,7 @@ def fetch_pr_head(
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=extra_env,
             safe_directory=safe_directory,
         )
@@ -783,6 +807,7 @@ def fetch_pr_head(
         remote,
         token=token,
         auth_url=auth_url,
+        git_auth_username=git_auth_username,
         extra_env=extra_env,
         safe_directory=safe_directory,
     )
@@ -923,6 +948,7 @@ def push(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     slot_uid: int | None = None,
     safe_directory: Path | None = None,
 ) -> PushResult:
@@ -1004,6 +1030,7 @@ def push(
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=push_extra_env,
             safe_directory=git_safe_directory,
             **slot_kwargs,
@@ -1035,6 +1062,7 @@ def push_release(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     slot_uid: int | None = None,
     safe_directory: Path | None = None,
 ) -> PushResult:
@@ -1085,6 +1113,7 @@ def push_release(
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=push_extra_env,
             safe_directory=git_safe_directory,
             **slot_kwargs,
