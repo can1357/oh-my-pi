@@ -3812,7 +3812,12 @@ export interface ProcessTerminateOptions {
   gracefulMs?: number
   /** Milliseconds to wait after hard-kill for the process tree to exit. */
   timeoutMs?: number
-  /** Abort signal for cancelling termination while waiting. */
+  /**
+   * Abort signal. An abort before or during the grace period ends the grace
+   * period, not the termination: the hard kill is sent at once, and the
+   * promise then rejects with `Aborted: Signal` without waiting for the tree
+   * to exit.
+   */
   signal?: unknown
 }
 
