@@ -200,6 +200,25 @@ describe("remote compaction replays stored output items without created_by", () 
 		},
 	);
 
+	test.each(["v2", "codex-v2"] as const)(
+		"%s request drops created_by: null from a shell output entry whose item holds none",
+		async route => {
+			const model = routeModel(route);
+			const { fetch, requests } = stubCompaction(route);
+			const entry = { stdout: "ls output", stderr: "", outcome: { type: "exit", exit_code: 0 } };
+			const history = [
+				{ type: "shell_call_output", call_id: "call_shell", output: [{ ...entry, created_by: null }] },
+			];
+			const messages = [{ role: "user" as const, content: "long history", timestamp: 1 }];
+			const preparation = makePreparation(route, messages, preserveData(route, model.provider, history));
+			await compact(preparation, model, "not-a-secret", undefined, undefined, { fetch });
+			expect(requests).toHaveLength(1);
+			expect(requests[0]!.input.filter(item => item.type === "shell_call_output")).toStrictEqual([
+				{ type: "shell_call_output", call_id: "call_shell", output: [entry] },
+			]);
+		},
+	);
+
 	test.each(ROUTES)(
 		"%s: a compaction item the API returned with created_by: null reaches the next compaction without it",
 		async route => {
