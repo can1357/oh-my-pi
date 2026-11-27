@@ -18,7 +18,7 @@
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
-- Fixed Mermaid flowcharts drawing edges into a top-rank node, such as two back edges into it, as a straight line through other nodes' boxes and labels with no arrowhead; those edges now route around the nodes.
+- Fixed Mermaid flowcharts drawing edges into a top-rank node, such as two back edges into it, as a straight line through other nodes' boxes and labels with no arrowhead; those edges now route around the nodes ([#20781](https://github.com/can1357/oh-my-pi/pull/20781) by [@loishi](https://github.com/loishi))
 
 ## [19.2.1] - 2026-11-25
 
