@@ -305,7 +305,7 @@ export class SessionFocusController {
 			type: "agent_view_changed",
 			agentId,
 			previousAgentId,
-			sessionId: target.sessionId,
+			sessionId: target.sessionManager.getSessionId(),
 		});
 	}
 

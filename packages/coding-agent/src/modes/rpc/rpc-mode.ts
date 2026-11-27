@@ -341,7 +341,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
 	images?: ImageContent[];
-	isCurrent?: () => boolean;
+	isCurrent?: () => boolean | Promise<boolean>;
 }): Promise<RpcSkillCommandResult | "cancelled" | null> {
 	const invocation = resolveRpcSkillInvocation(input.session, input.message);
 	if (!invocation) return null;
@@ -350,7 +350,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	// replacement first). Rendering (and authorizing model tags) happens
 	// only after the in-flight submission survives the currentness check.
 	const loaded = await loadSkillPrompt(invocation.skill, input.session);
-	if (input.isCurrent && !input.isCurrent()) return "cancelled";
+	if (input.isCurrent && !(await input.isCurrent())) return "cancelled";
 	const built = input.session.renderUserSkillPrompt(loaded.skill, invocation, loaded.body);
 	// A failure before admission still resolves this wait (without rejecting this
 	// call) — reportPromptResult already routed it to onError and a failed prompt_result.
@@ -537,6 +537,7 @@ const USER_INPUT_TYPES: Record<string, true> = {
 };
 
 const SESSION_CHANGE_TYPES: Record<string, true> = {
+	clear_context: true,
 	new_session: true,
 	switch_session: true,
 	branch: true,
@@ -935,8 +936,8 @@ export async function handleRpcSessionChange(
 
 export type RpcOpenSessionSession = Pick<
 	AgentSession,
-	"newSession" | "switchSession" | "sessionFile" | "sessionId" | "messages" | "model" | "setModel"
->;
+	"newSession" | "switchSession" | "sessionFile" | "messages" | "model" | "setModel"
+> & { sessionManager: Pick<AgentSession["sessionManager"], "getSessionId"> };
 
 /**
  * Continue the newest non-empty session in `sessionDir`, or start a fresh one
@@ -979,7 +980,7 @@ export async function openRpcSession(
 	return {
 		cancelled,
 		resumed: !cancelled && latest !== null,
-		sessionId: session.sessionId,
+		sessionId: session.sessionManager.getSessionId(),
 		sessionFile: session.sessionFile,
 	};
 }
@@ -2085,6 +2086,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	await emitAvailableCommandsUpdate();
 
 	const inputGate = new RpcUserInputGate();
+	// A pre-clear hook or queued admission can finish *during* reset (e.g. while session_clear
+	// extensions run). Wait for its outcome before admitting that frame or discarding it.
+	let clearingContext: Promise<void> | undefined;
+	const isCurrentInput = async (command: RpcCommand): Promise<boolean> => {
+		if (clearingContext) await clearingContext;
+		return inputGate.isCurrent(command);
+	};
 	type OrderedUserInput = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
 	type OrderedInputOutcome = "local" | "cancelled" | "admitted" | "builtin-agent";
 	const dispatchOrderedUserInput = (
@@ -2093,20 +2101,20 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	): Promise<OrderedInputOutcome> =>
 		inputGate.enqueue(async () => {
 			const sessionId = session.sessionId;
-			const isCurrent = () =>
-				inputGate.isCurrent(command) && !shutdownState.requested && session.sessionId === sessionId;
-			if (!isCurrent()) return "cancelled";
+			const isCurrent = async () =>
+				(await isCurrentInput(command)) && !shutdownState.requested && session.sessionId === sessionId;
+			if (!(await isCurrent())) return "cancelled";
 			let text = command.message;
 			let images = command.images;
 			const runner = session.extensionRunner;
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, images, "rpc");
-				if (!isCurrent()) return "cancelled";
+				if (!(await isCurrent())) return "cancelled";
 				if (result.handled) return "local";
 				if (result.text !== undefined) text = result.text;
 				if (result.images !== undefined) images = result.images;
 			}
-			if (!isCurrent()) return "cancelled";
+			if (!(await isCurrent())) return "cancelled";
 			if (!text.trim() && !images?.length) return "local";
 			if (command.type === "steer") {
 				await session.steer(text, images);
@@ -2131,6 +2139,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				});
 				if (skillResult === "cancelled") return "cancelled";
 				if (skillResult) return "admitted";
+				if (!(await isCurrent())) return "cancelled";
 				const builtinAbort = new AbortController();
 				builtinCommandAborts.add(builtinAbort);
 				let backgroundedBuiltin = false;
@@ -2161,14 +2170,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						shutdownCoordinator.track(task().finally(() => builtinCommandAborts.delete(builtinAbort)));
 					},
 					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+						output({
+							type: "session_info_update",
+							title: session.sessionName,
+							sessionId: session.sessionManager.getSessionId(),
+						});
 					},
 					notifyConfigChanged: async () => {
 						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 					},
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);
-				if (!isCurrent()) return "cancelled";
+				if (!(await isCurrent())) return "cancelled";
 				if (builtinResult !== false) {
 					if (!("prompt" in builtinResult)) {
 						if (builtinResult.agentInvoked === true && ticket) {
@@ -2187,7 +2200,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					text = builtinResult.prompt;
 				}
 			}
-			if (!isCurrent() || !ticket) return "cancelled";
+			if (!(await isCurrent()) || !ticket) return "cancelled";
 			await watchAndReportPromptResult({
 				ticket,
 				startPrompt: onPromptAdmitted =>
@@ -2304,7 +2317,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// The TUI's empty Enter. Ordered behind earlier input, so a message sent just
 				// before is queued by the time this runs and is the one the continuation takes.
 				const aborted = await inputGate.enqueue(async () => {
-					if (!inputGate.isCurrent(command) || !session.isStreaming || !session.hasInterruptibleInput) {
+					if (!(await isCurrentInput(command)) || !session.isStreaming || !session.hasInterruptibleInput) {
 						return false;
 					}
 					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true, detachTools: true });
@@ -2317,7 +2330,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// The TUI's `.`/`c`, ordered behind earlier input like abort_and_deliver_queue.
 				// Answer once the continuation is under way; a failure after that is a late error.
 				await inputGate.enqueue(async () => {
-					if (!inputGate.isCurrent(command) || shutdownState.requested) return;
+					if (!(await isCurrentInput(command)) || shutdownState.requested) return;
 					const admitted = Promise.withResolvers<void>();
 					const resuming = session.resume({ onAdmitted: admitted.resolve });
 					await Promise.race([resuming, admitted.promise]);
@@ -2351,11 +2364,22 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					session.abortCompaction();
 					while (session.isCompacting) await Bun.sleep(10);
 				}
-				const result = await session.resetSessionContext();
-				if (!result) {
-					return error(id, "clear_context", new SessionBusyError("clear the context").message, "session_busy");
+				const clear = Promise.withResolvers<void>();
+				clearingContext = clear.promise;
+				try {
+					const result = await session.resetSessionContext();
+					if (!result) {
+						return error(id, "clear_context", new SessionBusyError("clear the context").message, "session_busy");
+					}
+					inputGate.commitSessionChange(command);
+					// Clearing can close a paused run without an agent_end for its prompts or settle subscribers.
+					promptResults.abortOpen();
+					void settleWatcher.check();
+					return success(id, "clear_context", { droppedCount: result.droppedCount });
+				} finally {
+					clearingContext = undefined;
+					clear.resolve();
 				}
-				return success(id, "clear_context", { droppedCount: result.droppedCount });
 			}
 
 			case "new_session":
@@ -2507,7 +2531,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					followUpMode: session.followUpMode,
 					interruptMode: session.interruptMode,
 					sessionFile: session.sessionFile,
-					sessionId: session.sessionId,
+					sessionId: session.sessionManager.getSessionId(),
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					queuedMessageCount: session.queuedMessageCount,
@@ -2970,7 +2994,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						pageRpcMessages(
 							messages,
 							{
-								sessionId: session.sessionId,
+								sessionId: session.sessionManager.getSessionId(),
 								leafId: session.sessionManager.getLeafId(),
 								messageCount: messages.length,
 							},

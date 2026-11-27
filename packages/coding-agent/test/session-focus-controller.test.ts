@@ -25,7 +25,8 @@ function makeSessionStub(opts: { isStreaming?: boolean; sessionId?: string } = {
 	let unsubscribeCalls = 0;
 	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const stub = {
-		sessionId: opts.sessionId ?? "session",
+		sessionId: "provider-session",
+		sessionManager: { getSessionId: () => opts.sessionId ?? "session" },
 		isStreaming: opts.isStreaming ?? false,
 		runStartedAt: undefined as number | undefined,
 		agent: { state: { streamMessage: null } },
