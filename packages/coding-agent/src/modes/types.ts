@@ -781,6 +781,8 @@ export interface InteractiveModeContext {
 	showSessionInfo(info: string, context?: ContextUsage): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
+	/** Hide the deferred command output preview; the output still mounts at the settle. False when none is shown (Esc falls through). */
+	dismissDeferredCommandOutput(): boolean;
 	/**
 	 * Remove every transcript block (disposing their roots, so timers and subscriptions stop) and
 	 * forget the block maps. Used before a full rebuild.

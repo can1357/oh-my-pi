@@ -38,6 +38,7 @@
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
 - The `logout` RPC response carries `signOutError` when the provider could not confirm revoking the login; the login is removed regardless
+- Esc hides the command output (`/mcp` and other slash commands) previewed above the editor while the agent streams, without interrupting the turn; the output still enters the transcript when the agent pauses ([#17954](https://github.com/can1357/oh-my-pi/issues/17954))
 
 ### Changed
 

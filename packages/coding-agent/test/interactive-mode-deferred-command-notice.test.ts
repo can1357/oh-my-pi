@@ -11,6 +11,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { type JSXNode, jsx } from "@oh-my-pi/pi-tui";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { showCommandMessage } from "../src/modes/controllers/command-controller-shared";
 import { DeferredCommand } from "../src/ui/dock/deferred";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal } from "./helpers/mode-terminal";
@@ -188,6 +189,41 @@ describe("InteractiveMode deferred command preview", () => {
 
 		expect(noticeText(mode)).toBe("");
 		expect(transcriptText(mode)).toContain("usage panel");
+	});
+
+	it("hides the preview on Esc without interrupting the turn and still mounts the output at the settle", async () => {
+		const { mode, session, setStreaming } = await createHarness();
+		setStreaming(true);
+		const abort = vi.spyOn(session, "abort").mockResolvedValue(undefined);
+
+		// `/mcp reload` mid-turn: its status messages queue as command output.
+		showCommandMessage(mode, "Reloading MCP servers and runtime tools...");
+		showCommandMessage(mode, "MCP reload complete");
+		expect(noticeText(mode)).toContain("2 command outputs");
+		expect(noticeText(mode)).toContain("to hide");
+
+		mode.interruptFromPointer();
+
+		expect(noticeText(mode)).toBe("");
+		expect(abort).not.toHaveBeenCalled();
+		expect(transcriptText(mode)).not.toContain("MCP reload complete");
+
+		// Output queued after the dismissal previews on its own.
+		mode.presentCommandOutput(panel("usage panel"));
+		expect(noticeText(mode)).toContain("1 command output");
+		expect(noticeText(mode)).not.toContain("MCP reload complete");
+
+		setStreaming(false);
+		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+		const transcript = transcriptText(mode);
+		const reloading = transcript.indexOf("Reloading MCP servers");
+		const complete = transcript.indexOf("MCP reload complete");
+		const usage = transcript.indexOf("usage panel");
+		expect(reloading).toBeGreaterThanOrEqual(0);
+		expect(complete).toBeGreaterThan(reloading);
+		expect(usage).toBeGreaterThan(complete);
+		expect(noticeText(mode)).toBe("");
 	});
 
 	it("shows no preview when the agent is idle, since output mounts immediately", async () => {

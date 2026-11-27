@@ -1129,8 +1129,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Command output held while a turn streams (also previewed in the `deferredCommand` slot). */
 	#pendingCommandOutput: { factory: () => JSXNode; options?: BlockOptions & { readonly live?: boolean } }[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
-	/** Commands (not components) queued while streaming, for the deferral hint. */
+	/** Commands (not components) shown in the preview, for the deferral hint. */
 	#pendingCommandOutputCommands = 0;
+	/** Index of the first queued panel the preview shows; Esc hides the ones before it (they still mount at the settle). */
+	#pendingCommandOutputPreviewFrom = 0;
 	#pendingSlashCommands: SlashCommand[] = [];
 	/** Symbol preset the slash-command picker icons were resolved under. */
 	#slashIconPreset: string | undefined;
@@ -1355,6 +1357,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
+		this.#pendingCommandOutputPreviewFrom = 0;
 		this.#syncDeferredCommandPreview();
 		// A view switch leaves the main session, and the input queued for it, in place. A session reset
 		// hands a queued `/compact` and the input in the compaction queue back to the editor.
@@ -7415,6 +7418,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#pendingCommandOutput.length > 0 && this.#pendingCommandOutputSessionId !== sessionId) {
 			this.#pendingCommandOutput = [];
 			this.#pendingCommandOutputCommands = 0;
+			this.#pendingCommandOutputPreviewFrom = 0;
 		}
 		this.#pendingCommandOutputSessionId = sessionId;
 		this.#pendingCommandOutput.push(options ? { factory, options } : { factory });
@@ -7426,9 +7430,21 @@ export class InteractiveMode implements InteractiveModeContext {
 	#syncDeferredCommandPreview(): void {
 		const deferred = this.hud.deferred;
 		batch(() => {
-			deferred.panels.set(this.#pendingCommandOutput.map(item => item.factory));
+			deferred.panels.set(
+				this.#pendingCommandOutput.slice(this.#pendingCommandOutputPreviewFrom).map(item => item.factory),
+			);
 			deferred.commands.set(this.#pendingCommandOutputCommands);
+			deferred.dismissKey.set(appInterruptKeys(this.keybindings)[0] ?? "escape");
 		});
+	}
+
+	/** Esc: hide the queued panels shown above the editor; they still enter the transcript at the settle. False when none is shown. */
+	dismissDeferredCommandOutput(): boolean {
+		if (this.#pendingCommandOutputPreviewFrom >= this.#pendingCommandOutput.length) return false;
+		this.#pendingCommandOutputPreviewFrom = this.#pendingCommandOutput.length;
+		this.#pendingCommandOutputCommands = 0;
+		this.#syncDeferredCommandPreview();
+		return true;
 	}
 
 	/** Mount every command panel queued for the current session while the agent was streaming. */
@@ -7439,6 +7455,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
+		this.#pendingCommandOutputPreviewFrom = 0;
 		this.#syncDeferredCommandPreview();
 		if (pendingSessionId !== this.sessionManager.getSessionId()) return;
 		for (const item of pending) this.present(item.factory, item.options);

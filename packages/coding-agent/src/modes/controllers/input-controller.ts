@@ -800,6 +800,10 @@ export class InputController {
 		if (this.ctx.dismissCommandReport()) {
 			return;
 		}
+		// Command output queued mid-turn is hidden, not dropped: it still enters the transcript at the settle.
+		if (this.ctx.dismissDeferredCommandOutput()) {
+			return;
+		}
 
 		if (!this.ctx.focusedAgentId) {
 			const viewSession = this.ctx.viewSession;
