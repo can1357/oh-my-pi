@@ -232,6 +232,18 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
  * marker with an old event timestamp (issue #4819). Rows flagged `IMPORTED`
  * are treated as durable and never trimmed, and trimmed rows cascade all linked
  * artifacts via `purgeWorkingMemoryArtifacts`.
+ *
+ * The trim addresses each row by its rowid, never by `id`. `id TEXT PRIMARY KEY`
+ * on a rowid table admits NULL, and a database rebuilt by SQLite's `.recover` can
+ * hold such a row. By id, `id NOT IN (keep set)` is NULL, never true, for that row,
+ * so it was never trimmed. While the row was among the newest `workingMemoryLimit`
+ * rows, the keep set held a NULL and the test was NULL for every other row as well,
+ * so the overflow half trimmed nothing until enough newer writes pushed the row out,
+ * and never again if its timestamp sorted above every later write. Rows past the TTL
+ * were still removed. The rowid of a rowid table is never NULL, and it is read and
+ * bound as decimal text because it is a signed 64-bit integer that a JS number would
+ * round past 2^53. Only text ids go to `purgeWorkingMemoryArtifacts`, which keys every
+ * artifact by the memory id.
  */
 function trimWorkingMemory(beam: BeamMemoryState): void {
 	const limit = beam.config.workingMemoryLimit;
@@ -240,30 +252,35 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 	const cutoff = toUtcIso(new Date(Date.now() - ttlHours * 3_600_000));
 	transaction(beam.db, () => {
 		using selectStatement = beam.db.prepare(`
-			SELECT id FROM working_memory
+			SELECT CAST(rowid AS TEXT) AS rowid, id FROM working_memory
 			WHERE session_id = ?
 			  AND consolidated_at IS NULL
 			  AND trust_tier IS NOT 'IMPORTED'
 			  AND (
 				timestamp < ? OR
-				id NOT IN (
-					SELECT id FROM working_memory
+				rowid NOT IN (
+					SELECT rowid FROM working_memory
 					WHERE session_id = ? AND consolidated_at IS NULL AND trust_tier IS NOT 'IMPORTED'
 					ORDER BY timestamp DESC
 					LIMIT ?
 				)
 			  )
 		`);
-		const ids = (selectStatement.all(beam.sessionId, cutoff, beam.sessionId, limit) as { id: string }[]).map(
-			row => row.id,
-		);
-		if (ids.length === 0) return;
-		const placeholders = ids.map(() => "?").join(", ");
-		beam.db.run(`DELETE FROM working_memory WHERE id IN (${placeholders}) AND session_id = ?`, [
-			...ids,
+		const trimmed = selectStatement.all(beam.sessionId, cutoff, beam.sessionId, limit) as {
+			rowid: string;
+			id: unknown;
+		}[];
+		if (trimmed.length === 0) return;
+		const rowids = trimmed.map(row => row.rowid);
+		const placeholders = rowids.map(() => "?").join(", ");
+		beam.db.run(`DELETE FROM working_memory WHERE rowid IN (${placeholders}) AND session_id = ?`, [
+			...rowids,
 			beam.sessionId,
 		]);
-		purgeWorkingMemoryArtifacts(beam.db, ids);
+		purgeWorkingMemoryArtifacts(
+			beam.db,
+			trimmed.map(row => row.id).filter(id => typeof id === "string"),
+		);
 	});
 }
 

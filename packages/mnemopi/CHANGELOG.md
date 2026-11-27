@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed transient working memory growing past its limit, and a memory row with no text id never ageing out, when a database holds such a row (as SQLite's `.recover` can write): the trim now removes rows by rowid
+
 ### Removed
 
 - Removed unused public configuration exports from @oh-my-pi/pi-mnemopi/config.
