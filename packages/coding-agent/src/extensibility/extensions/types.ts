@@ -626,6 +626,12 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/** Host wiring for the owning session's async jobs, backing `ctx.getAsyncJobSnapshot`/`ctx.cancelAsyncJob`. */
+export interface ExtensionAsyncJobAccess {
+	getSnapshot(): AsyncJobSnapshot | null;
+	cancel(id: string): boolean;
+}
+
 /**
  * The agent a session runs. Extension factories are rebound to every subagent session
  * (task tool, eval `agent()`, `/tan` clones), so this tells a handler which agent it is serving.
@@ -836,6 +842,11 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
+	/**
+	 * Cancel a running async job this session owns (an id from {@link getAsyncJobSnapshot}), as `/jobs kill <id>`
+	 * does. Returns false when this session owns no running job by that id, or no session owns the context.
+	 */
+	cancelAsyncJob(id: string): boolean;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */

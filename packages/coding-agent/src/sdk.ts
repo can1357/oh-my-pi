@@ -3974,7 +3974,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
-			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			{
+				getSnapshot: () => (hasSession ? session.getAsyncJobSnapshot() : null),
+				cancel: id => hasSession && session.cancelAsyncJob(id),
+			},
 			Object.freeze({
 				kind: isSubagentSession ? "sub" : "main",
 				id: resolvedAgentId,

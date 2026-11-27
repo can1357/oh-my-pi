@@ -438,6 +438,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
+- `cancelAsyncJob(id)` cancels a running async job (e.g. a background `task` worker) this session owns, like `/jobs kill <id>`; returns `false` when the session owns no running job by that id. To stop them all, loop over `getAsyncJobSnapshot()?.running`
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
