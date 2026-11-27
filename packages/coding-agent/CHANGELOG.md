@@ -68,6 +68,7 @@
 
 ### Fixed
 
+- The Hindsight retain outbox now sends the memories of each tag set in the order they were queued. It ordered them by file modification time alone, so memories written within one tick of the filesystem's clock (most often the items of one call) went out in the directory's listing order, which differs from one filesystem to the next. Each queued memory now records a sequence one past the highest pending one's; memories an older release queued have none, and go first, by modification time, as before
 - Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back
 - Fixed a handoff model that never stops streaming holding automatic compaction indefinitely: handoff output is now capped like a summary, and the new `compaction.handoffTimeoutSeconds` setting (off by default) fails a handoff that runs too long so automatic compaction moves on to the next method and `/handoff` reports the timeout ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
 - Fixed the tool-call loop guard never stopping a model that keeps calling nonexistent tools (`wri`, `ed`, `ba`) with varying names or arguments; it now redirects after `model.toolCallLoopGuard.threshold` such turns in a row, while a single typo followed by a valid call is unaffected ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
