@@ -177,6 +177,7 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			const kept = "keep @sample-note.txt";
 			await draft(kept);
 
+			// The nested ring is a different target from the model name, despite sharing its chip.
 			const effort = await visible(".sf-effort.sf-act", node => Boolean(node.title), "interactive effort ring");
 			await click(effort);
 			await visible(
@@ -191,6 +192,8 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 				"visible session model picker",
 			);
 			await enterText("smoke/beta");
+			// Beta is visible in the unfiltered list too, at a different coordinate. Wait until
+			// the new query is displayed and the filtered row is selected before clicking it.
 			await visible(".pk-search", node => node.text === "smoke/beta", "rendered model search");
 			await click(
 				await visible(".pk-row.sel", node => node.text?.includes("beta") === true, "selected beta result"),
@@ -234,72 +237,95 @@ function annotationSession(cwd: string): readonly unknown[] {
 }
 
 test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
-	"`/annotate session` selects the exact second block on desktop and phone",
+	"`/copy` and `/annotate session` preserve block previews and exact selection on desktop and phone",
 	async () => {
-		await withTern(async ({ ctl, visible, click, enterText }) => {
-			for (const mode of ["desktop", "phone"] as const) {
-				const viewport = mode === "phone" ? ([390, 844] as const) : ([1200, 800] as const);
-				async function press(node: Element) {
-					if (mode === "desktop") {
-						await click(node);
-						return;
+		for (const command of ["/copy", "/annotate session"] as const) {
+			await withTern(async ({ ctl, visible, click, enterText }) => {
+				for (const mode of ["desktop", "phone"] as const) {
+					const viewport = mode === "phone" ? ([390, 844] as const) : ([1200, 800] as const);
+					async function pressVisible(selector: string, match: (node: Element) => boolean, description: string) {
+						const node = await visible(selector, match, description, viewport);
+						if (mode === "desktop") {
+							await click(node);
+							return;
+						}
+						const [x, y, w, h] = node.rect;
+						const coords = [String(x + w / 2), String(y + h / 2)];
+						await ctl("touch", "down", "1", ...coords);
+						await ctl("touch", "up", "1", ...coords);
 					}
-					const [x, y, w, h] = node.rect;
-					const coords = [String(x + w / 2), String(y + h / 2)];
-					await ctl("touch", "down", "1", ...coords);
-					await ctl("touch", "up", "1", ...coords);
-				}
-				const pressVisible = (selector: string, match: (node: Element) => boolean, description: string) =>
-					visible(selector, match, description, viewport).then(press);
 
-				if (mode === "phone") {
-					await ctl("size", String(viewport[0]), String(viewport[1]), "2");
-					await ctl("phone", "on");
-					await pressVisible(".sf-editor", node => node.text === "What are we cooking?", "phone composer");
+					if (mode === "phone") {
+						await ctl("size", String(viewport[0]), String(viewport[1]), "2");
+						await ctl("phone", "on");
+					}
+					const context = `${mode} ${command}`;
+					if (mode === "phone")
+						await pressVisible(".sf-editor", node => node.text === "What are we cooking?", "phone composer");
+					await enterText(command);
+					if (mode === "phone")
+						await pressVisible("[title]", node => node.title?.startsWith("Send") === true, "phone Send button");
+					else await ctl("key", "Enter");
+					await visible(
+						".sf-picker .pk-row.sel",
+						node => node.text?.includes("newerTurnWithoutBlocks") === true,
+						`${context}: latest turn initially selected`,
+						viewport,
+					);
+					const isEarlierTurn = (node: Element) => node.text?.includes("sessionWholeTurnOnly") === true;
+					await pressVisible(".sf-picker .pk-row", isEarlierTurn, `${context}: earlier turn with two blocks`);
+					await visible(".sf-picker .pk-row.sel", isEarlierTurn, `${context}: earlier turn highlighted`, viewport);
+					await pressVisible('.sf-picker .pk-btn[title^="Blocks"]', () => true, `${context}: Blocks action`);
+
+					const preview = '.sf-section[data-role="omp.picker.block.focused"]';
+					if (mode === "desktop")
+						await visible(
+							preview,
+							node => node.text?.includes("sessionBlockOne") === true,
+							`${context}: full first-block preview beside the list`,
+							viewport,
+						);
+					// The timeline label also contains this snippet; match a descended block row.
+					const isSecondBlock = (node: Element) =>
+						node.text?.startsWith("ts ·") === true && node.text.includes("sessionBlockTwo");
+					if (command === "/copy") {
+						// Browse without changing the system clipboard.
+						await visible(".sf-picker .pk-row", isSecondBlock, `${context}: second block row`, viewport);
+						await pressVisible('.sf-picker .pk-btn[title^="Back"]', () => true, `${context}: Back action`);
+						await visible(
+							".sf-picker .pk-row.sel",
+							isEarlierTurn,
+							`${context}: Back restores the turn`,
+							viewport,
+						);
+						if (mode === "phone") continue;
+						await pressVisible('.sf-picker .pk-btn[title^="Close"]', () => true, `${context}: Close action`);
+						const deadline = performance.now() + 2_000;
+						while ((await ctl("tree", ".sf-layer > .sf-picker")).nodes?.length) {
+							if (performance.now() > deadline) throw new Error(`${context}: picker did not close`);
+							await Bun.sleep(25);
+						}
+						continue;
+					}
+					await pressVisible(".sf-picker .pk-row", isSecondBlock, `${context}: second block row`);
+					if (mode === "desktop")
+						await pressVisible(
+							preview,
+							node => node.text?.includes("sessionBlockTwo") === true,
+							`${context}: click the second-block side preview`,
+						);
+					const source = await visible(
+						'.sf-list[data-role="omp.review.text"]',
+						node => node.text?.includes("sessionBlockTwo") === true,
+						`${context}: annotation contains the second snippet`,
+						viewport,
+					);
+					expect(source.text).not.toContain("sessionWholeTurnOnly");
+					expect(source.text).not.toContain("sessionBlockOne");
+					if (mode === "desktop") await ctl("key", "Escape");
 				}
-				await enterText("/annotate session");
-				if (mode === "phone")
-					await pressVisible("[title]", node => node.title?.startsWith("Send") === true, "phone Send button");
-				else await ctl("key", "Enter");
-				await visible(
-					".sf-picker .pk-row.sel",
-					node => node.text?.includes("newerTurnWithoutBlocks") === true,
-					`${mode}: latest turn initially selected`,
-					viewport,
-				);
-				await pressVisible(
-					".sf-picker .pk-row",
-					node => node.text?.includes("sessionWholeTurnOnly") === true,
-					"non-default turn with two code blocks",
-				);
-				await visible(
-					".sf-picker .pk-row.sel",
-					node => node.text?.includes("sessionWholeTurnOnly") === true,
-					`${mode}: non-default turn selected without activating its whole message`,
-					viewport,
-				);
-				await pressVisible(
-					'.sf-picker .pk-btn[title^="Blocks"]',
-					node => node.title?.startsWith("Blocks") === true,
-					"visible Blocks action",
-				);
-				// The timeline row also contains the snippet; only match the descended block row.
-				const isSecondBlock = (node: Element) =>
-					node.text?.startsWith("ts ·") === true && node.text.includes("sessionBlockTwo");
-				await pressVisible(".sf-picker .pk-row", isSecondBlock, "second fenced block");
-				if (mode === "desktop")
-					await pressVisible(".sf-picker .pk-row.sel", isSecondBlock, "activate the selected second block");
-				const source = await visible(
-					'.sf-list[data-role="omp.review.text"]',
-					node => node.text?.includes("sessionBlockTwo") === true,
-					`${mode}: annotation source containing the second snippet`,
-					viewport,
-				);
-				expect(source.text).not.toContain("sessionWholeTurnOnly");
-				expect(source.text).not.toContain("sessionBlockOne");
-				if (mode === "desktop") await ctl("key", "Escape");
-			}
-		}, annotationSession);
+			}, annotationSession);
+		}
 	},
 	100_000,
 );

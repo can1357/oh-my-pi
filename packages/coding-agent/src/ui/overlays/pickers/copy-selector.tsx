@@ -1,12 +1,14 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
- * `/copy`: pick what to put on the clipboard from the transcript, as a
+ * Shared transcript picker used by `/copy` and annotation session sources: a
  * `timeline` picker of the branch's turns.
  *
- * The selected turn's preview holds its whole text and each inner block
- * (fenced code, quotes, links, commands, tool output) as sections a click
- * copies. → descends into the blocks (↑/↓ move between them, ← or ⎋ back);
- * ⏎ picks the outlined turn or block; `o` opens a link block. Long sessions
+ * The selected turn's side preview holds its whole text and each inner block
+ * (fenced code, quotes, links, commands, tool output) as sections the current
+ * action can pick. Select/activate highlights a turn with blocks; use Blocks
+ * to browse them or Copy/Select/Enter to accept the whole turn. A turn without
+ * blocks activates immediately. When descended, ↑/↓ move between blocks, ← or
+ * ⎋ back; ⏎ picks the focused block; `o` opens a link block. Long sessions
  * replay only their tail until ↑ walks past it (or `a`).
  *
  * The terminal fills the screen with the branch drawn by the transcript's own
@@ -47,8 +49,6 @@ export interface CopySelectorProps {
 	readonly title?: string;
 	/** The pick verb (default "copy"). */
 	readonly actionLabel?: string;
-	/** Require an explicit pick after browsing turns in the native picker. */
-	readonly explicitTurnPick?: boolean;
 	onPick(content: string, label: string, source: CopyPickSource): void;
 	/** `o` on a link block; absent: links are not opened. */
 	onOpen?(href: string, label: string): void;
@@ -57,7 +57,7 @@ export interface CopySelectorProps {
 	readonly terminalRows?: Accessor<number>;
 }
 
-/** Lines of a block the preview holds; longer blocks copy through the program. */
+/** Maximum code lines rendered in a block's side preview; picking retains full content. */
 const PREVIEW_BLOCK_LINES = 400;
 /** Lines of a block the terminal shows while descended. */
 const TERMINAL_BLOCK_LINES = 12;
@@ -578,12 +578,12 @@ export function CopySelector(props: CopySelectorProps): JSXNode {
 			if (activate) pick();
 			return;
 		}
-		const index = targets().findIndex(t => t.turnId === id);
+		const currentTargets = targets();
+		const index = currentTargets.findIndex(t => t.turnId === id);
 		if (index < 0) return;
 		selected.set(index);
-		// Tern touch may send select and activate for one tap. Annotation
-		// needs to let the user choose Blocks before accepting the whole turn.
-		if (activate && !props.explicitTurnPick) pick();
+		// A single Tern tap can activate a row. Don't skip its block choices.
+		if (activate && blocksOf(currentTargets[index]!).length === 0) pick();
 	};
 
 	const onAction = (act: string, section?: string): void => {
