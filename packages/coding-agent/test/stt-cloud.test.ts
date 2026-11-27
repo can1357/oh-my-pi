@@ -36,6 +36,7 @@ function makeOptions() {
 	return {
 		showWarning: vi.fn(),
 		showStatus: vi.fn(),
+		clearStatus: vi.fn(),
 		onStateChange: vi.fn(),
 	};
 }
@@ -145,6 +146,9 @@ describe("STTController cloud transcription", () => {
 		expect(editor.commitVolatileText).toHaveBeenCalledWith("cloud transcript");
 		expect(options.onStateChange.mock.calls.map(([next]) => next)).toEqual(["recording", "transcribing", "idle"]);
 		expect(options.showStatus).toHaveBeenCalledWith("Transcribing...");
+		// The landed text withdraws the progress status; an empty status drew an empty toast.
+		expect(options.clearStatus).toHaveBeenCalledTimes(1);
+		expect(options.showStatus).not.toHaveBeenCalledWith("");
 	});
 
 	it.each([
