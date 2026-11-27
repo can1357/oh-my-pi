@@ -529,10 +529,20 @@ async fn cancel_stops_an_endless_read() {
 
 /// `read` does not keep what it takes from an endless NUL source: bash
 /// skips NUL bytes and the delimiter never comes. While the read runs,
-/// resident memory must not grow with the bytes read.
+/// resident memory must not grow with the bytes read. Both counters are
+/// the process's, so the test runs in a process of its own.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn endless_nul_input_is_not_kept() {
+	const MARKER: &str = "PI_SHELL_TEST_ENDLESS_NUL_INPUT";
+	if std::env::var_os(MARKER).is_none() {
+		// The child reads at full speed: no timed test of this process runs
+		// beside it.
+		let _guard = shell_test_lock().lock().await;
+		run_isolated_kill_test("shell::tests::session::endless_nul_input_is_not_kept", MARKER, false)
+			.await;
+		return;
+	}
 	fn proc_field(file: &str, key: &str) -> u64 {
 		let text = std::fs::read_to_string(format!("/proc/self/{file}")).expect("procfs");
 		let line = text
