@@ -1,3 +1,4 @@
+import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	MemoryOutbox,
@@ -51,8 +52,6 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 		header: undefined as SessionHeader | undefined,
 		/** A run still in flight. */
 		isStreaming: false,
-		/** The session itself is being torn down (exit). */
-		isDisposed: false,
 		sessionManager: {
 			getEntries: () => entries,
 			getBranch: () => [...(branch ?? entries)],
@@ -110,6 +109,13 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 			for (const listener of [...listeners]) listener({ type: "agent_start" } as never);
 		},
+		/** A turn another process (memory off) wrote: no listener of this one hears it start. */
+		addTurnWithoutStart(text: string) {
+			const saved = [...listeners];
+			listeners.clear();
+			session.addTurn(text);
+			for (const listener of saved) listeners.add(listener);
+		},
 		addTurn(text: string) {
 			session.emitStart();
 			const at = new Date(0).toISOString();
@@ -126,8 +132,9 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 				message: { role: "assistant", content: [{ type: "text", text: `reply to ${text}` }], timestamp: 0 },
 			});
 		},
-		/** Dispatches `agent_end` without waiting for the retention it starts. */
+		/** Closes the run as production does: run-state `idle`, then `agent_end`; does not wait for retention. */
 		emitEnd() {
+			session.emitIdle();
 			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 			for (const listener of [...listeners]) listener({ type: "agent_end", messages: [] } as never);
 		},
@@ -998,6 +1005,64 @@ describe("supermemoryBackend", () => {
 		expect(docs.join("\n")).not.toContain("off-period");
 	});
 
+	it("continuing a /skill: turn begun with memory off never extends an older window", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		// Memory off: the user invokes `/skill:foo`, which is stored as a custom message, not a user message.
+		session.sessionManager.getEntries().push({
+			type: "custom_message",
+			id: "skill-two",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: "off-period skill prompt",
+			display: true,
+			attribution: "user",
+		} as never);
+		session.addAnswer("off-period skill answer");
+		// Memory back on while idle, then `.`/`c`.
+		await start(session);
+		session.addAnswer("off-period continuation");
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).not.toContain("off-period");
+	});
+
+	it("a later run's stop never validates a start left dangling in the file", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		// A start with no run behind it (one carried into a copy), then another process adds a turn with
+		// memory off, then this state runs a turn of its own.
+		const state = session.getSupermemorySessionState();
+		session.emitStart();
+		session.emitIdle();
+		const entries = session.sessionManager.getEntries();
+		const dangling = entries.findLast(
+			entry => entry.type === "custom" && JSON.stringify(entry).includes('"started":true'),
+		)!;
+		const closing = entries.at(-1)!;
+		entries.splice(entries.indexOf(closing), 1);
+		session.addTurnWithoutStart("off-period");
+		expect(state).toBe(session.getSupermemorySessionState());
+		session.addTurn("two");
+		await session.endTurn();
+		expect(entries.includes(dangling)).toBe(true);
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to two");
+		expect(contents).not.toContain("off-period");
+	});
+
 	it("a later state's dispose never validates a run a crash left open", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")
@@ -1181,7 +1246,6 @@ describe("supermemoryBackend", () => {
 		await first.endTurn();
 		// Quit while turn two streams: its aborted partial answer lands after the stop.
 		first.isStreaming = true;
-		first.isDisposed = true;
 		first.emitStart();
 		first.sessionManager.getEntries().push({
 			type: "message",
