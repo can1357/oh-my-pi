@@ -958,6 +958,46 @@ describe("supermemoryBackend", () => {
 		expect(contents).not.toContain("off-period");
 	});
 
+	it("a run of several model loops keeps its first turn across a state replacement", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		// Turn one runs through two model loops (a retry): two starts, one stop.
+		session.addTurn("one");
+		session.emitStart();
+		await session.endTurn();
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		await start(session);
+		for (const turn of ["two", "three"]) {
+			session.addTurn(turn);
+			await session.endTurn();
+		}
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to one");
+		expect(contents).toContain("reply to three");
+	});
+
+	it("a continuation of a turn begun with memory off never extends an older window", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.addTurn("off-period");
+		// Memory back on while idle, then `.`/`c` continues turn two.
+		await start(session);
+		session.addAnswer("off-period continuation");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(docs).toHaveLength(1);
+		expect(docs.join("\n")).not.toContain("off-period");
+	});
+
 	it("a later state's dispose never validates a run a crash left open", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")
@@ -1130,26 +1170,53 @@ describe("supermemoryBackend", () => {
 		expect(contents).not.toContain("new-transcript");
 	});
 
-	it("an answer that lands after an exit mid-run is still retained on resume", async () => {
+	it("after an exit mid-run, the resumed answer is retained and a later memory-off one is not", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
-		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
-		await start(session);
-		session.addTurn("one");
-		await session.endTurn();
-		// Quit while turn two streams: the stop is written before its answer lands.
-		session.isStreaming = true;
-		session.isDisposed = true;
-		session.addTurn("two");
-		await session.setSupermemorySessionState(undefined)?.dispose();
-		session.isStreaming = false;
-		session.isDisposed = false;
-		session.addAnswer("late answer");
-		await start(session);
-		await session.endTurn();
-		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
-		expect(contents.join("\n")).toContain("late answer");
+		const settings = { "supermemory.retainEveryNTurns": 1 };
+		const first = makeSession({ settings });
+		await start(first);
+		first.addTurn("one");
+		await first.endTurn();
+		// Quit while turn two streams: its aborted partial answer lands after the stop.
+		first.isStreaming = true;
+		first.isDisposed = true;
+		first.emitStart();
+		first.sessionManager.getEntries().push({
+			type: "message",
+			id: "u-two",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "two", timestamp: 0 },
+		} as never);
+		await first.setSupermemorySessionState(undefined)?.dispose();
+		first.sessionManager.getEntries().push({
+			type: "message",
+			id: "a-partial",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "aborted partial" }],
+				stopReason: "aborted",
+				timestamp: 0,
+			},
+		} as never);
+		// Another process, memory off, completes the prompt with `/retry` (no new user entry).
+		const second = makeSession({ settings });
+		second.sessionManager.getEntries().push(...first.sessionManager.getEntries());
+		second.addAnswer("off-period retry answer");
+		// Memory back on: a later turn settles.
+		const third = makeSession({ settings });
+		third.sessionManager.getEntries().push(...second.sessionManager.getEntries());
+		await start(third);
+		third.addTurn("three");
+		await third.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to three");
+		expect(contents).not.toContain("off-period");
+		expect(contents).not.toContain("aborted partial");
 	});
 
 	it("switching off mid-run in the same process never uploads that run's later output or off turns", async () => {

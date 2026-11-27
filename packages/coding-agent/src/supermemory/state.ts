@@ -74,11 +74,11 @@ interface RetentionCursorData {
 	windowStart: number;
 	/** Written when automatic retention began a run (`agent_start`): messages after it are retainable. */
 	started?: true;
-	/** The run a start opens or a stop closes (the writing state's id). A start counts only once a stop of the same run closed it, or while its own state runs, so a crash mid-run cannot leave the file open to later turns. */
+	/** The run a start opens or a stop closes (the writing state's id). A start counts only once a later stop of the same run closed it, or while its own state runs, so a crash mid-run cannot leave the file open to later turns. */
 	run?: string;
 	/** Written when a run ended or retention stopped (`agent_end`, dispose): user turns the branch held then. Messages after it were exchanged while retention was off, until the next start. */
 	stoppedAt?: number;
-	/** With {@link stoppedAt}: messages the branch held then. Absent after an exit mid-run, whose aborted answer still counts. */
+	/** With {@link stoppedAt}: messages the branch held then. */
 	stoppedMessages?: number;
 }
 
@@ -420,8 +420,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (!this.automatic) return;
 		// Attached while a run is in progress (a `supermemory.*` edit mid-run replaced the state): that run
 		// fires no further `agent_start`, so open it here; its rest is retained, while anything written
-		// between the predecessor's stop and now stays out.
-		if (this.#config.autoRetain && !this.#disposed && this.session.isStreaming && this.#inFlightTurnRetainable()) {
+		// between the predecessor's stop and now stays out. An answer to a turn retention never saw stays
+		// out too (see {@link #retainable}).
+		if (this.#config.autoRetain && !this.#disposed && this.session.isStreaming) {
 			this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, {
 				started: true,
 				run: this.#runId,
@@ -752,50 +753,41 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	 * The branch's entries from `start` that automatic retention may send: only messages written during
 	 * one of its runs, on any branch. In file order a start marker (`agent_start`) opens a run and a stop
 	 * (`agent_end`, dispose) closes it; whatever lies outside (another process with retention off, a
-	 * transcript used without Supermemory, turns from before it first ran) is never sent. A stop without a
-	 * message bound (an exit mid-run) lets the aborted run's answer in, up to the next user turn. Without
-	 * automatic retention, `/memory enqueue` sends what the user asked for, all of it.
+	 * transcript used without Supermemory, turns from before it first ran) is never sent. A start counts
+	 * once a later stop of the same run closed it (a run can start several model loops), or while its own
+	 * state runs; a run a crash left open never counts. An answer counts only with its user turn, so a
+	 * continuation of a turn retention never saw cannot land in an older window. Without automatic
+	 * retention, `/memory enqueue` sends what the user asked for, all of it.
 	 */
 	#retainable(path: readonly SessionEntry[], start: number): SessionEntry[] {
 		const own = path.slice(start);
 		if (!this.automatic || !this.#config.autoRetain) return own;
 		const entries = this.session.sessionManager.getEntries();
-		// Runs a stop closed: a stop names the run it closes, and only that run's own state writes it.
-		// Another state's unclosed run ended in a crash: whatever follows it (another process with
-		// retention off) cannot be told apart from its turns, so none of it counts.
-		const closed = new Set<number>();
-		let open: number | undefined;
+		const lastStop = new Map<string | undefined, number>();
 		for (let index = 0; index < entries.length; index++) {
 			const marker = retentionMarker(entries[index]);
-			if (marker?.started) open = index;
-			else if (marker?.stoppedAt !== undefined && open !== undefined) {
-				if (retentionMarker(entries[open])?.run === marker.run) closed.add(open);
-				open = undefined;
-			}
+			if (marker?.stoppedAt !== undefined) lastStop.set(marker.run, index);
 		}
-		const on = new Set<string>();
-		let state: "on" | "off" | "untilUser" = "off";
+		const inRun = new Set<string>();
+		let on = false;
 		for (let index = 0; index < entries.length; index++) {
 			const entry = entries[index]!;
 			const marker = retentionMarker(entry);
-			if (marker?.started) state = closed.has(index) || marker.run === this.#runId ? "on" : "off";
-			else if (marker?.stoppedAt !== undefined) state = marker.stoppedMessages === undefined ? "untilUser" : "off";
-			if (marker || entry.type !== "message") continue;
-			if (state === "untilUser" && entry.message.role === "user") state = "off";
-			if (state !== "off") on.add(entry.id);
+			if (marker?.started) on = (lastStop.get(marker.run) ?? -1) > index || marker.run === this.#runId;
+			else if (marker?.stoppedAt !== undefined) on = false;
+			else if (on && entry.type === "message") inRun.add(entry.id);
 		}
-		return own.filter(entry => entry.type !== "message" || on.has(entry.id));
-	}
-
-	/**
-	 * Whether the turn in flight may be retained: its user turn was written inside a retained run (a
-	 * `supermemory.*` edit replaced the state mid-run). A turn begun while retention was off stays out
-	 * whole, so its answer never lands in an older window.
-	 */
-	#inFlightTurnRetainable(): boolean {
-		const [path, start] = this.#retainedEntries();
-		const lastUser = path.findLast(entry => entry.type === "message" && entry.message.role === "user");
-		return lastUser !== undefined && this.#retainable(path, start).includes(lastUser);
+		const retainable: SessionEntry[] = [];
+		let turnRetainable = false;
+		for (const entry of own) {
+			if (entry.type !== "message") {
+				retainable.push(entry);
+				continue;
+			}
+			if (entry.message.role === "user") turnRetainable = inRun.has(entry.id);
+			if (turnRetainable && inRun.has(entry.id)) retainable.push(entry);
+		}
+		return retainable;
 	}
 
 	/** The file's latest run marker (a start or a stop), if any. */
@@ -1041,22 +1033,18 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	#recordStop(): void {
 		if (!this.automatic || !this.#config.autoRetain) return;
 		this.#followBranch();
-		// Session teardown mid-run: the aborted run appends its answer after this, so no message bound
-		// (that answer still counts; later user turns do not). A backend switch mid-run keeps the bound:
-		// the rest of that run happens while retention is off.
-		const midRunExit = this.session.isDisposed && this.session.isStreaming;
 		// Only this state's own open run is closed here: a run another state left open (a crash) must
 		// not be validated by a later state's stop. Already closed, or never opened (no turn since this
-		// state started): nothing to mark, which also keeps an untouched draft session empty.
+		// state started): nothing to mark, which also keeps an untouched draft session empty. A run cut
+		// off by an exit keeps nothing written after this (its aborted answer included): `/retry` or a
+		// resume completes the turn in a run of its own.
 		const latest = this.#latestMarker();
 		if (!latest?.started || latest.run !== this.#runId) return;
 		const [path, start] = this.#retainedEntries();
 		const retainable = this.#retainable(path, start);
-		const stoppedAt = countUserTurns(retainable);
-		const stoppedMessages = midRunExit ? undefined : extractMessages(retainable).length;
 		this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, {
-			stoppedAt,
-			...(stoppedMessages === undefined ? {} : { stoppedMessages }),
+			stoppedAt: countUserTurns(retainable),
+			stoppedMessages: extractMessages(retainable).length,
 			run: this.#runId,
 		});
 	}
