@@ -12,6 +12,7 @@ import {
 	GOOGLE_THINKING_BUDGETS,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
+	minimumSupportedEffort,
 	requireSupportedEffort,
 	resolveWireModelId,
 	withoutUnverifiedThinking,
@@ -47,7 +48,7 @@ import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./provid
 import type { GoogleOptions } from "./providers/google";
 import { perturbContext } from "./prompts/perturbation";
 import { getVertexAccessToken } from "./providers/google-auth";
-import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
+import type { GoogleInteractionsOptions } from "./providers/google-interactions";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
 import type { KiroOptions } from "./providers/kiro/stream";
@@ -65,7 +66,7 @@ import {
 	streamCursor,
 	streamDevin,
 	streamGoogle,
-	streamGoogleGeminiCli,
+	streamGoogleInteractions,
 	streamGoogleVertex,
 	streamKiro,
 	streamOllama,
@@ -582,11 +583,11 @@ function streamDispatch<TApi extends Api>(
 		case "google-generative-ai":
 			return streamGoogle(providerModel as Model<"google-generative-ai">, context, providerOptions);
 
-		case "google-gemini-cli":
-			return streamGoogleGeminiCli(
-				providerModel as Model<"google-gemini-cli">,
+		case "google-interactions":
+			return streamGoogleInteractions(
+				providerModel as Model<"google-interactions">,
 				context,
-				providerOptions as GoogleGeminiCliOptions,
+				providerOptions as GoogleInteractionsOptions,
 			);
 
 		case "ollama-chat":
@@ -700,13 +701,16 @@ function isRetryableUpstreamError(
 	message: string | undefined,
 ): boolean {
 	if (AIError.isAuthRetryableError(error)) return true;
+	// Zen's free tier serves only the OpenCode app: every key 403s identically (#12306).
+	if (AIError.isOpenCodeFreeTierGateMessage(message)) return false;
+	if (AIError.isClientAccessDisabledMessage(message)) return false;
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
 	// `cyber_policy` are likewise rotatable. A denial of only the requested
 	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404,
-	// agy `Unknown model ID`) is rotatable when its provider and requested model
-	// match.
+	// agy `Unknown model ID`, Gemini per-user quota model refusal) is rotatable
+	// when its provider and requested model match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
@@ -1263,7 +1267,7 @@ export function mapAnthropicToolChoice(choice?: ToolChoice): AnthropicOptions["t
 
 export function mapGoogleToolChoice(
 	choice?: ToolChoice,
-): GoogleOptions["toolChoice"] | GoogleGeminiCliOptions["toolChoice"] | GoogleVertexOptions["toolChoice"] {
+): GoogleOptions["toolChoice"] | GoogleVertexOptions["toolChoice"] {
 	if (!choice) return undefined;
 	if (typeof choice === "string") {
 		if (choice === "required") return "any";
@@ -1808,75 +1812,6 @@ function mapOptionsForApi<TApi extends Api>(
 			});
 		}
 
-		case "google-gemini-cli": {
-			const reasoning = options?.reasoning;
-			const toolChoice = mapGoogleToolChoice(options?.toolChoice);
-			if (reasoning && model.reasoning && !options?.disableReasoning && !options?.forceReasoningOff) {
-				const effort = requireSupportedEffort(model, reasoning);
-
-				// Gemini 3+ models use thinkingLevel instead of thinkingBudget
-				if (model.thinking?.mode === "google-level") {
-					return castApi<"google-gemini-cli">({
-						...base,
-						// Caller's maxTokens is desired output; Gemini counts thinking against the cap.
-						maxTokens: googleMaxOutputTokens(
-							base.maxTokens,
-							model,
-							googleThinkingHeadroom(model, effort, options.thinkingBudgets),
-						),
-						requestModelId: resolveWireModelId(model, effort),
-						thinking: {
-							enabled: true,
-							level: mapEffortToGoogleThinkingLevel(effort, model),
-						},
-						hideThinkingSummary: options?.hideThinkingSummary,
-						toolChoice,
-						antigravityEndpointMode: options?.antigravityEndpointMode,
-					});
-				}
-
-				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ??
-					model.thinking?.effortBudgets?.[effort] ??
-					GOOGLE_THINKING_BUDGETS[effort];
-
-				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
-				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
-
-				// If not enough room for thinking + output, reduce thinking budget
-				if (maxTokens <= thinkingBudget) {
-					thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
-				}
-
-				if (thinkingBudget > 0) {
-					return castApi<"google-gemini-cli">({
-						...base,
-						maxTokens,
-						requestModelId: resolveWireModelId(model, effort),
-						thinking: { enabled: true, budgetTokens: thinkingBudget },
-						hideThinkingSummary: options?.hideThinkingSummary,
-						toolChoice,
-						antigravityEndpointMode: options?.antigravityEndpointMode,
-					});
-				}
-				// Budget clamped to zero — fall through to the thinking-off path.
-			}
-
-			const thinking: GoogleGeminiCliOptions["thinking"] = { enabled: false };
-			if (model.reasoning && model.thinking?.suppressWhenOff) {
-				// CCA re-applies the per-id baked server default when the config
-				// is omitted; suppression must be explicit on the wire.
-				thinking.suppress = model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 };
-			}
-			return castApi<"google-gemini-cli">({
-				...base,
-				requestModelId: resolveWireModelId(model, undefined),
-				thinking,
-				toolChoice,
-				antigravityEndpointMode: options?.antigravityEndpointMode,
-			});
-		}
-
 		case "google-vertex": {
 			// Explicitly disable thinking when reasoning is absent, unsupported, or
 			// replaced by the caller's external scratchpad.
@@ -1940,6 +1875,25 @@ function mapOptionsForApi<TApi extends Api>(
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
 				cachedContent: options?.cachedContent,
+			});
+		}
+
+		case "google-interactions": {
+			// Gemini cannot turn thinking off; reasoning-off maps to the model's lowest
+			// level. `max_output_tokens` is sent only when the caller asked for a cap:
+			// the row's 65,536 default would only restate the server's own.
+			const thinkingOff = !options?.reasoning || options.disableReasoning || options.forceReasoningOff;
+			const thinkingLevel = !model.reasoning
+				? undefined
+				: thinkingOff || !options?.reasoning
+					? minimumSupportedEffort(model)
+					: requireSupportedEffort(model, options.reasoning);
+			return castApi<"google-interactions">({
+				...base,
+				maxTokens: rawOptions?.maxTokens,
+				thinkingLevel,
+				hideThinkingSummary: options?.hideThinkingSummary,
+				toolChoice: mapGoogleToolChoice(options?.toolChoice),
 			});
 		}
 

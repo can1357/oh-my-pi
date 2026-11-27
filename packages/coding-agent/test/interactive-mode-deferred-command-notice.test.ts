@@ -1,10 +1,11 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type JSXNode, jsx } from "@oh-my-pi/pi-tui";
@@ -224,5 +225,76 @@ describe("InteractiveMode deferred command preview", () => {
 		expect(notice).not.toContain("stale panel");
 		expect(notice).toContain("1 command output");
 		expect(notice).not.toContain("2 command outputs");
+	});
+
+	it("mounts deferred command output once after the active turn ends", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		const streamedReply = mode.present(panel("agent is streaming"), { live: true });
+
+		mode.presentCommandOutput(panel("Deferred Output"));
+
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
+
+		setStreaming(false);
+		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
+		expect(transcriptText(mode).match(/Deferred Output/g)).toHaveLength(1);
+	});
+
+	it("opens the usage dashboard overlay without touching the transcript, even mid-stream", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		const usageReports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: 1_700_000_000_000,
+				limits: [
+					{
+						id: "codex-weekly",
+						label: "Weekly",
+						scope: { provider: "openai-codex", tier: "pro", accountId: "acct-1" },
+						window: { id: "weekly", label: "weekly" },
+						amount: { remainingFraction: 0.25, unit: "requests" },
+						status: "ok",
+					},
+				],
+				metadata: { email: "user@example.com" },
+			},
+		];
+		const streamedReply = mode.present(panel("agent is streaming"), { live: true });
+		const showDashboard = vi.spyOn(mode, "showUsageDashboard").mockImplementation(() => {});
+
+		await mode.handleUsageCommand(usageReports);
+
+		// /usage renders as an overlay (the /settings idiom): nothing may mount
+		// into the transcript, mid-stream or otherwise — mounting above the
+		// growing live block is what duplicated in native scrollback (#6767).
+		expect(showDashboard).toHaveBeenCalledTimes(1);
+		expect(showDashboard).toHaveBeenCalledWith(usageReports);
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
+
+		setStreaming(false);
+		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+		// Turn end must not flush any deferred usage panel either.
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
+	});
+
+	it("drops deferred command output when the session changes before agent_end", async () => {
+		const { mode, session, setStreaming } = await createHarness();
+		setStreaming(true);
+		const streamedReply = mode.present(panel("old session is streaming"), { live: true });
+		const previousSessionId = session.sessionManager.getSessionId();
+
+		mode.presentCommandOutput(panel("Deferred Output"));
+		await session.newSession();
+
+		expect(session.sessionManager.getSessionId()).not.toBe(previousSessionId);
+		setStreaming(false);
+		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 	});
 });

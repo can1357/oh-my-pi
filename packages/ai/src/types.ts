@@ -49,7 +49,7 @@ import type { DevinOptions } from "./providers/devin";
 import type { FactoryDroidOptions } from "./providers/factory-droid";
 import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
-import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
+import type { GoogleInteractionsOptions } from "./providers/google-interactions";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
@@ -83,7 +83,7 @@ export interface ApiOptionsMap {
 	"openai-codex-responses": OpenAICodexResponsesOptions;
 	"azure-openai-responses": AzureOpenAIResponsesOptions;
 	"google-generative-ai": GoogleOptions;
-	"google-gemini-cli": GoogleGeminiCliOptions;
+	"google-interactions": GoogleInteractionsOptions;
 	"google-vertex": GoogleVertexOptions;
 	"kiro-api": KiroOptions;
 	"ollama-chat": OllamaChatOptions;
@@ -942,8 +942,6 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * providers ignore it. Callers own the cache lifecycle and compatibility.
 	 */
 	cachedContent?: string;
-	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
-	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	/**
 	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
 	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is

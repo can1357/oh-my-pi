@@ -31,6 +31,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { bold, inverse, italic, strikethrough, underline } from "@oh-my-pi/pi-tui/theme/theme";
 import type { ExtensionRows, ExtensionTheme } from "../../extensibility/extensions/render-types";
 
@@ -112,7 +113,9 @@ export function paintRows(rows: ExtensionRows, width: number, onError?: (error: 
 	} catch (error) {
 		onError?.(error);
 		const message = error instanceof Error ? error.message : String(error);
-		return [truncate(`⚠ extension render failed: ${message}`, width)];
+		return [
+			truncate(`${currentTheme().symbols.symbol("status.warning")} extension render failed: ${message}`, width),
+		];
 	}
 }
 

@@ -20,6 +20,7 @@ export {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
+	TAN_RESULT_MESSAGE_TYPE,
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
@@ -29,6 +30,7 @@ export {
 	type CustomMessagePayload,
 	type NormalizedCustomMessagePayload,
 	type BackgroundTanDispatchDetails,
+	type TanResultDetails,
 	type SkillPromptDetails,
 	SILENT_ABORT_MARKER,
 	isSilentAbort,
@@ -72,6 +74,7 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
+import { formatExitCodeNotice } from "../tools/details/bash";
 import { formatOutputNotice } from "../tools/output-meta-format";
 import { titleTextFromSkillPrompt } from "./transcript/skill-title-input";
 
@@ -988,7 +991,7 @@ export function bashExecutionToText(msg: BashExecutionMessage): string {
 	if (msg.cancelled) {
 		text += "\n\n(command cancelled)";
 	} else if (msg.exitCode !== null && msg.exitCode !== undefined && msg.exitCode !== 0) {
-		text += `\n\nCommand exited with code ${msg.exitCode}`;
+		text += `\n\n${formatExitCodeNotice(msg.exitCode)}`;
 	}
 	text += formatOutputNotice(msg.meta);
 	return text;

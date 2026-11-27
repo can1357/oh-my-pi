@@ -361,7 +361,7 @@ describe("EventController async update finalization", () => {
 				result: bashResult(formatBackgroundNotice("bash-1", 300)),
 				isError: false,
 			});
-			await controller.handleEvent(jobFrame(bashResult("[Command cancelled]\nBenchmark 1", "cancelled")));
+			await controller.handleEvent(jobFrame(bashResult("[cancelled]\nBenchmark 1", "cancelled")));
 
 			expect(rendered(component)).toContain("Benchmark 1");
 			expect(component.call?.status()).toBe("cancelled");

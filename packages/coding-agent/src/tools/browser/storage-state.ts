@@ -221,10 +221,15 @@ function parseCookieString(source: string): BrowserCookieInput[] {
 export function normalizeCookieArguments(args: unknown[]): CookieParam[] {
 	// `tab.cookies()` returns an array, so `setCookies(await other.cookies())` passes every cookie as one argument.
 	const items = args.flat();
-	if (items.length === 0) throw new ToolError(COOKIE_PARSE_ERROR);
 	const trailing = items.at(-1);
 	const scope = isScope(trailing) ? (items.pop() as CookieScope) : undefined;
-	if (items.length === 0) throw new ToolError(COOKIE_PARSE_ERROR);
+	if (items.length === 0) {
+		// Usually `setCookies(await other.cookies())` where the other tab had none for its page.
+		throw new ToolError(
+			"tab.setCookies() received no cookies (an empty list: a tab.cookies() read returns only the cookies for its page's URL, or for the urls passed to it). " +
+				COOKIE_SHAPES,
+		);
+	}
 	const parsed = items.flatMap((item, index) =>
 		typeof item === "string" ? parseCookieString(item) : [parseCookieObject(item, index)],
 	);
@@ -255,9 +260,11 @@ export function storageEntries(value: unknown): Array<[string, string]> {
 }
 
 /** Reject storage kinds other than `local`/`session`. */
-export function assertStorageKind(kind: string): asserts kind is StorageKind {
+export function assertStorageKind(kind: unknown): asserts kind is StorageKind {
 	if (kind !== "local" && kind !== "session") {
-		throw new ToolError('Storage kind must be "local" or "session"');
+		throw new ToolError(
+			`Storage kind must be "local" or "session"; got ${kind === undefined ? "none" : JSON.stringify(kind)}. Pass it first: tab.storage("local"), tab.setStorage("session", key, value), tab.clearStorage("local").`,
+		);
 	}
 }
 

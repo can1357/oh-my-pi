@@ -122,7 +122,7 @@ export const KEYBINDINGS = {
 	},
 	"app.tools.toggleVisibility": {
 		defaultKeys: "ctrl+shift+o",
-		description: "Show or hide tool activity",
+		description: "Cycle tool activity: detailed, concise, hidden",
 	},
 	"app.ask.hide": {
 		defaultKeys: "alt+h",
