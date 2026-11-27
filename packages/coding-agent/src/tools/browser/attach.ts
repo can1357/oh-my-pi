@@ -238,56 +238,49 @@ export function isChromiumBrowserExecutable(exe: string): boolean {
 	return CHROMIUM_BROWSER_BASENAME.test(base) || Object.hasOwn(CHROMIUM_FLATPAK_IDS, base);
 }
 
-/**
- * Launch argv for a spawned executable. Chrome 136+ silently ignores
- * `--remote-debugging-port` when the default user-data-dir is in use: the
- * browser opens as usual, nothing listens, and attach waits out its timeout.
- * Chromium-family browsers therefore get a stable omp-owned profile under
- * `~/.omp/browser-profiles/<exe slug>` unless the caller already picked one.
- * That profile is also what lets a second instance start beside the user's
- * running default-profile browser instead of handing off to it. Electron apps
- * are left untouched: `--user-data-dir` would relocate their app data.
- *
- * An omp-owned profile also bypasses the OS keystore (`--use-mock-keychain`,
- * `--password-store=basic`, the same pair puppeteer's launcher sets): Chromium
- * otherwise derives its cookie-encryption key from the login keychain and
- * macOS blocks on a "wants to use your confidential information" dialog for
- * every fresh binary. A caller-supplied profile keeps the real keystore; its
- * existing cookies are encrypted with that key and a mock one would corrupt them.
- */
-export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
+/** Canonicalize the caller's Chromium profile switch for both reuse and launch, without adding launch defaults. */
+export function normalizeAppArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
 	const args = appArgs ?? [];
 	if (!isChromiumBrowserExecutable(exe)) return args;
-	const requestedProfile = findUserDataDirInArgs(args);
-	if (requestedProfile !== null) {
-		// Chromium accepts switch values as --name=value, not a separate argv
-		// item. Canonicalize both spellings so reuse and process launch agree.
-		const launchArgs: string[] = [];
-		for (let index = 0; index < args.length; index++) {
-			const arg = args[index]!;
-			if (arg === "--user-data-dir") {
-				if (args[index + 1] && !args[index + 1]!.startsWith("--")) index++;
-			} else if (!arg.startsWith("--user-data-dir=")) {
-				launchArgs.push(arg);
-			}
+	const profile = findUserDataDirInArgs(args);
+	if (profile === null) return args;
+	// Chromium accepts switch values as --name=value, not a separate argv item.
+	const normalized: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg === "--user-data-dir") {
+			if (args[index + 1] && !args[index + 1]!.startsWith("--")) index++;
+		} else if (!arg.startsWith("--user-data-dir=")) {
+			normalized.push(arg);
 		}
-		launchArgs.push(`--user-data-dir=${path.resolve(cwd, requestedProfile)}`);
-		return launchArgs;
 	}
+	normalized.push(`--user-data-dir=${path.resolve(cwd, profile)}`);
+	return normalized;
+}
+
+/** Chrome 136+ ignores the debugging port on its default profile. Reuse and launch must pick the same isolated profile. */
+function defaultChromiumProfile(exe: string): string {
 	const slug = path
 		.basename(exe)
 		.replace(/\.exe$/i, "")
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-");
 	const hash = Bun.hash.wyhash(exe).toString(16).padStart(16, "0");
-	const launchArgs = [...args];
-	// A fresh profile otherwise opens the welcome tour and default-browser
-	// prompt as extra page targets, which attach may adopt instead of ours.
+	return path.join(getBrowserProfilesDir(), `${slug}-${hash}`);
+}
+
+/** Switches for a new process only. A running app need not have these defaults to be driven over CDP. */
+export function buildSpawnArgs(exe: string, appArgs: string[]): string[] {
+	const launchArgs = [...appArgs];
+	if (!appArgs.includes("--allow-file-access-from-files")) launchArgs.push("--allow-file-access-from-files");
+	if (!isChromiumBrowserExecutable(exe) || findUserDataDirInArgs(appArgs) !== null) return launchArgs;
+	// Skip first-run tabs and keychain prompts on omp's profile. A caller-supplied profile keeps the
+	// real keystore: its existing cookies are encrypted with that key.
 	for (const flag of ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"]) {
-		if (!args.includes(flag)) launchArgs.push(flag);
+		if (!appArgs.includes(flag)) launchArgs.push(flag);
 	}
-	if (!args.some(arg => arg.startsWith("--password-store"))) launchArgs.push("--password-store=basic");
-	launchArgs.push(`--user-data-dir=${path.join(getBrowserProfilesDir(), `${slug}-${hash}`)}`);
+	if (!appArgs.some(arg => arg.startsWith("--password-store"))) launchArgs.push("--password-store=basic");
+	launchArgs.push(`--user-data-dir=${defaultChromiumProfile(exe)}`);
 	return launchArgs;
 }
 
@@ -409,7 +402,9 @@ export async function findReusableCdp(
 	exe: string,
 	options: { signal?: AbortSignal; appArgs?: string[] } = {},
 ): Promise<{ cdpUrl: string; pid: number } | null> {
-	const requestedUserDataDir = findUserDataDirInArgs(options.appArgs);
+	const isChromium = isChromiumBrowserExecutable(exe);
+	const requestedUserDataDir =
+		findUserDataDirInArgs(options.appArgs) ?? (isChromium ? defaultChromiumProfile(exe) : null);
 	const normalizedRequestedUserDataDir =
 		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
 			? normalizeUserDataDir(requestedUserDataDir)
@@ -418,7 +413,6 @@ export async function findReusableCdp(
 	// wrapper script defeats realpath, so resolve through the wrapper exec target
 	// for Chromium-family browsers on Linux.
 	const executablePath = await fs.realpath(exe).catch(() => exe);
-	const isChromium = isChromiumBrowserExecutable(exe);
 	const wrapperTarget = process.platform === "linux" && isChromium ? await resolveWrapperTarget(executablePath) : null;
 	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
 		candidate => candidate.status() === ProcessStatus.Running,
@@ -695,13 +689,19 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		let entries = await fetchRelayEntries(options.relayJson, options.signal);
 		const matcher = options.matcher;
 		const settleDeadline = Date.now() + RELAY_MATCH_SETTLE_MS;
-		// Without page metadata, target enumeration below decides at once, as before.
 		while (
 			matcher &&
-			entries?.some(e => e.type === "page") &&
+			entries &&
 			!entries.some(e => e.type === "page" && relayEntryMatches(e, matcher)) &&
 			Date.now() < settleDeadline
 		) {
+			// If /json has no pages yet, Puppeteer can already know the tab. When neither lists
+			// a page, give an explicit target the same short grace as any other just-opened tab.
+			if (!entries.some(e => e.type === "page")) {
+				if (browser.targets().some(target => String(target.type()) === "page")) break;
+				const pages = await abortable(options.signal, () => browser.pages());
+				if (pages.length > 0) return pickPageFromList(pages, options);
+			}
 			await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));
 			const polled = await fetchRelayEntries(
 				options.relayJson,
@@ -748,7 +748,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 	if (!targets.some(target => String(target.type()) === "page")) {
 		const pages = await abortable(options.signal, () => browser.pages());
 		if (pages.length > 0) return pickPageFromList(pages, options);
-		// A connected relay lists every adoptable tab in /json; none means waiting cannot help.
+		// An explicit matcher has had its discovery grace; an untargeted open need not wait at all.
 		if (relayHasNoEligibleTabs) {
 			throw new ToolError(
 				"The browser relay is connected but has no eligible tabs to adopt. Open a normal web page in the connected browser (internal pages such as chrome:// or edge://newtab cannot be adopted), then retry.",
