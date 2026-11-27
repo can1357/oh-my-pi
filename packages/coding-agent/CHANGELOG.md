@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
 - The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
 - Removed unused `parse*Args` and `print*Help` exports from the CLI configuration, grep, plugin, setup, shell, web-search, and update modules.
 

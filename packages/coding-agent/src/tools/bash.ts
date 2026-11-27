@@ -84,7 +84,7 @@ import { findHintVisible } from "./jfind";
 import { formatArtifactErrorNotice } from "./output-meta-format";
 import { formatOutputNotice } from "./output-meta-format";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
-import { resolveShellDirectory, resolveToCwd } from "./path-utils";
+import { resolveShellDirectory } from "./path-utils";
 import {
 	bashApprovalDialect,
 	clauseMutatesShellState,
@@ -559,14 +559,12 @@ const SERVICE_READY = type({
 const bashSchemaBase = type({
 	command: type("string"),
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
-	"cwd?": "string",
 	"pty?": "boolean",
 });
 
 const bashSchemaWithAsync = type({
 	command: "string",
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
-	"cwd?": "string",
 	"pty?": "boolean",
 	"async?": "boolean",
 	"notify?": "string",
@@ -575,7 +573,6 @@ const bashSchemaWithAsync = type({
 const bashSchemaWithService = type({
 	command: "string",
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
-	"cwd?": "string",
 	"pty?": "boolean",
 	"notify?": "string",
 	"name?": SERVICE_NAME,
@@ -585,7 +582,6 @@ const bashSchemaWithService = type({
 const bashSchemaWithAsyncAndService = type({
 	command: "string",
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
-	"cwd?": "string",
 	"pty?": "boolean",
 	"async?": "boolean",
 	"notify?": "string",
@@ -609,7 +605,6 @@ type BashToolSchema =
 export interface BashToolInput {
 	command: string;
 	timeout?: number;
-	cwd?: string;
 	name?: string;
 	ready?: ServiceReady;
 	async?: boolean;
@@ -761,12 +756,6 @@ function noticeUrlWrites(notices: string[]): (report: UrlWriteReport) => void {
 	};
 }
 
-/** Explicit tool `cwd` keeps the workspace-root alias; a hoisted shell `cd` does not. */
-function resolveCommandCwd(cwd: string | undefined, sessionCwd: string, hoistedShellCwd: boolean): string {
-	if (!cwd) return sessionCwd;
-	return hoistedShellCwd ? resolveShellDirectory(cwd, sessionCwd) : resolveToCwd(cwd, sessionCwd);
-}
-
 /** Words that may precede a simple command in a command list without being its name. */
 const SHELL_COMMAND_PREFIX_WORDS: ReadonlySet<string> = new Set([
 	"!",
@@ -915,7 +904,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
 		// An intercepted call is refused outright; asking first would only approve a doomed call.
-		const cwdCommand = input.cwd ? command : (extractLeadingCdTarget(command)?.rest ?? command);
+		const cwdCommand = extractLeadingCdTarget(command)?.rest ?? command;
 		const name = typeof input.name === "string" ? blankToUndefined(input.name) : undefined;
 		const toolCommands = new Set(toolCommandNames(this.session));
 		const interception = this.#interception(command, cwdCommand, name, ctx?.toolNames ?? [], toolCommands);
@@ -1932,7 +1921,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		{
 			command: rawCommand,
 			timeout: rawTimeout,
-			cwd,
 			name: rawName,
 			ready: rawReady,
 			async: rawAsync,
@@ -1951,30 +1939,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const sessionEnv = this.#sessionEnv(toolCallId);
 
-		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
-		// model ignores the cwd parameter. The scanner captures only a single path
-		// token and defers to the shell for anything else (redirects, extra args,
-		// shell expansion), so it never absorbs shell syntax like
-		// `cd /tmp 2>/dev/null && ...` into the structured cwd. `&&` always hoists:
-		// a missing directory fails early, as the shell would short-circuit. `;`
-		// runs the rest even when `cd` fails, so it hoists only onto an existing host
-		// directory; anything else (URL targets included) stays with the shell.
-		// The target is a shell path: `/` is the filesystem root, not the workspace
-		// alias an explicit tool `cwd` keeps.
-		let hoistedShellCwd = false;
-		if (!cwd) {
-			const cd = extractLeadingCdTarget(command);
-			const virtualTarget = cd !== null && InternalUrlRouter.instance().canHandle(cd.path);
-			const semicolonDirectory =
-				cd?.separator === ";" &&
-				!virtualTarget &&
-				(await fs.promises.stat(resolveShellDirectory(cd.path, this.session.cwd)).catch(() => null))?.isDirectory();
-			if (cd && (cd.separator === "&&" || semicolonDirectory === true)) {
-				hoistedShellCwd = !virtualTarget;
-				cwd = cd.path;
-				command = cd.rest;
-				if (cd.separator === ";") ran.cdSeparator = ";";
-			}
+		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into the working
+		// directory. The scanner captures only a single path token and defers to the
+		// shell for anything else (redirects, extra args, shell expansion), so it
+		// never absorbs shell syntax like `cd /tmp 2>/dev/null && ...`. `&&` always
+		// hoists: a missing directory fails early, as the shell would short-circuit.
+		// `;` runs the rest even when `cd` fails, so it hoists only onto an existing
+		// host directory; anything else (URL targets included) stays with the shell.
+		// The target is a shell path: `/` is the filesystem root.
+		let cwd: string | undefined;
+		const cd = extractLeadingCdTarget(command);
+		const virtualTarget = cd !== null && InternalUrlRouter.instance().canHandle(cd.path);
+		const semicolonDirectory =
+			cd?.separator === ";" &&
+			!virtualTarget &&
+			(await fs.promises.stat(resolveShellDirectory(cd.path, this.session.cwd)).catch(() => null))?.isDirectory();
+		if (cd && (cd.separator === "&&" || semicolonDirectory === true)) {
+			cwd = cd.path;
+			command = cd.rest;
+			if (cd.separator === ";") ran.cdSeparator = ";";
 		}
 		// Mode selection runs on normalized fields: a caller that materializes
 		// every optional argument with empty or placeholder values still asked
@@ -2076,7 +2059,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
-		const commandCwd = virtualCwd ?? resolveCommandCwd(cwd, this.session.cwd, hoistedShellCwd);
+		const commandCwd = virtualCwd ?? (cwd ? resolveShellDirectory(cwd, this.session.cwd) : this.session.cwd);
 		if (cwd) ran.cwd = commandCwd;
 		// Where a process for this command starts: a URL directory has none of its own.
 		const hostCwd = virtualCwd === undefined ? commandCwd : this.session.cwd;

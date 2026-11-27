@@ -559,16 +559,9 @@ export function createBashToolDefinition(cwd: string, options?: BashToolOptions)
 			// configuration and is rejected outside it. A hook's env reaches `!` user
 			// shells through `shellEnv` above and the `operations` branch through its
 			// exec options.
-			return tool.execute(
-				toolCallId,
-				{
-					command: spawn?.command ?? command,
-					cwd: spawn?.cwd ?? cwd,
-					timeout,
-				},
-				signal,
-				onUpdate,
-			);
+			const spawnCwd = spawn?.cwd ?? cwd;
+			const runner = spawnCwd === cwd ? tool : createRegistryTool(spawnCwd, "bash");
+			return runner.execute(toolCallId, { command: spawn?.command ?? command, timeout }, signal, onUpdate);
 		},
 	});
 }
