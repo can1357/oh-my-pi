@@ -835,6 +835,23 @@ describe("chat-completions history estimate", () => {
 		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
 	});
 
+	test("does not budget an opaque summary from an errored turn with a later content block", () => {
+		const signature = JSON.stringify({ field: "reasoning_text", reasoningOpaque: "error-state" });
+		const turn: AssistantMessage = {
+			...thinkingTurn(copilotGemini, signature),
+			content: [
+				{ type: "thinking", thinking: THINKING, thinkingSignature: signature },
+				{ type: "text", text: "Partial answer" },
+			],
+			stopReason: "error",
+		};
+		const tokenizer = new Tokenizer(copilotGemini);
+		const textOnly = tokenizer.countMessage({ ...turn, content: [{ type: "text", text: "Partial answer" }] });
+		expect(tokenizer.countMessage(turn)).toBe(textOnly);
+		expect(tokenizer.countMessage(turn, floor)).toBe(textOnly);
+		expect(tokenizer.countMessages([turn])).toBe(textOnly);
+	});
+
 	test("recounts after the replay policy changes", () => {
 		const turn = thinkingTurn(dropping, "reasoning_content");
 		const agent = new Agent({ initialState: { model: dropping, systemPrompt: [], tools: [], messages: [] } });

@@ -2011,14 +2011,21 @@ const streamOpenAICompletionsOnce = (
 
 			// Store message-level reasoning replay data on the first thinking block
 			// carrying only a source marker. Use an empty thinking block if needed,
-			// but leave a turn with no other content eligible for empty-stop retry.
-			if (receivedReasoningDetails.length > 0 || reasoningOpaque !== undefined) {
+			// but leave a turn with no other content eligible for empty-stop retry
+			// and never persist turn-scoped opaque state from errored/aborted turns.
+			const failedTurn =
+				output.stopReason === "error" ||
+				output.stopReason === "aborted" ||
+				abortTracker.getLocalAbortReason() !== undefined ||
+				abortTracker.wasCallerAbort();
+			const persistReasoningOpaque = failedTurn ? undefined : reasoningOpaque;
+			if (receivedReasoningDetails.length > 0 || persistReasoningOpaque !== undefined) {
 				const holder = output.content.find(
 					(block): block is ThinkingContent =>
 						block.type === "thinking" &&
 						(block.thinkingSignature === undefined || isReasoningField(block.thinkingSignature)),
 				);
-				const stored: ReasoningDetailsSignature = { reasoningOpaque };
+				const stored: ReasoningDetailsSignature = { reasoningOpaque: persistReasoningOpaque };
 				if (receivedReasoningDetails.length > 0) stored.reasoningDetails = receivedReasoningDetails;
 				const holderField = holder?.thinkingSignature;
 				const field = isReasoningField(holderField) ? holderField : mirroredReasoningField;
@@ -2675,23 +2682,26 @@ export function completionsDropsOwnThinking(
 
 /**
  * Replay the latest opaque state with the whole turn's summary, but only
- * to the exact model that issued it. Counts on pre-transform history can skip an
- * untrusted trailing block as `transformMessages` does.
+ * to the exact model that issued it and never from errored/aborted turns.
  */
 export function getReasoningOpaqueReplay(
 	turn: AssistantMessage,
 	model: Pick<Model, "api" | "provider" | "id"> | undefined,
 	enabled: boolean,
-	untrustedIndex = -1,
 ): { opaque: string; text: string } | undefined {
-	if (!enabled || !model || !isSameModelTurn(turn, model)) {
+	if (
+		!enabled ||
+		!model ||
+		turn.stopReason === "error" ||
+		turn.stopReason === "aborted" ||
+		!isSameModelTurn(turn, model)
+	) {
 		return undefined;
 	}
 	let opaque: string | undefined;
 	let text = "";
-	for (let index = 0; index < turn.content.length; index++) {
-		const block = turn.content[index];
-		if (index === untrustedIndex || block.type !== "thinking") continue;
+	for (const block of turn.content) {
+		if (block.type !== "thinking") continue;
 		const signature = block.thinkingSignature;
 		const stored = parseReasoningDetailsSignature(signature);
 		if (stored?.reasoningOpaque) opaque = stored.reasoningOpaque;

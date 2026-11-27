@@ -686,7 +686,7 @@ export class Tokenizer {
 				let opaqueReplay =
 					!opaqueReplayLimits || abandonedToolUse || shouldDropTruncatedThinkingOnlyAssistant(message)
 						? undefined
-						: getReasoningOpaqueReplay(message, this.#reasoningReader, true, untrustedIndex);
+						: getReasoningOpaqueReplay(message, this.#reasoningReader, true);
 				if (
 					opaqueReplay &&
 					opaqueReplayLimits &&

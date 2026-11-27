@@ -1408,6 +1408,51 @@ describe("openai-completions compatibility", () => {
 		});
 	});
 
+	it("drops opaque replay state from errored turns on both capture and replay", async () => {
+		const model = buildModel(copilotGeminiSpec);
+		const fetchMock = createMockFetch([
+			{
+				choices: [
+					{
+						index: 0,
+						delta: {
+							reasoning_text: "Partial summary",
+							reasoning_opaque: "error-state",
+						},
+					},
+				],
+			},
+			{
+				choices: [{ index: 0, delta: { content: "Partial answer" }, finish_reason: "error" }],
+			},
+			"[DONE]",
+		]);
+		const context = baseContext();
+		const errored = await streamOpenAICompletions(model, context, { apiKey: "test-key", fetch: fetchMock }).result();
+		expect(errored.stopReason).toBe("error");
+		const thinking = errored.content.find(block => block.type === "thinking");
+		expect(thinking?.thinkingSignature).toBe("reasoning_text");
+
+		// Even if an earlier thinking block already carries an opaque envelope on a persisted error turn,
+		// replay must not send it back to Copilot.
+		const persistedError: AssistantMessage = {
+			...errored,
+			content: [
+				{
+					type: "thinking",
+					thinking: "Partial summary",
+					thinkingSignature: JSON.stringify({ field: "reasoning_text", reasoningOpaque: "error-state" }),
+				},
+				{ type: "text", text: "Partial answer" },
+			],
+		};
+		const replayed = getPayloadMessages(
+			await captureOpenAICompletionsPayload(model, { messages: [...context.messages, persistedError] }),
+		).find(message => message.role === "assistant");
+		expect(replayed?.reasoning_opaque).toBeUndefined();
+		expect(replayed?.reasoning_text).toBeUndefined();
+	});
+
 	it.each([
 		{ label: "opaque", provider: "github-copilot", envelope: { reasoningOpaque: "stale-state" } },
 		{
