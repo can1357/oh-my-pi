@@ -1257,11 +1257,12 @@ async function rewriteLegacyExtensionSource(
 	importerPath: string,
 	mtimeTag: string | null = null,
 	resolvedImportMtimeTag: string | null = mtimeTag,
+	sources?: ExtensionGraphSources,
 ): Promise<string> {
 	// Compiled mode completes the override map from the build-supplied module
 	// keys on first use; every rewrite path must see the full map.
 	await ensureLegacyPiOverridesReady();
-	const analysis = getExtensionSourceAnalysis(source, importerPath);
+	const analysis = sources ? await sources.analyze(importerPath) : getExtensionSourceAnalysis(source, importerPath);
 	const references = analysis.references;
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
@@ -1302,7 +1303,7 @@ async function rewriteLegacyExtensionSource(
 	// import-rewritten text: the rewrite embeds the load's `?mtime=` tag, which
 	// changes on every same-process reload and would force a Babel reparse.
 	// Import and require references never overlap, so one pass applies both.
-	replacements.push(...(await collectExtensionSpecifierReplacements(source, importerPath)));
+	replacements.push(...(await collectExtensionSpecifierReplacements(references, importerPath, false, sources)));
 	return applySourceEdits(source, [
 		...replacements.map(toSpecifierEdit),
 		...jsxImportSourceEdits(analysis.jsxImportSources),
@@ -1371,7 +1372,7 @@ function hasSourceModuleExtension(p: string): boolean {
 	return (SOURCE_MODULE_EXTENSIONS as readonly string[]).includes(ext);
 }
 
-async function resolveSourceModuleFile(basePath: string): Promise<string | null> {
+async function resolveSourceModuleFile(basePath: string, preferDirectoryMain = false): Promise<string | null> {
 	try {
 		const stats = await fs.promises.stat(basePath);
 		if (stats.isFile()) {
@@ -1381,6 +1382,13 @@ async function resolveSourceModuleFile(basePath: string): Promise<string | null>
 			return hasSourceModuleExtension(basePath) ? realpathOrSelf(basePath) : null;
 		}
 		if (stats.isDirectory()) {
+			if (preferDirectoryMain) {
+				const manifest = await readPackageManifest(basePath);
+				if (typeof manifest?.main === "string") {
+					const main = await resolveSourceModuleFile(path.resolve(basePath, manifest.main));
+					if (main) return main;
+				}
+			}
 			for (const extension of SOURCE_MODULE_EXTENSIONS) {
 				const resolved = await resolveSourceModuleFile(path.join(basePath, `index${extension}`));
 				if (resolved) return resolved;
@@ -1399,23 +1407,6 @@ async function resolveSourceModuleFile(basePath: string): Promise<string | null>
 		if (resolved) return resolved;
 	}
 	return null;
-}
-
-async function resolveRelativeCommonJsRequire(specifier: string, importerPath: string): Promise<string | null> {
-	const candidate = path.resolve(path.dirname(importerPath), specifier);
-	try {
-		const stats = await fs.promises.stat(candidate);
-		if (stats.isDirectory()) {
-			const manifest = await readPackageManifest(candidate);
-			if (typeof manifest?.main === "string") {
-				const main = await resolveSourceModuleFile(path.resolve(candidate, manifest.main));
-				if (main) return main;
-			}
-		}
-	} catch {
-		// Missing candidates fall through to extension and index resolution.
-	}
-	return resolveSourceModuleFile(candidate);
 }
 
 function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
@@ -1730,7 +1721,7 @@ async function readPackageManifestUncached(packageRoot: string): Promise<Record<
 type ExtensionModuleKind = "commonjs" | "esm";
 
 /**
- * Per-walk memo of source text, analysis, and relative `require()` resolution.
+ * Per-walk memo of source text, analysis, and relative import/require resolution.
  * Every edge into a module asks for its CommonJS verdict, and every extensionless
  * `require("./x")` probes up to nine paths; without this each edge repeated the
  * reads, hashes, and stats. Scoped to a single walk so reloads still see edits.
@@ -1739,12 +1730,23 @@ class ExtensionGraphSources {
 	readonly #sources = new Map<string, Promise<string>>();
 	readonly #analyses = new Map<string, Promise<ExtensionSourceAnalysis>>();
 	readonly #relativeRequires = new Map<string, Promise<string | null>>();
+	readonly #relativeImports = new Map<string, string>();
+
+	resolveRelativeImport(specifier: string, dir: string): string {
+		const key = `${dir}\0${specifier}`;
+		let resolved = this.#relativeImports.get(key);
+		if (resolved === undefined) {
+			resolved = Bun.resolveSync(specifier, dir);
+			this.#relativeImports.set(key, resolved);
+		}
+		return resolved;
+	}
 
 	resolveRelativeRequire(specifier: string, importerPath: string): Promise<string | null> {
 		const key = path.resolve(path.dirname(importerPath), specifier);
 		let resolved = this.#relativeRequires.get(key);
 		if (!resolved) {
-			resolved = resolveRelativeCommonJsRequire(specifier, importerPath);
+			resolved = resolveSourceModuleFile(key, true);
 			this.#relativeRequires.set(key, resolved);
 		}
 		return resolved;
@@ -2067,7 +2069,7 @@ async function resolveExtensionCommonJsRequire(
 	if (specifier.startsWith(".")) {
 		return sources
 			? sources.resolveRelativeRequire(specifier, importerPath)
-			: resolveRelativeCommonJsRequire(specifier, importerPath);
+			: resolveSourceModuleFile(path.resolve(path.dirname(importerPath), specifier), true);
 	}
 	const remappedSpecifier = remapLegacyPiSpecifier(specifier);
 	if (remappedSpecifier) {
@@ -2104,15 +2106,11 @@ async function resolveExtensionCommonJsRequire(
  * lazy hydration after load-time source caches clear.
  */
 async function collectExtensionSpecifierReplacements(
-	source: string,
+	references: readonly ExtensionSpecifierReference[],
 	importerPath: string,
-	rewriteImports = false,
-	/** The walk that read `source` for `importerPath`; its analysis memo is keyed by path. */
+	rewriteImports: boolean,
 	sources?: ExtensionGraphSources,
 ): Promise<Array<ExtensionSpecifierReference & { replacement: string }>> {
-	const { references } = sources
-		? await sources.analyze(importerPath)
-		: getExtensionSourceAnalysis(source, importerPath);
 	const resolvedSpecifierTargets = new Map<string, string>();
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
@@ -2121,7 +2119,10 @@ async function collectExtensionSpecifierReplacements(
 			resolved = await resolveExtensionCommonJsRequire(reference.specifier, importerPath, sources);
 		} else if (rewriteImports) {
 			if (reference.specifier.startsWith(".")) {
-				const candidate = Bun.resolveSync(reference.specifier, path.dirname(importerPath));
+				const dir = path.dirname(importerPath);
+				const candidate = sources
+					? sources.resolveRelativeImport(reference.specifier, dir)
+					: Bun.resolveSync(reference.specifier, dir);
 				resolved = hasSourceModuleExtension(candidate) ? await realpathOrSelf(candidate) : null;
 			} else if (reference.specifier.startsWith("#")) {
 				resolved = packageImportPath(
@@ -2162,23 +2163,22 @@ function rewriteExtensionSpecifiersFromCache(source: string, importerPath: strin
  * extension graph so {@link collectExtensionSpecifierReplacements} can pin its
  * platform-package requires to absolute paths.
  */
-async function moduleRequiresNativeAddon(modulePath: string): Promise<boolean> {
+async function moduleRequiresNativeAddon(sources: ExtensionGraphSources, modulePath: string): Promise<boolean> {
 	const cached = nativeAddonRequireScanCache.get(modulePath);
 	if (cached) return cached;
 
-	const promise = moduleRequiresNativeAddonUncached(modulePath);
+	const promise = moduleRequiresNativeAddonUncached(sources, modulePath);
 	nativeAddonRequireScanCache.set(modulePath, promise);
 	return promise;
 }
 
-async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<boolean> {
-	let source: string;
+async function moduleRequiresNativeAddonUncached(sources: ExtensionGraphSources, modulePath: string): Promise<boolean> {
 	try {
-		source = await Bun.file(modulePath).text();
+		await sources.read(modulePath);
 	} catch {
 		return false;
 	}
-	for (const reference of getExtensionSourceAnalysis(source, modulePath).references) {
+	for (const reference of (await sources.analyze(modulePath)).references) {
 		if (reference.kind === "require" && (await resolveExtensionNativeAddon(reference.specifier, modulePath))) {
 			return true;
 		}
@@ -2395,14 +2395,16 @@ interface ExtensionModuleGraph {
  * synchronous bridge. Resolved ESM imports inside third-party dependencies
  * omit the reload tag so their importer paths stay query-free.
  */
-async function collectExtensionModules(entryRealPath: string): Promise<ExtensionModuleGraph> {
+async function collectExtensionModules(
+	entryRealPath: string,
+	sources: ExtensionGraphSources,
+): Promise<ExtensionModuleGraph> {
 	const modules = new Map<string, string>();
 	const commonJsPaths = new Set<string>();
 	const synchronousSourcePaths = new Set<string>();
 	const queuedCacheBustResolvedImports = new Map<string, boolean>([[entryRealPath, true]]);
 	const queuedModuleKinds = new Map<string, ExtensionModuleKind>([[entryRealPath, "esm"]]);
 	const queuedEsmBranchPaths = new Set<string>();
-	const sources = new ExtensionGraphSources();
 	const queue: Array<{
 		file: string;
 		cacheBustResolvedImports: boolean;
@@ -2457,7 +2459,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 				if (specifier.startsWith(".")) {
 					const candidate = isRequired
 						? await sources.resolveRelativeRequire(specifier, file)
-						: Bun.resolveSync(specifier, dir);
+						: sources.resolveRelativeImport(specifier, dir);
 					if (candidate && hasSourceModuleExtension(candidate)) {
 						const inheritedTargetKind = isRequired
 							? sourceIsCommonJs
@@ -2476,7 +2478,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						);
 						const isCommonJsDescendant = isRequired && sourceIsCommonJs && targetIsCommonJs;
 						requiresNativeAddonRewrite =
-							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(candidate));
+							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(sources, candidate));
 						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite || !targetIsCommonJs) {
 							resolved = await realpathOrSelf(candidate);
 							resolvedModuleKind = targetIsCommonJs ? "commonjs" : "esm";
@@ -2504,7 +2506,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						);
 						const isCommonJsDescendant = isRequired && sourceIsCommonJs && targetIsCommonJs;
 						requiresNativeAddonRewrite =
-							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(candidate));
+							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(sources, candidate));
 						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite || !targetIsCommonJs) {
 							resolved = candidate;
 							resolvedModuleKind = targetIsCommonJs ? "commonjs" : "esm";
@@ -2544,7 +2546,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						resolved = await realpathOrSelf(dependencyEntry);
 						requiresSynchronousSourceHook = true;
 					} else if (isHookableEntry && dependencyEntry && isRequired) {
-						requiresNativeAddonRewrite = await moduleRequiresNativeAddon(dependencyEntry);
+						requiresNativeAddonRewrite = await moduleRequiresNativeAddon(sources, dependencyEntry);
 						if (requiresNativeAddonRewrite) {
 							resolved = await realpathOrSelf(dependencyEntry);
 						}
@@ -2602,15 +2604,11 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 	}
 	for (const [modulePath, source] of modules) {
 		if (commonJsPaths.has(modulePath)) {
-			modules.set(
-				modulePath,
-				applySourceEdits(
-					source,
-					(await collectExtensionSpecifierReplacements(source, modulePath, true, sources)).map(toSpecifierEdit),
-				),
-			);
+			const { references } = await sources.analyze(modulePath);
+			const replacements = await collectExtensionSpecifierReplacements(references, modulePath, true, sources);
+			modules.set(modulePath, applySourceEdits(source, replacements.map(toSpecifierEdit)));
 		} else if (synchronousSourcePaths.has(modulePath)) {
-			modules.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath));
+			modules.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath, null, null, sources));
 		}
 	}
 	return {
@@ -2630,7 +2628,7 @@ export async function __collectLegacyPiExtensionSourcesForTests(
 	entryPath: string,
 ): Promise<ReadonlyMap<string, string>> {
 	const entryRealPath = await realpathOrSelf(path.resolve(entryPath));
-	const graph = await collectExtensionModules(entryRealPath);
+	const graph = await collectExtensionModules(entryRealPath, new ExtensionGraphSources());
 	return graph.modules;
 }
 
@@ -2682,13 +2680,14 @@ async function prepareGraphCommonJsModule(modulePath: string, source: string): P
  * loaders stay synchronous because Bun rejects `require()` targets backed by
  * async `onLoad` callbacks.
  */
-async function installExtensionGraphHook(
+function installExtensionGraphHook(
 	entryRealPath: string,
 	modules: Map<string, string>,
 	commonJsPaths: Set<string>,
 	synchronousSourcePaths: ReadonlySet<string>,
 	cacheBustResolvedImportModules: ReadonlySet<string>,
-): Promise<{ asyncModules: Map<string, string> }> {
+	initialSources: ExtensionGraphSources | undefined,
+): () => void {
 	const asyncModules = new Map<string, string>();
 	for (const [modulePath, source] of modules) {
 		if (commonJsPaths.has(modulePath) || synchronousSourcePaths.has(modulePath)) {
@@ -2718,6 +2717,7 @@ async function installExtensionGraphHook(
 						return { contents: synchronousSource, loader: getLoader(sourcePath) };
 					}
 					const cached = asyncModules.get(sourcePath);
+					const sources = cached === undefined ? undefined : initialSources;
 					const resolvedImportMtimeTag = cacheBustResolvedImportModules.has(sourcePath) ? mtimeTag : null;
 					return (async () => {
 						let raw: string;
@@ -2729,7 +2729,13 @@ async function installExtensionGraphHook(
 							raw = await Bun.file(sourcePath).text();
 						}
 						return {
-							contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag, resolvedImportMtimeTag),
+							contents: await rewriteLegacyExtensionSource(
+								raw,
+								sourcePath,
+								mtimeTag,
+								resolvedImportMtimeTag,
+								sources,
+							),
 							loader: getLoader(sourcePath),
 						};
 					})();
@@ -2786,7 +2792,11 @@ async function installExtensionGraphHook(
 			},
 		});
 	}
-	return { asyncModules };
+	return () => {
+		asyncModules.clear();
+		// The permanent hook must neither retain the walk nor reuse it on a late import.
+		initialSources = undefined;
+	};
 }
 
 /**
@@ -2798,12 +2808,13 @@ async function installExtensionGraphHook(
  * during the initial load; `undefined` when no new modules were discovered.
  */
 async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(): void } | undefined> {
+	const sources = new ExtensionGraphSources();
 	const {
 		modules: currentModules,
 		commonJsPaths,
 		cacheBustResolvedImportModules: discoveredCacheBustModules,
 		synchronousSourcePaths,
-	} = await collectExtensionModules(entryRealPath);
+	} = await collectExtensionModules(entryRealPath, sources);
 	let cacheBustResolvedImportModules = extensionGraphCacheBustResolvedImportModules.get(entryRealPath);
 	if (!cacheBustResolvedImportModules) {
 		cacheBustResolvedImportModules = new Set<string>();
@@ -2850,22 +2861,23 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 		return undefined;
 	}
 
-	let asyncModules = new Map<string, string>();
+	let clearInitialSources: (() => void) | undefined;
 	if (pendingModules.size > 0) {
-		({ asyncModules } = await installExtensionGraphHook(
+		clearInitialSources = installExtensionGraphHook(
 			entryRealPath,
 			pendingModules,
 			pendingCommonJsPaths,
 			pendingSynchronousSourcePaths,
 			cacheBustResolvedImportModules,
-		));
+			sources,
+		);
 		for (const modulePath of pendingModules.keys()) {
 			hookedModules.add(modulePath);
 		}
 	}
 	return {
 		clear() {
-			asyncModules.clear();
+			clearInitialSources?.();
 			for (const modulePath of commonJsPaths) {
 				commonJsModuleDefinitions.delete(modulePath);
 				commonJsModuleCache.delete(modulePath);

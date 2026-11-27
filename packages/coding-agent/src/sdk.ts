@@ -2271,9 +2271,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	};
 	if (!hasExplicitModel && defaultRoleValue && defaultRoleValue.trim() !== "default") {
 		const scoped = defaultSelector
-			? await tryResolveStartupModelRole(defaultSelector, modelRegistry, modelMatchPreferences)
+			? await tryResolveStartupModelRole(
+					defaultSelector,
+					modelRegistry,
+					modelMatchPreferences,
+					hydrateFullStartupModelCaches,
+				)
 			: undefined;
-		if (scoped) {
+		// A path-scoped allow-list can change during hydration. A narrow
+		// match was made in an open pool, so it cannot decide the restricted role.
+		if (scoped && cfgEnabledModels.get(settings).length === 0) {
 			defaultRoleSpec = scoped;
 		} else {
 			const allowedModels = await logger.time("resolveAllowedModels", async () => {

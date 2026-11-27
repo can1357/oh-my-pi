@@ -42,7 +42,13 @@ import {
 } from "./anthropic";
 import { applyCompatOverrides } from "./apply";
 import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
-import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
+import {
+	catalogAxisProviders,
+	hasModelScopedEffortsRule,
+	resolveCascade,
+	resolveCascadeCatalog,
+	resolveCascadeCatalogAxis,
+} from "./cascade";
 import { compareRevision, parseRevision, type Revision } from "./revision";
 import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
 import type { ModelIdentity, RequestPolicy, ResolvedAxes, ResolveTarget } from "./types";
@@ -1384,7 +1390,18 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
 export function resolveCatalogAxes(spec: CatalogPolicyInputs, route?: ResolveRoute): Record<string, unknown> {
 	const target = buildResolveTarget(spec, resolveIdentity(spec));
 	target.upstream = route?.upstream;
-	return resolveCascade(target).catalog;
+	return resolveCascadeCatalog(target);
+}
+
+/** One catalog assignment for a built model; skip identity and rule resolution for ineligible providers. */
+export function resolveCatalogAxis(model: CatalogPolicyInputs, axis: string): unknown {
+	const provider = model.providerType ?? model.provider;
+	const providers = catalogAxisProviders(axis);
+	if (providers && !providers.has(provider)) return undefined;
+	const target = buildResolveTarget(model, resolveIdentity(model), provider);
+	// A built row's provisional thinking ladder is not evidence of reasoning capability.
+	if (model.thinking?.unverified) target.reasoning = false;
+	return resolveCascadeCatalogAxis(target, axis);
 }
 
 /**

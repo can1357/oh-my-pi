@@ -2564,13 +2564,15 @@ export function getStartupModelRoleSelector(
  * Resolve a startup role without widening its catalog. A provider reference wins
  * outright; for a suffix/pin, the ordinary matcher must first rule out literal
  * IDs and bare variant aliases. The registry verifies that no other roster could
- * affect those phases. Probe after hydrating the named provider. Callers with
- * an explicit model allow-list must use the full role resolver instead.
+ * affect those phases. Probe after hydrating the named provider. If another
+ * roster might compete, hydrate it before inspecting its literal/alias sources.
+ * An explicit model allow-list must use the full role resolver instead.
  */
 export async function tryResolveStartupModelRole(
 	selector: StartupModelRoleSelector,
 	registry: ModelRegistry,
 	preferences?: ModelMatchPreferences,
+	hydrateRemaining?: () => Promise<void>,
 ): Promise<ResolvedModelRoleValue | undefined> {
 	const { provider, pattern } = selector;
 	const providerScope = new Set([provider]);
@@ -2590,19 +2592,50 @@ export async function tryResolveStartupModelRole(
 		logger.time("resolveDefaultModelRole:scope:no-exact-reference");
 		return undefined;
 	}
-	const shadowSelectors = new Set<string>();
+	const spellings = new Set<string>();
 	// The parser may recursively remove colons, including an invalid suffix
 	// ahead of a clean route. Check every spelling it could inspect for a
 	// globally registered bare variant alias before using the smaller pool.
 	for (const spelling of route ? [pattern, route.base] : [pattern]) {
 		for (let end = spelling.length; end > 0; ) {
-			shadowSelectors.add(spelling.slice(0, end).trim().toLowerCase());
+			spellings.add(spelling.slice(0, end).trim());
 			end = spelling.lastIndexOf(":", end - 1);
 		}
 	}
-	const parsed = await registry.withStartupModelRoleCatalog(provider, shadowSelectors, models =>
+	const shadowSelectors = new Set(Array.from(spellings, spelling => spelling.toLowerCase()));
+	let parsed = await registry.withStartupModelRoleCatalog(provider, shadowSelectors, models =>
 		parseModelPattern(pattern, models, preferences),
 	);
+	if (!parsed && hydrateRemaining) {
+		await hydrateRemaining();
+		// Hydration can replace the named provider's rows and register aliases
+		// from unkeyed providers. Never reuse the pre-hydration match.
+		const models = registry.getAvailableForProviders(providerScope);
+		const candidate = parseModelPattern(pattern, models, preferences);
+		if (candidate.model && !candidate.warning && models.length > 0) {
+			shadowSelectors.clear();
+			for (const spelling of spellings) {
+				// A provider-qualified reference wins before all bare-ID phases,
+				// even over an aggregator carrying the base as a literal ID.
+				if (!findExactModelReferenceMatch(spelling, models)) shadowSelectors.add(spelling.toLowerCase());
+			}
+			let couldMatchBare = false;
+			for (const id of shadowSelectors) {
+				if (
+					// Only an intact, known provider prefix forbids cross-provider
+					// fuzzy matches (including matches against display names).
+					!id.startsWith(`${provider}/`) ||
+					resolveBareVariantSelector(id) ||
+					stripThinkingVariantSuffix(id) ||
+					BEDROCK_INFERENCE_PROFILE_ARN.test(id)
+				) {
+					couldMatchBare = true;
+					break;
+				}
+			}
+			if (!couldMatchBare && !registry.mayShadowHydratedStartupRole(provider, shadowSelectors)) parsed = candidate;
+		}
+	}
 	if (!parsed) {
 		logger.time("resolveDefaultModelRole:scope:possible-catalog-shadow");
 		return undefined;

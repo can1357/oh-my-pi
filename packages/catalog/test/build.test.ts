@@ -2208,6 +2208,41 @@ describe("model cache materialized round trip", () => {
 		}
 	});
 
+	it("keeps restored headers private across cold, shared and concurrent reads of one payload", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-private-headers-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const providerId = "header-isolation-test";
+		const model = buildModel(
+			completionsSpec({ id: "private-route", provider: providerId, headers: { "X-Route": "seed" } }),
+		);
+		const resolveFor = async (route: string) => {
+			const result = await resolveProviderModels(
+				{
+					providerId,
+					cacheDbPath: dbPath,
+					staticModels: [],
+					restoreCachedHeaders: () => ({ headers: { "X-Route": route } }),
+				},
+				"offline",
+			);
+			return result.models.find(row => row.id === model.id);
+		};
+		try {
+			writeModelCache(providerId, Date.now(), [model], true, "", dbPath);
+			const first = await resolveFor("tenant-a");
+			const raw = readModelCache(providerId, 60_000, Date.now, dbPath);
+			const [second, third] = await Promise.all([resolveFor("tenant-b"), resolveFor("tenant-c")]);
+			expect([first, second, third].map(row => row?.headers?.["X-Route"])).toEqual([
+				"tenant-a",
+				"tenant-b",
+				"tenant-c",
+			]);
+			expect(raw?.models.map(row => row.headers)).toEqual([undefined]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("refetches dynamic-only models whose headers cannot be restored", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-dynamic-headers-"));
 		const dbPath = path.join(tempDir, "models.db");

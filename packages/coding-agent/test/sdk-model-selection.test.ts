@@ -1593,7 +1593,15 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		},
 	);
 
-	test.each(["thinking", "routing", "literal shadow", "disabled shadow", "unkeyed variant alias"] as const)(
+	test.each([
+		"thinking",
+		"routing",
+		"unrelated available roster",
+		"literal shadow",
+		"standard cache shadow",
+		"disabled shadow",
+		"unkeyed variant alias",
+	] as const)(
 		"preserves default model precedence at startup with %s",
 		async selection => {
 			const authStorage = createInMemoryAuthStorage();
@@ -1607,7 +1615,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			const id = "reasoner";
 			const aliasTarget = "startup-alias-target";
 			const routes = selection === "routing" || selection === "literal shadow";
-			const literal = selection === "literal shadow" || selection === "disabled shadow";
+			const literal =
+				selection === "literal shadow" || selection === "standard cache shadow" || selection === "disabled shadow";
+			if (selection === "unrelated available roster") authStorage.keys.setRuntime("openrouter", "test-key");
 			const variantAlias = selection === "unkeyed variant alias";
 			const selector = `${provider}/${id}${routes ? "@test-upstream" : ""}:high`;
 			const model = {
@@ -1640,7 +1650,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			});
 			if (literal || variantAlias || selection === "thinking") {
 				// A cached unkeyed roster by itself is not a competing model.
-				const cacheProvider = literal ? "opencode-go" : "factory-droid";
+				const cacheProvider =
+					selection === "standard cache shadow" ? "openai" : literal ? "opencode-go" : "factory-droid";
 				const apiKey = literal ? "test-key" : undefined;
 				if (apiKey) authStorage.keys.setRuntime(cacheProvider, apiKey);
 				const cached = buildModel({
@@ -1662,7 +1673,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 						: {}),
 				});
 				writeModelCache(
-					resolveModelCacheProviderId(cacheProvider, { apiKey }),
+					selection === "standard cache shadow"
+						? cacheProvider
+						: resolveModelCacheProviderId(cacheProvider, { apiKey }),
 					Date.now(),
 					[cached],
 					true,
@@ -1672,8 +1685,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			}
 			const modelRegistry = new ModelRegistry(authStorage, modelsPath, { settings });
 			const hydrate = modelRegistry.createStartupModelCacheHydrator();
+			const broad = vi.spyOn(modelRegistry, "getAvailable");
+			let broadReadsAtSelection: number | undefined;
 			const events: string[] = [];
 			vi.spyOn(authStorage.keys, "prefetchUsage").mockImplementation(async () => {
+				broadReadsAtSelection ??= broad.mock.calls.length;
 				events.push("selected");
 			});
 			const { session } = await createAgentSession({
@@ -1689,8 +1705,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			});
 
 			try {
-				if (selection === "literal shadow") {
-					expect(session.model?.provider).toBe("opencode-go");
+				if (selection === "literal shadow" || selection === "standard cache shadow") {
+					expect(session.model?.provider).toBe(selection === "standard cache shadow" ? "openai" : "opencode-go");
 					expect(session.model?.id).toBe(selector);
 					expect(events[0]).toBe("hydrate-all");
 				} else if (variantAlias) {
@@ -1702,7 +1718,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 						`${provider}/${id}${routes ? "@test-upstream" : ""}`,
 					);
 					expect(session.configuredThinkingLevel()).toBe(Effort.High);
-					expect(events[0]).toBe("selected");
+					expect(events[0]).toBe(selection === "unrelated available roster" ? "hydrate-all" : "selected");
+					if (selection === "unrelated available roster") expect(broadReadsAtSelection).toBe(0);
 				}
 			} finally {
 				await session.dispose();

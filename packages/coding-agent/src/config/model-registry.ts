@@ -518,6 +518,27 @@ export interface ContextWindowTiers {
 	extended: number;
 }
 
+/** Input spellings that can survive composition as a literal ID or register a global wire alias. */
+function couldShadowModelRole(
+	model: Pick<ModelSpec<Api>, "id" | "requestModelId" | "thinking">,
+	selectors: ReadonlySet<string>,
+): boolean {
+	if (
+		selectors.has(model.id.trim().toLowerCase()) ||
+		(model.requestModelId && selectors.has(model.requestModelId.toLowerCase()))
+	) {
+		return true;
+	}
+	const routes: Readonly<Record<string, string | undefined>> | undefined = model.thinking?.effortRouting;
+	if (routes) {
+		for (const effort in routes) {
+			const id = routes[effort];
+			if (id && selectors.has(id.toLowerCase())) return true;
+		}
+	}
+	return false;
+}
+
 /** Rows of a registry layer owned by `providerFilter`, or the whole layer when unfiltered. */
 function selectProviderModels<T extends { provider: string }>(models: T[], providerFilter?: ReadonlySet<string>): T[] {
 	return providerFilter ? models.filter(model => providerFilter.has(model.provider)) : models;
@@ -4583,23 +4604,6 @@ export class ModelRegistry {
 		}
 
 		const disabled = getDisabledProviderIdsFromSettings(this.#settings);
-		const couldRegisterAlias = (models: readonly Pick<ModelSpec<Api>, "id" | "requestModelId" | "thinking">[]) => {
-			for (const model of models) {
-				if (
-					selectorIds.has(model.id.toLowerCase()) ||
-					(model.requestModelId && selectorIds.has(model.requestModelId.toLowerCase()))
-				) {
-					return true;
-				}
-				const routing: Readonly<Record<string, string | undefined>> | undefined = model.thinking?.effortRouting;
-				if (!routing) continue;
-				for (const effort in routing) {
-					const id = routing[effort];
-					if (id && selectorIds.has(id.toLowerCase())) return true;
-				}
-			}
-			return false;
-		};
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const other of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
 			if (other === provider || !isCredentialScopedModelCacheProvider(other) || disabled.has(other)) continue;
@@ -4626,20 +4630,79 @@ export class ModelRegistry {
 			// Without a reviewed collapse table the offline roster contributes
 			// only input IDs and recorded wire IDs as aliases. Read persisted
 			// rows directly, not the manager's merge, policies, or landing.
-			if (couldRegisterAlias(options.staticModels ?? getBundledModelSlice(other))) return undefined;
+			if ((options.staticModels ?? getBundledModelSlice(other)).some(model => couldShadowModelRole(model, selectorIds))) {
+				return undefined;
+			}
 			const cache = readModelCache(
 				options.cacheProviderId ?? other,
 				options.cacheTtlMs ?? BUILT_IN_DISCOVERY_CACHE_TTL_MS,
 				Date.now,
 				this.#cacheDbPath,
 			);
-			if (cache && couldRegisterAlias(cache.models)) return undefined;
+			if (cache?.models.some(model => couldShadowModelRole(model, selectorIds))) return undefined;
 		}
 
 		// Keyless built-ins include runners and optional local endpoints with
 		// no bundled chat rows. Their cached/configured rows can still be chat.
 		if (otherAvailable.size > 0 && this.getAvailableForProviders(otherAvailable).length > 0) return undefined;
 		return resolve(this.getAvailableForProviders(new Set([provider])));
+	}
+
+	/**
+	 * After full credential-cache hydration, unavailable providers have already
+	 * contributed their discovery aliases. Check the inputs of the *available*
+	 * composition for remaining literal/alias shadows without projecting their
+	 * windows, overrides and metrics merely to select a role in another provider.
+	 * False proves absence; an uncertain or stale source takes the ordinary matcher.
+	 * @internal
+	 */
+	mayShadowHydratedStartupRole(provider: string, selectors: ReadonlySet<string>): boolean {
+		if (this.#owner || this.#runtimeRegistrations.length || this.#hasFullSnapshot || hasRuntimeProviderRules()) {
+			return true;
+		}
+		const isAvailable = this.#createProviderAvailabilityCheck();
+		const competes = (other: string) => other.toLowerCase() !== provider && isAvailable(other);
+		const shadow = (model: Pick<ModelSpec<Api>, "id" | "requestModelId" | "thinking">) =>
+			couldShadowModelRole(model, selectors);
+		for (const rows of [
+			this.#customModelOverlays,
+			this.#runtimeModelOverlays,
+			this.#cachedDiscoverableModels,
+			this.#runtimeDiscoveredModels,
+		]) {
+			if (rows.some(row => competes(row.provider) && shadow(row))) return true;
+		}
+		const pending: string[] = [];
+		for (const other of this.#knownStaticProviders()) {
+			if (other.toLowerCase() === provider) {
+				// A lookup snapshot groups case variants, while availability is
+				// keyed by the registered spelling. Let the full pool separate them.
+				if (!isAvailable(other)) return true;
+				continue;
+			}
+			if (!isAvailable(other)) continue;
+			// Reviewed renames, Cursor's synthesized families and per-model
+			// overrides can contribute spellings beyond those on the input rows.
+			// Ordinary derived thinking pairs only combine two existing IDs.
+			const table = reviewedCollapseTable(other);
+			if (
+				other === "cursor" ||
+				table?.families.length ||
+				table?.templates?.length ||
+				this.#modelOverrides.has(other)
+			) {
+				return true;
+			}
+			if (getBundledModelSlice(other).some(shadow) || this.#cachedStandardModelsByProvider.get(other)?.some(shadow)) {
+				return true;
+			}
+			if (this.#pendingStandardCacheProviders.has(other)) {
+				pending.push(this.#resolveStartupModelCacheProviderId(other));
+			}
+		}
+		const caches = readModelCaches<Api>(pending, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
+		for (const cache of caches.values()) if (cache.models.some(shadow)) return true;
+		return false;
 	}
 
 	/**

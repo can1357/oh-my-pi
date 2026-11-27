@@ -3,7 +3,7 @@ import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
-import { forEachInSlices, readModelCache, writeModelCacheAsync } from "./model-cache";
+import { forEachInSlices, readCacheForHeaderRestore, writeModelCacheAsync } from "./model-cache";
 import { getBundledModelSlice, getBundledModelSliceHash, isBundledModelSlice } from "./models";
 import { TimeBasedCostShape } from "./pricing";
 import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
@@ -207,8 +207,8 @@ function restoreCachedModelHeaders<TApi extends Api>(
 	const unrestorableIds = new Set(unrestorableHeaderModelIds);
 	const staticById = new Map(staticModels.map(model => [model.id, model]));
 	const unresolvedModelIds = new Set<string>();
-	const restored = cachedModels.map(model => {
-		if (!omittedIds.has(model.id)) return model;
+	for (const model of cachedModels) {
+		if (!omittedIds.has(model.id)) continue;
 		const unrestorable = unrestorableIds.has(model.id);
 		// Current unrestorable markers prove that neither same-id nor request-model
 		// static headers matched the live model. Only the old id-only writer's
@@ -224,16 +224,22 @@ function restoreCachedModelHeaders<TApi extends Api>(
 			// model with no bundled entry). Reattach the constant by value instead
 			// of dropping the model on this offline read.
 			if (!unrestorable && restorableHeaderFallback) {
-				return { ...model, headers: { ...restorableHeaderFallback } };
+				model.headers = { ...restorableHeaderFallback };
+				continue;
 			}
 			const configured = restoreCachedHeaders?.(model);
-			if (configured?.headers || configured?.resolveHeaders) return { ...model, ...configured };
-			unresolvedModelIds.add(model.id);
-			return model;
+			if (configured?.headers || configured?.resolveHeaders) {
+				model.headers = configured.headers;
+				model.resolveHeaders = configured.resolveHeaders;
+			} else {
+				unresolvedModelIds.add(model.id);
+			}
+			continue;
 		}
-		return { ...model, headers: staticModel.headers, resolveHeaders: staticModel.resolveHeaders };
-	});
-	return { models: restored, unresolvedModelIds };
+		model.headers = staticModel.headers;
+		model.resolveHeaders = staticModel.resolveHeaders;
+	}
+	return { models: cachedModels, unresolvedModelIds };
 }
 
 /**
@@ -262,7 +268,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? materializeStaticModels<TApi>(options.staticModels)
 		: (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]);
 	const additiveStatic = Boolean(options.modelsDev?.additiveOnly) && staticModels.length > 0;
-	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+	const cache = readCacheForHeaderRestore<TApi>(cacheProviderId, ttlMs, now, dbPath);
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.payloadAuthoritative ?? false);
 	const restoredCache = restoreCachedModelHeaders(
@@ -439,16 +445,18 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// models cannot be restored offline: rewriting it would drop them and
 			// mark the remainder fresh, while the untouched row keeps forcing a
 			// refetch that recovers them (#18227).
-			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
-			const latestRestoredCache = restoreCachedModelHeaders(
-				latestCache?.models ?? cache?.models ?? [],
-				staticModels,
-				latestCache?.headerOmittedModelIds ?? cache?.headerOmittedModelIds ?? [],
-				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
-				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
-				restorableHeaderFallback,
-				options.restoreCachedHeaders,
-			);
+			const latestCache = readCacheForHeaderRestore<TApi>(cacheProviderId, ttlMs, now, dbPath);
+			const latestRestoredCache = latestCache
+				? restoreCachedModelHeaders(
+						latestCache.models,
+						staticModels,
+						latestCache.headerOmittedModelIds,
+						latestCache.unrestorableHeaderModelIds,
+						latestCache.legacyHeaderRestoreMarkers,
+						restorableHeaderFallback,
+						options.restoreCachedHeaders,
+					)
+				: restoredCache;
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
 				model => !latestRestoredCache.unresolvedModelIds.has(model.id),
 			);
@@ -574,13 +582,8 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 	staticModels: readonly Model<TApi>[],
 	cacheFingerprintMatches: boolean,
 	ids: readonly string[] | undefined,
-): Model<TApi>[] {
-	if (models.length === 0) {
-		return [];
-	}
-	if (cacheFingerprintMatches) {
-		return [...models];
-	}
+): readonly Model<TApi>[] {
+	if (models.length === 0 || cacheFingerprintMatches) return models;
 
 	const droppedIds = ids && ids.length > 0 ? new Set(ids) : undefined;
 	const staticIds = staticModels.length > 0 ? new Set(staticModels.map(model => model.id)) : undefined;
@@ -595,9 +598,9 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 }
 
 function mergeCatalogMetrics<TApi extends Api>(
-	models: Model<TApi>[],
+	models: readonly Model<TApi>[],
 	catalogModels: readonly Model<TApi>[],
-): Model<TApi>[] {
+): readonly Model<TApi>[] {
 	if (models.length === 0 || catalogModels.length === 0) return models;
 	return applyCatalogMetrics(models, new CatalogMetricsIndex(catalogModels));
 }
@@ -620,12 +623,12 @@ async function mergeDynamicModels<TApi extends Api>(
 	dynamicModels: readonly Model<TApi>[],
 	authority: DynamicMergeAuthority,
 	explicitKindModels?: ReadonlySet<Model<TApi>>,
-): Promise<Model<TApi>[]> {
+): Promise<readonly Model<TApi>[]> {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
 	// after we've already merged the first pair, and `(...)` with no base
 	// happens for providers without static catalogs.
-	if (dynamicModels.length === 0) return baseModels.length === 0 ? [] : [...baseModels];
-	if (baseModels.length === 0) return [...dynamicModels];
+	if (dynamicModels.length === 0) return baseModels;
+	if (baseModels.length === 0) return dynamicModels;
 	const merged = new Map<string, Model<TApi>>(baseModels.map(model => [model.id, model]));
 	await forEachInSlices(dynamicModels, dynamicModel => {
 		if (!dynamicModel?.id) return;
@@ -653,7 +656,7 @@ async function mergeCachedModels<TApi extends Api>(
 	staticModels: readonly Model<TApi>[],
 	cacheModels: readonly Model<TApi>[],
 	options: { authority: DynamicMergeAuthority; matchesStatic: boolean },
-): Promise<Model<TApi>[]> {
+): Promise<readonly Model<TApi>[]> {
 	if (!options.matchesStatic) return await mergeDynamicModels(staticModels, cacheModels, options.authority);
 	const merged = new Map<string, Model<TApi>>(staticModels.map(model => [model.id, model]));
 	for (const cachedModel of cacheModels) merged.set(cachedModel.id, cachedModel);

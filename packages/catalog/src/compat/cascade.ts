@@ -571,19 +571,29 @@ function cloneAxes(axes: ResolvedAxes): ResolvedAxes {
  * @throws AmbiguousOverlapError when equal-rank rules contest one axis.
  */
 export function resolveCascade(target: ResolveTarget): ResolvedAxes {
-	if (cascadeMemoBypassDepth > 0) {
-		return cloneAxes(resolveRanked(target, rankRelevantRules(getRuleIndex(), prepareTarget(target))));
-	}
+	return cloneAxes(canonicalAxes(target));
+}
+
+/** Caller-owned catalog assignments without copying wire or thinking policy. */
+export function resolveCascadeCatalog(target: ResolveTarget): Record<string, unknown> {
+	return cloneAxisRecord(canonicalAxes(target).catalog);
+}
+
+/** One caller-owned catalog assignment, without cloning unrelated policy. */
+export function resolveCascadeCatalogAxis(target: ResolveTarget, axis: string): unknown {
+	return cloneAxisValue(canonicalAxes(target).catalog[axis]);
+}
+
+/** The cached canonical graph is private; every public lookup copies the part it exposes. */
+function canonicalAxes(target: ResolveTarget): ResolvedAxes {
+	if (cascadeMemoBypassDepth > 0)
+		return resolveRanked(target, rankRelevantRules(getRuleIndex(), prepareTarget(target)));
 	const key = targetKey(target);
 	const cached = resolveCache.get(key);
-	if (cached) {
-		// Nested rule values are applied to mutable compat records; the cached
-		// canonical graph must never escape to those consumers.
-		return cloneAxes(cached);
-	}
+	if (cached) return cached;
 	const resolved = resolveRanked(target, rankPlannedRules(getRuleIndex(), prepareTarget(target)));
 	resolveCache.set(key, resolved);
-	return cloneAxes(resolved);
+	return resolved;
 }
 
 /**

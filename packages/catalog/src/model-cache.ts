@@ -813,11 +813,41 @@ function parseModelIds(serialized: string): readonly string[] | null {
 		return null;
 	}
 }
+/** Read shared model metadata, with request headers omitted. */
 export function readModelCache<TApi extends Api>(
 	providerId: string,
 	ttlMs: number,
 	now: () => number,
 	dbPath?: string,
+): CacheEntry<TApi> | null {
+	return readCache(providerId, ttlMs, now, dbPath, "shared");
+}
+
+/** Read a snapshot whose header-omitted rows the resolver may attach credentials to in place. */
+export function readCacheForHeaderRestore<TApi extends Api>(
+	providerId: string,
+	ttlMs: number,
+	now: () => number,
+	dbPath?: string,
+): CacheEntry<TApi> | null {
+	return readCache(providerId, ttlMs, now, dbPath, "restoreHeaders");
+}
+
+type CacheRead = "shared" | "restoreHeaders";
+
+function forReader<TApi extends Api>(entry: CacheEntry<TApi> | null, use: CacheRead): CacheEntry<TApi> | null {
+	if (use === "shared" || !entry?.headerOmittedModelIds.length) return entry;
+	// Another reader already owns the headerless metadata. Detach only the rows we will write.
+	const omitted = new Set(entry.headerOmittedModelIds);
+	return { ...entry, models: entry.models.map(model => (omitted.has(model.id) ? { ...model } : model)) };
+}
+
+function readCache<TApi extends Api>(
+	providerId: string,
+	ttlMs: number,
+	now: () => number,
+	dbPath: string | undefined,
+	use: CacheRead,
 ): CacheEntry<TApi> | null {
 	try {
 		// Monotonic change signal: same-shaped WAL overwrites after checkpoint
@@ -833,14 +863,14 @@ export function readModelCache<TApi extends Api>(
 			if (generation !== null && cached?.generation === generation) {
 				// Freshness is time-relative: recompute per call from the
 				// cached row's updatedAt so a long-lived process goes stale.
-				return withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
+				return forReader(withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now), use);
 			}
 			// Any commit (to any provider) bumps data_version. Revalidate the
 			// scalars and fetch the payload only on a hash miss, in one snapshot.
 			const row = db
 				.query<CacheRow, [string | null, string, string]>(SELECT_CACHE_ROW)
 				.get(cached?.meta?.models_hash || null, providerId, materializationPolicy());
-			return rememberRow<TApi>(db, key, providerId, cached, row, generation, ttlMs, now);
+			return rememberRow<TApi>(db, key, providerId, cached, row, generation, ttlMs, now, use);
 		});
 	} catch {
 		return null;
@@ -856,15 +886,54 @@ function rememberRow<TApi extends Api>(
 	generation: ReadGeneration | null,
 	ttlMs: number,
 	now: () => number,
+	use: CacheRead = "shared",
 ): CacheEntry<TApi> | null {
-	const previous = cached?.entry as CacheEntry<TApi> | null | undefined;
+	if (use === "restoreHeaders" && row?.models != null && row.header_omitted_model_ids !== "[]") {
+		const serialized = row.models;
+		const hash = row.models_hash || payloadHash(serialized);
+		if (!parsedPayloads.has(hash)) {
+			const owned = parseCacheRow<TApi>(db, providerId, row, ttlMs, now, undefined, parseMaterializedModels);
+			row.models = null;
+			// The first resolver owns the decoded rows. Keep only the headerless bytes for
+			// other readers, never the objects it is about to populate with credentials.
+			readRowCache.set(
+				key,
+				owned
+					? pendingHeaderlessRow(generation, row, owned, serialized, hash)
+					: { generation, meta: null, entry: null },
+			);
+			return owned;
+		}
+	}
+	const previous = row?.models === null ? (cached?.entry as CacheEntry<TApi> | null | undefined) : undefined;
 	const entry =
 		row?.models === null && previous && cached?.meta && cacheRowsEqual(cached.meta, row)
 			? withFreshness(withRowState(previous, row), ttlMs, now)
 			: parseCacheRow(db, providerId, row, ttlMs, now, previous?.models);
 	if (row) row.models = null; // Never pin the serialized payload in the memo.
 	readRowCache.set(key, { generation, meta: entry ? row : null, entry: entry as CacheEntry<Api> | null });
-	return entry;
+	return forReader(entry, use);
+}
+
+/** Materialize the validated headerless bytes only if another reader actually needs them. */
+function pendingHeaderlessRow(
+	generation: ReadGeneration | null,
+	meta: CacheRowMeta,
+	entry: CacheEntry<Api>,
+	serialized: string,
+	hash: string,
+): ReadRowCacheEntry {
+	// Retain the provenance but not a reference to the resolver-owned models.
+	const headerless: CacheEntry<Api> = { ...entry, models: [] };
+	return {
+		generation,
+		meta,
+		get entry(): CacheEntry<Api> {
+			headerless.models = parsePayload<Api>(serialized, hash)!;
+			Object.defineProperty(this, "entry", { value: headerless });
+			return headerless;
+		},
+	};
 }
 
 /**
@@ -984,6 +1053,7 @@ function parseCacheRow<TApi extends Api>(
 	ttlMs: number,
 	now: () => number,
 	knownModels: Model<TApi>[] | undefined,
+	decode: (serialized: string, hash: string) => Model<TApi>[] | null = parsePayload<TApi>,
 ): CacheEntry<TApi> | null {
 	if (!row) return null;
 	const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
@@ -992,7 +1062,7 @@ function parseCacheRow<TApi extends Api>(
 		row.models === null
 			? (knownModels ?? null)
 			: headerOmittedModelIds && unrestorableHeaderModelIds
-				? parsePayload<TApi>(row.models, row.models_hash)
+				? decode(row.models, row.models_hash)
 				: null;
 	if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
 		// Fail closed on corrupt header provenance: treating malformed
