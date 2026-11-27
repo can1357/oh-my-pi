@@ -6986,7 +6986,7 @@ impl<'t> Match<'t> {
 pub enum Captures<'t> {
 	Literal(Match<'t>), // only group 0
 	Unicode(UnicodeCaptures<'t>),
-	Fancy(FancyCaptures<'t>),
+	Fancy(FancyCaptures<'t, str>),
 	Raw(Cow<'t, Region>, &'t [u8]),
 }
 
