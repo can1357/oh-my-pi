@@ -203,6 +203,7 @@
 - Fixed `browser` open silently reusing a running Chromium that lacks the requested `app.args`; it now reports the missing args and asks to quit the browser first ([#18858](https://github.com/can1357/oh-my-pi/issues/18858))
 - The `[raw output: …]` footer on minimized or byte-capped tool output now names `local://N.log:raw`, so reading it returns the original text instead of a paged, column-capped view ([#18764](https://github.com/can1357/oh-my-pi/issues/18764))
 - Fixed Claude marketplace plugins with a root-level `SKILL.md` and no `skills/` directory loading zero skills; the root `SKILL.md` now loads as one skill, matching Claude Code ([#18695](https://github.com/can1357/oh-my-pi/issues/18695))
+- Fixed OpenRouter rejecting every request with `403 Request blocked: prompt injection patterns detected` on accounts with a blocking prompt-injection guardrail: system prompts and tool text no longer contain the role-tag-like `<tool>` placeholder ([#18756](https://github.com/can1357/oh-my-pi/issues/18756))
 
 ### Removed
 

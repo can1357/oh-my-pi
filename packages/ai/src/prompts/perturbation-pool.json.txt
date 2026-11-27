@@ -10459,21 +10459,21 @@
 			]
 		},
 		{
-			"source": "help://<tool>/<topic>: reference docs for a tool, linked from its description",
+			"source": "help://<tool-name>/<topic>: reference docs for a tool, linked from its description",
 			"origin": "packages/coding-agent/src/prompts/internal-urls/help-reference.md",
 			"variants": [
-				"help://<tool>/<topic>: reference docs for a tool, linked from the tool's description",
-				"help://<tool>/<topic>: reference documentation for a tool, linked from its description",
-				"help://<tool>/<topic>: docs for reference on a tool, linked from its description"
+				"help://<tool-name>/<topic>: reference docs for a tool, linked from the tool's description",
+				"help://<tool-name>/<topic>: reference documentation for a tool, linked from its description",
+				"help://<tool-name>/<topic>: docs for reference on a tool, linked from its description"
 			]
 		},
 		{
-			"source": "help://<tool> lists its topics",
+			"source": "help://<tool-name> lists its topics",
 			"origin": "packages/coding-agent/src/prompts/internal-urls/help-reference.md",
 			"variants": [
-				"help://<tool> enumerates its topics",
-				"help://<tool> lists the topics it has",
-				"help://<tool> shows its topics"
+				"help://<tool-name> enumerates its topics",
+				"help://<tool-name> lists the topics it has",
+				"help://<tool-name> shows its topics"
 			]
 		},
 		{
@@ -15176,12 +15176,12 @@
 			]
 		},
 		{
-			"source": "Further tools are mounted under their `mcp__<server>__<tool>` command names",
+			"source": "Further tools are mounted under their `mcp__<server>__<tool-name>` command names",
 			"origin": "packages/coding-agent/src/prompts/system/mcp-tool-command-guidance.md",
 			"variants": [
-				"Additional tools are mounted under their `mcp__<server>__<tool>` command names",
-				"More tools are mounted under the command names `mcp__<server>__<tool>`",
-				"Further tools get mounted under their `mcp__<server>__<tool>` command names"
+				"Additional tools are mounted under their `mcp__<server>__<tool-name>` command names",
+				"More tools are mounted under the command names `mcp__<server>__<tool-name>`",
+				"Further tools get mounted under their `mcp__<server>__<tool-name>` command names"
 			]
 		},
 		{
@@ -19845,12 +19845,12 @@
 			]
 		},
 		{
-			"source": "`<tool> --help` prints usage derived from its schema",
+			"source": "`<tool-name> --help` prints usage derived from its schema",
 			"origin": "packages/coding-agent/src/prompts/system/system-prompt.md",
 			"variants": [
-				"`<tool> --help` prints usage that derives from its schema",
-				"`<tool> --help` outputs usage derived from the schema",
-				"`<tool> --help` prints usage from its schema"
+				"`<tool-name> --help` prints usage that derives from its schema",
+				"`<tool-name> --help` outputs usage derived from the schema",
+				"`<tool-name> --help` prints usage from its schema"
 			]
 		},
 		{
@@ -21394,11 +21394,11 @@
 			]
 		},
 		{
-			"source": "Run `<tool> --help` before first use",
+			"source": "Run `<tool-name> --help` before first use",
 			"origin": "packages/coding-agent/src/prompts/system/tool-command-catalog.md",
 			"variants": [
-				"Before first use, run `<tool> --help`",
-				"Run `<tool> --help` prior to first use"
+				"Before first use, run `<tool-name> --help`",
+				"Run `<tool-name> --help` prior to first use"
 			]
 		},
 		{
