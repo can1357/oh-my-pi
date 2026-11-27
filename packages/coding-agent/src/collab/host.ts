@@ -1377,10 +1377,10 @@ export class CollabHost {
 		return (
 			AgentRegistry.global()
 				.list()
-				// Advisor transcripts are local observability only; never mirror them to
-				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
-				// be able to chat/kill/revive them).
-				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind !== "advisor")
+				// Guests mirror the main/sub tree only. Advisor transcripts are local
+				// observability, and external agents run outside this process with no
+				// transcript file or session a guest could fetch, chat with or revive.
+				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind === "main" || ref.kind === "sub")
 				.map(ref => ({
 					id: ref.id,
 					displayName: ref.displayName,
@@ -1409,10 +1409,13 @@ export class CollabHost {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
-		// Advisor refs are excluded from snapshots, but reject control by id defensively:
-		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		// Advisor and external refs are excluded from snapshots, but reject control by id defensively:
+		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript or an
+		// agent an extension runs elsewhere.
+		const kind = AgentRegistry.global().get(agentId)?.kind;
+		if (kind === "advisor" || kind === "external") {
+			const reason = kind === "advisor" ? "advisor transcripts are read-only" : "it runs outside this session";
+			this.#send({ t: "error", message: `agent ${agentId}: ${reason}` }, fromPeer);
 			return;
 		}
 		const fail = (err: unknown) => {
@@ -1460,7 +1463,7 @@ export class CollabHost {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
 		const ref = AgentRegistry.global().get(agentId);
-		if (!ref?.sessionFile || ref.kind === "advisor") {
+		if (!ref?.sessionFile || (ref.kind !== "main" && ref.kind !== "sub")) {
 			reply("", fromByte, "no transcript available");
 			return;
 		}

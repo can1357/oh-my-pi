@@ -415,6 +415,50 @@ describe("collab read-only links", () => {
 		}
 	});
 
+	it("keeps agents an extension runs elsewhere away from guests", async () => {
+		const id = `external-${crypto.randomUUID()}`;
+		const reads: number[] = [];
+		const steers: string[] = [];
+		const registry = AgentRegistry.global();
+		const ref = registry.register({
+			id,
+			displayName: "remote worker",
+			kind: "external",
+			session: null,
+			status: "running",
+			external: {
+				readTranscript: async fromByte => {
+					reads.push(fromByte);
+					return { text: "", newSize: fromByte };
+				},
+				steer: async text => void steers.push(text),
+			},
+		});
+		try {
+			const guest = await joinAsGuest(host.link, "writer-external");
+			guestCleanups.push(() => guest.socket.close());
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			expect(welcome.agents.map(agent => agent.id)).not.toContain(id);
+
+			for (const cmd of ["chat", "kill", "revive"] as const) {
+				guest.socket.send({ t: "agent-cmd", cmd, agentId: id, text: "hello" });
+				const reply = await guest.nextFrame();
+				if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+				expect(reply.message).toBe(`agent ${id}: it runs outside this session`);
+			}
+			guest.socket.send({ t: "fetch-transcript", reqId: 7, agentId: id, fromByte: 0 });
+			const transcript = await guest.nextFrame();
+			if (transcript.t !== "transcript") throw new Error(`expected transcript, got ${transcript.t}`);
+			expect(transcript).toMatchObject({ reqId: 7, text: "", error: "no transcript available" });
+			expect(registry.get(id)?.status).toBe("running");
+			expect(steers).toEqual([]);
+			expect(reads).toEqual([]);
+		} finally {
+			registry.unregister(id, ref);
+		}
+	});
+
 	it("routes host UI requests to write guests and resolves their response", async () => {
 		const guest = await joinAsGuest(host.link, "writer-ui");
 		guestCleanups.push(() => guest.socket.close());
