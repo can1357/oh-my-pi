@@ -1,5 +1,5 @@
-//! `timeout`, `nohup` and `kill` through a [`Session`]: the engine, pi's
-//! host and the tools' drive loop, with real processes.
+//! `time`, `timeout`, `nohup` and `kill` through a [`Session`]: the engine,
+//! pi's host and the tools' drive loop, with real processes.
 
 #![cfg(unix)]
 
@@ -283,6 +283,51 @@ async fn kill_of_a_job_spec_ends_the_job() {
 	let r = run(&mut s, "sleep 30 & kill %1; wait %1; echo st=$?").await;
 	assert_eq!(r.stdout, "st=143\n", "{}", r.stderr);
 	assert!(r.elapsed < Duration::from_secs(5), "took {:?}", r.elapsed);
+}
+
+/// The peak resident set size of `dd` reading one 64 MiB block, as `time
+/// -l` reports it after `command` on the pipe.
+async fn dd_rss(s: &mut Session, command: &str) -> u64 {
+	let probe = format!("{command} 2>&1 | awk '/maximum resident set size/ {{ print $1 }}'");
+	let r = run(s, &probe).await;
+	assert_eq!(r.status, 0, "{command}: {}", r.stderr);
+	r.stdout
+		.trim()
+		.parse()
+		.unwrap_or_else(|_| panic!("{command}: {:?}", r.stdout))
+}
+
+/// `time -l` is the utility, not the keyword timing a command named `-l`:
+/// it reports the program's own peak memory, on its stderr, so a pipe
+/// reads it; a program run inside a nested shell's pipeline counts too.
+/// The peak is the program's, not this process's (Linux exec keeps the
+/// spawner's high-water mark).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn time_reports_a_programs_peak_memory() {
+	let mut s = session();
+	let dd = "/bin/dd if=/dev/zero of=/dev/null bs=67108864 count=1";
+	for command in [format!("time -l {dd}"), format!("time -l sh -c '{dd} 2>/dev/null | cat; true'")]
+	{
+		let rss = dd_rss(&mut s, &command).await;
+		assert!((64 << 20..1 << 30).contains(&rss), "{command}: {rss}");
+	}
+}
+
+/// The report follows the command's output; `time` exits with its status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn time_reports_after_the_command_with_its_status() {
+	let mut s = session();
+	let r = run(&mut s, "time -v sh -c 'echo out; exit 3'").await;
+	assert_eq!((r.status, r.stdout.as_str()), (3, "out\n"));
+	assert!(
+		r.stderr.starts_with(
+			"Command exited with non-zero status 3\n\tCommand being timed: \"sh -c echo out; exit \
+			 3\"\n"
+		),
+		"{}",
+		r.stderr
+	);
+	assert!(r.stderr.ends_with("\tExit status: 3\n"), "{}", r.stderr);
 }
 
 /// pi's `kill_builtin_refuses_*`: no signal reaches pi's own process group or

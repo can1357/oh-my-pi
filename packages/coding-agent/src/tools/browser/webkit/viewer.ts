@@ -8,7 +8,7 @@
  * steps, and windows that went away. It exits when its stdin closes, so it
  * never outlives omp.
  */
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import { isRecord, logger, readLines } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { TernInputStep } from "../tern/keys";

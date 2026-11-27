@@ -19,8 +19,8 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
 
 const GO_ON_FORM =
 	'<form><p>Go on?</p><label><input type="radio" name="go" value="yes"> Yes</label><label><input type="radio" name="go" value="no"> No</label></form>';
@@ -32,7 +32,7 @@ describe("SDK session dialogs and the computer display hold", () => {
 	let unregister: (() => void) | undefined;
 
 	beforeAll(async () => {
-		await initTheme(false);
+		initTheme();
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-computer-user-wait-${Snowflake.next()}-`));
 		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		authStorage.keys.setRuntime("openai", "test-key");

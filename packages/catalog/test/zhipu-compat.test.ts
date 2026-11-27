@@ -223,4 +223,28 @@ describe("zhipu-coding-plan model discovery", () => {
 		expect(flashx47?.reasoning).toBeUndefined();
 		expect(flashx47 && buildModel(flashx47).input).toEqual(["text"]);
 	});
+
+	it("ships GLM-5.4 with vision, 1M context, and the mandatory-thinking ladder on both coding plans", async () => {
+		const mockFetch: FetchImpl = Object.assign(
+			async (): Promise<Response> =>
+				new Response(JSON.stringify({ data: [{ id: "glm-5.4", name: "GLM-5.4" }] }), {
+					headers: { "content-type": "application/json" },
+				}),
+			{ preconnect: fetch.preconnect },
+		);
+		const discovered = (
+			await zhipuCodingPlanModelManagerOptions({ apiKey: "test-key", fetch: mockFetch }).fetchDynamicModels?.()
+		)?.find(model => model.id === "glm-5.4");
+		const expected = {
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			thinking: { efforts: ["low", "high", "max"], defaultLevel: "max", requiresEffort: true },
+		};
+
+		expect(discovered && buildModel(discovered)).toMatchObject(expected);
+		expect(getBundledModel("zhipu-coding-plan", "glm-5.4")).toMatchObject(expected);
+		expect(getBundledModel("zai", "glm-5.4")).toMatchObject(expected);
+	});
 });

@@ -523,6 +523,29 @@ describe("era probe of a remote server", () => {
 		expect(seen[0].headers.get("Mcp-Method")).toBe("server/discover");
 	});
 
+	it("falls back to the handshake when discover lists only a handshake-era revision", async () => {
+		// Dagu 2.27.0 answers server/discover, but only advertises 2025-11-25, and refuses every 2026-07-28 request in plain text.
+		const { url, seen } = serveLegacy(({ body }) => {
+			if (body.method === "server/discover") {
+				return json(body.id, {
+					supportedVersions: [MCP_LEGACY_PROTOCOL_VERSION],
+					capabilities: { tools: {} },
+					ttlMs: 1000,
+					cacheScope: "public",
+				});
+			}
+			return new Response('Bad Request: protocol version "2026-07-28" is only supported on stateless HTTP servers', {
+				status: 400,
+			});
+		});
+
+		const result = await mcpUpstreams.probe(httpSpec(url), realDeps());
+
+		expect(result.era).toBe("legacy");
+		const initialize = seen.find(entry => entry.body.method === "initialize");
+		expect(initialize && paramsOf(initialize).protocolVersion).toBe(MCP_LEGACY_PROTOCOL_VERSION);
+	});
+
 	it("takes a 32022 that lists this revision as modern, without falling back to initialize", async () => {
 		const { url, seen } = serve(({ body }) =>
 			rpcError(400, body.id, -32022, "Unsupported protocol version", { supported: [MCP_PROTOCOL_VERSION] }),
@@ -614,6 +637,29 @@ describe("era probe of a remote server", () => {
 		const closing = seen.at(-1);
 		expect(closing?.method).toBe("DELETE");
 		expect(closing?.headers.get("Mcp-Session-Id")).toBe("session-1");
+	});
+
+	it("falls back to initialize on a plain 415 and reports a legacy server", async () => {
+		// rmcp 0.2.1 cannot deserialize an unknown method and refuses the body as unsupported media.
+		const { url, seen } = serveLegacy(
+			() =>
+				new Response(
+					"fail to deserialize request body data did not match any variant of untagged enum JsonRpcMessage",
+					{
+						status: 415,
+						headers: { "Content-Type": "text/plain" },
+					},
+				),
+		);
+
+		const result = await mcpUpstreams.probe(httpSpec(url), realDeps());
+
+		expect(result.era).toBe("legacy");
+		expect(seen.filter(entry => entry.method === "POST").map(entry => entry.body.method)).toEqual([
+			"server/discover",
+			"initialize",
+			"notifications/initialized",
+		]);
 	});
 
 	it("passes an auth challenge through instead of guessing an era", async () => {

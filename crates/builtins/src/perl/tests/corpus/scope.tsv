@@ -1,0 +1,21 @@
+# Perl corpus: scope. Format and regeneration: crates/builtins/src/perl/tests.rs.
+foreach-restores	our $i='outside'; for $i (1,2) {print $i} print "|$i\n";	12|outside␊
+foreach-topic-restores	$_='outside'; for (1,2) {print} print "|$_\n";	12|outside␊
+lexical-shadow	my $x='outside'; {my $x='inside'; print "$x|"} print "$x\n";	inside|outside␊
+local-array-slot	our @a=(1,2); {local $a[1]=7; print "@a|"} print "@a\n";	1 7|1 2␊
+local-array	our @a=(1,2); {local @a=(3,4); print "@a|"} print "@a\n";	3 4|1 2␊
+local-dynamic	our $x=1; sub f {$x} {local $x=4; print f(),'|'} print f(),"\n";	4|1␊
+local-hash-slot	our %h=(x=>1); {local $h{x}=7; print "$h{x}|"} print "$h{x}\n";	7|1␊
+local-hash	our %h=(x=>3); {local %h=(x=>4); print "$h{x}|"} print "$h{x}\n";	4|3␊
+local-list	our ($x,$y)=(1,2); {local ($x,$y)=(3,4); print "$x$y|"} print "$x$y\n";	34|12␊
+local-missing-hash-slot	our %h; {local $h{x}=7; print "$h{x}|"} print exists($h{x})?1:0,"\n";	7|0␊
+local-nesting	our $x=1; {local $x=2; {local $x=3; print "$x|"} print "$x|"} print "$x\n";	3|2|1␊
+local-restored-on-die	our $x=1; eval {local $x=9; die "stop\n"}; print "$x\n";	1␊
+local-undef	our $x=1; {local $x; print defined($x)?1:0,'|'} print "$x\n";	0|1␊
+my-array	my @a=(9,8); {my @a=(1,2); print "@a|"} print "@a\n";	1 2|9 8␊
+my-hash	my %a=(x=>5); {my %a=(x=>9); print "$a{x}|"} print "$a{x}\n";	9|5␊
+my-implicit-undef	my $x; print defined($x)?1:0,"\n";	0␊
+my-package-separation	our $x=2; {my $x=8; print "$x|$main::x\n"}	8|2␊
+my-rhs-outer	my $x=7; {my $x=$x+1; print "$x\n"}	8␊
+our-across-package	package P; our $x=7; package Q; print "$x|",defined($Q::x)?1:0,"\n";	7|0␊
+our-lexical-binding	our $x=7; {package Q; our $x=5; print "$x|"} print "$x\n";	5|7␊

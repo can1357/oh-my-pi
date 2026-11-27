@@ -1,4 +1,4 @@
-import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import type { MultiplexerId } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { terminalLaunchCapabilities } from "./providers";
 import type {
 	TerminalLaunchMultiplexer,
@@ -8,7 +8,7 @@ import type {
 } from "./types";
 import { validateRequest } from "./validate";
 
-function isSupportedMultiplexer(multiplexer: TerminalMultiplexer): multiplexer is TerminalLaunchMultiplexer {
+function isSupportedMultiplexer(multiplexer: MultiplexerId): multiplexer is TerminalLaunchMultiplexer {
 	return terminalLaunchCapabilities[multiplexer].supported;
 }
 
@@ -23,7 +23,7 @@ function supportedProvidersMessage(placement: TerminalLaunchPlacement): string {
 
 /** Resolve the provider's support and user-facing placement metadata. */
 export function getTerminalLaunchPlacement(
-	multiplexer: TerminalMultiplexer | null,
+	multiplexer: MultiplexerId | null,
 	placement: TerminalLaunchPlacement,
 ): { error: string } | TerminalLaunchPlacementInfo {
 	if (multiplexer === null) {
@@ -56,7 +56,7 @@ export function getTerminalLaunchPlacement(
 
 /** Build a provider-default request after checking the canonical provider and placement capabilities. */
 export function createDefaultTerminalLaunchRequest(
-	multiplexer: TerminalMultiplexer | null,
+	multiplexer: MultiplexerId | null,
 	placement: TerminalLaunchPlacement,
 	command: readonly string[],
 	cwd: string,

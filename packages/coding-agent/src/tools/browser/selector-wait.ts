@@ -1,4 +1,4 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ElementHandle } from "puppeteer-core";
 import { isNavigatedContextError } from "./navigation";

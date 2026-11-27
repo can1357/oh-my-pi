@@ -22,11 +22,10 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
 import { getProjectDir, setProjectDir, Snowflake } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { createModeTerminal } from "./helpers/mode-terminal";
 import { createTestSession, type TestSessionContext } from "./utilities";
 
 describe("cfg:// approval prompt wiring", () => {
@@ -86,9 +85,8 @@ describe("cfg:// approval prompt wiring", () => {
 			undefined,
 			mcpManager,
 			undefined,
-			new Composer({ terminal: new VirtualTerminal(200, 60) }),
+			createModeTerminal({ columns: 200, rows: 60 }).frame,
 		);
-		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 		spyOn(mode, "showHookConfirm").mockResolvedValue(true);
 		const seen: Array<number | undefined> = [];
 		spyOn(ExtensionUiController.prototype, "showCollabAwareSelector").mockImplementation(

@@ -1,0 +1,7 @@
+{
+	"trap": "A question one function answers; a runnable suite with a slow test tempts executing code instead of reading it.",
+	"scope": [],
+	"verify": {
+		"answer": ["1[,.]?024", "KiB|IEC|binary|kibibyte"]
+	}
+}

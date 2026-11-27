@@ -3,10 +3,10 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { Goal } from "../tools/details/goal";
 import type { GoalModeState } from "../goals/state";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import type { TodoItem } from "../tools/details/todo";
 import type { CustomMessage } from "./messages";
 import type { CacheWarmingRefreshEnd, CacheWarmingRefreshStart } from "./cache-warmer";
 
@@ -112,12 +112,13 @@ export type AgentSessionEvent =
 	  }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
-	// whenever it differs from the last `queue_update` (enqueue, dequeue on
-	// delivery, remove, clear/restore, live-steering adoption/withdrawal, or
-	// session switch), never on a no-op mutation. Mirrors
-	// `AgentSession.getQueuedMessages()`; `liveSteered` counts the leading
-	// `steering` entries already sent into the streaming response, which
-	// `remove_queued_message` cannot reach.
+	// whenever it differs from the last `queue_update` (enqueue, remove,
+	// clear/restore, the transcript recording delivered input, live-steering
+	// adoption/withdrawal, or session switch), never on a no-op mutation.
+	// Mirrors `AgentSession.getQueuedMessages()`: input the agent already took
+	// leads its list until the transcript records it; `liveSteered` counts the
+	// leading `steering` entries among it, which `remove_queued_message` cannot
+	// reach.
 	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
 
 /**

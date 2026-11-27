@@ -18,10 +18,11 @@ import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
+import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	expandRoleAlias,
@@ -29,6 +30,7 @@ import {
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	type ModelLookupRegistry,
 	resolveModelFromString,
 	resolveModelOverride,
 } from "../config/model-resolver";
@@ -36,19 +38,15 @@ import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { Semaphore } from "../task/parallel";
 import type { ToolSession } from "../tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import {
 	findRetryFallbackCandidates,
 	getRetryFallbackChains,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import {
-	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
-	shouldDisableReasoning,
-	toReasoningEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { JsStatusEvent } from "./js/shared/types";
 
 import { cfgDisabledProviders } from "../config/model-settings";
@@ -198,10 +196,24 @@ function candidateIdentity(
 
 interface FallbackExpansion {
 	context: RetryFallbackResolutionContext;
-	modelRegistry: ModelRegistry;
+	/** Where fallback selectors resolve; see {@link completionModelLookup}. */
+	lookup: ModelLookupRegistry;
 	settings: Settings | undefined;
 	tier: CompletionTier;
 	disabledProviders: Set<string>;
+	/** Offline mode (`models.offline`): the only provider a fallback entry may name. */
+	offlineProvider: string | undefined;
+}
+
+/**
+ * Where completion models resolve: the registry, or with offline mode
+ * (`models.offline`) only the active model provider's models, none without an active model.
+ */
+function completionModelLookup(session: ToolSession, registry: ModelRegistry): ModelLookupRegistry {
+	if (!cfgOffline.get(session.settings)) return registry;
+	const provider = session.getActiveModel?.()?.provider;
+	const models = provider ? registry.getAvailableForProviders(new Set([provider])) : [];
+	return { getAvailable: () => models };
 }
 
 /**
@@ -236,7 +248,10 @@ function appendFallbackCandidates(
 	for (const entry of findRetryFallbackCandidates(deps.context, chainKey, selector, model, {
 		allowMissingPrimary: true,
 	})) {
-		const resolved = resolveModelOverride([entry.raw], deps.modelRegistry, deps.settings);
+		// Like the turn path's offline filter: an entry for another provider is skipped, not re-read
+		// as a bare id that one of the allowed provider's models happens to carry.
+		if (deps.offlineProvider !== undefined && entry.provider !== deps.offlineProvider) continue;
+		const resolved = resolveModelOverride([entry.raw], deps.lookup, deps.settings);
 		const candidate = resolved.model;
 		if (!candidate || deps.disabledProviders.has(candidate.provider)) continue;
 		const reasoning = reasoningForCandidate(deps.tier, candidate, entry.thinkingLevel, parent);
@@ -255,7 +270,8 @@ function appendFallbackCandidates(
 function resolveTierCandidates(tier: CompletionTier, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
-	const available = modelRegistry.getAvailable();
+	const lookup = completionModelLookup(session, modelRegistry);
+	const available = lookup.getAvailable();
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
@@ -308,10 +324,12 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 				getModelRole: (role: string) => session.settings.getModelRole(role),
 				modelLookup: modelRegistry,
 			},
-			modelRegistry,
+			lookup,
 			settings: session.settings,
 			tier,
 			disabledProviders: new Set(cfgDisabledProviders.get(session.settings)),
+			// Offline, the primary resolved from the active provider's models.
+			offlineProvider: cfgOffline.get(session.settings) ? primary.model.provider : undefined,
 		},
 		primary.selector,
 		primary.model,
@@ -351,12 +369,17 @@ function isCompletionTier(value: string): value is CompletionTier {
 function resolveTaggedAgentCandidates(agentName: string, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
-	const available = modelRegistry.getAvailable();
+	const lookup = completionModelLookup(session, modelRegistry);
+	const available = lookup.getAvailable();
 	if (available.length === 0) return [];
 	const agent = session.getSessionAgents?.().find(candidate => candidate.name === agentName);
 	const selector = agent?.model?.[0];
 	if (!selector) return [];
-	const resolved = resolveModelOverride([selector], modelRegistry, session.settings);
+	// Offline mode matches the pin exactly: a fuzzy match on the active provider's models could
+	// swap in an aggregator's copy of a model the user tagged on another provider.
+	const resolved = resolveModelOverride([selector], lookup, session.settings, {
+		exactOnly: cfgOffline.get(session.settings),
+	});
 	if (!resolved.model) return [];
 	const reasoning = reasoningForCandidate("default", resolved.model, resolved.thinkingLevel ?? agent?.thinkingLevel);
 	return [{ selector, model: resolved.model, ...reasoning }];

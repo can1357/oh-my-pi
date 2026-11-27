@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use common::run_fixture;
 use omp_edit::{
-	EditMode, PathPolicy,
+	EditMode, Location, PathPolicy,
 	fuzzy::{FindMatchOptions, find_match},
 	path_policy::canonical_key,
 	text::adjust_indentation,
@@ -90,8 +90,8 @@ fn resolves_parent_targets_outside_cwd() {
 		policy
 			.resolve("../outside.txt", &HashMap::new())
 			.unwrap()
-			.absolute,
-		root.path().join("outside.txt")
+			.location,
+		Location::Disk(root.path().join("outside.txt"))
 	);
 }
 
@@ -108,8 +108,8 @@ fn preserves_absolute_targets_outside_cwd() {
 		policy
 			.resolve(absolute.to_str().unwrap(), &HashMap::new())
 			.unwrap()
-			.absolute,
-		absolute
+			.location,
+		Location::Disk(absolute)
 	);
 }
 
@@ -126,8 +126,8 @@ fn expands_home_targets_outside_cwd() {
 		policy
 			.resolve("~/.claude/settings.json", &HashMap::new())
 			.unwrap()
-			.absolute,
-		home.join(".claude/settings.json")
+			.location,
+		Location::Disk(home.join(".claude/settings.json"))
 	);
 }
 
@@ -163,6 +163,13 @@ fn canonical_snapshot_keys_fuse_symlink_equivalent_paths() {
 	assert_eq!(alias_key, real_key);
 
 	let store = EditStore::new();
-	let hash = store.record(&real_key, "x\n", None);
-	assert_eq!(store.by_hash(&alias_key, &hash).unwrap().text.as_ref(), "x\n");
+	let hash = store.record(&Location::Disk(real_key), "x\n", None);
+	assert_eq!(
+		store
+			.by_hash(&Location::Disk(alias_key), &hash)
+			.unwrap()
+			.text
+			.as_ref(),
+		"x\n"
+	);
 }

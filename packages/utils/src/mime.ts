@@ -110,9 +110,9 @@ function parseGifMetadata(header: Uint8Array): ImageMetadata | null {
 function parseWebpMetadata(header: Uint8Array): ImageMetadata | null {
 	if (!magicEquals(header, 0, WEBP_RIFF_MAGIC)) return null;
 	if (!magicEquals(header, 8, WEBP_MAGIC)) return null;
-	if (header.length < 30) return { mimeType: "image/webp" };
 
 	if (magicEquals(header, 12, WEBP_VP8X)) {
+		if (header.length < 30) return { mimeType: "image/webp" };
 		const hasAlpha = (header[20] & 0x10) !== 0;
 		const width = (header[24] | (header[25] << 8) | (header[26] << 16)) + 1;
 		const height = (header[27] | (header[28] << 8) | (header[29] << 16)) + 1;
@@ -130,6 +130,7 @@ function parseWebpMetadata(header: Uint8Array): ImageMetadata | null {
 	}
 
 	if (magicEquals(header, 12, WEBP_VP8)) {
+		if (header.length < 30) return { mimeType: "image/webp" };
 		const width = view.getUint16(26, true) & 0x3fff;
 		const height = view.getUint16(28, true) & 0x3fff;
 		return { mimeType: "image/webp", width, height, channels: 3, hasAlpha: false };

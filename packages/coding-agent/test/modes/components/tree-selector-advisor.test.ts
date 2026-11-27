@@ -1,7 +1,10 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { renderTreeSelector } from "../../helpers/tree-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 interface AdvisorNoteFixture {
 	note: string;
@@ -29,21 +32,10 @@ function advisorTree(...notes: AdvisorNoteFixture[]): SessionTreeNode[] {
 }
 
 function render(tree: SessionTreeNode[]): string {
-	const selector = new TreeSelectorComponent(
-		tree,
-		tree[0]?.entry.id ?? null,
-		60,
-		() => {},
-		() => {},
-	);
-	return Bun.stripANSI(selector.render(120).join("\n"));
+	return renderTreeSelector({ roots: tree, currentLeafId: tree[0]?.entry.id ?? null }, { rows: 60 });
 }
 
 describe("TreeSelectorComponent advisor message rendering", () => {
-	beforeAll(async () => {
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
 	it("shows advisor notes with severity and without their model-facing XML wrapper", () => {
 		const rendered = render(advisorTree({ note: "Check error handling.", severity: "concern" }));
 

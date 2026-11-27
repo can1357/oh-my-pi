@@ -49,7 +49,7 @@ function createRuntime(activeSessionId?: string, cwd = tempDir, sessionDir = tem
 		setText,
 		ctx: {
 			showStatus,
-			editor: {
+			composer: {
 				setText,
 			},
 			sessionManager: {
