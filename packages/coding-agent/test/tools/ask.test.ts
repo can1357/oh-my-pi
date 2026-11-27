@@ -1051,6 +1051,35 @@ describe("AskTool answered by an extension", () => {
 			expect(text(checked.result!)).toContain(JSON.stringify({ tags: ["a"], region: "eu", agree: "yes" }, null, 2));
 			expect((await answer({ agree: ["yes", "no"] })).accepted).toBe(false);
 		});
+		it("refuses an answer to a name several controls share", async () => {
+			const SHARED = `<form>
+  <label>Contact <input type="email" name="contact" required></label>
+  <label>Contact <select name="contact"><option value="phone">Phone</option></select></label>
+  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+</form>`;
+			const ext = channel();
+			const opened = Promise.withResolvers<void>();
+			const formDialog = vi.fn<FormDialog>(async (_html, options) => {
+				opened.resolve();
+				const closed = Promise.withResolvers<void>();
+				options?.signal?.addEventListener("abort", () => closed.resolve());
+				await closed.promise;
+				return undefined;
+			});
+			const outcome = new AskTool(createSession()).execute(
+				"call-shared",
+				{ html: SHARED },
+				undefined,
+				undefined,
+				withChannel(createContext({ formDialog }), ext.extensionAsk),
+			);
+			await opened.promise;
+			const askId = ext.requested[0]?.askId ?? "missing";
+			// The select's option would skip the email field's validation.
+			expect(ext.pending.resolveAsk(askId, { data: { contact: "phone" } })).toBe(false);
+			expect(ext.pending.resolveAsk(askId, "cancel")).toBe(true);
+			await outcome.catch(() => undefined);
+		});
 	});
 
 	it("a call aborted while its answer is being reported takes the abort path", async () => {

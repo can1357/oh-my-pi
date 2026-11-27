@@ -486,15 +486,20 @@ function extensionChoiceValue(field: ChoiceField, value: unknown): HtmlFormValue
 
 /**
  * The data `form` submits for an extension's answer: its defaults with `data`'s fields applied.
- * `undefined` when `data` names no such field, gives a value the field cannot take, or leaves the
- * form invalid (a required field empty, failed text validation).
+ * `undefined` when `data` names no such field or a name several controls share (one value cannot be
+ * checked against all of them), gives a value the field cannot take, or leaves the form invalid (a
+ * required field empty, failed text validation).
  */
 function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlFormData | undefined {
 	const submitted = defaultFormData(form);
-	const named = new Map(form.fields.flatMap(field => (field.name ? [[field.name, field] as const] : [])));
+	const named = new Map<string, FormField[]>();
+	for (const field of form.fields) {
+		if (field.name) named.set(field.name, [...(named.get(field.name) ?? []), field]);
+	}
 	for (const [name, value] of Object.entries(data)) {
-		const field = named.get(name);
-		if (!field) return undefined;
+		const fields = named.get(name);
+		if (fields?.length !== 1) return undefined;
+		const [field] = fields;
 		if (field.kind === "choice") {
 			const choice = extensionChoiceValue(field, value);
 			if (choice === undefined) return undefined;
@@ -505,8 +510,10 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 		if (typeof value !== "string" && typeof value !== "number") return undefined;
 		submitted[name] = textValue(field, String(value));
 	}
-	for (const field of named.values()) {
-		if (fieldError(field, submitted[field.name]) !== undefined) return undefined;
+	// A shared name the extension left alone keeps the form's default, checked as before: by its last control.
+	for (const [name, fields] of named) {
+		const last = fields.at(-1);
+		if (last && fieldError(last, submitted[name]) !== undefined) return undefined;
 	}
 	return submitted;
 }
