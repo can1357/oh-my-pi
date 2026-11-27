@@ -157,12 +157,10 @@ export class HtmlFormModel {
 	readonly dropdown = signal<number | undefined>(undefined);
 	readonly note = signal<NoteDraft | undefined>(undefined);
 	readonly hidden = signal(false);
-	/**
-	 * Where the highlighted row sits when the open group is taller than the
-	 * card: on top, or on the bottom after Up at the very first row (showing
-	 * the text above it).
-	 */
-	readonly scrollAnchor = signal<"top" | "bottom">("top");
+	/** Rows the card is scrolled up past the highlight: Up at the top of a group taller than the card scrolls through the text above it. */
+	readonly scrollBack = signal(0);
+	/** Rows of the open group above the card as the terminal last drew it; 0 before that paint and in Tern. */
+	hiddenAbove = 0;
 	/**
 	 * Cells a textarea's rows wrap at as the terminal card last drew them, so
 	 * Up/Down step through the rows on screen; undefined before that paint
@@ -502,11 +500,18 @@ export class HtmlFormModel {
 	/** The highlight moves a row: through the open field's rows, then onto the neighbouring field's nearest row. */
 	#move(delta: 1 | -1): void {
 		const active = untrack(this.active);
-		if (active !== "submit" && !isDropdown(this.field(active))) {
-			const rows = this.rows(active);
-			const next = rows.indexOf(untrack(this.row)) + delta;
-			if (next >= 0 && next < rows.length) {
-				this.row.set(rows[next]!);
+		if (active !== "submit") {
+			if (!isDropdown(this.field(active))) {
+				const rows = this.rows(active);
+				const next = rows.indexOf(untrack(this.row)) + delta;
+				if (next >= 0 && next < rows.length) {
+					this.row.set(rows[next]!);
+					return;
+				}
+			}
+			const group = this.layout.groups.find(g => g.fields.includes(active));
+			if (delta < 0 && this.hiddenAbove > 0 && group?.fields.find(i => this.#reachable(i)) === active) {
+				this.scrollBack.set(untrack(this.scrollBack) + 1);
 				return;
 			}
 		}
@@ -650,13 +655,15 @@ export class HtmlFormModel {
 	key(key: KeyEvent): boolean {
 		const step = this.#vimRowStep(key);
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
-		const active = untrack(this.active);
-		const first = active === 0 && untrack(this.row) === this.rows(0)[0];
-		const id = listKeyId(routed);
-		this.scrollAnchor.set(
-			id === "up" && first ? "bottom" : id === "up" || id === "down" ? "top" : untrack(this.scrollAnchor),
-		);
-		return this.#key(routed);
+		const back = untrack(this.scrollBack);
+		// Down scrolls back toward the highlight before moving it; any key that does not scroll up drops the scroll.
+		if (back > 0 && listKeyId(routed) === "down") {
+			this.scrollBack.set(back - 1);
+			return true;
+		}
+		const handled = this.#key(routed);
+		if (untrack(this.scrollBack) === back) this.scrollBack.set(0);
+		return handled;
 	}
 
 	/**

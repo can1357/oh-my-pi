@@ -255,6 +255,58 @@ test("places the masked password caret after one bullet for an emoji", () => {
 	}
 });
 
+test("Up at the top of a question taller than the card scrolls up through its text before leaving it", () => {
+	const context = (name: string) => Array.from({ length: 12 }, (_, i) => `<p>${name} context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form>
+			<fieldset><legend>First question</legend>${context("first")}
+				<label><input type="radio" name="a" value="alpha" checked> Alpha</label>
+				<label><input type="radio" name="a" value="beta"> Beta</label>
+			</fieldset>
+			<fieldset><legend>Second question</legend>${context("second")}
+				<label><input type="radio" name="b" value="gamma" checked> Gamma</label>
+				<label><input type="radio" name="b" value="delta"> Delta</label>
+			</fieldset>
+		</form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) => term.screen().some(row => row.includes(text));
+	/** Presses `key` until `text` shows (at most 60 times); the presses it took. */
+	const pressUntil = (key: string, text: string) => {
+		let presses = 0;
+		while (!shows(text) && presses < 60) {
+			term.press(key);
+			presses++;
+		}
+		return presses;
+	};
+	try {
+		term.focus(term.surface.dock()[0]!);
+		expect(shows("Alpha")).toBe(true);
+		expect(shows("First question")).toBe(false);
+		// The first question's own text, then back down to its options.
+		expect(pressUntil("up", "First question")).toBeGreaterThan(1);
+		expect(model.active()).toBe(0);
+		pressUntil("down", "Alpha");
+		expect(shows("Alpha")).toBe(true);
+
+		term.press("pageDown");
+		expect(model.active()).toBe(1);
+		expect(shows("Second question")).toBe(false);
+		expect(pressUntil("up", "Second question")).toBeGreaterThan(1);
+		expect(model.active()).toBe(1);
+		// With its text all shown, Up leaves for the question above.
+		term.press("up");
+		expect(model.active()).toBe(0);
+	} finally {
+		term.dispose();
+	}
+});
+
 corpusSuite({
 	dir: "forms/html-form",
 	mount(caseName, corpusCase, env): Mounted {

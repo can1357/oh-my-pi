@@ -714,14 +714,16 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	}
 	const maxOffset = Math.max(0, lines.length - rows);
 	// The open group from its top when it fits with the highlight; else the highlighted row on top
-	// (a note under it: the note on the bottom).
+	// (a note under it: the note on the bottom), scrolled up toward the group's top by Up at its first row.
 	let offset =
 		column.focusEnd - column.groupStart <= rows
 			? column.groupStart
-			: column.focusEnd - column.focusStart <= 1 && model.scrollAnchor() === "top"
+			: column.focusEnd - column.focusStart <= 1
 				? column.focusStart
 				: column.focusEnd - rows;
 	offset = Math.max(0, Math.min(offset, maxOffset));
+	offset = Math.max(Math.min(offset, column.groupStart), offset - model.scrollBack());
+	model.hiddenAbove = Math.max(0, offset - column.groupStart);
 	const content: string[] = [];
 	const scrolls = lines.length > rows;
 	const thumb = scrolls ? Math.max(1, Math.floor((rows * rows) / lines.length)) : 0;
