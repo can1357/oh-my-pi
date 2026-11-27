@@ -375,19 +375,24 @@ pub fn perform(
 				&& handle.kind() == Some(FileKind::Tty)
 				&& k.engine.config().platform == Platform::Windows;
 			let squeeze_nul = *squeeze_nul && *delim != Some(0);
-			// Armed when the read starts and checked once per turn, so input
-			// that never waits still times out.
-			if let Some(t) = timeout_ns
-				&& !matches!(sc.live, Live::Timer(_))
-			{
-				let at = Deadline(cx.host.now_ns().saturating_add(*t));
-				sc.live = Live::Timer(cx.host.timer(at));
-			}
-			let timed_out = match &mut sc.live {
-				Live::Timer(timer) => timer.poll(&mut tcx).is_ready(),
-				_ => false,
+			// A kept deadline is checked before the turn's first read; a new
+			// one only once a read would wait, so a zero timeout still takes
+			// input that is there. A timer is armed only for a read that waits.
+			let kept = match &sc.live {
+				Live::ReadDeadline(at) => Some(*at),
+				Live::ReadTimer(armed) => Some(armed.0),
+				_ => None,
 			};
-			// The bytes so far, beside `sc.live` (the timer).
+			let (at, check_first) = match (*timeout_ns, kept) {
+				(None, _) => (None, false),
+				(Some(_), Some(at)) => (Some(at), true),
+				(Some(t), None) => {
+					let at = Deadline(cx.host.now_ns().saturating_add(t));
+					sc.live = Live::ReadDeadline(at);
+					(Some(at), false)
+				},
+			};
+			// The bytes so far, beside `sc.live` (the deadline).
 			let input = &mut sc.io.get_or_insert_with(Box::default).input;
 			let lines = (*lines).max(1) as usize;
 			// Delimiters read so far.
@@ -404,12 +409,12 @@ pub fn perform(
 						timed_out: false,
 					};
 				}
-				if timed_out {
-					break ProbeResult::Input {
-						data:      BString::from(std::mem::take(input)),
-						eof:       false,
-						timed_out: true,
-					};
+				if reads == 0
+					&& check_first
+					&& let Some(at) = at
+					&& passed(cx, at)
+				{
+					break timed_out(input);
 				}
 				if reads == READS_PER_TURN {
 					return Err(yield_turn(&tcx, WaitKey::Read { fd: *fd }));
@@ -462,15 +467,19 @@ pub fn perform(
 						}
 					},
 					Poll::Pending => {
-						if let Live::Timer(timer) = &mut sc.live
-							&& timer.poll(&mut tcx).is_ready()
-						{
-							// Partial input is kept, as bash's `read -t` does.
-							break ProbeResult::Input {
-								data:      BString::from(std::mem::take(input)),
-								eof:       false,
-								timed_out: true,
+						if let Some(at) = at {
+							if passed(cx, at) {
+								break timed_out(input);
+							}
+							let mut armed = match std::mem::take(&mut sc.live) {
+								Live::ReadTimer(armed) => armed,
+								_ => Box::new((at, cx.host.timer(at))),
 							};
+							let fired = armed.1.poll(&mut tcx).is_ready();
+							sc.live = Live::ReadTimer(armed);
+							if fired {
+								break timed_out(input);
+							}
 						}
 						return Err(WaitKey::Read { fd: *fd });
 					},
@@ -479,6 +488,21 @@ pub fn perform(
 		},
 	};
 	Ok(finish(sc, res))
+}
+
+/// Whether the host's clock has reached `at`.
+fn passed(cx: &Cx<'_>, at: Deadline) -> bool {
+	cx.host.now_ns() >= at.0
+}
+
+/// The answer of an input probe out of time. Partial input is kept, as
+/// bash's `read -t` does.
+fn timed_out(input: &mut Vec<u8>) -> ProbeResult {
+	ProbeResult::Input {
+		data:      BString::from(std::mem::take(input)),
+		eof:       false,
+		timed_out: true,
+	}
 }
 
 /// The fd an input probe reads: `fd` of the table, or the shell's
@@ -557,20 +581,32 @@ pub(super) fn begin(sc: &mut Scratch, probe: &Probe) {
 		if let Some(z) = io.zsh.as_mut() {
 			z.stats.clear();
 		}
-		sc.live = Live::None;
+		keep_deadline(&mut sc.live, Some(probe));
 	}
 }
 
 /// Cache `r` as the answer of the probe in flight.
 pub(super) fn finish(sc: &mut Scratch, r: ProbeResult) -> ProbeResult {
-	sc.live = Live::None;
 	let io = sc.io();
 	io.search = None;
 	io.walk = None;
-	if let Some(p) = io.probing.take() {
-		io.probes.push((p, r.clone()));
+	let probe = io.probing.take();
+	keep_deadline(&mut sc.live, probe.as_ref());
+	if let Some(p) = probe {
+		sc.io().probes.push((p, r.clone()));
 	}
 	r
+}
+
+/// Clear `live` between two probes. `probe` is the one that ends or starts;
+/// with `span_parts` set it keeps the deadline of its read, not the timer.
+fn keep_deadline(live: &mut Live, probe: Option<&Probe>) {
+	let keep = matches!(probe, Some(Probe::Input { span_parts: true, .. }));
+	*live = match std::mem::take(live) {
+		Live::ReadDeadline(at) if keep => Live::ReadDeadline(at),
+		Live::ReadTimer(armed) if keep => Live::ReadDeadline(armed.0),
+		_ => Live::None,
+	};
 }
 
 fn read_file(

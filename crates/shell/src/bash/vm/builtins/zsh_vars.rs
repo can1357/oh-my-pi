@@ -653,6 +653,7 @@ fn read_input(
 			part,
 			timeout_ns,
 			squeeze_nul: false,
+			span_parts: false,
 		};
 		let answer = match ctx.probe(probe) {
 			Ok(a) => a,

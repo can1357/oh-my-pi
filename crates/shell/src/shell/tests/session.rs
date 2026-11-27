@@ -481,6 +481,33 @@ async fn read_timeout_ends_on_input_that_never_blocks() {
 	assert!(start.elapsed() < Duration::from_secs(2), "returned after {:?}", start.elapsed());
 }
 
+/// The parts of one `read -t` share one deadline. Under `-n` and `-N` each
+/// NUL the read drops ends a part, and on `/dev/zero` each part ends at
+/// once.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn read_timeout_spans_the_parts_of_one_read() {
+	// The clock starts once this run holds the shell test lock.
+	let _guard = shell_test_lock().lock().await;
+	let start = std::time::Instant::now();
+	let (result, output) = time::timeout(
+		Duration::from_secs(10),
+		capture_unlocked(
+			concat!(
+				"read -n 1 -t 0.3 x < /dev/zero; echo \"n=$?\"\n",
+				"read -N 1 -t 0.3 x < /dev/zero; echo \"N=$?\"",
+			),
+			None,
+			None,
+			CancelToken::default(),
+		),
+	)
+	.await
+	.expect("read -t must end at its deadline");
+	assert_eq!((result.exit_code, output.as_str()), (Some(0), "n=142\nN=142\n"));
+	assert!(start.elapsed() < Duration::from_secs(2), "returned after {:?}", start.elapsed());
+}
+
 /// A cancel stops a `read` of endless input. Returning before the 2 s
 /// cancel grace shows the engine ended the read; after the grace the run
 /// is dropped while its read goes on.

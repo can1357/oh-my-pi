@@ -246,6 +246,7 @@ const fn probe(fd: i32, part: u32) -> Probe {
 		part,
 		timeout_ns: None,
 		squeeze_nul: false,
+		span_parts: false,
 	}
 }
 
@@ -681,6 +682,7 @@ fn ptywrite(ctx: &mut Ctx<'_, '_>, cmd: &PtyCmd, args: &[BString], nonl: bool) -
 			part:        0,
 			timeout_ns:  None,
 			squeeze_nul: false,
+			span_parts:  false,
 		};
 		if let ProbeResult::Input { data, .. } = ctx.probe(input)? {
 			ctx.out_fd(cmd.fd, &data);

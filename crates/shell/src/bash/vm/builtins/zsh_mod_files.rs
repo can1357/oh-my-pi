@@ -130,6 +130,7 @@ impl<'a> Fsq<'a> {
 			part:        self.part,
 			timeout_ns:  None,
 			squeeze_nul: false,
+			span_parts:  false,
 		};
 		self.part += 1;
 		match ctx.probe(probe) {

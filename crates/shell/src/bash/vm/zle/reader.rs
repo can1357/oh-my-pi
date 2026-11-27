@@ -1072,6 +1072,7 @@ impl Reader {
 			part:        0,
 			timeout_ns:  None,
 			squeeze_nul: false,
+			span_parts:  false,
 		};
 		let answer = probe::perform(k, cx, vp, &mut self.sc, &input)?;
 		self.sc.recycle();

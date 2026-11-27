@@ -203,6 +203,7 @@ fn read_run(ctx: &Ctx<'_, '_>, spec: &Spec<'_>, run: u64) -> Result<Batch, super
 			part:        0,
 			timeout_ns:  None,
 			squeeze_nul: false,
+			span_parts:  false,
 		};
 		if let ProbeResult::Input { data, .. } = ctx.probe(probe)? {
 			let skip = usize::try_from(spec.skip).unwrap_or(usize::MAX);
@@ -224,6 +225,7 @@ fn read_run(ctx: &Ctx<'_, '_>, spec: &Spec<'_>, run: u64) -> Result<Batch, super
 			part,
 			timeout_ns: None,
 			squeeze_nul: false,
+			span_parts: false,
 		};
 		Ok(match ctx.probe(probe)? {
 			ProbeResult::Input { data, eof, .. } => (data, eof),

@@ -792,7 +792,7 @@ impl crate::bash::Host for PiHost {
 				waker.wake();
 			}
 		});
-		Box::new(RuntimeTimer { shared, task, deadline })
+		Box::new(RuntimeTimer { shared, task })
 	}
 
 	fn wall(&self) -> SystemTimeLike {
@@ -1028,16 +1028,13 @@ struct TimerShared {
 
 /// A timer sleeping on the tokio runtime; dropping it aborts the sleep.
 struct RuntimeTimer {
-	shared:   Arc<TimerShared>,
-	task:     tokio::task::JoinHandle<()>,
-	/// When it fires. `poll` compares the clock with it, because the sleep
-	/// task runs late when every runtime worker is busy.
-	deadline: tokio::time::Instant,
+	shared: Arc<TimerShared>,
+	task:   tokio::task::JoinHandle<()>,
 }
 
 impl Timer for RuntimeTimer {
 	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		if self.shared.fired.load(Ordering::Acquire) || tokio::time::Instant::now() >= self.deadline {
+		if self.shared.fired.load(Ordering::Acquire) {
 			return Poll::Ready(());
 		}
 		*self.shared.waker.lock() = Some(cx.waker().clone());

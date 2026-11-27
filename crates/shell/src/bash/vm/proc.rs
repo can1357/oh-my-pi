@@ -1430,6 +1430,9 @@ pub enum Probe {
 	/// whether or not the fd ever blocks. `squeeze_nul` keeps a run of NUL
 	/// bytes as one: bash's `read` drops NULs (a `\` before a run still
 	/// takes the first), so an endless NUL source (`/dev/zero`) is not kept.
+	/// `span_parts` makes the parts of one read share the deadline the first
+	/// sets: bash's `read -t` limits the whole command, whose parts end at
+	/// each continuation line and each NUL `-n` drops.
 	/// Nothing past the end is consumed: a regular file's read-ahead is given
 	/// back, other fds are read a byte at a time. `fd`
 	/// [`Probe::TERMINAL_FD`] reads the shell's terminal
@@ -1442,6 +1445,7 @@ pub enum Probe {
 		part:        u32,
 		timeout_ns:  Option<u64>,
 		squeeze_nul: bool,
+		span_parts:  bool,
 	},
 	/// Whether fd has input available, without reading it (`read -t 0`).
 	Ready { fd: i32 },
@@ -1757,8 +1761,14 @@ pub enum Live {
 	/// [`Host::spawn`](crate::bash::Host::spawn) of the external of a
 	/// `Dispatch` still in flight: no process exists yet.
 	Spawn(crate::bash::host::SpawnFuture),
-	/// The timer of an `Input` probe with a timeout.
+	/// The timer of a probe that waits at most a given time (`sysread -t`,
+	/// `zselect -t`, a history file lock's backoff).
 	Timer(Box<dyn crate::bash::host::Timer>),
+	/// The deadline of an `Input` probe with a timeout; the next part of
+	/// the same read keeps it ([`Probe::Input`] `span_parts`).
+	ReadDeadline(crate::bash::host::Deadline),
+	/// That deadline, and the timer that wakes the read waiting for input.
+	ReadTimer(Box<(crate::bash::host::Deadline, Box<dyn crate::bash::host::Timer>)>),
 	/// `read_dir` of a glob walk in flight.
 	OpenDir(Box<dyn FsPending<Box<dyn crate::bash::fs::DirIter>>>),
 	/// The listing of a glob walk.
@@ -1792,7 +1802,13 @@ impl Live {
 			Self::Fs(live) => live.idempotent,
 			Self::File(file) => file.kind() == crate::bash::fs::FileKind::Regular,
 			// Network traffic is not asked twice.
-			Self::Task(_) | Self::Ext(_) | Self::Timer(_) | Self::Zftp(_) | Self::None => false,
+			Self::Task(_)
+			| Self::Ext(_)
+			| Self::Timer(_)
+			| Self::ReadDeadline(_)
+			| Self::ReadTimer(_)
+			| Self::Zftp(_)
+			| Self::None => false,
 		}
 	}
 }

@@ -1630,6 +1630,7 @@ fn read_script_line(
 		part:        0,
 		timeout_ns:  None,
 		squeeze_nul: false,
+		span_parts:  false,
 	};
 	let answer = match probe::cached(&sc, &input).cloned() {
 		Some(answer) => answer,

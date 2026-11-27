@@ -1565,6 +1565,7 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 			part:        0x8000_0000 | seq,
 			timeout_ns:  None,
 			squeeze_nul: false,
+			span_parts:  false,
 		};
 		let mut line = match self.ctx.probe(probe)? {
 			ProbeResult::Input { data, .. } => data,

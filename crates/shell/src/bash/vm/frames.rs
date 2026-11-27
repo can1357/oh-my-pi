@@ -399,8 +399,8 @@ fn scratch_image(
 				}
 			},
 			Live::Ext(child) => report.lost.push(Lost::Ext { vpid, pid: child.pid() }),
-			// Fs ops are counted below; a timer is re-armed (from the
-			// restore) when the read retries.
+			// Fs ops are counted below; a read's deadline and timer start
+			// again (from the restore) when the read retries.
 			Live::Stat(_)
 			| Live::Access(_)
 			| Live::Path(_)
@@ -410,6 +410,8 @@ fn scratch_image(
 			| Live::Dir(_)
 			| Live::Spawn(_)
 			| Live::Timer(_)
+			| Live::ReadDeadline(_)
+			| Live::ReadTimer(_)
 			| Live::Fd(_)
 			| Live::Fs(_)
 			| Live::Zftp(_)
