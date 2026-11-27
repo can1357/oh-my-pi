@@ -21,6 +21,7 @@ import {
 	cfgHindsightMentalModelsEnabled,
 	cfgHindsightRecallBudget,
 	cfgHindsightRecallContextTurns,
+	cfgHindsightRecallCooldownMs,
 	cfgHindsightRecallMaxQueryChars,
 	cfgHindsightRecallMaxTokens,
 	cfgHindsightRecallTimeoutMs,
@@ -64,6 +65,11 @@ export interface HindsightConfig {
 	recallContextTurns: number;
 	recallMaxQueryChars: number;
 	recallPromptPreamble: string;
+	/**
+	 * First pause (ms) after a failed automatic recall. Each further failure doubles it, up to
+	 * 30 minutes, or up to this value when it is larger. `0` or less turns it off.
+	 */
+	recallCooldownMs: number;
 
 	debug: boolean;
 
@@ -115,6 +121,7 @@ export function loadHindsightConfig(settings: Settings): HindsightConfig {
 		recallContextTurns: cfgHindsightRecallContextTurns.get(settings),
 		recallMaxQueryChars: cfgHindsightRecallMaxQueryChars.get(settings),
 		recallPromptPreamble: DEFAULT_PREAMBLE,
+		recallCooldownMs: cfgHindsightRecallCooldownMs.get(settings),
 
 		debug: cfgHindsightDebug.get(settings),
 

@@ -1,7 +1,7 @@
 /**
  * Wire protocols of the main-thread memory objects a subagent worker reaches by
  * reference: the Hindsight client, a parent `HindsightSessionState` (routing,
- * config, snippets, and its confirmed-bank set), and a parent
+ * config, snippets, its confirmed-bank set, and its recall pause), and a parent
  * `MnemopiSessionState` (identity, config, and every scoped-bank operation).
  *
  * Bank targets cross as `{ bank }`; main resolves the name to its live store.
@@ -35,6 +35,7 @@ import type {
 	UpdateDocumentOptions,
 } from "../../hindsight/client";
 import type { HindsightConfig } from "../../hindsight/config";
+import type { RecallSkip, RecallWaitOutcome } from "../../hindsight/recall-wait";
 import type { MnemopiBackendConfig } from "../../mnemopi/config";
 import type {
 	MnemopiBankStats,
@@ -83,7 +84,11 @@ export type HindsightClientProtocol = {
 	getMentalModelHistory: RpcMethod<[bankId: string, mentalModelId: string], MentalModelHistoryEntry[]>;
 };
 
-/** A parent Hindsight state's fields (read live, synchronously) and its confirmed-bank set (`banks.*`). */
+/**
+ * A parent Hindsight state's fields (read live, synchronously), its confirmed-bank set (`banks.*`), and
+ * its pause after a failed automatic recall (`recallWait.skip`, `recallWait.record`), which a worker alias
+ * shares and which reads main's clock.
+ */
 export type HindsightSessionStateProtocol = {
 	client: RpcMethod<[], HindsightClientApi>;
 	bankId: RpcMethod<[], string>;
@@ -98,6 +103,8 @@ export type HindsightSessionStateProtocol = {
 	"banks.add": RpcMethod<[bankId: string], void>;
 	"banks.delete": RpcMethod<[bankId: string], boolean>;
 	"banks.list": RpcMethod<[], string[]>;
+	"recallWait.skip": RpcMethod<[], RecallSkip | undefined>;
+	"recallWait.record": RpcMethod<[outcome: RecallWaitOutcome], number | undefined>;
 };
 
 /** A parent Mnemopi state's fields (read live) and its scoped-bank operations; sync ones are `callSync`. */
