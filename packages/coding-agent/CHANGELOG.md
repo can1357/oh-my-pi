@@ -117,6 +117,7 @@
 
 ### Fixed
 
+- Extensions whose `.tsx`/`.jsx` files use `/** @jsxImportSource @oh-my-pi/pi-tui */` load in the compiled omp binary instead of failing with `Cannot find package '@oh-my-pi/pi-tui'` ([#20840](https://github.com/can1357/oh-my-pi/issues/20840))
 - Fixed web search with GitHub Copilot Claude models: it now uses the Copilot login's token and endpoint (Enterprise included) and sends the same Copilot and session headers as chat, so replies are no longer rejected or blocked ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
 - Session mentions whose title carries a card icon no longer show a second session icon in front of it
 - Git mention chips in the composer draw in the git color instead of plain text
