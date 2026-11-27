@@ -93,6 +93,7 @@
 - `/tan` agents now treat the conversation they fork from as reference only and stop after finishing your request, instead of picking up or deferring to the main agent's in-progress work
 - The main agent no longer sees `/tan` dispatch notices or gets woken when a tangent finishes; with your next message it gets a short record linking the tangent's output
 - Subagents may now run quick checks on their own files; only full builds and whole test suites wait for the parent agent.
+- Recovered retry notices preview the saved error and show the successful fallback route ([#20770](https://github.com/can1357/oh-my-pi/pull/20770) by [@dagurval](https://github.com/dagurval)).
 - Redesigned the `/live` call panel in Tern: your voice as a moving wave in the call's color, the transcript as a caption, and the call's status beside Mute and End call.
 - Redesigned the composer's dictation control in Tern: while recording it shows a live wave of your voice and the time recorded beside a stop button.
 - In Tern, only a click on a `/btw` note's question line points the composer at the note; clicking its answer to read or select it no longer does.

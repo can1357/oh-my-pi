@@ -213,6 +213,34 @@ screenSuite("assistant-message", (corpusCase, env) => {
 	};
 });
 
+test("a recovered turn shows a compact model and error reason without terminal formatting", () => {
+	const message = assistant([], 0, {
+		stopReason: "error",
+		errorMessage: `503 \x1b[31mupstream\x1b[0m\r\n\tunavailable: ${"provider diagnostic ".repeat(8)}`,
+		retryRecovery: {
+			kind: "auto-retry",
+			status: "recovered",
+			attempt: 2,
+			recoveredAt: new Date(TS).toISOString(),
+			recovery: "model",
+			note: "switched model; retried",
+			supersededBy: { timestamp: TS + 1, provider: "anthropic", model: "claude-sonnet-4-5" },
+		},
+	});
+	const transcript = new Transcript();
+	const block = transcript.append(() => <AssistantMessageBlock model={{ message, finalized: true }} />);
+	try {
+		const { rows } = paintNode(staticEnvironment(loadThemeSync("dark")), block.node, 100);
+		const row = rows.find(line => line.includes("503"));
+		expect(row && stripEscapes(row).trim()).toMatch(
+			/^503 upstream unavailable: .*… — recovered on anthropic\/claude-sonnet-4-5$/,
+		);
+		expect(row).not.toContain("\x1b[31m");
+	} finally {
+		transcript.clear();
+	}
+});
+
 describe("assistant message tone", () => {
 	test("a toned reply (/live's spoken one) draws its prose in the tone, natively and in the terminal", () => {
 		const theme = loadThemeSync("dark");

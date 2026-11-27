@@ -637,15 +637,12 @@ function sameSlots(a: readonly string[], b: readonly string[]): boolean {
 function errorPart(message: AssistantMessage, model: AssistantMessageModel): ErrorPart | undefined {
 	const presentation = resolveAssistantErrorPresentation(message);
 	if (presentation.kind === "compact-recovered") {
-		const attempt = message.retryRecovery?.attempt ?? 1;
-		const body = [message.errorMessage?.trim(), presentation.text].filter(
-			(line, index, all): line is string => !!line && all.indexOf(line) === index,
-		);
+		const { detail, outcome, text } = presentation;
 		return {
 			kind: "recovered",
-			attempt,
-			body: body.join("\n"),
-			note: presentation.text,
+			attempt: message.retryRecovery?.attempt ?? 1,
+			body: detail && detail !== outcome ? `${detail}\n${outcome}` : outcome,
+			note: text,
 		};
 	}
 	if (presentation.kind !== "full" || message.content.some(content => content.type === "toolCall")) return undefined;
