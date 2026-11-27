@@ -7,8 +7,35 @@ import { SPEECH_FORMAT_MIME_TYPES, type SpeechFormat, type SpeechOptions, type S
 
 const SPEECH_TIMEOUT_MS = 60_000;
 
+/** Status of a 2xx JSON body that reports no 4xx/5xx status of its own: a bad gateway. */
+const UNREPORTED_ERROR_BODY_STATUS = 502;
+
 export class SpeechApiError extends AIError.ProviderHttpError {
 	override readonly name = "SpeechApiError";
+}
+
+/**
+ * Error for a 2xx response that carries JSON instead of audio: some gateways
+ * report failures that way. The status is the 4xx/5xx `status`/`code` the body
+ * reports (in `error` or at the top level), else {@link UNREPORTED_ERROR_BODY_STATUS}.
+ */
+function jsonBodyError(label: string, text: string, headers: Headers): SpeechApiError {
+	let body: Record<string, unknown> = {};
+	try {
+		const parsed: unknown = JSON.parse(text);
+		if (typeof parsed === "object" && parsed !== null) body = parsed as Record<string, unknown>;
+	} catch {}
+	const error = typeof body.error === "object" && body.error !== null ? (body.error as Record<string, unknown>) : {};
+	const status = [error.status, error.code, body.status, body.code]
+		.map(Number)
+		.find(value => Number.isInteger(value) && value >= 400 && value < 600);
+	const detail =
+		typeof body.error === "string" ? body.error : typeof error.message === "string" ? error.message : text;
+	return new SpeechApiError(
+		`${label} speech API returned an error body: ${detail.slice(0, 300)}`,
+		status ?? UNREPORTED_ERROR_BODY_STATUS,
+		{ headers },
+	);
 }
 
 export async function postSpeechRequest(
@@ -46,6 +73,9 @@ export async function postSpeechRequest(
 						headers: response.headers,
 					},
 				);
+			}
+			if (response.headers.get("content-type")?.includes("json")) {
+				throw jsonBodyError(label, await response.text(), response.headers);
 			}
 			return new Uint8Array(await response.arrayBuffer());
 		},

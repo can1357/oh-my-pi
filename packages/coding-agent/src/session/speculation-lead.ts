@@ -11,7 +11,7 @@
  * annotated context gauge (boundary marker position).
  */
 const SPECULATION_LEAD_FRACTION = 0.125;
-/** Floor of the speculation band; also the armed-summary refresh budget floor. */
+/** Minimum speculation lead and minimum headroom for threshold deferral. */
 export const SPECULATION_LEAD_MIN_TOKENS = 8_192;
 const SPECULATION_LEAD_MAX_TOKENS = 32_000;
 

@@ -3,7 +3,9 @@
  * themselves, and every other tool's non-error result passes through it when the agent's call returns
  * ({@link shapeCalledTool}, from the tool wrapper); each journals one `spotlight:shape` entry per result. Other tools'
  * error results pass through unshaped and are not journaled. Only the tools `spotlight.experiment.tools` names are
- * shaped and journaled. Shaping never fails a tool call: any error keeps the unshaped text.
+ * shaped and journaled. Shaping never fails a tool call: any error keeps the unshaped text. A session without an
+ * active `read` tool (an RPC host's own tools under `--no-tools`) shapes nothing: a cut's hidden lines come back only
+ * through `read local://…`, so the agent would lose them.
  *
  * A random share of the results shaping would cut is held out (`spotlight.experiment.holdout`): the model gets the
  * plain result for the call, and the trace (`holdout: true`) records the would-be cut. Of the rest, a random share
@@ -49,22 +51,28 @@ export interface ShapeRequest extends Omit<ShapeInput, "cwd"> {
 	plainWidthCut?: boolean;
 }
 
-/** Whether the experiment replaces pi's own read summarizer and bash minimizer: whenever it is on, for every tool. */
-export function nativeShapingOff(session: Pick<ToolSession, "spotlight">): boolean {
-	return session.spotlight !== undefined;
+/** Whether the experiment replaces pi's own read summarizer and bash minimizer: whenever it shapes, for every tool. */
+export function nativeShapingOff(session: Pick<ToolSession, "spotlight" | "isToolActive">): boolean {
+	return shapingExperiment(session) !== undefined;
 }
 
 /**
  * Whether the experiment rewrites `tool`'s output (the tools `spotlight.experiment.tools` names): a `read` without a
  * selector then pages the whole file, as the summarizer it replaces would have seen it, and shaping cuts it down.
  */
-export function shapesOutput(session: Pick<ToolSession, "spotlight">, tool: ShapedTool): boolean {
+export function shapesOutput(session: Pick<ToolSession, "spotlight" | "isToolActive">, tool: ShapedTool): boolean {
 	return shapingExperiment(session)?.shapesTool(tool) === true;
 }
 
-/** The session's experiment when it shapes tool output, with the state shaping needs. */
-export function shapingExperiment(session: Pick<ToolSession, "spotlight">): SpotlightExperiment | undefined {
-	return session.spotlight instanceof SpotlightExperiment ? session.spotlight : undefined;
+/**
+ * The session's experiment when it shapes tool output, with the state shaping needs; none while `read` is inactive,
+ * since a cut names its hidden lines as `read local://…` ranges (an unmanaged session, without `isToolActive`, shapes).
+ */
+export function shapingExperiment(
+	session: Pick<ToolSession, "spotlight" | "isToolActive">,
+): SpotlightExperiment | undefined {
+	if (!(session.spotlight instanceof SpotlightExperiment)) return undefined;
+	return session.isToolActive?.("read") === false ? undefined : session.spotlight;
 }
 
 /** A result's text after shaping, and the trace its details keep (`details.spotlight`). */

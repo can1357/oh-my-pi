@@ -13,4 +13,16 @@ describe("ExtensionContext project trust compatibility", () => {
 
 		expect(runner.createContext().isProjectTrusted()).toBe(true);
 	});
+
+	it("command context inherits isProjectTrusted()", () => {
+		const runner = new ExtensionRunner(
+			[],
+			{} as never,
+			"/project",
+			{ getCwd: () => "/project" } as never,
+			{} as never,
+		);
+
+		expect(runner.createCommandContext().isProjectTrusted()).toBe(true);
+	});
 });

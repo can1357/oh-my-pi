@@ -1186,8 +1186,8 @@ export interface HandoffFromContextOptions {
 	 * session's payload/response hooks. Sending the same routing + payload shape
 	 * the main loop uses is what lets the handoff oneshot READ the provider
 	 * prompt cache the live turn populated instead of cold-missing the whole
-	 * prefix. `reasoning` and `toolChoice` are set internally and override
-	 * anything provided here.
+	 * prefix. `maxTokens`, `reasoning` and `toolChoice` are set internally and
+	 * override anything provided here.
 	 */
 	streamOptions: SimpleStreamOptions;
 	/** Optional completion transport override for host-level request wrappers. */
@@ -1229,6 +1229,11 @@ export async function generateHandoffFromContext(
 	}
 	const requestOptions = {
 		...options.streamOptions,
+		// Bound the document like a summary: without an explicit cap a local
+		// server falls back to its own (possibly unlimited) output limit, so a
+		// runaway stream never ends and maintenance never reaches its next method.
+		// Hitting the cap ends with `stopReason: "length"`, rejected below.
+		maxTokens: MAX_SUMMARY_TOKENS,
 		reasoning: resolveCompactionEffort(model, options.thinkingLevel),
 		toolChoice: "none" as const,
 	};

@@ -32,6 +32,10 @@ interface AppKeybindings {
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.transcript.pageUp": true;
+	"app.transcript.pageDown": true;
+	"app.transcript.top": true;
+	"app.transcript.bottom": true;
 	"app.agents.hub": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -122,7 +126,7 @@ export const KEYBINDINGS = {
 	},
 	"app.tools.toggleVisibility": {
 		defaultKeys: "ctrl+shift+o",
-		description: "Show or hide tool activity",
+		description: "Cycle tool activity: detailed, concise, hidden",
 	},
 	"app.ask.hide": {
 		defaultKeys: "alt+h",
@@ -186,6 +190,23 @@ export const KEYBINDINGS = {
 	"app.clipboard.copyPrompt": {
 		defaultKeys: "alt+shift+c",
 		description: "Copy prompt",
+	},
+	// Fullscreen screen mode only (`tui.screen`); inline, these keys reach the editor.
+	"app.transcript.pageUp": {
+		defaultKeys: "pageUp",
+		description: "Scroll the fullscreen transcript up a page",
+	},
+	"app.transcript.pageDown": {
+		defaultKeys: "pageDown",
+		description: "Scroll the fullscreen transcript down a page",
+	},
+	"app.transcript.top": {
+		defaultKeys: "ctrl+home",
+		description: "Scroll the fullscreen transcript to its start",
+	},
+	"app.transcript.bottom": {
+		defaultKeys: "ctrl+end",
+		description: "Scroll the fullscreen transcript to its end and follow new output",
 	},
 	"app.session.new": {
 		defaultKeys: [],

@@ -32,6 +32,8 @@ async function loadPluginToggle() {
  * capability cache, and reconnect MCP servers (rebinding the session's MCP
  * tools). Shared by `/reload-plugins`'s TUI handler and the `handle`-adapter's
  * `reloadPlugins` hook so both honor the command's documented reload scope.
+ * Extension hooks, tools, and modules are bound once at session creation and
+ * are not rebuilt here; changing them requires restarting omp.
  */
 export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
 	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
@@ -515,16 +517,20 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 	{
 		name: "reload-plugins",
 		icon: "restart",
-		description: "Reload all plugins (skills, commands, hooks, tools, agents, MCP)",
-		acpDescription: "Reload all plugins",
+		description: "Reload plugin skills, commands, agents, and MCP (restart for extension hooks/tools)",
+		acpDescription: "Reload plugin skills and commands (restart for extension hooks/tools)",
 		handle: async (_command, runtime) => {
 			await runtime.reloadPlugins();
-			await runtime.output("Plugins reloaded.");
+			await runtime.output(
+				"Reloaded plugin skills and slash commands. Extension hooks and tools are unchanged; restart omp to apply their changes.",
+			);
 			return commandConsumed();
 		},
 		handleTui: async (_command, runtime) => {
 			await reloadTuiPluginState(runtime.ctx);
-			runtime.ctx.showStatus("Plugins reloaded.");
+			runtime.ctx.showStatus(
+				"Reloaded skills, slash commands, task agents, and MCP servers. Extension hooks and tools are unchanged; restart omp to apply their changes.",
+			);
 			clearSubmittedText(runtime);
 		},
 	},

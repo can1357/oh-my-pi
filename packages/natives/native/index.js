@@ -160,6 +160,7 @@ export const shellBuiltins = nativeBindings.shellBuiltins ?? missingNativeExport
 export const shellReservedCommandNames = nativeBindings.shellReservedCommandNames ?? missingNativeExport("shellReservedCommandNames");
 export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExport("sliceWithWidth");
 export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars ?? missingNativeExport("snapcompactSupportedChars");
+export const spawnBreakaway = nativeBindings.spawnBreakaway ?? missingNativeExport("spawnBreakaway");
 export const spawnRaw = nativeBindings.spawnRaw ?? missingNativeExport("spawnRaw");
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missingNativeExport("structuredPatchHunks");
 export const summarizeCode = nativeBindings.summarizeCode ?? missingNativeExport("summarizeCode");

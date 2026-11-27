@@ -21,6 +21,7 @@ import type {
 	HeadersHook,
 	LoginHook,
 	RefreshHook,
+	SignOutHook,
 	ValueHook,
 } from "../hooks/types";
 import type { OAuthCredentials } from "../oauth/types";
@@ -42,6 +43,10 @@ export async function loadLoginHook(name: string): Promise<LoginHook> {
 
 export async function loadRefreshHook(name: string): Promise<RefreshHook> {
 	return (HOOKS.refresh[name] ?? missingHook("refresh", name))();
+}
+
+export async function loadSignOutHook(name: string): Promise<SignOutHook> {
+	return (HOOKS.signOut[name] ?? missingHook("sign-out", name))();
 }
 
 export async function loadAfterExchangeHook(name: string): Promise<AfterExchangeHook> {

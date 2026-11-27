@@ -37,19 +37,6 @@ const googleModel: Model<"google-generative-ai"> = buildModel({
 	reasoning: false,
 });
 
-const googleCliModel: Model<"google-gemini-cli"> = buildModel({
-	api: "google-gemini-cli",
-	provider: "google-gemini-cli",
-	id: "gemini-2.5-pro",
-	name: "Gemini 2.5 Pro",
-	baseUrl: "https://cloudcode-pa.googleapis.com",
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	maxTokens: 8192,
-	contextWindow: 200000,
-	reasoning: false,
-});
-
 function assistant(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
 	return {
 		role: "assistant",
@@ -287,7 +274,7 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 		]);
 	});
 
-	it("keeps function names only within the selected Google endpoint's length limit", () => {
+	it("keeps function names only within the Google function-name length limit", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "inspect the file", timestamp: 1 },
 			assistant(
@@ -306,11 +293,6 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 		expect(getToolCalls(transformMessages(messages, googleModel)).map(call => call.id)).toEqual([
 			"call_64",
 			"call_65",
-		]);
-		const cliHistory = transformMessages(messages, googleCliModel);
-		expect(getToolCalls(cliHistory).map(call => call.id)).toEqual(["call_64"]);
-		expect(cliHistory.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
-			"call_64",
 		]);
 	});
 

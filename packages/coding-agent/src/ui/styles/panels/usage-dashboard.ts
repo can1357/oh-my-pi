@@ -26,6 +26,7 @@ import {
 	pressureTone,
 	type UsageDashboardModel,
 } from "../../overlays/panels/usage-dashboard-model";
+import { hangingWrap } from "../tools/frame";
 import { bindingGlyph, boxRows, keyGlyph, selectNavGlyphs, termOf } from "./common";
 
 const CARD_MIN_WIDTH = 32;
@@ -116,7 +117,8 @@ function cardLines(
 			const reset = row.resetMs === undefined ? "" : formatDuration(row.resetMs);
 			text = `${bar}${pct}${geometry.resetWidth > 0 ? ` ${theme.fg("dim", reset.padStart(geometry.resetWidth))}` : ""}`;
 		}
-		for (const line of wrap(`${prefix}${text}`, content)) lines.push(`  ${line}`);
+		const hang = " ".repeat(visibleWidth(prefix));
+		for (const line of hangingWrap(prefix, hang, text, content)) lines.push(`  ${line}`);
 	}
 	const hidden = card.windows.length - CARD_MAX_WINDOWS;
 	if (hidden > 0) lines.push(`  ${theme.fg("dim", `+${hidden} more`)}`);

@@ -573,7 +573,12 @@ export interface CompiledDeadGrant {
 /** Refresh-token grant declared for a provider. */
 export type CompiledRefresh =
 	| { kind: "none" }
-	| { kind: "hook"; hook: string }
+	| {
+			kind: "hook";
+			hook: string;
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+	  }
 	| {
 			kind: "request";
 			token: CompiledOAuthRequest;
@@ -611,9 +616,30 @@ export interface CompiledAuthProvider {
 	disabled?: string;
 	/** Account risk a user must accept (by typing "yes") before a new login starts. */
 	loginWarning?: string;
+	/**
+	 * What every surface calls the provider once an account is linked (such as
+	 * "Acme Pro plan"); `name` stays the pre-sign-in `/login` label.
+	 */
+	connectedName?: string;
+	/**
+	 * One transcript line shown when a session starts using one of the provider's
+	 * models (such as "Using your Acme Pro plan").
+	 */
+	activeNotice?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;
+	/**
+	 * Logins are bound to a key only this machine holds (such as a proof-of-possession key in
+	 * the OS vault), so they stay in the local `agent.db`: the auth broker
+	 * neither stores nor refreshes them.
+	 */
+	deviceBound?: boolean;
+	/**
+	 * Runs when a login is removed: `hook` forgets the account's secrets kept
+	 * outside the credential store and revokes the grant at the provider.
+	 */
+	signOut?: { hook: string };
 	apiKeyFormat: "bearer" | "structured";
 	expiry?: "jwt-or-never";
 	/** `api-key`: an OAuth login persists only `credentials.access` as a plain API key. */

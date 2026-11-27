@@ -71,6 +71,27 @@ describe("Anthropic context management compatibility", () => {
 		expect(request.payload.context_management).toBeUndefined();
 		expect(request.beta).not.toContain("context-management-2025-06-27");
 	});
+
+	// The Zen Anthropic proxy rejects `context_management` as an unrecognized field.
+	it("omits context_management and its beta on opencode-zen thinking requests", async () => {
+		const zenModel = buildModel({
+			id: "claude-haiku-4-5",
+			name: "Claude Haiku 4.5",
+			api: "anthropic-messages",
+			provider: "opencode-zen",
+			baseUrl: "https://opencode.ai/zen/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+		} as ModelSpec<"anthropic-messages">);
+		const request = await captureRequest(zenModel, "sk-zen-test");
+
+		expect(request.payload.thinking?.type).toBe("enabled");
+		expect(request.payload.context_management).toBeUndefined();
+		expect(request.beta).not.toContain("context-management-2025-06-27");
+	});
 });
 
 function textTurnResponse(): Response {

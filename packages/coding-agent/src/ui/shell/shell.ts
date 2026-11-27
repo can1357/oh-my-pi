@@ -24,6 +24,7 @@ import {
 	type Host,
 	type KeyEvent,
 	type Reactive,
+	type ScrollRequest,
 	type Signal,
 	type Surface,
 	signal,
@@ -33,6 +34,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { InputEvent, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
+import type { ScreenMode } from "@oh-my-pi/pi-tui/term/backend";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 
@@ -72,6 +74,8 @@ export interface ShellStartOptions {
 	readonly textSizing?: Accessor<boolean>;
 	/** The terminal clock painters read (scripted replays); default the wall clock. */
 	readonly clock?: Accessor<number>;
+	/** Where the terminal renderer draws the session (`tui.screen`, may change at runtime). Default inline. */
+	readonly screen?: Accessor<ScreenMode>;
 }
 
 /**
@@ -155,6 +159,14 @@ export class Shell {
 		return promise;
 	}
 
+	/**
+	 * Scroll the fullscreen transcript (a page, a line, its start or end); its end follows the tail
+	 * again. False when none is on screen (inline mode, a page up, Tern, not started).
+	 */
+	scrollTranscript(by: ScrollRequest["by"]): boolean {
+		return this.#host?.scroll(by) ?? false;
+	}
+
 	/** Set inline mouse reporting; a modal screen's override lasts until it closes. */
 	setInlineMouse(tracking: MouseTracking): void {
 		this.#inlineMouse.set(tracking);
@@ -179,11 +191,17 @@ export class Shell {
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
+			...(options.screen ? { screen: options.screen } : {}),
 			beforeTerminalRenderer: ensureTerminalStylesLoaded,
 		});
 		this.#host = host;
 		this.#unwatchMouse = createRoot(dispose => {
-			effect(() => host.setMouse(this.overlays.mouse() ?? this.#inlineMouse()));
+			effect(() => {
+				const inline = this.#inlineMouse();
+				// The fullscreen transcript scrolls with the wheel: the terminal must report it.
+				const wheel = inline === "off" && !host.native && options.screen?.() === "fullscreen";
+				host.setMouse(this.overlays.mouse() ?? (wheel ? "click" : inline));
+			});
 			return dispose;
 		});
 		this.#theme = options.theme;

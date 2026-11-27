@@ -20,7 +20,6 @@ function isGatewayImageApi(api: string): boolean {
 		api === "openai-images" ||
 		api === "openrouter-images" ||
 		api === "google-generative-ai" ||
-		api === "google-gemini-cli" ||
 		api === "factory-droid-agent"
 	);
 }

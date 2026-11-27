@@ -9,6 +9,7 @@
 ### Added
 
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Added the `fullscreen` screen mode (`HostOptions.screen`, `TermBackendOptions.screen`): alternate-screen frames with the dock pinned to the bottom and `main` in an app-owned window that follows the tail or stays anchored, scrolled by `Host.scroll()`/`TermBackend.scroll()` and the mouse wheel; history is written only by the shutdown flush, and a session that drew only fullscreen frames never clears native history on resize or display reset ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe))
 ### Added
 
 - `TextEdit.paste` marks an edit that types a bracketed paste ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
@@ -17,6 +18,7 @@
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to control whether URLs are displayed after named OSC 8 hyperlinks.
 - Added `TextEdit.paste` to identify edits produced by bracketed paste operations.
 - Added `tool.gl` symbols to the Unicode, Nerd Font, and ASCII presets for the GitLab tool.
+- Terminal painters can attach one-shot marks to rows as they enter scrollback without re-emitting them on redraw.
 
 ### Fixed
 
@@ -28,8 +30,11 @@
 - Reduced idle CPU usage on Windows after `/restart`.
 - Improved recovery from lost Tern surfaces and malformed TSP responses.
 - Typing in a Tern composer now remains responsive while an agent is streaming, even when Tern is slow to acknowledge frames.
+- Clicks in Tern now show their effect while Tern is slow to acknowledge frames: an ask form you submit leaves the screen at once instead of staying with a Submit button that no longer responds.
 - Fixed inverse video styling leaking into padding and borders at wrapped line endings.
 - Fixed win32 input-mode key records being inserted as literal composer text in certain timing conditions.
+- Fixed SIXEL and iTerm2 images losing their bottom cell row in terminals that clear image cells on line erase, such as xterm.js ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
+- Fixed code blocks drawn with `codeIndent: 0` putting their ``` fence rows one column right of the code; fences now sit at column 0 with it, so copying the whole block yields its markdown ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 
 ## [19.2.1] - 2026-11-25
 

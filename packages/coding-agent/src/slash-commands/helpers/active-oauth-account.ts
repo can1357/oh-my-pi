@@ -103,8 +103,7 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
  *   an org, the base fallback applies unchanged (providers without orgs
  *   keep their former behavior).
  * - `email`     ↔ report metadata `email` — decisive when both sides carry
- *   one: Codex Team seats share an account id and Antigravity accounts share
- *   one Google project, so only the email tells their reports apart
+ *   one: Codex Team seats share an account id, so only the email tells their reports apart
  * - `accountId` ↔ report metadata `accountId`/`account_id` or `limit.scope.accountId`
  * - `projectId` ↔ report metadata `projectId` or `limit.scope.projectId`
  *   (Google-style providers key usage on the GCP project, not an account id)

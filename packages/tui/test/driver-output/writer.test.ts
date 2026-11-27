@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { anchoredRows } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { duplicated, lines, Vt } from "./vt";
 
 const CURSOR_HIDE = "\x1b[?25l";
@@ -147,6 +148,20 @@ describe("images", () => {
 		vt.present({ viewport: ["b", "c", "d", "status"], cursor: null });
 		expect(vt.since(removed)).not.toMatch(/\x1b\[\d*[LM]/);
 		expect(vt.screen().slice(0, 4)).toEqual(["b", "c", "d", "status"]);
+	});
+
+	it("erases an anchored image's last row before drawing the image, never after", () => {
+		const vt = new Vt({ columns: 30, rows: 8 });
+		vt.present({ viewport: ["prose", "stale one", "stale two", "stale three", "more"], cursor: null });
+		const mark = vt.writes.length;
+		const sixel = '\x1bP9;1;0q"1;1;20;18#0~\x1b\\';
+		vt.present({ viewport: ["prose", ...anchoredRows(sixel, 3), "more"], cursor: null });
+		const bytes = vt.since(mark);
+		// The image's cells start at the restored cursor: an erase there clears the image's bottom row.
+		const restored = bytes.slice(bytes.indexOf(sixel) + sixel.length);
+		expect(restored.slice(0, restored.search(/\x1b\[\d*B|\n/))).not.toMatch(/\x1b\[\d*K/);
+		// The row still loses the older, wider row's text.
+		expect(vt.screen().slice(0, 5)).toEqual(["prose", "", "", "", "more"]);
 	});
 });
 
