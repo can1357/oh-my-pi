@@ -59,6 +59,7 @@
 - Updated the local speech runtimes to sherpa-onnx 2.0.3 and Transformers.js 4.3.2; they reinstall on first use.
 - Shortened and bracketed bash's notices, e.g. `[next call: cwd → …, set -e off]`, `[timeout clamped: 7200s → 3600s]`, `[backgrounded as bg_3, killed at 300s total; …]`, `[took 1.23s]`, `[exit code 3]`, `[timed out after 30s]`, `[cancelled]`; eval's notices follow suit, e.g. `[Python kernel restarted; earlier state gone]`, `[timed out after 30s; kernel interrupted, state kept]`.
 - `cfg://` writes to map settings such as `modelRoles` now change only the entries they name (`null` removes one), so approval prompts and transcripts show just those entries instead of the whole map, and saving one entry keeps the others in your config.
+- The task tool's agent list now shows each restricted agent's tools (e.g. `scout` has no shell), and `scout` reports a requested method it cannot perform instead of silently substituting a weaker one ([#7020](https://github.com/can1357/oh-my-pi/issues/7020))
 
 ### Fixed
 
