@@ -162,6 +162,7 @@ const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 		return !verb || (verb === "full" && !rest);
 	},
 	model: () => true,
+	retry: () => true,
 	switch: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
@@ -1721,7 +1722,8 @@ export class InputController {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /copy picks
 				// from it, /export writes it (with its own subagents), /jobs lists the focused
 				// agent's jobs without a way to cancel them, /usage reports account-wide limits,
-				// and /model, /switch, /effort change the focused agent's model and thinking.
+				// /model, /switch, /effort change the focused agent's model and thinking, and
+				// /retry retries the focused agent's last failed turn.
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {

@@ -503,7 +503,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed({ agentInvoked: true });
 		},
 		handleTui: async (_command, runtime) => {
-			const didRetry = await runtime.ctx.session.retry();
+			// The viewed session, like Alt+R: a focused subagent retries its own failed turn.
+			const didRetry = await runtime.ctx.viewSession.retry();
 			if (!didRetry) {
 				runtime.ctx.showStatus("Nothing to retry");
 			}

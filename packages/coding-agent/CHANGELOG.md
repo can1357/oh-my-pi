@@ -257,6 +257,7 @@
 - Fixed glob/batch `lsp diagnostics` reporting every file as failed on large workspaces by using the same per-file wait as single-file diagnostics instead of a 400ms cap ([#10701](https://github.com/can1357/oh-my-pi/issues/10701))
 - Fixed bash `gh issue`/`gh pr` cache invalidation dropping the wrong row when a numeric flag value (e.g. `--parent 100`) preceded the target, and invalidating only the first of several targets ([#10626](https://github.com/can1357/oh-my-pi/issues/10626))
 - Fixed extensions crashing when they call `isFocused()` on the overlay handle from `ctx.ui.custom(..., { overlay: true, onHandle })`; the handle now reports whether the overlay holds keyboard focus ([#10664](https://github.com/can1357/oh-my-pi/issues/10664))
+- `/retry` in a focused subagent view now retries that agent's last failed turn, matching Alt+R, instead of being refused as a main-session command ([#7369](https://github.com/can1357/oh-my-pi/issues/7369))
 
 ### Removed
 
