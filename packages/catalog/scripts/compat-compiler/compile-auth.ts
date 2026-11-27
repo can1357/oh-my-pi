@@ -824,6 +824,21 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				result.activeNotice = singleString(child);
 				if (!result.activeNotice.trim()) malformed(child);
 				break;
+			case "login-notice":
+				leaf(child, []);
+				result.loginNotice = singleString(child);
+				if (!result.loginNotice.trim()) malformed(child);
+				break;
+			case "manage-url":
+				leaf(child, []);
+				result.manageUrl = singleString(child);
+				if (!URL.canParse(result.manageUrl)) malformed(child);
+				break;
+			case "required-scope":
+				leaf(child, []);
+				result.requiredScope = singleString(child);
+				if (!result.requiredScope.trim() || /\s/.test(result.requiredScope)) malformed(child);
+				break;
 			case "store-as":
 				leaf(child, []);
 				result.storeAs = singleString(child);

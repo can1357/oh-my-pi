@@ -429,6 +429,9 @@ auth "anthropic" {
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
     connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
     active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
+    login-notice "Requests follow Acme's terms"  // shown once after each successful sign-in
+    manage-url "https://acme.example/apps"       // the host page where the user turns this app's access on or off
+    required-scope "acme.inference"              // a login without this scope stays signed in with the provider off
 }
 ```
 
@@ -441,6 +444,8 @@ auth "anthropic" {
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
 `connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
+
+`login-notice "<text>"` adds a dim line under the login success line. `manage-url "<url>"` is the host's page where the user turns the app's access on or off: login and logout output link it, and the model picker's provider pane opens it (F6). `required-scope "<scope>"` names the OAuth scope a login must hold to serve requests; a login whose granted `scope` lacks it is kept, and login output, logout rows and the model picker show the provider as off instead of signing the user out.
 
 Login kinds:
 

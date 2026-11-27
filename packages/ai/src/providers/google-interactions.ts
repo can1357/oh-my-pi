@@ -411,9 +411,9 @@ function describeHttpError(
 	if (status === 403 && (error?.reason === "SERVICE_DISABLED" || CLIENT_NOT_AUTHORIZED_PATTERN.test(detail))) {
 		return `Google has turned off Gemini access for this sign-in right now; signing in again will not help. Try again later or ${GEMINI_API_KEY_HINT}.`;
 	}
-	// Copy stays classifiable: AIError.isInvalidatedOAuthTokenError disables the credential like a dead grant.
+	// The sign-in stays stored: a grant without the scope (declined, or turned off at Google) is off, not dead.
 	if (isScopeInsufficient(status, error, detail)) {
-		return "Your Google sign-in is missing a permission omp needs; sign in again.";
+		return "Gemini access is off for this Google sign-in (declined at sign-in or turned off at https://myaccount.google.com/permissions). Sign in again to turn it on.";
 	}
 	if (status === 400 && UNSUPPORTED_LOCATION_PATTERN.test(detail)) {
 		return `Gemini API access is not available in your region (${detail})`;

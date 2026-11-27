@@ -628,6 +628,15 @@ export interface CompiledAuthProvider {
 	 * models (such as "Using your Acme Pro plan").
 	 */
 	activeNotice?: string;
+	/** Shown once after each successful sign-in (such as the terms requests follow). */
+	loginNotice?: string;
+	/** The host's page where the user turns this app's access on or off. */
+	manageUrl?: string;
+	/**
+	 * OAuth scope a login must hold for the provider to serve requests. A login
+	 * whose granted scope lacks it stays signed in with the provider off.
+	 */
+	requiredScope?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;

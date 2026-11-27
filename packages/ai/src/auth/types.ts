@@ -608,6 +608,8 @@ export interface OAuthLoginIdentity {
 	accountId?: string;
 	orgId?: string;
 	orgName?: string;
+	/** The login is stored but lacks the provider's `required-scope`: signed in, provider off. */
+	accessOff?: boolean;
 }
 
 /** Failure while resolving access to one OAuth account. */
