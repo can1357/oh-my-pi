@@ -999,6 +999,7 @@ describe("AskTool answered by an extension", () => {
     <label><input type="checkbox" name="tags" value="c" disabled> C</label>
   </fieldset>
   <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+  <label><input type="checkbox" name="agree" value="yes" checked> Agree</label>
 </form>`;
 		const answer = async (data: ExtensionAskData) => {
 			const ext = channel();
@@ -1034,10 +1035,21 @@ describe("AskTool answered by an extension", () => {
 		it("accepts one Other value beside options, and an empty array clears the group", async () => {
 			const other = await answer({ tags: ["b", "x"] });
 			expect(other.accepted).toBe(true);
-			expect(text(other.result!)).toContain(JSON.stringify({ tags: ["b", "x"], region: "eu" }, null, 2));
+			expect(text(other.result!)).toContain(
+				JSON.stringify({ tags: ["b", "x"], region: "eu", agree: "yes" }, null, 2),
+			);
 			const cleared = await answer({ tags: [] });
 			expect(cleared.accepted).toBe(true);
-			expect(text(cleared.result!)).toContain(JSON.stringify({ region: "eu" }, null, 2));
+			expect(text(cleared.result!)).toContain(JSON.stringify({ region: "eu", agree: "yes" }, null, 2));
+		});
+		it("an empty array unchecks a preselected lone checkbox, and [value] keeps it checked", async () => {
+			const unchecked = await answer({ agree: [] });
+			expect(unchecked.accepted).toBe(true);
+			expect(text(unchecked.result!)).toContain(JSON.stringify({ tags: ["a"], region: "eu" }, null, 2));
+			const checked = await answer({ agree: ["yes"] });
+			expect(checked.accepted).toBe(true);
+			expect(text(checked.result!)).toContain(JSON.stringify({ tags: ["a"], region: "eu", agree: "yes" }, null, 2));
+			expect((await answer({ agree: ["yes", "no"] })).accepted).toBe(false);
 		});
 	});
 

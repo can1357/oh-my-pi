@@ -1544,7 +1544,10 @@ export interface ToolApprovalResolvedEvent {
 /** One named control of an `ask` form, as `ask_requested` reports it. */
 export interface AskFieldSummary {
 	name: string;
-	/** `choice`: radio/checkbox group or select (answer with an option `value`, an array of them when `multi`); `text`: free text. */
+	/**
+	 * `choice`: radio/checkbox group or select (answer with an option `value`, an array of them when `multi`;
+	 * a lone checkbox, reported with `multi: false`, also takes `[]` to leave it unchecked); `text`: free text.
+	 */
 	kind: "choice" | "text";
 	/** The question shown for this control, plain text. */
 	question: string;

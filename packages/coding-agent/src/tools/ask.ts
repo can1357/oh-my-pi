@@ -473,6 +473,13 @@ function extensionChoiceValue(field: ChoiceField, value: unknown): HtmlFormValue
 		const values = [...new Set(value)];
 		return fits(values) ? values : undefined;
 	}
+	// A lone checkbox submits a string when checked and nothing when not: `[]` unchecks it (even a
+	// preselected one, as the dialog can), and `[value]` checks it like `value`.
+	if (field.multi && Array.isArray(value)) {
+		if (value.length === 0) return [];
+		if (value.length !== 1) return undefined;
+		value = value[0];
+	}
 	if (typeof value !== "string") return undefined;
 	return fits([value]) ? value : undefined;
 }
