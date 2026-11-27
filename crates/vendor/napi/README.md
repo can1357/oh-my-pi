@@ -39,7 +39,9 @@ dependency here through `[patch.crates-io]`. MIT licensed; see `LICENSE`.
   uses it to trim freed heap pages after the JS GC releases a native result
   (`crates/natives/src/memory.rs`); without a registered hook the
   finalizers behave as upstream.
-- `Cargo.toml`: `publish = false` and a `[lints.clippy]` block that keeps the
+- `Cargo.toml`: `publish = false`, `rust-version` inherited from the
+  workspace (upstream's 1.88 would cap cargo's MSRV-aware resolution of every
+  workspace dependency at 1.88), and a `[lints.clippy]` block that keeps the
   workspace's lint config off upstream code. `CHANGELOG.md`: the vendor
   import entries under `[Unreleased]`. The crates.io `Cargo.lock`,
   `Cargo.toml.orig`, `README.md` and VCS metadata are dropped; `BUILD.bazel`

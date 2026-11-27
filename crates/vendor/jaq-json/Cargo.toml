@@ -14,8 +14,8 @@ sync = []
 std = ["jaq-core/std", "jaq-std/std"]
 
 [dependencies]
-jaq-core = { version = "3.1.1", default-features = false }
-jaq-std = { version = "3.0.3", default-features = false }
+jaq-core = { version = "3.1.2", default-features = false }
+jaq-std = { version = "3.0.4", default-features = false }
 
 bstr = { version = "1", default-features = false }
 bytes = { version = "1", default-features = false }

@@ -1,6 +1,6 @@
 # jaq-core (vendored)
 
-Vendored copy of [jaq-core 3.1.1](https://crates.io/crates/jaq-core/3.1.1), licensed under MIT. The workspace's `[patch.crates-io]` routes `omp-builtins`, `jaq-std` and `jaq-json` through this copy so they share the same interpreter types.
+Vendored copy of [jaq-core 3.1.2](https://crates.io/crates/jaq-core/3.1.2), licensed under MIT. The workspace's `[patch.crates-io]` routes `omp-builtins`, `jaq-std` and `jaq-json` through this copy so they share the same interpreter types.
 
 ## Why
 

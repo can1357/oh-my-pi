@@ -11,7 +11,7 @@
 
 [package]
 edition = "2021"
-rust-version = "1.88"
+rust-version.workspace = true
 name = "napi"
 version = "3.14.2"
 authors = [
