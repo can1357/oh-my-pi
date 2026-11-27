@@ -58,6 +58,8 @@ interface ClaudePluginManifest {
 
 interface ResolvedPluginDir {
 	dirs: string[];
+	/** A manifest named a path, even if it resolved to the conventional directory or was rejected. */
+	declared: boolean;
 	warnings: string[];
 }
 
@@ -177,7 +179,7 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 	}
 
 	if (configured.length === 0) {
-		return { dirs: [fallbackDir], warnings: [] };
+		return { dirs: [fallbackDir], declared: false, warnings: [] };
 	}
 
 	const seen = new Set<string>();
@@ -200,7 +202,7 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 		dirs.push(resolved);
 	}
 
-	return { dirs, warnings };
+	return { dirs, declared: true, warnings };
 }
 
 // =============================================================================
@@ -237,7 +239,11 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const results = await Promise.all(
 		roots.map(async root => {
 			const marketplaceRootManifest = await readMarketplaceRootManifest(root);
-			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
+			const {
+				dirs: skillsDirs,
+				declared,
+				warnings: resolveWarnings,
+			} = await resolvePluginDir(root, {
 				manifestKeys: ["skills"],
 				fallback: "skills",
 				includeFallback: true,
@@ -248,12 +254,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 			// itself a single skill.
 			const defaultSkillsDir = path.join(root.path, "skills");
 			const rootSkillPath = path.join(root.path, "SKILL.md");
-			if (
-				skillsDirs.length === 1 &&
-				skillsDirs[0] === defaultSkillsDir &&
-				!(await pathExists(defaultSkillsDir)) &&
-				(await pathExists(rootSkillPath))
-			) {
+			if (!declared && !(await pathExists(defaultSkillsDir)) && (await pathExists(rootSkillPath))) {
 				const rootResult = await scanSkillsFromDir(ctx, {
 					dir: root.path,
 					providerId: PROVIDER_ID,
