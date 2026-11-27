@@ -134,14 +134,15 @@ describe("pi.sendUserMessage drops", () => {
 		return { content: ["must not run for a dropped message"] };
 	};
 
-	/** Holds image normalization for image-bearing calls until released. */
-	function holdImageNormalization(): { started: Promise<void>; release: () => void } {
+	/** Holds image normalization for image-bearing calls until released; `onReturn` runs as it returns. */
+	function holdImageNormalization(onReturn?: () => void): { started: Promise<void>; release: () => void } {
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
 			if (!images?.length) return images;
 			started.resolve();
 			await release.promise;
+			onReturn?.();
 			return images;
 		});
 		return { started: started.promise, release: () => release.resolve() };
@@ -263,6 +264,54 @@ describe("pi.sendUserMessage drops", () => {
 			kickoff.release();
 
 			expect(await withTimeout(sent, 10_000, "sendUserMessage never settled")).toBeInstanceOf(PromptDroppedError);
+			await turn.catch(() => undefined);
+			await disposing;
+			session = undefined;
+			expect(streamCalls).toBe(1);
+		});
+
+		it("rejects an aside skill disposed after the post-image streaming check", async () => {
+			const kickoff = heldTurn();
+			const created = await createSession([kickoff.response, unexpectedTurn]);
+			// Armed when normalization returns: the dispatcher's next `isStreaming` read is the check that
+			// sends the skill to the aside queue. Disposing inside that read lands after every dispatcher
+			// guard, so only the queue's check after its awaited generation test refuses the skill, and only
+			// the propagation of that refusal turns it into a drop.
+			let armed = false;
+			let triggered = false;
+			let disposing: Promise<void> | undefined;
+			const normalization = holdImageNormalization(() => {
+				armed = true;
+			});
+			const sent = outcomeOf(
+				created.sendUserMessage([{ type: "text", text: SKILL_INVOCATION }, IMAGE], {
+					expand: true,
+					deliverAs: "aside",
+					tag: "skill-post-image-dispose",
+				}),
+			);
+			await withTimeout(normalization.started, 5_000, "Skill image normalization never started");
+			// A turn starts while the images are prepared, so the skill comes back to a streaming session.
+			const turn = created.prompt("kickoff");
+			await withTimeout(kickoff.started, 5_000, "Kickoff turn never started");
+			const readStreaming = Object.getOwnPropertyDescriptor(AgentSession.prototype, "isStreaming")?.get;
+			if (!readStreaming) throw new Error("AgentSession.isStreaming has no getter");
+			Object.defineProperty(created, "isStreaming", {
+				configurable: true,
+				get(): boolean {
+					const streaming: boolean = readStreaming.call(created);
+					if (armed && streaming && !triggered) {
+						triggered = true;
+						disposing = created.dispose();
+					}
+					return streaming;
+				},
+			});
+			normalization.release();
+
+			expect(await withTimeout(sent, 10_000, "sendUserMessage never settled")).toBeInstanceOf(PromptDroppedError);
+			expect(triggered).toBe(true);
+			kickoff.release();
 			await turn.catch(() => undefined);
 			await disposing;
 			session = undefined;
