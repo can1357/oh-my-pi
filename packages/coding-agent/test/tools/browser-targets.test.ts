@@ -1,12 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { cdpTargets, findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import * as discovery from "@oh-my-pi/pi-coding-agent/tools/browser/relay/discovery";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	type TabSnapshot,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
+import * as windowsDiscovery from "@oh-my-pi/pi-coding-agent/tools/browser/relay/windows-discovery";
 import { releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -227,6 +229,58 @@ async function connectExtension(port: number, tabs: TabSnapshot[]): Promise<WebS
 }
 
 describe("browser targets with the relay", () => {
+	it.skipIf(process.platform !== "linux")(
+		"rediscovers a rotated Windows relay instead of listing the old browser",
+		async () => {
+			process.env.PI_BROWSER_RELAY = "1";
+			const previous = process.env.WSL_DISTRO_NAME;
+			process.env.WSL_DISTRO_NAME = "fixture";
+			const local = spyOn(discovery, "discoverRelayEndpoints").mockReturnValue([]);
+			const windows = spyOn(windowsDiscovery, "discoverWindowsRelay");
+			const methods: string[] = [];
+			using reused = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request) {
+					methods.push(request.method);
+					return Response.json({ Browser: "Chrome/151" });
+				},
+			});
+			const hosts: RelayServer[] = [];
+			try {
+				local.mockReturnValueOnce([reused.url.origin]);
+				const tool = session();
+				for (const title of ["First", "Second"]) {
+					const host = startRelayServer({ port: 0 });
+					hosts.push(host); // Keep the first port allocated so the replacement cannot reuse it.
+					const url = `https://example.com/${title}`;
+					const peer = await connectExtension(host.port, [snapshot(1, { url, title })]);
+					try {
+						const cdpUrl = `http://127.0.0.1:${host.port}`;
+						const info = await (await fetch(`${cdpUrl}/json/version`, { proxy: "" })).json();
+						if (!isRecord(info) || typeof info.ompRelayInstance !== "string")
+							throw new Error("No relay instance");
+						windows.mockResolvedValue({ kind: "relay", cdpUrl, windowsInstance: info.ompRelayInstance });
+						const { value } = await invoke(tool, { action: "targets", app: "relay" });
+						expect(value).toEqual([{ target: url, title, url, shown: false }]);
+					} finally {
+						peer.close();
+					}
+				}
+				expect(methods).toEqual(["GET"]);
+				await expect(
+					invoke(session({ "browser.relayUrl": "///" }), { action: "open", app: "relay" }),
+				).rejects.toThrow(/configure browser\.relayUrl/);
+			} finally {
+				for (const host of hosts) host.stop();
+				windows.mockRestore();
+				local.mockRestore();
+				if (previous === undefined) delete process.env.WSL_DISTRO_NAME;
+				else process.env.WSL_DISTRO_NAME = previous;
+			}
+		},
+	);
+
 	it("lists the user's Chrome pages, skipping discarded ones", async () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		const port = await findFreeCdpPort();

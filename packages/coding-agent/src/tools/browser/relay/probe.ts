@@ -9,7 +9,9 @@
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
+import type { RelayKind } from "./kind";
 import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion, RELAY_RESTART_PATH } from "./protocol";
+import { discoverWindowsRelay } from "./windows-discovery";
 
 /** How long a relay that is up may go without its browser's hello. */
 const HELLO_WINDOW_MS = 10_000;
@@ -58,6 +60,27 @@ function parseVersionBody(body: string): object | null {
 	}
 }
 
+function reportedRelayInstance(info: object | null): string | undefined {
+	if (info && relayVersionOf(info) && "ompRelayInstance" in info && typeof info.ompRelayInstance === "string") {
+		return info.ompRelayInstance;
+	}
+}
+
+/** A stale local record can outlive its relay even when the PID and port are both reused. */
+export async function resolveWslRelay(local: RelayKind, signal?: AbortSignal): Promise<RelayKind> {
+	if (local.cdpUrl) {
+		const reply = await probeCdpResponse(`${local.cdpUrl}/json/version`, { timeoutMs: 500, signal });
+		if (
+			reply &&
+			(reply.status === 200 || reply.status === 503) &&
+			reportedRelayInstance(parseVersionBody(reply.body))
+		) {
+			return local;
+		}
+	}
+	return discoverWindowsRelay(signal);
+}
+
 /** The id of the relay server answering at `cdpUrl`, ready or waiting; null when none answers. */
 async function relayInstanceAt(cdpUrl: string, signal?: AbortSignal): Promise<string | null> {
 	const response = await probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS, signal });
@@ -68,31 +91,24 @@ async function relayInstanceAt(cdpUrl: string, signal?: AbortSignal): Promise<st
 		: "";
 }
 
-function readyOutcome(body: string): RelayWaitOutcome {
-	try {
-		const parsed: unknown = JSON.parse(body);
-		if (
-			typeof parsed !== "object" ||
-			parsed === null ||
-			!("ompRelayDiscardedTabsProtocol" in parsed) ||
-			parsed.ompRelayDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
-		) {
-			return "outdated-relay";
-		}
-		if (
-			!("ompExtensionDiscardedTabsProtocol" in parsed) ||
-			parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
-		) {
-			// A relay from another OMP version is the likelier culprit than the extension.
-			if (relayVersionOf(parsed) !== VERSION) return "outdated-relay";
-			return "outdated-extension";
-		}
-		if (isOlderOmpVersion(relayVersionOf(parsed), VERSION) && relayCdpClientsOf(parsed) === 0)
-			return "idle-older-relay";
-		return "ready";
-	} catch {
+function readyOutcome(parsed: object | null, windowsRelay: boolean): RelayWaitOutcome {
+	if (
+		parsed === null ||
+		!("ompRelayDiscardedTabsProtocol" in parsed) ||
+		parsed.ompRelayDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+	) {
 		return "outdated-relay";
 	}
+	if (
+		!("ompExtensionDiscardedTabsProtocol" in parsed) ||
+		parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+	) {
+		// A local relay from another OMP version is the likelier culprit than the extension.
+		return !windowsRelay && relayVersionOf(parsed) !== VERSION ? "outdated-relay" : "outdated-extension";
+	}
+	if (!windowsRelay && isOlderOmpVersion(relayVersionOf(parsed), VERSION) && relayCdpClientsOf(parsed) === 0)
+		return "idle-older-relay";
+	return "ready";
 }
 
 /**
@@ -102,10 +118,11 @@ function readyOutcome(body: string): RelayWaitOutcome {
 export async function waitForRelayExtension(
 	cdpUrl: string,
 	signal?: AbortSignal,
-	options?: { restarted?: boolean },
+	options?: { restarted?: boolean; windowsInstance?: string },
 ): Promise<RelayWaitOutcome> {
 	const probeUrl = `${cdpUrl}/json/version`;
 	const reachableBy = Date.now() + (options?.restarted ? RESTART_WINDOW_MS : 0);
+	const windowsInstance = options?.windowsInstance;
 	let helloBy: number | null = null;
 	for (;;) {
 		throwIfAborted(signal);
@@ -113,16 +130,18 @@ export async function waitForRelayExtension(
 		throwIfAborted(signal);
 		if (response === null) {
 			if (Date.now() >= reachableBy) return "unreachable";
-		} else if (response.status >= 200 && response.status < 300) {
-			return readyOutcome(response.body);
-		} else if (response.status !== 503) {
-			return "unreachable";
 		} else {
+			const parsed = parseVersionBody(response.body);
+			if (windowsInstance !== undefined && reportedRelayInstance(parsed) !== windowsInstance) return "unreachable";
+			if (response.status >= 200 && response.status < 300)
+				return readyOutcome(parsed, windowsInstance !== undefined);
+			if (response.status !== 503) return "unreachable";
 			helloBy ??= Date.now() + HELLO_WINDOW_MS;
 			if (Date.now() >= helloBy) {
 				// A relay from another version reads as outdated: no browser is behind it to blame instead.
-				const parsed = parseVersionBody(response.body);
-				return parsed !== null && relayVersionOf(parsed) !== VERSION ? "outdated-relay" : "no-extension";
+				return windowsInstance === undefined && parsed !== null && relayVersionOf(parsed) !== VERSION
+					? "outdated-relay"
+					: "no-extension";
 			}
 		}
 		await Bun.sleep(POLL_INTERVAL_MS);

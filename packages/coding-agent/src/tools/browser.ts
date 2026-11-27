@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { getWebKitHostPath, isRecord, isWsl, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "./streaming-output";
@@ -21,8 +21,8 @@ import { type EmulationViewport, viewportSchema } from "./browser/emulation";
 import { sameAddress } from "./browser/navigation";
 import { resolveInitScriptSources } from "./browser/open-options";
 import type { BrowserRelayGuidance } from "./browser/prelude-definition";
-import { isRelayOnly, resolveRelayKind } from "./browser/relay/kind";
-import { relayExtensionNotice } from "./browser/relay/probe";
+import { isRelayOnly, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
+import { relayExtensionNotice, resolveWslRelay } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -169,6 +169,11 @@ interface BrowserPreludeDetails {
 	value?: unknown;
 }
 
+function configuredRelayUrl(session: ToolSession, env: Record<string, string | undefined>): string | undefined {
+	const url = cfgBrowserRelayUrl.get(session.settings);
+	return isRelayOnly(env) ? (env.PI_PANEL_RELAY_URL ?? url) : url;
+}
+
 /**
  * The browser an open drives, by precedence: an explicit `app` (an executable
  * path or CDP URL, or a keyword: `relay`, `tern`, `webkit`, `chromium`, `own`),
@@ -194,10 +199,7 @@ export function resolveBrowserKind(
 				`This session drives the user's Chrome through the omp extension and has no other browser; app: ${JSON.stringify(app)} is unavailable. Omit app or pass app: "relay".`,
 			);
 		}
-		const relayKind = resolveRelayKind(
-			{ url: env.PI_PANEL_RELAY_URL ?? cfgBrowserRelayUrl.get(session.settings) },
-			env,
-		);
+		const relayKind = resolveRelayKind({ url: configuredRelayUrl(session, env) }, env);
 		if (relayKind) return relayKind;
 	}
 	if (app !== undefined && URL_SCHEME.test(app)) {
@@ -683,6 +685,20 @@ async function installWebKitForOpen(
 	}
 }
 
+function automaticWslRelay(kind: BrowserKind, session: ToolSession): RelayKind | undefined {
+	if (kind.kind === "relay" && isWsl() && !configuredRelayUrl(session, process.env)?.trim()) return kind;
+}
+
+function matchingTab(name: string, kind: BrowserKind): TabSession | undefined {
+	const existing = getTab(name);
+	if (existing && browserKey(existing.browser.kind) !== browserKey(kind)) {
+		throw new ToolError(
+			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}, not ${describeKind(kind)}). Close it first, or reopen it with the app and headed it was opened with.`,
+		);
+	}
+	return existing;
+}
+
 async function openOnKind(
 	session: ToolSession,
 	name: string,
@@ -696,13 +712,8 @@ async function openOnKind(
 	const downloadsPath = params.downloads === undefined ? undefined : resolveToCwd(params.downloads, session.cwd);
 	details.browser = kind.kind;
 
-	// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
-	const existing = getTab(name);
-	if (existing && browserKey(existing.browser.kind) !== browserKey(kind)) {
-		throw new ToolError(
-			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}, not ${describeKind(kind)}). Close it first, or reopen it with the app and headed it was opened with.`,
-		);
-	}
+	const wslRelay = automaticWslRelay(kind, session);
+	let existing = wslRelay ? undefined : matchingTab(name, kind);
 	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
 	if (params.insecure && kind.kind === "relay") {
 		throw new ToolError(
@@ -736,8 +747,15 @@ async function openOnKind(
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	// The step in flight when the deadline fires; a timeout names it.
-	let stage = `launching or connecting to the browser (${describeKind(kind)})`;
+	let stage = wslRelay
+		? "discovering the relay from WSL"
+		: `launching or connecting to the browser (${describeKind(kind)})`;
 	try {
+		if (wslRelay) {
+			kind = await resolveWslRelay(wslRelay, openSignal);
+			existing = matchingTab(name, kind);
+			stage = `launching or connecting to the browser (${describeKind(kind)})`;
+		}
 		const browser = await untilAborted(openSignal, () =>
 			acquireBrowser(kind, {
 				cwd: session.cwd,
@@ -759,7 +777,7 @@ async function openOnKind(
 		let relayNotice: string | null = null;
 		try {
 			// Read before the tab is acquired, so a cancel or the deadline landing during the read leaves no tab to close.
-			if (kind.kind === "relay") {
+			if (kind.kind === "relay" && kind.windowsInstance === undefined) {
 				stage = "reading the relay extension version";
 				relayNotice = await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal);
 				throwIfAborted(openSignal);
@@ -860,16 +878,18 @@ async function listTargets(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
 	// Resolve as an open naming a target: inside Tern that selects Tern even when the `browser.tern` setting is off.
-	const kind = resolveBrowserKind({ ...params, target: params.target ?? "" }, session);
-	if (kind.kind !== "tern" && kind.kind !== "relay" && kind.kind !== "connected") {
+	const resolved = resolveBrowserKind({ ...params, target: params.target ?? "" }, session);
+	if (resolved.kind !== "tern" && resolved.kind !== "relay" && resolved.kind !== "connected") {
 		throw new ToolError(
-			`No pages to adopt here (the browser would be ${describeKind(kind)}): targets exist only inside a Tern pane (its browser blocks), with the omp relay (app: "relay" or the browser.relay setting), or at a CDP endpoint (app: "http://127.0.0.1:9222" or the browser.cdpUrl setting).`,
+			`No pages to adopt here (the browser would be ${describeKind(resolved)}): targets exist only inside a Tern pane (its browser blocks), with the omp relay (app: "relay" or the browser.relay setting), or at a CDP endpoint (app: "http://127.0.0.1:9222" or the browser.cdpUrl setting).`,
 		);
 	}
-	details.browser = kind.kind;
+	details.browser = resolved.kind;
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const listSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
+		const wslRelay = automaticWslRelay(resolved, session);
+		const kind = wslRelay ? await resolveWslRelay(wslRelay, listSignal) : resolved;
 		if (kind.kind === "connected") {
 			const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 			const targets = await untilAborted(listSignal, () => listCdpTargets(cdpUrl, listSignal));
@@ -1087,7 +1107,7 @@ function describeKind(kind: BrowserKind): string {
 		case "connected":
 			return `connected:${kind.cdpUrl}`;
 		case "relay":
-			return `relay:${kind.cdpUrl}`;
+			return browserKey(kind);
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
 		case "tern":
