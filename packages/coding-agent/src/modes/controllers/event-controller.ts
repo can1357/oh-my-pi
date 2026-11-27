@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { batch, isSettled, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
 import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -54,6 +55,7 @@ import type { TranscriptBlock } from "../../ui/shell";
 import { toolEditMode } from "../../ui/tools/edit";
 import { PREVIEW_LIMITS, previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
+import { reportProgramResume } from "../../utils/program-resume";
 import {
 	cfgCompletionNotify,
 	cfgDisplayCacheMissMarker,
@@ -241,6 +243,18 @@ function mergeRules(rules: readonly NotificationRule[], added: readonly Notifica
 	const merged = [...rules];
 	for (const rule of added) if (!merged.some(existing => existing.name === rule.name)) merged.push(rule);
 	return merged;
+}
+
+/**
+ * Human label for a classified account usage/quota limit. Providers often send
+ * these as generic `rate_limit_error` bodies, which read like a transient
+ * throttle; the raw text stays in the transcript message and logs.
+ */
+function usageLimitLabel(errorMessage: string, provider?: string, baseUrl?: string): string {
+	const subject = provider ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)} account` : "Account";
+	const resetMs = extractProviderRetryHint(provider, errorMessage, baseUrl);
+	const reset = resetMs !== undefined && resetMs > 0 ? `; resets in ${formatDuration(resetMs)}` : "";
+	return `${subject} usage limit reached${reset}`;
 }
 
 export class EventController {
@@ -432,6 +446,7 @@ export class EventController {
 						settings: session.settings,
 						registry: session.modelRegistry,
 						getSessionProvider: () => session.model?.provider,
+						getSessionId: () => session.sessionId,
 					}
 				: null,
 		);
@@ -466,7 +481,7 @@ export class EventController {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_pause: e => this.#handleAgentPause(e),
 			agent_end: e => this.#handleAgentEnd(e),
-			turn_start: async () => {},
+			turn_start: async () => this.#handleTurnStart(),
 			turn_end: async e => this.#handleTurnEnd(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
@@ -507,6 +522,7 @@ export class EventController {
 			model_changed: async () => {
 				vocalizer.enforceProviderPolicy();
 				this.ctx.statusLine.refresh();
+				this.ctx.showActiveModelNotice();
 			},
 			// Header rebuild is owned by InteractiveMode's own session
 			// subscription (mirrors model_changed); nothing to do here.
@@ -1360,6 +1376,8 @@ export class EventController {
 			this.#turnStartedAt = undefined;
 		}
 		this.#clearApprovalPreviewGates();
+		// A session that started on a plan model has had no switch to announce it.
+		this.ctx.showActiveModelNotice();
 		// A new turn cannot inherit a foreground tool execution. A dropped
 		// agent_end (for example after a renderer exception) otherwise leaves a
 		// live-only tool card without a persisted result; ordered transcript
@@ -1403,6 +1421,7 @@ export class EventController {
 		this.#setTerminalProgress(true);
 		this.ctx.ensureWorkingRow();
 		setRunStatus({ state: "working" });
+		reportProgramResume();
 	}
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
@@ -1715,6 +1734,17 @@ export class EventController {
 		} else if (delta.type === "thinking_delta" && mode === "all") {
 			vocalizer.pushDelta(delta.delta);
 		}
+	}
+
+	/**
+	 * A new turn means a fresh model request: drop the previous turn's tool
+	 * intent (e.g. a lone `todo init`) so the row stops naming finished work
+	 * while the provider is still thinking.
+	 */
+	#handleTurnStart(): void {
+		if (this.#lastIntent === undefined || this.#showingAsyncWait) return;
+		this.#lastIntent = undefined;
+		this.ctx.setWorkingMessage();
 	}
 
 	/**
@@ -2144,7 +2174,19 @@ export class EventController {
 				this.#pinnedErrorComponent = lastAssistant;
 				this.#pinnedErrorMessage = event.message;
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
-				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
+				if (!recoverableEmptyOutput) {
+					const usageLimit = AIError.is(AIError.classifyMessage(event.message), AIError.Flag.UsageLimit);
+					const model = this.ctx.viewSession.model;
+					this.ctx.showPinnedError(
+						usageLimit
+							? usageLimitLabel(
+									event.message.errorMessage,
+									event.message.provider,
+									model?.provider === event.message.provider ? model.baseUrl : undefined,
+								)
+							: event.message.errorMessage,
+					);
+				}
 			}
 			this.ctx.statusLine.refresh();
 		}
@@ -2507,6 +2549,7 @@ export class EventController {
 			if (!runActive) setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		}
+		reportProgramResume();
 		// This run may be extension-started while the main input loop remains
 		// asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
@@ -2759,11 +2802,28 @@ export class EventController {
 		// leaves no error in the transcript. The retry row names the reason;
 		// `auto_retry_end` marks the attempt recovered or superseded, or restores
 		// its error when the saga fails without accounting for it.
+		const model = this.ctx.viewSession.model;
+		const provider = this.#pinnedErrorMessage?.provider ?? model?.provider;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
 		this.ctx.clearPinnedError();
-		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
+		const usageLimit =
+			event.errorId !== undefined
+				? AIError.is(event.errorId, AIError.Flag.UsageLimit)
+				: AIError.isUsageLimit(event.errorMessage);
+		const reason = previewLine(
+			sanitizeText(
+				usageLimit
+					? usageLimitLabel(
+							event.errorMessage,
+							provider,
+							model?.provider === provider ? model?.baseUrl : undefined,
+						)
+					: event.errorMessage,
+			),
+			TRUNCATE_LENGTHS.CONTENT,
+		);
 		// Replaces the turn's row with the countdown.
 		this.ctx.showWorking("retry", {
 			label: `Retrying (${event.attempt}/${event.maxAttempts})`,
@@ -2878,7 +2938,7 @@ export class EventController {
 			ttsrBlock(
 				rules,
 				() => this.ctx.toolOutputExpanded,
-				() => !this.ctx.hideToolActivity,
+				() => this.ctx.toolActivity !== "hidden",
 			),
 		);
 		this.#lastTtsrNotification = { block, rules };
@@ -2886,7 +2946,7 @@ export class EventController {
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
 		const { todos, attempt, maxAttempts } = event;
-		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => !this.ctx.hideToolActivity));
+		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => this.ctx.toolActivity !== "hidden"));
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();

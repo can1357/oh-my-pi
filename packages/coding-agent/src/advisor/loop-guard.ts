@@ -58,6 +58,7 @@ export class AdvisorLoopGuard {
 			message: context.message,
 			toolResults: context.toolResults,
 			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
+			unresolvedToolCallIds: context.unresolvedToolCallIds,
 		});
 		if (!detection) return;
 		if (this.#redirectIssued) {

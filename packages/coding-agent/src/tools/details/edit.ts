@@ -36,6 +36,8 @@ type EditDiffPreview =
 /** Result metadata for one edited file. */
 export interface EditToolPerFileResult {
 	path: string;
+	/** The edited worktree differs from the session's checkout of the same Git repository. */
+	checkoutNotice?: string;
 	diff: string;
 	firstChangedLine?: number;
 	diagnostics?: FileDiagnosticsResult;
@@ -77,6 +79,8 @@ export interface EditToolDetails {
 	perFileResults?: EditToolPerFileResult[];
 	/** Absolute file path for single-file edit results. Required by ACP diff metadata consumers. */
 	path?: string;
+	/** The edited worktree differs from the session's checkout of the same Git repository. */
+	checkoutNotice?: string;
 	/** Source-of-truth content before the edit; `undefined` for create operations. */
 	oldText?: string;
 	/** Source-of-truth content after the edit; `undefined` for delete operations. */

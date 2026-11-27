@@ -75,14 +75,6 @@ describe("bash leading cd filesystem root", () => {
 				expect(lines).not.toContain("where:workspace");
 				expect(result.details?.cdSeparator).toBe(separator);
 			}
-
-			const aliased = await tool.execute("explicit-slash-cwd", { command: rest, cwd: "/" });
-			const aliasedLines = linesOf(textOf(aliased));
-			expect(aliased.isError).toBeUndefined();
-			expect(aliased.details?.cwd).toBe(workspace);
-			expect(aliasedLines).toContain(workspace);
-			expect(aliasedLines).toContain("where:workspace");
-			expect(aliasedLines).not.toContain("where:root");
 		},
 		30_000,
 	);

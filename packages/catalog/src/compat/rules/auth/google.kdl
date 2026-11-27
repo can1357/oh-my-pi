@@ -1,3 +1,11 @@
 auth "google" {
 	name "Google Gemini"
+	login "api-key" {
+		auth-url "https://aistudio.google.com/apikey"
+		instructions "Create or copy your Gemini API key from Google AI Studio"
+		prompt "Paste your Gemini API key" placeholder="AIza..."
+		// No probe: the models-endpoint validator authenticates with
+		// `Authorization: Bearer`, which the Gemini API rejects for API keys
+		// (it expects `x-goog-api-key` or `?key=`).
+	}
 }

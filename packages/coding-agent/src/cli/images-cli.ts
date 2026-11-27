@@ -1,9 +1,10 @@
 import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { openLocalAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-broker";
 import { getBundledModels } from "@oh-my-pi/pi-catalog";
-import { $which, type FetchImpl, formatBytes, getAgentDbPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { $which, type FetchImpl, formatBytes, isEnoent } from "@oh-my-pi/pi-utils";
 import {
 	queryBlobBrokerDoctor,
 	queryBlobBrokerProbe,
@@ -237,7 +238,7 @@ function defaultCreateProviderFileClient(
 
 async function defaultOpenAuthStorage(): Promise<AuthStorage> {
 	applyUnpausedProviders(await resolveEffectiveSettings());
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await openLocalAuthCredentialStore();
 	const storage = new AuthStorage(store);
 	await storage.credentials.reload();
 	return storage;

@@ -191,8 +191,6 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 	function skillsSettings(): Settings {
 		return Settings.isolated({
 			"skills.enabled": true,
-			"skills.enableCodexUser": false,
-			"skills.enableClaudeUser": false,
 			"skills.enableClaudeProject": false,
 		});
 	}

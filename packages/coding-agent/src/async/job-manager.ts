@@ -152,9 +152,9 @@ export interface AsyncJob {
 	 */
 	intent?: string;
 	/**
-	 * The user's request a `/tan` job carries out, verbatim. The owner never saw
-	 * that work, so its completion notice quotes the request and frames the
-	 * result as the user's tangent rather than the owner's own job.
+	 * The user's request a `/tan` job carries out, verbatim. The owner never ran
+	 * that work, so its completion reaches the owner as a breadcrumb and a hidden
+	 * record linking the output, never as an `async-result` turn.
 	 */
 	request?: string;
 	abortController: AbortController;

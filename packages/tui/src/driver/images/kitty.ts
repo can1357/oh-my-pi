@@ -197,6 +197,7 @@ const PLACEHOLDER_TERMINALS: Record<string, true> = {
 	otty: true,
 	tern: true,
 	monstar: true,
+	rex: true,
 };
 
 const FLAG_WORDS: Record<string, boolean> = {
