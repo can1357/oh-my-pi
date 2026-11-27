@@ -150,11 +150,17 @@ export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
+	/** A `session_before_compact` hook returned `cancel`; nothing was committed. */
+	vetoedByHook?: boolean;
 }>;
 
 /** Shared no-op result for dispatcher paths that perform no maintenance. */
 export const COMPACTION_CHECK_NONE: CompactionCheckResult = {
 	continuationScheduled: false,
+};
+const COMPACTION_CHECK_VETOED: CompactionCheckResult = {
+	continuationScheduled: false,
+	vetoedByHook: true,
 };
 const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
 	continuationScheduled: true,
@@ -3370,7 +3376,15 @@ export class SessionMaintenance {
 
 		if (signal?.aborted) return;
 		this.#replaceActiveMessages(activeMessages);
-		logger.debug("Mid-run compaction ran between provider calls", {
+		const outcome = result.vetoedByHook
+			? "vetoed"
+			: result.automaticContinuationBlocked
+				? "dead_end"
+				: activeMessages.length === messagesBefore && !result.historyRewritten
+					? "unchanged"
+					: "committed";
+		logger.debug("Mid-run compaction attempted between provider calls", {
+			outcome,
 			contextTokens,
 			contextWindow,
 			methods: resolveCompactionMethodOrder(compactionSettings.methodOrder),
@@ -5998,6 +6012,11 @@ export class SessionMaintenance {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (hookResult?.cancel) {
+					logger.debug("Automatic compaction vetoed by session_before_compact hook", {
+						reason,
+						phase: options.phase,
+						triggerContextTokens: options.triggerContextTokens,
+					});
 					await this.#emitLifecycleEvent(
 						{
 							type: "auto_compaction_end",
@@ -6008,7 +6027,7 @@ export class SessionMaintenance {
 						},
 						options.detachPostCommit === true,
 					);
-					return COMPACTION_CHECK_NONE;
+					return COMPACTION_CHECK_VETOED;
 				}
 
 				if (hookResult?.compaction) {

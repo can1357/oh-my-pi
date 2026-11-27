@@ -195,6 +195,7 @@
 - `commit` refuses colocated Jujutsu workspaces and points to `jj`, instead of advancing Git HEAD and leaving a duplicate of jj's working-copy change ([#19815](https://github.com/can1357/oh-my-pi/issues/19815))
 - Fixed `omp skill publish` producing different package integrities for the same files on macOS and Linux ([#19402](https://github.com/can1357/oh-my-pi/issues/19402))
 - The `encourageEdits` rule now applies only to content-addressed edits and permits scripts for mechanical bulk or encoding transforms (cross-file patterns, line endings, whitespace) that `edit` cannot express ([#19350](https://github.com/can1357/oh-my-pi/issues/19350))
+- Logged automatic compactions vetoed by a `session_before_compact` hook, and mid-run compaction logs now report whether the attempt committed, was vetoed, or hit a dead end instead of always claiming it ran ([#19563](https://github.com/can1357/oh-my-pi/issues/19563))
 
 ### Removed
 

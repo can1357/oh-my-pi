@@ -482,7 +482,7 @@ Pre-compaction hook.
 
 Can:
 
-- cancel compaction (`{ cancel: true }`)
+- cancel compaction (`{ cancel: true }`): ends the whole attempt, skipping every remaining method in `methodOrder`; automatic attempts log the veto at debug level and report `aborted: true` on `auto_compaction_end`
 - provide full custom compaction payload (`{ compaction: CompactionResult }`)
 
 The hook's `customInstructions` carries only the public user focus. Internal summarizer guidance — currently the plan-mode "Approve and compact context" distillation prompt — travels a separate `internalGuidance` channel on `CompactOptions` that reaches only native summarization, never this hook or `session.compacting`; when both are set the summarizer uses `internalGuidance` while hooks still see the public `customInstructions` (issue #4359).
