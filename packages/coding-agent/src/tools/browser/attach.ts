@@ -690,6 +690,7 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 /** Select relay pages from /json metadata before probing pages; enumerate targets when metadata offers no selection. */
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
+	let relayHasNoEligibleTabs = false;
 	if (options.relayJson) {
 		let entries = await fetchRelayEntries(options.relayJson, options.signal);
 		const matcher = options.matcher;
@@ -712,6 +713,7 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 		if (entries) {
 			const pageEntries = entries.filter(e => e.type === "page");
+			relayHasNoEligibleTabs = !pageEntries.some(isAdoptableRelayEntry);
 			const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
 			const targets = browser.targets();
 			if (selected) {
@@ -746,6 +748,12 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 	if (!targets.some(target => String(target.type()) === "page")) {
 		const pages = await abortable(options.signal, () => browser.pages());
 		if (pages.length > 0) return pickPageFromList(pages, options);
+		// A connected relay lists every adoptable tab in /json; none means waiting cannot help.
+		if (relayHasNoEligibleTabs) {
+			throw new ToolError(
+				"The browser relay is connected but has no eligible tabs to adopt. Open a normal web page in the connected browser (internal pages such as chrome:// or edge://newtab cannot be adopted), then retry.",
+			);
+		}
 		// CDP discovery can start answering before Chromium or Electron has
 		// created its first window. Wait for the page, never create a tab in a
 		// borrowed browser or mistake endpoint readiness for page readiness.

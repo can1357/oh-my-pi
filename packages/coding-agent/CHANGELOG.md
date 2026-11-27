@@ -233,6 +233,7 @@
 - Fixed `mnemopi.embeddingApiKey` and `mnemopi.llmApiKey` sending an environment variable name literally instead of resolving it, matching `models.yml` `apiKey` ([#16334](https://github.com/can1357/oh-my-pi/issues/16334))
 - Waking a parked isolated subagent after a restart now says it is not resumable by design instead of "no reviver registered", and later wakes fail fast without re-reading its transcript ([#16448](https://github.com/can1357/oh-my-pi/issues/16448))
 - Fixed hold-to-talk ending right after it started when opening the microphone blocked the TUI for slightly longer than the release window, which left the recording empty ([#16121](https://github.com/can1357/oh-my-pi/issues/16121))
+- Fixed `browser.open()` over a connected relay with no eligible tabs waiting 10 seconds and failing with a raw timeout; it now fails at once and says to open a normal web page ([#16100](https://github.com/can1357/oh-my-pi/issues/16100))
 
 ### Removed
 

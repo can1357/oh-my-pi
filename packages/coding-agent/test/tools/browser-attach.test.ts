@@ -1351,6 +1351,13 @@ describe("pickElectronTarget relay path", () => {
 		expect(served).toBe(2);
 	});
 
+	it("fails at once with recovery guidance when a connected relay lists no eligible tabs", async () => {
+		relayEntries = [];
+		await expect(pickElectronTarget(makeBrowser([]), { relayJson })).rejects.toThrow(
+			"The browser relay is connected but has no eligible tabs to adopt",
+		);
+	});
+
 	it("lists relay page ids with their URLs when a target id is missing", async () => {
 		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "PAGE_MISSING" }));
 
