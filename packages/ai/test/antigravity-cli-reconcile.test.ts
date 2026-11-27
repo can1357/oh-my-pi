@@ -12,9 +12,11 @@ import type {
 	AntigravityCliPayload,
 	AssistantMessage,
 	Message,
+	Model,
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 function user(text: string): UserMessage {
 	return { role: "user", content: text, timestamp: 0 };
@@ -42,6 +44,27 @@ function assistant(text: string, toolCallIds: string[] = [], payload?: Antigravi
 		providerPayload: payload,
 		timestamp: 0,
 	};
+}
+
+function antigravityTarget(id: string): Model<"antigravity-acp"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "antigravity-acp",
+		provider: "antigravity-cli",
+		baseUrl: "https://antigravity.example.test",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	});
+}
+
+function replayText(messages: readonly Message[], target: Model<"antigravity-acp">): string {
+	return replayPrompt(messages, target)
+		.flatMap(block => (block.type === "text" ? [block.text] : []))
+		.join("\n");
 }
 
 function toolResult(toolCallId: string, text: string): ToolResultMessage {
@@ -189,7 +212,10 @@ describe("replayPrompt", () => {
 		reply.content.push(secondImage);
 		const body = toolResult("a", "before");
 		body.content.push(thirdImage, { type: "text", text: "after" });
-		const blocks = replayPrompt([{ ...user(""), content: [firstImage] }, reply, body, user("continue")]);
+		const blocks = replayPrompt(
+			[{ ...user(""), content: [firstImage] }, reply, body, user("continue")],
+			antigravityTarget("gemini-3.8-flash"),
+		);
 		expect(blocks.filter(block => block.type === "image")).toEqual([firstImage, secondImage, thirdImage]);
 		const imageIndex = blocks.findIndex(block => block.type === "image" && block.data === thirdImage.data);
 		expect(blocks[imageIndex - 1]).toEqual({ type: "text", text: "before" });
@@ -233,13 +259,32 @@ describe("replayPrompt", () => {
 			text: `<tool_result id=${JSON.stringify(quoted.toolCallId)} name=${JSON.stringify(quoted.toolName)}>`,
 		});
 	});
+
+	it("drops another model's thinking from a Claude replay and keeps its answer and tool call", () => {
+		const foreign = assistant("FOREIGN_ANSWER", ["foreign-call"]);
+		foreign.content.unshift({ type: "thinking", thinking: "FOREIGN_THINKING" });
+		const own = assistant("OWN_ANSWER", ["own-call"]);
+		own.model = "claude-opus-4-6";
+		own.content.unshift({ type: "thinking", thinking: "OWN_THINKING" });
+		const target = antigravityTarget("claude-opus-4-6");
+
+		const foreignText = replayText([foreign], target);
+		expect(foreignText).not.toContain("FOREIGN_THINKING");
+		expect(foreignText).toContain("FOREIGN_ANSWER");
+		expect(foreignText).toContain('id="foreign-call"');
+		expect(replayText([own], target)).toContain("OWN_THINKING");
+	});
+
 	it("sends trailing user input as-is and labels earlier transcript messages", () => {
-		const blocks = replayPrompt([
-			user("read a.txt"),
-			assistant("reading", ["call-1"]),
-			toolResult("call-1", "FILE-BODY-42"),
-			user("what did it say?"),
-		]);
+		const blocks = replayPrompt(
+			[
+				user("read a.txt"),
+				assistant("reading", ["call-1"]),
+				toolResult("call-1", "FILE-BODY-42"),
+				user("what did it say?"),
+			],
+			antigravityTarget("gemini-3.8-flash"),
+		);
 
 		const text = blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 		expect(text).toContain("FILE-BODY-42");

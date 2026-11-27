@@ -188,7 +188,7 @@ it("replays signed and redacted thinking only when the serving credential matche
 	expect(replayBlocks(2, assistant).map(block => block.type)).toEqual(["thinking", "redacted_thinking", "text"]);
 });
 
-it("preserves latest Anthropic thinking blocks even when model id changes", () => {
+it("drops latest Anthropic thinking blocks when the model id changes", () => {
 	const model: Model<"anthropic-messages"> = buildModel({
 		api: "anthropic-messages",
 		provider: "anthropic",
@@ -234,8 +234,8 @@ it("preserves latest Anthropic thinking blocks even when model id changes", () =
 	);
 	const transformedAssistant = transformed.find(m => m.role === "assistant") as AssistantMessage | undefined;
 	expect(transformedAssistant).toBeDefined();
-	expect(transformedAssistant?.content[0]).toEqual(assistant.content[0]);
-	expect(transformedAssistant?.content[1]).toEqual(assistant.content[1]);
+	// Claude receives no other model's thinking, other Claude models included.
+	expect(transformedAssistant?.content).toEqual([{ type: "text", text: "Answer" }]);
 });
 
 it("preserves a completed thinking signature on an aborted turn interrupted during later output", () => {

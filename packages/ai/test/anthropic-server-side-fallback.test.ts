@@ -341,11 +341,11 @@ describe("anthropic fallback content-block replay policy", () => {
 		expect(params[0]?.content).toEqual([{ type: "text", text: "continued" }]);
 	});
 
-	it("keeps one model's reasoning when the marker cannot go on the wire", () => {
-		// Each model signed its reasoning against the turn's original prefix.
-		// Back to back without the marker, Anthropic rejects the latest turn:
-		// "`thinking` or `redacted_thinking` blocks in the latest assistant
-		// message cannot be modified".
+	it("drops both models' reasoning from a fallback turn another model served", () => {
+		// The turn is stored as the fallback model's (Opus 4.8). Claude receives
+		// no other model's thinking, so Fable gets neither model's reasoning from
+		// it: dropping every thinking block of the turn also keeps the latest
+		// turn's remaining blocks unmodified.
 		const history = [
 			priorFallbackAssistant([
 				{ type: "thinking", thinking: "primary plan", thinkingSignature: "sig-primary" },
@@ -357,16 +357,11 @@ describe("anthropic fallback content-block replay policy", () => {
 		];
 		const optedIn = convertAnthropicMessages(history, fableModel, false, { serverSideFallbackEnabled: true });
 		expect(optedIn[0]?.content).toEqual([
-			{ type: "thinking", thinking: "primary plan", signature: "sig-primary" },
 			{ type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" } },
-			{ type: "thinking", thinking: "fallback plan", signature: "sig-fallback" },
 			{ type: "text", text: "continued" },
 		]);
 		const optedOut = convertAnthropicMessages(history, fableModel, false);
-		expect(optedOut[0]?.content).toEqual([
-			{ type: "thinking", thinking: "fallback plan", signature: "sig-fallback" },
-			{ type: "text", text: "continued" },
-		]);
+		expect(optedOut[0]?.content).toEqual([{ type: "text", text: "continued" }]);
 	});
 });
 

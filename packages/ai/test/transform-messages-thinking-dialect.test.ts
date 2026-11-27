@@ -12,12 +12,11 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  * neither recalled nor influences generation). `transformMessages` therefore
  * demotes the reasoning to a `text` block so it survives as conversation
  * context, usually wrapping it in the TARGET model's own canonical
- * thinking-block dialect (e.g. a ```thinking fence for Gemini). The
- * Anthropic/Claude dialect is the exception: every Claude model
- * (Opus / Sonnet / Haiku / Fable / Mythos, etc.) receives bare assistant prose,
- * because Anthropic's `reasoning_extraction` classifier flags `<thinking>` /
- * `antml:thinking` tags in prior turn history — refusing (Fable) or leaking
- * the wrapped chain-of-thought as visible reasoning on the others. Same-model
+ * thinking-block dialect (e.g. a ```thinking fence for Gemini). Claude is the
+ * exception: its `reasoning_extraction` classifier refuses another model's
+ * reasoning in prior turn history whether it is wrapped in `<thinking>` tags
+ * or written as bare prose, so every Claude model (Opus / Sonnet / Haiku /
+ * Fable / Mythos, etc.) gets the turn's reply without its thinking. Same-model
  * continuations keep the native `thinking` block untouched.
  */
 const REASONING = "The user wants the Paris weather; I will call get_weather with city=Paris.";
@@ -130,13 +129,10 @@ describe("transformMessages cross-provider thinking demotion → canonical diale
 		expect(text).toContain(REASONING);
 	});
 
-	it("renders demoted foreign reasoning as bare assistant prose for every Anthropic-dialect Claude target", () => {
-		// The Anthropic reasoning_extraction classifier flags `<thinking>` and
-		// `antml:thinking` tags in prior turn history for the whole Claude family
-		// — Fable refuses outright, Opus/Sonnet/Haiku/Mythos leak the wrapped
-		// chain-of-thought as visible reasoning. Every Anthropic-dialect target
-		// therefore receives bare prose, not the dialect's canonical thinking
-		// tags.
+	it("drops another model's reasoning for every Claude target and keeps its reply", () => {
+		// The Anthropic reasoning_extraction classifier refuses a request that
+		// carries another model's reasoning in prior turn history, tagged or as
+		// bare prose, for the whole Claude family.
 		const targets = [
 			{ name: "Claude Opus", id: "claude-opus-4-8" },
 			{ name: "Claude Sonnet", id: "claude-sonnet-4-6" },
@@ -157,67 +153,30 @@ describe("transformMessages cross-provider thinking demotion → canonical diale
 				model,
 			);
 
-			expect(assistant.content.some(b => b.type === "thinking")).toBe(false);
-
-			const first = assistant.content[0];
-			expect(first?.type).toBe("text");
-			const text = first && first.type === "text" ? first.text : "";
-			expect(text).toBe(REASONING);
-			expect(text).toBe(renderDemotedThinking(target.id, REASONING));
-			expect(text).not.toContain("<thinking>");
-			expect(text).not.toContain("</thinking>");
-			expect(text).not.toContain("<think>");
-			expect(text).not.toContain("</think>");
-			expect(text).not.toContain("_Hmm.");
-
-			const reply = assistant.content[1];
-			expect(reply?.type).toBe("text");
-			expect(reply && reply.type === "text" ? reply.text : "").toBe("Checking the forecast.");
+			expect(assistant.content).toEqual([{ type: "text", text: "Checking the forecast." }]);
 		}
 	});
 
-	it("trims a demoted block that becomes final after following empty thinking blocks are dropped", () => {
+	it("leaves a Claude target no text from a turn that held only another model's thinking", () => {
+		// Anthropic rejects a final assistant text that ends with whitespace;
+		// these turns' reasoning ends with whitespace, and a Claude target gets
+		// no text from them at all.
 		const claude = makeModel("anthropic-messages", "anthropic", "claude-sonnet-4-6");
-		const turn: AssistantMessage = {
-			...geminiThinkingTurn(),
-			content: [
+		const turns: AssistantMessage["content"][] = [
+			[
 				{ type: "thinking", thinking: `${REASONING}\n`, thinkingSignature: "google-sig" },
 				{ type: "thinking", thinking: " \n\t", thinkingSignature: "" },
 			],
-		};
+			[{ type: "thinking", thinking: "The plan is complete.\n \t", thinkingSignature: "google-sig" }],
+		];
+		for (const content of turns) {
+			const assistant = transformedAssistant(
+				[user("weather in Paris?"), { ...geminiThinkingTurn(), content }],
+				claude,
+			);
 
-		const assistant = transformedAssistant([user("weather in Paris?"), turn], claude);
-
-		expect(assistant.content).toHaveLength(1);
-		const first = assistant.content[0];
-		expect(first?.type).toBe("text");
-		const text = first && first.type === "text" ? first.text : "";
-		expect(text).toBe(REASONING);
-		expect(/\s$/.test(text)).toBe(false);
-	});
-
-	it("trimEnds trailing whitespace already present in bare Anthropic-dialect demoted thinking", () => {
-		const claude = makeModel("anthropic-messages", "anthropic", "claude-sonnet-4-6");
-		const reasoningWithTrailingWhitespace = "The plan is complete.\n \t";
-		const turn: AssistantMessage = {
-			...geminiThinkingTurn(),
-			content: [
-				{
-					type: "thinking",
-					thinking: reasoningWithTrailingWhitespace,
-					thinkingSignature: "google-sig",
-				},
-			],
-		};
-
-		const assistant = transformedAssistant([user("weather in Paris?"), turn], claude);
-
-		expect(assistant.content).toHaveLength(1);
-		const first = assistant.content[0];
-		expect(first?.type).toBe("text");
-		const text = first && first.type === "text" ? first.text : "";
-		expect(text).toBe("The plan is complete.");
-		expect(/\s$/.test(text)).toBe(false);
+			expect(assistant.content).toEqual([]);
+		}
 	});
 
 	it("keeps the native thinking block for a same-provider/same-model continuation", () => {
