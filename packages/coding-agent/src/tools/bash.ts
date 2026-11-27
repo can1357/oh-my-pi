@@ -44,7 +44,7 @@ import {
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash, sessionShellEnv } from "../exec/bash-executor";
-import { BASH_SESSION_ENV } from "../exec/session-processes";
+import { BASH_SESSION_ENV, bashSessionTag } from "../exec/session-processes";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { InternalUrlRouter } from "../internal-urls";
@@ -1218,8 +1218,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = owningSessionId(this.session) ?? "";
 		return {
 			...sessionShellEnv({ id: sessionId, file: this.session.getSessionFile() }),
-			// Membership tag for processes the call leaves running (session-processes.ts).
-			[BASH_SESSION_ENV]: sessionId,
+			// Membership tag for processes the call leaves running, scoped to this omp process
+			// (session-processes.ts).
+			[BASH_SESSION_ENV]: bashSessionTag(sessionId),
 			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}

@@ -68,6 +68,7 @@
 
 ### Fixed
 
+- Fixed `omp render` (and any other omp process opening the same session id) SIGKILLing the `&` processes and running bash calls of the live omp that owns the session: the `OMP_BASH_SESSION` leftover tag now carries the pid of the omp process that ran the bash call, so session-end reaping and leftover reminders only touch processes this process started, and `omp render` no longer reaps at all
 - Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back
 - Fixed a handoff model that never stops streaming holding automatic compaction indefinitely: handoff output is now capped like a summary, and the new `compaction.handoffTimeoutSeconds` setting (off by default) fails a handoff that runs too long so automatic compaction moves on to the next method and `/handoff` reports the timeout ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
 - Fixed the tool-call loop guard never stopping a model that keeps calling nonexistent tools (`wri`, `ed`, `ba`) with varying names or arguments; it now redirects after `model.toolCallLoopGuard.threshold` such turns in a row, while a single typo followed by a valid call is unaffected ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
