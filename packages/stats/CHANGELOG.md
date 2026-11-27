@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added queryable tracking of tool approval requests and outcomes across sessions in the stats database.
+
+### Fixed
+
+- Fixed live updates and synchronization in the `omp stats` dashboard when session directories are inaccessible or agents are continuously writing.
+
 ## [19.1.1] - 2026-11-23
 
 ### Added

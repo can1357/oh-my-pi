@@ -8,9 +8,11 @@
  * Settle rules: a reply settles when its view is finalized; a card on its
  * final result (a parked background card keeps taking frames: natively they
  * repaint, a terminal retires it as it was) unless the result gives way to the
- * next call (a `wait` poll whose jobs still run, a `todo`
- * snapshot), which the event controller seals; a read group only when sealed;
- * a run once it completes.
+ * next call (a `wait` poll whose jobs still run), which the event controller
+ * seals; a read group only when sealed; a run once it completes. A live block
+ * holds every block after it out of terminal scrollback, so a `todo` snapshot
+ * settles too, though a later update may still replace it; a live one that
+ * completed tasks stays live while their strike plays.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -21,11 +23,13 @@ import {
 	effect,
 	type Host,
 	type JSXNode,
+	onCleanup,
 	type Signal,
 	signal,
 	untrack,
 } from "@oh-my-pi/pi-tui";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import type {
@@ -38,6 +42,7 @@ import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/repl
 import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
 import { capturePage } from "../../tools/browser/page-shot";
 import { type SpotlightDetails, spotlightDetails } from "../../tools/details/spotlight";
+import { TODO_STRIKE_TOTAL_FRAMES } from "../../tools/details/todo";
 import { isWaitingPollDetails } from "../../tools/details/wait";
 import { presentShellInspector } from "../../ui/apps/shell-visualizer";
 import "../../ui/tools";
@@ -52,7 +57,7 @@ import { legacyPresenter, type LegacyToolRenderer } from "../../ui/tools/legacy"
 import { toolPresenter } from "../../ui/tools/registry";
 import type { ToolCommandMounted } from "../../ui/tools/tool-command";
 import type { BlockOptions, Shell, TranscriptBlock, ViewList } from "../../ui/shell";
-import { mountNode } from "../../ui/shell";
+import { holdSettle, mountNode } from "../../ui/shell";
 import { type ExecRun, ExecRunBlock } from "../../ui/transcript/exec-run";
 import { cardExpansion } from "../../ui/transcript/expansion";
 import { PresentedBlock, presentedMode } from "../../ui/transcript/figures/presented-block";
@@ -455,7 +460,18 @@ export class TranscriptPresenter {
 		const editMode = toolEditMode(spec.name, spec.tool);
 		if (editMode) call.setRenderContext({ editMode });
 		const presentedId = signal(spec.id);
+		// A live `todo` result strikes the tasks it completed through on the spinner clock, which the
+		// look plays only while the block is live: the card holds its settle for the strike while it
+		// draws its look (not with tool activity hidden or a compact presentation). A replayed one
+		// does not hold (a rebuild would pin the transcript behind it).
+		const striking = spec.name === "todo" ? signal(false) : undefined;
+		let strikeEnd: Timer | undefined;
 		const factory = () => {
+			if (striking) {
+				const facts = call.facts;
+				holdSettle(() => striking() && facts.activityVisible() && facts.presentation() === "full");
+				onCleanup(() => clearTimeout(strikeEnd));
+			}
 			effect(() => {
 				const value = display.toolOutputExpanded();
 				untrack(() => call.setExpanded(value));
@@ -495,10 +511,7 @@ export class TranscriptPresenter {
 		const block = this.#mount(factory, { before, compact: () => call.facts.presentation() !== "full" });
 		const settleIfFinal = (result: ToolCallResult, partial: boolean): void => {
 			if (partial) return;
-			if (result.isError !== true) {
-				if (spec.name === "wait" && isWaitingPollDetails(result.details)) return;
-				if (spec.name === "todo" && hasTodoPhases(result.details)) return;
-			}
+			if (spec.name === "wait" && result.isError !== true && isWaitingPollDetails(result.details)) return;
 			this.#settle(block);
 		};
 		return {
@@ -508,6 +521,11 @@ export class TranscriptPresenter {
 			updateStreamPreview: preview => call.updateStreamPreview(preview),
 			updateResult: (result, partial) => {
 				call.updateResult(result, partial);
+				if (striking && !partial && completesTasks(result) && untrack(call.facts.startedAt) !== undefined) {
+					clearTimeout(strikeEnd);
+					striking.set(true);
+					strikeEnd = setTimeout(() => striking.set(false), TODO_STRIKE_HOLD_MS);
+				}
 				settleIfFinal(result, partial);
 			},
 			setArgsComplete: () => call.setArgsComplete(),
@@ -787,8 +805,21 @@ function textOf(message: AssistantMessage | undefined): string {
 	return (message?.content ?? []).map(part => (part.type === "text" ? part.text : "")).join("");
 }
 
-function hasTodoPhases(details: unknown): boolean {
-	return isRecord(details) && Array.isArray(details.phases);
+/**
+ * How long a live `todo` result keeps its card live for its completion strike: at most the strike's
+ * frames plus one from the list's first paint, which lands a frame later.
+ */
+const TODO_STRIKE_HOLD_MS = (TODO_STRIKE_TOTAL_FRAMES + 2) * SPINNER_INTERVAL_MS;
+
+/** Whether a final `todo` result completed tasks (its card strikes them through). */
+function completesTasks(result: ToolCallResult): boolean {
+	const details = result.details;
+	return (
+		result.isError !== true &&
+		isRecord(details) &&
+		Array.isArray(details.completedTasks) &&
+		details.completedTasks.length > 0
+	);
 }
 
 /** An extension tool's render hooks, when it has any. */

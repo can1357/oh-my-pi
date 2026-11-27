@@ -3594,18 +3594,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return toolResult(details).text(resource.content).sourceInternal(url).done();
 		}
 
-		// A remote file `edit` can patch is tagged through its local mirror, under its URL.
-		const mirror =
+		// A remote file `edit` can patch is tagged through its local mirror, under its canonical
+		// URL, so every spelling of the file shares one mirror and one tag.
+		const remote =
 			isRemoteTextWritable(spec) && !resource.isDirectory && resource.immutable !== true
-				? await writeRemoteMirror(url, resource.content)
+				? InternalUrlRouter.instance().remoteEdit(url)
 				: undefined;
-		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
+		const location = remote
+			? await remote.hooks.locate(remote.url, sessionResolveContext(this.session, { signal }))
+			: undefined;
+		const canonical = location?.url;
+		const mirror = location === undefined ? undefined : await writeRemoteMirror(location, resource.content);
+		// A remote notebook reads as the cell projection `edit` patches, like a local one; `:raw` keeps the JSON.
+		const notebook =
+			canonical !== undefined &&
+			new URL(canonical).pathname.toLowerCase().endsWith(".ipynb") &&
+			!isRawSelector(parsedSel);
+		const text = notebook ? notebookToEditableText(resource.content, canonical) : resource.content;
+		return buildInMemorySelectorResult(this.session, text, parsedSel, {
 			details,
 			sourcePath: mirror ?? resource.sourcePath,
-			hashlinePath: mirror ? url : undefined,
+			hashlinePath: canonical,
 			sourceStartLine: resource.sourceStartLine,
 			sourceInternal: url,
-			entityLabel: "resource",
+			entityLabel: notebook ? "notebook" : "resource",
 			ignoreResultLimits:
 				(resource.unbounded ?? spec.unbounded === true) || (programmatic && isRawSelector(parsedSel)),
 			immutable: resource.immutable,

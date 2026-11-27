@@ -22,7 +22,8 @@ describe("outlier catalog policies", () => {
 	test("seed rules distinguish local speech, dictation, and tiny role candidates", () => {
 		const local = Object.fromEntries(seedModels("local").map(spec => [spec.id, buildModel(spec)]));
 		expect(local["phonon-31m"]?.kind).toBe("tts");
-		expect(local["parakeet-tdt-0.6b-v3"]?.kind).toBe("stt");
+		expect(local["fluid-speech-pro"]?.kind).toBe("stt");
+		expect(local["parakeet-tdt-0.6b-v2"]?.kind).toBe("stt");
 		expect(local["nemotron-streaming-en-0.6b"]?.kind).toBe("stt");
 		expect(local["whisper-large-v3-turbo"]?.kind).toBe("stt");
 		expect(local["lfm2.5-230m"]?.kind).toBe("tiny");
@@ -36,6 +37,8 @@ describe("outlier catalog policies", () => {
 			["google-antigravity", "gemini-3-pro-image", "image"],
 			["deepinfra", "black-forest-labs/FLUX-2-pro", "image"],
 			["deepinfra", "hexgrad/Kokoro-82M", "tts"],
+			["deepinfra", "Qwen/Qwen3-TTS", "tts"],
+			["deepinfra", "sesame/csm-1b", "tts"],
 			["xai", "grok-tts", "tts"],
 			["xai-oauth", "grok-imagine-image", "image"],
 			["xai-oauth", "grok-tts", "tts"],

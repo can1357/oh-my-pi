@@ -51,7 +51,7 @@ The OpenAI Chat Completions provider implements HTTP POST JSON body streaming ov
 ### Catalog model handling
 
 - **Provider entry (`openai`)**: `packages/catalog/src/compat/rules/providers/openai.kdl` declares default model `gpt-5.5`. Environment keys: `OPENAI_API_KEY`.
-- **Authored seeds**: `daybreak-blue-latest`, `daybreak-red-latest`, `gpt-5.6-cyber`, `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`, `gpt-6-luna-decisions`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows. `gpt-6-luna-decisions` is a `judge` row on the `openai-decisions` API that requests wire id `gpt-6-luna`; until a regenerated bundle carries it, `openaiModelManagerOptions` appends it to successful discovery.
+- **Authored seeds**: `daybreak-blue-latest`, `daybreak-red-latest`, `gpt-5.6-cyber`, `gpt-transcribe`, `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`, `gpt-6-luna-decisions`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows. `gpt-6-luna-decisions` is a `judge` row on the `openai-decisions` API that requests wire id `gpt-6-luna`; until a regenerated bundle carries it, `openaiModelManagerOptions` appends it to successful discovery.
 - **Model Resolvers & Managers**: `createOpenAICompatibleModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` constructs model managers for `openai-completions` providers. It combines static/curated model definitions, bundled reference specs (`getBundledModels`), and live models fetched from remote catalog endpoints.
 - **Catalog Discovery**: `fetchOpenAICompatibleModels` in `packages/catalog/src/discovery/openai-compatible.ts` queries provider `/models` endpoints. It safely parses envelopes (`data`, `models`, `result`, `items`), enforces request timeouts using `withOpenAICompatibleDiscoveryTimeout`, validates model record schemas (`openAICompatibleModelRecordSchema`), applies custom mappers/filters, and deduplicates models by ID.
 
@@ -83,7 +83,7 @@ The OpenAI Responses provider (`packages/ai/src/providers/openai-responses.ts`) 
 ### Catalog model handling
 
 - **Provider entry (`openai`)**: `packages/catalog/src/compat/rules/providers/openai.kdl` declares default model `gpt-5.5`. Environment keys: `OPENAI_API_KEY`.
-- **Authored seeds**: `daybreak-blue-latest`, `daybreak-red-latest`, `gpt-5.6-cyber`, `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`, `gpt-6-luna-decisions`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows. `gpt-6-luna-decisions` is a `judge` row on the `openai-decisions` API that requests wire id `gpt-6-luna`; until a regenerated bundle carries it, `openaiModelManagerOptions` appends it to successful discovery.
+- **Authored seeds**: `daybreak-blue-latest`, `daybreak-red-latest`, `gpt-5.6-cyber`, `gpt-transcribe`, `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`, `gpt-6-luna-decisions`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows. `gpt-6-luna-decisions` is a `judge` row on the `openai-decisions` API that requests wire id `gpt-6-luna`; until a regenerated bundle carries it, `openaiModelManagerOptions` appends it to successful discovery.
 
 ## OpenAI Codex
 
@@ -1829,9 +1829,10 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 ### Catalog model handling
 
 - **Provider entry (`openrouter`)**: `packages/catalog/src/compat/rules/providers/openrouter.kdl` declares default model `openai/gpt-5.5`. Environment keys: `OPENROUTER_API_KEY`.
-- **Authored seeds**: `~typesafe/jev-latest`, `typesafe/jev-1.14`, `openai/whisper-1`, `openai/whisper-large-v3`, `openai/gpt-4o-transcribe`, `microsoft/mai-transcribe-1.5`, `microsoft/mai-transcribe-2`, `cohere/rerank-v3.5`, `openai/text-embedding-3-small`, `qwen/qwen3-embedding-8b`, `google/veo-3.1`, `minimax/hailuo-3`, `alibaba/wan-2.7`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `~typesafe/jev-latest`, `typesafe/jev-1.14`, `openai/whisper-1`, `openai/whisper-large-v3`, `openai/gpt-4o-transcribe`, `microsoft/mai-transcribe-1.5`, `microsoft/mai-transcribe-2`, `openai/gpt-transcribe`, `openai/whisper-large-v3-turbo`, `nvidia/nemotron-3.5-transcribe`, `elevenlabs/scribe-v2`, `assemblyai/universal-3-6-pro`, `deepgram/nova-3`, `qwen/qwen3-asr-1.7b`, `x-ai/grok-stt-2.0`, `cohere/rerank-v3.5`, `openai/text-embedding-3-small`, `qwen/qwen3-embedding-8b`, `google/veo-3.1`, `minimax/hailuo-3`, `alibaba/wan-2.7`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - **Dynamic Discovery & Filter**: `openrouterModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` queries `https://openrouter.ai/api/v1/models` using `fetchOpenAICompatibleModels` with `api: "openrouter"`. Cache entries are partitioned under `resolveModelCacheProviderId("openrouter", { apiKey, baseUrl })`, which hashes the key and base URL (`openrouter` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), so a keyless or wider-key roster is never served to a guardrailed key. Discovered models are filtered to entries specifying `supported_parameters.includes("tools")`.
 - **Guardrail-scoped roster**: with a key, `/models` returns only the models the key's workspace guardrails allow (model and provider allow-lists); without one it returns the public roster. Chat discovery is therefore authoritative (`dynamic-models-authoritative`): a successful fetch replaces bundled chat rows, so `/model` never lists models the workspace blocks. A failed chat listing returns no discovery result, so a media-only success cannot prune the chat roster. The `/images/models`, `/videos/models`, and `/embeddings/models` listings ignore guardrails (verified 2026-11-12), so blocked non-chat models can still appear.
+- **Speech rosters are seeded, not discovered**: `/models` lists transcription (`audio->transcription`) and TTS (`text->speech`) rows only under `?output_modalities=all`, so the bundled STT rows come from the authored seed. OpenRouter's `/audio/speech` speaks the `openai-speech` wire, but every TTS upstream rejects a request without an explicit model-specific `voice` (400 "An explicit voice is required for this TTS provider.") and each accepts only some formats (e.g. Gemini TTS: `pcm`/`wav`; ElevenLabs, Kokoro, Grok, MAI-Voice: `mp3`/`pcm`). The `tts` tool omits `voice` by default, so no OpenRouter TTS rows are seeded.
 - **Spec Mapping**: `openrouterModelManagerOptions` maps `modality` (`text`/`image`), pricing per million tokens (`prompt`, `completion`, `input_cache_read`, `input_cache_write`), `context_length`, `top_provider.max_completion_tokens`, and reasoning effort ladders via `mapOpenRouterThinking`.
 
 ## Qianfan (`qianfan`)
@@ -2572,7 +2573,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 
 - **Provider entry (`deepinfra`)**: `packages/catalog/src/compat/rules/providers/deepinfra.kdl` declares default model `deepseek-ai/DeepSeek-V4-Flash-0731`. Environment keys: `DEEPINFRA_API_KEY`.
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
-- **Authored seeds**: `black-forest-labs/FLUX-2-pro`, `hexgrad/Kokoro-82M`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `black-forest-labs/FLUX-2-pro`, `hexgrad/Kokoro-82M`, `Qwen/Qwen3-TTS`, `sesame/csm-1b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `deepinfraModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
 ## Helmcode (`helmcode`)
@@ -2605,7 +2606,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 ### Catalog model handling
 
 - **Provider entry (`local`)**: `packages/catalog/src/compat/rules/providers/local.kdl` declares default model `lfm2.5-230m`. Model management permits unauthenticated access.
-- **Authored seeds**: `phonon-31m`, `parakeet-tdt-0.6b-v3`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `phonon-31m`, `fluid-speech-pro`, `parakeet-tdt-0.6b-v2`, `nemotron-streaming-en-0.6b`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `localModelManagerOptions` in `packages/catalog/src/provider-models/special.ts`.
 
 ## Muse Code (Subscription) (`muse-code`)
