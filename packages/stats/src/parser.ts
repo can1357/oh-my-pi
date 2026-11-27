@@ -725,7 +725,8 @@ export interface ResetForkHeader {
 /**
  * Read `sessionPath`'s header identity and whether the file can hold a reset fork's inherited prefix
  * ({@link inheritedPrefixEnd}): a header marker, or a legacy `/tan` boundary in a file whose header names a
- * parent. Only such a fork reads past its header line. Null for a missing file or one without a header.
+ * parent. Only a file whose header names a parent, and has no marker, reads past its header line. Null for a
+ * file without a header or one that cannot be read: the upgrade scan skips what it cannot re-parse anyway.
  */
 export async function readResetFork(sessionPath: string): Promise<ResetForkHeader | null> {
 	try {
@@ -745,9 +746,8 @@ export async function readResetFork(sessionPath: string): Promise<ResetForkHeade
 				Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).indexOf(TAN_FORK_BOUNDARY_BYTES) >= 0;
 		}
 		return { id, parentSession, resetFork };
-	} catch (err) {
-		if (isEnoent(err)) return null;
-		throw err;
+	} catch {
+		return null;
 	}
 }
 

@@ -505,6 +505,30 @@ describe("stats sync deduplicates forked-session entries", () => {
 		expect(replayKey?.value).toBe("complete");
 	});
 
+	it("finishes the upgrade scan when a tracked transcript cannot be read", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[buildUserEntry("user01ab", ts, "hello")],
+		);
+		await syncAllSessions({ workers: 1, files: [parentFile] });
+		// A tracked path that no longer opens as a file (here a directory) must not wedge every later sync.
+		const unreadable = path.join(getSessionsDir(), "--tmp--fork-dedup", "02_unreadable.jsonl");
+		await fs.mkdir(unreadable, { recursive: true });
+		const db = await initDb();
+		db.query("INSERT INTO file_offsets (session_file, offset, last_modified) VALUES (?, 1, 1)").run(unreadable);
+		db.query("DELETE FROM meta WHERE key = ?").run("inherited_prefix_replay_v1");
+
+		await syncAllSessions({ workers: 1, files: [parentFile] });
+
+		const replayKey = db
+			.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'inherited_prefix_replay_v1'")
+			.get();
+		expect(replayKey?.value).toBe("complete");
+	});
+
 	it("counts every call of a session whose header marks an entry its file does not hold", async () => {
 		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
 		const laterTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
