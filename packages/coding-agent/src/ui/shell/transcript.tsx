@@ -58,6 +58,16 @@ export interface TranscriptBlock extends ViewEntry {
 	readonly native: Accessor<readonly UiNode[]>;
 }
 
+/**
+ * Whether `node` draws something: a layout `col`/`row` only through a child that does. Selectors
+ * over transcript turns (`/rewind`) step over a turn whose blocks draw nothing, such as the empty
+ * reply a user interrupt leaves.
+ */
+export function showsAnything(node: UiNode): boolean {
+	if (node.kind !== "col" && node.kind !== "row") return true;
+	return node.children().some(showsAnything);
+}
+
 /** Options of {@link Transcript.append}. */
 export interface BlockOptions {
 	readonly prompt?: boolean;

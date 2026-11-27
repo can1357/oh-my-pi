@@ -10,7 +10,7 @@
  * stays with the turn it measures. Entries that draw nothing have no turn.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type Signal, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getAssistantMessageLinkTargets } from "../../session/transcript/link-targets";
 import { ServedModelTracker } from "../../session/transcript/served-model-marker";
 import {
@@ -18,7 +18,7 @@ import {
 	type TranscriptEntryLike,
 	transcriptEntryMessage,
 } from "../../session/transcript/transcript-entry";
-import { type Shell, Transcript, type TranscriptBlock, ViewList } from "../../ui/shell";
+import { type Shell, showsAnything, Transcript, type TranscriptBlock, ViewList } from "../../ui/shell";
 import type { ReplayContext, ReplayTarget } from "../utils/ui-helpers";
 import type { MessageFaceEnv } from "./messages";
 import { type DisplayFlags, TranscriptPresenter } from "./transcript";
@@ -57,12 +57,6 @@ interface MutableTurn {
 	readonly isUserTurn: boolean;
 	readonly entries: TranscriptEntryLike[];
 	blocks: TranscriptBlock[];
-}
-
-/** Whether `node` shows something: a layout `col`/`row` only through a child that does. */
-function shows(node: UiNode): boolean {
-	if (node.kind !== "col" && node.kind !== "row") return true;
-	return node.children().some(shows);
 }
 
 /** See the module docs. */
@@ -176,7 +170,7 @@ export class TranscriptReplica {
 
 	/** Whether `turn` shows anything (reactive): an interrupted turn with no output does not. */
 	visible(turn: ReplicaTurn): boolean {
-		return turn.blocks.some(block => block.native().some(shows));
+		return turn.blocks.some(block => block.native().some(showsAnything));
 	}
 
 	/** Retire every block. */

@@ -65,7 +65,7 @@ import {
 	selectKeyId,
 } from "../../../config/keybindings/matchers";
 import { actionKbd, kbdOf } from "../../keys/hints";
-import type { TranscriptBlock } from "../../shell";
+import { showsAnything, type TranscriptBlock } from "../../shell";
 import { applyEdit } from "../panels/common";
 import { keyTitle } from "../../styles/panels/common";
 import { turnSearchText } from "./copy-selector";
@@ -201,12 +201,16 @@ interface TurnLane {
 	holds(index: number, entryId: string): boolean;
 }
 
-function termLane(targets: readonly RewindTarget[]): TurnLane {
+/** The terminal look's lane: a turn whose blocks draw nothing (the empty reply an interrupt leaves) is stepped over. */
+function termLane(targets: readonly RewindTarget[], views: TurnViews): TurnLane {
 	const texts = targets.map(target => target.text.toLowerCase());
 	return {
 		turns: targets,
 		targets,
-		shows: () => true,
+		shows: index => {
+			const target = targets[index];
+			return target !== undefined && views.blocks(target.entryId, target.messages).some(showsAnything);
+		},
 		text: index => texts[index] ?? "",
 		holds: (index, entryId) => targets[index]?.entryId === entryId || targets[index]?.turnId === entryId,
 	};
@@ -305,8 +309,9 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	onCleanup(() => {
 		for (const replica of replicas) replica.dispose();
 	});
+	const views = new TurnViews();
 	const laneOf = (entries: readonly TranscriptEntryLike[], clipped: boolean): TurnLane => {
-		if (!replay) return termLane(rewindTargets(entries));
+		if (!replay) return termLane(rewindTargets(entries), views);
 		const replica = keep(() => replay(entries, clipped));
 		replica.expanded.set(expanded);
 		replicas.add(replica);
@@ -326,7 +331,6 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	const filter = signal<LineState | undefined>(undefined);
 	/** The filter field is up: one field for the whole query, whatever is typed into it. */
 	const filtering = computed(() => filter() !== undefined);
-	const views = new TurnViews();
 
 	/** Replay the whole branch, keeping the outline on the same turn. */
 	const loadFull = (): void => {
@@ -403,13 +407,11 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 		});
 	// An outline on a turn that shows nothing (the empty turn an interrupt leaves last, one the
 	// expansion toggle folded away) moves to the nearest that shows and leaves the strip.
-	if (replay) {
-		effect(() => {
-			const at = selected();
-			const next = nearestShown(main(), at);
-			if (next !== at && next >= 0) untrack(() => toMain(next));
-		});
-	}
+	effect(() => {
+		const at = selected();
+		const next = nearestShown(main(), at);
+		if (next !== at && next >= 0) untrack(() => toMain(next));
+	});
 
 	/** Step the current path by `delta` to the nearest shown turn `accept` takes; above the replayed tail, load the rest first. */
 	const move = (delta: -1 | 1, accept: (turn: LaneTurn) => boolean): void => {
