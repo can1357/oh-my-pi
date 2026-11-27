@@ -41,6 +41,7 @@
 - A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"
 - Browser helper calls (`tab.goto`, `tab.click`, `tab.evaluate`, etc.) and tab reuse on Tern, WebKit, and cmux tabs no longer queue behind another tab's long-running `tab.run()`, and queued `tab.run()` timeouts now name the tab and agent holding the queue
 - The resume picker's **All projects** scope shows each session's folder in rows and the preview, and search matches folder paths there ([#20746](https://github.com/can1357/oh-my-pi/issues/20746))
+- Reading `history://current/full` on Claude no longer returns the model's own earlier reasoning as text, which Anthropic refuses as `reasoning_extraction` ([#19740](https://github.com/can1357/oh-my-pi/issues/19740))
 - The completion popup keeps the selected entry visible when descriptions wrap and hides its scrollbar when all entries fit ([#20731](https://github.com/can1357/oh-my-pi/issues/20731))
 - Turning an extension off in `/extensions` hides its editor widgets; turning it back on restores them ([#20725](https://github.com/can1357/oh-my-pi/issues/20725)).
 - On Windows, closing the terminal that first started the shared omp daemon no longer kills the daemon and the services of other sessions, as long as the terminal's job object allows breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))

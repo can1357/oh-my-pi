@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fixed Claude replaying its own unsigned reasoning as plain text when the latest turn ended without running its tool calls (e.g. cut off by the output limit mid-thinking), which Anthropic refuses as `reasoning_extraction` ([#19740](https://github.com/can1357/oh-my-pi/issues/19740))
 - Fixed authentication-gateway requests so configured authorization headers are honored regardless of capitalization, with API-key fallback when the header is missing or empty.
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.

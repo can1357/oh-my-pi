@@ -192,6 +192,8 @@ Explicit compaction modes and focused instructions retain their existing behavio
   boundaries. Shared selectors work, for example
   `history://current/full:1-200` and `history://current/full:raw:1-200`.
   Queries, fragments, trailing slashes, and additional path components are rejected.
+  A model that refuses its own reasoning quoted back as text (Claude) gets the
+  view without assistant reasoning.
 - The full-history route is bound to the calling session's current branch. It
   never falls back to another registered agent or an on-disk session search.
   Existing `history://<id>` routes retain their concise transcript behavior.
