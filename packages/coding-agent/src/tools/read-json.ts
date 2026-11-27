@@ -4,7 +4,14 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Shell } from "@oh-my-pi/pi-natives";
 import type { ReadToolDetails } from "./details/read";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead, truncateMiddle, truncateTail } from "./streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	truncateHead,
+	truncateHeadBytes,
+	truncateMiddle,
+	truncateTail,
+} from "./streaming-output";
 import { ToolError } from "./tool-errors";
 import {
 	IMAGE_METADATA_HEADER_BYTES,
@@ -484,7 +491,21 @@ export async function readJson(
 		}
 	}
 
-	const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES });
+	let truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES });
+	if (truncation.firstLineExceedsLimit) {
+		// truncateHead keeps nothing when the first line alone is over budget; show its
+		// UTF-8-safe byte prefix as one partial line instead of an empty result.
+		const newline = output.indexOf("\n");
+		const firstLine = newline === -1 ? output : output.slice(0, newline);
+		const snippet = truncateHeadBytes(firstLine, DEFAULT_MAX_BYTES);
+		truncation = {
+			...truncation,
+			content: snippet.text,
+			totalBytes: Buffer.byteLength(firstLine, "utf-8"),
+			outputLines: snippet.bytes > 0 ? 1 : 0,
+			outputBytes: snippet.bytes,
+		};
+	}
 	details.truncation = truncation.truncated ? toReadTruncationStats(truncation) : undefined;
 	const resultBuilder = toolResult<ReadToolDetails>(details).text(truncation.content);
 	if (resource) resultBuilder.sourceInternal(resource.url);
