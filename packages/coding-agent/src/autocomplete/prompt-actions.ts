@@ -166,11 +166,16 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		this.#unifiedMentions?.warm();
 	}
 
-	trySyncMentionCompletion(lines: string[], cursorLine: number, cursorCol: number): UnifiedMentionSnapshot | null {
+	trySyncMentionCompletion(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		lock?: MentionCategoryId,
+	): UnifiedMentionSnapshot | null {
 		if (!this.#unifiedMentions) return null;
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
 		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) return null;
-		return this.#unifiedMentions.querySync(lines, cursorLine, cursorCol);
+		return this.#unifiedMentions.querySync(lines, cursorLine, cursorCol, lock);
 	}
 
 	getMentionSuggestions(
@@ -179,11 +184,12 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		cursorCol: number,
 		signal?: AbortSignal,
 		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
+		lock?: MentionCategoryId,
 	): Promise<UnifiedMentionSnapshot | null> {
 		if (!this.#unifiedMentions) return Promise.resolve(null);
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
 		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) return Promise.resolve(null);
-		return this.#unifiedMentions.queryAsync(lines, cursorLine, cursorCol, signal, onPartial);
+		return this.#unifiedMentions.queryAsync(lines, cursorLine, cursorCol, signal, onPartial, lock);
 	}
 
 	applyMentionCompletion(

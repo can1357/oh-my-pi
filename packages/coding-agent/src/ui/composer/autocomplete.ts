@@ -90,8 +90,16 @@ export interface AutocompleteProvider extends Pick<
 	getInlineHint?(lines: string[], line: number, col: number): string | null;
 	/** Pre-warm background mention caches (non-blocking). */
 	warmMentions?(): void;
-	/** Synchronously resolve Tier 0 unified mention suggestions (`@`, `^`, `#<N>`). */
-	trySyncMentionCompletion?(lines: string[], line: number, col: number): UnifiedMentionSnapshot | null;
+	/**
+	 * Synchronously resolve Tier 0 unified mention suggestions (`@`, `^`, `#<N>`); `lock` keeps an
+	 * `@` token on the one category the user chose for it (the Files tile).
+	 */
+	trySyncMentionCompletion?(
+		lines: string[],
+		line: number,
+		col: number,
+		lock?: MentionCategoryId,
+	): UnifiedMentionSnapshot | null;
 	/** Async streaming refinement for unified mention suggestions (`@`, `^`, `#<N>`). */
 	getMentionSuggestions?(
 		lines: string[],
@@ -99,6 +107,7 @@ export interface AutocompleteProvider extends Pick<
 		col: number,
 		signal?: AbortSignal,
 		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
+		lock?: MentionCategoryId,
 	): Promise<UnifiedMentionSnapshot | null>;
 	/** Apply a unified mention item with an optional interactive thinking-effort override. */
 	applyMentionCompletion?(

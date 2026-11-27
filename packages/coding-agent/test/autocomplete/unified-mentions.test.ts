@@ -143,7 +143,7 @@ describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 		{ id: "ssh", label: "SSH" },
 	];
 
-	it("lists the eight category shortcuts, never a files shortcut, on bare @", () => {
+	it("lists Files, then the eight category shortcuts, on bare @", () => {
 		const query: MentionQuery = { trigger: "@", prefix: "@", query: "", rawBody: "" };
 		const results: MentionSourceResult[] = [
 			{
@@ -187,8 +187,10 @@ describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 
 		const out = arbitrateMentions(query, results, metas);
 		const tokens = ["@m:", "@p2p:", "@ses:", "@git:", "@pr:", "@iss:", "@mcp:", "@ssh:"];
-		expect(out.items.map(i => i.insertText)).toEqual(tokens);
-		expect(out.palette.pickerItems.map(i => i.facts?.meta)).toEqual(tokens);
+		expect(out.items.map(i => i.insertText)).toEqual(["@", ...tokens]);
+		// Files has no token: a path already says files.
+		expect(out.palette.pickerItems.map(i => i.facts?.meta)).toEqual([undefined, ...tokens]);
+		expect(out.palette.pickerItems[0]).toMatchObject({ id: "ns:files", label: "Files", facts: { right: "50" } });
 		expect(out.items.every(i => i.isNamespaceShortcut === true && i.appendSpace === false)).toBe(true);
 	});
 
@@ -511,12 +513,28 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 				.slice(2)
 				.join("\n");
 			expect(popupRows).not.toContain("index.ts");
-			expect(popupRows).not.toContain("Files");
+			expect(popupRows).toContain("Files");
 			expect(popupRows).toContain("Models");
-			expect(popupRows).toContain("@m:  Tag a model");
+			expect(popupRows).toContain("Tag a file or folder");
 			expect(popupRows).not.toContain("──");
 
-			// Tab selects the category in place; typing then enters it.
+			// Enter on the lit Files tile keeps the bare `@` and lists files.
+			sendKey(composer.node, composer.field, key("\r"));
+			expect(composer.text()).toBe("@");
+			expect(composer.completing()).toBe(true);
+			expect(plainRows(paintNode(env, composer.node, 80).rows).join("\n")).toContain("index.ts");
+			sendKey(composer.node, composer.field, key("\x7f"));
+			expect(composer.text()).toBe("");
+
+			// Space picks the lit tile as Enter does, without keeping the space.
+			sendKey(composer.node, composer.field, key("@"));
+			sendKey(composer.node, composer.field, key(" "));
+			expect(composer.text()).toBe("@");
+			expect(plainRows(paintNode(env, composer.node, 80).rows).join("\n")).toContain("index.ts");
+			sendKey(composer.node, composer.field, key("\x7f"));
+			sendKey(composer.node, composer.field, key("@"));
+
+			// Tab selects the next category in place; typing then enters it.
 			composer.handleDraftKey({ id: "tab", kind: "press", raw: "\t" });
 			expect(composer.text()).toBe("@");
 			expect(plainRows(paintNode(env, composer.node, 80).rows).join("\n")).toContain("@m:  Tag a model");

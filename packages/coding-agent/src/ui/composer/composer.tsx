@@ -430,6 +430,8 @@ export class Composer {
 	readonly #completion: Signal<Completion | null> = signal<Completion | null>(null);
 	#completionRequest: AbortController | undefined;
 	#forceFiles = false;
+	/** Offset of the bare `@` whose Files tile the user picked: that token lists files until it ends. */
+	#filesAt: number | undefined;
 
 	readonly #vimLayer: VimEditor;
 	readonly #vimOn: Signal<boolean>;
@@ -1270,6 +1272,7 @@ export class Composer {
 		this.#completionRequest?.abort();
 		this.#completionRequest = undefined;
 		this.#forceFiles = false;
+		this.#filesAt = undefined;
 		if (this.#completion() !== null) this.#completion.set(null);
 	}
 
@@ -1370,8 +1373,13 @@ export class Composer {
 			}
 
 			// Unified `@`, `^`, and `#<N>` mention palette: Tier 0 sync frame + streaming async refinement.
+			// An `@` pinned to Files keeps listing files while it is the token at the caret.
+			const atPrefix = extractAtFilePrefix(before);
+			const pinned = atPrefix !== null && cursor - atPrefix.length === this.#filesAt;
+			if (!pinned) this.#filesAt = undefined;
+			const lock = pinned ? "files" : undefined;
 			if (regular && provider.trySyncMentionCompletion) {
-				const syncResult = provider.trySyncMentionCompletion(lines, line, col);
+				const syncResult = provider.trySyncMentionCompletion(lines, line, col, lock);
 				if (syncResult) {
 					const alreadyOpen = this.#completion.peek()?.mention !== undefined;
 					if (!syncResult.hasAsyncPending || !provider.getMentionSuggestions) {
@@ -1385,10 +1393,17 @@ export class Composer {
 						showMention(syncResult, false);
 					}
 					let gotAsync = false;
-					const asyncTask = provider.getMentionSuggestions(lines, line, col, signal, partial => {
-						gotAsync = true;
-						showMention(partial, false);
-					});
+					const asyncTask = provider.getMentionSuggestions(
+						lines,
+						line,
+						col,
+						signal,
+						partial => {
+							gotAsync = true;
+							showMention(partial, false);
+						},
+						lock,
+					);
 					if (shouldDeferInterim) {
 						const settled = await Promise.race([asyncTask.then(() => true), Bun.sleep(45).then(() => false)]);
 						if (!current()) return;
@@ -1498,6 +1513,13 @@ export class Composer {
 		}
 		const run = enter && name && value !== SKILL_NAMESPACE && this.#cursor() === this.#text().length;
 		const mentionItem = open.mention !== undefined && isMentionItem(item) ? item : undefined;
+		// The Files tile has no token: the `@` stays and lists files from here on.
+		if (mentionItem?.isNamespaceShortcut && mentionItem.category === "files") {
+			this.#closeCompletion();
+			this.#filesAt = this.#cursor() - open.prefix.length;
+			void this.#complete();
+			return;
+		}
 		const result =
 			mentionItem && provider.applyMentionCompletion
 				? provider.applyMentionCompletion(lines, line, col, mentionItem, open.prefix, open.effortOverride)
@@ -1524,15 +1546,25 @@ export class Composer {
 		const provider = this.#autocomplete;
 		if (!provider) return;
 		const at = this.#position();
-		// Typing after cycling to a row of the bare `@` category list enters that category: `@` + `o` → `@m:o`.
+		// On the bare `@` category strip, Space picks the lit category as Enter does (the space is not
+		// kept), and typing after cycling to one enters it: `@` + `o` → `@m:o`.
+		const pick = insert === " ";
 		const entered =
-			!deleted && previous?.chosen && isCategoryList(previous) && !/\s/.test(insert)
+			!deleted && previous && isCategoryList(previous) && (pick || (previous.chosen && !/\s/.test(insert)))
 				? previous.items[previous.selected]
 				: undefined;
 		if (isMentionItem(entered) && at.before.endsWith(`@${insert}`)) {
 			const cursor = this.#cursor();
 			const from = cursor - insert.length - 1;
-			const replacement = `${entered.insertText}${insert}`;
+			const typed = pick ? "" : insert;
+			if (entered.category === "files") {
+				// The user's keystroke already recorded this undo step.
+				if (pick) this.#change(from + 1, cursor, "", from + 1, "history");
+				this.#filesAt = from;
+				void this.#complete();
+				return;
+			}
+			const replacement = `${entered.insertText}${typed}`;
 			// The user's keystroke already recorded this undo step.
 			this.#change(from, cursor, replacement, from + replacement.length, "history");
 			this.#typingAt = -1;

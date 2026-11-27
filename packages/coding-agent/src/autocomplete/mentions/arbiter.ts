@@ -137,6 +137,31 @@ function makeNamespaceShortcutItem(namespace: MentionNamespace, count: number): 
 	};
 }
 
+/**
+ * The Files tile: no token (a path already says files), so choosing it keeps the bare `@` and
+ * locks the mention to files, listing the folder.
+ */
+function makeFilesShortcutItem(count: number): MentionItem {
+	const detail = "Tag a file or folder";
+	const facts: Record<string, string> = {};
+	const shown = shownCount(count);
+	if (shown !== undefined) facts.right = String(shown);
+	return {
+		category: "files",
+		tier: MATCH_TIER.Medium,
+		value: "@",
+		insertText: "@",
+		appendSpace: false,
+		isNamespaceShortcut: true,
+		label: "Files",
+		description: detail,
+		nativeDetail: detail,
+		icon: currentTheme().symbols.symbol("mention.file"),
+		iconName: "file",
+		pickerItem: { id: "ns:files", label: "Files", detail, icon: "file", facts },
+	};
+}
+
 /** A match count worth printing beside a category: 1..99, else nothing. */
 function shownCount(total: number): number | undefined {
 	return total > 0 && total <= 99 ? total : undefined;
@@ -178,8 +203,9 @@ export function arbitrateMentions(
 			];
 		}
 	} else if (query.query.trim() === "") {
-		// Bare `@`: the category jump rows alone; the composer Tab-cycles them.
+		// Bare `@`: the category jump rows alone, Files first; the composer Tab-cycles them.
 		const shortcuts: MentionItem[] = [];
+		if (metaById.has("files")) shortcuts.push(makeFilesShortcutItem(byId.get("files")?.total ?? 0));
 		for (const key in MENTION_NAMESPACES) {
 			const namespace = key as MentionNamespace;
 			const category = MENTION_NAMESPACES[namespace].category;

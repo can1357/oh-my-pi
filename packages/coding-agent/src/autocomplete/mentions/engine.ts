@@ -104,18 +104,28 @@ export class UnifiedMentionEngine {
 		for (const source of this.#sources) source.warm?.();
 	}
 
-	/** Parse the live mention token before the caret using live provider/dir hints. */
-	parse(textBeforeCursor: string): MentionQuery | null {
-		return parseMentionQuery(textBeforeCursor, {
+	/**
+	 * Parse the live mention token before the caret using live provider/dir hints. `lock` holds an
+	 * `@` token its syntax leaves open to one category (the Files tile chosen on a bare `@`).
+	 */
+	parse(textBeforeCursor: string, lock?: MentionCategoryId): MentionQuery | null {
+		const query = parseMentionQuery(textBeforeCursor, {
 			isKnownProvider: this.#modelsSource ? head => this.#modelsSource!.hasProviderPrefix(head) : undefined,
 			isKnownDir: this.#filesSource ? head => this.#filesSource!.isKnownDirSync(head) : undefined,
 		});
+		if (!query || !lock || query.trigger !== "@" || query.syntaxLock) return query;
+		return { ...query, syntaxLock: lock };
 	}
 
 	/** Run Tier 0 / warm-cache query synchronously for 0ms frame-0 painting. */
-	querySync(lines: readonly string[], cursorLine: number, cursorCol: number): UnifiedMentionSnapshot | null {
+	querySync(
+		lines: readonly string[],
+		cursorLine: number,
+		cursorCol: number,
+		lock?: MentionCategoryId,
+	): UnifiedMentionSnapshot | null {
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
-		const query = this.parse(textBeforeCursor);
+		const query = this.parse(textBeforeCursor, lock);
 		if (!query) return null;
 		const { results, hasAsyncPending } = this.#collectSyncResults(query);
 		const arbitrated = arbitrateMentions(query, [...results.values()], this.#sourceMetas);
@@ -139,10 +149,11 @@ export class UnifiedMentionEngine {
 		cursorCol: number,
 		signal: AbortSignal | undefined,
 		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
+		lock?: MentionCategoryId,
 	): Promise<UnifiedMentionSnapshot | null> {
 		if (signal?.aborted) return null;
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
-		const query = this.parse(textBeforeCursor);
+		const query = this.parse(textBeforeCursor, lock);
 		if (!query) return null;
 
 		const { results, asyncSources } = this.#collectSyncResults(query);
