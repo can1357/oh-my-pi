@@ -1,6 +1,7 @@
 import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
@@ -40,14 +41,20 @@ import { sanitizeFactoryDroidToolName } from "./tool-names";
 
 /** Factory's Gemini endpoint speaks native generateContent SSE at `/api/llm/g/v1/generate`. */
 
-/** OMP effort → Gemini thinkingLevel (low/minimal→LOW, medium→MEDIUM when supported, else HIGH). */
-function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean): "LOW" | "MEDIUM" | "HIGH" {
+/**
+ * OMP effort → Gemini thinkingLevel (low/minimal→LOW, medium→MEDIUM when
+ * supported, xhigh→the Gemini API's lowercase `xhigh`, else HIGH). `xhigh`
+ * arrives only for ladders that expose it.
+ */
+function geminiThinkingLevel(effort: Effort | undefined, supportsMedium: boolean): "LOW" | "MEDIUM" | "HIGH" | "xhigh" {
 	switch (effort) {
 		case "low":
 		case "minimal":
 			return "LOW";
 		case "medium":
 			return supportsMedium ? "MEDIUM" : "HIGH";
+		case "xhigh":
+			return "xhigh";
 		default:
 			return "HIGH";
 	}
@@ -93,7 +100,6 @@ function mapFactoryDroidFinishReason(reason: string): {
 const GOOGLE_APIS: Record<string, true> = {
 	"google-generative-ai": true,
 	"google-vertex": true,
-	"google-gemini-cli": true,
 };
 
 /** Whether Factory serves `model` on this Gemini generate wire rather than through an inner Anthropic or OpenAI model. */
@@ -443,7 +449,7 @@ export function streamFactoryDroidGemini(
 							: {
 									includeThoughts: true,
 									thinkingLevel: geminiThinkingLevel(
-										options.reasoning,
+										clampThinkingLevelForModel(model, options.reasoning),
 										options.thinkingDialect === "level-medium",
 									),
 								},

@@ -51,6 +51,11 @@ import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
+import { captureProgramResumeToken } from "./utils/program-resume-token";
+
+// Capture OSC7577_TOKEN into memory and remove it from process.env before any
+// subprocess, worker, or tool can inherit it.
+captureProgramResumeToken();
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(

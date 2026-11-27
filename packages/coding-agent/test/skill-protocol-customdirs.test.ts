@@ -21,8 +21,6 @@ function makeSkillMd(name: string, dir: string) {
 }
 
 const ALL_DEFAULT_SOURCES_DISABLED = {
-	enableCodexUser: false,
-	enableClaudeUser: false,
 	enableClaudeProject: false,
 	enablePiUser: false,
 	enablePiProject: false,
@@ -271,8 +269,6 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 
 		const { skills } = await loadSkills({
 			cwd,
-			enableCodexUser: false,
-			enableClaudeUser: false,
 			enableClaudeProject: true,
 			enablePiUser: false,
 			enablePiProject: false,
@@ -316,8 +312,6 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 
 		const { skills } = await loadSkills({
 			cwd,
-			enableCodexUser: false,
-			enableClaudeUser: false,
 			enableClaudeProject: true,
 			enablePiUser: false,
 			enablePiProject: false,

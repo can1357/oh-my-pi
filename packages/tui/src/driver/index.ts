@@ -43,6 +43,8 @@ export interface TerminalDriverOptions extends ProcessInputOptions {
 	readonly resizeSettleMs?: number;
 	/** Images drawn at once (see `TerminalImages`). */
 	readonly imageBudget?: number;
+	/** A fullscreen row session will not use the shell's cursor until it first writes inline. */
+	readonly deferShellLine?: () => boolean;
 	/** The input half (tests). Default: {@link createProcessInput}. */
 	readonly input?: (port: TerminalPort) => TerminalInput;
 }
@@ -58,7 +60,7 @@ export interface ProcessTerminalDriver extends TerminalDriver, Pick<TerminalInpu
 	 * `replay` batch with the complete ledger at the current width under a fresh id.
 	 */
 	onReplay(listener: () => void): () => void;
-	setMouse(tracking: MouseTracking): void;
+	setMouse(tracking: MouseTracking, reportFocus?: boolean): void;
 	refreshAppearance(): void;
 	/** `sequence` wrapped so it reaches the outer terminal through a multiplexer. */
 	passthrough(sequence: string): string;
@@ -283,11 +285,11 @@ export function createTerminalDriver(
 
 	let running = false;
 	let stopping: Promise<void> | undefined;
-	const stopWriter = (): void => {
+	const stopWriter = (emergency = false): void => {
 		cancelKittyHold?.();
 		kittyReady.set(true);
 		stopStallPoll();
-		writer.stop();
+		writer.stop(emergency);
 	};
 	const release = (): void => {
 		try {
@@ -300,9 +302,9 @@ export function createTerminalDriver(
 			}
 		}
 	};
-	const handBack = async (): Promise<void> => {
+	const handBack = async (emergency: boolean): Promise<void> => {
 		try {
-			stopWriter();
+			stopWriter(emergency);
 		} finally {
 			try {
 				if (terminal.drainInput) await terminal.drainInput(() => sink.flush());
@@ -312,11 +314,18 @@ export function createTerminalDriver(
 			if (!terminal.drainInput) await sink.flush();
 		}
 	};
+	const stop = (emergency: boolean): Promise<void> => {
+		if (stopping) return stopping;
+		if (!running) return Promise.resolve();
+		running = false;
+		stopping = handBack(emergency);
+		return stopping;
+	};
 	const restoreOwner = async (): Promise<void> => {
 		try {
 			stopRenderer?.();
 		} finally {
-			await driver.stop();
+			await stop(true);
 		}
 	};
 
@@ -356,15 +365,12 @@ export function createTerminalDriver(
 			screenRows.set(terminal.rows);
 			writer.resize(terminal.columns, terminal.rows);
 			const cursor = await terminal.queryCursor();
-			if (running) writer.start(cursor);
+			if (running) {
+				const defer = !terminal.tspExpected && !terminal.capabilities.tsp && options.deferShellLine?.();
+				writer.start(cursor, defer);
+			}
 		},
-		stop() {
-			if (stopping) return stopping;
-			if (!running) return Promise.resolve();
-			running = false;
-			stopping = handBack();
-			return stopping;
-		},
+		stop: () => stop(false),
 		restoreNow() {
 			if (!running && !stopping) return;
 			try {
@@ -372,7 +378,7 @@ export function createTerminalDriver(
 			} finally {
 				running = false;
 				try {
-					stopWriter();
+					stopWriter(true);
 				} finally {
 					release();
 				}
@@ -418,7 +424,7 @@ export function createTerminalDriver(
 			return terminal.tspExpected;
 		},
 		onHelloSettled: listener => terminal.onHelloSettled(listener),
-		setMouse: tracking => terminal.setMouse(tracking),
+		setMouse: (tracking, reportFocus) => terminal.setMouse(tracking, reportFocus),
 		refreshAppearance: () => terminal.refreshAppearance(),
 		passthrough: sequence => terminal.passthrough(sequence),
 		notify(message) {

@@ -8,14 +8,13 @@ import { type ToolCommandRenderDispatch } from "./tool-commands";
  * LLM-facing footer appended when a tool call becomes a background job. It states the job's kill
  * deadline (`timeoutSec`, `undefined` when disabled) so the model knows the job will die at it before
  * it waits on the result. The deadline counts the job's whole run time, not time left from now: an
- * auto-backgrounded call has already spent its foreground wait.
+ * auto-backgrounded call has already spent its foreground wait. `reason` names why a call left the
+ * foreground before its threshold (`incoming message`).
  */
-export function formatBackgroundNotice(jobId: string, timeoutSec: number | undefined): string {
-	const deadline =
-		timeoutSec === undefined
-			? " (no deadline)"
-			: ` (killed once it has run ${timeoutSec}s in total; \`timeout: 0\` disables the deadline)`;
-	return `Backgrounded as job ${jobId}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
+export function formatBackgroundNotice(jobId: string, timeoutSec: number | undefined, reason?: string): string {
+	const deadline = timeoutSec === undefined ? "no deadline" : `killed at ${timeoutSec}s total`;
+	const why = reason ? ` (${reason})` : "";
+	return `[backgrounded as ${jobId}${why}, ${deadline}; result arrives as follow-up; never poll]`;
 }
 
 /** Shell execution metadata used by transcript rendering. */
@@ -76,12 +75,26 @@ export const WALL_TIME_NOTICE_MIN_MS = 1000;
 
 /** Formats the model-facing command duration notice. */
 export function formatWallTimeNotice(wallTimeMs: number): string {
-	return `Wall time: ${formatWallTimeSeconds(wallTimeMs)} seconds`;
+	return `[took ${formatWallTimeSeconds(wallTimeMs)}s]`;
+}
+
+/**
+ * Body of the timeout notice bash and eval put on a run their deadline ended (`timeoutMs` undefined:
+ * no deadline known); callers bracket it, as `OutputSink.dump` does.
+ */
+export function formatTimeoutNotice(timeoutMs?: number): string {
+	if (timeoutMs === undefined) return "timed out";
+	return `timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s`;
+}
+
+/** Formats the notice bash and eval add when the requested `timeout` was clamped. */
+export function formatTimeoutClampNotice(requestedSec: number, effectiveSec: number): string {
+	return `[timeout clamped: ${requestedSec}s → ${effectiveSec}s]`;
 }
 
 /** Formats the model-facing command exit status notice. */
 export function formatExitCodeNotice(exitCode: number): string {
-	return `Command exited with code ${exitCode}`;
+	return `[exit code ${exitCode}]`;
 }
 
 /** Shell arguments used to build a command preview. */

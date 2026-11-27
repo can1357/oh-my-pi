@@ -1,6 +1,7 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
+import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -13,7 +14,7 @@ import { loadWatchdogConfigFile, resolveAdvisorConfigEditPath, saveWatchdogConfi
 import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "../../advisor/advisor-config-types";
 import { showGitOverlay } from "../../cli/git-tui";
-import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { formatLoginIdentity, loginFollowUps } from "../../cli/oauth-terminal";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
@@ -45,6 +46,7 @@ import type {
 	SubmittedUserInput,
 } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
+import type { AiuTotals } from "../../session/aiu-billing";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import { credentialStoreLabel } from "../../session/auth-broker-config";
 import {
@@ -64,12 +66,14 @@ import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import { connectedProviderName } from "../view-model/chrome/format";
 import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
+	usageAuthRejectedHint,
 	collectUnreportedAccounts,
 	selectReportableAccounts,
 } from "../../slash-commands/helpers/usage-accounts";
@@ -126,7 +130,7 @@ import type { ModelHubState } from "../../ui/overlays/pickers/model-hub-state";
 import { ModelPicker, type ModelPickerProps, prewarmModelPicker } from "../../ui/overlays/pickers/model-picker";
 import { type OAuthAuthState, OAuthSelector } from "../../ui/overlays/pickers/oauth-selector";
 import { ResetUsageSelector } from "../../ui/overlays/pickers/reset-usage-selector";
-import { RewindSelector, rewindTargets } from "../../ui/overlays/pickers/rewind-selector";
+import { hasRewindPoint, RewindSelector } from "../../ui/overlays/pickers/rewind-selector";
 import { SessionAccountSelector } from "../../ui/overlays/pickers/session-account-selector";
 import {
 	SessionSelector,
@@ -186,6 +190,25 @@ function statusLinePreview(preview: StatusLinePreview): Partial<StatusLineSettin
 /** Keys of a select sheet go to its `picker`. */
 const pickerFocus = (root: UiNode): UiNode => firstOfKind(root, "picker");
 
+/**
+ * History sizes from which a picker's first terminal paint takes about 100 ms (headless profiles:
+ * a /copy or /rewind tail of 600 entries 130–220 ms, a /tree of 5,814 entries 27 ms). A smaller
+ * history opens at once: a loading notice would only flash.
+ */
+const SLOW_TRANSCRIPT_PICKER_ENTRIES = 300;
+const SLOW_TREE_PICKER_ENTRIES = 20_000;
+
+/** The entries under `roots`, counted without recursion: a long session nests thousands deep. */
+function treeSize(roots: readonly SessionTreeNode[]): number {
+	let size = 0;
+	const pending = [...roots];
+	for (let node = pending.pop(); node; node = pending.pop()) {
+		size++;
+		for (const child of node.children) pending.push(child);
+	}
+	return size;
+}
+
 /** Menus that open at most once: a repeat request focuses the open one. */
 type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
 
@@ -215,6 +238,8 @@ export class SelectorController {
 	#openMenus = new Map<MenuKind, OpenMenu>();
 	/** The open agent hub's handle (deep links into the open hub). */
 	#agentHub: AgentHubHandle | undefined;
+	/** A history picker waiting for its loading notice's frame. */
+	#historyPickerOpening: Promise<void> | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -323,6 +348,45 @@ export class SelectorController {
 		const handle = this.ctx.showEditorAreaDialog(() => build(done), { focus });
 	}
 
+	/**
+	 * Say the history is loading before a picker that draws it: the terminal paints such a picker in
+	 * one frame that takes a while on a long session, and until then the keypress showed nothing.
+	 * The notice takes the composer hint's place, so nothing on screen moves.
+	 */
+	async #presentHistoryLoader(): Promise<void> {
+		const composer = this.ctx.composer;
+		const symbols = currentTheme().symbols;
+		composer.setNotice([
+			{ t: symbols.symbol("status.pending"), s: "accent" },
+			{ t: " " },
+			{ t: "Loading the session history…", s: "dim em" },
+		]);
+		await this.ctx.shell.nextFrame();
+		// The caller opens its picker before the next frame: the notice stays on screen while that frame paints.
+		composer.setNotice(undefined);
+	}
+
+	/**
+	 * Open a history picker with `open`: at once, or, when the terminal renderer would take a while
+	 * to paint its `slow` history, after a frame showing the loading notice. A request while one
+	 * waits joins it and opens nothing of its own: the composer still holds the keys then, and a
+	 * second picker would stack on the first.
+	 */
+	#openHistoryPicker(slow: boolean, open: () => void): Promise<void> {
+		if (this.#historyPickerOpening) return this.#historyPickerOpening;
+		if (!slow || this.ctx.shell.native()) {
+			open();
+			return Promise.resolve();
+		}
+		const opening = this.#presentHistoryLoader()
+			.then(open)
+			.finally(() => {
+				this.#historyPickerOpening = undefined;
+			});
+		this.#historyPickerOpening = opening;
+		return opening;
+	}
+
 	showSettingsSelector(): void {
 		if (this.#focusOpenMenu("settings")) return;
 		const menu = this.#claimMenu("settings");
@@ -420,24 +484,28 @@ export class SelectorController {
 	 * idiom): compact subscriptions grid + daily activity heatmap, with the
 	 * classic full report one keypress away. Takes no transcript space.
 	 */
-	showUsageDashboard(reports: UsageReport[]): void {
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void {
 		// Checked here, not before the fetch: a repeat `/usage` whose fetch lands
 		// while the first dashboard is open focuses it instead of stacking a copy.
 		const kind = "usage-dashboard";
 		if (this.#focusOpenMenu(kind)) return;
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
-		const accounts = selectReportableAccounts(
-			collectStoredAccounts(authStorage),
-			provider => authStorage.usage.providerFor(provider) !== undefined,
-		);
-		if (reports.length === 0 && accounts.length === 0) {
+		const dashboardData = (reports: UsageReport[]) => {
+			const accounts = selectReportableAccounts(
+				collectStoredAccounts(authStorage),
+				provider => authStorage.usage.providerFor(provider) !== undefined,
+			);
+			const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
+				provider: account.provider,
+				label: [accountIdentityLabel(account), usageAuthRejectedHint(account)].filter(Boolean).join(" — "),
+			}));
+			return { reports, unavailableAccounts };
+		};
+		const data = dashboardData(reports);
+		if (reports.length === 0 && data.unavailableAccounts.length === 0 && sessionAiu === undefined) {
 			this.ctx.showWarning("No usage data available.");
 			return;
 		}
-		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
-			provider: account.provider,
-			label: accountIdentityLabel(account),
-		}));
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
@@ -446,9 +514,9 @@ export class SelectorController {
 		const menu = this.#claimMenu(kind);
 		const size = this.ctx.shell.size;
 		const dashboard = new UsageDashboardModel({
-			reports,
-			unavailableAccounts,
-			renderDetail: (width, current) =>
+			...data,
+			sessionAiu,
+			renderDetail: (width, { reports: current, unavailableAccounts }) =>
 				renderUsageReports(
 					current,
 					currentTheme(),
@@ -469,7 +537,10 @@ export class SelectorController {
 					throw error;
 				}
 			},
-			refresh: () => this.ctx.session.fetchUsageReports(),
+			refresh: async () => {
+				const refreshed = await this.ctx.session.fetchUsageReports();
+				return refreshed && dashboardData(refreshed);
+			},
 			terminalRows: () => size().rows,
 			onClose: () => this.#closeMenu(menu),
 		});
@@ -1162,6 +1233,7 @@ export class SelectorController {
 				done();
 				void this.#loginThenReopenModelHub(providerId);
 			},
+			onManageAccess: url => openPath(url),
 			onCatalogRefreshed: async () => {
 				await this.ctx.session.refreshScopedModels();
 				return this.ctx.session.scopedModels;
@@ -1358,43 +1430,43 @@ export class SelectorController {
 	}
 
 	/** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
-	showUserMessageSelector(startAt?: string): void {
+	async showUserMessageSelector(startAt?: string): Promise<void> {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
-		if (entries.length === 0) {
+		if (!hasRewindPoint(entries)) {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
 
-		if (rewindTargets(entries).length === 0) {
-			this.ctx.showStatus("No messages to branch from");
-			return;
-		}
-		const done = () => {
-			overlay?.close();
-			this.focusActiveEditorArea();
-		};
-		// Fullscreen alternate-screen overlay: the replica draws over the live
-		// transcript, and the normal screen stays untouched until the rewind
-		// itself rewrites it.
-		const native = this.ctx.shell.native();
-		const overlay = this.ctx.shell.overlays.show(
-			() =>
-				fullscreenMenuView(
-					"rewind",
-					RewindSelector({
-						entries,
-						siblingPaths: entryId => this.#siblingBranchPaths(entryId),
-						startAt,
-						terminalRows: () => this.ctx.shell.size().rows,
-						...(native ? { replica: turns => this.ctx.createTranscriptReplica(turns) } : {}),
-						onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
-						onCancel: done,
-					}),
-					undefined,
-					REWIND_PAGE,
-				),
-			{ focus: layerDock },
-		);
+		return this.#openHistoryPicker(entries.length >= SLOW_TRANSCRIPT_PICKER_ENTRIES, () => {
+			const done = () => {
+				overlay?.close();
+				this.focusActiveEditorArea();
+			};
+			// Fullscreen alternate-screen overlay: the replica draws over the live
+			// transcript, and the normal screen stays untouched until the rewind
+			// itself rewrites it.
+			const native = this.ctx.shell.native();
+			const overlay = this.ctx.shell.overlays.show(
+				() =>
+					fullscreenMenuView(
+						"rewind",
+						RewindSelector({
+							entries,
+							siblingPaths: entryId => this.#siblingBranchPaths(entryId),
+							startAt,
+							terminalRows: () => this.ctx.shell.size().rows,
+							...(native
+								? { replica: (turns, clipped) => this.ctx.createTranscriptReplica(turns, clipped) }
+								: {}),
+							onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
+							onCancel: done,
+						}),
+						undefined,
+						REWIND_PAGE,
+					),
+				{ focus: layerDock },
+			);
+		});
 	}
 
 	/**
@@ -1595,7 +1667,7 @@ export class SelectorController {
 			return;
 		}
 		if (turn === "rewind") {
-			this.showUserMessageSelector(entry.id);
+			await this.showUserMessageSelector(entry.id);
 			return;
 		}
 		if (turn === "fork") {
@@ -1633,7 +1705,7 @@ export class SelectorController {
 		);
 	}
 
-	showCopySelector(): void {
+	async showCopySelector(): Promise<void> {
 		// The session on screen: a focused subagent's transcript, else the main one.
 		const session = this.ctx.viewSession;
 		const entries = session.sessionManager.getBranch().filter(isTranscriptEntry);
@@ -1642,39 +1714,41 @@ export class SelectorController {
 			return;
 		}
 
-		const done = () => {
-			overlay?.close();
-			this.focusActiveEditorArea();
-		};
-		const overlay = this.ctx.shell.overlays.show(
-			() =>
-				fullscreenMenuView(
-					"copy",
-					CopySelector({
-						entries,
-						onPick: (content, label) => {
-							done();
-							if (!content.trim()) {
-								this.ctx.showStatus("Nothing to copy in that item");
-								return;
-							}
-							void copyToClipboard(content);
-							this.ctx.showStatus(`Copied ${label} to clipboard`);
-						},
-						onOpen: (href, label) => {
-							done();
-							openPath(href);
-							this.ctx.showStatus(`Opening ${label}: ${href}`);
-						},
-						onCancel: done,
-						terminalRows: () => this.ctx.shell.size().rows,
-					}),
-				),
-			{ focus: layerContent },
-		);
+		return this.#openHistoryPicker(entries.length >= SLOW_TRANSCRIPT_PICKER_ENTRIES, () => {
+			const done = () => {
+				overlay?.close();
+				this.focusActiveEditorArea();
+			};
+			const overlay = this.ctx.shell.overlays.show(
+				() =>
+					fullscreenMenuView(
+						"copy",
+						CopySelector({
+							entries,
+							onPick: (content, label) => {
+								done();
+								if (!content.trim()) {
+									this.ctx.showStatus("Nothing to copy in that item");
+									return;
+								}
+								void copyToClipboard(content);
+								this.ctx.showStatus(`Copied ${label} to clipboard`);
+							},
+							onOpen: (href, label) => {
+								done();
+								openPath(href);
+								this.ctx.showStatus(`Opening ${label}: ${href}`);
+							},
+							onCancel: done,
+							terminalRows: () => this.ctx.shell.size().rows,
+						}),
+					),
+				{ focus: layerContent },
+			);
+		});
 	}
 
-	showTreeSelector(): void {
+	async showTreeSelector(): Promise<void> {
 		const tree = this.ctx.sessionManager.getTree();
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
@@ -1683,6 +1757,12 @@ export class SelectorController {
 			return;
 		}
 
+		return this.#openHistoryPicker(treeSize(tree) >= SLOW_TREE_PICKER_ENTRIES, () =>
+			this.#mountTreeSelector(tree, realLeafId),
+		);
+	}
+
+	#mountTreeSelector(tree: readonly SessionTreeNode[], realLeafId: string | null): void {
 		this.#showInEditorArea(done =>
 			TreeSelector({
 				roots: tree,
@@ -1732,7 +1812,7 @@ export class SelectorController {
 
 						if (summaryChoice === undefined) {
 							// User pressed escape - re-show tree selector
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 
@@ -1792,7 +1872,7 @@ export class SelectorController {
 						if (result.aborted) {
 							// Summarization aborted - re-show tree selector
 							this.ctx.showStatus("Branch summarization cancelled");
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 						if (result.cancelled) {
@@ -2314,7 +2394,17 @@ export class SelectorController {
 			const destination = await credentialStoreLabel(getOAuthCredentialProvider(providerId));
 			this.ctx.present(() =>
 				outcomeLinesView([
-					["success", successText(`Successfully logged in to ${providerId}${who ? ` as ${who}` : ""}`)],
+					[
+						"success",
+						successText(
+							`Successfully logged in to ${connectedProviderName(providerId)}${who ? ` as ${who}` : ""}`,
+						),
+					],
+					...(identity
+						? loginFollowUps(providerId, identity, `/login ${providerId}`).map(
+								({ tone, text }) => [tone, text] as const,
+							)
+						: []),
 					["dim", `Credentials saved to ${destination}`],
 				]),
 			);
@@ -2325,6 +2415,11 @@ export class SelectorController {
 				// surfaced "Login cancelled".
 				return false;
 			}
+			if (error instanceof LoginCancelledError) {
+				// Declining the provider's consent screen is a choice, not a failure.
+				this.ctx.showStatus(error.message);
+				return false;
+			}
 			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
 			return false;
 		} finally {
@@ -2333,24 +2428,26 @@ export class SelectorController {
 	}
 
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
+		const providerName = connectedProviderName(providerId);
 		try {
 			// Before the logout: removing a broker-unserved provider's last local login hands it back to the broker.
 			const source = await credentialStoreLabel(providerId);
-			const { removed, remainingSource } = await logoutCredential(
+			const { removed, remainingSource, signOutError } = await logoutCredential(
 				this.ctx.session,
 				providerId,
 				account.credentialId,
 			);
 			if (!removed) {
-				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
+				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerName}.`);
 				return;
 			}
 
 			const lines: [string, string][] = [
-				["success", successText(`Successfully logged out ${account.label} from ${providerId}`)],
+				["success", successText(`Successfully logged out ${account.label} from ${providerName}`)],
 				["dim", `Credential removed from ${source}`],
 			];
-			if (remainingSource) lines.push(["warning", `${providerId} is still authenticated via ${remainingSource}`]);
+			if (signOutError) lines.push(["warning", signOutError]);
+			if (remainingSource) lines.push(["warning", `${providerName} is still authenticated via ${remainingSource}`]);
 			this.ctx.present(() => outcomeLinesView(lines));
 		} catch (error: unknown) {
 			this.ctx.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2382,7 +2479,7 @@ export class SelectorController {
 
 		this.#showInEditorArea(done =>
 			LogoutAccountSelector({
-				provider: provider?.name ?? providerId,
+				provider: connectedProviderName(providerId, provider?.name ?? providerId),
 				accounts,
 				onSelect: account => {
 					done();
@@ -2480,7 +2577,7 @@ export class SelectorController {
 		}
 		const { getOAuthProviders } = await loadProviderAuthUi();
 		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
-		const providerName = provider?.name ?? accountList.provider;
+		const providerName = connectedProviderName(accountList.provider, provider?.name ?? accountList.provider);
 		const accounts = toSessionPinAccounts(accountList.accounts);
 		if (accounts.length === 0) {
 			const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);

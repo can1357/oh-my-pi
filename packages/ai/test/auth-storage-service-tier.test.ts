@@ -47,12 +47,21 @@ describe("service-tier credential selection", () => {
 	let store: SqliteAuthCredentialStore;
 	let authStorage: AuthStorage;
 	const usageByAccount = new Map<string, UsageReport>();
+	/** Set by a test to stall usage reads until it releases them. */
+	let usageHold: { accountId?: string; started: PromiseWithResolvers<void>; release: Promise<void> } | undefined;
 
 	beforeEach(() => {
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const usageProvider = (id: string): UsageProvider => ({
 			id,
 			async fetchUsage(params) {
+				if (
+					usageHold &&
+					(usageHold.accountId === undefined || usageHold.accountId === params.credential.accountId)
+				) {
+					usageHold.started.resolve();
+					await usageHold.release;
+				}
 				return usageByAccount.get(params.credential.accountId ?? "") ?? null;
 			},
 		});
@@ -61,6 +70,7 @@ describe("service-tier credential selection", () => {
 				provider === "openai-codex" || provider === "anthropic" ? usageProvider(provider) : undefined,
 		});
 		usageByAccount.clear();
+		usageHold = undefined;
 		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
 			const credential = credentials[provider] as OAuthCredentials | undefined;
 			return credential?.accountId ? { apiKey: `oauth-${credential.accountId}`, newCredentials: credential } : null;
@@ -160,6 +170,75 @@ describe("service-tier credential selection", () => {
 
 			expect(tiered?.apiKey).toBe("oauth-acct-plus");
 			expect(tiered?.serviceTierUnavailable).toBe(true);
+		});
+
+		// The tier path records after resolution; the plain path records inside it.
+		for (const serviceTier of ["priority", undefined] as const) {
+			test(`a pin made while a ${serviceTier ?? "plain"} selection is in flight survives that selection`, async () => {
+				setCodexUsage(0.6);
+				// Hold the ranking's usage reads until the pin lands, as a startup
+				// prewarm still fetching reports does when `/session pin` runs.
+				const started = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				usageHold = { started, release: release.promise };
+				const pro = authStorage.oauth
+					.accounts("openai-codex", "s")
+					.find(account => account.accountId === "acct-pro");
+				if (!pro) throw new Error("expected acct-pro");
+				const request = { modelId: MODEL, serviceTier };
+
+				const prewarm = authStorage.keys.getWithCredential("openai-codex", "s", request);
+				await started.promise;
+				expect(authStorage.sessions.pin("openai-codex", "s", pro.credentialId)).toBe(true);
+				release.resolve();
+				expect((await prewarm)?.apiKey).toBe("oauth-acct-plus");
+
+				const next = await authStorage.keys.getWithCredential("openai-codex", "s", request);
+				expect(next?.apiKey).toBe("oauth-acct-pro");
+				expect(authStorage.sessions.sticky?.("openai-codex", "s")).toMatchObject({
+					credentialId: pro.credentialId,
+					explicit: true,
+				});
+			});
+		}
+
+		test("re-pinning an account while a selection routes around it keeps the pin", async () => {
+			setCodexUsage(0.6);
+			const provider = "openai-codex";
+			const sessionId = "scoped-fallback";
+			const pinned = authStorage.oauth.accounts(provider).find(account => account.accountId === "acct-pro");
+			if (!pinned) throw new Error("expected acct-pro");
+			expect(authStorage.sessions.pin(provider, sessionId, pinned.credentialId)).toBe(true);
+			// Blocked for Spark only: chat still uses the pin, Spark routes to acct-plus.
+			store.upsertCredentialBlock({
+				credentialId: pinned.credentialId,
+				providerKey: "openai-codex:oauth",
+				blockScope: "spark",
+				blockedUntilMs: Date.now() + HOUR_MS,
+			});
+
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			usageHold = { accountId: "acct-plus", started, release: release.promise };
+			const fallback = authStorage.keys.getWithCredential(provider, sessionId, {
+				modelId: "gpt-5.3-codex-spark",
+				serviceTier: "priority",
+			});
+			await Promise.race([
+				started.promise,
+				fallback.then(result => {
+					throw new Error(`Spark selection finished before its usage read: ${result?.apiKey}`);
+				}),
+			]);
+			usageHold = undefined;
+			try {
+				expect(authStorage.sessions.pin(provider, sessionId, pinned.credentialId)).toBe(true);
+			} finally {
+				release.resolve();
+			}
+
+			expect((await fallback)?.apiKey).toBe("oauth-acct-plus");
+			expect(await authStorage.keys.get(provider, sessionId, { modelId: MODEL })).toBe("oauth-acct-pro");
 		});
 	});
 

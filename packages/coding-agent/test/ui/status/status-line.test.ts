@@ -70,6 +70,36 @@ describe("status segment gallery", () => {
 	});
 });
 
+test("compact automatic thinking distinguishes pending, low and high in the model prefix", () => {
+	const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "unicode" }));
+	const { symbols } = env.theme();
+	const auto = symbols.symbol("thinking.autoPending");
+	const settings: StatusLineSettings = {
+		preset: "custom",
+		leftSegments: ["model"],
+		rightSegments: [],
+		compactThinkingLevel: true,
+	};
+	createRoot(dispose => {
+		try {
+			const facts = signal<StatusFacts>({ ...corpusStatusFacts(), autoThinking: true });
+			const { preview } = createStatusLine({
+				settings: () => settings,
+				facts,
+				placement: () => ({ bar: "full", gap: false, autocomplete: false }),
+			});
+			const bar = preview(undefined);
+			for (const level of [undefined, "low", "high"]) {
+				facts.set({ ...facts(), autoResolvedLevel: level });
+				const effort = level ? symbols.symbol(`thinking.${level}`).split(" ")[0] : "";
+				expect(Bun.stripANSI(paintNode(env, bar, 40).rows[0] ?? "").trim()).toBe(`${auto}${effort} Opus`);
+			}
+		} finally {
+			dispose();
+		}
+	});
+});
+
 test("the brand hides the profile when its segment opts out", () => {
 	const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "nerd" }));
 	const facts = { ...corpusStatusFacts(), profile: "work" };

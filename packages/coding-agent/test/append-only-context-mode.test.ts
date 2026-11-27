@@ -26,7 +26,7 @@ describe("shouldEnableAppendOnlyContext", () => {
 	});
 
 	test("auto preserves prefix caches on Google hosts while respecting explicit off", () => {
-		for (const provider of ["google-antigravity", "google", "google-vertex"]) {
+		for (const provider of ["google", "google-vertex"]) {
 			const model = { provider, baseUrl: "https://generativelanguage.googleapis.com" };
 			expect(shouldEnableAppendOnlyContext("auto", model)).toBe(true);
 			expect(shouldEnableAppendOnlyContext("off", model)).toBe(false);

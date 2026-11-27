@@ -1,13 +1,15 @@
 /**
  * Claude Code Marketplace Plugin Provider
  *
- * Loads configuration from ~/.claude/plugins/cache/ based on installed_plugins.json registry.
- * Priority: 70 (below claude.ts at 80, so user overrides in .claude/ take precedence)
+ * Loads Claude Code-format plugins (`.claude-plugin/` layout) installed through OMP's
+ * marketplace registries (`~/.omp/plugins/installed_plugins.json`, the project registry)
+ * or passed via `--plugin-dir`.
+ * Priority: 70 (below claude.ts at 80, so project overrides in .claude/ take precedence)
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isRecord, logger, pathIsWithinLexical } from "@oh-my-pi/pi-utils";
-import { isUserSourceEnabled, registerProvider } from "../capability";
+import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
@@ -31,7 +33,7 @@ import { resolvePluginStdioPaths, substitutePluginRoot } from "./substitute-plug
 
 const PROVIDER_ID = "claude-plugins";
 const DISPLAY_NAME = "Claude Code Marketplace";
-const PRIORITY = 70; // Below claude.ts (80) so user .claude/ overrides win
+const PRIORITY = 70; // Below claude.ts (80) so project .claude/ overrides win
 
 /**
  * Plugin roots this legacy provider may process for a given surface. Roots
@@ -44,10 +46,8 @@ async function allowedRoots(
 	surface: "skills" | "mcp" | "other",
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
-	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
-	const scopedRoots = userEnabled ? roots : roots.filter(root => root.scope === "project" || root.origin !== "claude");
-	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));
-	return { roots: scopedRoots.filter((_, i) => flags[i]), warnings };
+	const flags = await Promise.all(roots.map(root => legacyProviderAllowed(root.path, surface)));
+	return { roots: roots.filter((_, i) => flags[i]), warnings };
 }
 
 interface ClaudePluginManifest {
@@ -58,6 +58,8 @@ interface ClaudePluginManifest {
 
 interface ResolvedPluginDir {
 	dirs: string[];
+	/** A manifest named a path, even if it resolved to the conventional directory or was rejected. */
+	declared: boolean;
 	warnings: string[];
 }
 
@@ -177,7 +179,7 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 	}
 
 	if (configured.length === 0) {
-		return { dirs: [fallbackDir], warnings: [] };
+		return { dirs: [fallbackDir], declared: false, warnings: [] };
 	}
 
 	const seen = new Set<string>();
@@ -200,12 +202,34 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 		dirs.push(resolved);
 	}
 
-	return { dirs, warnings };
+	return { dirs, declared: true, warnings };
 }
 
 // =============================================================================
 // Skills
 // =============================================================================
+
+async function pathExists(p: string): Promise<boolean> {
+	try {
+		await fs.stat(p);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function withPluginRoot(result: LoadResult<Skill>, pluginRoot: string): LoadResult<Skill> {
+	return {
+		items: result.items.map(item => ({
+			...item,
+			content: substitutePluginRoot(item.content, pluginRoot),
+			// Forward the install path so read-time body rendering
+			// (`skill://` reads, `/skill:` expansion) can substitute too.
+			_source: { ...item._source, pluginRoot },
+		})),
+		warnings: result.warnings,
+	};
+}
 
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
@@ -215,12 +239,36 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const results = await Promise.all(
 		roots.map(async root => {
 			const marketplaceRootManifest = await readMarketplaceRootManifest(root);
-			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
+			const {
+				dirs: skillsDirs,
+				declared,
+				warnings: resolveWarnings,
+			} = await resolvePluginDir(root, {
 				manifestKeys: ["skills"],
 				fallback: "skills",
 				includeFallback: true,
 				marketplaceRootManifest,
 			});
+			// Claude Code >= 2.1.142 parity: a plugin with no `skills` manifest
+			// path and no `skills/` directory whose root holds a `SKILL.md` is
+			// itself a single skill.
+			const defaultSkillsDir = path.join(root.path, "skills");
+			const rootSkillPath = path.join(root.path, "SKILL.md");
+			if (!declared && !(await pathExists(defaultSkillsDir)) && (await pathExists(rootSkillPath))) {
+				const rootResult = await scanSkillsFromDir(ctx, {
+					dir: root.path,
+					providerId: PROVIDER_ID,
+					level: root.scope,
+					includeSelf: true,
+					origin: root.origin,
+					pluginName: root.plugin,
+				});
+				rootResult.items = rootResult.items.filter(item => item.path === rootSkillPath);
+				return {
+					scanResults: [withPluginRoot(rootResult, root.path)],
+					resolveWarnings,
+				};
+			}
 			const scanResults = await Promise.all(
 				skillsDirs.map(dir =>
 					scanSkillsFromDir(ctx, {
@@ -236,17 +284,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 			// Claude Code parity: `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}`
 			// resolve in skill Markdown bodies (#20165) — substitute the plugin
 			// install path when the content is loaded, not in bash.
-			const substitutedResults = scanResults.map(result => ({
-				items: result.items.map(item => ({
-					...item,
-					content: substitutePluginRoot(item.content, root.path),
-					// Forward the install path so read-time body rendering
-					// (`skill://` reads, `/skill:` expansion) can substitute too.
-					_source: { ...item._source, pluginRoot: root.path },
-				})),
-				warnings: result.warnings,
-			}));
-			return { scanResults: substitutedResults, resolveWarnings };
+			return { scanResults: scanResults.map(result => withPluginRoot(result, root.path)), resolveWarnings };
 		}),
 	);
 	for (const { scanResults, resolveWarnings } of results) {
@@ -719,7 +757,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 registerProvider<Skill>(skillCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load skills from Claude Code marketplace plugins (~/.claude/plugins/cache/)",
+	description: "Load skills from Claude Code marketplace plugins",
 	priority: PRIORITY,
 	load: loadSkills,
 });

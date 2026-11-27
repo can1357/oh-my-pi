@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { validateToolArguments } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
@@ -184,6 +185,31 @@ it("renders completed tasks as checked before revealing strikethrough", async ()
 });
 
 describe("TodoTool operations", () => {
+	it.each([
+		{
+			label: "flat items",
+			args: { op: "init", items: [{ phase: "Investigate", items: ["find usage"] }, "write issue"] },
+		},
+		{
+			label: "nested list items",
+			args: { op: "init", list: [{ phase: "Investigate", items: [{ task: "find usage" }, "write issue"] }] },
+		},
+	])("rejects non-string init task entries in $label", async ({ args }) => {
+		const session = createSession();
+		const tool = new TodoTool(session);
+		const params = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-1",
+			name: "todo",
+			arguments: args,
+		});
+		const result = await tool.execute("call-1", tool.parameters.assert(params));
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0]?.type === "text" && result.content[0].text).toContain("must be plain strings");
+		expect(session.getTodoPhases?.()).toEqual([]);
+	});
+
 	it("jumps to a specific task out of order", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", {
@@ -590,6 +616,17 @@ describe("TodoTool lenient init shapes", () => {
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Missing list for init operation");
+	});
+
+	it("names an unknown field like tasks and the expected init shape", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", { op: "init", tasks: ["a", "b"] } as never);
+
+		expect(result.isError).toBe(true);
+		const summary = result.content.find(part => part.type === "text");
+		if (summary?.type !== "text") throw new Error("Expected text summary");
+		expect(summary.text).toContain('unknown field "tasks"');
+		expect(summary.text).toContain('list: [{"phase"');
 	});
 });
 describe("TodoTool lenient op recovery", () => {

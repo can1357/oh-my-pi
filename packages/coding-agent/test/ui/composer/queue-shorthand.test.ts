@@ -5,6 +5,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createRoot, setNativeRenderingForTest } from "@oh-my-pi/pi-tui";
 import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { Composer } from "../../../src/ui/composer";
 import { attachQueueShorthand } from "../../../src/ui/composer/queue-shorthand";
@@ -13,7 +14,7 @@ import { initTheme } from "../../../src/ui/theme/service";
 const restoreTheme = currentTheme();
 
 beforeAll(() => {
-	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true } });
+	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } });
 });
 
 afterAll(() => {

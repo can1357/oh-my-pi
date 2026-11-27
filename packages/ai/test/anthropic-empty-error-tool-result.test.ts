@@ -20,6 +20,14 @@ const anthropicModel: Model<"anthropic-messages"> = buildModel({
 	baseUrl: "https://api.anthropic.com",
 });
 
+const zaiModel: Model<"anthropic-messages"> = buildModel({
+	...baseModel,
+	id: "glm-4.6",
+	name: "GLM-4.6",
+	provider: "zai",
+	baseUrl: "https://api.z.ai/api/anthropic",
+});
+
 const visionModel: Model<"anthropic-messages"> = buildModel({
 	...baseModel,
 	input: ["text", "image"],
@@ -121,5 +129,31 @@ describe("anthropic empty error tool_result encoding", () => {
 		const block = getToolResultBlock(visionModel, toolResult);
 		expect(block.is_error).toBe(false);
 		expect(block.content).toBe("");
+	});
+});
+
+// Z.AI's proxy deserializes tool_result blocks into a class that reads `.id`
+// (500 "'ClaudeContentBlockToolResult' object has no attribute 'id'"), so its
+// tool_result blocks alias `id` to `tool_use_id`; standard Anthropic stays unchanged.
+describe("anthropic tool_result id alias", () => {
+	const toolResult: ToolResultMessage = {
+		role: "toolResult",
+		toolCallId: "toolu_empty_error",
+		toolName: "bash",
+		content: [{ type: "text", text: "file1\nfile2" }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+
+	it("includes `id` aliased to `tool_use_id` on tool_result blocks for z.ai", () => {
+		const block = getToolResultBlock(zaiModel, toolResult);
+		expect(block.tool_use_id).toBe("toolu_empty_error");
+		expect(block.id).toBe("toolu_empty_error");
+	});
+
+	it("does not include `id` on tool_result blocks for api.anthropic.com", () => {
+		const block = getToolResultBlock(anthropicModel, toolResult);
+		expect(block.tool_use_id).toBe("toolu_empty_error");
+		expect("id" in block).toBe(false);
 	});
 });

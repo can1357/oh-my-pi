@@ -102,13 +102,57 @@ type GitHubCopilotApiKeyPayload = {
 	token?: unknown;
 	enterpriseUrl?: unknown;
 	apiEndpoint?: unknown;
+	tokenBasedBilling?: unknown;
 };
 
 export type ParsedGitHubCopilotApiKey = {
 	accessToken: string;
 	enterpriseUrl?: string;
 	apiEndpoint?: string;
+	/** The account meters usage in AI credits (`token_based_billing`); absent when unknown. */
+	tokenBasedBilling?: boolean;
 };
+
+/** What `copilot_internal/user` reports about the account a GitHub token belongs to. */
+export type GitHubCopilotAccountInfo = {
+	apiEndpoint?: string;
+	tokenBasedBilling?: boolean;
+};
+
+/**
+ * Whether a `copilot_internal/user` body flags usage-based (AI credit) billing:
+ * on the account or on its premium-interactions snapshot. True wins, then an
+ * explicit false; undefined when neither field is a boolean.
+ */
+export function readCopilotTokenBilling(data: unknown): boolean | undefined {
+	if (!isRecord(data)) return undefined;
+	const snapshots = isRecord(data.quota_snapshots) ? data.quota_snapshots : undefined;
+	const premium = snapshots && isRecord(snapshots.premium_interactions) ? snapshots.premium_interactions : undefined;
+	const flags = [data.token_based_billing, premium?.token_based_billing];
+	if (flags.includes(true)) return true;
+	return flags.includes(false) ? false : undefined;
+}
+
+/**
+ * Billing modes learned this process for bare GitHub tokens, keyed by a hash of
+ * the token (never the token itself). A raw `COPILOT_GITHUB_TOKEN` has no
+ * credential row to persist the mode on, so request-time billing reads it here.
+ */
+const learnedTokenBilling = new Map<string, boolean>();
+
+function tokenBillingKey(token: string): string {
+	return Bun.hash(token).toString(36);
+}
+
+/** Remember the billing mode `copilot_internal/user` reported for `token`, for this process. */
+export function rememberCopilotTokenBilling(token: string, tokenBasedBilling: boolean): void {
+	learnedTokenBilling.set(tokenBillingKey(token), tokenBasedBilling);
+}
+
+/** A request key's billing mode: the one it carries, else the one learned for its token, else unknown. */
+export function resolveCopilotTokenBilling(apiKey: ParsedGitHubCopilotApiKey): boolean | undefined {
+	return apiKey.tokenBasedBilling ?? learnedTokenBilling.get(tokenBillingKey(apiKey.accessToken));
+}
 
 const PUBLIC_GITHUB_HOSTS = new Set(["api.github.com", "github.com", "www.github.com"]);
 
@@ -144,18 +188,20 @@ export function normalizeGitHubCopilotApiEndpoint(input: string | undefined): st
 	}
 }
 /**
- * Resolve the plan-specific Copilot API endpoint advertised for a GitHub token.
- * Login and raw environment-token discovery share this best-effort probe. Pass
- * a `signal` to bound it against the same discovery deadline as `/models`; a
- * stalled probe otherwise blocks discovery indefinitely.
+ * Read the plan-specific Copilot API endpoint and billing mode advertised for a
+ * GitHub token. Login and raw environment-token discovery share this
+ * best-effort probe. Pass a `signal` to bound it against the same discovery
+ * deadline as `/models`; a stalled probe otherwise blocks discovery indefinitely.
  */
-export async function discoverGitHubCopilotApiEndpoint(
+export async function discoverGitHubCopilotAccount(
 	token: string,
 	fetchImpl: FetchImpl,
 	signal?: AbortSignal,
-): Promise<string | undefined> {
+	/** The GitHub REST API host the token belongs to; GitHub Enterprise logins pass theirs. */
+	githubApiBaseUrl = "https://api.github.com",
+): Promise<GitHubCopilotAccountInfo> {
 	try {
-		const response = await fetchImpl("https://api.github.com/copilot_internal/user", {
+		const response = await fetchImpl(`${githubApiBaseUrl}/copilot_internal/user`, {
 			headers: {
 				Accept: "application/json",
 				Authorization: `token ${token}`,
@@ -163,14 +209,29 @@ export async function discoverGitHubCopilotApiEndpoint(
 			},
 			signal,
 		});
-		if (!response.ok) return undefined;
+		if (!response.ok) return {};
 		const data: unknown = await response.json();
-		if (!isRecord(data) || !isRecord(data.endpoints)) return undefined;
-		const endpoint = data.endpoints.api;
-		return typeof endpoint === "string" ? normalizeGitHubCopilotApiEndpoint(endpoint) : undefined;
+		if (!isRecord(data)) return {};
+		const endpoint = isRecord(data.endpoints) ? data.endpoints.api : undefined;
+		const apiEndpoint = typeof endpoint === "string" ? normalizeGitHubCopilotApiEndpoint(endpoint) : undefined;
+		const tokenBasedBilling = readCopilotTokenBilling(data);
+		if (tokenBasedBilling !== undefined) rememberCopilotTokenBilling(token, tokenBasedBilling);
+		return {
+			...(apiEndpoint ? { apiEndpoint } : {}),
+			...(tokenBasedBilling === undefined ? {} : { tokenBasedBilling }),
+		};
 	} catch {
-		return undefined;
+		return {};
 	}
+}
+
+/** The plan-specific Copilot API endpoint advertised for a GitHub token (see {@link discoverGitHubCopilotAccount}). */
+export async function discoverGitHubCopilotApiEndpoint(
+	token: string,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	return (await discoverGitHubCopilotAccount(token, fetchImpl, signal)).apiEndpoint;
 }
 
 export function parseGitHubCopilotApiKey(apiKeyRaw: string): ParsedGitHubCopilotApiKey {
@@ -187,6 +248,7 @@ export function parseGitHubCopilotApiKey(apiKeyRaw: string): ParsedGitHubCopilot
 					typeof parsed.apiEndpoint === "string"
 						? normalizeGitHubCopilotApiEndpoint(parsed.apiEndpoint)
 						: undefined,
+				...(typeof parsed.tokenBasedBilling === "boolean" ? { tokenBasedBilling: parsed.tokenBasedBilling } : {}),
 			};
 		}
 	} catch {}

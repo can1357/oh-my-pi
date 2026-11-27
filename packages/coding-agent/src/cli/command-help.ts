@@ -12,7 +12,8 @@ export const anonymizeHelp = {
 } satisfies CommandMetadata;
 
 export const authHelp = {
-	description: "Export or import stored provider credentials (API keys and OAuth logins) as JSON",
+	description:
+		"Export or import stored provider credentials (API keys and OAuth logins) as JSON, or show or set the key that encrypts them",
 } satisfies CommandMetadata;
 
 export const authBrokerHelp = {
