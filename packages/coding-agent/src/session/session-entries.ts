@@ -99,6 +99,12 @@ export interface SessionHeader {
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
+	/**
+	 * Epoch milliseconds at which this fork reset its inherited billing (`forkFrom` with `resetInheritedCost`).
+	 * Turns written at or before it were copied from the parent with their charge stripped, so a missing
+	 * AI-credit frame on them is the parent's spend, not unreported spend of this session.
+	 */
+	billingResetAt?: number;
 }
 
 export interface NewSessionOptions {

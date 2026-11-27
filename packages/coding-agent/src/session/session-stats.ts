@@ -19,7 +19,7 @@ import {
 	type NonMessageTokenSource,
 } from "./context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
-import { isMissingAiuBillingFrame } from "./aiu-billing";
+import { isInheritedBilling, isMissingAiuBillingFrame } from "./aiu-billing";
 import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu } from "./async-result";
 import { getLatestCompactionEntry } from "./session-context";
 import type { ModelUsageEntry, SessionEntry } from "./session-entries";
@@ -202,6 +202,7 @@ export class SessionStatsTracker {
 		let hasCredits = false;
 		let aiuNano: number | undefined;
 		let aiuUnreportedTurns = 0;
+		const billingResetAt = this.#host.sessionManager.getHeader()?.billingResetAt;
 		const routedModels: Record<string, number> = {};
 		const editRejections: Record<string, number> = {};
 		const addUsage = (usage: Usage): void => {
@@ -248,8 +249,11 @@ export class SessionStatsTracker {
 				// Persisted and imported transcripts can predate usage metadata despite the current message type.
 				const usage = message.usage;
 				if (usage) {
-					// A provider-declared billing frame that did not arrive is unknown spend, not free.
-					if (isMissingAiuBillingFrame(message, usage)) aiuUnreportedTurns++;
+					// A provider-declared billing frame that did not arrive is unknown spend, not free; turns a
+					// reset fork copied from its parent were stripped on purpose.
+					if (!isInheritedBilling(billingResetAt, message.timestamp) && isMissingAiuBillingFrame(message, usage)) {
+						aiuUnreportedTurns++;
+					}
 					addUsage(usage);
 					if (message.upstreamModel !== undefined) {
 						routedModels[message.upstreamModel] = (routedModels[message.upstreamModel] ?? 0) + 1;
@@ -265,7 +269,9 @@ export class SessionStatsTracker {
 		}
 		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), entry => {
 			// A side request without its declared billing frame is unknown spend too.
-			if (isMissingAiuBillingFrame(entry, entry.usage)) aiuUnreportedTurns++;
+			if (!isInheritedBilling(billingResetAt, entry.timestamp) && isMissingAiuBillingFrame(entry, entry.usage)) {
+				aiuUnreportedTurns++;
+			}
 			addUsage(entry.usage);
 		});
 		return {

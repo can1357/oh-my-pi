@@ -230,6 +230,42 @@ describe("AgentSession session stats", () => {
 		});
 	});
 
+	it("does not count a reset fork's copied Copilot turns as missing frames of its own", () => {
+		const target = getCopilotModel();
+		const sessionManager = SessionManager.inMemory();
+		const turn = (timestamp: number, usage: Partial<Usage>): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text: "reply" }],
+			api: target.api,
+			provider: "github-copilot",
+			model: target.id,
+			timestamp,
+			stopReason: "stop",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				...usage,
+			},
+		});
+		const resetAt = 10_000;
+		const header = sessionManager.getHeader();
+		if (!header) throw new Error("expected session header");
+		header.billingResetAt = resetAt;
+		sessionManager.appendMessage({ role: "user", content: "go", timestamp: 1 });
+		// Copied from the parent before the reset: its charge was stripped on purpose.
+		sessionManager.appendMessage(turn(resetAt - 1, {}));
+		// The fork's own turn after the reset reported its frame; the next one did not.
+		sessionManager.appendMessage(turn(resetAt + 1, { aiu: { nano: 9_000_000 } }));
+		sessionManager.appendMessage(turn(resetAt + 2, {}));
+		session = createStatsSession(sessionManager, target);
+
+		expect(session.getSessionStats().aiu).toEqual({ nano: 9_000_000, unreportedTurns: 1 });
+	});
+
 	it("reports no AI credits when no turn carried a billing frame", () => {
 		const target = model();
 		const sessionManager = SessionManager.inMemory();

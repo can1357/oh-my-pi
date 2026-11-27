@@ -30,7 +30,6 @@ import {
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
 
-import { type AiuBillingRequest, declaresAiuBilling } from "./aiu-billing";
 import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu } from "./async-result";
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
@@ -481,24 +480,16 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
  * counts untouched. Cost, credit meters, and premium-request counts describe
  * billing; forks that must not inherit spend (see {@link SessionManager.forkFrom}
  * `resetInheritedCost`) drop them while keeping the tokens compaction relies on.
- *
- * `request` names the model call of a turn or side request: when its model
- * declares a server-side AI-credit frame, the reset record carries an explicit
- * zero charge so the fork's totals read the inherited turn as the parent's
- * spend instead of a billing frame the fork never received.
+ * The AI-credit charge is dropped, not zeroed: an absent charge stays open for the
+ * parent's real one to attach in stats, and the fork records `billingResetAt` on its
+ * header so these turns are not mistaken for missing billing frames.
  */
-function resetUsageCost(usage: Usage | undefined, request?: AiuBillingRequest): void {
+function resetUsageCost(usage: Usage | undefined): void {
 	if (!usage) return;
 	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 	usage.credits = undefined;
-	usage.aiu = request !== undefined && declaresAiuBilling(request) ? { nano: 0 } : undefined;
+	usage.aiu = undefined;
 	usage.premiumRequests = undefined;
-}
-
-/** The model call behind an entry's usage: an assistant turn or a side request; task results carry none. */
-function resetRequestOf(entry: SessionEntry): AiuBillingRequest | undefined {
-	if (entry.type === "model_usage") return entry;
-	return entry.type === "message" && entry.message.role === "assistant" ? entry.message : undefined;
 }
 
 /** Clear child billing kept in task results without discarding their token counts. */
@@ -2692,6 +2683,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			billingResetAt: this.#header.billingResetAt,
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
@@ -4335,6 +4327,7 @@ export class SessionManager {
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
+			billingResetAt: this.#header.billingResetAt,
 		};
 
 		const labels: LabelEntry[] = [];
@@ -4481,6 +4474,8 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
+		// History copied without a reset keeps the ancestor's stripped turns marked as inherited.
+		manager.#header.billingResetAt = options?.resetInheritedCost ? Date.now() : sourceHeader?.billingResetAt;
 		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
@@ -4516,7 +4511,7 @@ export class SessionManager {
 	 */
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
 		for (const entry of history) {
-			resetUsageCost(entryUsage(entry), resetRequestOf(entry));
+			resetUsageCost(entryUsage(entry));
 			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
 				resetTaskResultBilling(entry.message.details);
 			}

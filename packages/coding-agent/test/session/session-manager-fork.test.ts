@@ -19,7 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/async-result";
-import { isMissingAiuBillingFrame } from "@oh-my-pi/pi-coding-agent/session/aiu-billing";
+import { isInheritedBilling, isMissingAiuBillingFrame } from "@oh-my-pi/pi-coding-agent/session/aiu-billing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-coding-agent/utils/ttyid";
@@ -579,13 +579,13 @@ describe("SessionManager.forkFrom", () => {
 		await sourceManager.close();
 	});
 
-	it("gives reset turns of a billing-frame model an explicit zero charge, not a missing frame", async () => {
+	it("strips the charge of reset turns and marks the reset on the header instead of zeroing aiu", async () => {
 		using tempDir = TempDir.createSync("@omp-session-fork-aiu-");
 		const cwd = path.join(tempDir.path(), "project");
 		const sessionDir = path.join(tempDir.path(), "sessions");
 		await fs.mkdir(sessionDir, { recursive: true });
 		const sourceFile = path.join(sessionDir, "source.jsonl");
-		const timestamp = new Date().toISOString();
+		const timestamp = new Date(Date.now() - 60_000).toISOString();
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -593,7 +593,7 @@ describe("SessionManager.forkFrom", () => {
 			timestamp,
 			cwd,
 		};
-		const turn = (id: string, parentId: string | null, provider: string, model: string) => ({
+		const turn = (id: string, parentId: string | null, provider: string, model: string, aiu?: { nano: number }) => ({
 			type: "message",
 			id,
 			parentId,
@@ -605,39 +605,64 @@ describe("SessionManager.forkFrom", () => {
 				provider,
 				model,
 				stopReason: "stop",
-				timestamp: Date.now(),
+				timestamp: Date.parse(timestamp),
 				usage: {
 					input: 10,
 					output: 5,
 					cacheRead: 0,
 					cacheWrite: 0,
 					totalTokens: 15,
+					...(aiu ? { aiu } : {}),
 					cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
 				},
 			},
 		});
-		const copilotTurn = turn("copilot-1", null, "github-copilot", "claude-sonnet-5.5");
-		const lines = [header, copilotTurn, turn("direct-1", "copilot-1", "anthropic", "claude")];
+		// A Copilot turn that reported its charge, and one that never received its frame.
+		const reported = turn("copilot-1", null, "github-copilot", "claude-sonnet-5.5", { nano: 8_000_000 });
+		const unreported = turn("copilot-2", "copilot-1", "github-copilot", "claude-sonnet-5.5");
+		const lines = [header, reported, unreported];
 		await Bun.write(sourceFile, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
 
+		const before = Date.now();
 		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
 			suppressBreadcrumb: true,
 			resetInheritedCost: true,
 		});
 		const resetFile = reset.getSessionFile();
 		if (!resetFile) throw new Error("expected reset fork file");
-		const turns = (await loadEntriesFromFile(resetFile)).filter(
+
+		// The copied charge is dropped, not zeroed: stats must still be able to attach the parent's real charge.
+		const rawFork = await Bun.file(resetFile).text();
+		expect(rawFork).not.toContain('"aiu"');
+		const forkHeader = reset.getHeader();
+		expect(forkHeader?.billingResetAt).toBeGreaterThanOrEqual(before);
+		const copied = (await loadEntriesFromFile(resetFile)).filter(
 			(entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "assistant",
 		);
-		const [copilot, direct] = turns.map(entry => (entry.message.role === "assistant" ? entry.message : undefined));
-		if (!copilot || !direct) throw new Error("expected both assistant turns");
+		expect(copied).toHaveLength(2);
+		for (const entry of copied) {
+			if (entry.message.role !== "assistant") throw new Error("expected assistant turn");
+			expect(entry.message.usage.aiu).toBeUndefined();
+			// Declared but absent, yet inherited: the header marks it as the parent's spend.
+			expect(isMissingAiuBillingFrame(entry.message, entry.message.usage)).toBe(true);
+			expect(isInheritedBilling(forkHeader?.billingResetAt, entry.message.timestamp)).toBe(true);
+		}
+		expect(reset.getUsageStatistics().aiuNano).toBeUndefined();
+		// A turn the fork writes itself is later than the reset and counts as its own.
+		expect(isInheritedBilling(forkHeader?.billingResetAt, Date.now() + 1_000)).toBe(false);
 
-		// Before the reset the Copilot turn lacks its declared frame; after it the turn is the parent's zeroed spend.
-		expect(isMissingAiuBillingFrame(copilotTurn.message, copilotTurn.message.usage)).toBe(true);
-		expect(isMissingAiuBillingFrame(copilot, copilot.usage)).toBe(false);
-		expect(copilot.usage.aiu).toEqual({ nano: 0 });
-		expect(direct.usage.aiu).toBeUndefined();
-		expect(reset.getUsageStatistics().aiuNano).toBe(0);
+		// Derivatives made without another reset still carry the copied, stripped turns as inherited.
+		const resetAt = forkHeader?.billingResetAt;
+		const plain = await SessionManager.forkFrom(resetFile, cwd, path.join(tempDir.path(), "plain"), undefined, {
+			suppressBreadcrumb: true,
+		});
+		expect(plain.getHeader()?.billingResetAt).toBe(resetAt);
+		const branchFile = reset.createBranchedSession("copilot-2");
+		if (!branchFile) throw new Error("expected branched session file");
+		expect(reset.getHeader()?.billingResetAt).toBe(resetAt);
+		const rotated = await reset.fork();
+		if (!rotated) throw new Error("expected rotated session");
+		expect(reset.getHeader()?.billingResetAt).toBe(resetAt);
 	});
 
 	for (const { name, createStorage, padding } of [
