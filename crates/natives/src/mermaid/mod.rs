@@ -401,6 +401,47 @@ mod tests {
 		assert_eq!(assert_clean_box(&art, "C", "C"), 1, "{art}");
 	}
 
+	/// Two back edges into a top node stay unbundled, yet the source with
+	/// forward edges still fans them out through one exit, apart from its back
+	/// edge.
+	#[test]
+	fn fan_out_stays_apart_from_its_sources_back_edge() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart TD\nA --> B\nB --> C\nC --> D\nC --> E\nB --> A\nC --> A", &options)
+				.unwrap();
+		assert_eq!(assert_clean_box(&art, "A", "A"), 2, "{art}");
+		assert_eq!(assert_clean_box(&art, "D", "D"), 1, "{art}");
+		assert_eq!(assert_clean_box(&art, "E", "E"), 1, "{art}");
+		assert_clean_box(&art, "C", "C");
+		let grid = cells(&art);
+		let (top, left, bottom, right) = node_box(&grid, "C").unwrap();
+		let at = |r: usize, c: usize| grid.get(r).and_then(|line| line.get(c)).copied();
+		let (exit, start, step) = (top + 1..bottom)
+			.flat_map(|r| [(r, right + 1, 1), (r, left.wrapping_sub(1), -1)])
+			.find(|&(r, c, _)| at(r, c) == Some('─'))
+			.unwrap();
+		let mut c = start;
+		while at(exit, c) == Some('─') {
+			c = c.wrapping_add_signed(step);
+		}
+		assert!(
+			matches!(at(exit, c), Some('┘' | '┐' | '└' | '┌')),
+			"back edge from C shares its line:\n{art}"
+		);
+		let column = (left + 1..right)
+			.find(|&c| at(bottom + 1, c) == Some('│'))
+			.unwrap();
+		let mut r = bottom + 1;
+		while at(r, column) == Some('│') {
+			r += 1;
+		}
+		assert!(
+			matches!(at(r, column), Some('├' | '┤' | '┴' | '┼')),
+			"no shared exit below C:\n{art}"
+		);
+	}
+
 	/// Edges inside a left-to-right subgraph on the top row of a top-down
 	/// graph all end on row zero, so they cannot be bundled either.
 	#[test]
