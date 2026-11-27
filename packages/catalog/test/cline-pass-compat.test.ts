@@ -7,6 +7,7 @@ import { isBareIdReferenceProvider } from "@oh-my-pi/pi-catalog/compat/behavior"
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -465,19 +466,19 @@ describe("ClinePass catalog", () => {
 		const spec = models?.find(model => model.id === "deepseek-v4.1-flash-1017");
 		if (!spec) throw new Error("ClinePass roster is missing the subscription deepseek-v4.1-flash-1017 model");
 
-		const model = buildModel(spec);
-		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		const efforts = [Effort.Low, Effort.High, Effort.Max];
+		const bundled = getBundledModel<"openai-completions">("cline-pass", spec.id);
+		for (const model of [bundled, buildModel(spec)]) {
+			expect(getSupportedEfforts(model)).toEqual(efforts);
+			const wire = await Promise.all(
+				efforts.map(async effort => (await captureChatBody(model, { reasoning: effort })).reasoning_effort),
+			);
+			expect(wire).toEqual(efforts);
 
-		const wire = await Promise.all(
-			[Effort.Low, Effort.High, Effort.Max].map(
-				async effort => (await captureChatBody(model, { reasoning: effort })).reasoning_effort,
-			),
-		);
-		expect(wire).toEqual([Effort.Low, Effort.High, Effort.Max]);
-
-		const disabled = await captureChatBody(model, { disableReasoning: true });
-		expect(disabled.reasoning_effort).toBeUndefined();
-		expect(disabled.reasoning).toEqual({ enabled: false });
+			const disabled = await captureChatBody(model, { disableReasoning: true });
+			expect(disabled.reasoning_effort).toBeUndefined();
+			expect(disabled.reasoning).toEqual({ enabled: false });
+		}
 	});
 });
 
