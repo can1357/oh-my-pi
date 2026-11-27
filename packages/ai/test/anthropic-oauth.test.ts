@@ -76,6 +76,75 @@ describe("anthropic oauth alignment", () => {
 		});
 	});
 
+	it.each(["occupied preferred", "OS-assigned"] as const)("completes OAuth with an %s callback port", async mode => {
+		using occupied =
+			mode === "occupied preferred"
+				? Bun.serve({ hostname: "localhost", port: 0, fetch: () => new Response(null, { status: 409 }) })
+				: undefined;
+		const preferredPort = occupied?.port ?? 0;
+		await withEnv({ ANTHROPIC_OAUTH_CALLBACK_PORT: String(preferredPort) }, async () => {
+			const login = getProviderDefinition("anthropic")?.login;
+			if (!login) throw new Error("anthropic login is unavailable");
+			const abort = new AbortController();
+			const authorized = Promise.withResolvers<string>();
+			const progress: string[] = [];
+			let tokenRequest: unknown;
+			const signedIn = login({
+				signal: abort.signal,
+				onAuth: info => authorized.resolve(info.url),
+				onProgress: message => {
+					progress.push(message);
+				},
+				fetch: async (_input, init) => {
+					tokenRequest = JSON.parse(String(init?.body));
+					return Response.json({
+						access_token: "granted",
+						refresh_token: "refresh-token",
+						expires_in: 3600,
+						account: { uuid: "account-id", email_address: "user@example.com" },
+						organization: { uuid: "org-id", name: "Team Workspace" },
+					});
+				},
+			});
+			try {
+				const authUrl = await Promise.race([
+					authorized.promise,
+					signedIn.then(() => {
+						throw new Error("OAuth completed before publishing a callback URL");
+					}),
+				]);
+				const authorize = new URL(authUrl);
+				const redirectUri = authorize.searchParams.get("redirect_uri")!;
+				const callback = new URL(redirectUri);
+				const callbackPort = Number(callback.port);
+				expect(callbackPort).toBeGreaterThan(0);
+				if (occupied) {
+					expect(callbackPort).not.toBe(preferredPort);
+					expect(progress).toContainEqual(
+						expect.stringMatching(new RegExp(`\\b${preferredPort}\\b.*\\b${callbackPort}\\b`)),
+					);
+				}
+				callback.searchParams.set("state", authorize.searchParams.get("state")!);
+				callback.searchParams.set("code", "code-123");
+				const response = await fetch(callback, { signal: AbortSignal.timeout(2000) });
+				expect(response.ok).toBe(true);
+				expect(await signedIn).toMatchObject({ access: "granted" });
+				expect(tokenRequest).toHaveProperty("redirect_uri", redirectUri);
+			} finally {
+				abort.abort();
+				await signedIn.catch(() => undefined);
+			}
+		});
+	});
+
+	it("rejects an invalid forwarded port before starting authorization", async () => {
+		await withEnv({ ANTHROPIC_OAUTH_CALLBACK_PORT: "65536" }, async () => {
+			await expect(loginAnthropic(() => Promise.reject(new Error("unexpected token request")))).rejects.toThrow(
+				/ANTHROPIC_OAUTH_CALLBACK_PORT.*0 to 65535/,
+			);
+		});
+	});
+
 	it("refreshes like Claude Code, keeps the server's expiry, and omits response organization drift", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(

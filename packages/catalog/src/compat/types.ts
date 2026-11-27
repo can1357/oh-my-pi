@@ -484,6 +484,8 @@ export interface CompiledOAuthRequest {
 /** Callback transport configuration for authorization-code logins. */
 export interface CompiledCallback {
 	port: number;
+	/** Optional environment variable that overrides the preferred loopback port. */
+	portEnv?: string;
 	path: string;
 	hostname: string;
 	redirectUri?: CompiledAuthValue;

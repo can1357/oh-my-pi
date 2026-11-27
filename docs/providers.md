@@ -59,6 +59,10 @@ Outside a session, `omp login [<provider>]` runs the same login from the termina
 
 For headless or remote setups backed by a shared auth broker, the CLI exposes `omp auth-broker login <provider>` / `omp auth-broker logout` (and `status`, `list`, `import`, `migrate`). See [Secrets and credentials](./secrets.md) for the broker model.
 
+Anthropic OAuth uses loopback port `54545` by default. Set `ANTHROPIC_OAUTH_CALLBACK_PORT` before starting omp to use a different forwarded port, or set it to `0` to let the OS choose a free port. This works for both regular and one-year Anthropic logins.
+
+This setting does not change the forwarding port for [`omp auth-broker login --via`](./auth-broker-gateway.md#cli).
+
 When a model has no credentials, `omp` tells you to run `/login` or set the provider's environment variable.
 
 For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline dashboard and validate a newly created API key against `/users/me`, without a completion probe or subscription-quota charge. OMP refreshes membership from Cline's public recommended-models endpoint and bundles reviewed Cline metadata for offline startup. New live IDs are enriched from upstream references or use conservative metadata without invented reasoning controls. `omp usage` reports five-hour, weekly, and monthly quota windows. Free-tier models are marked `(free)` and use the same key; subscription models show API-equivalent reference pricing, while streamed gateway cost is authoritative for the actual charge. Requests mirror Cline CLI client headers and a stable per-session task ID; reasoning controls remain model-specific.
