@@ -1065,6 +1065,10 @@ export interface ParsedModelResult {
 	explicitThinkingLevel: boolean;
 }
 
+function parseExactModelMatch(pattern: string, model: Model<Api>): ParsedModelResult {
+	const thinkingLevel = inferWireRouteThinkingLevel(pattern, model);
+	return { model, thinkingLevel, warning: undefined, explicitThinkingLevel: thinkingLevel !== undefined };
+}
 /*
  * An allow-list (a pool marked by filterAvailableModelsByEnabledPatterns, resolveAllowedModels or
  * scopeAllowList) constrains upstream pins only; IDs, variants and thinking suffixes match as in an
@@ -1078,6 +1082,7 @@ export interface ParsedModelResult {
  *                  there                              pinned there or a listed unpinned id pinned
  *                                                     there; never re-pinned
  */
+
 /**
  * Parse a pattern to extract model and thinking level.
  * Handles models with colons in their IDs (e.g., OpenRouter's :exacto suffix).
@@ -1108,15 +1113,7 @@ function parseModelPatternInPool(
 ): ParsedModelResult {
 	// A literal model ID takes precedence over a thinking suffix.
 	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true });
-	if (exactMatch) {
-		const thinkingLevel = inferWireRouteThinkingLevel(pattern, exactMatch);
-		return {
-			model: exactMatch,
-			thinkingLevel,
-			warning: undefined,
-			explicitThinkingLevel: thinkingLevel !== undefined,
-		};
-	}
+	if (exactMatch) return parseExactModelMatch(pattern, exactMatch);
 
 	// Prefer a fuzzy match whose actual id ends in the suffix, preserving
 	// shorthand selectors for literal tier models such as `router:low`. Other
@@ -2545,6 +2542,77 @@ export function modelSelectorProviderHint(selector: string): string | undefined 
 	const slash = value.indexOf("/");
 	if (slash <= 0 || !value.slice(slash + 1).trim()) return undefined;
 	return value.slice(0, slash).trim().toLowerCase() || undefined;
+}
+
+interface StartupModelRoleSelector {
+	provider: string;
+	pattern: string;
+}
+
+/** The leading configured pattern, if it names a provider worth hydrating first. */
+export function getStartupModelRoleSelector(
+	role: string | undefined,
+	settings?: Settings,
+): StartupModelRoleSelector | undefined {
+	const pattern = resolveConfiguredModelPatterns(role, settings)[0];
+	if (!pattern) return undefined;
+	const provider = modelSelectorProviderHint(pattern);
+	return provider ? { provider, pattern } : undefined;
+}
+
+/**
+ * Resolve a startup role without widening its catalog. A provider reference wins
+ * outright; for a suffix/pin, the ordinary matcher must first rule out literal
+ * IDs and bare variant aliases. The registry verifies that no other roster could
+ * affect those phases. Probe after hydrating the named provider. Callers with
+ * an explicit model allow-list must use the full role resolver instead.
+ */
+export async function tryResolveStartupModelRole(
+	selector: StartupModelRoleSelector,
+	registry: ModelRegistry,
+	preferences?: ModelMatchPreferences,
+): Promise<ResolvedModelRoleValue | undefined> {
+	const { provider, pattern } = selector;
+	const providerScope = new Set([provider]);
+	const available = registry.getAvailableForProviders(providerScope);
+	const exact = findExactModelReferenceMatch(pattern, available);
+	if (exact) {
+		logger.time("resolveDefaultModelRole:scope:provider-reference");
+		return toResolvedRoleValue(exact, parseExactModelMatch(pattern, exact), 0);
+	}
+	if (available.length === 0) {
+		logger.time("resolveDefaultModelRole:scope:unavailable-provider");
+		return undefined;
+	}
+
+	const route = splitUpstreamRouting(pattern);
+	if (!route && !splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).level) {
+		logger.time("resolveDefaultModelRole:scope:no-exact-reference");
+		return undefined;
+	}
+	const shadowSelectors = new Set<string>();
+	// The parser may recursively remove colons, including an invalid suffix
+	// ahead of a clean route. Check every spelling it could inspect for a
+	// globally registered bare variant alias before using the smaller pool.
+	for (const spelling of route ? [pattern, route.base] : [pattern]) {
+		for (let end = spelling.length; end > 0; ) {
+			shadowSelectors.add(spelling.slice(0, end).trim().toLowerCase());
+			end = spelling.lastIndexOf(":", end - 1);
+		}
+	}
+	const parsed = await registry.withStartupModelRoleCatalog(provider, shadowSelectors, models =>
+		parseModelPattern(pattern, models, preferences),
+	);
+	if (!parsed) {
+		logger.time("resolveDefaultModelRole:scope:possible-catalog-shadow");
+		return undefined;
+	}
+	if (!parsed.model || parsed.warning) {
+		logger.time("resolveDefaultModelRole:scope:unresolved-suffix");
+		return undefined;
+	}
+	logger.time("resolveDefaultModelRole:scope:suffix-or-route");
+	return toResolvedRoleValue(parsed.model, parsed, 0);
 }
 
 /**

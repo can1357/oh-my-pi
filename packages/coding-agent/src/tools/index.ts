@@ -55,7 +55,7 @@ import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
-import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
+import { type BuiltinToolName, type HiddenToolName, normalizeToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
@@ -696,6 +696,23 @@ export interface BuiltinToolPlan {
 	isAllowed(name: string): boolean;
 }
 
+function canUseTaskTool(session: Pick<ToolSession, "settings" | "taskDepth">): boolean {
+	return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0);
+}
+
+/** Whether startup can begin the agent scan for the requested built-in task tool. */
+export function isBuiltinTaskPlanned(
+	session: Pick<ToolSession, "settings" | "taskDepth" | "restrictToolNames">,
+	toolNames?: readonly string[],
+): boolean {
+	return (
+		canUseTaskTool(session) &&
+		(toolNames === undefined
+			? session.restrictToolNames !== true
+			: toolNames.some(name => normalizeToolName(name) === "task"))
+	);
+}
+
 /**
  * Resolve which built-in tools `session` gets for `toolNames` under the current
  * settings. Shared by {@link createTools} and the live settings reconcile so both
@@ -874,9 +891,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings))
 			);
 		}
-		if (name === "task") {
-			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0);
-		}
+		if (name === "task") return canUseTaskTool(session);
 		return true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {

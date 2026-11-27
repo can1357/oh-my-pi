@@ -81,9 +81,13 @@ import {
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import { aggregateExtensionFlags } from "./extensibility/extensions/flags";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
-import { loadExtensions } from "./extensibility/extensions/loader";
-import { ExtensionRunner } from "./extensibility/extensions/runner";
+import {
+	loadSessionExtensions,
+	loadTrustedSessionExtensions,
+	resolveTrustedExtensionPaths,
+} from "./extensibility/extensions/session-discovery";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import {
 	scheduleMarketplaceAutoUpdate,
@@ -118,6 +122,8 @@ import {
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
+import { SessionModelRestoreError } from "./session/model-restore-error";
+import { resolvePrewalkTarget } from "./session/prewalk-target";
 import {
 	createForeignSessionStore,
 	foreignSessionInfoToSessionInfo,
@@ -573,26 +579,6 @@ export interface AcpSessionFactoryOptions {
 	>;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
-}
-
-async function loadTrustedSessionExtensions(
-	options: Pick<CreateAgentSessionOptions, "additionalExtensionPaths">,
-	cwd: string,
-	eventBus: EventBus,
-) {
-	const paths = options.additionalExtensionPaths ?? [];
-	for (const trustedPath of paths) {
-		let stat: fsSync.Stats;
-		try {
-			stat = fsSync.statSync(trustedPath);
-		} catch {
-			throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-		}
-		if (!stat.isFile()) {
-			throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-		}
-	}
-	return loadExtensions(paths, cwd, eventBus);
 }
 
 /**
@@ -1896,7 +1882,6 @@ export async function buildSessionOptions(
 		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 
 		await hydrateModelCaches();
-		const { resolvePrewalkTarget } = await import("./sdk");
 		const selection = await resolvePrewalkTarget(
 			targetPatterns,
 			target,
@@ -1990,22 +1975,8 @@ export async function buildSessionOptions(
 
 	// Trusted extension paths are an exact allowlist for extension modules.
 	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
-		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
-			let resolvedPath: string;
-			let stat: fsSync.Stats;
-			try {
-				resolvedPath = fsSync.realpathSync.native(trustedPath);
-				stat = fsSync.statSync(resolvedPath);
-			} catch {
-				throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-			}
-			if (!stat.isFile()) {
-				throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-			}
-			return resolvedPath;
-		});
 		options.disableExtensionDiscovery = true;
-		options.additionalExtensionPaths = trustedPaths;
+		options.additionalExtensionPaths = resolveTrustedExtensionPaths(parsed.trustedExtensions);
 	} else {
 		// Additional extension paths from CLI
 		const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
@@ -2675,9 +2646,12 @@ export async function runRootCommand(
 			}
 		}
 
-		const sdk = await logger.time("loadStartupSdk", () => import("./sdk"));
-		const createAgentSessionImpl = deps.createAgentSession ?? sdk.createAgentSession;
+		// Keep SDK evaluation off argv error paths and defer it to `session/new` in ACP.
+		let startupSessionCreator: Promise<typeof createAgentSession> | undefined;
+		const loadStartupSessionCreator = () =>
+			(startupSessionCreator ??= logger.time("loadStartupSdk", async () => (await import("./sdk")).createAgentSession));
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
+			const createAgentSessionImpl = deps.createAgentSession ?? (await loadStartupSessionCreator());
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// Kick off background model discovery only after createAgentSession finishes its parallel
 			// discovery arms; running these concurrently contends for the event loop and stretches
@@ -2749,11 +2723,11 @@ export async function runRootCommand(
 				!(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || parsedArgs.restore || foreignSource);
 			const extensionsResult = parsedArgs.trustedExtensions?.length
 				? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
-				: await sdk.loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
 						deferStartupSafe: deferStartupSafeExtensions,
 					});
 			const extensionFlagSink: ExtensionFlagSink = {
-				getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
+				getFlags: () => aggregateExtensionFlags(extensionsResult.extensions),
 				setFlagValue: (name, value) => {
 					extensionsResult.runtime.flagValues.set(name, value);
 				},
@@ -2839,6 +2813,9 @@ export async function runRootCommand(
 			let lastChangelogVersion: string | undefined;
 			let pythonEvalWarningPromise: Promise<string | undefined> | undefined;
 			if (isInteractive) {
+				// Args and files are settled. Overlap the SDK with the changelog read
+				// and probe; the cached promise still surfaces import errors at use.
+				if (!deps.createAgentSession) void loadStartupSessionCreator().catch(() => {});
 				lastChangelogVersion = await readLastChangelogVersion();
 				const pythonEvalProbeAbort = new AbortController();
 				const unregisterPythonEvalProbe = postmortem.register(
@@ -2876,8 +2853,8 @@ export async function runRootCommand(
 					hydrateStartupModelCaches: hydrateLaunchModelCaches,
 				});
 			} catch (error) {
-				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof sdk.SessionModelRestoreError)) {
-					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof sdk.SessionModelRestoreError) {
+				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof SessionModelRestoreError)) {
+					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof SessionModelRestoreError) {
 						await writeRpcModelRestoreNotice(error.message);
 					}
 					throw error;

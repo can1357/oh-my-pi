@@ -33,6 +33,20 @@ import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "./task-details";
 import type { AgentDefinition } from "./types";
 
+const enum PluginAgentSources {
+	None = 0,
+	OmpPackages = 1,
+	ClaudeMarketplace = 2,
+}
+
+/** Snapshot the provider switches that affect the task agent roster. */
+export function getAgentDiscoverySources(): PluginAgentSources {
+	return (
+		(isProviderEnabled("omp-plugins") ? PluginAgentSources.OmpPackages : PluginAgentSources.None) |
+		(isProviderEnabled("claude-plugins") ? PluginAgentSources.ClaudeMarketplace : PluginAgentSources.None)
+	);
+}
+
 /** Result of agent discovery */
 export interface DiscoveryResult {
 	agents: AgentDefinition[];
@@ -106,11 +120,13 @@ async function loadAgentsFromDir({
  * @param cwd - Current working directory for project agent discovery
  * @param home - Home directory for user and marketplace discovery
  * @param extensionRoots - Session-local extension roots (explicit + mode + configured)
+ * @param sources - Provider switches captured by the caller when keying a shared scan
  */
 export async function discoverAgents(
 	cwd: string,
 	home: string = os.homedir(),
 	extensionRoots?: EffectiveExtensionRoots,
+	sources = getAgentDiscoverySources(),
 ): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
@@ -132,7 +148,7 @@ export async function discoverAgents(
 
 	// Extension-package agents use the same effective root set as sibling
 	// skills/hooks/tools, threaded whole so explicit roots and mode survive.
-	const packageRoots = isProviderEnabled("omp-plugins")
+	const packageRoots = sources & PluginAgentSources.OmpPackages
 		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
 		: [];
 	for (const root of packageRoots) {
@@ -140,7 +156,7 @@ export async function discoverAgents(
 	}
 
 	// Load agents from marketplace plugins (respects disabledProviders).
-	const { roots: pluginRoots } = isProviderEnabled("claude-plugins")
+	const { roots: pluginRoots } = sources & PluginAgentSources.ClaudeMarketplace
 		? await listClaudePluginRoots(home, resolvedCwd)
 		: { roots: [] };
 	const sortedPluginRoots = [...pluginRoots].sort((a, b) => {

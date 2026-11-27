@@ -74,20 +74,19 @@ import {
 	disabledProviderIds,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
-	type ModelMatchPreferences,
+	getStartupModelRoleSelector,
 	modelSelectorProviderHint,
 	parseModelPattern,
 	pickDefaultAvailableModel,
 	providerModelHint,
 	resolveAllowedModels,
 	resolveCliModel,
-	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
-	resolveProviderModelReference,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
+	tryResolveStartupModelRole,
 } from "./config/model-resolver";
 import { formatModelSelectorValue, parseModelString } from "./config/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
@@ -143,7 +142,12 @@ import {
 } from "./extensibility/extensions";
 import type { UserWaitTracker } from "./extensibility/extensions/user-wait";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
-import { partitionStartupExtensions, recordStartupVerdicts } from "./extensibility/extensions/startup-deferral";
+import {
+	discoverSessionExtensionPaths,
+	type ExtensionDiscoveryOptions,
+	loadSessionExtensions,
+} from "./extensibility/extensions/session-discovery";
+import { recordStartupVerdicts } from "./extensibility/extensions/startup-deferral";
 import {
 	createSkillDescriptionCompressor,
 	openSessionSkillDescriptionStore,
@@ -283,6 +287,8 @@ import {
 	capCacheWarmingMode,
 	resolveBridgeCompactionThreshold,
 } from "./session/cache-warmer";
+import { SessionModelRestoreError } from "./session/model-restore-error";
+import { resolvePrewalkTarget } from "./session/prewalk-target";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -330,6 +336,7 @@ import {
 	GlobTool,
 	GrepTool,
 	HIDDEN_TOOLS,
+	isBuiltinTaskPlanned,
 	isMountableAsToolCommand,
 	type LspStartupServerInfo,
 	listToolCommands,
@@ -404,7 +411,6 @@ import {
 	cfgToolsCommandDocs,
 	cfgToolsCommandInline,
 	cfgSessionToolGates,
-	cfgTodoBackend,
 } from "./tools/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import { cfgAutolearnEnabled } from "./autolearn/settings";
@@ -1098,14 +1104,6 @@ export interface CreateAgentSessionOptions {
 	autoApprove?: boolean;
 }
 
-/** Saved models were exhausted without permission to substitute another model. */
-export class SessionModelRestoreError extends Error {
-	constructor(modelSelector: string) {
-		super(`Could not restore model ${modelSelector}`);
-		this.name = "SessionModelRestoreError";
-	}
-}
-
 /** Result from createAgentSession */
 export interface CreateAgentSessionResult {
 	/** The created session */
@@ -1184,6 +1182,8 @@ export {
 // Discovery Functions
 
 export { discoverAuthStorage };
+export { discoverSessionExtensionPaths, loadSessionExtensions };
+export { SessionModelRestoreError, resolvePrewalkTarget };
 
 /**
  * Discover extensions from cwd.
@@ -1194,74 +1194,10 @@ export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsRe
 	return discoverAndLoadExtensions([], resolvedCwd);
 }
 
-type ExtensionDiscoveryOptions = Pick<
-	CreateAgentSessionOptions,
-	"disableExtensionDiscovery" | "additionalExtensionPaths" | "extensionRoots"
-> & { includeAmbientHooks?: boolean };
-
 type CliExtensionProviderOptions = ExtensionDiscoveryOptions & {
 	/** Discover extension model catalogs after registration (default true); usage-only commands skip it. */
 	discoverModels?: boolean;
 };
-
-/**
- * Path-only counterpart of {@link loadSessionExtensions}: the FS-heavy scan
- * without the per-session module load. Subagents reuse the parent's path list
- * (cached on {@link ToolSession.extensionPaths}) and rebuild Extension
- * instances themselves so each session's `ExtensionAPI` (cwd, eventBus,
- * runtime) is its own.
- */
-export async function discoverSessionExtensionPaths(
-	options: ExtensionDiscoveryOptions,
-	cwd: string,
-	settings: Settings,
-): Promise<string[]> {
-	const roots = options.extensionRoots?.();
-	const explicit = roots?.explicit ?? options.additionalExtensionPaths ?? [];
-	const explicitOnly = roots ? roots.mode === "explicit-only" : options.disableExtensionDiscovery;
-	const configuredPaths = explicitOnly
-		? [...explicit]
-		: [...explicit, ...(roots?.configured ?? cfgExtensions.get(settings))];
-	const disabledExtensionIds = explicitOnly ? undefined : cfgDisabledExtensions.get(settings);
-	return discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, {
-		ambient: !explicitOnly,
-		includeAmbientHooks: options.includeAmbientHooks,
-	});
-}
-
-/**
- * Load the discovered/configured extensions for a session — everything {@link
- * createAgentSession} would load except the inline factory extensions it appends
- * itself. Extracted so the CLI can resolve extension-registered flags (and thus
- * classify `@file` arguments extension-aware) *before* a session — and its
- * terminal breadcrumb — is created, then hand the result back through
- * {@link CreateAgentSessionOptions.preloadedExtensions} so the work is not
- * repeated. Keep this the single source of the discovery branch logic.
- *
- * With `deferStartupSafe`, sources whose recorded startup verdict proves they
- * register nothing needed before the first frame are left unloaded and
- * returned as `deferredPaths` for {@link CreateAgentSessionOptions.deferredExtensionPaths}.
- */
-export async function loadSessionExtensions(
-	options: ExtensionDiscoveryOptions,
-	cwd: string,
-	settings: Settings,
-	eventBus: EventBus,
-	loadOptions: { deferStartupSafe?: boolean } = {},
-): Promise<LoadExtensionsResult & { deferredPaths: string[] }> {
-	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
-	const storage = settings.getStorage();
-	const { eager, deferred } =
-		loadOptions.deferStartupSafe && storage
-			? await partitionStartupExtensions(storage, paths, cwd, cfgTodoBackend.get(settings))
-			: { eager: paths, deferred: [] };
-	const result = await logger.time("loadExtensions", loadExtensions, eager, cwd, eventBus);
-	if (storage) await recordStartupVerdicts(storage, result.extensions);
-	for (const { path, error } of result.errors) {
-		logger.error("Failed to load extension", { path, error });
-	}
-	return { ...result, deferredPaths: deferred };
-}
 
 /**
  * Load discovered/configured extensions and register their providers into
@@ -1291,96 +1227,6 @@ export async function loadCliExtensionProviders(
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
 	if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
-}
-
-/** Resolve prewalk with the same ordering before and after extension registration. */
-export async function resolvePrewalkTarget(
-	patterns: readonly string[],
-	target: string,
-	modelRegistry: ModelRegistry,
-	preferences: ModelMatchPreferences,
-	disabledProviders: ReadonlySet<string>,
-	{
-		deferUnregistered = false,
-		beforeRefresh,
-	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void> } = {},
-): Promise<{ prewalk?: Prewalk; warnings: string[]; deferred: boolean }> {
-	let refreshedProviders: Set<string> | undefined;
-	const resolveCandidate = (pattern: string) => resolveCliModel({ cliModel: pattern, modelRegistry, preferences });
-	let authenticated: ResolveCliModelResult | undefined;
-	let firstUnauthenticated: ResolveCliModelResult | undefined;
-	let lastResolution: ResolveCliModelResult | undefined;
-	let deferred = false;
-	let disabledProvider: string | undefined;
-
-	// Each provider-qualified candidate gets its scoped discovery opportunity
-	// before advancing to the next candidate in the configured role chain.
-	for (const pattern of patterns) {
-		disabledProvider = undefined;
-		let candidate = resolveCandidate(pattern);
-		lastResolution = candidate;
-		if (candidate.model && disabledProviders.has(candidate.model.provider)) {
-			disabledProvider = candidate.model.provider;
-			continue;
-		}
-		if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-			authenticated = candidate;
-			break;
-		}
-		if (candidate.model) {
-			firstUnauthenticated ??= candidate;
-			continue;
-		}
-
-		const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
-		if (requestedProvider && disabledProviders.has(requestedProvider)) {
-			disabledProvider = requestedProvider;
-			continue;
-		}
-		if (!requestedProvider) {
-			if (deferUnregistered) deferred = true;
-			continue;
-		}
-		if (refreshedProviders?.has(requestedProvider)) continue;
-		const provider = modelRegistry.getDiscoveryProviderId(requestedProvider);
-		if (!provider) {
-			if (deferUnregistered) deferred = true;
-			continue;
-		}
-
-		(refreshedProviders ??= new Set()).add(requestedProvider);
-		await beforeRefresh?.();
-		await modelRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
-		candidate = resolveCandidate(pattern);
-		lastResolution = candidate;
-		if (candidate.model && disabledProviders.has(candidate.model.provider)) {
-			disabledProvider = candidate.model.provider;
-			continue;
-		}
-		if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-			authenticated = candidate;
-			break;
-		}
-		if (candidate.model) firstUnauthenticated ??= candidate;
-	}
-
-	if (deferred) return { warnings: [], deferred: true };
-	const resolved = authenticated ?? firstUnauthenticated ?? lastResolution ?? resolveCandidate(patterns[0] ?? target);
-	const warnings = resolved.warning ? [resolved.warning] : [];
-	if (resolved.error || !resolved.model) {
-		warnings.push(
-			disabledProvider
-				? `prewalk disabled — provider "${disabledProvider}" is disabled`
-				: `prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`,
-		);
-	} else if (disabledProviders.has(resolved.model.provider)) {
-		warnings.push(`prewalk disabled — provider "${resolved.model.provider}" is disabled`);
-	} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-		warnings.push(`prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`);
-	} else {
-		return { prewalk: { target: resolved.model, thinkingLevel: resolved.thinkingLevel }, warnings, deferred: false };
-	}
-	return { warnings, deferred: false };
 }
 
 /**
@@ -2043,11 +1889,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
 	// reloads and recursively spawned children consume.
-	const extensionRoots = options.extensionRoots?.();
-	setInvocationConfiguredExtensions(
-		extensionRoots?.configured ?? cfgExtensions.get(settings),
-		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
-	);
+	// Inherited child roots stay linked to the owning session; top-level roots
+	// use live settings so later discoveries still see scope changes.
+	const buildSessionExtensionRoots =
+		options.extensionRoots ??
+		((): EffectiveExtensionRoots => ({
+			explicit: options.additionalExtensionPaths ?? [],
+			mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
+			configured: cfgExtensions.get(settings),
+			configuredLevel: settings.extensionsSourceLevel(),
+		}));
+	const extensionRoots = buildSessionExtensionRoots();
+	setInvocationConfiguredExtensions(extensionRoots.configured, extensionRoots.configuredLevel);
 
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
@@ -2109,19 +1962,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	};
 	let fullStartupModelCaches: Promise<void> | undefined;
 	const hydrateFullStartupModelCaches = () => (fullStartupModelCaches ??= startStartupModelCacheHydration());
-	const getDefaultSelector = (role: string | undefined) => {
-		const first = resolveConfiguredModelPatterns(role, settings)[0];
-		if (!first) return undefined;
-		const provider = modelSelectorProviderHint(first);
-		return provider ? { provider, id: first.slice(first.indexOf("/") + 1).trim() } : undefined;
-	};
 	// Start local cache I/O while cwd discovery runs, but wait for the journal
 	// before naming resume providers. Unknown or unqualified selectors widen.
 	const startupDefaultRole = settings.getModelRole("default");
 	const startupProvider = options.model
 		? options.hydrateStartupModelCaches && options.model.provider.toLowerCase()
 		: !hasExplicitModel && cfgEnabledModels.get(settings).length === 0
-			? getDefaultSelector(startupDefaultRole)?.provider
+			? getStartupModelRoleSelector(startupDefaultRole, settings)?.provider
 			: undefined;
 	// With a caller-supplied model and no CLI work to reuse, start only the
 	// broad pass. In particular, worker mirrors need one owner RPC, not two.
@@ -2268,6 +2115,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						}),
 					);
 	customToolPathsPromise?.catch(() => {});
+	if (
+		isBuiltinTaskPlanned(
+			{ settings, taskDepth: options.taskDepth, restrictToolNames: options.restrictToolNames },
+			options.toolNames,
+		)
+	) {
+		// TaskTool.create joins this scan only if its live cwd/extension scope
+		// still matches; the first request never sees a partial agent roster.
+		const taskAgents = logger.time("discoverTaskAgents", () =>
+			TaskTool.discoverAgents({
+				cwd: options.sessionManager?.getCwd() ?? cwd,
+				effectiveExtensionRoots: buildSessionExtensionRoots,
+			}),
+		);
+		taskAgents.catch(() => {});
+	}
 
 	const sessionManager =
 		options.sessionManager ??
@@ -2377,7 +2240,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const modelMatchPreferences = getModelMatchPreferences(settings);
 	const defaultRoleValue = settings.getModelRole("default");
 	const hasModelScope = cfgEnabledModels.get(settings).length > 0;
-	const defaultSelector = !hasExplicitModel && !hasModelScope ? getDefaultSelector(defaultRoleValue) : undefined;
+	const defaultSelector =
+		!hasExplicitModel && !hasModelScope ? getStartupModelRoleSelector(defaultRoleValue, settings) : undefined;
 	if (options.model) {
 		if (startupProviderHydration) await startupProviderHydration;
 	} else if (hasModelScope || hasExplicitModel || fullStartupModelCaches) {
@@ -2406,25 +2270,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		warning: undefined,
 	};
 	if (!hasExplicitModel && defaultRoleValue && defaultRoleValue.trim() !== "default") {
-		const allowedModels = await logger.time("resolveAllowedModels", async () => {
-			if (defaultSelector) {
-				const available = modelRegistry.getAvailableForProviders(new Set([defaultSelector.provider]));
-				// A direct match on the leading pattern wins before raw aggregator
-				// IDs. Don't strip thinking/routing suffixes for this probe: a
-				// literal with that suffix in another roster can beat the stripped id.
-				if (resolveProviderModelReference(defaultSelector.provider, defaultSelector.id, available)) {
-					return available;
-				}
-			}
-			await hydrateFullStartupModelCaches();
-			return resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-		});
-		defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
-			resolveModelRoleValue(defaultRoleValue, allowedModels, {
-				settings,
-				matchPreferences: modelMatchPreferences,
-			}),
-		);
+		const scoped = defaultSelector
+			? await tryResolveStartupModelRole(defaultSelector, modelRegistry, modelMatchPreferences)
+			: undefined;
+		if (scoped) {
+			defaultRoleSpec = scoped;
+		} else {
+			const allowedModels = await logger.time("resolveAllowedModels", async () => {
+				await hydrateFullStartupModelCaches();
+				return resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+			});
+			defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
+				resolveModelRoleValue(defaultRoleValue, allowedModels, {
+					settings,
+					matchPreferences: modelMatchPreferences,
+				}),
+			);
+		}
 	}
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
@@ -2738,6 +2600,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			effectiveExtensionRoots: buildSessionExtensionRoots,
 			get costGate() {
 				return currentCostGate();
 			},
@@ -3031,19 +2894,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			parentPrefix: options.parentTaskPrefix,
 		});
-		// Provider, never a stored value: inherited child policy remains linked to
-		// the owning session, while top-level sessions materialize their own live
-		// settings on every discovery call.
-		const buildSessionExtensionRoots =
-			options.extensionRoots ??
-			((): EffectiveExtensionRoots => ({
-				explicit: options.additionalExtensionPaths ?? [],
-				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: cfgExtensions.get(settings),
-				configuredLevel: settings.extensionsSourceLevel(),
-			}));
-		// The task tool discovers agents while built-in tools are created.
-		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
 
 		// The built-in tool plan can read the full registry (for example, auto
 		// find considers cross-provider judge candidates).

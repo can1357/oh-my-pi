@@ -34,7 +34,7 @@ import {
 	hasRuntimeProviderRules,
 	setRuntimeProviderRule,
 } from "@oh-my-pi/pi-catalog/compat/cascade";
-import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { collapseBuiltVariants, reviewedCollapseTable } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
 	clampsContextOverride,
@@ -73,6 +73,7 @@ import {
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
 	piNativeModelManagerOptions,
+	type ProviderDescriptor,
 	resolveModelCacheProviderId,
 	resolveOllamaModelCacheProviderId,
 	resolvePiNativeModelCacheProviderId,
@@ -631,7 +632,7 @@ export class ModelRegistry {
 	readonly #credentialScopedCacheHydrations = new Map<string, Promise<void>>();
 	readonly #landedStartupCacheStates = new WeakSet<ProviderDiscoveryState>();
 	#startupCacheResetEpoch = 0;
-	#credentialScopedCacheAuthPoll?: Promise<void>;
+	#credentialScopedCacheAuthPoll?: Promise<boolean | undefined>;
 	#configuredDiscoveryInFlight: Map<
 		DiscoveryProviderConfig,
 		Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>
@@ -1190,19 +1191,7 @@ export class ModelRegistry {
 			else pending.add(providerId);
 		}
 		if (pending.size > 0) {
-			// `peek` normally adopts external logins before selecting a key. The
-			// cheap source guard below can skip peek, so adopt them once before
-			// testing the in-memory pool, shared by concurrent scopes.
-			const authPoll = (this.#credentialScopedCacheAuthPoll ??= Promise.resolve()
-				.then(async () => {
-					await this.authStorage.credentials.poll();
-				})
-				.catch(error => {
-					logger.debug("External credential poll failed", { error: String(error) });
-				})
-				.finally(() => {
-					this.#credentialScopedCacheAuthPoll = undefined;
-				}));
+			const authPoll = this.#pollStartupCacheCredentials();
 			const refresh = () =>
 				authPoll.then(() =>
 					this.#refreshRuntimeDiscoveries("offline", pending, {
@@ -1222,6 +1211,19 @@ export class ModelRegistry {
 			hydrations.add(hydration);
 		}
 		if (hydrations.size > 0) await Promise.all(hydrations);
+	}
+
+	/** `peek` may be skipped for missing keys. Adopt external logins before checking the live pool. */
+	#pollStartupCacheCredentials(): Promise<boolean | undefined> {
+		return (this.#credentialScopedCacheAuthPoll ??= Promise.resolve()
+			.then(() => this.authStorage.credentials.poll())
+			.catch(error => {
+				logger.debug("External credential poll failed", { error: String(error) });
+				return undefined;
+			})
+			.finally(() => {
+				this.#credentialScopedCacheAuthPoll = undefined;
+			}));
 	}
 
 	/**
@@ -3616,6 +3618,53 @@ export class ModelRegistry {
 		}
 	}
 
+	#hasStartupDiscoveryAuth(provider: string): boolean {
+		return (
+			this.#keylessProviders.has(provider) ||
+			this.authStorage.keys.source(provider, { env: "aliases" }) !== undefined ||
+			this.authStorage.keys.keyless(provider) ||
+			this.authStorage.credentials.hasOAuth(provider)
+		);
+	}
+
+	#canUseDescriptorWithoutAuth(descriptor: ProviderDescriptor): boolean {
+		const { providerId } = descriptor;
+		return (
+			descriptor.allowUnauthenticated === true ||
+			(MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true && !descriptor.dynamicModelsAuthoritative) ||
+			(providerId === "vllm" &&
+				(this.#runtimeProviderOverrides.has(providerId) ||
+					this.#providerOverrides.has(providerId) ||
+					this.#keylessProviders.has(providerId)))
+		);
+	}
+
+	#createDescriptorModelManagerOptions(
+		descriptor: ProviderDescriptor,
+		apiKey: string | undefined,
+	): ModelManagerOptions<Api> {
+		// Residency belongs to the token selected for discovery, not another
+		// stored account that happens to appear first in the pool.
+		const identity = getOAuthCredentialsForProvider(this.authStorage, descriptor.providerId).find(
+			credential => credential.access === apiKey,
+		);
+		const discoveryConfig = {
+			apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
+			baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
+			fetch: this.#fetch,
+			region: identity?.region,
+			inferenceRegion: identity?.inferenceRegion,
+			orgId: identity?.orgId,
+		};
+		const preparedConfig =
+			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
+		const managerOptions = this.#withRuntimeDiscovery(descriptor.createModelManagerOptions(preparedConfig), apiKey);
+		const modelsDev = managerOptions.modelsDev
+			? { ...managerOptions.modelsDev, additiveOnly: true }
+			: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
+		return modelsDev ? { ...managerOptions, modelsDev } : managerOptions;
+	}
+
 	async #collectBuiltInModelManagerOptions(
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
@@ -3696,15 +3745,7 @@ export class ModelRegistry {
 		const resolveKey = (provider: string, cacheProviderId: string | undefined, authoritative: boolean) => {
 			// No credential-scoped key to look up. Still let unauthenticated
 			// descriptors and shared/runtime catalogs build their offline options.
-			if (
-				credentialScoped &&
-				!this.#keylessProviders.has(provider) &&
-				this.authStorage.keys.source(provider, { env: "aliases" }) === undefined &&
-				!this.authStorage.keys.keyless(provider) &&
-				!this.authStorage.credentials.hasOAuth(provider)
-			) {
-				return undefined;
-			}
+			if (credentialScoped && !this.#hasStartupDiscoveryAuth(provider)) return undefined;
 			return this.#resolveBuiltInDiscoveryApiKey(provider, strategy, cacheProviderId, authoritative);
 		};
 		const standardProviderKeys = await Promise.all(
@@ -3728,43 +3769,8 @@ export class ModelRegistry {
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
 			const apiKey = standardProviderKeys[i];
-			const hasExplicitVllmConfig =
-				descriptor.providerId === "vllm" &&
-				(this.#runtimeProviderOverrides.has(descriptor.providerId) ||
-					this.#providerOverrides.has(descriptor.providerId) ||
-					this.#keylessProviders.has(descriptor.providerId));
-			const supportsSharedCatalog = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[descriptor.providerId] === true;
-			const canUseSharedCatalogWithoutAuth = supportsSharedCatalog && !descriptor.dynamicModelsAuthoritative;
-			if (
-				isAuthenticated(apiKey) ||
-				descriptor.allowUnauthenticated ||
-				hasExplicitVllmConfig ||
-				canUseSharedCatalogWithoutAuth
-			) {
-				// Residency belongs to the token selected for discovery, not another
-				// stored account that happens to appear first in the pool.
-				const identity = getOAuthCredentialsForProvider(this.authStorage, descriptor.providerId).find(
-					credential => credential.access === apiKey,
-				);
-				const discoveryConfig = {
-					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
-					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
-					fetch: this.#fetch,
-					region: identity?.region,
-					inferenceRegion: identity?.inferenceRegion,
-					orgId: identity?.orgId,
-				};
-				const preparedConfig =
-					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
-					discoveryConfig;
-				const managerOptions = this.#withRuntimeDiscovery(
-					descriptor.createModelManagerOptions(preparedConfig),
-					apiKey,
-				);
-				const modelsDev = managerOptions.modelsDev
-					? { ...managerOptions.modelsDev, additiveOnly: true }
-					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
-				options.push(modelsDev ? { ...managerOptions, modelsDev } : managerOptions);
+			if (isAuthenticated(apiKey) || this.#canUseDescriptorWithoutAuth(descriptor)) {
+				options.push(this.#createDescriptorModelManagerOptions(descriptor, apiKey));
 			}
 		}
 
@@ -4550,6 +4556,90 @@ export class ModelRegistry {
 			}
 			return available;
 		};
+	}
+
+	/**
+	 * Read a startup role's provider-local pool when no other available roster
+	 * can contribute a literal ID. Even an unavailable roster can register a
+	 * global bare variant alias; inspect its unkeyed sources without composing
+	 * them. Returns undefined when the full hydration and matcher are needed.
+	 * @internal
+	 */
+	async withStartupModelRoleCatalog<T>(
+		provider: string,
+		selectorIds: ReadonlySet<string>,
+		resolve: (models: Model<Api>[]) => T,
+	): Promise<T | undefined> {
+		// A newly adopted login could also have invalidated the startup cache
+		// scope that landed the named provider; let the full pass revalidate it.
+		if (this.#owner || (await this.#pollStartupCacheCredentials()) !== false) return undefined;
+		if (this.#runtimeRegistrations.length > 0 || this.#hasFullSnapshot) return undefined;
+		const isAvailable = this.#createProviderAvailabilityCheck();
+		const otherAvailable = new Set<string>();
+		for (const other of this.#knownStaticProviders()) {
+			if (other.toLowerCase() === provider || !isAvailable(other)) continue;
+			if (getBundledModelSlice(other).some(model => modelKind(model) === "chat")) return undefined;
+			otherAvailable.add(other);
+		}
+
+		const disabled = getDisabledProviderIdsFromSettings(this.#settings);
+		const couldRegisterAlias = (models: readonly Pick<ModelSpec<Api>, "id" | "requestModelId" | "thinking">[]) => {
+			for (const model of models) {
+				if (
+					selectorIds.has(model.id.toLowerCase()) ||
+					(model.requestModelId && selectorIds.has(model.requestModelId.toLowerCase()))
+				) {
+					return true;
+				}
+				const routing: Readonly<Record<string, string | undefined>> | undefined = model.thinking?.effortRouting;
+				if (!routing) continue;
+				for (const effort in routing) {
+					const id = routing[effort];
+					if (id && selectorIds.has(id.toLowerCase())) return true;
+				}
+			}
+			return false;
+		};
+		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
+		for (const other of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
+			if (other === provider || !isCredentialScopedModelCacheProvider(other) || disabled.has(other)) continue;
+			if (
+				this.#providerOverrides.get(other)?.transport === "pi-native" ||
+				this.#discoverableProviders.some(config => config.provider === other)
+			) {
+				continue;
+			}
+			if (isAvailable(other) || this.#hasStartupDiscoveryAuth(other)) return undefined;
+			const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === other);
+			if (!descriptor) {
+				// Special managers require a key. Catalog-only managers may
+				// still have an offline source.
+				if (!BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[other] && MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[other]) {
+					return undefined;
+				}
+				continue;
+			}
+			if (!this.#canUseDescriptorWithoutAuth(descriptor)) continue;
+			const table = reviewedCollapseTable(other);
+			if (table && (table.families.length > 0 || table.templates?.length)) return undefined;
+			const options = this.#createDescriptorModelManagerOptions(descriptor, undefined);
+			// Without a reviewed collapse table the offline roster contributes
+			// only input IDs and recorded wire IDs as aliases. Read persisted
+			// rows directly, not the manager's merge, policies, or landing.
+			if (couldRegisterAlias(options.staticModels ?? getBundledModelSlice(other))) return undefined;
+			const cache = readModelCache(
+				options.cacheProviderId ?? other,
+				options.cacheTtlMs ?? BUILT_IN_DISCOVERY_CACHE_TTL_MS,
+				Date.now,
+				this.#cacheDbPath,
+			);
+			if (cache && couldRegisterAlias(cache.models)) return undefined;
+		}
+
+		// Keyless built-ins include runners and optional local endpoints with
+		// no bundled chat rows. Their cached/configured rows can still be chat.
+		if (otherAvailable.size > 0 && this.getAvailableForProviders(otherAvailable).length > 0) return undefined;
+		return resolve(this.getAvailableForProviders(new Set([provider])));
 	}
 
 	/**
