@@ -1351,23 +1351,33 @@ describe("AgentSession auto-compaction progress guard", () => {
 			name: "retries an unsigned thinking-only stop",
 			thinkingSignature: undefined,
 			serverToolOutput: false,
+			narration: false,
 			expectedContinuations: 1,
 		},
 		{
 			name: "retries a signed thinking-only stop",
 			thinkingSignature: "sig",
 			serverToolOutput: false,
+			narration: false,
 			expectedContinuations: 1,
 		},
 		{
 			name: "settles a stop with completed server-tool output and signed thinking",
 			thinkingSignature: "sig",
 			serverToolOutput: true,
+			narration: false,
+			expectedContinuations: 0,
+		},
+		{
+			name: "settles a stop with signed narration",
+			thinkingSignature: "sig",
+			serverToolOutput: false,
+			narration: true,
 			expectedContinuations: 0,
 		},
 	])(
 		"$name while speculative handoff is still running",
-		async ({ thinkingSignature, serverToolOutput, expectedContinuations }) => {
+		async ({ thinkingSignature, serverToolOutput, narration, expectedContinuations }) => {
 			cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
 			cfgCompactionEnabled.set(session.settings, true);
 			cfgCompactionAsyncEnabled.set(session.settings, true);
@@ -1394,7 +1404,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 			const thinkingStop: AssistantMessage = {
 				...speculativeTrigger,
-				content: [{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature }],
+				content: [{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature, narration }],
 				timestamp: speculativeTrigger.timestamp + 1,
 			};
 			if (serverToolOutput) {

@@ -91,6 +91,7 @@ import { isPromptPerturbationEnabled, perturbPromptText } from "@oh-my-pi/pi-ai/
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
@@ -5262,7 +5263,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (
 					speculativeHandoff &&
 					(assistantMsg.stopReason !== "stop" ||
-						assistantTurnDelivered(assistantMsg) ||
+						assistantTurnDelivered(presentNarrationAsAnswer(assistantMsg)) ||
 						assistantMsg.content.some(content => content.type === "anthropicServerTool"))
 				) {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
