@@ -30,7 +30,7 @@ import {
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
 
-import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu } from "./async-result";
+import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu, forEachJobControlAiu, jobControlJobs } from "./async-result";
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import { isUserRequestEntry } from "./transcript/transcript-entry";
@@ -704,6 +704,12 @@ export class SessionEntryIndex {
 			if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 				this.#usage.subagentCost += usage.cost.total;
 			}
+		}
+		// A `wait`/`cancel` snapshot that took a background job over from its push carries that job's credits.
+		if (entry.type === "message" && entry.message.role === "toolResult") {
+			forEachJobControlAiu(entry.message.details, nano => {
+				this.#usage.aiuNano = (this.#usage.aiuNano ?? 0) + nano;
+			});
 		}
 	}
 
@@ -4520,6 +4526,9 @@ export class SessionManager {
 				entry.message.role === "custom" &&
 				entry.message.customType === ASYNC_RESULT_MESSAGE_TYPE
 			) {
+				resetAsyncResultBilling(entry.message.details);
+			}
+			if (entry.type === "message" && entry.message.role === "toolResult" && jobControlJobs(entry.message.details)) {
 				resetAsyncResultBilling(entry.message.details);
 			}
 		}

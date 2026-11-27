@@ -173,7 +173,11 @@ export function buildTanResultMessages(
 	};
 }
 
-function backgroundTaskBilling(job: AsyncJob | undefined): Pick<AsyncResultJobDetails, "usage" | "aiuUnreportedTurns"> {
+/** Child usage and missing-frame count a settled background task job carries into the session that consumes its result. */
+export function backgroundTaskBilling(job: Pick<AsyncJob, "id" | "type" | "latestDetails" | "agentId"> | undefined): {
+	usage?: Usage;
+	aiuUnreportedTurns?: number;
+} {
 	if (job?.type !== "task") return {};
 	const progress = agentProgress(job.latestDetails, job.agentId ?? job.id);
 	if (!progress) return {};

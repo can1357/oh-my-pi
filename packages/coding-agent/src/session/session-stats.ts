@@ -20,7 +20,7 @@ import {
 } from "./context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
 import { isInheritedBilling, isMissingAiuBillingFrame } from "./aiu-billing";
-import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu } from "./async-result";
+import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu, forEachJobControlAiu, jobControlJobs } from "./async-result";
 import { getLatestCompactionEntry } from "./session-context";
 import type { ModelUsageEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -241,6 +241,11 @@ export class SessionStatsTracker {
 						if (typeof kind === "string") editRejections[kind] = (editRejections[kind] ?? 0) + 1;
 					}
 				}
+				// A `wait`/`cancel` snapshot that took a background job over from its push carries that job's credits.
+				forEachJobControlAiu(message.details, nano => {
+					aiuNano = (aiuNano ?? 0) + nano;
+				});
+				aiuUnreportedTurns += sumAiuUnreportedTurns(jobControlJobs(message.details));
 			} else if (message.role === "assistant") {
 				assistantMessages++;
 				for (const content of message.content) {

@@ -15,7 +15,12 @@ import {
 	type EvictedJob,
 } from "./job-manager";
 
-import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
+import {
+	backgroundTaskBilling,
+	renderStructuredJson,
+	structuredStatusLabel,
+	taskAgentHandles,
+} from "../session/async-job-delivery";
 import { AGENT_KILL_LABEL, type InterruptReason } from "../session/messages";
 import type { StructuredSubagentOutput } from "../task/task-details";
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
@@ -391,6 +396,26 @@ export function buildJobResult(
 	);
 
 	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+
+	// A result this call took over is never pushed as an `async-result`, so the
+	// job's child usage must ride on this snapshot or its credits vanish. The
+	// manager's consumed set makes the hand-off once-only: a job a push already
+	// delivered (or an earlier snapshot already took) reads as consumed above and
+	// carries nothing, so no path can count it twice.
+	const trackedById = new Map(uniqueJobs.map(job => [job.id, job]));
+	for (const job of jobResults) {
+		if (job.status === "running" || alreadyConsumed.has(job.id) || !manager.isJobResultConsumed(job.id)) continue;
+		const tracked = trackedById.get(job.id);
+		const current = manager.getJob(job.id);
+		const billing = backgroundTaskBilling({
+			id: job.id,
+			type: job.type,
+			latestDetails: (current ?? tracked)?.latestDetails,
+			agentId: current?.agentId,
+		});
+		if (billing.usage) job.usage = billing.usage;
+		if (billing.aiuUnreportedTurns !== undefined) job.aiuUnreportedTurns = billing.aiuUnreportedTurns;
+	}
 
 	// Read AFTER `consumeJobResults`: that call is what supersedes a queued push,
 	// so reading before it would always miss the jobs this snapshot handed over

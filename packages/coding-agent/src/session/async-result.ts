@@ -19,3 +19,17 @@ export function forEachAsyncResultAiu(details: unknown, visit: (nano: number) =>
 		if (isRecord(job) && isPersistedUsage(job.usage) && job.usage.aiu) visit(job.usage.aiu.nano);
 	}
 }
+
+/**
+ * Details of a `wait`/`cancel` snapshot (the `op` marker `buildJobResult` stamps) whose rows
+ * can carry the child usage of a job that snapshot took over from its async push.
+ */
+export function jobControlJobs(details: unknown): unknown[] | undefined {
+	if (!isRecord(details) || (details.op !== "wait" && details.op !== "cancel")) return undefined;
+	return Array.isArray(details.jobs) ? details.jobs : undefined;
+}
+
+/** {@link forEachAsyncResultAiu} for the jobs a `wait`/`cancel` snapshot consumed. */
+export function forEachJobControlAiu(details: unknown, visit: (nano: number) => void): void {
+	if (jobControlJobs(details)) forEachAsyncResultAiu(details, visit);
+}

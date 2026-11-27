@@ -230,6 +230,40 @@ describe("AgentSession session stats", () => {
 		});
 	});
 
+	it("counts the credits and missing frames of background jobs a wait snapshot consumed", () => {
+		const target = getCopilotModel();
+		const sessionManager = SessionManager.inMemory();
+		const usage: Usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			aiu: { nano: 4_000_000 },
+		};
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "wait",
+			content: [{ type: "text", text: "done" }],
+			isError: false,
+			timestamp: 2,
+			details: {
+				op: "wait",
+				jobs: [
+					{ id: "a", type: "task", status: "completed", usage, aiuUnreportedTurns: 1 },
+					// A running row or an already-consumed job carries no billing.
+					{ id: "b", type: "task", status: "running" },
+				],
+			},
+		});
+		session = createStatsSession(sessionManager, target);
+
+		expect(session.getSessionStats().aiu).toEqual({ nano: 4_000_000, unreportedTurns: 1 });
+		expect(sessionManager.getUsageStatistics().aiuNano).toBe(4_000_000);
+	});
+
 	it("does not count a reset fork's copied Copilot turns as missing frames of its own", () => {
 		const target = getCopilotModel();
 		const sessionManager = SessionManager.inMemory();

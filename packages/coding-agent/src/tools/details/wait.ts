@@ -1,3 +1,4 @@
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { type OutputMeta } from "../output-meta-format";
 import { type ConfiguredThinkingLevel } from "../../utils/render-utils";
 import type { StructuredSubagentOutput } from "../../task/task-details";
@@ -75,6 +76,14 @@ export interface JobSnapshot {
 	 * turn's output; undefined where the body does not report it.
 	 */
 	agentOutputPublished?: boolean;
+	/**
+	 * Child usage of a task job whose result this call consumed. Carried only by the
+	 * snapshot that takes the result over from its async push, so the session counts
+	 * the job's credits exactly once whichever path delivered it.
+	 */
+	usage?: Usage;
+	/** Child turns of the consumed task job whose expected billing frame was missing. */
+	aiuUnreportedTurns?: number;
 }
 
 /** Outcome of cancelling one background job. */
