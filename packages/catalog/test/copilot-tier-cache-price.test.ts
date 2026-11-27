@@ -6,7 +6,10 @@
  * (`tier-cache-follows-input`) says the rate card scales it. These assert resolved models, after
  * the merge with bundled rows and `buildModel`.
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { AmbiguousOverlapError } from "@oh-my-pi/pi-catalog/compat/cascade";
+import * as resolve from "@oh-my-pi/pi-catalog/compat/resolve";
+import { AmbiguousIdentityError } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
@@ -57,6 +60,8 @@ async function resolveCosts(data: CopilotPricedEntry[]) {
 }
 
 describe("Copilot tier cache pricing", () => {
+	afterEach(() => vi.restoreAllMocks());
+
 	it("carries omitted cache legs over unscaled when no rule scales them", async () => {
 		// The bundled Sonnet 5.5 row prices a cache read at $0.10/MTok and a write at $2.50/MTok.
 		const cost = await resolveCosts([
@@ -108,18 +113,31 @@ describe("Copilot tier cache pricing", () => {
 	});
 
 	it("keeps the other live rows when a long tier's rules cannot resolve", async () => {
-		// This build's rule tree cannot place either id: a reference-less Haiku 4.6's `-1m` row hits an
-		// equal-rank rule overlap, and `claude-haiku-fable-5.5` ties two family globs. Only they may drop out.
+		// Stand in for a rule tree that cannot place two synthesized long tiers: one hits an equal-rank
+		// rule overlap, the other an identity tie. Every other row resolves through the real rules.
+		const resolveCatalogAxes = resolve.resolveCatalogAxes;
+		const unplaceable = new Set<string>();
+		spyOn(resolve, "resolveCatalogAxes").mockImplementation((spec, route) => {
+			if (spec.id === "claude-sonnet-5.5-1m") {
+				unplaceable.add(spec.id);
+				throw new AmbiguousOverlapError("github-copilot", spec.id, "tierCacheFollowsInput", "a", "b");
+			}
+			if (spec.id === "claude-haiku-5.5-1m") {
+				unplaceable.add(spec.id);
+				throw new AmbiguousIdentityError(spec.id, "a", "b", "family");
+			}
+			return resolveCatalogAxes(spec, route);
+		});
 		const data = [
 			entry(
-				"claude-haiku-4.6",
-				{ max_prompt_tokens: 200_000, input_price: 100, output_price: 500 },
-				{ max_prompt_tokens: 936_000, input_price: 200, output_price: 1000 },
+				"claude-sonnet-5.5",
+				{ max_prompt_tokens: 200_000, input_price: 200, output_price: 1000 },
+				{ max_prompt_tokens: 936_000, input_price: 400, output_price: 1500 },
 			),
 			entry(
-				"claude-haiku-fable-5.5",
-				{ max_prompt_tokens: 200_000, input_price: 100, output_price: 500 },
-				{ max_prompt_tokens: 936_000, input_price: 200, output_price: 1000 },
+				"claude-haiku-5.5",
+				{ max_prompt_tokens: 100_000, input_price: 10, output_price: 50 },
+				{ max_prompt_tokens: 936_000, input_price: 50, output_price: 250 },
 			),
 			entry(
 				"gpt-6-luna",
@@ -128,17 +146,26 @@ describe("Copilot tier cache pricing", () => {
 			),
 		];
 		const cost = await resolveCosts(data);
+		expect([...unplaceable].sort()).toEqual(["claude-haiku-5.5-1m", "claude-sonnet-5.5-1m"]);
 		// Live prices, not the bundled fallback a rejected response would leave.
 		expect(cost("gpt-6-luna")?.input).toBe(0.13);
 		expect(cost("gpt-6-luna-1m")?.input).toBe(0.26);
-		expect(cost("claude-haiku-4.6-1m")).toBeUndefined();
-		// No sibling is synthesized, so the base row cannot promote into a row that never resolves.
+		expect(cost("claude-sonnet-5.5")?.input).toBe(2);
+		expect(cost("claude-haiku-5.5")?.input).toBe(0.1);
+		// Only the unplaceable tiers drop out.
+		expect(cost("claude-sonnet-5.5-1m")).toBeUndefined();
+		expect(cost("claude-haiku-5.5-1m")).toBeUndefined();
+		// No sibling is synthesized, so neither base row promotes into a row that never resolves.
 		const specs =
 			(await githubCopilotModelManagerOptions({
 				apiKey: "copilot-test-key",
 				fetch: async () => Response.json({ data }),
 			}).fetchDynamicModels?.()) ?? [];
-		expect(specs.map(spec => spec.id)).not.toContain("claude-haiku-4.6-1m");
-		expect(specs.find(spec => spec.id === "claude-haiku-4.6")?.contextPromotionTarget).toBeUndefined();
+		const ids = specs.map(spec => spec.id);
+		expect(ids).not.toContain("claude-sonnet-5.5-1m");
+		expect(ids).not.toContain("claude-haiku-5.5-1m");
+		expect(ids).toContain("gpt-6-luna-1m");
+		expect(specs.find(spec => spec.id === "claude-sonnet-5.5")?.contextPromotionTarget).toBeUndefined();
+		expect(specs.find(spec => spec.id === "claude-haiku-5.5")?.contextPromotionTarget).toBeUndefined();
 	});
 });
