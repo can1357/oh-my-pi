@@ -610,7 +610,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					// Replies are drawn from the frames of the call while it waits and from its result;
 					// a job frame repeating them after the call returned would draw them again.
 					if (backgrounded) {
-						emitToolUpdate?.(text, { ...details, replies: undefined, async: { state, jobId, type: "eval" } });
+						emitToolUpdate?.(text, {
+							...details,
+							replies: undefined,
+							consumedJobs: undefined,
+							async: { state, jobId, type: "eval" },
+						});
 					}
 				};
 				try {
@@ -723,19 +728,23 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		timeoutSec: number | undefined,
 		reason?: string,
 	): AgentToolResult<EvalToolDetails> {
-		// latestDetails snapshots are per-update copies (buildUpdateDetails), so
-		// tagging the async marker on cannot leak into later job progress.
-		const details: EvalToolDetails = latestDetails ?? {
-			language: languages[0],
-			languages,
-			cells: cells.map(cell => ({
-				index: cell.index,
-				title: cell.title,
-				code: cell.displayCode,
-				language: cell.resolved.backend.id,
-				output: previewText,
-				status: "running" as const,
-			})),
+		// Copied so the marker cannot leak into later job progress. The call returns before the job
+		// settles, so rows its cells already consumed are left off: the job's delivery carries every
+		// consumed row (`backgroundTaskBilling`), and listing them here too would count them twice.
+		const details: EvalToolDetails = {
+			...(latestDetails ?? {
+				language: languages[0],
+				languages,
+				cells: cells.map(cell => ({
+					index: cell.index,
+					title: cell.title,
+					code: cell.displayCode,
+					language: cell.resolved.backend.id,
+					output: previewText,
+					status: "running" as const,
+				})),
+			}),
+			consumedJobs: undefined,
 		};
 		if (notice) details.notice ??= notice;
 		details.async = { state: "running", jobId, type: "eval" };

@@ -2,6 +2,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { type OutputMeta } from "../output-meta-format";
 import { type ConfiguredThinkingLevel } from "../../utils/render-utils";
 import type { StructuredSubagentOutput } from "../../task/task-details";
+import type { EvalConsumedJob } from "./eval";
 import { type JobWidgetView } from "./job-widget";
 import type { IrcDeliveryReceipt } from "../../irc/irc-types";
 
@@ -84,6 +85,8 @@ export interface JobSnapshot {
 	usage?: Usage;
 	/** Child turns of the consumed task job whose expected billing frame was missing. */
 	aiuUnreportedTurns?: number;
+	/** Billing of the jobs a consumed eval job's cells took over from their async push. */
+	consumedJobs?: EvalConsumedJob[];
 }
 
 /** Outcome of cancelling one background job. */

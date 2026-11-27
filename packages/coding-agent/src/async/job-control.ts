@@ -415,6 +415,7 @@ export function buildJobResult(
 		});
 		if (billing.usage) job.usage = billing.usage;
 		if (billing.aiuUnreportedTurns !== undefined) job.aiuUnreportedTurns = billing.aiuUnreportedTurns;
+		if (billing.consumedJobs) job.consumedJobs = billing.consumedJobs;
 	}
 
 	// Read AFTER `consumeJobResults`: that call is what supersedes a queued push,

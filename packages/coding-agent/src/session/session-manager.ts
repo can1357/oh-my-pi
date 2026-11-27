@@ -521,6 +521,7 @@ function resetJobRowsBilling(rows: unknown): void {
 		if (!isRecord(job)) continue;
 		resetUsageCost(taskUsageFrom(job));
 		job.aiuUnreportedTurns = undefined;
+		resetJobRowsBilling(job.consumedJobs);
 	}
 }
 

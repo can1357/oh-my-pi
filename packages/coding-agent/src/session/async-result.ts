@@ -8,11 +8,13 @@ import { isPersistedUsage } from "../task/task-details";
  */
 export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 
-/** Visit the server-reported AI-credit charge (nano-AIU) of each row that carries persisted usage. */
+/** Visit the server-reported AI-credit charge (nano-AIU) of each row that carries persisted usage, nested `consumedJobs` rows included. */
 function forEachRowAiu(rows: unknown, visit: (nano: number) => void): void {
 	if (!Array.isArray(rows)) return;
 	for (const row of rows) {
-		if (isRecord(row) && isPersistedUsage(row.usage) && row.usage.aiu) visit(row.usage.aiu.nano);
+		if (!isRecord(row)) continue;
+		if (isPersistedUsage(row.usage) && row.usage.aiu) visit(row.usage.aiu.nano);
+		forEachRowAiu(row.consumedJobs, visit);
 	}
 }
 

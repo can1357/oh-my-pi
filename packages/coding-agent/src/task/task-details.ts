@@ -37,13 +37,18 @@ export function isPersistedUsage(value: unknown): value is Usage {
 	return PersistedUsageShape.allows(value);
 }
 
-/** Sum of the positive `aiuUnreportedTurns` counts across persisted task results, progress rows or async-job rows. */
+/**
+ * Sum of the positive `aiuUnreportedTurns` counts across persisted task results, progress rows or async-job
+ * rows, including the rows an eval job's `consumedJobs` nest.
+ */
 export function sumAiuUnreportedTurns(rows: unknown): number {
 	if (!Array.isArray(rows)) return 0;
 	let turns = 0;
 	for (const row of rows) {
-		const count = isRecord(row) ? row.aiuUnreportedTurns : undefined;
+		if (!isRecord(row)) continue;
+		const count = row.aiuUnreportedTurns;
 		if (typeof count === "number" && Number.isFinite(count) && count > 0) turns += count;
+		turns += sumAiuUnreportedTurns(row.consumedJobs);
 	}
 	return turns;
 }

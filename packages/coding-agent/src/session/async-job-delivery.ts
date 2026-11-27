@@ -9,7 +9,7 @@
  * This replaces the old single hardwired `onJobComplete` closure that routed
  * every completion — regardless of owner — into the first top-level session.
  */
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { type AsyncJob, type AsyncJobType, agentProgress } from "../async/job-manager";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
@@ -22,6 +22,7 @@ import {
 	TAN_RESULT_MESSAGE_TYPE,
 	type TanResultDetails,
 } from "./messages";
+import type { EvalConsumedJob } from "../tools/details/eval";
 import type { OutputMeta } from "../tools/output-meta-format";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "./async-result";
 import { truncateMiddle } from "../tools/streaming-output";
@@ -65,6 +66,8 @@ type AsyncResultJobDetails = {
 	usage?: Usage;
 	/** Child turns whose expected billing frame was missing. */
 	aiuUnreportedTurns?: number;
+	/** Billing of the background jobs an auto-backgrounded eval cell consumed with `wait()`. */
+	consumedJobs?: EvalConsumedJob[];
 };
 
 export type AsyncResultDetails = {
@@ -173,11 +176,22 @@ export function buildTanResultMessages(
 	};
 }
 
-/** Child usage and missing-frame count a settled background task job carries into the session that consumes its result. */
+/**
+ * Child billing a settled background job carries into the session that consumes its result: a task
+ * job's own usage and missing-frame count, or the billing of the jobs an eval job's cells consumed
+ * (the job's call had already returned when they were consumed, so no earlier result holds them).
+ */
 export function backgroundTaskBilling(job: Pick<AsyncJob, "id" | "type" | "latestDetails" | "agentId"> | undefined): {
 	usage?: Usage;
 	aiuUnreportedTurns?: number;
+	consumedJobs?: EvalConsumedJob[];
 } {
+	if (job?.type === "eval") {
+		const rows = job.latestDetails?.consumedJobs;
+		if (!Array.isArray(rows)) return {};
+		const consumedJobs = rows.filter((row): row is EvalConsumedJob => isRecord(row) && typeof row.jobId === "string");
+		return consumedJobs.length > 0 ? { consumedJobs } : {};
+	}
 	if (job?.type !== "task") return {};
 	const progress = agentProgress(job.latestDetails, job.agentId ?? job.id);
 	if (!progress) return {};
@@ -245,6 +259,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			durationMs: job.durationMs,
 			...(job.usage ? { usage: job.usage } : {}),
 			...(job.aiuUnreportedTurns !== undefined ? { aiuUnreportedTurns: job.aiuUnreportedTurns } : {}),
+			...(job.consumedJobs ? { consumedJobs: job.consumedJobs } : {}),
 			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
 		})),
