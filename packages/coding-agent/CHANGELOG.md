@@ -181,6 +181,7 @@
 - Fixed `todo` `init` and `append` accepting non-string task entries (such as phase objects passed in flat `items`) and storing their JSON text as task labels; the call now fails with an error pointing at `list: [{phase, items}]` ([#20669](https://github.com/can1357/oh-my-pi/issues/20669))
 - Fixed `bash script.sh`, `sh -c '…'` and other nested `bash`/`sh` shells in the bash tool skipping their `EXIT` trap when the script ends without `exit`, which left `trap 'rm -rf "$tmp"' EXIT` cleanups undone ([#20047](https://github.com/can1357/oh-my-pi/issues/20047))
 - Documented that extension `getThinkingLevel()` returns `undefined` when the model has no concrete effort (e.g. off/auto-only models on `auto`) ([#20128](https://github.com/can1357/oh-my-pi/issues/20128))
+- A long session no longer keeps every finished background job, with its full output, in memory after the job's result reaches the agent
 
 ### Removed
 
