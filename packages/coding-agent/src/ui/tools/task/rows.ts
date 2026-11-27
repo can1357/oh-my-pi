@@ -329,7 +329,7 @@ function inlineContainer(value: unknown): Seg[] | undefined {
 }
 
 /** A JSON value as `├─ key: value` rows; small containers inline, larger ones open a subtree. */
-function jsonTreeLines(value: unknown): { lines: Line[]; truncated: boolean } {
+function jsonTreeLines(cx: RowContext, value: unknown): { lines: Line[]; truncated: boolean } {
 	const lines: Line[] = [];
 	let truncated = false;
 	if (value === null || typeof value !== "object") {
@@ -345,7 +345,7 @@ function jsonTreeLines(value: unknown): { lines: Line[]; truncated: boolean } {
 			const last = index === entries.length - 1;
 			const row: Seg[] = [
 				...gutter,
-				seg(last ? "└─" : "├─", "dim"),
+				seg(cx.glyph(last ? "tree.last" : "tree.branch"), "dim"),
 				seg(" "),
 				seg(key, Array.isArray(container) ? "dim" : "muted"),
 			];
@@ -357,7 +357,8 @@ function jsonTreeLines(value: unknown): { lines: Line[]; truncated: boolean } {
 				}
 				const size = Array.isArray(entry) ? `[${entry.length}]` : `{${Object.keys(entry).length}}`;
 				lines.push([...row, seg(" "), seg(size, "dim")]);
-				if (depth < TREE_MAX_DEPTH) walk(entry, depth + 1, [...gutter, last ? seg("   ") : seg("│  ", "dim")]);
+				if (depth < TREE_MAX_DEPTH)
+					walk(entry, depth + 1, [...gutter, last ? seg("   ") : seg(`${cx.glyph("tree.vertical")}  `, "dim")]);
 				return;
 			}
 			lines.push([...row, seg(": "), seg(scalarText(entry, TREE_MAX_SCALAR), SCALAR_COLOR(entry))]);
@@ -445,7 +446,7 @@ function outputSection(
 				lines.push([...inner, seg(outputInline(parsed), "dim")]);
 				return lines;
 			}
-			const tree = jsonTreeLines(parsed);
+			const tree = jsonTreeLines(cx, parsed);
 			if (tree.lines.length > 0) {
 				if (!warning) lines.push([...cp, seg("Output", "dim")]);
 				for (const line of tree.lines) lines.push([...cp, seg("  "), ...line]);
