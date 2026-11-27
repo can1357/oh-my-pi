@@ -70,6 +70,36 @@ const STRAITLY_ROWS: Record<string, unknown>[] = [
 		reasoning: { mandatory: false, default_enabled: false, default_effort: null },
 		pricing: { prompt: "0.000001", completion: "0.000003" },
 	},
+	{
+		id: "reasoning-object-only",
+		name: "Reasoning Object Only",
+		context_length: 128_000,
+		architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+		top_provider: { context_length: 128_000, max_completion_tokens: 16_384 },
+		supported_parameters: ["max_tokens", "reasoning", "tool_choice", "tools"],
+		reasoning: null,
+		pricing: { prompt: "0.000001", completion: "0.000002" },
+	},
+	{
+		id: "audio-transcription-model",
+		name: "Audio Transcription",
+		context_length: 32_768,
+		architecture: { input_modalities: ["audio"], output_modalities: ["text"] },
+		top_provider: { context_length: 32_768, max_completion_tokens: 4_096 },
+		supported_parameters: ["max_tokens"],
+		reasoning: null,
+		pricing: { prompt: "0.000001", completion: "0.000001" },
+	},
+	{
+		id: "image-generator-model",
+		name: "Image Generator",
+		context_length: 32_768,
+		architecture: { input_modalities: ["text"], output_modalities: ["image"] },
+		top_provider: { context_length: 32_768, max_completion_tokens: 4_096 },
+		supported_parameters: ["max_tokens"],
+		reasoning: null,
+		pricing: { prompt: "0.000001", completion: "0.000001" },
+	},
 ];
 
 function makeModelsFetch(): { calls: string[]; authorizations: (string | null)[]; fetch: FetchImpl } {
@@ -138,6 +168,13 @@ describe("Straitly provider", () => {
 		const defaultOff = models.find(model => model.id === "default-off-reasoner");
 		expect(defaultOff?.reasoning).toBe(true);
 		expect(defaultOff?.compat?.whenThinking?.extraBody).toEqual({ reasoning: { enabled: true } });
+
+		const reasoningOnly = models.find(model => model.id === "reasoning-object-only");
+		expect(reasoningOnly?.reasoning).toBe(true);
+		expect(reasoningOnly?.compat?.supportsReasoningEffort).toBe(false);
+
+		expect(models.find(model => model.id === "audio-transcription-model")).toBeUndefined();
+		expect(models.find(model => model.id === "image-generator-model")).toBeUndefined();
 	});
 
 	test("normalizes custom baseUrl overrides and scopes cache namespace by endpoint only", async () => {

@@ -9132,16 +9132,20 @@ function mapStraitlyModel(
 		: catalogMeta?.vision === true
 			? ["text", "image"]
 			: ["text"];
-	const advertisesEffortParam =
-		params !== undefined && (params.includes("reasoning") || params.includes("reasoning_effort"));
-	const reasoning = advertisesEffortParam || reasoningMeta !== undefined || catalogMeta?.reasoning === true;
+	const advertisesReasoning = params !== undefined && params.includes("reasoning");
+	const advertisesReasoningEffort = params !== undefined && params.includes("reasoning_effort");
+	const reasoning =
+		advertisesReasoning ||
+		advertisesReasoningEffort ||
+		reasoningMeta !== undefined ||
+		catalogMeta?.reasoning === true;
 	const thinking = mapStraitlyThinking(entry, defaults);
 	const supportsTools = params !== undefined ? params.includes("tools") : undefined;
 	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
 	const compatPatch: OpenAICompat = {
 		...defaults.compat,
 		...(!supportsToolChoice && { supportsToolChoice: false }),
-		...(reasoning && params !== undefined && !advertisesEffortParam && { supportsReasoningEffort: false }),
+		...(reasoning && params !== undefined && !advertisesReasoningEffort && { supportsReasoningEffort: false }),
 		...(reasoningMeta?.mandatory === true && { reasoningDisableMode: "lowest-effort" }),
 		...(reasoningMeta?.default_enabled === false && {
 			whenThinking: { extraBody: { reasoning: { enabled: true } } },
@@ -9185,6 +9189,18 @@ export function straitlyModelManagerOptions(config?: ModelManagerConfig): ModelM
 				provider: "straitly",
 				baseUrl,
 				apiKey: config?.apiKey,
+				filterModel: (entry, model) => {
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const input = architecture?.input_modalities;
+					if (Array.isArray(input) && input.length > 0 && !input.includes("text")) {
+						return false;
+					}
+					const output = architecture?.output_modalities;
+					if (Array.isArray(output) && output.length > 0 && !output.includes("text")) {
+						return false;
+					}
+					return !isExcludedModel("straitly", model.id);
+				},
 				mapModel: mapStraitlyModel,
 				fetch: config?.fetch,
 			}),
