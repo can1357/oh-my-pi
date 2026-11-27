@@ -733,7 +733,8 @@ export async function readResetFork(sessionPath: string): Promise<ResetForkHeade
 		let header: SessionEntry | null = null;
 		for await (const line of readLines(Bun.file(sessionPath).stream())) {
 			header = parseJsonLine(line, 0, line.length);
-			break;
+			// `SessionManager` writes a fixed-width title slot ahead of the header line.
+			if (header?.type !== "title") break;
 		}
 		if (header?.type !== "session") return null;
 		const id = "id" in header && typeof header.id === "string" ? header.id : undefined;

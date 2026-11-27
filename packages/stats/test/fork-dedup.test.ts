@@ -75,7 +75,9 @@ async function writeSessionFile(
 		...(header.parentSession ? { parentSession: header.parentSession } : {}),
 		...(header.inheritedThroughEntryId ? { inheritedThroughEntryId: header.inheritedThroughEntryId } : {}),
 	};
-	const lines = [headerEntry, ...entries].map(entry => JSON.stringify(entry)).join("\n");
+	// `SessionManager` leads every transcript with a title slot, ahead of the header.
+	const titleSlot = { type: "title", v: 1, title: "", updatedAt: headerEntry.timestamp, pad: "" };
+	const lines = [titleSlot, headerEntry, ...entries].map(entry => JSON.stringify(entry)).join("\n");
 	await Bun.write(sessionFile, `${lines}\n`);
 	return sessionFile;
 }
