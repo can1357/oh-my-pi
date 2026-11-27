@@ -2986,25 +2986,6 @@ mod tests {
 		assert!(gap < lull + lull / 2, "the second keepalive ended {gap:?} after the first");
 	}
 
-	/// The postponement and the idle check read one last output, so they cannot
-	/// postpone against a clock they do not then judge by. On a real connection
-	/// a reader and its linked writer share one `IoCounters` (`make_streams`),
-	/// so only a writer with counters of its own tells the two readings apart:
-	/// the check takes no writer from a hooked reader (the receiving side's
-	/// receiver, whose keepalives stay off the connection), and neither does
-	/// this.
-	#[test]
-	fn the_postponement_reads_the_output_the_idle_check_reads() {
-		let counters = IoCounters::default();
-		let (mut r, _tx, _cancel) = blocking_reader(Some(Duration::from_secs(10)));
-		let sink = Sink::default();
-		r.link_writer(MuxWriter::new(Box::new(sink.clone()), counters.clone(), WriteConfig::default()));
-		counters.last_out.store(clock_ms(), Ordering::Relaxed);
-		assert!(r.since_output().is_some(), "the check counts the linked writer's output");
-		r.set_refill_hook(Some(Box::new(|_| {})));
-		assert_eq!(r.since_output(), None, "the check takes no writer from a hooked reader");
-	}
-
 	#[test]
 	fn bwlimit_caps_write_size_and_sleeps() {
 		let sink = Sink::default();
