@@ -615,6 +615,44 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
+	it("loads legacy Pi extensions whose sibling TypeScript files import each other via relative paths", async () => {
+		const toolName = "legacy-multi-file-tool";
+		const extDir = path.join(tempDir.path(), "legacy-pi-multi-file-extension");
+		fs.mkdirSync(extDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(extDir, "package.json"),
+			JSON.stringify({
+				name: "legacy-pi-multi-file-extension",
+				version: "1.0.0",
+				pi: { extensions: ["./index.ts"] },
+			}),
+		);
+		fs.writeFileSync(path.join(extDir, "helper.ts"), `export const foo = ${JSON.stringify(toolName)};\n`);
+		fs.writeFileSync(
+			path.join(extDir, "index.ts"),
+			[
+				'import { foo } from "./helper.ts";',
+				"",
+				"export default function(pi) {",
+				"\tconst { Type } = pi.typebox;",
+				"\tpi.registerTool({",
+				"\t\tname: foo,",
+				'\t\tdescription: "Multi-file legacy Pi extension",',
+				"\t\tparameters: Type.Object({}),",
+				'\t\texecute: async () => ({ content: [{ type: "text", text: foo }] }),',
+				"\t});",
+				"}",
+			].join("\n"),
+		);
+
+		const result = await discoverForTest([extDir]);
+		const extension = result.extensions.find(ext => ext.path === path.join(extDir, "index.ts"));
+
+		expect(result.errors).toHaveLength(0);
+		expect(extension).toBeDefined();
+		expect(extension?.tools.has(toolName)).toBe(true);
+	});
+
 	it("registers message renderers", async () => {
 		const extCode = `
 			export default function(pi) {

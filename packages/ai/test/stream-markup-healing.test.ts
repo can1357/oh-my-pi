@@ -15,6 +15,7 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { minimaxTokenPlanOpenAIModel } from "./helpers";
 
 interface SseToolCallDelta {
 	index: number;
@@ -24,6 +25,7 @@ interface SseToolCallDelta {
 }
 
 interface SseChoiceDelta {
+	role?: "assistant";
 	content?: string;
 	tool_calls?: SseToolCallDelta[];
 	reasoning_content?: string;
@@ -1225,6 +1227,57 @@ describe("OpenAI completions MiniMax thinking healing", () => {
 			{ type: "text", text: "visible " },
 			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined, summary: false },
 			{ type: "text", text: " answer" },
+		]);
+	});
+
+	it("parses minimax-code-cn <think> content into a thinking block", async () => {
+		const model = minimaxTokenPlanOpenAIModel("minimax-code-cn", "MiniMax-M2.5");
+		const fetchMock = mockFetch([
+			chunk(model.id, { content: "<think>", role: "assistant" }),
+			chunk(model.id, { content: "hidden reasoning", role: "assistant" }),
+			chunk(model.id, { content: "</think>", role: "assistant" }),
+			chunk(model.id, { content: "visible answer", role: "assistant" }),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.content).toEqual([
+			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined, summary: false },
+			{ type: "text", text: "visible answer" },
+		]);
+	});
+
+	it("dedupes MiniMax-M3 cumulative reasoning snapshots after answer text has started", async () => {
+		const model = minimaxTokenPlanOpenAIModel("minimax-code-cn", "MiniMax-M3");
+		const fetchMock = mockFetch([
+			chunk(model.id, { role: "assistant", content: "<think>The user just", reasoning_content: "The user just" }),
+			chunk(model.id, { content: " said hi.</think>Hello!", reasoning_content: "The user just said hi." }),
+			// Visible text continues, yet the host keeps echoing the same cumulative
+			// reasoning snapshot. The current block is now text, so a block-scoped
+			// dedup would re-emit the entire snapshot as a second thinking block.
+			chunk(model.id, { content: " How can I help?", reasoning_content: "The user just said hi." }),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.content).toEqual([
+			{
+				type: "thinking",
+				thinking: "The user just said hi.",
+				thinkingSignature: "reasoning_content",
+				summary: false,
+			},
+			{ type: "text", text: "Hello! How can I help?" },
 		]);
 	});
 });

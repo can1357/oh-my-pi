@@ -1,12 +1,16 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import {
 	applyOpenRouterRoutingVariant,
 	convertMessages,
+	type OpenAICompletionsOptions,
 	parseChunkUsage,
 	streamOpenAICompletions,
 } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
+	Api,
 	AssistantMessage,
 	Context,
 	FetchImpl,
@@ -22,6 +26,7 @@ import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-ca
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { minimaxTokenPlanOpenAIModel } from "./helpers";
 
 const gpt4oMiniSpec: ModelSpec<"openai-completions"> = (() => {
 	const {
@@ -114,13 +119,7 @@ function kimiZaiModel(): Model<"openai-completions"> {
 async function captureOpenAICompletionsPayload(
 	model: Model<"openai-completions">,
 	context: Context = baseContext(),
-	options?: {
-		apiKey?: string;
-		reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-		temperature?: number;
-		sessionId?: string;
-		cacheRetention?: "none" | "short" | "long";
-	},
+	options?: OpenAICompletionsOptions,
 ): Promise<unknown> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	const fetchMock = createMockFetch(["[DONE]"]);
@@ -1306,6 +1305,168 @@ describe("openai-completions compatibility", () => {
 		);
 		expect(collapsedXhighPayload ? Reflect.get(collapsedXhighPayload, "reasoning_effort") : undefined).toBe("high");
 	});
+
+	it("uses the configured xhigh effort for custom OpenAI-compatible models", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			id: "gpt-5.1",
+			name: "GPT-5.1 proxy",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		let payload: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				payload = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
+				return createSseResponse([
+					{
+						id: "chatcmpl-custom-xhigh",
+						object: "chat.completion.chunk",
+						created: 0,
+						model: model.id,
+						choices: [{ index: 0, delta: { content: "ok" } }],
+					},
+					{
+						id: "chatcmpl-custom-xhigh",
+						object: "chat.completion.chunk",
+						created: 0,
+						model: model.id,
+						choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+					},
+					"[DONE]",
+				]);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		expect(getSupportedEfforts(model)).toContain(Effort.XHigh);
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			reasoning: "xhigh",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(payload?.reasoning_effort).toBe("xhigh");
+	});
+});
+
+// Some OpenAI-compatible hosts (GLM, Qwen reasoning variants behind custom
+// providers) stream the DeepSeek-format dual-key pattern
+// `{"delta":{"content":null,"reasoning_content":"..."}}`, where `content` is
+// explicitly JSON null. The reasoning delta must still become a thinking block,
+// and the null content must not be coerced into an empty text block.
+describe("streamed reasoning_content beside null content", () => {
+	function customReasoningModel(id = "glm-5.2"): Model<"openai-completions"> {
+		return buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "yunwu",
+			baseUrl: "https://yunwu.ai/v1",
+			id,
+			reasoning: true,
+		} as ModelSpec<"openai-completions">);
+	}
+
+	function deltaChunk(model: Model<"openai-completions">, delta: Record<string, unknown>): unknown {
+		return {
+			id: "x",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: model.id,
+			choices: [{ index: 0, delta }],
+		};
+	}
+
+	it("emits a thinking block for reasoning_content deltas paired with content:null", async () => {
+		const model = customReasoningModel();
+		const fetchMock = createMockFetch([
+			deltaChunk(model, { content: null, reasoning_content: "分析" }),
+			deltaChunk(model, { content: null, reasoning_content: "步骤" }),
+			deltaChunk(model, { content: "2", reasoning_content: null }),
+			{
+				id: "x",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "high",
+		}).result();
+
+		expect(result.content).toEqual([
+			{ type: "thinking", thinking: "分析步骤", thinkingSignature: "reasoning_content", summary: false },
+			{ type: "text", text: "2" },
+		]);
+	});
+
+	it("does not coerce a content:null delta into a text block when only reasoning_content is present", async () => {
+		const model = customReasoningModel();
+		const fetchMock = createMockFetch([
+			deltaChunk(model, { content: null, reasoning_content: "only thinking" }),
+			deltaChunk(model, { content: "answer", reasoning_content: null }),
+			{
+				id: "x",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "high",
+		}).result();
+
+		const textBlocks = result.content.filter(b => b.type === "text");
+		expect(textBlocks).toEqual([{ type: "text", text: "answer" }]);
+	});
+});
+
+describe("MiniMax Token Plan request payload", () => {
+	it.each([
+		["minimax-code", "MiniMax-M2.5"],
+		["minimax-code-cn", "MiniMax-M2.5"],
+	] as const)("omits unsupported thinking fields for %s/%s", async (provider, modelId) => {
+		const model = minimaxTokenPlanOpenAIModel(provider, modelId);
+		const body = toObject(
+			await captureOpenAICompletionsPayload(
+				model,
+				{
+					systemPrompt: ["stable instructions", "cacheable policy"],
+					messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+				},
+				{ reasoning: "high" },
+			),
+		);
+
+		expect(body?.model).toBe(modelId);
+		expect(body?.messages).toEqual([
+			{ role: "system", content: "stable instructions\n\ncacheable policy" },
+			{ role: "user", content: "hello" },
+		]);
+		expect(body?.thinking).toBeUndefined();
+		expect(body?.reasoning).toBeUndefined();
+		expect(body?.reasoning_effort).toBeUndefined();
+	});
 });
 
 describe("kimi model detection via detectCompat", () => {
@@ -2243,6 +2404,140 @@ describe("kimi model detection via detectCompat", () => {
 		const compat = model.compat;
 		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
 	});
+
+	// Moonshot's K2.6 `thinking.keep: "all"` makes the server preserve
+	// `reasoning_content` from historical assistant turns across multi-step tool
+	// calls; without it the backend silently drops every prior turn's reasoning
+	// even though it rides on the wire. The field is K2.6-only (K2.5 and earlier
+	// reject unknown fields) and Moonshot-host-only: every gateway translates
+	// thinking into its own native shape and would reject the extra key.
+	describe("Moonshot K2.6 preserved thinking (thinking.keep)", () => {
+		it("preserves the Moonshot-native gate against gateway IDs that match the kimi-k2.6 prefix", async () => {
+			// The gate is provider+baseUrl driven, not id-only: a non-Moonshot host
+			// with `kimi-k2.6` in the id never gets the Moonshot-only `keep`.
+			const customModel: Model<"openai-completions"> = buildModel({
+				...gpt4oMiniSpec,
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://example.com/v1",
+				id: "kimi-k2.6",
+				reasoning: true,
+			} as ModelSpec<"openai-completions">);
+			const payload = await captureOpenAICompletionsPayload(customModel, baseContext(), { reasoning: "high" });
+			expect(toObject(payload)?.thinking).toBeUndefined();
+		});
+
+		it("does NOT send thinking.keep on kimi-k2.5 (field is K2.6-only in Moonshot's schema)", async () => {
+			const payload = await captureOpenAICompletionsPayload(kimiMoonshotModel("kimi-k2.5"), baseContext(), {
+				reasoning: "high",
+			});
+			const thinking = getNestedObject(payload, "thinking");
+			expect(thinking).not.toBeNull();
+			expect(thinking?.type).toBe("enabled");
+			expect(thinking?.keep).toBeUndefined();
+		});
+
+		it("does NOT send thinking.keep on OpenRouter-hosted Kimi K2.6 (proxy uses its own thinking shape)", async () => {
+			// OpenRouter uses `reasoning: { effort }` rather than Moonshot's
+			// `thinking: { type, keep }`.
+			const openRouterModel: Model<"openai-completions"> = buildModel({
+				...gpt4oMiniSpec,
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				id: "moonshotai/kimi-k2.6",
+				reasoning: true,
+			} as ModelSpec<"openai-completions">);
+			const payload = await captureOpenAICompletionsPayload(openRouterModel, baseContext(), { reasoning: "high" });
+			expect(toObject(payload)?.thinking).toBeUndefined();
+		});
+
+		it("does NOT send thinking.keep on a forced-tool turn (compat disables thinking entirely for Kimi)", async () => {
+			// `disableReasoningOnForcedToolChoice` flips thinking to `disabled` for
+			// Kimi whenever a named tool is forced (Moonshot rejects
+			// `tool_choice 'specified'` with thinking enabled); `keep` MUST NOT
+			// resurrect on this path.
+			const payload = await captureOpenAICompletionsPayload(
+				kimiMoonshotModel("kimi-k2.6"),
+				{
+					messages: [{ role: "user", content: "Use the read tool", timestamp: Date.now() }],
+					tools: [
+						{
+							name: "read",
+							description: "read a file",
+							parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+						},
+					],
+				},
+				{ reasoning: "high", toolChoice: { type: "tool", name: "read" } },
+			);
+			expect(toObject(payload)?.thinking).toEqual({ type: "disabled" });
+		});
+
+		it("survives kimi-k2.6 ids that include a routing suffix (Fireworks-style)", async () => {
+			// Fireworks publishes Kimi K2.6 under `accounts/fireworks/routers/` and
+			// never speaks the Moonshot wire, so it takes the reasoning_effort path.
+			const fireworksModel: Model<"openai-completions"> = buildModel({
+				...gpt4oMiniSpec,
+				api: "openai-completions",
+				provider: "fireworks",
+				baseUrl: "https://api.fireworks.ai/inference/v1",
+				id: "accounts/fireworks/routers/kimi-k2.6",
+				reasoning: true,
+			} as ModelSpec<"openai-completions">);
+			const payload = await captureOpenAICompletionsPayload(fireworksModel, baseContext(), { reasoning: "high" });
+			expect(toObject(payload)?.thinking).toBeUndefined();
+		});
+
+		it("preserves the streamed assistant flow alongside thinking.keep='all'", async () => {
+			// The rest of the body is unchanged when keep is set: `stream` stays true
+			// and the prior assistant reasoning_content still rides on the wire, so
+			// the server's `keep: "all"` has data to preserve.
+			const priorAssistant: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "Need to read the file first.", thinkingSignature: "reasoning_content" },
+					{ type: "toolCall", id: "call_abc", name: "read", arguments: { path: "README.md" } },
+				],
+				api: "openai-completions",
+				provider: "moonshot",
+				model: "kimi-k2.6",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			};
+			const payload = await captureOpenAICompletionsPayload(
+				kimiMoonshotModel("kimi-k2.6"),
+				{
+					messages: [
+						{ role: "user", content: "Summarize README", timestamp: Date.now() },
+						priorAssistant,
+						{
+							role: "toolResult",
+							toolCallId: "call_abc",
+							toolName: "read",
+							content: [{ type: "text", text: "# Hello\n" }],
+							isError: false,
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{ reasoning: "high" },
+			);
+			expect(toObject(payload)?.thinking).toEqual({ type: "enabled", keep: "all" });
+			expect(toObject(payload)?.stream).toBe(true);
+			const assistant = getPayloadMessages(payload).find(message => message.role === "assistant");
+			expect(assistant).toBeDefined();
+			expect(assistant?.reasoning_content).toBe("Need to read the file first.");
+		});
+	});
 });
 
 describe("NVIDIA NIM DeepSeek special-token stripping", () => {
@@ -2401,6 +2696,97 @@ describe("NVIDIA NIM DeepSeek special-token stripping", () => {
 			.map(b => (b as { text: string }).text)
 			.join("");
 		expect(text).toBe("keep <\uff5cas-is\uff5c> please");
+	});
+});
+
+describe("DeepSeek chat-template token stripping", () => {
+	const model: Model<"openai-completions"> = {
+		...getBundledModel("deepseek", "deepseek-v4-flash"),
+	};
+
+	it("strips leaked deepseek chat-template markers from visible text for deepseek providers", async () => {
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-deepseek-1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { content: "去改前端交互描述：" } }],
+			},
+			{
+				id: "chatcmpl-deepseek-1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { content: "<｜Assistant｜>\n\n" } }],
+			},
+			{
+				id: "chatcmpl-deepseek-1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { content: "让我找到对应位置并修改。" } }],
+			},
+			{
+				id: "chatcmpl-deepseek-1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+		const text = result.content
+			.filter(block => block.type === "text")
+			.map(block => (block as { text: string }).text)
+			.join("");
+
+		expect(text).toBe("去改前端交互描述：让我找到对应位置并修改。");
+		expect(text).not.toContain("<｜Assistant｜>");
+	});
+
+	it("holds partial deepseek markers across chunks before stripping them", async () => {
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-deepseek-2",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { content: "去改前端交互描述：<｜Ass" } }],
+			},
+			{
+				id: "chatcmpl-deepseek-2",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { content: "istant｜>\n\n让我找到对应位置并修改。" } }],
+			},
+			{
+				id: "chatcmpl-deepseek-2",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+		const text = result.content
+			.filter(block => block.type === "text")
+			.map(block => (block as { text: string }).text)
+			.join("");
+
+		expect(text).toBe("去改前端交互描述：让我找到对应位置并修改。");
+		expect(text).not.toContain("<｜Assistant｜>");
 	});
 });
 
@@ -2929,6 +3315,113 @@ describe("Mistral reasoning_effort ladders (#19265)", () => {
 	});
 });
 
+// Mistral Medium 3.5 streams `delta.content` as an array of typed content parts
+// (`[{ type: "text", text: "Hello" }]`) instead of a plain string; appending it
+// verbatim would coerce the array to the literal `[object Object]`.
+describe("Mistral typed content parts in streamed deltas", () => {
+	const model: Model<"openai-completions"> = {
+		...getBundledModel("mistral", "mistral-medium-2604"),
+	};
+
+	it("normalizes array-of-parts delta.content into the assembled text without [object Object]", async () => {
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-mistral-1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [
+					{
+						index: 0,
+						delta: { content: [{ type: "text", text: "Hello" }] },
+					},
+				],
+			},
+			{
+				id: "chatcmpl-mistral-1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [
+					{
+						index: 0,
+						delta: { content: [{ type: "text", text: ", world" }] },
+					},
+				],
+			},
+			{
+				id: "chatcmpl-mistral-1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+		const text = result.content
+			.filter(b => b.type === "text")
+			.map(b => (b as { text: string }).text)
+			.join("");
+
+		expect(text).not.toContain("[object Object]");
+		expect(text).toBe("Hello, world");
+	});
+
+	it("handles mixed string and array-of-parts content shapes within one stream", async () => {
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-mistral-2",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { content: "plain " } }],
+			},
+			{
+				id: "chatcmpl-mistral-2",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [
+					{
+						index: 0,
+						delta: {
+							content: [
+								{ type: "text", text: "and " },
+								{ type: "text", text: "typed" },
+							],
+						},
+					},
+				],
+			},
+			{
+				id: "chatcmpl-mistral-2",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+		const text = result.content
+			.filter(b => b.type === "text")
+			.map(b => (b as { text: string }).text)
+			.join("");
+
+		expect(text).not.toContain("[object Object]");
+		expect(text).toBe("plain and typed");
+	});
+});
+
 describe("Groq Qwen reasoning_effort on the wire", () => {
 	it("sends each Qwen only an effort value Groq accepts", async () => {
 		// Qwen 3.6 takes `default` (thinking) or `none`; Qwen 3.8 takes low/medium/high.
@@ -2940,5 +3433,149 @@ describe("Groq Qwen reasoning_effort on the wire", () => {
 		const qwen38 = getBundledModel<"openai-completions">("groq", "qwen/qwen3.8-27b");
 		const on38 = toObject(await captureOpenAICompletionsPayload(qwen38, undefined, { reasoning: "low" }));
 		expect(on38?.reasoning_effort).toBe("low");
+	});
+});
+
+describe("Kimi K3 reasoning_effort contract on OpenAI-compatible routes", () => {
+	const kimiK3Litellm = buildModel({
+		id: "kimi-k3",
+		name: "Kimi K3",
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "http://127.0.0.1:4000/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	});
+
+	it("derives K3's mandatory low/high/max ladder for a LiteLLM route", () => {
+		expect(getSupportedEfforts(kimiK3Litellm)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(kimiK3Litellm.thinking).toMatchObject({
+			mode: "effort",
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+		expect(kimiK3Litellm.compat.reasoningEffortMap).toEqual({
+			minimal: "low",
+			medium: "high",
+			xhigh: "max",
+			max: "max",
+		});
+	});
+
+	it("folds every generic requested tier into K3's accepted wire values", async () => {
+		const cases: readonly (readonly [Effort, string])[] = [
+			[Effort.Minimal, "low"],
+			[Effort.Low, "low"],
+			[Effort.Medium, "high"],
+			[Effort.High, "high"],
+			[Effort.XHigh, "max"],
+			[Effort.Max, "max"],
+		];
+		const payloads = await Promise.all(
+			cases.map(([requested]) =>
+				captureOpenAICompletionsPayload(kimiK3Litellm, undefined, { reasoning: requested }),
+			),
+		);
+		for (let index = 0; index < cases.length; index++) {
+			expect(payloads[index]).toMatchObject({ reasoning_effort: cases[index]?.[1] });
+		}
+	});
+});
+
+describe("custom API OpenAI-completions compatibility", () => {
+	const CUSTOM_OPENAI_API = "custom-openai-wrapper";
+
+	function customModel(api: string, compat?: ModelSpec<Api>["compat"]): Model<Api> {
+		return buildModel({
+			id: "hy4-preview",
+			name: "HY4 Preview",
+			provider: "custom-wrapper-provider",
+			baseUrl: "https://example.com/v1",
+			api,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131_072,
+			maxTokens: 8_192,
+			compat,
+		} as ModelSpec<Api>);
+	}
+
+	function createFetch(capture: (body: Record<string, unknown>) => void): FetchImpl {
+		async function mockFetch(_input: string | URL | Request, init?: RequestInit): Promise<Response> {
+			if (typeof init?.body === "string") capture(JSON.parse(init.body) as Record<string, unknown>);
+			const payload = [
+				`data: ${JSON.stringify({
+					id: "chatcmpl-custom",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: "hy4-preview",
+					choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }],
+				})}`,
+				`data: ${JSON.stringify({
+					id: "chatcmpl-custom",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: "hy4-preview",
+					choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+				})}`,
+				"data: [DONE]",
+			].join("\n\n");
+			return new Response(`${payload}\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		}
+		return Object.assign(mockFetch, { preconnect: fetch.preconnect });
+	}
+
+	afterEach(() => {
+		clearCustomApis();
+	});
+
+	it("streams through an OpenAI-completions wrapper with declared overrides", async () => {
+		const model = customModel(CUSTOM_OPENAI_API, {
+			maxTokensField: "max_tokens",
+			supportsSamplingParams: false,
+		});
+		registerCustomApi(CUSTOM_OPENAI_API, (custom, messages, options) =>
+			streamOpenAICompletions(
+				custom as Model<"openai-completions">,
+				messages,
+				(options ?? {}) as OpenAICompletionsOptions,
+			),
+		);
+
+		let request: Record<string, unknown> | undefined;
+		const result = await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				fetch: createFetch(body => {
+					request = body;
+				}),
+				temperature: 0.7,
+				maxTokens: 321,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "ok" }]);
+		expect(request?.max_tokens).toBe(321);
+		expect(request?.max_completion_tokens).toBeUndefined();
+		expect(request?.temperature).toBeUndefined();
+	});
+
+	it("keeps compatibility undefined for a registered unrelated custom API", () => {
+		const api = "custom-anthropic-shaped";
+		registerCustomApi(api, () => {
+			throw new Error("unrelated custom streamer must not run");
+		});
+		const model = customModel(api);
+		expect(model.compat).toBeUndefined();
 	});
 });
