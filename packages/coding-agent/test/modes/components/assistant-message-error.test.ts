@@ -1,11 +1,19 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent, resetThinkingSpeedTracker } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { type Signal, signal } from "@oh-my-pi/pi-tui";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import "../../../src/ui/styles/messages";
+import { printRows } from "../../../src/ui/print-rows";
+import {
+	AssistantMessageBlock,
+	type AssistantMessageModel,
+} from "../../../src/ui/transcript/messages/assistant-message";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-const originalImageProtocol = TERMINAL.imageProtocol;
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const RENDER_WIDTH = 120;
 
@@ -30,29 +38,26 @@ function erroredMessage(errorMessage: string): AssistantMessage {
 	};
 }
 
+/** A settled assistant block's plain rows. */
 function renderLines(message: AssistantMessage, hideThinkingBlock = false): string[] {
-	const component = new AssistantMessageComponent(message, hideThinkingBlock);
-	return Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"))
-		.split("\n")
-		.map(line => line.trimEnd());
+	const model: AssistantMessageModel = {
+		message: signal(message),
+		finalized: signal(true),
+		hideThinking: signal(hideThinkingBlock),
+	};
+	return printRows(() => AssistantMessageBlock({ model }), RENDER_WIDTH).map(line => Bun.stripANSI(line).trimEnd());
 }
-
-beforeAll(async () => {
-	await initTheme(false);
-});
 
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	setTerminalImageProtocol(null);
 });
 
 afterEach(() => {
 	resetSettingsForTest();
-	setTerminalImageProtocol(originalImageProtocol);
 });
 
-describe("AssistantMessageComponent error rendering", () => {
+describe("assistant message block error rendering", () => {
 	// A proxy 502 returns its own HTML page as the body; AnthropicApiError folds
 	// that whole document into `errorMessage`. The inline transcript render must
 	// not faithfully reprint every line, or the scrollback fills with the HTML
@@ -102,7 +107,7 @@ describe("AssistantMessageComponent error rendering", () => {
 	});
 });
 
-describe("AssistantMessageComponent hidden thinking rendering", () => {
+describe("assistant message block hidden thinking rendering", () => {
 	function thinkingMessage(): AssistantMessage {
 		return {
 			role: "assistant",
@@ -139,7 +144,7 @@ describe("AssistantMessageComponent hidden thinking rendering", () => {
 	});
 });
 
-describe("AssistantMessageComponent streaming thinking pulse", () => {
+describe("assistant message block streaming thinking pulse", () => {
 	// The in-flight streaming partial always carries stopReason "stop" (proxy.ts
 	// seeds it), so "still streaming" is keyed off the block not yet being
 	// finalized — a live component is constructed with no message.
@@ -163,14 +168,40 @@ describe("AssistantMessageComponent streaming thinking pulse", () => {
 		};
 	}
 
+	/** A live (streaming) block on a terminal whose clock stays at 0. */
+	interface LiveBlock {
+		readonly term: TestTerminal;
+		readonly message: Signal<AssistantMessage | undefined>;
+		readonly finalized: Signal<boolean>;
+		text(): string;
+	}
+
+	function liveBlock(hideThinkingBlock = true): LiveBlock {
+		const message = signal<AssistantMessage | undefined>(undefined);
+		const finalized = signal(false);
+		const model: AssistantMessageModel = {
+			message,
+			transient: signal(true),
+			finalized,
+			hideThinking: signal(hideThinkingBlock),
+		};
+		const term = createTestTerminal(() => ({ main: AssistantMessageBlock({ model }) }), {
+			columns: RENDER_WIDTH,
+			rows: 40,
+			theme: loadThemeSync("dark"),
+		});
+		return { term, message, finalized, text: () => term.screen().join("\n") };
+	}
+
 	function liveLines(message: AssistantMessage, hideThinkingBlock = true): string[] {
-		const component = new AssistantMessageComponent(undefined, hideThinkingBlock);
-		component.updateContent(message);
-		const lines = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"))
-			.split("\n")
-			.map(line => line.trimEnd());
-		component.dispose();
-		return lines;
+		const block = liveBlock(hideThinkingBlock);
+		try {
+			block.message.set(message);
+			block.term.render();
+			return block.term.screen().map(line => line.trimEnd());
+		} finally {
+			block.term.dispose();
+		}
 	}
 
 	// First frame of the expanding/shrinking ✻ pulse; deterministic right after updateContent.
@@ -183,6 +214,18 @@ describe("AssistantMessageComponent streaming thinking pulse", () => {
 		expect(lines.some(line => line.includes(PULSE) && line.includes(THINKING_LABEL))).toBe(true);
 		expect(lines.map(line => line.trim()).some(line => THINKING_GLYPH_ONLY_LINE.test(line))).toBe(false);
 		expect(lines.some(line => line.includes("private reasoning"))).toBe(false);
+	});
+
+	it("holds the pulse on its first facet while motion is reduced (tui.motion: none)", () => {
+		const block = liveBlock();
+		try {
+			block.term.backend.setReduceMotion(true);
+			block.message.set(streaming([{ type: "thinking", thinking: "private reasoning" }]));
+			block.term.tick(5_000);
+			expect(block.text()).toContain(`${PULSE} ${THINKING_LABEL}`);
+		} finally {
+			block.term.dispose();
+		}
 	});
 
 	it("drops the pulse once visible text starts streaming", () => {
@@ -213,133 +256,42 @@ describe("AssistantMessageComponent streaming thinking pulse", () => {
 	});
 
 	it("removes the pulse when the block is finalized", () => {
-		const component = new AssistantMessageComponent(undefined, true);
-		component.updateContent(streaming([{ type: "thinking", thinking: "private reasoning" }]));
-		expect(Bun.stripANSI(component.render(RENDER_WIDTH).join("\n")).includes(PULSE)).toBe(true);
+		const block = liveBlock();
+		try {
+			block.message.set(streaming([{ type: "thinking", thinking: "private reasoning" }]));
+			block.term.render();
+			expect(block.text().includes(PULSE)).toBe(true);
 
-		component.markTranscriptBlockFinalized();
-		const afterFinalize = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
-		expect(afterFinalize.includes(PULSE)).toBe(false);
-		expect(afterFinalize.includes("private reasoning")).toBe(false);
-		component.dispose();
+			block.finalized.set(true);
+			block.term.render();
+			expect(block.text().includes(PULSE)).toBe(false);
+			expect(block.text().includes("private reasoning")).toBe(false);
+		} finally {
+			block.term.dispose();
+		}
 	});
 
-	it("keeps the pulse across thinking deltas on a reused component, then yields to text", () => {
-		// Mirrors live streaming: one component reused across updateContent calls
-		// (the fast path early-returns on a stable shape, so the placeholder must
-		// persist) until visible text arrives and replaces it.
-		const component = new AssistantMessageComponent(undefined, true);
-		const rendered = () => Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
-		component.updateContent(streaming([{ type: "thinking", thinking: "a" }]));
-		expect(rendered().includes(PULSE)).toBe(true);
-		component.updateContent(streaming([{ type: "thinking", thinking: "ab" }]));
-		expect(rendered().includes(PULSE)).toBe(true);
-		component.updateContent(
-			streaming([
-				{ type: "thinking", thinking: "abc" },
-				{ type: "text", text: "Answer" },
-			]),
-		);
-		expect(rendered().includes(PULSE)).toBe(false);
-		expect(rendered().includes("Answer")).toBe(true);
-		component.dispose();
-	});
-
-	it("derives the windowed token speed from provider usage while thinking streams", () => {
-		resetThinkingSpeedTracker();
-		const component = new AssistantMessageComponent(undefined, true);
-		const nowSpy = spyOn(performance, "now");
-
-		let mockTime = 1000;
-		nowSpy.mockImplementation(() => mockTime);
-
-		// First update seeds the baseline from provider output tokens; no rate yet.
-		component.updateContent(streaming([{ type: "thinking", thinking: "a" }], 10), { transient: true });
-
-		// +47 provider output tokens 1s later → 47 tok/s.
-		mockTime = 2000;
-		component.updateContent(streaming([{ type: "thinking", thinking: "ab" }], 57), { transient: true });
-
-		const plain = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
-		// Layout: "<glyph> Thinking · <total> · <rate> toks/s" — 57 provider tokens, 47.0 tok/s.
-		expect(plain).toContain("57 · 47.0 toks/s");
-
-		nowSpy.mockRestore();
-		component.dispose();
-	});
-
-	it("clamps the displayed speed to the 200 tok/s ceiling", () => {
-		resetThinkingSpeedTracker();
-		const component = new AssistantMessageComponent(undefined, true);
-		const nowSpy = spyOn(performance, "now");
-
-		let mockTime = 1000;
-		nowSpy.mockImplementation(() => mockTime);
-		component.updateContent(streaming([{ type: "thinking", thinking: "a" }], 10), { transient: true });
-
-		// +977 provider output tokens in 100 ms is far past the ceiling.
-		mockTime = 1100;
-		component.updateContent(streaming([{ type: "thinking", thinking: "a" }], 987), { transient: true });
-
-		const plain = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
-		expect(plain).toContain("200.0 toks/s");
-
-		nowSpy.mockRestore();
-		component.dispose();
-	});
-
-	it("drops the badge entirely once the rate reads zero (streaming lull)", () => {
-		resetThinkingSpeedTracker();
-		const component = new AssistantMessageComponent(undefined, true);
-		const nowSpy = spyOn(performance, "now");
-
-		let mockTime = 1000;
-		nowSpy.mockImplementation(() => mockTime);
-		component.updateContent(streaming([{ type: "thinking", thinking: "a" }], 10), { transient: true });
-		mockTime = 2000;
-		component.updateContent(streaming([{ type: "thinking", thinking: "ab" }], 57), { transient: true });
-
-		// Long pause: rate observations age out of the window. A same-token update
-		// refreshes the live label, which now drops the numeric badge entirely
-		// rather than lingering on "0.0 toks/s" while retaining descriptive text.
-		mockTime = 30_000;
-		component.updateContent(streaming([{ type: "thinking", thinking: "ab" }], 57), { transient: true });
-		const plain = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
-		expect(plain).not.toContain("toks/s");
-		expect(plain).not.toContain("57");
-		expect(plain.includes(PULSE)).toBe(true);
-		expect(plain).toContain(THINKING_LABEL);
-
-		nowSpy.mockRestore();
-		component.dispose();
-	});
-
-	it("ignores the session gauge's prior-turn rate on a fresh token-less block", () => {
-		resetThinkingSpeedTracker();
-		const nowSpy = spyOn(performance, "now");
-		let mockTime = 1000;
-		nowSpy.mockImplementation(() => mockTime);
-
-		// Block A records a live rate into the session-wide gauge.
-		const a = new AssistantMessageComponent(undefined, true);
-		a.updateContent(streaming([{ type: "thinking", thinking: "a" }], 10), { transient: true });
-		mockTime = 2000;
-		a.updateContent(streaming([{ type: "thinking", thinking: "ab" }], 57), { transient: true });
-		expect(Bun.stripANSI(a.render(RENDER_WIDTH).join("\n"))).toContain("toks/s");
-		a.dispose();
-
-		// Block B starts moments later with provider tokens but no positive delta of
-		// its own; the gauge still holds A's observation, but B must not borrow it.
-		mockTime = 2500;
-		const b = new AssistantMessageComponent(undefined, true);
-		b.updateContent(streaming([{ type: "thinking", thinking: "xyz" }], 99), { transient: true });
-		const plain = Bun.stripANSI(b.render(RENDER_WIDTH).join("\n"));
-		expect(plain).not.toContain("toks/s");
-		expect(plain).not.toContain("99");
-		expect(plain.includes(PULSE)).toBe(true);
-		expect(plain).toContain(THINKING_LABEL);
-
-		nowSpy.mockRestore();
-		b.dispose();
+	it("keeps the pulse across thinking deltas on a live block, then yields to text", () => {
+		const block = liveBlock();
+		const rendered = (): string => {
+			block.term.render();
+			return block.text();
+		};
+		try {
+			block.message.set(streaming([{ type: "thinking", thinking: "a" }]));
+			expect(rendered().includes(PULSE)).toBe(true);
+			block.message.set(streaming([{ type: "thinking", thinking: "ab" }]));
+			expect(rendered().includes(PULSE)).toBe(true);
+			block.message.set(
+				streaming([
+					{ type: "thinking", thinking: "abc" },
+					{ type: "text", text: "Answer" },
+				]),
+			);
+			expect(rendered().includes(PULSE)).toBe(false);
+			expect(rendered().includes("Answer")).toBe(true);
+		} finally {
+			block.term.dispose();
+		}
 	});
 });

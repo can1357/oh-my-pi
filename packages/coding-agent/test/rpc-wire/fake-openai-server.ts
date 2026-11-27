@@ -12,11 +12,12 @@
  * Replies, by the conversation's last message:
  * - a tool result → text `tool said: <result text>`
  * - a user message containing `echo_host` → a call to the `echo_host` tool with
- *   `{"message": "hello"}` (through `write` to `xd://echo_host` when host tools
- *   are mounted as devices)
+ *   `{"message": "hello"}` (through a `bash` tool command on `echo_host` when the tool
+ *   is mounted as a command)
  * - a user message containing `read_uri <url>` → a `read` call for `<url>`
+ * - a user message containing `run_command <shell line>` → a `bash` call running `<shell line>`
  * - a user message containing `write_uri <url>` → a `write` call storing
- *   `written by model` at `<url>`
+ *   `written by model` at `<url>` (or the JSON value after `<url>`, if supplied)
  * - anything else → text `pong`
  */
 import * as path from "node:path";
@@ -46,16 +47,17 @@ function scriptedReply(request: ChatRequest): Reply {
 	if (last?.role === "tool") return { text: `tool said: ${messageText(last.content)}` };
 	const offered = new Set((request.tools ?? []).map(tool => tool.function?.name));
 	const userText = last?.role === "user" ? messageText(last.content) : "";
-	const uriRequest = /\b(read|write)_uri (\S+)/.exec(userText);
+	const runRequest = /\brun_command (\S[^\n]*)/.exec(userText);
+	if (runRequest) return { tool: "bash", args: { command: runRequest[1] } };
+	const uriRequest = /\b(read|write)_uri (\S+)(?: (\{[^\n]*\}))?/.exec(userText);
 	if (uriRequest?.[1] === "read") return { tool: "read", args: { path: uriRequest[2] } };
 	if (uriRequest?.[1] === "write") {
-		return { tool: "write", args: { path: uriRequest[2], content: "written by model" } };
+		return { tool: "write", args: { path: uriRequest[2], content: uriRequest[3] ?? "written by model" } };
 	}
 	if (userText.includes("echo_host")) {
 		const args = { message: "hello" };
 		if (offered.has("echo_host")) return { tool: "echo_host", args };
-		if (offered.has("write"))
-			return { tool: "write", args: { path: "xd://echo_host", content: JSON.stringify(args) } };
+		if (offered.has("bash")) return { tool: "bash", args: { command: `echo_host -j '${JSON.stringify(args)}'` } };
 	}
 	return { text: "pong" };
 }

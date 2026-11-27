@@ -20,7 +20,7 @@ export const cfgTtsLocalVoice = register({
 		tab: "providers",
 		group: "Services",
 		label: "Local TTS Voice",
-		description: "Kokoro voice used by the local TTS backend (American/British, female/male)",
+		description: "Phonon voice used by the local TTS backend (American/British, female/male)",
 		options: TTS_LOCAL_VOICE_OPTIONS,
 	},
 });
@@ -33,7 +33,7 @@ export const cfgTtsLocalSpeed = register({
 		tab: "providers",
 		group: "Services",
 		label: "Local TTS Speed",
-		description: "Speaking rate of the local TTS backend (tts tool, omp say). 1 = normal; clamped to 0.5–2.5",
+		description: "Speaking rate of the local TTS backend (tts tool, omp say). 1 = normal; clamped to 0.8–1.3",
 		options: TTS_SPEED_OPTIONS,
 	},
 });
@@ -47,6 +47,19 @@ export const cfgSpeechEnabled = register({
 		group: "Services",
 		label: "Speech Vocalization",
 		description: "Speak the assistant's output aloud through the speakers as it streams",
+	},
+});
+
+export const cfgSpeechCloud = register({
+	id: "speech.cloud",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Cloud Speech Vocalization",
+		description:
+			"Vocalize through the configured cloud speech models (openai-speech/xai-tts) in modelRoles.speech and its fallbacks, sending each spoken segment to that endpoint. Off keeps vocalization on local Phonon",
 	},
 });
 
@@ -91,7 +104,7 @@ export const cfgSpeechVoice = register({
 		tab: "providers",
 		group: "Services",
 		label: "Speech Vocalization Voice",
-		description: "Kokoro voice used when speaking the assistant's output aloud",
+		description: "Phonon voice used when speaking the assistant's output aloud",
 		options: TTS_LOCAL_VOICE_OPTIONS,
 	},
 });
@@ -104,7 +117,7 @@ export const cfgSpeechSpeed = register({
 		tab: "providers",
 		group: "Services",
 		label: "Speech Vocalization Speed",
-		description: "Speaking rate when reading the assistant's output aloud. 1 = normal; clamped to 0.5–2.5",
+		description: "Speaking rate when reading the assistant's output aloud. 1 = normal; clamped to 0.8–1.3",
 		options: TTS_SPEED_OPTIONS,
 	},
 });

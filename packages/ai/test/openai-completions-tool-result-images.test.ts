@@ -30,6 +30,8 @@ const compat: ResolvedOpenAICompat = {
 	maxTokensField: "max_completion_tokens",
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
+	foldUserAfterToolResult: false,
+	splitToolCalls: false,
 	requiresThinkingAsText: false,
 	requiresMistralToolIds: false,
 	thinkingFormat: "openai",
@@ -461,7 +463,8 @@ describe("openai-completions convertMessages", () => {
 		// convertMessages must never forward `image_url` parts.
 		const deepseekModelIds = [
 			{ id: "deepseek-v4-pro", provider: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
-			{ id: "deepseek-v4-flash", provider: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
+			// V4.0 Flash weights; DeepSeek's own API serves this id with V4.1 Flash.
+			{ id: "deepseek-v4-flash", provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" },
 			{ id: "deepseek-chat", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
 			{ id: "deepseek-reasoner", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
 			{ id: "deepseek-ai/DeepSeek-V4-Pro", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
@@ -544,7 +547,18 @@ describe("openai-completions convertMessages", () => {
 		}
 	});
 	it("preserves image_url for the multimodal DeepSeek OCR model", () => {
-		const model = getBundledModel("novita", "deepseek/deepseek-ocr-2") as Model<"openai-completions">;
+		const model = buildModel({
+			id: "deepseek/deepseek-ocr-2",
+			name: "DeepSeek OCR 2",
+			api: "openai-completions",
+			provider: "novita",
+			baseUrl: "https://api.novita.ai/openai/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0.03, output: 0.03, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8_192,
+			maxTokens: 8_192,
+		});
 		const context: Context = {
 			messages: [
 				{
@@ -569,32 +583,34 @@ describe("openai-completions convertMessages", () => {
 			},
 		]);
 	});
-	it("preserves image_url for the multimodal DeepSeek vision SKU", () => {
-		// deepseek-v4-flash-vision-exp is genuinely multimodal: the blanket
-		// DeepSeek text-only guard must not strip its image parts.
-		const model = getBundledModel("deepseek", "deepseek-v4-flash-vision-exp") as Model<"openai-completions">;
-		const context: Context = {
-			messages: [
+	it("preserves image_url for DeepSeek ids served by the multimodal V4.1 Flash", () => {
+		// DeepSeek's API serves both retired V4.0 Flash ids with V4.1 Flash, so
+		// the blanket DeepSeek text-only guard must not strip their image parts.
+		for (const id of ["deepseek-v4-flash-vision-exp", "deepseek-v4-flash"]) {
+			const model = getBundledModel("deepseek", id) as Model<"openai-completions">;
+			const context: Context = {
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "Describe this image" },
+							{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+						],
+						timestamp: Date.now(),
+					},
+				],
+			};
+
+			const messages = convertMessages(model, context, compat);
+
+			expect(messages).toHaveLength(1);
+			expect(messages[0].content).toEqual([
+				{ type: "text", text: "Describe this image" },
 				{
-					role: "user",
-					content: [
-						{ type: "text", text: "Describe this image" },
-						{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
-					],
-					timestamp: Date.now(),
+					type: "image_url",
+					image_url: { url: "data:image/png;base64,ZmFrZQ==" },
 				},
-			],
-		};
-
-		const messages = convertMessages(model, context, compat);
-
-		expect(messages).toHaveLength(1);
-		expect(messages[0].content).toEqual([
-			{ type: "text", text: "Describe this image" },
-			{
-				type: "image_url",
-				image_url: { url: "data:image/png;base64,ZmFrZQ==" },
-			},
-		]);
+			]);
+		}
 	});
 });

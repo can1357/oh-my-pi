@@ -1,6 +1,9 @@
 import type { Settings } from "../config/settings";
-import type { SlashCommandIconName } from "@oh-my-pi/pi-tui/theme/symbols";
+import type { SlashCommandIconName } from "../modes/view-model/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
+import type { ConversationPosition } from "../modes/utils/conversation-position";
+import type { MCPManager } from "../mcp/manager";
+import type { MCPServerConfig } from "../mcp/types";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
 
@@ -54,7 +57,10 @@ export interface ParsedSlashCommand {
  * - `{ prompt: string }` — command handled, pass `prompt` through as the new
  *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
  */
-export type SlashCommandResult = undefined | { consumed: true; agentInvoked?: boolean } | { prompt: string };
+export type SlashCommandResult =
+	| undefined
+	| { consumed: true; agentInvoked?: boolean; failed?: boolean }
+	| { prompt: string };
 
 /**
  * Runtime visible to slash-command handlers that run in text/ACP mode.
@@ -72,13 +78,18 @@ export interface SlashCommandRuntime {
 	signal?: AbortSignal;
 	/** Emit text to the operator. TUI maps to `ctx.showStatus`, ACP to `sessionUpdate`. */
 	output: (text: string) => Promise<void> | void;
+	/**
+	 * Show a titled read-only listing (TUI: `ctx.showCommandReport`, like `/mcp list`). Absent where the
+	 * host has no report surface (ACP, RPC, print); callers then emit the listing through `output`.
+	 */
+	report?: (title: string, text: string) => void;
 	/** Re-advertise the available command list (no-op outside ACP). */
 	refreshCommands: () => Promise<void> | void;
 	/**
 	 * Reload plugin state (caches, skills, slash command registry, project
-	 * registries) and re-emit available commands. Used by `/reload-plugins`,
-	 * `/move`, and `/marketplace`/`/plugins` mutations so the session sees a
-	 * consistent view after plugin or project-scope changes.
+	 * registries) and re-emit available commands. Used by `/reload-plugins`
+	 * and `/marketplace`/`/plugins` mutations so the session sees a consistent
+	 * view after plugin changes. `/move` re-scopes through `rescopeSessionToCwd`.
 	 */
 	reloadPlugins: () => Promise<void>;
 	/**
@@ -103,7 +114,28 @@ export interface SlashCommandRuntime {
 	 * return immediately and leave the serialized queue free for `abort`.
 	 */
 	runCommandInBackground?: (task: () => Promise<void>) => void;
+	/**
+	 * Ask the host to reconnect one live-manager MCP server by name after its
+	 * credentials changed (e.g. `/mcp reauth`), and report the post-reconnect
+	 * state. Returns `undefined` when this host keeps no live manager for the
+	 * server; callers then fall back to restart guidance. `selected` is the
+	 * definition the reauth refreshed; hosts match it against their manager
+	 * entry so a name collision never reconnects an unrelated server.
+	 */
+	reconnectMcpServer?: (
+		name: string,
+		/** The server definition the reauth actually refreshed, for ownership matching. */
+		selected: MCPServerConfig,
+	) => Promise<"connected" | "connecting" | "disconnected" | undefined>;
+	/**
+	 * The host's live MCP manager when it keeps one. ACP sessions keep one for
+	 * client-declared servers (`session/new`/`load_session` `mcpServers`), whose
+	 * definitions live in no writable config file; `/mcp` lookups consult it so
+	 * those servers resolve like configured ones.
+	 */
+	mcpManager?: MCPManager | undefined;
 	notifyTitleChanged?: () => Promise<void> | void;
+	notifySessionPinChanged?: (sessionId: string, pinned: boolean) => Promise<void> | void;
 	/**
 	 * Push the host's view of the session config (model, thinking level, mode).
 	 *
@@ -130,6 +162,9 @@ export interface TuiSlashCommandRuntime {
 	input?: Pick<SubmittedUserInput, "images" | "imageLinks">;
 	/** The editor snapshot was cleared before asynchronous input hooks ran. */
 	draftDetached?: boolean;
+	/** Submitted with the follow-up key from this conversation position: queue behind the active run
+	 *  rather than interrupt it. */
+	followUp?: ConversationPosition;
 }
 
 /** Unified slash-command spec consumed by both TUI and ACP dispatchers. */
@@ -183,4 +218,7 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 }
 
 /** Result returned by `executeAcpBuiltinSlashCommand`. */
-export type AcpBuiltinSlashCommandResult = false | { consumed: true; agentInvoked?: boolean } | { prompt: string };
+export type AcpBuiltinSlashCommandResult =
+	| false
+	| { consumed: true; agentInvoked?: boolean; failed?: boolean }
+	| { prompt: string };

@@ -14,15 +14,16 @@ import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { AgentSession, AsyncJobTree } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
-import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { getProjectDir, removeWithRetries, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
-import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgOvnfsPath, cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { makeAssistantMessage } from "./session-manager/helpers";
+import { initTheme } from "../src/ui/theme/service";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -44,6 +45,7 @@ interface FakeAcpBuiltinSession {
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	getAsyncJobTree: () => AsyncJobTree | null;
+	requestJobCaptions: () => void;
 	cancelAsyncJob: (id: string) => boolean;
 	formatSessionAsText: () => string;
 	dumpLlmRequestToTmpDir: () => Promise<string | undefined>;
@@ -57,15 +59,15 @@ interface FakeAcpBuiltinSession {
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
 	markMovedFromEmptySessionFile(sessionFile: string): void;
 	fork(): Promise<boolean>;
-	handoff(instr?: string): Promise<{ document: string; savedPath?: string } | undefined>;
 	dispose(): Promise<void>;
 	exportToHtml(outputPath?: string): Promise<string>;
 	effectiveExtensionRoots: unknown;
 	setTitleSystemPrompt(prompt: string | undefined): void;
 	setSlashCommands(commands: unknown[]): void;
 	refreshSkillsAndCommands(): Promise<void>;
+	refreshProjectScope(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
-	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
+	commitTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
 	getHindsightSessionState(): undefined;
 	applyMemoryBackend(): Promise<void>;
@@ -107,6 +109,7 @@ function createRuntime() {
 		setTitleSystemPrompt: (_prompt: string | undefined) => {},
 		setSlashCommands: (_commands: unknown[]) => {},
 		refreshSkillsAndCommands: async () => {},
+		refreshProjectScope: async () => {},
 		toggleFastMode() {
 			this.fastMode = !this.fastMode;
 			return this.fastMode;
@@ -151,17 +154,15 @@ function createRuntime() {
 		async fork() {
 			return true;
 		},
-		async handoff(_instr?: string) {
-			return undefined;
-		},
 		async exportToHtml(outputPath?: string) {
 			return outputPath ?? "/tmp/exported-session.html";
 		},
 		getTodoPhases() {
 			return this._todoPhases;
 		},
-		setTodoPhases(phases) {
+		commitTodoPhases(phases) {
 			this._todoPhases = phases;
+			fakeSessionManager.appendCustomEntry("user_todo_edit", { phases });
 		},
 		async refreshBaseSystemPrompt() {},
 		// Headless `/move` and `/wt` rebind memory for the destination project.
@@ -169,6 +170,7 @@ function createRuntime() {
 		async applyMemoryBackend() {},
 		getAsyncJobSnapshot: () => null,
 		getAsyncJobTree: () => null,
+		requestJobCaptions: () => {},
 		cancelAsyncJob: () => false,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
@@ -282,6 +284,21 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("reports that /reload-plugins leaves extension hooks and tools for a restart", async () => {
+		const { output, runtime } = createRuntime();
+		let reloads = 0;
+		runtime.reloadPlugins = async () => {
+			reloads++;
+		};
+
+		expect(await executeAcpBuiltinSlashCommand("/reload-plugins", runtime)).toEqual({ consumed: true });
+
+		expect(reloads).toBe(1);
+		expect(output).toEqual([
+			"Reloaded plugin skills and slash commands. Extension hooks and tools are unchanged; restart omp to apply their changes.",
+		]);
 	});
 
 	it("toggles extended context with explicit controls and reports state", async () => {
@@ -524,7 +541,7 @@ describe("ACP builtin slash commands", () => {
 
 	describe("jobs tree", () => {
 		beforeAll(async () => {
-			await initTheme();
+			initTheme();
 		});
 
 		it("nests a subagent's jobs under the task job that runs it, inside one fence", async () => {
@@ -869,7 +886,7 @@ describe("session lifecycle commands", () => {
 	it("/session delete: returns in-memory usage when no sessionFile", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/session delete", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("in-memory");
 	});
 
@@ -878,8 +895,53 @@ describe("session lifecycle commands", () => {
 		session.isStreaming = true;
 		fakeSessionManager._sessionFile = "/tmp/session.jsonl";
 		const result = await executeAcpBuiltinSlashCommand("/session delete", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("streaming");
+	});
+
+	it("/session delete moves the live session and keeps the next turn resumable", async () => {
+		using tempDir = TempDir.createSync("@pi-acp-session-delete-");
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		try {
+			manager.appendMessage({ role: "user", content: "first turn", timestamp: 1 });
+			manager.appendMessage(makeAssistantMessage());
+			await manager.flush();
+			const deletedFile = manager.getSessionFile();
+			const deletedId = manager.getSessionId();
+			if (!deletedFile) throw new Error("Expected a persisted session");
+
+			const { output, session, runtime } = createRuntime();
+			runtime.sessionManager = manager;
+			session.newSession = async options => {
+				await manager.newSession(options);
+				session.sessionId = manager.getSessionId();
+				session.sessionFile = manager.getSessionFile();
+				return true;
+			};
+			expect(await executeAcpBuiltinSlashCommand("/session delete", runtime)).toEqual({ consumed: true });
+			expect(await Bun.file(deletedFile).exists()).toBe(false);
+			expect(manager.getSessionId()).not.toBe(deletedId);
+			expect(output[0]).toContain(manager.getSessionId());
+			const nextFile = manager.getSessionFile();
+			if (!nextFile) throw new Error("Expected a new session path");
+			expect(output[0]).toContain(nextFile);
+			// The successor stays lazy: deleting must not leave an empty listed session behind.
+			expect(await Bun.file(nextFile).exists()).toBe(false);
+			expect(await SessionManager.list(tempDir.path(), tempDir.path())).toEqual([]);
+
+			manager.appendMessage({ role: "user", content: "second turn", timestamp: 2 });
+			manager.appendMessage(makeAssistantMessage());
+			await manager.flush();
+			const resumed = await SessionManager.open(nextFile);
+			try {
+				expect(resumed.buildSessionContext().messages.map(message => message.role)).toEqual(["user", "assistant"]);
+				expect(resumed.buildSessionContext().messages[0]).toMatchObject({ content: "second turn" });
+			} finally {
+				await resumed.close();
+			}
+		} finally {
+			await manager.close();
+		}
 	});
 
 	it("/rename: renames and calls notifyTitleChanged on success", async () => {
@@ -912,7 +974,7 @@ describe("session lifecycle commands", () => {
 		const { output, session, runtime } = createRuntime();
 		session.isStreaming = true;
 		const result = await executeAcpBuiltinSlashCommand("/move /tmp", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("streaming");
 	});
 });
@@ -939,7 +1001,7 @@ describe("wave 3 commands", () => {
 			throw new Error("disk full");
 		};
 		const result = await executeAcpBuiltinSlashCommand("/export", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Failed to export session: disk full");
 	});
 
@@ -1046,7 +1108,7 @@ describe("wave 3 commands", () => {
 
 			const result = await executeAcpBuiltinSlashCommand("/todo import", runtime);
 
-			expect(result).toEqual({ consumed: true });
+			expect(result).toEqual({ consumed: true, failed: true });
 			expect(output[0]).toContain(`Could not parse ${target}:`);
 			expect(session._todoPhases).toEqual([]);
 		} finally {
@@ -1058,9 +1120,9 @@ describe("wave 3 commands", () => {
 		const { output, session, runtime } = createRuntime();
 		session._todoPhases = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];
 
-		const result = await executeAcpBuiltinSlashCommand("/todo export artifact://1", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/todo export agent://1", runtime);
 
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Failed to write todos:");
 		expect(output[0]).toContain("internal scheme");
 	});
@@ -1068,9 +1130,9 @@ describe("wave 3 commands", () => {
 	it("/todo import: reports invalid internal-scheme paths", async () => {
 		const { output, session, runtime } = createRuntime();
 
-		const result = await executeAcpBuiltinSlashCommand("/todo import artifact://1", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/todo import agent://1", runtime);
 
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Failed to read todos:");
 		expect(output[0]).toContain("internal scheme");
 		expect(session._todoPhases).toEqual([]);
@@ -1079,21 +1141,21 @@ describe("wave 3 commands", () => {
 	it("/todo edit: returns TUI-only usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo edit", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("TUI editor");
 	});
 
 	it("/todo expand: returns HUD-only usage message in ACP mode", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo expand", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("interactive HUD");
 	});
 
 	it("/todo unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo foobar", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Unknown /todo subcommand");
 	});
 
@@ -1101,14 +1163,14 @@ describe("wave 3 commands", () => {
 	it("/move: returns usage when no arg", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/move", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Usage: /move");
 	});
 
 	it("/move: returns usage when path does not exist", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/move /no/such/path/xyz", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("does not exist");
 	});
 
@@ -1146,7 +1208,7 @@ describe("wave 3 commands", () => {
 		fakeSessionManager._cwd = plainDir;
 		try {
 			const result = await executeAcpBuiltinSlashCommand("/wt feature", runtime);
-			expect(result).toEqual({ consumed: true });
+			expect(result).toEqual({ consumed: true, failed: true });
 			expect(output[0]).toContain("Not inside a git repository");
 			expect(fakeSessionManager._movedTo).toBeUndefined();
 		} finally {
@@ -1156,6 +1218,7 @@ describe("wave 3 commands", () => {
 
 	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
+		cfgOvnfsPath.override(runtime.settings, "/nonexistent/ovnfs");
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
@@ -1173,6 +1236,8 @@ describe("wave 3 commands", () => {
 			await git("init", "-q", "-b", "main");
 			await git("config", "user.email", "t@example.com");
 			await git("config", "user.name", "t");
+			// A hooks directory of its own: `/wt` runs post-checkout, and the host's global hooks must stay out.
+			await git("config", "core.hooksPath", path.join(root, "hooks"));
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
 			await git("add", "-A");
@@ -1209,6 +1274,7 @@ describe("wave 3 commands", () => {
 	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		cfgWorktreeCleanSource.override(runtime.settings, true);
+		cfgOvnfsPath.override(runtime.settings, "/nonexistent/ovnfs");
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
@@ -1229,6 +1295,8 @@ describe("wave 3 commands", () => {
 			// The reset source is compared byte-for-byte; Git for Windows'
 			// system `core.autocrlf=true` would restore it as CRLF.
 			await git("config", "core.autocrlf", "false");
+			// A hooks directory of its own: `/wt` runs post-checkout, and the host's global hooks must stay out.
+			await git("config", "core.hooksPath", path.join(root, "hooks"));
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
 			await git("add", "-A");
@@ -1264,6 +1332,67 @@ describe("wave 3 commands", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32").each([
+		["and reports its failure", false],
+		["and drops its warning once the prompt was cancelled", true],
+	])(
+		"/wt: reports the move, then runs the post-checkout hook after the source cleanup %s",
+		async (_what, cancelled) => {
+			const { output, runtime, fakeSessionManager } = createRuntime();
+			const prompt = new AbortController();
+			cfgWorktreeCleanSource.override(runtime.settings, true);
+			cfgOvnfsPath.override(runtime.settings, "/nonexistent/ovnfs");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-hook-"));
+			const repoDir = path.join(root, "repo");
+			const hook = path.join(root, "hooks", "post-checkout");
+			const originalProjectDir = process.cwd();
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			process.env.OMP_WORKTREE_DIR = path.join(root, "wt");
+			const git = async (...args: string[]) => {
+				const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "ignore", stderr: "ignore" });
+				expect(await proc.exited).toBe(0);
+			};
+			try {
+				await fs.mkdir(repoDir, { recursive: true });
+				await git("init", "-q", "-b", "main");
+				await git("config", "user.email", "t@example.com");
+				await git("config", "user.name", "t");
+				await git("commit", "-q", "--allow-empty", "-m", "init");
+				// The repo's own hooks directory, so the host's global hooks stay out.
+				await git("config", "core.hooksPath", path.dirname(hook));
+				await Bun.write(hook, `#!/bin/sh\nls "${repoDir}" > .source-at-hook\necho not today >&2\nexit 3\n`);
+				await fs.chmod(hook, 0o755);
+				await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+				fakeSessionManager._cwd = repoDir;
+
+				// The summary comes before the hook starts: a cancel then is a cancel while the hook runs.
+				const result = await executeAcpBuiltinSlashCommand("/wt feature/hook", {
+					...runtime,
+					signal: prompt.signal,
+					output: text => {
+						runtime.output(text);
+						if (cancelled) prompt.abort();
+					},
+				});
+
+				expect(result).toEqual({ consumed: true });
+				const movedTo = fakeSessionManager._movedTo;
+				expect(output).toEqual([
+					expect.stringContaining(`Moved to worktree ${movedTo} on branch feature/hook`),
+					...(cancelled ? [] : ["Warning: Worktree created, but post-checkout hook exited with 3: not today"]),
+				]);
+				// The hook ran in the worktree, and the carried-over file had already left the source.
+				expect(await Bun.file(path.join(movedTo!, ".source-at-hook")).text()).toBe("");
+				expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			} finally {
+				setProjectDir(originalProjectDir);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
@@ -1292,7 +1421,7 @@ describe("wave 3 commands", () => {
 
 			const result = await executeAcpBuiltinSlashCommand("/wt feature/flush-fail", runtime);
 
-			expect(result).toEqual({ consumed: true });
+			expect(result).toEqual({ consumed: true, failed: true });
 			expect(output[0]).toContain("Failed to save pending settings: disk full");
 			expect(fakeSessionManager._movedTo).toBeUndefined();
 			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("dirty\n");
@@ -1315,7 +1444,7 @@ describe("wave 3 commands", () => {
 	it("/memory unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/memory unknownverb", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Usage: /memory");
 	});
 
@@ -1387,6 +1516,18 @@ describe("wave 3 commands", () => {
 		expect(compactCalled).toBe(true);
 		expect(output[0]).toContain("Compaction complete.");
 	});
+
+	it("/compact: marks the run failed when session.compact throws", async () => {
+		// Print mode turns a failed compaction into a nonzero exit; the
+		// `failed` marker is what maps the operational failure to that status.
+		const { output, session, runtime } = createRuntime();
+		session.compact = async (_args?: string) => {
+			throw new Error("no available model");
+		};
+		const result = await executeAcpBuiltinSlashCommand("/compact", runtime);
+		expect(result).toEqual({ consumed: true, failed: true });
+		expect(output[0]).toContain("Compaction failed: no available model");
+	});
 });
 
 describe("wave 4 commands", () => {
@@ -1405,7 +1546,7 @@ describe("wave 4 commands", () => {
 	it("/mcp add (no args): returns usage string", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/mcp add", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Usage");
 	});
 
@@ -1432,7 +1573,7 @@ describe("wave 4 commands", () => {
 	it("/mcp unknown-verb: returns usage pointing to help", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/mcp frobnicate", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Unknown");
 	});
 
@@ -1456,14 +1597,14 @@ describe("wave 4 commands", () => {
 	it("/ssh add (no args): returns usage", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/ssh add", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Usage");
 	});
 
 	it("/ssh unknown-verb: returns unknown subcommand message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/ssh frobnicate", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Unknown");
 	});
 
@@ -1479,14 +1620,14 @@ describe("wave 4 commands", () => {
 	it("/marketplace install (no args): returns interactive picker usage", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/marketplace install", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("TUI-only");
 	});
 
 	it("/marketplace uninstall (no args): returns interactive picker usage", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/marketplace uninstall", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("TUI-only");
 	});
 
@@ -1562,7 +1703,7 @@ describe("wave 5 — adapters and polish", () => {
 		const { output, runtime } = createRuntime();
 		// No servers in /tmp/project config — server not found
 		const result = await executeAcpBuiltinSlashCommand("/mcp test bogus", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("not found");
 	});
 
@@ -1590,7 +1731,7 @@ describe("wave 5 — adapters and polish", () => {
 	it("/model gpt-fake-9000: returns unknown-model message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/model gpt-fake-9000", runtime);
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Unknown model");
 	});
 
@@ -1705,7 +1846,7 @@ describe("/move preflight flush", () => {
 
 			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
 
-			expect(result).toEqual({ consumed: true });
+			expect(result).toEqual({ consumed: true, failed: true });
 			expect(output[0]).toContain("disk full");
 			expect(fakeSessionManager!._movedTo).toBeUndefined();
 		} finally {

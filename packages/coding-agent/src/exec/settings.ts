@@ -13,10 +13,37 @@ export interface BashInterceptorRule {
 	allowSubcommands?: string[];
 }
 
+export type BashPatternApproval = "allow" | "deny" | "prompt";
+
+/** One bash approval pattern rule (`bash.patterns`). */
+export interface BashApprovalPatternRule {
+	match: string;
+	approval: BashPatternApproval;
+	/** Leading env assignment names this `allow` rule strips before matching. */
+	env?: string[];
+}
+
+const EMPTY_BASH_PATTERNS: BashApprovalPatternRule[] = [];
+
 const EMPTY_STRING_ARRAY: string[] = [];
+
+// Perl keeps reading switches after consuming an argument to -e/-E, -I, or -m/-M.
+// Treat quoted and escaped text as part of that argument, not as more switches.
+const PERL_ARGUMENT = String.raw`(?:[^ \t\r\n;|&<>()'"\\]|\\[^\n]|'[^']*'|"(?:[^"\\]|\\[\s\S])*")+`;
+const PERL_SWITCH_CLUSTER = "(?:[0-7acfglnpSstTuUwWX]|d(?!t?[:=])|V(?!:))*";
+const PERL_SWITCH_VALUE = String.raw`(?:[eEImM](?:${PERL_ARGUMENT}|[ \t]+(?!#)${PERL_ARGUMENT})|(?:[CDFx]|dt?[:=]|V:)(?:${PERL_ARGUMENT})?)`;
+const PERL_IN_PLACE_PATTERN = String.raw`^[ \t]*perl[ \t]+(?:-(?=[^ \t\r\n-])${PERL_SWITCH_CLUSTER}${PERL_SWITCH_VALUE}?[ \t]+)*-${PERL_SWITCH_CLUSTER}i`;
+
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
-		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
+		// `cat` that sends stdout to a file or reads a heredoc writes rather than
+		// reads, also after leading redirects of other fds (`cat 2>err > out`);
+		// the write rule below owns those forms. `cat 2>err file` and
+		// `cat >&2 file` (stdout duplicated, not sent to a file) still read.
+		// A redirect target cannot start with `>` or `|`, so each leading
+		// redirect is consumed one way and matching stays linear.
+		pattern:
+			"^\\s*(?:(?:head|tail|less|more)\\s+|cat\\s+(?!\\s|(?:[02-9]>{1,2}\\|?\\s*[^\\s>|]\\S*\\s+)*(?:<<|1?>(?!&)|&>)))",
 		tool: "read",
 		message: "Use the `read` tool instead of cat/head/tail. It provides better context and handles binary files.",
 	},
@@ -36,7 +63,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		message: "Use the `edit` tool instead of sed -i. It provides diff preview and fuzzy matching.",
 	},
 	{
-		pattern: "^\\s*perl\\s+.*-[pn]?i",
+		pattern: PERL_IN_PLACE_PATTERN,
 		tool: "edit",
 		message: "Use the `edit` tool instead of perl -i. It provides diff preview and fuzzy matching.",
 	},
@@ -48,14 +75,27 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		// `>` must sit outside quoted regions (so `echo "a -> b"` passes) and be
 		// followed by a plausible filename — including `$VAR` targets; `>|`
-		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication is
-		// not matched. Allowed device sinks are consumed while looking for later
-		// real file redirects because the write tool cannot replace shell
-		// output/discard targets.
+		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication and
+		// redirects of fds other than stdout (`2>err.log`) are not matched, and
+		// the scan continues past them and past input duplication (`<&0`), so
+		// `2>&1 > out.txt` is a write. The scan stops at an unquoted,
+		// unescaped `;`, `&&`, `|` or newline outside a command substitution,
+		// so a redirect in a later command or a heredoc body is not attributed
+		// to the echo/cat, while `echo foo\; > out.txt` and
+		// `echo $(printf a; printf b) > out.txt` keep theirs. Allowed device
+		// sinks are consumed while looking for later real file redirects
+		// because the write tool cannot replace shell output/discard targets.
+		// Each character has exactly one way to be consumed (an fd-numbered
+		// redirect only by the fd branch, an escape only by the escape branch,
+		// a `$(`, `${` or backtick only by the substitution branch, and as a
+		// plain character only when that branch cannot consume it, so a deeper
+		// nesting such as `${a:-${b}}` is scanned as before), which keeps
+		// matching linear on long commands.
 		pattern:
-			"^\\s*(echo|printf|cat\\s*<<)\\s+(?:(?:[^\"'>]|\"[^\"]*\"|'[^']*')|(?<!\\|)>{1,2}\\|?\\s*(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))*(?<!\\|)>{1,2}\\|?\\s*(?!(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))[$\\w./~\"'-]",
+			"^\\s*(?:(?:echo|printf)\\s+|cat\\s*<<|cat(?=\\s+(?:\\d+|&)?>)\\s+)(?:(?:\\\\[\\s\\S]|\\$\\((?:[^()\"'`]|\"[^\"]*\"|'[^']*'|`[^`]*`|\\([^()]*\\))*\\)|\\$\\{[^{}]*\\}|`[^`]*`|\\$(?!\\((?:[^()\"'`]|\"[^\"]*\"|'[^']*'|`[^`]*`|\\([^()]*\\))*\\)|\\{[^{}]*\\})|`(?![^`]*`)|[^\"'>;&|\\n\\\\$`]|(?<=[<>])&|(?<![<>])&(?=>)|(?<=(?:^|\\s)[02-9])>{1,2}\\|?|\"[^\"]*\"|'[^']*')|(?<!\\||>|(?:^|\\s)[02-9])>{1,2}\\|?\\s*(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?=[\\s;&|]|$))*(?<!\\||>|(?:^|\\s)[02-9])>{1,2}\\|?\\s*(?!(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))[$\\w./~\"'-]",
 		tool: "write",
-		message: "Use the `write` tool instead of echo/cat redirection. It handles encoding and provides confirmation.",
+		message:
+			"Use the `write` tool instead of echo/cat redirection. It handles encoding and provides confirmation. `write` replaces the whole file; to append to an existing file, use `edit` to insert after its last line.",
 	},
 	{
 		pattern: "^\\s*nohup\\s+|(?<!&)\\&\\s*$",
@@ -120,6 +160,19 @@ export const cfgBashAutoBackgroundEnabled = register({
 	},
 });
 
+export const cfgBashReapBackground = register({
+	id: "bash.reapBackground",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Reap Background Processes",
+		description:
+			"Remind the agent about processes its bash calls left running (`cmd &`, `nohup`) when it stops, and kill the `&` ones at session end unless registered as services; off in RPC mode",
+	},
+});
+
 export const cfgBashGitGuard = register({
 	id: "bash.gitGuard",
 	type: "boolean",
@@ -129,20 +182,35 @@ export const cfgBashGitGuard = register({
 		group: "Bash",
 		label: "Git Guard",
 		description:
-			"Refuse git commands that discard or move shared work in the bash tool: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict",
+			"Refuse git commands that discard or move shared work in a repository's main checkout: stash, reset --hard or to another commit, rebase/merge/pull/cherry-pick/revert (except continuing or aborting an active one), commit --amend, non-dry-run clean, and checkout/switch/restore outside a merge or rebase conflict. In a non-bare linked worktree they run, saving uncommitted changes discarded by reset/checkout/switch/restore first",
 	},
 });
 
 export const cfgBashPatterns = register({
 	id: "bash.patterns",
 	type: "array",
-	default: [],
+	default: EMPTY_BASH_PATTERNS,
+	pathScoped: { valuesKey: "patterns", itemType: "object" },
+	merge: "prepend",
 	ui: {
 		tab: "shell",
 		group: "Bash",
 		label: "Bash Approval Patterns",
 		description:
 			"Ordered bash command approval rules. Each item has match and approval fields; only '*' wildcards are supported.",
+	},
+});
+
+export const cfgBashAllowedEnvVars = register({
+	id: "bash.allowedEnvVars",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Bash Allowed Environment Variables",
+		description:
+			"Exact environment variable names allowed as leading KEY=VALUE prefixes when matching bash.patterns allow rules (no wildcards). Any value is accepted, so list only benign build/test variables; execution-altering variables (PATH, LD_PRELOAD, BASH_ENV, *_RUNNER, *_WRAPPER) allow arbitrary command execution.",
 	},
 });
 
@@ -163,6 +231,8 @@ export const cfgBashInterceptorPatterns = register({
 	id: "bashInterceptor.patterns",
 	type: "array",
 	default: DEFAULT_BASH_INTERCEPTOR_RULES,
+	pathScoped: { valuesKey: "patterns", itemType: "object" },
+	merge: "prepend",
 });
 
 export const cfgBashDirenv = register({
@@ -175,7 +245,7 @@ export const cfgBashDirenv = register({
 		group: "Bash",
 		label: "direnv Auto-Load",
 		description:
-			"Auto-load a repo's direnv/devenv `.envrc` into the bash session so devenv tools and env vars are present without manual `direnv exec`. Honors direnv's allow list: an `.envrc` you haven't `direnv allow`ed is never executed",
+			"Load project environment variables with the embedded direnv builtin, honoring direnv's allow and deny rules",
 	},
 });
 
@@ -188,7 +258,7 @@ export const cfgBashDirenvLoadTimeoutMs = register({
 		group: "Bash",
 		label: "direnv Load Timeout (ms)",
 		description:
-			"Max wait for the first `direnv export` (a cold devenv shell can be slow); on timeout the session runs without the direnv env",
+			"Max wait for embedded .envrc evaluation (a cold devenv shell can be slow); on timeout the session runs without its exports",
 	},
 });
 

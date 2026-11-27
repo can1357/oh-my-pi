@@ -118,4 +118,134 @@ describe("AgentSession tool-call loop guard", () => {
 		expect(redirects).toHaveLength(1);
 		expect(redirects[0]!.display).toBe(false);
 	});
+
+	it.each([
+		{
+			scenario: "exempt tool command",
+			command: "mcp__peers_wait --json {}",
+			exempt: "mcp__peers_wait",
+			redirects: 0,
+		},
+		{
+			scenario: "other tool command",
+			command: "mcp__other_tool --json {}",
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+		{
+			scenario: "plain shell command",
+			command: "git status",
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+		{
+			scenario: "reserved shell command",
+			command: "grep -r toolCommands",
+			exempt: "grep",
+			redirects: 1,
+		},
+		{
+			scenario: "transport exemption",
+			command: "git status",
+			exempt: "bash",
+			redirects: 0,
+		},
+	])("applies loop exemptions to $scenario", async ({ command, exempt, redirects }) => {
+		const tool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Mock command transport",
+			parameters: type({ "command?": "string" }),
+			execute: async () => ({ content: [{ type: "text", text: "No new results" }] }),
+		};
+		const mock = createMockModel({
+			provider: "openai",
+			responses: [
+				{ content: [{ type: "toolCall", name: "bash", arguments: { command } }] },
+				{ content: [{ type: "toolCall", name: "bash", arguments: { command } }] },
+				{ content: ["Finished waiting."] },
+			],
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.exemptTools": [exempt],
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([["bash", tool]]),
+		});
+
+		await session.prompt("wait for results");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(session.agent.state.messages.filter(message => message.role === "toolResult")).toHaveLength(2);
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "tool-call-loop-redirect",
+			),
+		).toHaveLength(redirects);
+	});
+
+	it("redirects a streak of varied calls to tools that do not exist (issue #10876)", async () => {
+		const tool: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "Mock write tool",
+			parameters: type({ "path?": "string" }),
+			execute: async () => ({ content: [{ type: "text", text: "written" }] }),
+		};
+		const mock = createMockModel({
+			provider: "openai",
+			responses: [
+				{ content: [{ type: "toolCall", name: "wri", arguments: { path: "a.txt" } }] },
+				{ content: [{ type: "toolCall", name: "ed", arguments: { path: "b.txt" } }] },
+				{ content: ["Stopped guessing tool names."] },
+			],
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.exemptTools": [],
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([["write", tool]]),
+		});
+
+		await session.prompt("write the files");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "tool-call-loop-redirect",
+		);
+		expect(redirects).toHaveLength(1);
+		expect(redirects[0]!.details).toMatchObject({ kind: "unresolved_tool_call", toolName: "ed", count: 2 });
+		expect(JSON.stringify(redirects[0]!.content)).toContain("tools that do not exist");
+	});
 });

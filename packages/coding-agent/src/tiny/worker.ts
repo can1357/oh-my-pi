@@ -1,27 +1,29 @@
 /**
- * ONNX tiny-model worker: one process per local model, owning the model's
- * socket (see `title-protocol.ts`), serving every omp process on the machine,
- * and exiting on its own once idle. Entered from `cli.ts` via
- * {@link TINY_WORKER_ARG} with the socket/model/tag env set by
- * `title-client.ts`. Runs `onnxruntime-node` outside every omp process so its
- * NAPI finalizer never runs in a shared address space.
+ * ONNX tiny-model worker: one process per local model, a child of the omp
+ * daemon's `infer` module (`daemon/modules/infer.ts`). Entered from `cli.ts`
+ * via {@link TINY_WORKER_ARG} with {@link TINY_WORKER_MODEL_ENV} set; speaks
+ * LF-delimited JSON over stdin/stdout (logs go to stderr) and serializes its
+ * work. Runs `onnxruntime-node` outside every omp process; the daemon
+ * SIGKILLs it, and it SIGKILLs itself when stdin closes, so the NAPI finalizer
+ * never runs (issue #1606).
  */
 import * as path from "node:path";
+import { errorMessage, getTinyModelsCacheDir, logger, setProcessName } from "@oh-my-pi/pi-utils";
+import { claimWorkerStdout } from "../daemon/modules/speech-frames";
+import { startParentWatchdog } from "../subprocess/parent-watchdog";
 import type {
 	ProgressInfo,
 	TextGenerationPipeline,
 	TextGenerationStringOutput,
 	StoppingCriteria as TransformersStoppingCriteria,
-} from "@huggingface/transformers";
-import { getTinyModelsCacheDir, logger, setProcessName } from "@oh-my-pi/pi-utils";
+} from "../subprocess/transformers-types";
 import {
-	errorMessage,
 	errorText,
 	formatOnnxRuntimeCudaDiagnostics,
-	getTransformersVersionSpec,
 	loadTransformersRuntime,
 	MemoizedRuntime,
 	sendProgress,
+	TRANSFORMERS_VERSION,
 	type TransformersRuntimeMetadata,
 } from "../subprocess/worker-runtime";
 import { renderTextChatTemplate } from "./completion-prompt";
@@ -38,16 +40,7 @@ import {
 	type TinyLocalModelKey,
 	type TinyTitleLocalModelSpec,
 } from "./models";
-import {
-	TINY_WORKER_IDLE_MS,
-	TINY_WORKER_IDLE_MS_ENV,
-	TINY_WORKER_MODEL_ENV,
-	TINY_WORKER_SOCKET_ENV,
-	TINY_WORKER_TAG_ENV,
-	type TinyWorkerRequest,
-	type TinyWorkerResponse,
-} from "./title-protocol";
-import { TinyWorkerServer } from "./worker-server";
+import { TINY_WORKER_MODEL_ENV, type TinyWorkerRequest, type TinyWorkerResponse } from "./title-protocol";
 
 const STOP_DECODE_WINDOW_TOKENS = 32;
 
@@ -81,7 +74,7 @@ function getTinyTitleRuntimeDir(): string {
 	return path.join(
 		path.dirname(getTinyModelsCacheDir()),
 		"tiny-title-runtime",
-		`transformers-${getTransformersVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_")}`,
+		`transformers-${TRANSFORMERS_VERSION.replace(/[^A-Za-z0-9._-]/g, "_")}`,
 	);
 }
 
@@ -251,30 +244,70 @@ class OnnxModel {
 	}
 }
 
-/** Run the ONNX worker for the model/endpoint selected by the CLI worker host environment. */
+/** Run the ONNX worker for {@link TINY_WORKER_MODEL_ENV} over stdin/stdout until stdin closes. */
 export async function startTinyWorkerFromEnvironment(): Promise<void> {
-	const endpoint = process.env[TINY_WORKER_SOCKET_ENV];
+	// Stdout carries reply lines only; library chatter goes to stderr.
+	const stdout = claimWorkerStdout();
+	const stdoutReply: ReplyTransport = {
+		send(message) {
+			stdout.write(`${JSON.stringify(message)}\n`);
+		},
+	};
+	// Native inference pins the main thread for minutes; the watchdog thread
+	// still notices a dead daemon (issue #14340).
+	if (process.ppid > 1) startParentWatchdog(process.ppid);
 	const modelKey = process.env[TINY_WORKER_MODEL_ENV];
-	const tag = process.env[TINY_WORKER_TAG_ENV];
-	if (!endpoint || !modelKey || !tag) throw new Error("tiny worker environment is incomplete");
+	if (!modelKey) throw new Error("tiny worker environment is incomplete");
 	if (!isTinyLocalModelKey(modelKey)) throw new Error(`Unknown tiny local model: ${modelKey}`);
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
 	setProcessName(`omp tiny ${modelKey}`);
 	const model = new OnnxModel(modelKey, spec, resolveTinyModelDevicePreference(), resolveTinyModelDtypeOverride());
-	const server = new TinyWorkerServer({
-		tag,
-		idleMs: Number(process.env[TINY_WORKER_IDLE_MS_ENV]) || TINY_WORKER_IDLE_MS,
-		async handle(request, reply) {
+	const handle = async (request: Extract<TinyWorkerRequest, { type: "load" | "chat" }>): Promise<void> => {
+		try {
 			if (request.type === "load") {
-				await model.pipeline(reply, request.id);
-				model.sendReady(reply, request.id);
-				reply.send({ type: "loaded", id: request.id });
+				await model.pipeline(stdoutReply, request.id);
+				model.sendReady(stdoutReply, request.id);
+				stdoutReply.send({ type: "loaded", id: request.id });
 				return;
 			}
-			const text = await model.chat(request, reply);
-			reply.send({ type: "text", id: request.id, text });
-		},
-	});
-	await server.serve(endpoint);
+			const text = await model.chat(request, stdoutReply);
+			stdoutReply.send({ type: "text", id: request.id, text });
+		} catch (error) {
+			stdoutReply.send({
+				type: "error",
+				id: request.id,
+				error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+			});
+		}
+	};
+	// One model, one queue: generations never overlap.
+	let queue = Promise.resolve();
+	const decoder = new TextDecoder();
+	let buffered = "";
+	for await (const chunk of Bun.stdin.stream()) {
+		buffered += decoder.decode(chunk, { stream: true });
+		let newline = buffered.indexOf("\n");
+		while (newline >= 0) {
+			const line = buffered.slice(0, newline).trim();
+			buffered = buffered.slice(newline + 1);
+			newline = buffered.indexOf("\n");
+			if (!line) continue;
+			let request: TinyWorkerRequest;
+			try {
+				request = JSON.parse(line) as TinyWorkerRequest;
+			} catch (error) {
+				logger.warn("tiny-worker: malformed request line", { error: String(error) });
+				continue;
+			}
+			if (request.type === "ping") {
+				stdoutReply.send({ type: "pong", id: request.id });
+				continue;
+			}
+			const run = (): Promise<void> => handle(request as Extract<TinyWorkerRequest, { type: "load" | "chat" }>);
+			queue = queue.then(run, run);
+		}
+	}
+	// The daemon went away: die without running the onnxruntime finalizer.
+	process.kill(process.pid, "SIGKILL");
 }

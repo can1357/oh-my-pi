@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
+import {
+	resolveImageCountBudget,
+	resolveInlineImageByteBudget,
+	resolveRequestBodyByteLimit,
+} from "@oh-my-pi/pi-catalog/compat/request-size";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 
@@ -37,7 +41,6 @@ function imageModel(provider: string, api: Api, baseUrl: string, id: string): Mo
 }
 
 const ANTHROPIC_API = "https://api.anthropic.com";
-const ANTIGRAVITY_URL = "https://daily-cloudcode-pa.googleapis.com";
 const XAI_URL = "https://api.x.ai/v1";
 const CURSOR_URL = "https://api2.cursor.sh";
 
@@ -92,7 +95,6 @@ describe("image-count-budget", () => {
 			90,
 		],
 		["openrouter", "openrouter", "https://openrouter.ai/api/v1", "anthropic/claude-opus-5.5", 90],
-		["google-antigravity", "google-gemini-cli", ANTIGRAVITY_URL, "gemini-3.7-flash", 60],
 		["xai-oauth", "openai-responses", XAI_URL, "grok-4.7", 60],
 		["xai", "openai-responses", XAI_URL, "grok-4.6", 60],
 		["cursor", "cursor-agent", CURSOR_URL, "gpt-5.5", 60],
@@ -100,10 +102,8 @@ describe("image-count-budget", () => {
 		expect(imageCountBudget(imageModel(provider, api, baseUrl, id))).toBe(budget);
 	});
 
-	test("Claude on Antigravity and Cursor, and Cursor's default route, carry Claude's 20-image many-image limit", () => {
+	test("Claude on Cursor, and Cursor's default route, carry Claude's 20-image many-image limit", () => {
 		for (const [provider, api, baseUrl, id] of [
-			["google-antigravity", "google-gemini-cli", ANTIGRAVITY_URL, "claude-sonnet-4-6"],
-			["google-antigravity", "google-gemini-cli", ANTIGRAVITY_URL, "claude-opus-5-5"],
 			["cursor", "cursor-agent", CURSOR_URL, "claude-opus-5-high"],
 			["cursor", "cursor-agent", CURSOR_URL, "claude-4.5-sonnet"],
 			["cursor", "cursor-agent", CURSOR_URL, "default"],
@@ -124,6 +124,22 @@ describe("image-count-budget", () => {
 });
 
 describe("inline-image-byte-budget", () => {
+	test("the Anthropic API carries 120 MB of images under its 128 MB body; a custom baseUrl carries neither", () => {
+		const opus = imageModel("anthropic", "anthropic-messages", ANTHROPIC_API, "claude-opus-5-5");
+		expect(configuredOfficial(opus)).toBe(true);
+		expect(inlineImageByteBudget(opus)).toBe(120_000_000);
+		expect(resolveRequestBodyByteLimit(opus, configuredOfficial(opus))).toBe(128_000_000);
+		const proxied = imageModel(
+			"anthropic",
+			"anthropic-messages",
+			"https://anthropic-proxy.example",
+			"claude-opus-5-5",
+		);
+		expect(configuredOfficial(proxied)).toBe(false);
+		expect(inlineImageByteBudget(proxied)).toBeUndefined();
+		expect(resolveRequestBodyByteLimit(proxied, configuredOfficial(proxied))).toBeUndefined();
+	});
+
 	test("the Codex backend carries 24 MB; a rerouted Codex baseUrl carries none", () => {
 		const sol = codex();
 		expect(configuredOfficial(sol)).toBe(true);

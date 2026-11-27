@@ -17,6 +17,7 @@ import grp
 import logging
 import os
 import shutil
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,7 @@ from robomp.git_ops import DirtyState, inspect_dirty_state
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import CommentInfo, IssueInfo, PullRequestInfo, RepoInfo
 from robomp.host_tools import AbortController, ReleaseToolContext, ToolBindings, _git_identity_env
+from robomp.issue_index import duplicate_candidates
 from robomp.natives_cache import NativesCache
 from robomp.natives_cache import compute_key as natives_compute_key
 from robomp.sandbox import GitTransport, Workspace, _prepare_slot_runtime_env, _safe_directory_env
@@ -481,7 +483,12 @@ def _build_prompt(
                 workspace=inputs.workspace,
                 directive=directive,
             )
-        return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
+        return persona.kickoff(
+            repo=inputs.repo,
+            issue=inputs.issue,
+            workspace=inputs.workspace,
+            candidates=duplicate_candidates(inputs.db, inputs.issue),
+        )
     if task_kind == "review_pr":
         assert inputs.issue is not None
         assert pr is not None
@@ -560,11 +567,12 @@ def _run_rpc_blocking(
 
     def _on_tool_end(event: ToolExecutionEndEvent) -> None:
         tool_name = event.tool_name
-        # `tool_name` is transport-normalized by omp_rpc for top-level and
-        # xd:// device dispatches, but an eval-bridged host tool only surfaces
-        # as the enclosing `eval`; terminal-action detection therefore relies
-        # on `_on_host_tool_completed`. A failed execution (`is_error`) does
-        # not count — a rejected submit must still trigger the reminder.
+        # `tool_name` is transport-normalized by omp_rpc for top-level calls and
+        # tool commands run inside a `bash` call, but an eval-bridged host tool
+        # only surfaces as the enclosing `eval`; terminal-action detection
+        # therefore relies on `_on_host_tool_completed`. A failed execution
+        # (`is_error`) does not count — a rejected submit must still trigger
+        # the reminder.
         ok = event.result is not None and not event.is_error
         if ok:
             tools_called.add(tool_name)
@@ -578,9 +586,10 @@ def _run_rpc_blocking(
         )
 
     def _on_host_tool_completed(event: HostToolCompletedEvent) -> None:
-        # Fires for every dispatch path (top-level, `write xd://X`, eval
-        # bridge) once the host tool's `execute()` returned, so a terminal
-        # action reached from inside `eval` still ends the task (#13583).
+        # Fires for every dispatch path (top-level, a tool command run inside a
+        # `bash` call, eval bridge) once the host tool's `execute()` returned,
+        # so a terminal action reached from inside `eval` still ends the task
+        # (#13583).
         tools_called.add(event.tool_name)
         log.info(
             "host_tool_completed",
@@ -886,6 +895,9 @@ def _capture_natives_cache(inputs: TaskInputs) -> None:
             key,
             native_dir,
             source_workspace=workspace.workspace_key,
+            expected_uid=inputs.slot_uid
+            if inputs.slot_uid is not None and os.geteuid() == 0 and sys.platform == "linux"
+            else os.geteuid(),
         )
     except Exception as exc:
         log.warning(

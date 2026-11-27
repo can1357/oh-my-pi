@@ -2,9 +2,7 @@
  * Effort-tier variant collapsing.
  *
  * Some providers expose one logical model as several effort- or
- * thinking-suffixed upstream ids (Antigravity CCA:
- * `gemini-3.5-flash-extra-low`/`-low`, `claude-*`/`claude-*-thinking` pairs;
- * aggregators: `X`/`X-thinking` twins). Collapsing replaces the member specs
+ * thinking-suffixed upstream ids (e.g. `X`/`X-thinking` twins). Collapsing replaces the member specs
  * with one logical spec whose `thinking.effortRouting` records the per-effort
  * upstream wire id; request-time code resolves the outbound id via
  * `resolveWireModelId` and everything local (selection, caching, usage
@@ -13,7 +11,7 @@
  * Families come from two sources:
  * - Reviewed `variant-family` nodes in `compat/rules/taxonomy/_collapse.kdl`
  *   (compiled into `rules.json`) for providers whose routing needs curation
- *   (Antigravity tier triplets, single-member renames, recycled ids). A
+ *   (tier triplets, single-member renames, recycled ids). A
  *   family whose ids carry `{rev}` is a template, instantiated for every
  *   revision the input advertises (`gemini-{rev}-flash` → `gemini-3.8-flash`).
  * - `deriveThinkingPairFamilies`: the global automatic rule — any live
@@ -101,7 +99,7 @@ export interface EffortVariantFamily {
 	suppressWhenOff?: boolean;
 	/**
 	 * Preserve non-off effort routes even when discovery omits the backing member.
-	 * Used for Cloud Code Assist `X`/`X-thinking` pairs where upstream accepts
+	 * Used for `X`/`X-thinking` pairs where upstream accepts
 	 * the `-thinking` wire id but the model-list endpoint may advertise only the
 	 * bare id.
 	 */
@@ -240,7 +238,7 @@ function compiledTemplate(compiled: CompiledVariantFamily): VariantFamilyTemplat
 	const alternatives = [family.id, ...family.members, ...(family.extraAliases ?? [])].map(id =>
 		id
 			.split(REVISION_PLACEHOLDER)
-			.map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+			.map(part => RegExp.escape(part))
 			.join(REVISION_CAPTURE),
 	);
 	const template: VariantFamilyTemplate = {
@@ -479,7 +477,7 @@ function deriveCursorEffortFamilies<TSpec extends VariantSpecLike>(specs: readon
 	return families;
 }
 
-/** Provider id → reviewed collapse table. The CCA providers diverge on thinking transport. */
+/** Provider id → reviewed collapse table. */
 const REVIEWED_COLLAPSE_TABLES: Readonly<Record<string, VariantCollapseTable>> = buildCompiledTables();
 
 /**
@@ -687,7 +685,7 @@ function refreshCollapsedThinking<TSpec extends VariantSpecLike>(
 	retired: ReadonlySet<string> | undefined,
 ): TSpec {
 	// Scope snapshot self-heal to families carrying a curated per-effort budget
-	// contract (Antigravity gemini-3.x). Their routing targets are all verified
+	// contract (e.g. tiered Gemini 3.x). Their routing targets are all verified
 	// live, so rebuilding routing here is safe; families without `effortBudgets`
 	// (derived `X`/`X-thinking` pairs, claude pairs, surface-less renames) keep
 	// their presence-filtered snapshot routing untouched.
@@ -755,6 +753,31 @@ function reconcileDefaultMember<TSpec extends VariantSpecLike>(
 export function isCursorMaxModeWireId(wireModelId: string): boolean {
 	const effort = collapseVariantId("cursor", wireModelId).effort;
 	return effort === Effort.XHigh || effort === Effort.Max;
+}
+
+/**
+ * Whether `wireModelId` is one tier of a reviewed `provider` family that serves
+ * different efforts from distinct sibling SKUs (`-low`/`-medium`/`-high`), so
+ * the SKU, not the effort, fixes the thinking strength. Decided from the
+ * declared family routes, not a collapsed row's routing: an account roster
+ * listing one tier collapses to a row routing every effort to it, yet that SKU
+ * still advertises its own fixed thinking. Families routing every effort to
+ * one `-thinking` SKU keep the effort's own budget or level.
+ */
+export function isReviewedTierVariantWireId(provider: string, wireModelId: string): boolean {
+	const table = reviewedCollapseTable(provider);
+	if (table === undefined) return false;
+	const id = wireModelId.trim();
+	const family =
+		table.families.find(candidate => candidate.members.includes(id)) ??
+		(table.templates === undefined ? undefined : templateFamilyFor(table.templates, id));
+	if (family === undefined) return false;
+	const tiers = new Set<string>();
+	for (const key of VARIANT_ROUTING_KEYS) {
+		const target = family.routing[key];
+		if (key !== "off" && target !== undefined) tiers.add(target);
+	}
+	return tiers.size > 1 && tiers.has(id);
 }
 
 /**

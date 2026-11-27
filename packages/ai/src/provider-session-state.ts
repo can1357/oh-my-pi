@@ -14,8 +14,10 @@
  *
  * - **Anthropic** — `fastModeDisabled` is account-scoped: the rejection reads
  *   "this model does not support fast mode for your account", i.e. a plan
- *   entitlement, so a switch to an entitled sibling must re-probe. Its
- *   siblings are endpoint-scoped and stay: `strictToolsDisabled`
+ *   entitlement, so a switch to an entitled sibling must re-probe. Message
+ *   thread chains are account-scoped too: a thread continues only for the
+ *   credential that created it. Its siblings are endpoint-scoped and stay:
+ *   `strictToolsDisabled`
  *   (grammar-too-large 400 for the model's tool schema),
  *   `replayUnsignedThinkingDisabled` / `thinkingReplayDisabled` (the endpoint
  *   is a signing proxy), `prefixDroppedThinkingBlocks` (blocks a rejected
@@ -30,16 +32,14 @@
  *   bearer (`getCodexWebSocketSessionKey`), so a switch naturally lands on a
  *   fresh transport session while the old one stays reachable for teardown.
  *   Resetting from the outside would close a socket a retry may still be on.
- * - **Antigravity** — `lastGoodEndpoint` is endpoint-scoped; the agent /
- *   conversation ids are conversation-scoped. Neither depends on the account.
  * - **GitLab Duo** — the active workflow is account-bound, but it is a live
  *   server-side workflow plus socket, and the switch happens *inside* the
  *   request that may still be resuming it. Tearing it down here would abort the
  *   very turn that rotated; it stays on its existing session-close path.
  */
 
-import { clearAnthropicFastModeFallback } from "./providers/anthropic-state";
-import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses";
+import { clearAnthropicFastModeFallback, resetAnthropicThreads } from "./providers/anthropic-state";
+import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses-state";
 import type { ProviderSessionState } from "./types";
 
 /**
@@ -52,5 +52,6 @@ export function resetAccountScopedProviderSessionState(states: Map<string, Provi
 	// Fast mode is the account-scoped half of the Anthropic record; the helper
 	// the `/fast on` re-arm path already uses clears exactly that flag.
 	clearAnthropicFastModeFallback(states);
+	resetAnthropicThreads(states);
 	resetOpenAIResponsesAccountScopedState(states);
 }

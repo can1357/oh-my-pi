@@ -2,7 +2,7 @@ import type { Token } from "@oh-my-pi/pi-utils/marked";
 import { Marked } from "@oh-my-pi/pi-utils/marked";
 import { listMayContinueAt } from "@oh-my-pi/pi-utils/marked-list";
 import type { ReactNode } from "react";
-import { memo, useMemo, useRef } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { escapeHtml } from "../../lib/format";
 import { mathExtension } from "./math";
 
@@ -187,18 +187,55 @@ export function renderStreamingMarkdown(
 	}
 }
 
+/** The frozen prefix a {@link StreamingMarkdown} element currently shows and the child nodes it built. */
+interface AppliedFrozen {
+	prefix: FrozenMarkdownPrefix;
+	nodeCount: number;
+}
+
 /**
  * {@link Markdown} for a block that is still streaming: settled leading
  * blocks are rendered once and reused, so each token re-parses only the open
  * tail instead of the whole growing block. Output is identical to
  * {@link Markdown} for the same text.
+ *
+ * The DOM follows the same split: frozen blocks are parsed into nodes once
+ * and kept; each update replaces only the tail's nodes. The container keeps
+ * the blocks as direct children, exactly as {@link Markdown} does.
  */
 export const StreamingMarkdown = memo(function StreamingMarkdown({ text }: { text: string }): ReactNode {
 	const prefixRef = useRef(NO_PREFIX);
-	const html = useMemo(() => {
-		const rendered = renderStreamingMarkdown(text, prefixRef.current);
+	const rootRef = useRef<HTMLDivElement>(null);
+	// Unknown after the initial markup; the first update rebuilds.
+	const appliedRef = useRef<AppliedFrozen | null>(null);
+	// React owns only the initial markup. It re-applies `dangerouslySetInnerHTML` whenever the
+	// prop object changes identity, so the object itself must stay constant across renders.
+	const [initialHtml] = useState(() => {
+		const rendered = renderStreamingMarkdown(text, NO_PREFIX);
 		prefixRef.current = rendered.prefix;
-		return rendered.html;
+		return { __html: rendered.html };
+	});
+	const shownTextRef = useRef(text);
+	useLayoutEffect(() => {
+		const root = rootRef.current;
+		if (root === null || text === shownTextRef.current) return;
+		shownTextRef.current = text;
+		const rendered = renderStreamingMarkdown(text, prefixRef.current);
+		const prefix = rendered.prefix;
+		prefixRef.current = prefix;
+		const applied = appliedRef.current;
+		if (applied !== null && (prefix === applied.prefix || prefix.html.startsWith(applied.prefix.html))) {
+			while (root.childNodes.length > applied.nodeCount) root.lastChild!.remove();
+			if (prefix !== applied.prefix) {
+				root.insertAdjacentHTML("beforeend", prefix.html.slice(applied.prefix.html.length));
+				appliedRef.current = { prefix, nodeCount: root.childNodes.length };
+			}
+		} else {
+			root.innerHTML = prefix.html;
+			appliedRef.current = { prefix, nodeCount: root.childNodes.length };
+		}
+		// `rendered.html` always starts with the frozen prefix's markup.
+		root.insertAdjacentHTML("beforeend", rendered.html.slice(prefix.html.length));
 	}, [text]);
-	return <div className="tr-md" dangerouslySetInnerHTML={{ __html: html }} />;
+	return <div ref={rootRef} className="tr-md" dangerouslySetInnerHTML={initialHtml} />;
 });

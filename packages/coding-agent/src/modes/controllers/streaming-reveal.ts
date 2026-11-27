@@ -1,9 +1,10 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
-import { type Component, getSegmenter } from "@oh-my-pi/pi-tui";
+import { batch } from "@oh-my-pi/pi-tui";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { formatThinkingForDisplay, hasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
-import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { formatThinkingForDisplay, hasDisplayableThinking } from "../../session/transcript/thinking-display";
+import { getSegmenter } from "../../utils/text-width";
+import type { AssistantView } from "../types";
 
 export const STREAMING_REVEAL_FRAME_MS = 1000 / 30;
 export const MIN_STEP = 3;
@@ -11,22 +12,23 @@ export const CATCHUP_FRAMES = 8;
 
 type AssistantContentBlock = AssistantMessage["content"][number];
 type DisplayThinkingContentBlock = Extract<AssistantContentBlock, { type: "thinking" }> & { rawThinking?: string };
-/** The concrete streaming-reveal target is an {@link AssistantMessageComponent}; the
- *  Component intersection is what lets the reveal request component-scoped renders
- *  through {@link TUI.requestComponentRender} instead of forcing a full-tree walk. */
-type StreamingRevealComponent = Pick<AssistantMessageComponent, "updateContent"> & Component;
+/** Where the reveal draws: the streaming reply's signals (each frame is a transient update). */
+export type StreamingRevealTarget = Pick<AssistantView, "message" | "transient">;
 type GraphemeSlicer = (index: number, text: string, units: number) => string;
 
 type StreamingRevealControllerOptions = {
 	getSmoothStreaming(): boolean;
 	getHideThinkingBlock(): boolean;
 	getProseOnlyThinking(): boolean;
-	/** Called after each reveal tick with the component whose subtree changed;
-	 *  callers scope the render to that subtree (a full tree walk here at 30fps
-	 *  costs 5% of CPU on its own and drives the Box/Container overhead that
-	 *  cascades into another ~15% — see issue #4377). */
-	requestRender(component: Component): void;
 };
+
+/** Draw one in-flight frame of the reveal. */
+function showFrame(target: StreamingRevealTarget, message: AssistantMessage): void {
+	batch(() => {
+		target.transient.set(true);
+		target.message.set(message);
+	});
+}
 
 const graphemeCountCache = new LRUCache<string, number>({ max: 128 });
 
@@ -254,9 +256,8 @@ export class StreamingRevealController {
 	readonly #getSmoothStreaming: () => boolean;
 	readonly #getHideThinkingBlock: () => boolean;
 	readonly #getProseOnlyThinking: () => boolean;
-	readonly #requestRender: (component: Component) => void;
 	#target: AssistantMessage | undefined;
-	#component: StreamingRevealComponent | undefined;
+	#component: StreamingRevealTarget | undefined;
 	#timer: NodeJS.Timeout | undefined;
 	#revealed = 0;
 	#targetDirty = false;
@@ -282,7 +283,6 @@ export class StreamingRevealController {
 		this.#getSmoothStreaming = options.getSmoothStreaming;
 		this.#getHideThinkingBlock = options.getHideThinkingBlock;
 		this.#getProseOnlyThinking = options.getProseOnlyThinking;
-		this.#requestRender = options.requestRender;
 	}
 	#build(target: AssistantMessage, revealed: number): AssistantMessage {
 		return buildDisplayMessage(
@@ -295,7 +295,7 @@ export class StreamingRevealController {
 		);
 	}
 
-	begin(component: StreamingRevealComponent, message: AssistantMessage, hasToolCalls: boolean): void {
+	begin(component: StreamingRevealTarget, message: AssistantMessage, hasToolCalls: boolean): void {
 		this.stop();
 		this.#component = component;
 		// Reveal counts narration as answer text, matching how the component renders it.
@@ -307,7 +307,7 @@ export class StreamingRevealController {
 		this.#smoothStreaming = this.#getSmoothStreaming();
 		if (!this.#smoothStreaming) {
 			const total = this.#visibleUnits(message);
-			component.updateContent(this.#build(message, total), { transient: true });
+			showFrame(component, this.#build(message, total));
 			return;
 		}
 		const total = this.#visibleUnits(message);
@@ -315,9 +315,7 @@ export class StreamingRevealController {
 			// A tool call is a transcript-order boundary: finish any leading
 			// assistant text before EventController renders the separate tool card.
 			this.#revealed = total;
-			component.updateContent(this.#build(message, this.#revealed), {
-				transient: true,
-			});
+			showFrame(component, this.#build(message, this.#revealed));
 			this.#snapToolBoundary(message.content);
 			return;
 		}
@@ -337,7 +335,7 @@ export class StreamingRevealController {
 			this.#revealed = total;
 			this.#targetDirty = false;
 			this.#stopTimer();
-			this.#component.updateContent(this.#build(message, total), { transient: true });
+			showFrame(this.#component, this.#build(message, total));
 			return;
 		}
 		const total = this.#visibleUnits(message);
@@ -360,9 +358,7 @@ export class StreamingRevealController {
 			this.#targetDirty = false;
 			this.#stopTimer();
 			if (alreadySnapped) return;
-			this.#component.updateContent(this.#build(message, this.#revealed), {
-				transient: true,
-			});
+			showFrame(this.#component, this.#build(message, this.#revealed));
 			this.#snapToolBoundary(message.content);
 			return;
 		}
@@ -419,6 +415,20 @@ export class StreamingRevealController {
 		this.#syncTimer(total);
 	}
 
+	/**
+	 * Re-read whether smooth streaming applies; when it no longer does (e.g. extension text renderers
+	 * were just enabled), drop the typing reveal and draw the whole target now rather than leaving the
+	 * running tick to keep drawing partial prefixes until the next provider delta.
+	 */
+	resyncSmoothStreaming(): void {
+		this.#smoothStreaming = this.#getSmoothStreaming();
+		if (this.#smoothStreaming || !this.#target || !this.#component) return;
+		this.#stopTimer();
+		this.#targetDirty = false;
+		this.#revealed = this.#visibleUnits(this.#target);
+		this.#renderCurrent();
+	}
+
 	/** Total reveal units of `message`, memoized per block across ticks. */
 	#visibleUnits(message: AssistantMessage): number {
 		let total = 0;
@@ -441,7 +451,7 @@ export class StreamingRevealController {
 		// Every controller render is an in-flight streaming snapshot, even when
 		// smooth reveal has temporarily caught up to the current target. The
 		// message_end handler performs the only stable non-transient render.
-		this.#component.updateContent(this.#build(this.#target, this.#revealed), { transient: true });
+		showFrame(this.#component, this.#build(this.#target, this.#revealed));
 	}
 
 	#syncTimer(total = this.#target ? this.#visibleUnits(this.#target) : 0): void {
@@ -479,16 +489,12 @@ export class StreamingRevealController {
 				this.#targetDirty = false;
 				this.#revealed = total;
 				this.#renderCurrent();
-				this.#requestRender(component);
 			}
 			this.#stopTimer();
 			return;
 		}
 		this.#revealed = Math.min(total, this.#revealed + nextStep(total - this.#revealed));
-		component.updateContent(this.#build(target, this.#revealed), {
-			transient: true,
-		});
-		this.#requestRender(component);
+		showFrame(component, this.#build(target, this.#revealed));
 		if (this.#revealed >= total) {
 			this.#stopTimer();
 		}

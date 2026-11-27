@@ -241,6 +241,20 @@ describe("marked compatibility", () => {
 		]);
 	});
 
+	// Korean, Japanese and Chinese put no space after a parenthesized URL, so the unbalanced ")" before the next word
+	// ends the URL. Balanced parentheses and ASCII after an unbalanced ")" keep the GFM rule.
+	test("bare URLs end at an unbalanced ) followed by non-ASCII text", () => {
+		const links = (source: string) =>
+			Lexer.lexInline(source).flatMap(token => (token.type === "link" ? [token.href] : []));
+		expect(links("F09(https://github.com/a/b/pull/12686)가 계약")).toEqual(["https://github.com/a/b/pull/12686"]);
+		expect(links("（https://x.y/a.)が")).toEqual(["https://x.y/a"]);
+		expect(links("https://x.y/w_(가)나 다")).toEqual(["https://x.y/w_(가)나"]);
+		expect(links("https://ko.wikipedia.org/wiki/서울 문서")).toEqual(["https://ko.wikipedia.org/wiki/서울"]);
+		expect(links("www.google.com/search?q=(business))+ok")).toEqual([
+			"http://www.google.com/search?q=(business))+ok",
+		]);
+	});
+
 	test("an inline extension's startFrom hint tokenizes like its start hint", () => {
 		const dollar = (src: string, from: number) => {
 			const index = src.indexOf("$", from);
@@ -513,28 +527,35 @@ describe("marked compatibility", () => {
 		expect(shape(Lexer.lexInline("*a ***a**"))).toEqual([["em", "*a ***a**", [["text", "a ***a*"]]]]);
 	});
 
-	// A code span closes at the first run of as many backticks after its opener that no backslash escapes, and the
-	// search goes on that many backticks past an escaped one. A URL autolink ends at the first " " or ">" after its
-	// scheme, past any "<". Inside emphasis or a link label, a closer past its end closes nothing.
-	test("closes code spans and autolinks past escaped runs and other openers, and not past a nested end", () => {
+	// A code span closes at the next run of exactly as many backticks as its opener: a longer run is no closer, and
+	// backslash escapes do not apply inside a code span, so a backslash right before the closing backtick is content
+	// rather than something that moves the closer along. A URL autolink ends at the first " " or ">" after its scheme,
+	// past any "<". A code span takes precedence over emphasis and link labels, so a marker or "]" inside it closes
+	// nothing outside it.
+	test("closes code spans at the next run of exactly their width, and autolinks past other openers, ahead of emphasis and labels", () => {
 		expect(shape(Lexer.lexInline("``a\\```b`` c\\````d``"))).toEqual([
 			["codespan", "``a\\```b``"],
 			["text", " c"],
 			["escape", "\\`"],
-			["text", "`"],
-			["codespan", "``d``"],
+			["text", "```d``"],
 		]);
 		expect(shape(Lexer.lexInline("`a\\``b` c"))).toEqual([
-			["codespan", "`a\\``"],
-			["text", "b` c"],
+			["codespan", "`a\\``b`"],
+			["text", " c"],
+		]);
+		// The width rule on its own: the width-2 run after `a` is no closer for the single backtick opener, so the
+		// span ends at the width-1 run past it.
+		expect(shape(Lexer.lexInline("`a``b` c"))).toEqual([
+			["codespan", "`a``b`"],
+			["text", " c"],
 		]);
 		expect(shape(Lexer.lexInline("*a `b* c`"))).toEqual([
-			["em", "*a `b*", [["text", "a `b"]]],
-			["text", " c`"],
+			["text", "*a "],
+			["codespan", "`b* c`"],
 		]);
 		expect(shape(Lexer.lexInline("[a `b](u) c`"))).toEqual([
-			["link", "[a `b](u)", [["text", "a `b"]]],
-			["text", " c`"],
+			["text", "[a "],
+			["codespan", "`b](u) c`"],
 		]);
 		expect(shape(Lexer.lexInline("*<http://a* b> <https://c<http://d> <x@y>"))).toEqual([
 			[
@@ -549,6 +570,248 @@ describe("marked compatibility", () => {
 			["link", "<https://c<http://d>", [["text", "https://c<http://d"]]],
 			["text", " "],
 			["link", "<x@y>", [["text", "x@y"]]],
+		]);
+	});
+
+	// CommonMark takes code spans, autolinks, inline HTML and a link's destination and title before emphasis and
+	// link labels, so their markers and brackets are content: an enclosing emphasis or label closes past them.
+	test("closes emphasis and link labels past delimiters a code span, autolink, tag or link destination holds", () => {
+		expect(shape(Lexer.lexInline("*use `*` as the marker*"))).toEqual([
+			[
+				"em",
+				"*use `*` as the marker*",
+				[
+					["text", "use "],
+					["codespan", "`*`"],
+					["text", " as the marker"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("**see `**.md` files**"))).toEqual([
+			[
+				"strong",
+				"**see `**.md` files**",
+				[
+					["text", "see "],
+					["codespan", "`**.md`"],
+					["text", " files"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("***a `***` b***"))).toEqual([
+			[
+				"em",
+				"***a `***` b***",
+				[
+					[
+						"strong",
+						"**a `***` b**",
+						[
+							["text", "a "],
+							["codespan", "`***`"],
+							["text", " b"],
+						],
+					],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("[a `]` b](u)"))).toEqual([
+			[
+				"link",
+				"[a `]` b](u)",
+				[
+					["text", "a "],
+					["codespan", "`]`"],
+					["text", " b"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline('*a <b x="*"> c*'))).toEqual([
+			[
+				"em",
+				'*a <b x="*"> c*',
+				[
+					["text", "a "],
+					["html", '<b x="*">'],
+					["text", " c"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("*a <http://x*y> b*"))).toEqual([
+			[
+				"em",
+				"*a <http://x*y> b*",
+				[
+					["text", "a "],
+					["link", "<http://x*y>", [["text", "http://x*y"]]],
+					["text", " b"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline('*a [l](u "*") c*'))).toEqual([
+			[
+				"em",
+				'*a [l](u "*") c*',
+				[
+					["text", "a "],
+					["link", '[l](u "*")', [["text", "l"]]],
+					["text", " c"],
+				],
+			],
+		]);
+		// Parentheses that hold no destination and title are text, and the markers in them delimit as usual.
+		expect(shape(Lexer.lexInline("*a [l](u *b c) d*"))).toEqual([
+			["text", "*a [l](u "],
+			["em", "*b c) d*", [["text", "b c) d"]]],
+		]);
+	});
+
+	// An escape takes the backslash and exactly one backtick, so the backticks left in a run whose first one a
+	// backslash escaped are a backtick string of their own, and a span opens there. A run whose opener found no closer
+	// still cannot be retried as a narrower opener, and an escaped backtick that is the whole run is just text.
+	test("opens a code span at the backticks left after an escape, and only there inside a run", () => {
+		expect(shape(Lexer.lexInline("\\``a`"))).toEqual([
+			["escape", "\\`"],
+			["codespan", "`a`"],
+		]);
+		expect(shape(Lexer.lexInline("\\``a` b"))).toEqual([
+			["escape", "\\`"],
+			["codespan", "`a`"],
+			["text", " b"],
+		]);
+		expect(shape(Lexer.lexInline("\\```a`` b"))).toEqual([
+			["escape", "\\`"],
+			["codespan", "``a``"],
+			["text", " b"],
+		]);
+		expect(shape(Lexer.lexInline("a \\``b` c"))).toEqual([
+			["text", "a "],
+			["escape", "\\`"],
+			["codespan", "`b`"],
+			["text", " c"],
+		]);
+		expect(shape(Lexer.lexInline("\\`a` b"))).toEqual([
+			["escape", "\\`"],
+			["text", "a` b"],
+		]);
+		expect(shape(Lexer.lexInline("```d`` then `e`"))).toEqual([
+			["text", "```d`` then "],
+			["codespan", "`e`"],
+		]);
+	});
+
+	// A tokenizer's raw may end inside a backtick run, which is where the scan resumes: the backticks left there are a
+	// string of their own and open a span, while a run whose own opener found no closer stays text.
+	test("opens a code span in the backticks a tokenizer's raw resumed inside", () => {
+		const marked = new Marked().use({
+			extensions: [
+				{
+					name: "eatX",
+					level: "inline",
+					// Consumes "x`" and reports it, so the lexer resumes one backtick into the run.
+					tokenizer: src => (src.startsWith("x`") ? { type: "eatX", raw: "x`" } : undefined),
+				},
+			],
+		});
+		const inlineShape = (source: string) => {
+			const [paragraph] = marked.lexer(source);
+			if (!paragraph || !("tokens" in paragraph) || !paragraph.tokens) {
+				throw new Error(`no inline tokens for ${JSON.stringify(source)}`);
+			}
+			return shape(paragraph.tokens);
+		};
+		expect(inlineShape("x```a``")).toEqual([
+			["eatX", "x`"],
+			["codespan", "``a``"],
+		]);
+		expect(inlineShape("x```a`")).toEqual([
+			["eatX", "x`"],
+			["text", "``a`"],
+		]);
+		expect(inlineShape("x``a`` b `c` d")).toEqual([
+			["eatX", "x`"],
+			["codespan", "`a`` b `"],
+			["text", "c` d"],
+		]);
+	});
+
+	// The `del` and `url` tokenizer overrides consume a raw of their own, so one that ends inside a backtick run leaves
+	// the scan where a code span opens, exactly as an inline extension's raw does.
+	test("opens a code span in the backticks a tokenizer override's raw resumed inside", () => {
+		const viaUrl = (source: string) =>
+			shape(
+				Lexer.lexInline(source, {
+					tokenizerOverrides: {
+						url: src =>
+							src.startsWith("x`") ? { type: "link", raw: "x`", text: "x`", href: "x`", tokens: [] } : false,
+					},
+				}),
+			);
+		expect(viaUrl("x```a``")).toEqual([
+			["link", "x`", []],
+			["codespan", "``a``"],
+		]);
+		expect(viaUrl("x```a`")).toEqual([
+			["link", "x`", []],
+			["text", "``a`"],
+		]);
+		expect(viaUrl("x``a`` b `c` d")).toEqual([
+			["link", "x`", []],
+			["codespan", "`a`` b `"],
+			["text", "c` d"],
+		]);
+		expect(
+			shape(
+				Lexer.lexInline("~~```a``", {
+					tokenizerOverrides: {
+						del: src => (src.startsWith("~~`") ? { type: "del", raw: "~~`", text: "~~`", tokens: [] } : false),
+					},
+				}),
+			),
+		).toEqual([
+			["del", "~~`", []],
+			["codespan", "``a``"],
+		]);
+	});
+
+	// Backslash escapes do not apply inside a code span, so a backtick a backslash precedes still closes the span. When
+	// the escaped-run rule was applied to the closer search, an opener whose closer a backslash precedes ran on to the
+	// next span's opener, which left the prose between two spans paired as span content one delimiter out of step, and
+	// the code span padding strip then trimmed that prose: `AppX is the LayoutDir` rendered as `AppXis theLayoutDir`.
+	test("closes a code span whose closing backtick a backslash precedes, and keeps the prose around it spaced", () => {
+		expect(shape(Lexer.lexInline("see `AppX\\` then done"))).toEqual([
+			["text", "see "],
+			["codespan", "`AppX\\`"],
+			["text", " then done"],
+		]);
+		expect(Lexer.lexInline("see `AppX\\` then done")[1]).toMatchObject({ text: "AppX\\" });
+		// The span holding only a backslash closes at its own closing backtick, so the sentence after it keeps all four
+		// of its code spans and the spaces between them.
+		const prose =
+			"leave `\\` adjacent to a closing backtick. The claim itself is unaffected — `AppX` is the `LayoutDir` in `EyeGuard (Package).build.appxrecipe`, i.e.";
+		expect(shape(Lexer.lexInline(prose))).toEqual([
+			["text", "leave "],
+			["codespan", "`\\`"],
+			["text", " adjacent to a closing backtick. The claim itself is unaffected — "],
+			["codespan", "`AppX`"],
+			["text", " is the "],
+			["codespan", "`LayoutDir`"],
+			["text", " in "],
+			["codespan", "`EyeGuard (Package).build.appxrecipe`"],
+			["text", ", i.e."],
+		]);
+		expect(
+			Lexer.lexInline(prose).map(token => (token.type === "text" || token.type === "codespan" ? token.text : null)),
+		).toEqual([
+			"leave ",
+			"\\",
+			" adjacent to a closing backtick. The claim itself is unaffected — ",
+			"AppX",
+			" is the ",
+			"LayoutDir",
+			" in ",
+			"EyeGuard (Package).build.appxrecipe",
+			", i.e.",
 		]);
 	});
 

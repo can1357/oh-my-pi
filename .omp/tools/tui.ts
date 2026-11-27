@@ -2,9 +2,9 @@
  * Project-local `tui` tool: run and debug pi-tui apps headlessly. Each session
  * spawns a TypeScript/JavaScript entry or executable on a real PTY: ConPTY on
  * Windows, Bun's controlling terminal on POSIX. `OMP_TUI_DEBUG` points at the
- * local IPC endpoint served by an omp/pi-tui host. Injected input
- * rides the app's own input path, while renderer and component queries inspect
- * the last painted frame.
+ * local IPC endpoint served by an omp/pi-ui host. Injected input
+ * rides the app's own input path, while renderer and surface queries inspect
+ * the last presented frame and the live surface tree.
  *
  * kitty's real terminal core (screen.c + vt-parser.c via kitty-vt-wasm)
  * tracks every PTY byte, so `screen` (and the socketless `text` fallback)
@@ -29,6 +29,7 @@ import {
 	type PtyDimensions,
 	PtySession,
 } from "@oh-my-pi/pi-natives";
+import { $which, isCompiledBinary } from "@oh-my-pi/pi-utils";
 import type * as KittyVt from "kitty-vt-wasm";
 import type { Color, KittyEvent, KittyTerminal } from "kitty-vt-wasm";
 import { tmpdir } from "node:os";
@@ -1072,6 +1073,21 @@ function ptyDimensions(cols: number, rows: number): PtyDimensions {
 		: { cols, rows };
 }
 
+/**
+ * Runtime for `file` entries. In the compiled binary `process.execPath` is omp,
+ * which would take the entry path as its first prompt, so run the `bun` on PATH
+ * (the one `bun install --cwd .omp/tools` needs). Not `BUN_BE_BUN=1`: the child
+ * would pass it to every command it runs, turning an `omp` there into Bun.
+ */
+function bunRuntime(): string {
+	if (!isCompiledBinary()) return process.execPath;
+	const bun = $which("bun");
+	if (!bun) {
+		throw new Error("`file` needs `bun` on PATH under the compiled omp; pass `bin` instead");
+	}
+	return bun;
+}
+
 const factory = (omp: ToolHost) => {
 	const startSession = async (params: TuiParams): Promise<string> => {
 		const name = params.name ?? "main";
@@ -1085,7 +1101,7 @@ const factory = (omp: ToolHost) => {
 		const file = params.bin ? undefined : (params.file ?? "packages/coding-agent/src/cli.ts");
 		const target = file ?? params.bin ?? "";
 		const command = file
-			? [process.execPath, resolve(omp.cwd, file), ...(params.args ?? [])]
+			? [bunRuntime(), resolve(omp.cwd, file), ...(params.args ?? [])]
 			: [target, ...(params.args ?? [])];
 
 		const { cols, rows } = ptyDimensions(params.cols ?? 100, params.rows ?? 30);
@@ -1146,7 +1162,7 @@ const factory = (omp: ToolHost) => {
 				};
 			}
 			// ConPTY emits ESC[6n on startup and the native layer pre-answers it
-			// (crates/pi-natives/src/pty.rs, "ConPTY sends ESC[6n"). Drop only the
+			// (crates/natives/src/pty.rs, "ConPTY sends ESC[6n"). Drop only the
 			// screen's duplicate reply to that first query; keep later cursor
 			// reports and any other replies sharing the same output buffer.
 			let hostCursorHandshake = process.platform === "win32";
@@ -1252,15 +1268,15 @@ const factory = (omp: ToolHost) => {
 		name: "tui",
 		label: "TUI Debug",
 		description:
-			"Run and debug omp/pi-tui apps headlessly on a real PTY plus the " +
+			"Run and debug omp/pi-ui apps headlessly on a real PTY plus the " +
 			"OMP_TUI_DEBUG socket. Start defaults to omp itself " +
 			"(packages/coding-agent/src/cli.ts); override with file (a TS/JS entry, e.g. " +
-			"file: \"packages/tui/examples/debug-demo.ts\") or bin (an executable name/path), plus optional rows/cols and args. Any omp/pi-tui app serves " +
+			"file: \"packages/tui/examples/debug-demo.tsx\") or bin (an executable name/path), plus optional rows/cols and args. Any omp/pi-ui app serves " +
 			"OMP_TUI_DEBUG. Ops: text (viewport screenshot as plain text), screen " +
 			"(plain-text screen from kitty's real terminal core — works for any app, no " +
 			"debug socket needed; peek=N prepends N scrollback lines), frame (full " +
-			"document), tree (component tree with ids/rects/focus), values (widget " +
-			"values JSON), info, keys (spec like \"tab C-c enter 'literal'\"), type " +
+			"document: history + screen), tree (surface node tree with keys/focus), values (props " +
+			"and widget state of interactive nodes as JSON), info, keys (spec like \"tab C-c enter 'literal'\"), type " +
 			"(literal text through the input decoder), paste (bracketed paste), mouse " +
 			"(x,y,action: click|right-click|middle-click|move|drag|release|wheel-up|" +
 			"wheel-down), send (raw bytes to the terminal, \\e/\\xNN escapes), resize " +

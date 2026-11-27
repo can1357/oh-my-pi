@@ -24,6 +24,7 @@ function baseParams() {
 		credential: {
 			type: "oauth" as const,
 			accessToken: "oat-test",
+			refreshToken: "refresh-test",
 			accountId: "account_test",
 			email: "user@example.com",
 			expiresAt: Date.now() + 60_000,
@@ -59,7 +60,8 @@ describe("claudeUsageProvider retry contract", () => {
 		let attempt = 0;
 		const fetchMock = (async (input: string | URL | Request) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-			if (new URL(url).search !== "") return jsonResponse(200, VALID_PAYLOAD);
+			if (!new URL(url).pathname.endsWith("/usage") || new URL(url).search !== "")
+				return jsonResponse(200, VALID_PAYLOAD);
 			attempt += 1;
 			if (attempt === 1) return jsonResponse(503, { error: "unavailable" });
 			return jsonResponse(200, VALID_PAYLOAD);
@@ -109,7 +111,8 @@ describe("claudeUsageProvider retry contract", () => {
 		const retryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
 		const fetchMock = (async (input: string | URL | Request) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-			if (new URL(url).search !== "") return jsonResponse(200, VALID_PAYLOAD);
+			if (!new URL(url).pathname.endsWith("/usage") || new URL(url).search !== "")
+				return jsonResponse(200, VALID_PAYLOAD);
 			attempt += 1;
 			if (attempt === 1) {
 				// Retry-After: 1 second. Provider must compute a 1s backoff before re-attempting.

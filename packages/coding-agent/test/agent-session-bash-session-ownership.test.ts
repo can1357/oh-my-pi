@@ -12,7 +12,7 @@ import { createBashTool } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-p
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
@@ -156,6 +156,60 @@ describe("AgentSession bash session ownership", () => {
 		);
 	});
 
+	/** Aborts a TERM-ignoring command and verifies disposal killed its process. */
+	async function expectAbortedCommandKilledByDispose(beforeAbort?: () => Promise<void>): Promise<void> {
+		const pidFile = path.join(tempDir.path(), "child.pid");
+		// Path-qualified: a bare `perl` runs the embedded shell's in-process builtin, whose `$$`
+		// is the test runner itself (the `finally` below would SIGKILL it).
+		const perl = $which("perl");
+		if (!perl) throw new Error("external perl is required for the TERM-ignoring child");
+		const command = `trap '' TERM HUP INT; '${perl}' -e 'open my $f, ">", $ARGV[0] or die $!; print $f $$; close $f; sleep 60' '${pidFile}'`;
+		const running = session.executeBash(command);
+		let pid = 0;
+		try {
+			for (let i = 0; i < 500 && !pid; i++) {
+				if (fs.existsSync(pidFile)) pid = Number(fs.readFileSync(pidFile, "utf8"));
+				if (!pid) await Bun.sleep(10);
+			}
+			expect(pid).toBeGreaterThan(0);
+			await beforeAbort?.();
+			session.abortBash();
+			const result = await running;
+			expect(result.cancelled).toBe(true);
+			await session.dispose();
+			let alive = true;
+			try {
+				process.kill(pid, 0);
+			} catch (error) {
+				if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+				alive = false;
+			}
+			expect(alive).toBe(false);
+		} finally {
+			if (pid) {
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+			}
+		}
+	}
+
+	it("finishes killing an aborted foreground command before session disposal returns", async () => {
+		if (process.platform === "win32") return;
+		createSession();
+		await expectAbortedCommandKilledByDispose();
+	});
+
+	it("finishes killing a command aborted after its session was replaced before disposal returns", async () => {
+		if (process.platform === "win32") return;
+		createSession();
+		const startedIn = session.sessionId;
+		await expectAbortedCommandKilledByDispose(async () => {
+			await session.newSession();
+			expect(session.sessionId).not.toBe(startedIn);
+		});
+	});
+
 	it("forwards a hook-injected variable even when process.env already mirrors its value", async () => {
 		// Regression: an extension may both mirror a variable into process.env (so
 		// MCP servers and workers inherit it) and inject it via its spawnHook. The
@@ -236,8 +290,13 @@ describe("AgentSession bash session ownership", () => {
 		await session.executeBash("true", undefined, { useUserShell: true });
 
 		expect(executeBashSpy).toHaveBeenCalledTimes(2);
-		expect(executeBashSpy.mock.calls[0]?.[1]?.env).toEqual({ OMP_INJECTED_TOKEN: "injected-value" });
-		expect(executeBashSpy.mock.calls[1]?.[1]?.env).toEqual({ OMP_INJECTED_TOKEN: "injected-value" });
+		const forwarded = {
+			OMP_INJECTED_TOKEN: "injected-value",
+			PI_SESSION_ID: session.sessionManager.getSessionId(),
+			PI_SESSION_FILE: session.sessionManager.getSessionFile() ?? "",
+		};
+		expect(executeBashSpy.mock.calls[0]?.[1]?.env).toEqual(forwarded);
+		expect(executeBashSpy.mock.calls[1]?.[1]?.env).toEqual(forwarded);
 		expect(cachedShellConfig.env).not.toHaveProperty("OMP_INJECTED_TOKEN");
 	});
 
@@ -478,7 +537,7 @@ describe("AgentSession bash session ownership", () => {
 				inputBytes: 23,
 				outputBytes: 10,
 			});
-			return { ...bashResult, output: artifactId ? `[raw output: artifact://${artifactId}]` : "missing artifact" };
+			return { ...bashResult, output: artifactId ? `[raw output: local://${artifactId}.log]` : "missing artifact" };
 		});
 
 		const bashPromise = session.executeBash("large old-session command");
@@ -504,7 +563,7 @@ describe("AgentSession bash session ownership", () => {
 					entry =>
 						entry.type === "message" &&
 						entry.message.role === "bashExecution" &&
-						entry.message.output.includes(`artifact://${artifactId}`),
+						entry.message.output.includes(`local://${artifactId}.log`),
 				),
 		).toBe(true);
 	});
@@ -524,7 +583,7 @@ describe("AgentSession bash session ownership", () => {
 				inputBytes: 20,
 				outputBytes: 9,
 			});
-			return { ...bashResult, output: artifactId ? `[raw output: artifact://${artifactId}]` : "discarded" };
+			return { ...bashResult, output: artifactId ? `[raw output: local://${artifactId}.log]` : "discarded" };
 		});
 
 		const bashPromise = session.executeBash("dropped-session-command");

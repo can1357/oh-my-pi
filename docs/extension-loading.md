@@ -2,8 +2,6 @@
 
 This document covers how the coding agent discovers and loads extension modules at startup. Scanned native/configured directories auto-discover `.ts` and `.js`; explicitly named files and installed-plugin manifest entries may also use `.mjs` and `.cjs`.
 
-It does **not** cover [`gemini-extension.json` manifest extensions](./gemini-manifest-extensions.md), which are documented separately.
-
 ## What this subsystem does
 
 Extension loading builds an ordered list of module entry files, imports the modules concurrently with Bun, then binds their factories sequentially in path order. It returns:
@@ -54,7 +52,7 @@ Hook-capability loading already applies its own hook-specific disabled ids, so t
 
 ### 3) Installed plugin extension entries
 
-After hook discovery, `discoverAndLoadExtensions()` appends extension entry points from enabled installed plugins via `getAllPluginExtensionPaths(cwd)`.
+After hook discovery, `discoverAndLoadExtensions()` appends extension entry points from enabled installed plugins via `listPackageExtensionModules()`.
 
 Plugin extension entries come from package `omp.extensions` / `pi.extensions` manifests, including enabled feature entries.
 
@@ -93,13 +91,13 @@ Examples:
 ```yaml
 # ~/.omp/agent/config.yml
 extensions:
-  - ~/my-exts/safety.ts
-  - ./local/ext-pack
+   - ~/my-exts/safety.ts
+   - ./local/ext-pack
 ```
 
 ```json
 {
-  "extensions": ["./.omp/extensions/my-extra"]
+	"extensions": ["./.omp/extensions/my-extra"]
 }
 ```
 
@@ -122,11 +120,16 @@ Behavior split:
   roots from explicitly named extension packages remain eligible. Project/user
   `extensions:` settings and installed OMP extension packages are excluded from
   that sibling surface.
+- Executable custom tool and custom command modules follow the same
+  explicit-only contract: ambient `.omp/tools`,
+  marketplace and installed-plugin tools are not imported, and no custom
+  command modules are loaded. Tools under explicitly named extension packages'
+  `tools/` directories still load.
 
-This flag governs extension factories and OMP extension-package sibling roots;
-it is not a whole-process capability-isolation switch. Skills, MCP servers,
-tools, prompts, and rules owned by other discovery subsystems retain their own
-enable/disable controls.
+This flag governs extension factories, executable custom tool/command modules,
+and OMP extension-package sibling roots; it is not a whole-process
+capability-isolation switch. Skills, MCP servers, prompts, rules, and the
+launch directory's `.env` retain their own controls.
 
 ### Exact module allowlist
 
@@ -157,23 +160,34 @@ Example:
 
 ```yaml
 disabledExtensions:
-  - extension-module:foo
+   - extension-module:foo
 ```
 
 An explicitly configured file path bypasses this name filter. Explicit-only
 sessions (`--no-extensions` / `disableExtensionDiscovery`) also omit the settings
 disable list entirely.
 
+`/extensions` lists every module this filter governs — native modules, installed-plugin
+entries, and entries expanded from configured directories (under OMP Extension
+Packages) — and toggles the same ids. Configured file paths have no row because
+the list cannot disable them.
+
 ### Live source changes
 
-In the main session, changes to `extensions` or `disabledExtensions` suspend or
-resume already-loaded, settings-governed sources: their handlers, commands,
-tools, renderers, shortcuts, flags, and file fallbacks stop or resume
-participating. A suspended override of a built-in tool restores the native tool.
-Modules are not unloaded or re-evaluated, and newly enabled modules that were
-not imported at startup require a restart. Inline and caller-preloaded sources
-outside the governed discovery set are left alone. Explicit-only sessions ignore
-these settings changes.
+In the main session, changes to `extensions` or `disabledExtensions`, and a
+change of the session's working directory (`/move`, resuming a session from
+another project), re-scope settings-governed sources. Sources that leave the
+discovered set are suspended: their handlers, commands, tools, renderers,
+shortcuts, flags, and file fallbacks stop participating, and subagents spawned
+afterwards no longer inherit them. In the interactive UI, their editor widgets
+are hidden and updates from suspended extensions are ignored. Returning sources
+resume with their prior widgets; newly discovered sources are imported and join
+the live session (their `session_start` handlers run then). Suspension does not
+stop extension-owned timers. A suspended override of a built-in tool restores
+the native tool. Modules are never unloaded or re-evaluated. Governed sources include those
+discovered from every directory the session was scoped to. Inline and
+caller-preloaded sources outside the governed discovery set are left alone.
+Explicit-only sessions ignore these settings and directory changes.
 
 ### Disable specific items of other capabilities
 
@@ -186,7 +200,7 @@ or `project`:
 
 ```yaml
 disabledExtensions:
-  - context-file:user:CLAUDE.md
+   - context-file:user:CLAUDE.md
 ```
 
 The id carries no directory and no depth, so a `project` entry disables files of
@@ -276,7 +290,8 @@ registration remain sequential in the discovered order.
 
 Each candidate path is loaded via `loadLegacyPiModule()` (`src/extensibility/plugins/legacy-pi-compat.ts`):
 
-- the entry's realpath is resolved, then dynamically imported with a per-load `?mtime` cache-buster. On POSIX the loader uses filesystem-path specifiers, and the same tag propagates through extension-owned relative imports, package `imports` aliases (`#alias/*`), and extension-local dependencies so same-process re-imports pick up graph edits. Windows uses `file://` specifiers, whose query strings Bun currently ignores, so the same reload guarantee does not apply there. Host-resolved rewrites (pi-package specifiers and the TypeBox shim) stay untagged because they point at in-process host code
+- the entry's realpath is resolved, then dynamically imported with a per-load `?mtime` cache-buster. The tag is a hash of the entry path followed by the number of times the process has loaded that entry, so a new process that loads unchanged files emits the same rewritten sources and reuses Bun's runtime transpiler cache instead of adding entries on every launch. The loader uses filesystem-path specifiers (on Windows without the extended-length prefix), not `file://` URLs, whose query strings Bun ignores, and the same tag propagates through extension-owned relative imports, package `imports` aliases (`#alias/*`), and extension-local dependencies so same-process re-imports pick up graph edits. Host-resolved rewrites (pi-package specifiers and the TypeBox shim) stay untagged because they point at in-process host code
+- an entry whose path, or realpath, contains `?` is refused before the import, with an error that names the path and says Bun cannot load a module from such a path (`src/extensibility/module-path.ts`): Bun reads the path cut at the `?`, whatever the specifier's form. Paths with `#`, `%`, a space or `'` load and reload. A source module (TypeScript or JavaScript) that the entry imports, whose realpath holds `?` through a link, still loads, because the graph's `onLoad` hooks serve its source; non-source modules (JSON, WASM, assets) are left to Bun's own loaders, where the limit applies. A relative specifier that spells a `?` starts a query, as in any ESM loader. The hooks, custom-commands and share-script loaders make the same check as the entry's
 - a scoped Bun `onLoad` hook rewrites legacy pi-package specifiers (`@mariozechner/*`, `@earendil-works/*`) and bare `@sinclair/typebox` onto the host-bundled copies before evaluation. Legacy Pi package-root imports resolve through compat shims: catalog symbols that moved to `@oh-my-pi/pi-catalog/models` (`calculateCost`, `modelsAreEqual`, `getBundledProviders`, plus `getModel`/`getModels` aliases) are re-exported by the legacy pi-ai shim (`src/extensibility/legacy-pi-ai-shim.ts`), and legacy `@oh-my-pi/pi-coding-agent` imports — including `DefaultResourceLoader` — resolve to the compat loader in `src/extensibility/legacy-pi-coding-agent-shim.ts`
 - graph-owned CommonJS modules use synchronous Bun `onLoad` object modules exposing runtime own-string export keys, including computed and non-enumerable names; `default` remains the complete `module.exports` value. The shared evaluator preserves cycles and `require`/import identity, while required host ESM shims are prepared before synchronous evaluation. No generated facade files or AST named-export reconstruction are needed
 - bundled host modules use Bun's native object loader. Modules exporting `theme` add a thin ESM binding bridge so the existing `theme` import follows host assignments synchronously without replacing the UI's change listener
@@ -323,6 +338,15 @@ Revived children inherit the current owning session's extension roots and
 prepared factories, not extension authority from a saved transcript. Cold
 discovery without prepared factories respects the owner's explicit-only or
 merged roots.
+
+Caller-supplied `CreateAgentSessionOptions.extensions` are recorded in
+`preparedExtensions` under synthetic `<inline-N>` source IDs and rebind only in
+in-process children. `topLevelExtensions` (`@internal`; the interactive CLI's
+Warp event bridge) and the session's own autoresearch and custom-tool factories
+stay with that session. Worker threads re-import only entries whose
+`resolvedPath` is a filesystem path; `<inline-N>` entries arrive without a
+factory, and the main thread logs one warning per inline extension naming its
+ID and factory.
 
 Extension factories still execute host code when rebound; tool restrictions are
 not an extension sandbox. Existing per-module load-failure handling is unchanged.
@@ -375,9 +399,9 @@ described in [Extensions](./extensions.md#background-work-ctxsetinterval--ctxset
 
 ```json
 {
-  "omp": {
-    "extensions": ["./src/check-a.ts", "./src/check-b.js"]
-  }
+	"omp": {
+		"extensions": ["./src/check-a.ts", "./src/check-b.js"]
+	}
 }
 ```
 
@@ -385,8 +409,8 @@ Legacy manifest key still accepted:
 
 ```json
 {
-  "pi": {
-    "extensions": ["./index.ts"]
-  }
+	"pi": {
+		"extensions": ["./index.ts"]
+	}
 }
 ```

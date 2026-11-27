@@ -1,6 +1,15 @@
 import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
-import { coworkFetch } from "../providers/cowork-fetch";
+import type * as CoworkFetchModule from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
+
+// Lazy loader: keeps cowork-fetch (node:https, internal:http, node:tls, node:zlib)
+// off CLI startup until an Anthropic Messages request actually runs.
+let coworkFetchPromise: Promise<typeof CoworkFetchModule.coworkFetch> | undefined;
+const lazyCoworkFetch: FetchImpl = async (input, init) => {
+	coworkFetchPromise ??= import("../providers/cowork-fetch").then(m => m.coworkFetch);
+	const fn = await coworkFetchPromise;
+	return fn(input, init);
+};
 import type { Api, FetchImpl, Model } from "../types";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
@@ -14,22 +23,36 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * The one fetch every inference request goes through. Per call it applies, in
  * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
  * per-provider proxy, and `PI_REQ_DEBUG` request/response recording — then
- * calls `fetchImpl` (or the model's default fetch) exactly once. Providers
- * never layer transport concerns themselves.
+ * calls `fetchImpl` (or the model's default fetch) exactly once.
+ *
+ * A request whose signal already aborted is refused with the signal's reason,
+ * as `fetch` refuses it, before `beforeDispatch` and without calling
+ * `fetchImpl`. `beforeDispatch` runs for every other HTTP attempt, including
+ * retries, before dispatch bookkeeping; a thrown refusal prevents that attempt.
  *
  * Idempotent: the built fetch is stamped and returned as-is on later passes.
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
  * on auth retries, so without the stamp each entry point would add another
  * layer (three PI_REQ_DEBUG dumps for one request).
  */
-export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
+export function transportFetch(
+	model: Model<Api>,
+	fetchImpl: FetchImpl | undefined,
+	beforeDispatch?: () => void,
+): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
-		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+		given ??
+		(model.provider === "anthropic" && model.api === "anthropic-messages" ? lazyCoworkFetch : globalThis.fetch);
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
+		// A wrapper above the transport (body compression) can still be preparing
+		// when the caller aborts; a fetch that ignores the signal would send anyway.
+		const signal = init?.signal !== undefined ? init.signal : input instanceof Request ? input.signal : undefined;
+		signal?.throwIfAborted();
+		beforeDispatch?.();
 		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
 			recordDispatchOrigin(model, input);
 		}

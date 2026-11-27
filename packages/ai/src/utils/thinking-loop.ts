@@ -18,7 +18,10 @@
  * Four failure shapes are detected:
  * 1. **Exact suffix cycles** — a byte-identical unit repeated back-to-back,
  *    including long cycles such as the observed 311-character Kiro runaway.
- *    This bounded detector applies to every model.
+ *    This bounded detector applies to every model the guard covers. A cycle
+ *    spanning a line break repeats whole lines — reasoning summarizers restate
+ *    one status line ("Still writing the parser...") while hidden work runs —
+ *    so it needs the long-cycle floor, not the short-stutter one.
  * 2. **Near-duplicate segments** — paragraphs that normalize to the same
  *    word-trigram fingerprint. Caught with a Jaccard window over recent
  *    paragraphs. Thresholds were calibrated on a real loop transcript plus
@@ -36,9 +39,15 @@
  * The semantic heuristics (2, 3) judge prose only: code-shaped lines are dropped
  * before analysis because legitimate code repeats one keyword skeleton with
  * different literals, and numeric tokens are stripped during normalization.
+ * Scripts written without word spaces (CJK, Thai, …) are tokenized as character
+ * bigrams so reasoning in those languages is measured like space-delimited prose.
+ * Segments that are recognisably structured rows (pipe-delimited table rows and
+ * JSON key/value records, including fragments the chunker cut from them) are
+ * skipped too; see {@link isStructuredSegment}.
  *
- * Scope: exact cycles are guarded for every model; semantic heuristics remain
- * limited to Gemini, DeepSeek, and Grok family streams. Thinking stays armed
+ * Scope: the `thinking-loop-guard` catalog axis picks the level per model line
+ * ({@link loopGuardLevel}): exact cycles by default, plus semantic heuristics
+ * for Gemini, DeepSeek, and Grok, and no guard for Claude. Thinking stays armed
  * after a tool call starts — xAI/Grok can keep emitting `thinking_delta` after
  * `toolcall_start`, and those deltas count as stream progress so the idle
  * watchdog never fires. Visible assistant text still latches the thinking
@@ -49,6 +58,7 @@
  * three guarded attempts and then fail closed. Disable detection with
  * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -68,7 +78,9 @@ const EXACT_CHECK_STRIDE = 128;
 /** Short cycles need four repeats covering at least this many characters. */
 const EXACT_SHORT_MAX_UNIT = 60;
 const EXACT_SHORT_MIN_REPEATED_CHARS = 180;
-/** Long cycles need at least three repeats covering at least this many chars. */
+/** Long cycles need at least three repeats covering at least this many chars.
+ *  Short cycles that span a line break need it too: those repeat whole lines,
+ *  which summarizer status lines do legitimately. */
 const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
 /** Repeated characters before a punctuation-only run counts as a loop. Matches
  *  {@link EXACT_LONG_MIN_REPEATED_CHARS}: a model that has emitted a kilobyte of
@@ -90,6 +102,47 @@ const SEGMENT_SIMILARITY = 0.8;
 const SEGMENT_MIN_COUNT = 8;
 /** Near-duplicate cluster size (current + matches) that trips the loop. */
 const SEGMENT_MIN_CLUSTER = 4;
+
+/** The tail of a JSON string that the chunker cut at the segment start: the text up to
+ *  its closing quote, which a JSON delimiter follows. It is masked to `""` first, so the
+ *  first real token after it is read as an opener. */
+const JSON_STRING_TAIL = /^[^"\n]*"(?=\s*[,}\]:])/;
+/** A JSON string value whose opening quote starts the segment: the `:` or `,` that
+ *  introduced it landed at the end of the previous chunk, so the delimiter lookbehind
+ *  of {@link JSON_STRING} is outside the segment and {@link JSON_STRING_TAIL} cannot
+ *  cross the opening quote to find a closing one. The value may run to the segment
+ *  end with no closing quote (`"?`); it is masked to `""` like any other string. */
+const JSON_STRING_LEAD = /^\s*"(?:\\.|[^"\\\n])*"?(?=\s*[,}\]:]|$)/;
+/** A JSON key or value string, closed or cut off at the segment end. It is masked to
+ *  `""` before the record check, so a long descriptive value cannot hide the record
+ *  around it. Anchored after `{`, `[`, `,` or `:` so a closing quote that the chunker
+ *  left at a segment start is never read as an opener; a string whose opening quote
+ *  starts the segment is {@link JSON_STRING_LEAD}'s case. */
+const JSON_STRING = /(?<=[{[,:]\s*)"(?:\\.|[^"\\\n])*"?/g;
+/** A scalar JSON value on masked text: a masked string, a number, or a literal. */
+const JSON_SCALAR = /""|-?\d[\d.eE+-]*|true|false|null/;
+/** A flat JSON array of scalar values on masked text, possibly empty. */
+const JSON_SCALAR_ARRAY = new RegExp(
+	`\\[\\s*(?:(?:${JSON_SCALAR.source})(?:\\s*,\\s*(?:${JSON_SCALAR.source}))*)?\\s*\\]`,
+);
+/** A JSON record field on masked text: `"key": value` after a `{` or `,` delimiter,
+ *  with a masked key and a masked, number, literal, or flat-array value — or a leading
+ *  masked value whose `:` the chunker cut off at the previous segment boundary. Global
+ *  flag: collected with matchAll, never used with the stateful test(). */
+const JSON_FIELD = new RegExp(
+	`(?:^|[{,])\\s*""\\s*:\\s*(?:${JSON_SCALAR.source}|${JSON_SCALAR_ARRAY.source})|^\\s*""(?=\\s*[,}\\]])`,
+	"gm",
+);
+/** JSON fields a segment needs before its field text can make it a record. */
+const JSON_MIN_FIELDS = 2;
+/** Least share of a segment's characters that must be JSON field text. */
+const JSON_MIN_FIELD_SHARE = 0.5;
+/** Pipe count at which a line is a markdown table row. */
+const TABLE_ROW_MIN_PIPES = 2;
+/** Non-blank lines a segment needs before its rows can make it a table. */
+const TABLE_MIN_LINES = 2;
+/** Least share of a segment's non-blank lines that must be table rows. */
+const TABLE_ROW_MIN_SHARE = 0.6;
 
 /** Recent segments whose pooled unigram vocabulary is the novelty baseline for
  *  progress-lexicon stall detection. */
@@ -125,19 +178,21 @@ const CONCRETE_ANCHOR =
 const CODE_LINE = /^(?:[ \t]*```.*|(?: {2,}|\t)(?![ \t]*(?:[-*+]|\d+[.)])[ \t]).*|.*[{}[\](;,>][ \t]*)$/gm;
 
 /**
- * True when resolved compatibility policy enables semantic loop heuristics for
- * this model. Exact suffix-cycle detection applies to every enabled model
- * independently of this predicate.
+ * How much of the loop guard runs on a stream: `off` none, `exact` only
+ * exact suffix cycles, `semantic` exact cycles plus the near-duplicate and
+ * progress-lexicon paragraph heuristics.
  */
-export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
-	if (options?.loopGuard?.enabled === false) return false;
-	const compat = model.compat;
-	if (compat !== undefined) return "thinkingLoopGuard" in compat && compat.thinkingLoopGuard !== undefined;
-	// Custom API surfaces resolve no compat record, so the KDL `thinking-loop-guard`
-	// axis cannot land on them; fall back to the class facts the axis encodes
-	// (classes/{gemini,deepseek,xai}.kdl).
-	const cls = model.identity?.class;
-	return cls === "gemini" || cls === "deepseek" || cls === "xai";
+export type LoopGuardLevel = "off" | "exact" | "semantic";
+
+/**
+ * Loop-guard level for a model stream. `PI_NO_THINKING_LOOP_GUARD=1` and
+ * `loopGuard.enabled: false` turn it off; otherwise the model line's
+ * `thinking-loop-guard` catalog axis decides, and unassigned lines get `exact`.
+ */
+export function loopGuardLevel(model: Model<Api>, options?: StreamOptions): LoopGuardLevel {
+	if (process.env.PI_NO_THINKING_LOOP_GUARD === "1" || options?.loopGuard?.enabled === false) return "off";
+	const level = resolveCatalogPolicy(model).thinkingLoopGuard;
+	return level === "off" || level === "semantic" ? level : "exact";
 }
 
 /**
@@ -247,6 +302,10 @@ export class ThinkingLoopDetector {
 			.replace(/^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm, "");
 		const normalized = normalizeSegment(segment);
 		if (normalized.length < SEGMENT_MIN_NORM_CHARS) return null;
+		// Structured answer content is not reasoning. Its rows differ only in data that
+		// normalization drops, so they would cluster like a loop. Skipping it leaves
+		// the cluster count and the stall run untouched.
+		if (isStructuredSegment(segment)) return null;
 
 		// (a) Near-duplicate trigram cluster: the same paragraph reused with
 		// cosmetic wording drift (high word-trigram overlap).
@@ -324,7 +383,7 @@ export class ThinkingLoopDetector {
  * real narration runaway burns dozens-to-hundreds of titles, so this still trips
  * fast on the actual pathology.
  */
-export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
+export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 64;
 
 /**
  * True when a single trimmed line is a Gemini reasoning-summary title: a markdown
@@ -397,7 +456,7 @@ export function guardThinkingLoopStream(
 	options?: StreamOptions,
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
-	const semanticHeuristics = isLoopGuardedModel(model, options);
+	const semanticHeuristics = loopGuardLevel(model, options) === "semantic";
 	const thinkingDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const textDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const checkAssistantContent = options?.loopGuard?.checkAssistantContent !== false;
@@ -500,11 +559,10 @@ export function guardThinkingLoopStream(
 }
 
 /**
- * Apply the loop guard around a provider dispatch. Unless explicitly disabled,
- * every model gets exact suffix-cycle detection; Gemini, DeepSeek, and Grok also
- * get the semantic heuristics selected by {@link isLoopGuardedModel}. The guard
- * injects an abort signal into the provider call so a detected loop tears down
- * the upstream, then wraps the returned stream. Bounding result-path re-samples
+ * Apply the loop guard around a provider dispatch at the model's
+ * {@link loopGuardLevel}; `off` dispatches unwrapped. The guard injects an
+ * abort signal into the provider call so a detected loop tears down the
+ * upstream, then wraps the returned stream. Bounding result-path re-samples
  * lives in the result-awaiting caller.
  */
 export function withThinkingLoopGuard<
@@ -514,9 +572,7 @@ export function withThinkingLoopGuard<
 	options: O | undefined,
 	dispatch: (options: O | undefined) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	if (process.env.PI_NO_THINKING_LOOP_GUARD === "1" || options?.loopGuard?.enabled === false) {
-		return dispatch(options);
-	}
+	if (loopGuardLevel(model, options) === "off") return dispatch(options);
 	const controller = new AbortController();
 	const caller = options?.signal;
 	const signal = caller ? AbortSignal.any([caller, controller.signal]) : controller.signal;
@@ -584,7 +640,8 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
  * computed — the period check reads nothing past it, and each `z[i]` reads
  * only `z[i - left]` with `i - left < i`, which is already filled. Short
  * cycles retain the original 180-character/four-repeat sensitivity; long
- * cycles require at least three repeats and 1024 repeated characters.
+ * cycles and short ones spanning a line break require at least three repeats
+ * and 1024 repeated characters.
  *
  * A unit carrying a letter or an emoji matches at those thresholds. A unit with
  * neither, such as the `?!?!` run a stuck model emits, matches only once it has
@@ -595,8 +652,18 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
 	if (n < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
-	const last = n - 1;
 	const maxUnit = Math.min(EXACT_MAX_UNIT, Math.floor(n / 3));
+	// Every match requires `z[len] >= min(EXACT_SHORT_MIN_REPEATED_CHARS - EXACT_SHORT_MAX_UNIT,
+	// 2 * (EXACT_SHORT_MAX_UNIT + 1))` = 120, so the last 32 chars must recur at `n - 32 - len`
+	// for some `len` in `[2, maxUnit]`. Forward `indexOf` from `needleEnd - maxUnit` scans at
+	// most `maxUnit` chars in native SIMD and rejects non-repeating tails while preserving the
+	// O(n) Z-array fallback for repeating/whitespace tails.
+	const needleLen = 32;
+	const needleEnd = n - needleLen;
+	const hit = text.indexOf(text.slice(needleEnd), needleEnd - maxUnit);
+	if (hit === -1 || hit > needleEnd - 2) return null;
+
+	const last = n - 1;
 	const z = exactZ;
 	let left = 0;
 	let right = 0;
@@ -604,7 +671,7 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		let zi = i <= right ? Math.min(right - i + 1, z[i - left]) : 0;
 		while (i + zi < n && text.charCodeAt(last - zi) === text.charCodeAt(last - i - zi)) zi++;
 		z[i] = zi;
-		if (i + zi - 1 > right) {
+		if (zi > 0 && i + zi - 1 > right) {
 			left = i;
 			right = i + zi - 1;
 		}
@@ -616,7 +683,11 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		if (count < minCount) continue;
 		const unit = text.slice(-len);
 		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) {
-			const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
+			// `unit` is one whole period, so it holds a newline iff the cycle does.
+			const minChars =
+				len <= EXACT_SHORT_MAX_UNIT && !unit.includes("\n")
+					? EXACT_SHORT_MIN_REPEATED_CHARS
+					: EXACT_LONG_MIN_REPEATED_CHARS;
 			if (len * count >= minChars) return [unit, count];
 			continue;
 		}
@@ -626,16 +697,58 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 	return null;
 }
 
-/** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers. */
+/** Structured answer content: a segment whose text is mostly JSON key/value fields
+ *  (a record, or a fragment of one cut mid-line), or whose non-blank lines are mostly
+ *  markdown table rows. A table row leads with a pipe: prose that merely contains two
+ *  pipes (a union type such as `A | B`, a shell pipeline such as `cat f | grep x`) is
+ *  reasoning and must still trip. Bullet and numbered lists are not structured here. */
+function isStructuredSegment(segment: string): boolean {
+	const masked = segment.replace(JSON_STRING_TAIL, '""').replace(JSON_STRING_LEAD, '""').replace(JSON_STRING, '""');
+	let fields = 0;
+	let fieldChars = 0;
+	for (const match of masked.matchAll(JSON_FIELD)) {
+		fields++;
+		fieldChars += match[0].length;
+	}
+	if (fields >= JSON_MIN_FIELDS && fieldChars >= masked.trim().length * JSON_MIN_FIELD_SHARE) return true;
+	const lines = segment.split("\n").filter(line => line.trim() !== "");
+	if (lines.length < TABLE_MIN_LINES) return false;
+	// A table row leads with a pipe (GFM). A line that only contains two pipes is prose —
+	// a union type or a shell pipeline — and counts as reasoning, not as a table row.
+	const tableRows = lines.filter(
+		line => /^\s*\|/.test(line) && (line.match(/\|/g)?.length ?? 0) >= TABLE_ROW_MIN_PIPES,
+	).length;
+	return tableRows >= lines.length * TABLE_ROW_MIN_SHARE;
+}
+
+/** One segment token: group 1 is a run of a script written without spaces
+ *  between words (Han, kana, Thai, Lao, Khmer, Myanmar, plus the katakana
+ *  prolonged-sound mark); otherwise a letter/mark/digit run in any other
+ *  script. The second branch excludes the first's scripts so `tool调用` splits
+ *  in two. */
+const SEGMENT_TOKEN =
+	/([\p{sc=Han}\p{sc=Hira}\p{sc=Kana}\p{sc=Thai}\p{sc=Laoo}\p{sc=Khmr}\p{sc=Mymr}\u30FC]+)|[[\p{L}\p{M}\p{N}]--[\p{sc=Han}\p{sc=Hira}\p{sc=Kana}\p{sc=Thai}\p{sc=Laoo}\p{sc=Khmr}\p{sc=Mymr}\u30FC]]+/gv;
+
+/**
+ * Lowercase and tokenize prose plus code/path payloads into space-joined
+ * words, dropping pure numbers. Space-delimited scripts split on word
+ * boundaries; runs of unspaced scripts (CJK, Thai, …) become overlapping
+ * character bigrams, the word-sized unit the novelty and trigram signals
+ * compare, so text in those scripts is measured rather than discarded
+ * (issue #20096).
+ */
 function normalizeSegment(segment: string): string {
-	return segment
-		.toLowerCase()
-		.replace(/`([^`]*)`/g, " $1 ")
-		.replace(/[^a-z0-9]+/g, " ")
-		.split(/\s+/)
-		.filter(token => /[a-z]/.test(token))
-		.join(" ")
-		.trim();
+	const tokens: string[] = [];
+	for (const [token, unspaced] of segment.toLowerCase().matchAll(SEGMENT_TOKEN)) {
+		if (unspaced) {
+			const chars = Array.from(unspaced);
+			if (chars.length === 1) tokens.push(unspaced);
+			for (let i = 1; i < chars.length; i++) tokens.push(chars[i - 1] + chars[i]);
+		} else if (/\p{L}/u.test(token)) {
+			tokens.push(token);
+		}
+	}
+	return tokens.join(" ");
 }
 
 /** Word-trigram shingle set of a normalized segment. */

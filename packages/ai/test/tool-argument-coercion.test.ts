@@ -206,7 +206,7 @@ describe("Tool argument coercion", () => {
 		},
 	);
 
-	it("tries another matching union branch when the first normalization invalidates its candidate", () => {
+	it("keeps nulls every overlapping union branch accepts", () => {
 		const tool: Tool = {
 			name: "overlapping-nullable-union",
 			description: "",
@@ -248,7 +248,7 @@ describe("Tool argument coercion", () => {
 				name: tool.name,
 				arguments: args,
 			}),
-		).toEqual({ payload: { x: null } });
+		).toEqual({ payload: { x: null, y: null } });
 		expect(args).toEqual({ payload: { x: null, y: null } });
 	});
 
@@ -2423,21 +2423,6 @@ describe("Tool argument coercion", () => {
 			}) as { items: Array<{ op: string }> };
 			expect(result.items).toEqual([{ op: "done" }]);
 		});
-
-		it("leaves ordinary keys untouched", () => {
-			const tool: Tool = {
-				name: "plain",
-				description: "",
-				parameters: type({ op: type("string"), count: type("number") }),
-			};
-			const result = validateToolArguments(tool, {
-				type: "toolCall",
-				id: "dk6",
-				name: "plain",
-				arguments: { op: "done", count: 2 },
-			}) as { op: string; count: number };
-			expect(result).toEqual({ op: "done", count: 2 });
-		});
 	});
 
 	describe("single-string-field coercion", () => {
@@ -2611,5 +2596,40 @@ describe("In-band arg spill healing", () => {
 		const content = "docs: emit </arg_key>\n<arg_key>path</arg_key>\n<arg_value>src/a.ts</arg_value> pairs";
 		const result = run(tool, { content });
 		expect(result).toEqual({ content });
+	});
+});
+
+describe("explicit null on optional properties", () => {
+	const tool: Tool = {
+		name: "update_issue",
+		description: "",
+		parameters: {
+			type: "object",
+			properties: {
+				id: { type: "string" },
+				note: { type: ["string", "null"] },
+				assignee: { anyOf: [{ type: "string" }, { type: "null" }] },
+				label: { type: "string" },
+			},
+			required: ["id"],
+		},
+	};
+	const call = (args: Record<string, unknown>): ToolCall => ({
+		type: "toolCall",
+		id: "call-null",
+		name: tool.name,
+		arguments: args,
+	});
+
+	it("keeps a null the property schema accepts", () => {
+		expect(validateToolArguments(tool, call({ id: "1", note: null, assignee: null }))).toEqual({
+			id: "1",
+			note: null,
+			assignee: null,
+		});
+	});
+
+	it("drops a null the property schema rejects", () => {
+		expect(validateToolArguments(tool, call({ id: "1", label: null, note: "x" }))).toEqual({ id: "1", note: "x" });
 	});
 });

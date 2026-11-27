@@ -11,6 +11,7 @@ const GIF89A = Buffer.from("GIF89a");
 const WEBP_VP8X = Buffer.from("VP8X");
 const WEBP_VP8L = Buffer.from("VP8L");
 const WEBP_VP8 = Buffer.from("VP8 ");
+const FTYP = Buffer.from("ftyp");
 
 export const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -109,9 +110,9 @@ function parseGifMetadata(header: Uint8Array): ImageMetadata | null {
 function parseWebpMetadata(header: Uint8Array): ImageMetadata | null {
 	if (!magicEquals(header, 0, WEBP_RIFF_MAGIC)) return null;
 	if (!magicEquals(header, 8, WEBP_MAGIC)) return null;
-	if (header.length < 30) return { mimeType: "image/webp" };
 
 	if (magicEquals(header, 12, WEBP_VP8X)) {
+		if (header.length < 30) return { mimeType: "image/webp" };
 		const hasAlpha = (header[20] & 0x10) !== 0;
 		const width = (header[24] | (header[25] << 8) | (header[26] << 16)) + 1;
 		const height = (header[27] | (header[28] << 8) | (header[29] << 16)) + 1;
@@ -129,6 +130,7 @@ function parseWebpMetadata(header: Uint8Array): ImageMetadata | null {
 	}
 
 	if (magicEquals(header, 12, WEBP_VP8)) {
+		if (header.length < 30) return { mimeType: "image/webp" };
 		const width = view.getUint16(26, true) & 0x3fff;
 		const height = view.getUint16(28, true) & 0x3fff;
 		return { mimeType: "image/webp", width, height, channels: 3, hasAlpha: false };
@@ -141,6 +143,40 @@ export function parseImageMetadata(header: Uint8Array): ImageMetadata | null {
 	return (
 		parsePngMetadata(header) ?? parseJpegMetadata(header) ?? parseGifMetadata(header) ?? parseWebpMetadata(header)
 	);
+}
+
+/** Still images in a HEIF (ISO BMFF) container, which the image pipeline cannot decode itself. */
+export type HeifImageMimeType = "image/heic" | "image/heif" | "image/avif";
+
+const HEIF_BRAND_MIME_TYPES: Readonly<Record<string, HeifImageMimeType>> = {
+	heic: "image/heic",
+	heix: "image/heic",
+	heim: "image/heic",
+	heis: "image/heic",
+	hevc: "image/heic",
+	hevx: "image/heic",
+	avif: "image/avif",
+	avis: "image/avif",
+	mif1: "image/heif",
+	msf1: "image/heif",
+};
+
+/**
+ * MIME type of a HEIC, AVIF or other HEIF image from the brands of its leading `ftyp` box:
+ * the major brand, then the compatible brands, with the generic `mif1`/`msf1` brands last.
+ */
+export function parseHeifImageMimeType(header: Uint8Array): HeifImageMimeType | null {
+	if (!magicEquals(header, 4, FTYP)) return null;
+	const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+	const boxEnd = Math.min(view.getUint32(0, false), header.length);
+	let generic: HeifImageMimeType | null = null;
+	// The major brand sits at 8 and the compatible brands start at 16, after the minor version.
+	for (let offset = 8; offset + 4 <= boxEnd; offset += offset === 8 ? 8 : 4) {
+		const mimeType = HEIF_BRAND_MIME_TYPES[String.fromCharCode(...header.subarray(offset, offset + 4))];
+		if (mimeType === "image/heif") generic ??= mimeType;
+		else if (mimeType) return mimeType;
+	}
+	return generic;
 }
 
 /** Why base64 image data is unusable; `undefined` when it is canonical and non-empty. */

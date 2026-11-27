@@ -1,9 +1,9 @@
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
+import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
-import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
@@ -349,6 +349,28 @@ export const cfgToolsApprovalMode = register({
 	},
 });
 
+// Folders where every action asks, in every approval mode and whatever was remembered.
+export const cfgToolsRestrictedFolders = register({
+	id: "tools.restrictedFolders",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Restricted Folders",
+		editor: "json",
+		description:
+			'Folders where every read, write, edit, search, or command needs an explicit approval, whatever the approval mode or a remembered grant. The folder and everything under it is restricted; commands are matched by the directory they run in. A JSON list of paths, e.g. ["~/secrets"].',
+		condition: "restrictedFoldersNotProject",
+	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(entry => typeof entry !== "string" || entry.trim().length === 0)) {
+			throw new Error("tools.restrictedFolders must be a list of folder paths");
+		}
+	},
+});
+
 // Todo tool
 // Todo settings deliberately have no `protocolDefault`: protocol embedders need project-level opt-outs
 // for reminder/prelude prompt injection.
@@ -394,6 +416,33 @@ export const cfgTodoRemindersMax = register({
 	},
 });
 
+export const cfgTodoMidRunNudges = register({
+	id: "todo.midRunNudges",
+	type: "enum",
+	values: ["off", "capped", "backoff"] as const,
+	default: "capped",
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Mid-Run Todo Nudges",
+		description: "How often a long turn is reminded to update its todo list while it keeps changing things",
+		options: [
+			{ value: "off", label: "Off", description: "Never nudge mid-run" },
+			{
+				value: "capped",
+				label: "Capped",
+				description:
+					"Nudge after 12 edits or commands, at most twice until the todo list changes or you send a message",
+			},
+			{
+				value: "backoff",
+				label: "Backoff",
+				description: "Keep nudging with a doubling gap: after 12, 24, 48, 96, then every 192 edits or commands",
+			},
+		],
+	},
+});
+
 export const cfgTodoEager = register({
 	id: "todo.eager",
 	type: "enum",
@@ -413,6 +462,22 @@ export const cfgTodoEager = register({
 			},
 			{ value: "always", label: "Always", description: "Forces a comprehensive todo list on the first message" },
 		],
+	},
+});
+
+/** `todo.backend` value for omp's own todo list, with no extension backend. */
+export const NATIVE_TODO_BACKEND = "native";
+
+export const cfgTodoBackend = register({
+	id: "todo.backend",
+	type: "string",
+	default: NATIVE_TODO_BACKEND,
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Todo Backend",
+		description: "Extension that the todo list is mirrored to; Native keeps it in the session only",
+		options: "runtime",
 	},
 });
 
@@ -465,7 +530,7 @@ export const cfgGrepEnabled = register({
 export const cfgGrepContextBefore = register({
 	id: "grep.contextBefore",
 	type: "number",
-	default: 1,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -484,7 +549,7 @@ export const cfgGrepContextBefore = register({
 export const cfgGrepContextAfter = register({
 	id: "grep.contextAfter",
 	type: "number",
-	default: 3,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -525,6 +590,19 @@ export const cfgAstEditEnabled = register({
 	},
 });
 
+export const cfgFindVerifyModel = register({
+	id: "find.verifyModel",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tools",
+		group: "Find",
+		label: "Find Verification Model",
+		description:
+			"Model selector (e.g. openrouter/liquid/d1-ultra) tried first for find's passage verification, before the judge role; filename and sketch ranking stay on the judge role. Unset: the judge role verifies too",
+	},
+});
+
 export const cfgFindEnabled = register({
 	id: "find.enabled",
 	type: "enum",
@@ -535,16 +613,34 @@ export const cfgFindEnabled = register({
 		group: "Available Tools",
 		label: "Find (semantic grep)",
 		description:
-			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it only when the judge role resolves to a native TypeSafe jev model",
+			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it when the first usable judge is native",
 		options: [
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Enable when the judge role resolves to a native TypeSafe jev model",
+				description: "Enable when the first usable judge is native",
 			},
 			{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
 			{ value: "off", label: "Off", description: "Disable the find tool" },
 		],
+	},
+});
+
+/**
+ * Verified-passage probability at or above which `find` reports a file as a hit, and the floor for the
+ * line ranges it lists. Unset keeps the cascade's built-in threshold (0.2), which suits TypeSafe Jev; other
+ * decision models calibrate differently, so a judge that scores unrelated passages high needs a higher one.
+ */
+export const cfgFindHitThreshold = register({
+	id: "find.hitThreshold",
+	type: "number",
+	default: undefined,
+	// The registry reads a non-number config value as the default, so quoted text must fail here.
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !(raw > 0 && raw <= 1)) {
+			throw new Error(`Invalid find.hitThreshold: expected a number above 0, up to 1, got ${Bun.inspect(raw)}.`);
+		}
 	},
 });
 
@@ -574,6 +670,16 @@ export const cfgLaunchEnabled = register({
 	},
 });
 
+// A service normally ends with the last omp process in its project: the broker shuts
+// down once no client remains and stops every non-persistent service. Print, RPC and
+// ACP hosts override this on: their caller outlives the omp process and uses the
+// servers a run left running.
+export const cfgLaunchPersist = register({
+	id: "launch.persist",
+	type: "boolean",
+	default: false,
+});
+
 export const cfgSpeechgenEnabled = register({
 	id: "speechgen.enabled",
 	type: "boolean",
@@ -582,7 +688,7 @@ export const cfgSpeechgenEnabled = register({
 		tab: "tools",
 		group: "Available Tools",
 		label: "Speech Generation",
-		description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
+		description: "Enable the tts tool for on-device (Phonon) or xAI Grok Voice speech-file synthesis",
 	},
 });
 
@@ -595,7 +701,7 @@ export const cfgGenerateImageEnabled = register({
 		group: "Available Tools",
 		label: "Generate Image",
 		description:
-			"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
+			"Enable the generate_image tool (text-to-image generation and editing). Mounted as a tool command when tools.commands is on.",
 	},
 });
 
@@ -636,6 +742,19 @@ export const cfgArchiveEnabled = register({
 	},
 });
 
+export const cfgCommitEnabled = register({
+	id: "commit.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Selective commit",
+		description:
+			"Enable the commit eval prelude and /commit: commit only the lines this agent and its subagents wrote",
+	},
+});
+
 export const cfgComputerDisplay = register({
 	id: "computer.display",
 	type: "string",
@@ -672,29 +791,41 @@ export const cfgComputerMaxHeight = register({
 	},
 });
 
-export const cfgComputerBackgroundFallback = register({
-	id: "computer.backgroundFallback",
+export const cfgComputerTakeover = register({
+	id: "computer.takeover",
 	type: "enum",
-	values: ["takeover", "refuse"] as const,
-	default: "takeover",
+	values: ["fallback", "foreground", "always", "refuse"] as const,
+	default: "fallback",
 	ui: {
 		tab: "tools",
 		group: "Computer",
-		label: "Computer Background Fallback",
+		label: "Computer Takeover",
 		description:
-			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS menus itself",
+			"When window input takes over (the real pointer and keyboard; your Escape stops it) instead of running in the background",
 		options: [
 			{
-				value: "takeover",
-				label: "Takeover",
+				value: "fallback",
+				label: "Fallback",
 				description:
-					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
+					"Background first; a call whose background route is unavailable briefly brings the target forward, then returns focus to your app (on macOS even if you kept typing). The agent may also ask for takeover on a call",
+			},
+			{
+				value: "foreground",
+				label: "Foreground",
+				description:
+					"omp, never the agent, decides: take over input to a window already in front of you, and a call whose background route is unavailable; stay in the background otherwise",
+			},
+			{
+				value: "always",
+				label: "Always",
+				description:
+					"omp, never the agent, decides: take over every window and element input call, bringing the target forward for that call and then returning focus to your app",
 			},
 			{
 				value: "refuse",
 				label: "Refuse",
 				description:
-					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
+					"Never take over: a call whose background route is unavailable fails, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
 			},
 		],
 	},
@@ -768,6 +899,19 @@ export const cfgGithubEnabled = register({
 		label: "GitHub CLI",
 		description:
 			"Enable the github tool (op-based dispatch for repository, issue, pull request, diff, search, checkout, push, and Actions watch workflows)",
+	},
+});
+
+export const cfgGitlabEnabled = register({
+	id: "gitlab.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "GitLab CLI",
+		description:
+			"Enable the gitlab tool (op-based dispatch for project, file, issue, merge request, discussion, search, checkout, push, and CI pipeline workflows)",
 	},
 });
 
@@ -845,6 +989,19 @@ export const cfgAskEnabled = register({
 	},
 });
 
+export const cfgOutEnabled = register({
+	id: "out.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Out",
+		description:
+			"Let the agent reply mid-task by writing to out://, shown like a response without ending its turn. Unset: on in the interactive TUI, off in print, RPC, and ACP",
+	},
+});
+
 // Tool execution
 export const cfgToolsIntentTracing = register({
 	id: "tools.intentTracing",
@@ -855,7 +1012,8 @@ export const cfgToolsIntentTracing = register({
 		tab: "tools",
 		group: "Execution",
 		label: "Intent Tracing",
-		description: "Ask the agent to describe the intent of each tool call before executing it",
+		description:
+			"Ask the agent to describe the intent of each tool call before executing it. Unset: on in the interactive TUI, off in print, RPC, ACP, and SDK sessions",
 	},
 });
 
@@ -945,6 +1103,22 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
+// Print mode is single-shot by default: it disposes after the last prompt, cancelling the
+// run's background jobs. Opting in keeps `-p` alive so each job's async-result wakes the same
+// session, as the TUI does, before exiting (issue #10363).
+export const cfgAsyncPrintWake = register({
+	id: "async.printWake",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wake Print Mode on Job Results",
+		description:
+			"In print mode (-p, --mode json), keep running after the last prompt while this run's background jobs are active, and start another turn in the same session with each job's result; exits once no job or result is pending. Off: print mode exits after its prompts and cancels running jobs",
+	},
+});
+
 export const cfgAsyncWidgets = register({
 	id: "async.widgets",
 	type: "boolean",
@@ -954,56 +1128,121 @@ export const cfgAsyncWidgets = register({
 		group: "Execution",
 		label: "Live Job Widgets",
 		description:
-			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet. The `widget` model role (default: `smol`) writes one spec per job; updates need no further model calls",
+			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet, and caption long shell commands with one line on what they do. The `widget` model role (default: `smol`) writes one spec and at most one caption per job; updates need no further model calls",
 	},
 });
 
-export const cfgToolsXdev = register({
-	id: "tools.xdev",
+/**
+ * `wait.idleTimeout`: how long a wait on the caller's own background jobs or services blocks with
+ * nothing new before it returns a still-running snapshot. `ladder` uses the wait tool's built-in
+ * windows, a duration one fixed window (milliseconds), `none` no window at all.
+ */
+export type WaitIdleTimeout = "ladder" | "none" | number;
+
+const WAIT_IDLE_DURATION = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/;
+const WAIT_IDLE_TIMEOUT_USAGE = "wait.idleTimeout takes ladder, none, or a duration such as 90s, 30m or 1h30m";
+
+/** `ladder`, `none`, or a positive duration such as `90s`, `30m`, `1h30m` (in milliseconds); `undefined` for anything else. */
+function parseWaitIdleTimeout(text: string): WaitIdleTimeout | undefined {
+	const value = text.trim().toLowerCase();
+	if (value === "ladder" || value === "none") return value;
+	const match = WAIT_IDLE_DURATION.exec(value);
+	if (!match) return undefined;
+	const [, hours = "0", minutes = "0", seconds = "0"] = match;
+	const ms = (Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)) * 1000;
+	return ms > 0 && Number.isSafeInteger(ms) ? ms : undefined;
+}
+
+export const cfgWaitIdleTimeout = register({
+	id: "wait.idleTimeout",
+	type: "string",
+	default: "ladder",
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "string" || parseWaitIdleTimeout(raw) === undefined) {
+			throw new Error(`${WAIT_IDLE_TIMEOUT_USAGE}, got ${Bun.inspect(raw)}`);
+		}
+	},
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wait Idle Timeout",
+		description:
+			"How long `wait` blocks on the agent's own background jobs and services with nothing new before it returns a still-running snapshot. Ladder: 5s, then 4m for back-to-back waits. A duration: that one window every time. None: only a finished job or service, a message, steering, or an interrupt ends it. Waits for a reply keep the ladder",
+		options: [
+			{ value: "ladder", label: "Ladder", description: "Default; 5s, then 4m back-to-back" },
+			{ value: "1m", label: "1 minute" },
+			{ value: "5m", label: "5 minutes" },
+			{ value: "15m", label: "15 minutes" },
+			{ value: "30m", label: "30 minutes" },
+			{ value: "1h", label: "1 hour" },
+			{ value: "none", label: "None", description: "Block until a job or service finishes, or a message arrives" },
+		],
+	},
+});
+
+/** {@link cfgWaitIdleTimeout} parsed; `validate` rejects malformed values before they reach it. */
+export const waitIdleTimeout = cfgWaitIdleTimeout.map(value => parseWaitIdleTimeout(value) ?? "ladder");
+
+export const cfgToolsCommands = register({
+	id: "tools.commands",
 	type: "boolean",
 	default: true,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Tools",
+		label: "Tool Commands",
 		description:
-			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (only local:// scratch stays writable besides devices). Disable to expose every enabled tool top-level.",
+			"Mount rarely-used (discoverable) tools as bash commands with schema-derived `--help` instead of shipping their schemas on every request. Needs the bash tool: sessions without it keep every enabled tool top-level. Disable to expose every enabled tool top-level.",
 	},
 });
 
-export const cfgToolsXdevDocs = register({
-	id: "tools.xdevDocs",
+export const cfgToolsCommandDocs = register({
+	id: "tools.commandDocs",
 	type: "enum",
 	values: ["inline", "builtins", "catalog"] as const,
 	default: "catalog",
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Prompt Docs",
+		label: "Tool Command Prompt Docs",
 		description:
-			"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
+			"Choose which mounted commands get their `--help` text inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on demand.",
 		options: [
-			{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
+			{ value: "inline", label: "All Commands", description: "Inline help for every mounted command." },
 			{
 				value: "builtins",
 				label: "Built-ins Only",
-				description: "Inline built-in docs; fetch MCP and extension docs on demand.",
+				description: "Inline built-in help; MCP and extension help on demand.",
 			},
-			{ value: "catalog", label: "Catalog Only", description: "List every device; fetch all docs on demand." },
+			{ value: "catalog", label: "Catalog Only", description: "List every command; run `--help` on demand." },
 		],
 	},
 });
 
-export const cfgToolsXdevInlineDevices = register({
-	id: "tools.xdevInlineDevices",
+export const cfgToolsCommandInline = register({
+	id: "tools.commandInline",
 	type: "array",
 	default: EMPTY_STRING_ARRAY,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Inline Devices",
+		label: "Tool Command Inline Help",
 		description:
-			"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+			"When Tool Command Prompt Docs is Built-ins Only, also inline dynamic commands whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+	},
+});
+
+export const cfgToolsCommandNotices = register({
+	id: "tools.commandNotices",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Tool Command Mount Notices",
+		description:
+			"Show a notice when MCP or extension tools are mounted or unmounted as commands; the model still learns of the change with its next prompt.",
 	},
 });
 
@@ -1017,7 +1256,7 @@ export const cfgDevAutoqa = register({
 		group: "Developer",
 		label: "Auto QA",
 		description:
-			"Automated tool issue reporting (xd://report_issue). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
+			"Automated tool issue reporting (`report_issue`). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
 	},
 });
 
@@ -1071,13 +1310,14 @@ export const cfgBuiltinToolGates = combine({
 	checkpoint: cfgCheckpointEnabled,
 	contextManagement: cfgCompactionExperimentalContextManagement,
 	debug: cfgDebugEnabled,
+	editMode: cfgEditMode,
 	evalJs: cfgEvalJs,
 	evalPy: cfgEvalPy,
 	find: cfgFindEnabled,
 	github: cfgGithubEnabled,
+	gitlab: cfgGitlabEnabled,
 	glob: cfgGlobEnabled,
 	grep: cfgGrepEnabled,
-	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
 	security: cfgSecurityEnabled,
@@ -1091,5 +1331,5 @@ export const cfgSessionToolGates = combine({
 	builtins: cfgBuiltinToolGates,
 	generateImage: cfgGenerateImageEnabled,
 	speechgen: cfgSpeechgenEnabled,
-	xdev: cfgToolsXdev,
+	toolCommands: cfgToolsCommands,
 });

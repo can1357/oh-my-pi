@@ -18,11 +18,19 @@
 import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
-import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import { createOpenAICodexCompatibilityMetadata } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { applySessionHeader } from "@oh-my-pi/pi-ai/providers/inference-headers";
+import {
+	applyCodexResponsesLiteShape,
+	moveCodexInstructionsToInput,
+	withCodexRoutingFieldsFirst,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import {
+	applyInferenceHeaders,
+	applySessionHeader,
+	resolveOpenCodeGoCacheAffinity,
+} from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
 	encodeResponsesToolResultOutput,
+	getOpenAIPromptCacheKey,
 	hoistInterleavedResponsesToolBatchMessages,
 	parseAzureDeploymentNameMap,
 	parseTextSignature,
@@ -35,16 +43,19 @@ import type {
 	Message,
 	Model,
 	ProviderSessionState,
+	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai/types";
 import {
 	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
+	stripOpenAIResponsesInternalMetadataForReplay,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 	truncateResponseItemId,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { withResolvedHeaders } from "@oh-my-pi/pi-ai/utils/model-headers";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
@@ -59,7 +70,12 @@ import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
-import { isOpenAiRemoteCompactionApi } from "./compaction-v2-streaming";
+import {
+	isOpenAiRemoteCompactionApi,
+	parseResponsesCompactionUsage,
+	type ResponsesCompactionUsage,
+	remoteCompactionPolicyModel,
+} from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
 export * from "./compaction-v2-streaming";
@@ -100,18 +116,13 @@ interface RemoteEstimateParts {
 	imageTokens: number;
 }
 
-function collectRemoteCompactionEstimate(
-	value: unknown,
-	tokenizer: Tokenizer,
-	dropEncrypted: boolean,
-	parts: RemoteEstimateParts,
-): void {
+function collectRemoteCompactionEstimate(value: unknown, tokenizer: Tokenizer, parts: RemoteEstimateParts): void {
 	if (typeof value === "string") {
 		if (value) parts.fragments.push(value);
 		return;
 	}
 	if (Array.isArray(value)) {
-		for (const item of value) collectRemoteCompactionEstimate(item, tokenizer, dropEncrypted, parts);
+		for (const item of value) collectRemoteCompactionEstimate(item, tokenizer, parts);
 		return;
 	}
 	if (value === null || typeof value !== "object") {
@@ -141,9 +152,9 @@ function collectRemoteCompactionEstimate(
 		// Opaque encrypted reasoning/compaction state: its local base64 size far
 		// exceeds what the provider bills, so it stays out of the fit estimate
 		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
-		if (item === undefined || (dropEncrypted && key === "encrypted_content" && typeof item === "string")) continue;
+		if (item === undefined || (key === "encrypted_content" && typeof item === "string")) continue;
 		parts.framing.push(key);
-		collectRemoteCompactionEstimate(item, tokenizer, dropEncrypted, parts);
+		collectRemoteCompactionEstimate(item, tokenizer, parts);
 	}
 }
 
@@ -155,21 +166,20 @@ function collectRemoteCompactionEstimate(
 function remoteCompactionEstimateParts(
 	value: unknown,
 	tokenizer: Tokenizer,
-	dropEncrypted: boolean,
 ): { fragments: string[]; imageTokens: number } {
 	const parts: RemoteEstimateParts = { fragments: [], framing: [], imageTokens: 0 };
-	collectRemoteCompactionEstimate(value, tokenizer, dropEncrypted, parts);
+	collectRemoteCompactionEstimate(value, tokenizer, parts);
 	if (parts.framing.length > 0) parts.fragments.push(parts.framing.join(" "));
 	return { fragments: parts.fragments, imageTokens: parts.imageTokens };
 }
 
 /**
  * Tokens of stored Responses replacement history. Retained `input_image` parts
- * count at their image estimate rather than as base64 text; everything else,
- * opaque compaction state included, counts as decoded text.
+ * count at their image estimate, not their base64 size. Opaque encrypted state
+ * stays excluded, matching ordinary message estimates and remote fit checks.
  */
 export function countResponsesHistoryTokens(items: unknown[], tokenizer: Tokenizer): number {
-	const { fragments, imageTokens } = remoteCompactionEstimateParts(items, tokenizer, false);
+	const { fragments, imageTokens } = remoteCompactionEstimateParts(items, tokenizer);
 	return (fragments.length === 0 ? 0 : tokenizer.countTokens(fragments)) + imageTokens;
 }
 
@@ -214,7 +224,6 @@ function probeRemoteCompactionInputBudget(
 	const { fragments, imageTokens } = remoteCompactionEstimateParts(
 		{ instructions, input, ...(tools ? { tools } : {}) },
 		tokenizer,
-		true,
 	);
 	const flatTokens = imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
 	if (!contextWindow || contextWindow <= 0) {
@@ -360,6 +369,13 @@ export interface OpenAiRemoteCompactionRequest {
 	model: string;
 	input: Array<Record<string, unknown>>;
 	instructions: string;
+	/**
+	 * Responses body cache identity. Mirrors the V2 body: the explicit
+	 * prompt-cache key when supplied (normalized to the 64-char wire limit),
+	 * else the session-derived cache id — retention-gated through
+	 * `getOpenAIPromptCacheKey`; absent when it resolves to nothing.
+	 */
+	prompt_cache_key?: string;
 	reasoning?: {
 		context?: string;
 		[key: string]: unknown;
@@ -367,7 +383,10 @@ export interface OpenAiRemoteCompactionRequest {
 	include?: string[];
 }
 
-export interface OpenAiRemoteCompactionResponse extends OpenAiRemoteCompactionPreserveData {}
+/** A `/responses/compact` result: the history to preserve, plus the usage the body reported. */
+export interface OpenAiRemoteCompactionResponse extends OpenAiRemoteCompactionPreserveData {
+	usage?: ResponsesCompactionUsage;
+}
 
 export interface RemoteCompactionRequest {
 	systemPrompt: string;
@@ -842,6 +861,9 @@ export function buildOpenAiNativeHistory(
 		msgIndex++;
 	}
 
+	for (let index = 0; index < input.length; index++) {
+		input[index] = stripOpenAIResponsesInternalMetadataForReplay(input[index]!);
+	}
 	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
 }
 
@@ -858,12 +880,20 @@ export async function requestOpenAiRemoteCompaction(
 		fetch?: FetchImpl;
 		timeoutMs?: number;
 		sessionId?: string;
+		/**
+		 * Explicit prompt-cache identity. Feeds the Go family affinity header
+		 * (`x-opencode-session`) and the Responses body `prompt_cache_key`
+		 * under the same KDL gate as the V2 request; an absent/empty key keeps
+		 * the child conversation id.
+		 */
+		promptCacheKey?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		/** Forwarded to {@link trimRemoteCompactionInputToContextWindow}. */
 		rewriteOutputs?: boolean;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
+	model = await withResolvedHeaders(model, signal);
 	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
 		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));
@@ -889,6 +919,12 @@ export async function requestOpenAiRemoteCompaction(
 		});
 	}
 	assertRemoteCompactionInputFits(trimmed, model);
+	// Same cache identity as the V2 request: the resolved id prefers the
+	// explicit prompt-cache key and falls back to the session id, all
+	// retention-gated by getOpenAIPromptCacheKey (PI_CACHE_RETENTION=none
+	// resolves to nothing here, which then also drops the affinity below).
+	const cacheOptions = { sessionId: opts?.sessionId, promptCacheKey: opts?.promptCacheKey };
+	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
 	const request: OpenAiRemoteCompactionRequest = {
 		model: requestModel,
 		// Preserve the native transcript. Only oversized trailing tool outputs are
@@ -896,6 +932,7 @@ export async function requestOpenAiRemoteCompaction(
 		// reasoning, or call/result pairing.
 		input: trimmed.input,
 		instructions,
+		...(promptCacheSessionId ? { prompt_cache_key: promptCacheSessionId } : {}),
 	};
 	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
 	const isCodexResponses =
@@ -911,10 +948,30 @@ export async function requestOpenAiRemoteCompaction(
 				Authorization: `Bearer ${apiKey}`,
 				...model.headers,
 			};
+	// Same gate as the V2 request, against the request this compaction actually
+	// sends. Azure keeps its plain header shape (V2 skips the cascade there too).
+	// Only an EXPLICIT prompt-cache key feeds the affinity; the sessionId-derived
+	// cache id never does. `promptCacheSessionId` is already retention-gated.
+	if (!isAzureOpenAiResponses) {
+		applyInferenceHeaders(headers, {
+			provider: model.provider,
+			providerType: model.providerType,
+			protocol: "openai",
+			sessionId: opts?.sessionId,
+			compat: model.compat,
+			cacheAffinity: resolveOpenCodeGoCacheAffinity(
+				remoteCompactionPolicyModel(model),
+				opts?.promptCacheKey ? promptCacheSessionId : undefined,
+			),
+		});
+	}
 	applySessionHeader(headers, model.compat, opts?.sessionId);
 
 	// Codex endpoints require additional auth headers
 	if (isCodexResponses) {
+		// Keep transport loading on the actual Codex request path, not compaction policy inspection.
+		const { createOpenAICodexCompatibilityMetadata } =
+			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 		const accountId = getCodexAccountId(apiKey);
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
@@ -924,7 +981,6 @@ export async function requestOpenAiRemoteCompaction(
 		if (attestation) {
 			headers[OPENAI_HEADERS.ATTESTATION] = attestation;
 		}
-		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 		// This compaction request sends no `service_tier`, so the hint is model-only.
 		headers[OPENAI_HEADERS.ROUTING_HINT] = codexRoutingHint(request.model, undefined);
@@ -941,9 +997,10 @@ export async function requestOpenAiRemoteCompaction(
 				includeInstallationHeader: true,
 			}).headers,
 		);
-		// Responses Lite models take the same rewrite on `/responses/compact`:
-		// instructions ride as an input item and the lite marker header is set
-		// (codex-rs routes compaction through `build_responses_request`).
+		// codex-rs routes `/responses/compact` through `build_responses_request`:
+		// instructions always ride as a leading input item, and Responses Lite
+		// models additionally take the Lite rewrite and marker header.
+		moveCodexInstructionsToInput(request);
 		if (model.useResponsesLite) {
 			applyCodexResponsesLiteShape(request);
 			headers[OPENAI_HEADERS.RESPONSES_LITE] = "true";
@@ -958,7 +1015,7 @@ export async function requestOpenAiRemoteCompaction(
 	const response = await fetchImpl(endpoint, {
 		method: "POST",
 		headers,
-		body: stringifyJson(request),
+		body: stringifyJson(isCodexResponses ? withCodexRoutingFieldsFirst(request) : request),
 		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
 	});
 
@@ -980,7 +1037,7 @@ export async function requestOpenAiRemoteCompaction(
 		);
 	}
 
-	const data = (await response.json()) as { output?: unknown[] } | undefined;
+	const data = (await response.json()) as { output?: unknown[]; usage?: unknown } | undefined;
 	const rawOutput = data?.output ?? [];
 	const replacementHistory = rawOutput.filter(
 		(item): item is Record<string, unknown> =>
@@ -1005,7 +1062,8 @@ export async function requestOpenAiRemoteCompaction(
 		});
 		throw new Error("Remote compaction response missing compaction item");
 	}
-	return { provider: model.provider, replacementHistory, compactionItem };
+	const usage = parseResponsesCompactionUsage(data?.usage);
+	return { provider: model.provider, replacementHistory, compactionItem, ...(usage ? { usage } : {}) };
 }
 
 /**
@@ -1018,16 +1076,24 @@ export async function requestOpenAiRemoteCompaction(
  * HTTP 400 `"'messages' is required"`, compaction silently fell back to
  * local summarization, and context grew unbounded.
  *
- * When `context.model` is provided the chat-completions body is tagged with
- * that model's wire id (llama.cpp requires the field) and `context.apiKey` is
- * forwarded as `Authorization: Bearer`. Callers wrap this in `withAuth` so
- * 401s force-refresh through the standard credential rotation policy.
+ * On chat-completions endpoints the model's request headers are resolved for
+ * each call, its wire id is sent (llama.cpp requires it), and `opts.apiKey` is
+ * forwarded as `Authorization: Bearer`. Custom summarizers receive no model
+ * credentials. `opts.onPayload` can inspect or replace either request body.
+ * Callers wrap this in `withAuth` so 401s force-refresh through the standard
+ * credential rotation policy.
  */
 export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string },
+	opts?: {
+		fetch?: FetchImpl;
+		timeoutMs?: number;
+		model?: Model;
+		apiKey?: string;
+		onPayload?: SimpleStreamOptions["onPayload"];
+	},
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -1036,13 +1102,18 @@ export async function requestRemoteCompaction(
 		// Keep the raw endpoint for relative/custom fetch implementations.
 	}
 	const isChatCompletions = /\/chat\/completions\/?$/.test(endpointPath);
-	const headers: Record<string, string> = { "content-type": "application/json" };
+	const headers = new Headers({ "content-type": "application/json" });
 	if (isChatCompletions) {
-		if (opts?.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
-		if (opts?.model?.headers) Object.assign(headers, opts.model.headers);
+		if (opts?.apiKey) headers.set("Authorization", `Bearer ${opts.apiKey}`);
+		const model = opts?.model;
+		const configuredHeaders = model ? (await withResolvedHeaders(model, signal)).headers : undefined;
+		// `set` replaces case-insensitively, so a configured `authorization` overrides the default bearer.
+		if (configuredHeaders) {
+			for (const name in configuredHeaders) headers.set(name, configuredHeaders[name]!);
+		}
 	}
 
-	const body: Record<string, unknown> = isChatCompletions
+	let body: unknown = isChatCompletions
 		? {
 				model: opts?.model ? resolveOpenAiCompactModel(opts.model) : undefined,
 				messages: [
@@ -1053,6 +1124,8 @@ export async function requestRemoteCompaction(
 				max_tokens: request.maxTokens,
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
+	const replacement = await opts?.onPayload?.(body, opts.model, signal);
+	if (replacement !== undefined) body = replacement;
 
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",

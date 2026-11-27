@@ -1,19 +1,6 @@
-import { logger } from "@oh-my-pi/pi-utils";
-import {
-	type ModelWorkerMessage,
-	ModelWorkerHost,
-	spawnRefCountedWorker,
-	wrapRefCountedSubprocess,
-} from "../subprocess/model-worker-host";
-import {
-	createWorkerSubprocess,
-	type RefCountedWorkerHandle,
-	resolveWorkerSpawnCmd,
-	SMOKE_TEST_TIMEOUT_MS,
-	type SpawnedSubprocess,
-	smokeTestWorker,
-} from "../subprocess/worker-client";
-import { tinyWorkerEnv } from "../tiny/title-client";
+import { logger, toError } from "@oh-my-pi/pi-utils";
+import { type ModelWorkerMessage, type ModelWorkerSender, ModelWorkerHost } from "../subprocess/model-worker-host";
+import { SMOKE_TEST_TIMEOUT_MS } from "../subprocess/worker-client";
 import { getTtsLocalModelSpec, isTtsLocalModelKey, type TtsLocalModelKey } from "./models";
 import type { TtsProgressEvent, TtsWorkerInbound, TtsWorkerOutbound } from "./tts-protocol";
 
@@ -67,12 +54,12 @@ export interface TtsStreamHandle {
 }
 
 /**
- * Single-producer/single-consumer async queue bridging the worker's IPC
+ * Single-producer/single-consumer async queue bridging the worker's tunnelled
  * `audio-chunk` messages to an async iterator. Chunks pushed while no consumer
  * is awaiting are buffered in order; {@link close} ends the iterator and
  * {@link fail} surfaces an error to the awaiting (or next) consumer.
  */
-class AudioChunkChannel {
+export class AudioChunkChannel {
 	#queue: TtsAudioChunk[] = [];
 	#waiters: Array<{
 		resolve: (result: IteratorResult<TtsAudioChunk>) => void;
@@ -132,34 +119,20 @@ class AudioChunkChannel {
 }
 
 /**
- * Hidden subcommand on the main CLI that boots the TTS worker in the spawned
- * subprocess. Kept in sync with the dispatch in `cli.ts` (Main-owned).
+ * Hidden subcommand on the main CLI that boots the TTS worker (spawned by the
+ * daemon `speech` module). Kept in sync with the dispatch in `cli.ts`.
  */
 export const TTS_WORKER_ARG = "__omp_worker_tts";
-
-/**
- * Spawn the TTS worker as a subprocess. Exported for tests and the smoke probe;
- * production callers go through {@link spawnTtsWorker}.
- */
-export function createTtsSubprocess(): SpawnedSubprocess<TtsWorkerOutbound> {
-	return createWorkerSubprocess<TtsWorkerOutbound>({
-		spawnCommand: resolveWorkerSpawnCmd(TTS_WORKER_ARG),
-		env: tinyWorkerEnv(),
-		exitLabel: "tts subprocess",
-	});
-}
-
-function spawnTtsWorker(): RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> {
-	return spawnRefCountedWorker(createTtsSubprocess, "tts", "TTS worker spawn failed; local TTS disabled");
-}
 
 export class TtsClient {
 	#host: ModelWorkerHost<TtsLocalModelKey, TtsWorkerInbound, TtsWorkerOutbound, TtsRequest, TtsProgressEvent>;
 
-	constructor(spawnWorker: () => RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> = spawnTtsWorker) {
+	/** `smoke`: a private unit the daemon stops once {@link terminate} releases it. */
+	constructor(options: { smoke?: boolean } = {}) {
 		this.#host = new ModelWorkerHost({
 			name: "tts",
-			spawnWorker,
+			smoke: options.smoke,
+			workerArg: TTS_WORKER_ARG,
 			modelLabel: modelKey => getTtsLocalModelSpec(modelKey)?.label ?? modelKey,
 			handleMessage: message => this.#handleMessage(message),
 			failRequest: (request, error, terminated) => {
@@ -207,7 +180,7 @@ export class TtsClient {
 	 * at a time via `chunks`, so playback can begin before the full text is
 	 * known. Returns an inert handle (immediately-ended `chunks`) for unknown
 	 * models or an already-aborted signal, and fails the iterator if the worker
-	 * cannot spawn.
+	 * cannot start.
 	 */
 	synthesizeStream(modelKey: string, options: TtsStreamOptions = {}): TtsStreamHandle {
 		if (!isTtsLocalModelKey(modelKey) || options.signal?.aborted) {
@@ -216,7 +189,7 @@ export class TtsClient {
 			return { push: () => {}, end: () => {}, chunks: channel.iterator() };
 		}
 
-		let worker: RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound>;
+		let worker: ModelWorkerSender<TtsWorkerInbound>;
 		try {
 			worker = this.#host.ensureWorker();
 		} catch (error) {
@@ -225,7 +198,7 @@ export class TtsClient {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			const channel = new AudioChunkChannel();
-			channel.fail(error instanceof Error ? error : new Error(String(error)));
+			channel.fail(toError(error));
 			return { push: () => {}, end: () => {}, chunks: channel.iterator() };
 		}
 
@@ -273,6 +246,11 @@ export class TtsClient {
 		return (await this.#host.downloadModel(modelKey, options)).ok;
 	}
 
+	/** Round-trip a `ping` to the worker. */
+	ping(timeoutMs: number): Promise<void> {
+		return this.#host.ping(timeoutMs);
+	}
+
 	terminate(): Promise<void> {
 		return this.#host.terminate();
 	}
@@ -305,11 +283,14 @@ export class TtsClient {
 			return;
 		}
 		logger.debug("tts: worker returned error", { error: message.error });
+		if (pending.kind === "ping") {
+			pending.reject(new Error(message.error));
+			return;
+		}
 		this.#host.emitProgress({ modelKey: pending.modelKey, status: "error" }, message.error);
 		if (pending.kind === "synthesize") pending.resolve(null);
 		else if (pending.kind === "download") pending.resolve({ ok: false, error: message.error });
 		else pending.channel.fail(new Error(message.error));
-		void this.terminate();
 	}
 }
 
@@ -319,14 +300,16 @@ export async function shutdownTtsClient(): Promise<void> {
 	await ttsClient.terminate();
 }
 
+/** `omp --smoke-test` probe: start the TTS worker under the daemon, ping it, and let the daemon stop it. */
 export async function smokeTestTtsWorker({
 	timeoutMs = SMOKE_TEST_TIMEOUT_MS,
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	await smokeTestWorker(
-		wrapRefCountedSubprocess<TtsWorkerInbound, TtsWorkerOutbound>(createTtsSubprocess(), "tts"),
-		"tts worker",
-		timeoutMs,
-	);
+	const client = new TtsClient({ smoke: true });
+	try {
+		await client.ping(timeoutMs);
+	} finally {
+		await client.terminate();
+	}
 }

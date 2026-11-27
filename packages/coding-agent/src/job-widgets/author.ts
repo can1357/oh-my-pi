@@ -4,18 +4,19 @@
  * schema, fed the job's brief and redacted output samples.
  */
 import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, Tool, ToolChoice, UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { formatBytes, prompt, truncate } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
-import { getModelMatchPreferences, parseModelPattern, resolveModelRoleValue } from "../config/model-resolver";
-import { formatModelRoleAlias } from "../config/model-roles";
+import { resolveRoleChain } from "../config/model-resolver";
+import { providerRoleCandidatePool, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-widget-system.md" with { type: "text" };
 import userPrompt from "../prompts/system/job-widget-user.md" with { type: "text" };
 import { CREDENTIAL_PATTERNS } from "../secrets/patterns";
+import type { CostGateApi } from "../session/cost-gate";
 import type { JobWidgetSourceSample } from "./runtime";
 import { JOB_WIDGET_SPEC_SCHEMA, type JobWidgetSpec } from "./spec";
 import type { JobWidgetBrief } from "./types";
@@ -165,56 +166,103 @@ export interface ModelJobWidgetAuthorOptions {
 	telemetry?: () => AgentTelemetryConfig | undefined;
 	/** The session's secret obfuscation, when secret handling is on. */
 	obfuscate?: () => ((text: string) => string) | undefined;
-	/** Each completed request's assistant message, for usage accounting (purpose `job-widget`). */
-	onUsage?: (message: AssistantMessage) => void;
+	/** Each completed request's assistant message and the user-turn text it answered, for usage accounting (purpose `job-widget`). */
+	onUsage?: (message: AssistantMessage, prompt: string) => void;
+	/** The session tree's current cost gate: refuses the request at the cap and adds its cost. */
+	costGate?: () => CostGateApi | undefined;
+	/** Provider of the session's active model; offline mode (`models.offline`) sends requests only there. */
+	getSessionProvider?: () => string | undefined;
+}
+
+/** One `widget`-role request, sent unchanged to each candidate {@link completeWidgetRequest} tries. */
+export interface WidgetRequest {
+	systemPrompt: string;
+	/** The user turn: the job's own text, which never repeats across requests. */
+	prompt: string;
+	tools?: Tool[];
+	maxTokens: number;
+	toolChoice?: ToolChoice;
+	/** Telemetry kind of the request (`job_widget`, `job_caption`). */
+	oneshotKind: string;
 }
 
 /**
- * The `widget` role's model with a usable credential: the role (configured,
- * or resolved like `smol`), then the built-in `smol` defaults.
+ * Sends a `widget`-role request for the spec author and job captions. Tries
+ * each model of the role's chain with a usable credential in order: the
+ * primary (configured, or resolved like `smol`), then
+ * `retry.fallbackChains.widget`, else the built-in `smol` defaults. Stops at
+ * the first reply that is not an error. Every attempt passes the cost gate and
+ * reaches `onUsage`. Offline mode (`models.offline`) keeps the chain on
+ * `getSessionProvider`'s provider, and tries none without one.
+ *
+ * Resolves `undefined` when no candidate has a credential. Throws
+ * `CostCapError` at the cost cap, an error on an aborted reply, and the last
+ * attempt's error once every candidate has replied with one.
  */
-async function resolveWidgetModel(
-	settings: Settings,
-	registry: ModelRegistry,
-	sessionId: string | undefined,
+export async function completeWidgetRequest(
+	options: ModelJobWidgetAuthorOptions,
+	request: WidgetRequest,
 	signal: AbortSignal,
-): Promise<Model<Api> | undefined> {
-	const available = registry.getAvailable();
-	const matchPreferences = getModelMatchPreferences(settings);
-	const candidates: Model<Api>[] = [];
-	const role = resolveModelRoleValue(formatModelRoleAlias("widget"), available, { settings, matchPreferences }).model;
-	if (role) candidates.push(role);
-	for (const pattern of roleDefaultModels().smol ?? []) {
-		const model = parseModelPattern(pattern, available, matchPreferences).model;
-		if (model) candidates.push(model);
+): Promise<AssistantMessage | undefined> {
+	const { settings, modelRegistry } = options;
+	const sessionId = options.sessionId();
+	const costGate = options.costGate?.();
+	let failure: AssistantMessage | undefined;
+	const message: UserMessage = {
+		role: "user",
+		content: [{ type: "text", text: request.prompt }],
+		timestamp: Date.now(),
+	};
+	// The system prompt and tools are the reusable prefix (cached by the provider). The job's text
+	// never repeats, so a cache breakpoint on it would only bill a cache write.
+	markPerCallContextMessage(message);
+	const context = { systemPrompt: [request.systemPrompt], messages: [message], tools: request.tools };
+	let pool: Model[] = [];
+	if (!cfgOffline.get(settings)) {
+		pool = roleCandidatePool("widget", settings, modelRegistry);
+	} else {
+		// Offline mode reads only the session provider's catalog, and none without one.
+		const provider = options.getSessionProvider?.();
+		if (provider) pool = providerRoleCandidatePool("widget", settings, modelRegistry, provider);
 	}
-	for (const model of candidates) {
-		if (await registry.getApiKey(model, sessionId, { signal })) return model;
+	for (const { model } of resolveRoleChain("widget", settings, pool)) {
+		if (!(await modelRegistry.getApiKey(model, sessionId, { signal }))) continue;
+		costGate?.admit();
+		const response = await instrumentedCompleteSimple(
+			model,
+			context,
+			{
+				apiKey: modelRegistry.resolver(model, sessionId),
+				signal,
+				// Widget specs and captions are formatting work; a forced tool call also rules out thinking on some providers.
+				disableReasoning: true,
+				maxTokens: request.maxTokens,
+				toolChoice: request.toolChoice,
+			},
+			{ telemetry: resolveTelemetry(options.telemetry?.(), sessionId), oneshotKind: request.oneshotKind },
+		);
+		costGate?.record(response.usage.cost.total);
+		options.onUsage?.(response, request.prompt);
+		if (response.stopReason === "aborted" || signal.aborted) {
+			throw new Error(response.errorMessage ?? `${request.oneshotKind} request aborted`);
+		}
+		if (response.stopReason !== "error") return response;
+		failure = response;
 	}
+	if (failure) throw new Error(failure.errorMessage ?? `${request.oneshotKind} request failed`);
 	return undefined;
 }
 
 /** A {@link JobWidgetAuthor} backed by the `widget` model role. */
 export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions): JobWidgetAuthor {
 	return async (request, signal) => {
-		const sessionId = options.sessionId();
-		const model = await resolveWidgetModel(options.settings, options.modelRegistry, sessionId, signal);
-		if (!model) return undefined;
 		const obfuscate = options.obfuscate?.();
 		const redact = (text: string): string => redactWidgetSample(text, obfuscate);
-		const message: UserMessage = {
-			role: "user",
-			content: [{ type: "text", text: renderJobWidgetPrompt(request, redact) }],
-			timestamp: Date.now(),
-		};
-		// The system prompt and schema are the reusable prefix (cached by the provider). The job's
-		// samples never repeat, so a cache breakpoint on them would only bill a cache write.
-		markPerCallContextMessage(message);
-		const response = await instrumentedCompleteSimple(
-			model,
+		const response = await completeWidgetRequest(
+			options,
 			{
-				systemPrompt: [systemPrompt],
-				messages: [message],
+				systemPrompt,
+				prompt: renderJobWidgetPrompt(request, redact),
 				tools: [
 					{
 						name: RESPOND_TOOL,
@@ -223,21 +271,13 @@ export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions)
 						strict: false,
 					},
 				],
-			},
-			{
-				apiKey: options.modelRegistry.resolver(model, sessionId),
-				signal,
-				// Spec writing is formatting work; a forced tool call also rules out thinking on some providers.
-				disableReasoning: true,
 				maxTokens: MAX_SPEC_TOKENS,
 				toolChoice: { type: "tool", name: RESPOND_TOOL },
+				oneshotKind: "job_widget",
 			},
-			{ telemetry: resolveTelemetry(options.telemetry?.(), sessionId), oneshotKind: "job_widget" },
+			signal,
 		);
-		options.onUsage?.(response);
-		if (response.stopReason === "error" || response.stopReason === "aborted") {
-			throw new Error(response.errorMessage ?? `widget spec request ${response.stopReason}`);
-		}
+		if (!response) return undefined;
 		const call = extractToolCall(response, RESPOND_TOOL);
 		if (call) return call.arguments;
 		const text = extractTextContent(response);

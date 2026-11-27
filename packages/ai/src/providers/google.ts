@@ -44,8 +44,10 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 			};
 			applyInferenceHeaders(headers, {
 				provider: model.provider,
+				providerType: model.providerType,
 				protocol: "google",
 				sessionId: options?.sessionId ?? options?.promptCacheKey,
+				parentSessionId: options?.parentSessionId,
 			});
 			return { params, url, headers, fetch: options?.fetch };
 		},

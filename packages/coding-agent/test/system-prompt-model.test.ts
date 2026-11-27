@@ -37,7 +37,7 @@ async function expectPromptDateFromStartupTimezone(options: {
 import { renderDateCwdReminder } from ${JSON.stringify(
 			path.resolve(import.meta.dir, "../src/session/date-cwd-reminder.ts"),
 		)};
-import { formatLocalCalendarDate } from ${JSON.stringify(path.resolve(import.meta.dir, "../../tui/src/chrome/local-date.ts"))};
+import { formatLocalCalendarDate } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/utils/local-date.ts"))};
 
 setSystemTime(new Date(process.env.OMP_TEST_NOW!));
 try {
@@ -172,10 +172,10 @@ describe("AgentSession model-change prompt refresh", () => {
 
 	function pickModelsAcrossTaskPolicies(): [Model, Model] {
 		const all = modelRegistry.getAll();
-		const eager = all.find(model => resolveDelegationBias(model) === "eager");
+		const gated = all.find(model => resolveDelegationBias(model) === "gated");
 		const restrained = all.find(model => resolveDelegationBias(model) === "restrained");
-		if (!eager || !restrained) throw new Error("Expected eager and restrained delegation models");
-		return [eager, restrained];
+		if (!gated || !restrained) throw new Error("Expected gated and restrained delegation models");
+		return [gated, restrained];
 	}
 
 	function newSession(
@@ -185,7 +185,12 @@ describe("AgentSession model-change prompt refresh", () => {
 	): AgentSession {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+			initialState: {
+				model,
+				systemPrompt: ["initial"],
+				tools: [],
+				messages: [],
+			},
 		});
 		const created = new AgentSession({
 			agent,
@@ -207,7 +212,9 @@ describe("AgentSession model-change prompt refresh", () => {
 		session = newSession(modelA, Settings.isolated({ "compaction.enabled": false }), async () => {
 			rebuildCount++;
 			const active = session?.model;
-			return { systemPrompt: [`model:${active ? `${active.provider}/${active.id}` : ""}`] };
+			return {
+				systemPrompt: [`model:${active ? `${active.provider}/${active.id}` : ""}`],
+			};
 		});
 
 		await session.setModel(modelB);
@@ -227,7 +234,10 @@ describe("AgentSession model-change prompt refresh", () => {
 		let rebuildCount = 0;
 		session = newSession(
 			modelA,
-			Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: false }),
+			Settings.isolated({
+				"compaction.enabled": false,
+				includeModelInPrompt: false,
+			}),
 			async () => {
 				rebuildCount++;
 				return { systemPrompt: ["unchanged"] };
@@ -247,7 +257,10 @@ describe("AgentSession model-change prompt refresh", () => {
 		let rebuildCount = 0;
 		session = newSession(
 			modelA,
-			Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: false }),
+			Settings.isolated({
+				"compaction.enabled": false,
+				includeModelInPrompt: false,
+			}),
 			async () => {
 				rebuildCount++;
 				return { systemPrompt: ["policy changed"] };

@@ -20,7 +20,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ContextNotesTool, NewContextTool } from "@oh-my-pi/pi-coding-agent/tools/context-notes";
@@ -103,7 +103,10 @@ describe("experimental context management", () => {
 		session = undefined;
 	});
 
-	async function createRolloverSession() {
+	async function createRolloverSession(options?: {
+		/** Runs inside a `session_before_compact` hook, with the live session manager. */
+		sessionBeforeCompact?: (manager: SessionManager) => void | Promise<void>;
+	}) {
 		const mock = createMockModel({
 			responses: [
 				{
@@ -140,6 +143,26 @@ describe("experimental context management", () => {
 			getApiKey: () => "test-key",
 			streamFn: mock.stream,
 		});
+		let extensionRunner: ExtensionRunner | undefined;
+		let hookTempDir: TempDir | undefined;
+		if (options?.sessionBeforeCompact) {
+			const hook = options.sessionBeforeCompact;
+			hookTempDir = TempDir.createSync("@pi-experimental-rollover-hook-");
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					pi.on("session_before_compact", async () => {
+						await hook(manager);
+						return {};
+					});
+				},
+				hookTempDir.path(),
+				new EventBus(),
+				runtime,
+				"experimental-rollover-hook",
+			);
+			extensionRunner = new ExtensionRunner([extension], runtime, hookTempDir.path(), manager, modelRegistry);
+		}
 		session = new AgentSession({
 			agent,
 			sessionManager: manager,
@@ -147,9 +170,10 @@ describe("experimental context management", () => {
 			modelRegistry,
 			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 			builtInToolNames: BUILTIN_TOOL_NAMES,
+			extensionRunner,
 		});
 		await session.setActiveToolsByName(tools.map(tool => tool.name));
-		return { session, manager, mock };
+		return { session, manager, mock, hookTempDir };
 	}
 
 	it("rolls over once on new_context below the automatic threshold", async () => {
@@ -278,6 +302,67 @@ describe("experimental context management", () => {
 		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 		expect(session.isCompacting).toBe(false);
 	});
+	it("does not repeatedly roll over a tool loop when fixed context exceeds the recovery band", async () => {
+		const mock = createMockModel({
+			contextWindow: 200_000,
+			responses: [
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: ["done"] },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: ["done again"] },
+			],
+		});
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([mock.model]);
+		const fixedPrompt = "fixed context ".repeat(100_000);
+		const manager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"compaction.experimentalContextManagement": true,
+			"compaction.thresholdTokens": 100_000,
+			"compaction.keepRecentTokens": 1,
+			"compaction.midTurnEnabled": true,
+			"compaction.autoContinue": false,
+		});
+		const { tools } = createRolloverTools(manager, settings);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: mock.model,
+				systemPrompt: [fixedPrompt],
+				tools,
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: manager,
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			builtInToolNames: BUILTIN_TOOL_NAMES,
+		});
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		await session.prompt("Continue the assignment across three tool calls.");
+		expect(mock.calls).toHaveLength(4);
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(1);
+
+		const previousSessionId = manager.getSessionId();
+		expect(await session.newSession()).toBe(true);
+		expect(manager.getSessionId()).not.toBe(previousSessionId);
+		agent.setSystemPrompt([fixedPrompt]);
+		await session.prompt("Continue the next assignment.");
+		expect(mock.calls).toHaveLength(6);
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(2);
+	});
+
 	it("keeps exact earlier requirements and the latest notebook through three real rollover boundaries", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");
@@ -733,6 +818,60 @@ describe("experimental context management", () => {
 			expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 		} finally {
 			tempDir.removeSync();
+		}
+	});
+
+	it("commits the explicit rollover when a non-message entry races the leaf guard (#20063)", async () => {
+		const {
+			session: rolloverSession,
+			manager,
+			hookTempDir,
+		} = await createRolloverSession({
+			sessionBeforeCompact: racingManager => {
+				// Mirrors the goal runtime's usage bookkeeping: a fire-and-forget
+				// non-message append landing between the new_context tool result
+				// and the compaction commit.
+				racingManager.appendModeChange("goal", { goal: "racemode" });
+			},
+		});
+		try {
+			const events: AgentSessionEvent[] = [];
+			rolloverSession.subscribe(event => {
+				events.push(event);
+			});
+			await rolloverSession.prompt("Implement the task.");
+			await rolloverSession.waitForIdle();
+
+			expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+			expect(events.filter(event => event.type === "auto_compaction_end" && event.skipped)).toHaveLength(0);
+			expect(events.filter(event => event.type === "notice")).toHaveLength(0);
+		} finally {
+			hookTempDir?.removeSync();
+		}
+	});
+
+	it("still drops the explicit rollover when a transcript message races the leaf guard", async () => {
+		const {
+			session: rolloverSession,
+			manager,
+			hookTempDir,
+		} = await createRolloverSession({
+			sessionBeforeCompact: racingManager => {
+				racingManager.appendMessage(user("a message that must survive the boundary"));
+			},
+		});
+		try {
+			const events: AgentSessionEvent[] = [];
+			rolloverSession.subscribe(event => {
+				events.push(event);
+			});
+			await rolloverSession.prompt("Implement the task.");
+			await rolloverSession.waitForIdle();
+
+			expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+			expect(events.some(event => event.type === "notice" && event.source === "compaction")).toBe(true);
+		} finally {
+			hookTempDir?.removeSync();
 		}
 	});
 });

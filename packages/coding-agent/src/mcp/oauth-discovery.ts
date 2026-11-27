@@ -87,6 +87,21 @@ export function extractOAuthChallengeScopes(error: Error): string | undefined {
 }
 
 /**
+ * Scopes an RFC 6750 §3.1 `insufficient_scope` challenge asks for: the
+ * `scope` parameter of the first `WWW-Authenticate` value whose `error` is
+ * `insufficient_scope` (`""` when it names none). Undefined when no value is
+ * such a challenge. The tool bridge treats a defined result as a step-up
+ * request; `reauthorizeMcpServer` adds the scopes to the grant.
+ */
+export function insufficientScopeOf(challenges: readonly string[]): string | undefined {
+	for (const challenge of challenges) {
+		if (!/\berror\s*=\s*"?insufficient_scope\b/i.test(challenge)) continue;
+		return challenge.match(/\bscope\s*=\s*"([^"]*)"/i)?.[1]?.trim() ?? "";
+	}
+	return undefined;
+}
+
+/**
  * Extract OAuth endpoints from error response.
  * Looks for WWW-Authenticate header format or JSON error bodies.
  */
@@ -563,7 +578,8 @@ export async function discoverOAuthEndpoints(
 	): OAuthEndpoints | null => {
 		const metadataScopes = readMetadataScopes(metadata, scopeOptions);
 		if (metadata.authorization_endpoint && metadata.token_endpoint) {
-			const resource = typeof metadata.resource === "string" ? metadata.resource : protectedResource;
+			// RFC 9728 names this MCP server; an auth server's `resource` is its own default audience.
+			const resource = protectedResource ?? (typeof metadata.resource === "string" ? metadata.resource : undefined);
 
 			return {
 				authorizationUrl: String(metadata.authorization_endpoint),
@@ -589,7 +605,8 @@ export async function discoverOAuthEndpoints(
 		if (metadata.oauth || metadata.authorization || metadata.auth) {
 			const oauthData = (metadata.oauth || metadata.authorization || metadata.auth) as Record<string, unknown>;
 			if (typeof oauthData.authorization_url === "string" && typeof oauthData.token_url === "string") {
-				const resource = typeof oauthData.resource === "string" ? oauthData.resource : protectedResource;
+				const resource =
+					protectedResource ?? (typeof oauthData.resource === "string" ? oauthData.resource : undefined);
 
 				return {
 					authorizationUrl: oauthData.authorization_url || String(oauthData.authorizationUrl),

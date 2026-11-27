@@ -11,17 +11,15 @@
  */
 import * as path from "node:path";
 import type { ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
-import { setInternalUrlCompletionHost } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
-import { splitInternalUrlSel } from "@oh-my-pi/pi-tui/tools/read";
-import { setInternalUrlSchemeHost, splitUrlScheme } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { splitUrlScheme } from "./url-scheme";
+import { ToolError } from "../tools/tool-errors";
 import type { ToolSession } from "../tools";
 import { TIER_RANK } from "../tools/approval";
 import { AgentProtocolHandler } from "./agent-protocol";
-import { ArtifactProtocolHandler } from "./artifact-protocol";
 import { AttachmentProtocolHandler } from "./attachment-protocol";
 import { CfgProtocolHandler } from "./cfg-protocol";
 import { ConflictProtocolHandler } from "./conflict-protocol";
+import { HelpProtocolHandler } from "./help-protocol";
 import { HistoryProtocolHandler } from "./history-protocol";
 import { IssueProtocolHandler, PrProtocolHandler } from "./issue-pr-protocol";
 import { LocalProtocolHandler } from "./local-protocol";
@@ -29,6 +27,7 @@ import { McpProtocolHandler } from "./mcp-protocol";
 import { MemoryProtocolHandler } from "./memory-protocol";
 import { MrProtocolHandler } from "./mr-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
+import { OutProtocolHandler } from "./out-protocol";
 import { extractUriScheme, parseInternalUrl } from "./parse";
 import { ProcProtocolHandler } from "./proc-protocol";
 import { RuleProtocolHandler } from "./rule-protocol";
@@ -41,6 +40,7 @@ import type {
 	InternalWriteResult,
 	LocateOptions,
 	ProtocolHandler,
+	RemoteEditHooks,
 	ResolveContext,
 	SchemeHost,
 	SchemeSpec,
@@ -48,14 +48,14 @@ import type {
 	WriteContext,
 } from "./types";
 import { VaultProtocolHandler } from "./vault-protocol";
-import { XdProtocolHandler } from "./xd-protocol";
+import { splitInternalUrlSel } from "../tools/details/read";
 
-setInternalUrlCompletionHost({
-	completionSchemes: () => InternalUrlRouter.instance().completionSchemes(),
-	resolveCompletions: (scheme, query, context) => InternalUrlRouter.instance().complete(scheme, query, context),
-});
-
-setInternalUrlSchemeHost({ spec: scheme => InternalUrlRouter.instance().spec(scheme) });
+/** A URL whose scheme lets `edit` update it in place through a local mirror (`spec.write.edits`). */
+export interface RemoteEditTarget {
+	url: InternalUrl;
+	scheme: string;
+	hooks: RemoteEditHooks;
+}
 
 /**
  * Routed read/search target.
@@ -107,9 +107,9 @@ export class InternalUrlRouter {
 		this.register(new SkillProtocolHandler());
 		this.register(new RuleProtocolHandler());
 		this.register(new MemoryProtocolHandler());
+		this.register(new OutProtocolHandler());
 		this.register(new AgentProtocolHandler());
 		this.register(new HistoryProtocolHandler());
-		this.register(new ArtifactProtocolHandler());
 		this.register(new LocalProtocolHandler());
 		this.register(new ProcProtocolHandler());
 		this.register(new CfgProtocolHandler());
@@ -122,7 +122,7 @@ export class InternalUrlRouter {
 		this.register(new MrProtocolHandler());
 		this.register(resourceFallback);
 		this.register(new OmpProtocolHandler());
-		this.register(new XdProtocolHandler());
+		this.register(new HelpProtocolHandler());
 		this.register(new AttachmentProtocolHandler());
 		this.register(new ConflictProtocolHandler());
 		this.#builtinSchemes = new Set(this.#handlers.keys());
@@ -162,6 +162,16 @@ export class InternalUrlRouter {
 			}
 			if (!handler.locate) throw new Error(`${scheme}:// spec.write.via "file" requires a locate() hook`);
 			if (spec.immutable) throw new Error(`${scheme}:// spec.write.via "file" contradicts spec.immutable`);
+		}
+		if (spec.write?.edits !== undefined) {
+			if (via !== "handler" || spec.write.payload !== "text" || spec.backing !== "remote") {
+				throw new Error(
+					`${scheme}:// spec.write.edits requires backing "remote" with a handler-written text payload`,
+				);
+			}
+			if (!handler.edit) throw new Error(`${scheme}:// spec.write.edits requires edit() hooks`);
+		} else if (handler.edit) {
+			throw new Error(`${scheme}:// handler has edit() hooks but spec.write.edits is absent`);
 		}
 		if (spec.write?.scope === "sandbox" && (!spec.linkable || !handler.locateSync)) {
 			throw new Error(`${scheme}:// spec.write.scope "sandbox" requires spec.linkable and a locateSync() hook`);
@@ -267,11 +277,17 @@ export class InternalUrlRouter {
 	 * A mutating tool's URL target ({@link normalize}d) with a whole-file display selector
 	 * (`:raw`/`:conflicts`) peeled, so it names the file `read` does. Any other selector — a line
 	 * range, `raw:1-20`, a malformed `:-10` — throws ToolError: the tool addresses a whole file, and
-	 * dropping the selector would mutate a file the caller never named. Non-URLs pass through.
+	 * dropping the selector would mutate a file the caller never named. Device-backed schemes
+	 * (proc://, out://) refuse every selector: write approval judges the unpeeled URL, so
+	 * peeling one would act on a handle the gate never judged. Non-URLs pass through.
 	 */
 	peelWriteSelector(input: string, tool: string): string {
 		const { path, sel } = this.split(input);
-		if (sel === undefined || WHOLE_FILE_SELECTOR_RE.test(sel)) return path;
+		if (sel === undefined) return path;
+		if (this.#registered(path)?.handler.spec.backing === "device") {
+			throw new ToolError(`${tool} does not accept the trailing selector ":${sel}" on a device URL. Remove it.`);
+		}
+		if (WHOLE_FILE_SELECTOR_RE.test(sel)) return path;
 		throw new ToolError(
 			`${tool} does not accept the trailing selector ":${sel}" — it addresses a whole file. ` +
 				`Remove ":${sel}", or if the filename truly ends with it, percent-encode the ":" as %3A.`,
@@ -309,8 +325,8 @@ export class InternalUrlRouter {
 
 	/**
 	 * locate or throw ToolError. A locatable, immutable, non-remote scheme resolves from session-local
-	 * stores, so its resolve error diagnoses the miss (`Cannot find artifact://9: Artifact 9 not found.
-	 * Available: …`); otherwise `Cannot ${action} ${scheme}:// URL: no local file backs ${input}`
+	 * stores, so its resolve error diagnoses the miss (`Cannot find agent://x: Not found: x`);
+	 * otherwise `Cannot ${action} ${scheme}:// URL: no local file backs ${input}`
 	 * (+ a `read` hint for remote/virtual schemes).
 	 */
 	async requireLocal(
@@ -389,6 +405,13 @@ export class InternalUrlRouter {
 		return registered && { url: parseInternalUrl(registered.url), spec: registered.handler.spec };
 	}
 
+	/** Parsed URL, scheme, and mirror-edit hooks of a registered `input` whose scheme declares `spec.write.edits`. */
+	remoteEdit(input: string): RemoteEditTarget | undefined {
+		const registered = this.#registered(input);
+		const hooks = registered?.handler.spec.write?.edits ? registered.handler.edit : undefined;
+		return hooks && registered && { url: parseInternalUrl(registered.url), scheme: registered.scheme, hooks };
+	}
+
 	/**
 	 * Whether file-editing tools (`edit`, `ast_edit`) may write the file `input` locates: its
 	 * scheme is mutable and tools own its writes (`spec.write.via === "file"`).
@@ -427,6 +450,16 @@ export class InternalUrlRouter {
 		const lines: string[] = [];
 		for (const handler of this.#handlers.values()) {
 			const line = handler.promptDoc?.(host);
+			if (line !== undefined) lines.push(line);
+		}
+		return lines;
+	}
+
+	/** Rendered promptReference entries, registration order: the body of `help://read/urls`. */
+	reference(): string[] {
+		const lines: string[] = [];
+		for (const handler of this.#handlers.values()) {
+			const line = handler.promptReference?.();
 			if (line !== undefined) lines.push(line);
 		}
 		return lines;
@@ -481,7 +514,7 @@ export class InternalUrlRouter {
 	}
 
 	/** Resolve an internal URL through its registered protocol handler. */
-	async resolve(input: string, context?: ResolveContext): Promise<InternalResource> {
+	async resolve(input: string, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		const { parsed, handler } = this.#route(input, true);
 		const resource = await handler.resolve(parsed, context);
 		return { ...resource, immutable: resource.immutable ?? handler.spec.immutable };

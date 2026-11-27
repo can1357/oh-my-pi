@@ -6,6 +6,7 @@ import {
 	defaultConvertToLlm,
 	generateHandoff,
 	generateHandoffFromContext,
+	MAX_SUMMARY_TOKENS,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
@@ -292,5 +293,43 @@ describe("handoff helpers", () => {
 			toolChoice: "none",
 			reasoning: Effort.Medium,
 		});
+	});
+
+	test("generateHandoffFromContext caps the document at the summary output budget", async () => {
+		const completeImpl = vi.fn(async (_model: Model, _context: unknown, options: { maxTokens?: number }) => {
+			expect(options.maxTokens).toBe(MAX_SUMMARY_TOKENS);
+			return createAssistantMessage([{ type: "text", text: "## Goal\nContinue" }]);
+		});
+
+		await generateHandoffFromContext(
+			{
+				systemPrompt: ["Live system prompt"],
+				messages: [{ role: "user", content: "prepare handoff", timestamp: 1 }],
+			},
+			getTestModel(),
+			{ streamOptions: { apiKey: "test-key", maxTokens: 1_000_000 }, completeImpl },
+		);
+
+		expect(completeImpl).toHaveBeenCalledTimes(1);
+	});
+
+	test("generateHandoffFromContext rejects output cut off at the length limit without retrying", async () => {
+		const completeImpl = vi.fn(async () => ({
+			...createAssistantMessage([{ type: "text", text: "## Next Steps\nContinue by" }]),
+			stopReason: "length" as const,
+		}));
+		const error = await generateHandoffFromContext(
+			{
+				systemPrompt: ["Live system prompt"],
+				messages: [{ role: "user", content: "prepare handoff", timestamp: 1 }],
+			},
+			getTestModel(),
+			{ streamOptions: { apiKey: "test-key" }, completeImpl },
+		).catch((caught: unknown) => caught);
+
+		expect((error as Error).message).toBe(
+			"Handoff generation failed: model output ended incomplete (stopReason: length)",
+		);
+		expect(completeImpl).toHaveBeenCalledTimes(1);
 	});
 });

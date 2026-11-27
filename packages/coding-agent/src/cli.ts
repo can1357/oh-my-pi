@@ -27,23 +27,35 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 
-import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { materializeDatalessFiles } from "@oh-my-pi/pi-utils/dataless-files";
+import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
+import {
+	declareWorkerHostEntry,
+	installWorkerInbox,
+	isWorkerHostSelector,
+	SHELL_PROCESS_SELECTOR,
+} from "@oh-my-pi/pi-utils/worker-host";
+import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
+import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
-	BLOB_BROKER_WORKER_ARG,
+	AUTO_UPDATE_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
-	DAEMON_BROKER_WORKER_ARG,
-	IDA_HOST_WORKER_ARG,
-	LSP_MUX_WORKER_ARG,
-	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
-	TERMINAL_OUTPUT_WORKER_ARG,
-	TEXT_PREDICT_WORKER_ARG,
+	SUBAGENT_WORKER_ARG,
+	TRANSCRIPT_INDEX_WORKER_ARG,
 } from "./cli/worker-selectors";
+import { DAEMON_WORKER_ARG } from "./daemon/protocol";
+import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
+import { captureProgramResumeToken } from "./utils/program-resume-token";
+
+// Capture OSC7577_TOKEN into memory and remove it from process.env before any
+// subprocess, worker, or tool can inherit it.
+captureProgramResumeToken();
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -52,9 +64,13 @@ if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.exit(1);
 }
 
-try {
-	process.title = APP_NAME;
-} catch {}
+// On Windows `process.title` is the shared console title, not a process name
+// (see `setProcessName`): every omp child would retitle the pane's tab.
+if (process.platform !== "win32") {
+	try {
+		process.title = APP_NAME;
+	} catch {}
+}
 
 // `Bun.build`-API compiled Windows executables report `import.meta.main ===
 // false`: the standalone loader keys the entry module with native backslashes
@@ -84,12 +100,42 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-extensions": true,
 	"--no-skills": true,
 	"--no-rules": true,
+	"--no-context-files": true,
 	"--no-tools": true,
+	"--no-judge": true,
+	"--no-spotlight": true,
+	"--offline": true,
 	"--no-lsp": true,
 	"--no-title": true,
 	"--no-prewalk": true,
 	"--no-pty": true,
+	// `-e`/`--extension` only registers a local extension path; the extension
+	// loads later, so the speculative first frame stays valid (issue #20158).
+	// These take a value, so they are handled by `isPrepaintSafeArgv`.
 };
+
+/**
+ * Flags in `PREPAINT_SAFE_FLAGS` whose single value follows as the next argv
+ * token. `--extension=value` needs no special handling: it is one token that
+ * matches the flag directly.
+ */
+const PREPAINT_SAFE_VALUE_FLAGS: ReadonlySet<string> = new Set(["-e", "--extension"]);
+
+/** True when every token in `argv` still yields a valid speculative first frame. */
+export function isPrepaintSafeArgv(argv: readonly string[]): boolean {
+	for (let index = 0; index < argv.length; index++) {
+		const arg = argv[index]!;
+		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg)) {
+			// The path value belongs to the flag; skip it. A missing value is
+			// a usage error the regular parse reports later.
+			index++;
+			continue;
+		}
+		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg.split("=", 1)[0]!)) continue;
+		if (PREPAINT_SAFE_FLAGS[arg] !== true) return false;
+	}
+	return true;
+}
 
 /** Complete the OS-visible process-name setup after speculative first paint. */
 async function setFullProcessName(): Promise<void> {
@@ -125,8 +171,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 	}
 }
 /**
- * Smoke-test entry. Spawns bundled workers, serves the stats dashboard once,
- * pings everything, then exits.
+ * Smoke-test entry. Exercises bundled workers and serves the stats dashboard once.
  *
  * Purpose: catch the silent worker-load and bundled-asset regressions that hit
  * compiled binaries and the npm CLI bundle. Version/help paths do not spawn
@@ -136,71 +181,72 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
  * tarball installs all exercise it on every CI run.
  */
 async function runSmokeTest(): Promise<void> {
-	const { smokeTestSyncWorker, startServer } = await import("@oh-my-pi/omp-stats");
+	const { smokeTestSpotlightWorker, smokeTestSyncWorker, startServer } = await import("@oh-my-pi/omp-stats");
 	const { smokeTestTinyTitleWorker } = await import("./tiny/title-client");
 	const { smokeTestSttWorker } = await import("./stt/asr-client");
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
 	const { smokeTestStatsActivityWorker } = await import("./stats/activity-client");
+	const { smokeTestTranscriptIndexWorker } = await import("./session/transcript-index-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
-	const { smokeTestDaemonBroker } = await import("./launch/client");
-	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
-	const { smokeTestIdaHost } = await import("./ida/client");
-	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
-	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
-	const { smokeTestTextPredictDaemon } = await import("./predict/client");
-	await smokeTestSyncWorker();
-	await smokeTestStatsActivityWorker();
-
-	const statsServer = await startServer(0);
+	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
+	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	// Every smoke that reaches the daemon must start this build's own, never the user's live one.
+	const cleanupDaemon = await isolateDaemonForSmokeTest();
 	try {
-		const response = await fetch(`http://127.0.0.1:${statsServer.port}/`);
-		if (!response.ok) throw new Error(`stats dashboard smoke failed: HTTP ${response.status}`);
-		const html = await response.text();
-		if (!html.includes('<div id="root"></div>') || !html.includes("index.js")) {
-			throw new Error("stats dashboard smoke failed: dashboard HTML was not served");
-		}
-	} finally {
-		statsServer.stop();
-	}
+		await smokeTestSyncWorker();
+		await smokeTestSpotlightWorker();
+		await smokeTestStatsActivityWorker();
+		await smokeTestTranscriptIndexWorker();
 
-	await smokeTestTinyTitleWorker();
-	await smokeTestSttWorker();
-	await smokeTestJsEvalWorker();
-	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
-	await smokeTestComputerWorker();
-	await smokeTestTtsWorker();
-	await smokeTestMnemopiEmbedWorker();
-	await smokeTestDaemonBroker();
-	await smokeTestLspMux();
-	await smokeTestIdaHost();
-	await smokeTestBlobBroker();
-	await smokeTestTerminalOutputWorker();
-	await smokeTestTextPredictDaemon();
+		const statsServer = await startServer(0);
+		try {
+			const response = await fetch(`http://127.0.0.1:${statsServer.port}/`);
+			if (!response.ok) throw new Error(`stats dashboard smoke failed: HTTP ${response.status}`);
+			const html = await response.text();
+			if (!html.includes('<div id="root"></div>') || !html.includes("index.js")) {
+				throw new Error("stats dashboard smoke failed: dashboard HTML was not served");
+			}
+		} finally {
+			statsServer.stop();
+		}
+
+		await smokeTestTinyTitleWorker();
+		await smokeTestSttWorker();
+		await smokeTestJsEvalWorker();
+		const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
+		await smokeTestComputerWorker();
+		await smokeTestTtsWorker();
+		await smokeTestMnemopiEmbedWorker();
+		await smokeTestDaemon();
+		await smokeTestSubagentWorker();
+	} finally {
+		await cleanupDaemon();
+	}
 	process.stdout.write("smoke-test: ok\n");
 }
 
 const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
 const STATS_SYNC_WORKER_ARG = "__omp_worker_stats_sync";
+const STATS_SPOTLIGHT_WORKER_ARG = "__omp_worker_stats_spotlight";
 const TAB_WORKER_ARG = "__omp_worker_tab";
 const JS_EVAL_WORKER_ARG = "__omp_worker_js_eval";
 const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
-const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
 		await runTinyWorker();
 		return true;
 	}
-	if (arg === STATS_SYNC_WORKER_ARG) {
-		// The sync worker handles messages via `self.onmessage`, assigned during
+	if (arg === STATS_SYNC_WORKER_ARG || arg === STATS_SPOTLIGHT_WORKER_ARG) {
+		// The stats workers handle messages via `self.onmessage`, assigned during
 		// this *async* dynamic import. Bun flushes the worker's initial message
 		// buffer when the entry module's top-level evaluation finishes — before
 		// this dispatch completes — so anything the parent posted right after
-		// spawning (the smoke ping, the first parse request) would be dropped.
+		// spawning (the smoke ping, the first parse or build request) would be dropped.
 		// Park early events and replay them once the module's handler is live.
 		// Worker-thread entries using `parentPort` need the same sync-prefix
 		// buffering; the computer/tab/eval cases install that inbox below.
@@ -210,7 +256,8 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 			pending.push(event);
 		};
 		scope.onmessage = buffer;
-		await import("@oh-my-pi/omp-stats/sync-worker");
+		if (arg === STATS_SYNC_WORKER_ARG) await import("@oh-my-pi/omp-stats/sync-worker");
+		else await import("@oh-my-pi/omp-stats/spotlight-worker");
 		const handler = scope.onmessage;
 		if (handler && handler !== buffer) {
 			for (const event of pending) handler.call(scope, event);
@@ -241,6 +288,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("./eval/js/worker-entry");
 		return true;
 	}
+	if (arg === SUBAGENT_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		await import("./thread/subagent-worker-entry");
+		return true;
+	}
 	if (arg === JS_EVAL_PROCESS_ARG) {
 		// This selector is the synchronous bootstrap boundary: keep the evaluator
 		// runtime and postmortem/inspector graph out of ordinary startup without
@@ -258,35 +311,30 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === STT_WORKER_ARG) {
-		const { startSttWorker } = await import("./stt/asr-worker");
-		await runIpcSubprocessWorker(startSttWorker);
+		const { runSttWorker } = await import("./stt/asr-worker");
+		await runSttWorker();
 		return true;
 	}
 	if (arg === TTS_WORKER_ARG) {
-		const { startTtsWorker } = await import("./tts/tts-worker");
-		await runIpcSubprocessWorker(startTtsWorker);
+		const { runTtsWorker } = await import("./tts/tts-worker");
+		await runTtsWorker();
 		return true;
 	}
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
-		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
-		return true;
-	}
-	if (arg === MNEMOPI_EMBED_SERVER_WORKER_ARG) {
-		const { startMnemopiEmbedServerFromEnvironment } = await import("./mnemopi/embed-server");
-		await startMnemopiEmbedServerFromEnvironment();
+		await startMnemopiEmbedWorker();
 		return true;
 	}
 	if (arg === STATS_ACTIVITY_WORKER_ARG) {
-		const { startStatsActivityWorker } = await import("./stats/activity-worker");
-		await runIpcSubprocessWorker(startStatsActivityWorker);
-		return true;
-	}
-	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
-		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
-		await import("./launch/terminal-output-worker");
+		await import("./stats/activity-worker");
+		return true;
+	}
+	if (arg === TRANSCRIPT_INDEX_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		await import("./session/transcript-index-worker");
 		return true;
 	}
 	if (arg === PARENT_WATCHDOG_WORKER_ARG) {
@@ -295,30 +343,18 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("./subprocess/parent-watchdog-worker");
 		return true;
 	}
-	if (arg === DAEMON_BROKER_WORKER_ARG) {
+	if (arg === DAEMON_WORKER_ARG) {
 		// Worker selectors must dispatch before the normal command graph loads.
-		const { startDaemonBrokerFromEnvironment } = await import("./launch/broker");
-		await startDaemonBrokerFromEnvironment();
+		const { startDaemonFromEnvironment } = await import("./daemon/server");
+		await startDaemonFromEnvironment();
 		return true;
 	}
-	if (arg === LSP_MUX_WORKER_ARG) {
-		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
-		await startLspMuxFromEnvironment();
-		return true;
-	}
-	if (arg === IDA_HOST_WORKER_ARG) {
-		const { startIdaHostFromEnvironment } = await import("./ida/host");
-		await startIdaHostFromEnvironment();
-		return true;
-	}
-	if (arg === BLOB_BROKER_WORKER_ARG) {
-		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
-		await startBlobBrokerFromEnvironment();
-		return true;
-	}
-	if (arg === TEXT_PREDICT_WORKER_ARG) {
-		const { startTextPredictDaemonFromEnvironment } = await import("./predict/daemon");
-		await startTextPredictDaemonFromEnvironment();
+	if (arg === AUTO_UPDATE_WORKER_ARG) {
+		// Selector boundary keeps the updater graph out of ordinary startup. The worker
+		// downloads releases, so it needs the PI_PROXY handling ordinary commands get.
+		await installNetworkBootstrap();
+		const { runAutoUpdateWorker } = await import("./cli/auto-update");
+		await runAutoUpdateWorker();
 		return true;
 	}
 	return false;
@@ -424,10 +460,9 @@ async function runIpcSubprocessWorker<In, Out>(
 }
 
 /**
- * Hidden subcommand that boots the ONNX tiny-model worker for one model: a
- * detached process owning that model's socket (`OMP_TINY_WORKER_SOCKET`),
- * shared by every omp process on the machine and exiting on its own when
- * idle. It exists so `onnxruntime-node` (loaded transitively by
+ * Hidden subcommand that boots the ONNX tiny-model worker for one model over
+ * stdin/stdout; the daemon's `infer` units host it, shared by every omp
+ * process on the machine. It exists so `onnxruntime-node` (loaded transitively by
  * `@huggingface/transformers`) never runs in an omp address space — its NAPI
  * finalizer segfaults Bun on Windows (issue #1606).
  */
@@ -441,6 +476,20 @@ let runningCommand: string | undefined;
 
 /** Run the CLI with the given argv (no `process.argv` prefix). */
 export async function runCli(argv: string[]): Promise<void> {
+	// `omp zsh|bash|sh [args...]`: the whole argv belongs to the shell (`--help`,
+	// `--profile`, `-c` included), so it dispatches before profile bootstrap,
+	// prepaint, network setup and the command table.
+	if (isNativeShell(argv[0])) {
+		await runNativeShell(argv);
+	}
+	// A shell process (a named service, a pty command): the argv after the
+	// selector is its own, its command's flags included, so it dispatches
+	// before anything reads flags out of it.
+	if (argv[0] === SHELL_PROCESS_SELECTOR) {
+		// Command boundary: only shell processes load the engine entry here.
+		const { runShellProcess } = await import("./exec/shell-process-worker");
+		await runShellProcess(argv.slice(1));
+	}
 	let resolvedArgv = argv;
 	try {
 		const extracted = extractProfileFlags(resolvedArgv);
@@ -484,33 +533,35 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
-	// Declare this module as the worker-host entry now that the active profile
-	// is resolved. The worker-host module is side-effect-free; importing
-	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
-	// worker host. Worker-thread re-entry has `!Bun.isMainThread` (isProcessEntry === false),
-	// and importers (`runCli` in profile-CLI tests, SDK embedding) have `import.meta.main === false`
-	// — declaring there would poison `workerHostEntry()` for the whole test process, forcing eval/stats/
-	// browser workers onto the same-realm inline fallback.
-	// This must run before worker selector dispatch so that worker subprocesses
-	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
-	if (isProcessEntry) declareWorkerHostEntry();
+	const workerSelector = resolvedArgv[0];
+	const isWorker = isWorkerHostSelector(workerSelector);
+	// A worker thread re-entering the CLI still hosts nested workers, even
+	// though Bun reports import.meta.main as false. SDK importers are not hosts.
+	if (isProcessEntry || (!Bun.isMainThread && isWorker)) declareWorkerHostEntry();
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
 	// worker's parked initial messages as soon as the entry module's
 	// top-level evaluation finishes.
-	if (isWorkerHostSelector(resolvedArgv[0])) {
+	if (isWorker) {
 		// Invoke dispatch first so its inbox is installed before asynchronous
 		// process-name setup yields; neither dependency belongs in prepaint.
-		const [dispatched] = await Promise.all([runWorkerEntrypoint(resolvedArgv[0]), setFullProcessName()]);
+		const [dispatched] = await Promise.all([runWorkerEntrypoint(workerSelector), setFullProcessName()]);
 		if (!dispatched) {
-			process.stderr.write(`Error: unknown worker selector: ${resolvedArgv[0]}\n`);
+			process.stderr.write(`Error: unknown worker selector: ${workerSelector}\n`);
 			process.exitCode = 1;
 		}
 		return;
 	}
+
+	// The user waits on this process (startup, typing, redraws), not on its
+	// workers: on macOS its main thread runs above the default class a busy
+	// machine's builds compete in.
+	if (isProcessEntry) raiseInteractiveQos();
+	// Before anything is spawned: worker subprocesses, shells and tools
+	// inherit the policy, so reads of cloud-only files download everywhere.
+	if (isProcessEntry) materializeDatalessFiles();
 
 	if (resolvedArgv[0] === "--license") {
 		// Command boundary: bundled notices are read only when requested.
@@ -518,12 +569,24 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.stdout.write(formatLicenseOutput());
 		return;
 	}
+	const helpOrVersion =
+		resolvedArgv[0] === "--help" ||
+		resolvedArgv[0] === "-h" ||
+		resolvedArgv[0] === "--version" ||
+		resolvedArgv[0] === "-v" ||
+		resolvedArgv[0] === "help";
+	// Before any store opens (the prepaint composer's cache included): SQLite's POSIX
+	// locks would be released by any other close of the same file in this process
+	// (issue #15586); OFD locks are not. Help and version open no store and load no addon.
+	// A failed install is reported once the launch has a warning sink (`main.ts`,
+	// `ensureSqliteLockShim`); this module stays free of pi-utils' env snapshot.
+	if (isProcessEntry && !helpOrVersion) installSqliteLockShim();
 	let stopStartupComposer: (() => void) | undefined;
 	if (
 		!process.env.PI_TIMING &&
 		process.stdin.isTTY === true &&
 		process.stdout.isTTY === true &&
-		resolvedArgv.every(arg => PREPAINT_SAFE_FLAGS[arg] === true)
+		isPrepaintSafeArgv(resolvedArgv)
 	) {
 		// Intentional exception to the static-import convention: this latency boundary
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
@@ -536,12 +599,6 @@ export async function runCli(argv: string[]): Promise<void> {
 	// The speculative composer owns stdin before either loader yields, so input
 	// typed during initialization stays buffered. Neither graph is needed to
 	// produce that frame.
-	const helpOrVersion =
-		resolvedArgv[0] === "--help" ||
-		resolvedArgv[0] === "-h" ||
-		resolvedArgv[0] === "--version" ||
-		resolvedArgv[0] === "-v" ||
-		resolvedArgv[0] === "help";
 	await Promise.all([setFullProcessName(), helpOrVersion ? Promise.resolve() : installNetworkBootstrap()]);
 
 	if (resolvedArgv[0] === "--smoke-test") {
@@ -581,18 +638,17 @@ export async function runCli(argv: string[]): Promise<void> {
 // their entry with `import.meta.main === false`, so the worker-host dispatch
 // is admitted via `!Bun.isMainThread`.
 if (isProcessEntry || !Bun.isMainThread) {
-	const postmortem: typeof Postmortem | undefined = isProcessEntry
-		? require("@oh-my-pi/pi-utils/postmortem.js")
-		: undefined;
+	const postmortem: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
+	postmortem.installProcessHandlers();
 	// A one-shot CLI run (`omp --help | head`, `omp --version | true`, `omp <sub> | grep -m1`)
 	// whose stdout consumer closes before the write drains gets an EPIPE that Bun surfaces as
 	// an unhandled rejection. Treat a vanished stdout peer as an ordinary Unix disconnect
 	// (graceful exit) rather than the fatal path. Interactive launches register their own
 	// terminal lifetime; help/version/subcommand launches never start one. See #10930. The
 	// registration lives for the process — a one-shot entry exits right after runCli settles.
-	postmortem?.registerStdioDisconnectHandling();
+	postmortem.registerStdioDisconnectHandling();
 	const entry = runCli(process.argv.slice(2));
-	postmortem?.reportUnsettledEntry(entry, () => runningCommand);
+	postmortem.reportUnsettledEntry(entry, () => runningCommand);
 	entry.catch(async error => {
 		// Failure boundary: inspector/postmortem is irrelevant to successful startup.
 		const { fatal } = await import("@oh-my-pi/pi-utils/postmortem");

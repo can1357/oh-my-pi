@@ -1,950 +1,304 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { detectMacOSAppearance, MacAppearanceObserver } from "@oh-my-pi/pi-natives";
-import type { Terminal, TerminalAppearance } from "../terminal";
-import { colorLuma } from "@oh-my-pi/pi-utils/color";
-import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
-import * as logger from "@oh-my-pi/pi-utils/logger";
-import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
-import { setActiveSymbolTheme } from "./active-symbols";
-import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
+/**
+ * A theme file resolved at a color depth: SGR per color key, span-token
+ * styling, symbols.
+ */
+import { adjustHsv, mixHex } from "@oh-my-pi/pi-utils/color";
+import { BG_DEFAULT, type ColorDepth, colorHex, FG_DEFAULT, fgSgr, bgSgr, isLightColor, normalizeHex } from "./color";
+import type { EmojiSupport, Theme } from "./contract";
 import {
-	type CreateThemeOptions,
-	createTheme,
-	getBuiltinThemes,
-	loadTheme,
-	loadThemeJson,
-	loadThemeJsonSync,
-	loadThemeSync,
-} from "./loader";
-import { isValidThemeBg, isValidThemeColor, type ThemeColor, type ThemeJson } from "./schema";
-import type { SymbolPreset } from "./symbols";
-import type { Theme } from "./theme-class";
-
-export { getAvailableThemes, getAvailableThemesWithPaths, getThemeByName, type ThemeInfo } from "./loader";
-export { isValidThemeColor, type ThemeBg, type ThemeColor } from "./schema";
-export {
-	getAvailableSymbolPresets,
-	isValidSymbolPreset,
-	type SpinnerType,
-	type SymbolKey,
+	BACKGROUND_KEYS,
+	type ColorValue,
+	FOREGROUND_KEYS,
+	OPTIONAL_KEYS,
 	type SymbolPreset,
-} from "./symbols";
-export { Theme } from "./theme-class";
-export {
-	createHighlightStream,
-	getEditorTheme,
-	getMarkdownTheme,
-	getMarkdownThemeWithLinkTargets,
-	getSelectListTheme,
-	getSettingsListTheme,
-	getSymbolTheme,
-	highlightCode,
-	setMarkdownMermaidRendering,
-	warmHighlighter,
-} from "./tui-adapters";
+	type ThemeJson,
+} from "./schema";
+import { LANGUAGE_BRAND_COLORS, languageKey, ThemeSymbols } from "./symbols";
 
-/** Appearance detected via OSC 11 background color query, or undefined if not yet available. */
-var terminalReportedAppearance: "dark" | "light" | undefined;
-
-/** Appearance reported by the macOS fallback observer, or undefined if not yet available. */
-var macOSReportedAppearance: "dark" | "light" | undefined;
-
-const backgroundFallbackListeners = new Set<() => void>();
-
-/**
- * Subscribe to native fallback appearance changes independently of theme changes.
- * Consumers must re-check the effective background: COLORFGBG can override it.
- */
-export function onTerminalBackgroundFallbackChange(callback: () => void): () => void {
-	backgroundFallbackListeners.add(callback);
-	return () => {
-		backgroundFallbackListeners.delete(callback);
-	};
+/** How to resolve a theme file. */
+export interface ThemeOptions {
+	/** Color depth of the terminal (default truecolor). */
+	readonly depth?: ColorDepth;
+	/** Symbol preset chosen in settings; wins over the theme file's `symbols.preset`. */
+	readonly symbolPreset?: SymbolPreset;
+	/** Shift `toolDiffAdded` from green toward blue (red–green color blindness). */
+	readonly colorBlindMode?: boolean;
+	/** How the terminal draws emoji-capable glyphs; picks their form in the symbol table (default conservative). */
+	readonly emoji?: EmojiSupport;
 }
 
-/**
- * Detect appearance from trusted OSC 11 reports, then COLORFGBG, then native
- * macOS appearance only on known-broken multiplexer background-query paths.
- * Defaults to dark when none of those signals is available.
- */
-export function detectTerminalBackground(): "dark" | "light" {
-	const backgroundQueryTrusted = isTerminalBackgroundQueryTrusted();
-	// Tier 1: terminal-reported appearance from OSC 11 luminance.
-	if (backgroundQueryTrusted && terminalReportedAppearance) {
-		return terminalReportedAppearance;
-	}
+/** TSP tones → the theme color that draws them. */
+const TONE_COLORS: Readonly<Record<string, string>> = {
+	neutral: "text",
+	accent: "accent",
+	info: "accent",
+	success: "success",
+	warning: "warning",
+	pending: "warning",
+	error: "error",
+	muted: "muted",
+	user: "customMessageLabel",
+};
 
-	// Tier 2: COLORFGBG env var (static at process start, but still terminal-derived).
-	const colorfgbg = Bun.env.COLORFGBG || "";
-	if (colorfgbg) {
-		const parts = colorfgbg.split(";");
-		if (parts.length >= 2) {
-			const bg = parseInt(parts[1], 10);
-			if (!Number.isNaN(bg)) return bg < 8 ? "dark" : "light";
+/**
+ * Semantic span tokens → the theme color drawn when no explicit color token is
+ * present; when several are, the more specific wins (`ins num` is an insertion).
+ */
+const SEMANTIC_COLORS: Readonly<Record<string, { readonly color: string; readonly rank: number }>> = {
+	ins: { color: "toolDiffAdded", rank: 5 },
+	del: { color: "toolDiffRemoved", rank: 5 },
+	link: { color: "mdLink", rank: 4 },
+	code: { color: "mdCode", rank: 3 },
+	path: { color: "accent", rank: 2 },
+	num: { color: "accent", rank: 1 },
+};
+
+interface Attribute {
+	readonly open: string;
+	readonly close: string;
+}
+
+const BOLD: Attribute = { open: "\x1b[1m", close: "\x1b[22m" };
+const FAINT: Attribute = { open: "\x1b[2m", close: "\x1b[22m" };
+const ITALIC: Attribute = { open: "\x1b[3m", close: "\x1b[23m" };
+const UNDERLINE: Attribute = { open: "\x1b[4m", close: "\x1b[24m" };
+const INVERSE: Attribute = { open: "\x1b[7m", close: "\x1b[27m" };
+const STRIKE: Attribute = { open: "\x1b[9m", close: "\x1b[29m" };
+
+/** Attribute tokens, innermost first. */
+const ATTRIBUTE_TOKENS: Readonly<Record<string, Attribute>> = {
+	strong: BOLD,
+	em: ITALIC,
+	underline: UNDERLINE,
+	typo: UNDERLINE,
+	strike: STRIKE,
+	inverse: INVERSE,
+	faint: FAINT,
+};
+const ATTRIBUTE_ORDER: readonly Attribute[] = [ITALIC, UNDERLINE, STRIKE, INVERSE, FAINT, BOLD];
+
+/**
+ * Wrap `text` in an attribute: a nested close re-opens it, and it closes
+ * before each line break and re-opens after. Empty text stays empty.
+ */
+export function withAttribute(attribute: Attribute, text: string): string {
+	if (text === "") return text;
+	const { open, close } = attribute;
+	let body = text.includes(close) ? text.split(close).join(close + open) : text;
+	if (body.includes("\n")) body = body.replace(/\r?\n/g, match => `${close}${match}${open}`);
+	return open + body + close;
+}
+
+export const bold = (text: string): string => withAttribute(BOLD, text);
+export const italic = (text: string): string => withAttribute(ITALIC, text);
+export const underline = (text: string): string => withAttribute(UNDERLINE, text);
+export const strikethrough = (text: string): string => withAttribute(STRIKE, text);
+export const inverse = (text: string): string => withAttribute(INVERSE, text);
+export const faint = (text: string): string => withAttribute(FAINT, text);
+
+const FOREGROUND_RESET = /\x1b\[(?:0|39)m/g;
+const BACKGROUND_RESET = /\x1b\[(?:0|49)m/g;
+
+/** Color `text` with foreground `sgr`, restoring it after every nested reset; ends with a foreground reset. */
+function wrapForeground(sgr: string, text: string): string {
+	const body = text.includes("\x1b[") ? text.replace(FOREGROUND_RESET, `$&${sgr}`) : text;
+	return `${sgr}${body}${FG_DEFAULT}`;
+}
+
+const BACKGROUND_KEY_SET: Readonly<Record<string, true>> = Object.fromEntries(BACKGROUND_KEYS.map(key => [key, true]));
+
+/**
+ * A theme file's color with `vars` references followed: hex strings, palette
+ * indices and `""` (terminal default) pass through. Throws on unknown or
+ * circular references.
+ */
+export function resolveColorValue(
+	value: ColorValue,
+	vars: Readonly<Record<string, ColorValue>>,
+	seen: string[] = [],
+): ColorValue {
+	if (typeof value === "number" || value === "" || value.startsWith("#")) return value;
+	if (seen.includes(value)) throw new Error(`Circular variable reference detected: ${[...seen, value].join(" -> ")}`);
+	const next = vars[value];
+	if (next === undefined) throw new Error(`Variable reference not found: ${value}`);
+	seen.push(value);
+	return resolveColorValue(next, vars, seen);
+}
+
+/** Share of `mdLink` in a derived `mdExtensionLink`; the rest is `text`. */
+const EXTENSION_LINK_TINT = 0.45;
+const COLOR_BLIND_SHIFT = { h: 60, s: 0.71 };
+
+/** A theme resolved at one color depth. */
+export class ResolvedTheme implements Theme {
+	readonly name: string;
+	readonly dark: boolean;
+	readonly depth: ColorDepth;
+	readonly symbols: ThemeSymbols;
+	/** The file the theme came from (for exports and previews). */
+	readonly json: ThemeJson;
+	readonly #colors: Readonly<Record<string, ColorValue>>;
+	readonly #fg: Record<string, string> = {};
+	readonly #bg: Record<string, string> = {};
+	readonly #fgResolved: Record<string, string> = {};
+	readonly #palette: readonly string[];
+	readonly #paletteHex: readonly (string | undefined)[];
+
+	constructor(json: ThemeJson, options: ThemeOptions = {}) {
+		const depth = options.depth ?? "truecolor";
+		const vars = json.vars ?? {};
+		const colors: Record<string, ColorValue> = {};
+		const declared = json.colors;
+		for (const key in declared) {
+			const value = declared[key as keyof typeof declared];
+			if (value !== undefined) colors[key] = resolveColorValue(value, vars);
 		}
-	}
-
-	// Tier 3: host macOS appearance for known-broken terminal paths only.
-	if (!backgroundQueryTrusted) {
-		const macAppearance = macOSReportedAppearance ?? detectMacOSAppearance();
-		if (macAppearance) return macAppearance;
-	}
-
-	return "dark";
-}
-
-function getDefaultTheme(): string {
-	const bg = detectTerminalBackground();
-	return bg === "light" ? autoLightTheme : autoDarkTheme;
-}
-
-// ============================================================================
-// Global Theme Instance
-// ============================================================================
-
-/** Active theme; imports remain live across initialization, previews, and theme switches. */
-export var theme: Theme;
-var currentThemeName: string | undefined;
-/** Theme shown by `previewTheme` until the next non-preview assignment. */
-var previewThemeName: string | undefined;
-
-type ThemeBinding = (value: Theme) => void;
-var themeBindings: Set<ThemeBinding> | undefined;
-
-/** @internal Mirror assignments into bundled module bindings without replacing the UI change listener. */
-export function bindTheme(binding: ThemeBinding): () => void {
-	const bindings = (themeBindings ??= new Set<ThemeBinding>());
-	bindings.add(binding);
-	binding(theme);
-	return () => {
-		bindings.delete(binding);
-	};
-}
-
-/** `previewName` marks a theme-selector preview; any other assignment ends it. */
-function assignTheme(value: Theme, previewName?: string): void {
-	theme = value;
-	previewThemeName = previewName;
-	setActiveSymbolTheme(value);
-	if (themeBindings) {
-		for (const binding of themeBindings) binding(value);
-	}
-}
-
-/** Get the name of the currently active theme. */
-export function getCurrentThemeName(): string | undefined {
-	return currentThemeName;
-}
-
-/** Returns unstyled `text` before `initTheme()` assigns the global theme; use only for early-render paths. */
-export function fgOrPlain(color: ThemeColor, text: string, styledText: string = text): string {
-	return typeof theme === "undefined" ? text : theme.fg(color, styledText);
-}
-export interface ThemeChangeEvent {
-	/** Preview/presentation-only changes should repaint live UI without replacing native scrollback. */
-	ephemeral?: boolean;
-}
-
-var currentSymbolPresetOverride: SymbolPreset | undefined;
-// Process-local preset forced while a Tern Surface Protocol surface is live;
-// wins over the user's preset and is never persisted.
-var nativeSymbolPreset: SymbolPreset | undefined;
-var currentColorBlindMode: boolean = false;
-var themeWatcher: fs.FSWatcher | undefined;
-var themeReloadTimer: NodeJS.Timeout | undefined;
-var sigwinchHandler: (() => void) | undefined;
-var autoDetectedTheme: boolean = false;
-var autoDarkTheme: string = "dark";
-var autoLightTheme: string = "light";
-var onThemeChangeCallback: ((event: ThemeChangeEvent) => void) | undefined;
-var themeLoadRequestId: number = 0;
-let themeEpoch = 0;
-
-function getCurrentThemeOptions(): CreateThemeOptions {
-	return {
-		symbolPresetOverride: nativeSymbolPreset ?? currentSymbolPresetOverride,
-		colorBlindMode: currentColorBlindMode,
-	};
-}
-function configureTheme(
-	symbolPreset?: SymbolPreset,
-	colorBlindMode?: boolean,
-	darkTheme?: string,
-	lightTheme?: string,
-): string {
-	autoDetectedTheme = true;
-	autoDarkTheme = darkTheme ?? "dark";
-	autoLightTheme = lightTheme ?? "light";
-	currentSymbolPresetOverride = symbolPreset;
-	currentColorBlindMode = colorBlindMode ?? false;
-	const name = getDefaultTheme();
-	currentThemeName = name;
-	return name;
-}
-
-/** Initialize the active theme synchronously before the first terminal paint. */
-export function initThemeSync(
-	symbolPreset?: SymbolPreset,
-	colorBlindMode?: boolean,
-	darkTheme?: string,
-	lightTheme?: string,
-): void {
-	const name = configureTheme(symbolPreset, colorBlindMode, darkTheme, lightTheme);
-	const options = getCurrentThemeOptions();
-	try {
-		assignTheme(loadThemeSync(name, options));
-	} catch (error) {
-		logger.debug("Theme loading failed, falling back to dark theme", { error: String(error) });
-		currentThemeName = "dark";
-		assignTheme(loadThemeSync("dark", options));
-	}
-}
-
-/** Ensure the module-local theme is initialized before synchronous component work. */
-export function ensureThemeSync(): void {
-	if (typeof theme === "undefined") initThemeSync();
-}
-
-/** Initialize the default theme only when no earlier prepaint initialized one. */
-export async function ensureTheme(): Promise<void> {
-	if (typeof theme !== "undefined") return;
-	await initTheme();
-}
-
-export async function initTheme(
-	enableWatcher: boolean = false,
-	symbolPreset?: SymbolPreset,
-	colorBlindMode?: boolean,
-	darkTheme?: string,
-	lightTheme?: string,
-): Promise<void> {
-	const name = configureTheme(symbolPreset, colorBlindMode, darkTheme, lightTheme);
-	try {
-		assignTheme(await loadTheme(name, getCurrentThemeOptions()));
-		if (enableWatcher) {
-			await startThemeWatcher();
+		const light = isLightColor(colors.statusLineBg);
+		const ansi = json.terminal?.ansi?.map(value => resolveColorValue(value, vars));
+		if (options.colorBlindMode) {
+			const added = colors.toolDiffAdded;
+			if (typeof added === "string" && added.startsWith("#"))
+				colors.toolDiffAdded = adjustHsv(added, COLOR_BLIND_SHIFT);
 		}
-	} catch (err) {
-		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
-		currentThemeName = "dark";
-		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
-		// Skip file watching for the fallback theme, not appearance tracking.
-	}
-	if (enableWatcher) startSigwinchListener();
-}
-
-export async function setTheme(
-	name: string,
-	enableWatcher: boolean = false,
-): Promise<{ success: boolean; error?: string }> {
-	autoDetectedTheme = false;
-	currentThemeName = name;
-	const requestId = ++themeLoadRequestId;
-	try {
-		const loadedTheme = await loadTheme(name, getCurrentThemeOptions());
-		if (requestId !== themeLoadRequestId) {
-			return { success: false, error: "Theme change superseded by a newer request" };
+		if (colors.mdExtensionLink === undefined && colors.text !== undefined && colors.mdLink !== undefined) {
+			const foreground = json.terminal?.foreground;
+			const terminalForeground = foreground === undefined ? undefined : resolveColorValue(foreground, vars);
+			const intended = (value: ColorValue): string => {
+				let color = value === "" ? (terminalForeground ?? value) : value;
+				if (typeof color === "number" && color < 16) color = ansi?.[color] ?? color;
+				return normalizeHex(colorHex(color, light));
+			};
+			colors.mdExtensionLink = mixHex(intended(colors.text), intended(colors.mdLink), EXTENSION_LINK_TINT);
 		}
-		assignTheme(loadedTheme);
-		if (enableWatcher) {
-			await startThemeWatcher();
-			// startThemeWatcher() calls stopThemeWatcher(), which tears down
-			// the SIGWINCH handler and the macOS appearance observer that
-			// feeds the SIXEL background fallback. Restart it like initTheme()
-			// does so a runtime theme change does not silence fallback
-			// background repaints. Without this, `setTheme(name, true)` after
-			// startup would leave the SIXEL repaint path dead until the next
-			// process restart.
-			startSigwinchListener();
+		colors.thinkingMax ??= colors.thinkingXhigh ?? "";
+
+		this.name = json.name;
+		this.json = json;
+		this.dark = !light;
+		this.depth = depth;
+		this.#colors = colors;
+		for (const key of FOREGROUND_KEYS) {
+			const value = colors[key] ?? (OPTIONAL_KEYS[key] ? "" : undefined);
+			if (value === undefined) continue;
+			this.#fg[key] = fgSgr(value, depth);
+			this.#fgResolved[key] = value === "" ? fgSgr(colorHex("", light), depth) : this.#fg[key]!;
 		}
-		notifyThemeChange();
-		return { success: true };
-	} catch (error) {
-		if (requestId !== themeLoadRequestId) {
-			return { success: false, error: "Theme change superseded by a newer request" };
+		for (const key of BACKGROUND_KEYS) {
+			const value = colors[key];
+			if (value !== undefined) this.#bg[key] = bgSgr(value, depth);
 		}
-		// Theme is invalid - fall back to dark theme
-		currentThemeName = "dark";
-		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
-		// The active theme just changed to the fallback — bump the epoch so memoized
-		// renderers (e.g. ToolExecutionComponent) re-shape with the fallback colors
-		// instead of holding the failed theme's stale styling.
-		notifyThemeChange();
-		// Don't start watcher for fallback theme
-		return {
-			success: false,
-			error: error instanceof Error ? error.message : String(error),
-		};
-	}
-}
-
-export async function previewTheme(
-	name: string,
-	event: ThemeChangeEvent = { ephemeral: true },
-): Promise<{ success: boolean; error?: string }> {
-	const requestId = ++themeLoadRequestId;
-	try {
-		const loadedTheme = await loadTheme(name, getCurrentThemeOptions());
-		if (requestId !== themeLoadRequestId) {
-			return { success: false, error: "Theme preview superseded by a newer request" };
-		}
-		// Previewing the active theme again (selector cancel) ends the preview.
-		assignTheme(loadedTheme, name === currentThemeName ? undefined : name);
-		notifyThemeChange(event);
-		return { success: true };
-	} catch (error) {
-		if (requestId !== themeLoadRequestId) {
-			return { success: false, error: "Theme preview superseded by a newer request" };
-		}
-		return {
-			success: false,
-			error: error instanceof Error ? error.message : String(error),
-		};
-	}
-}
-
-/**
- * Enable auto-detection mode, switching to the appropriate dark/light theme.
- */
-export function enableAutoTheme(event: ThemeChangeEvent = {}): void {
-	autoDetectedTheme = true;
-	reevaluateAutoTheme("enableAutoTheme", event);
-}
-
-/**
- * Update the theme mappings for auto-detection mode.
- * When a dark/light mapping changes and auto-detection is active, re-evaluate the theme.
- */
-export function setAutoThemeMapping(mode: "dark" | "light", themeName: string): void {
-	if (mode === "dark") autoDarkTheme = themeName;
-	else autoLightTheme = themeName;
-	reevaluateAutoTheme("setAutoThemeMapping");
-}
-
-/**
- * Called when the terminal detects a dark/light appearance change.
- * The terminal layer queries OSC 11 (background color) and computes luminance;
- * Mode 2031 notifications trigger re-queries rather than providing the value directly.
- */
-export function onTerminalAppearanceChange(
-	mode: "dark" | "light",
-	event: ThemeChangeEvent = { ephemeral: true },
-): void {
-	if (terminalReportedAppearance === mode) return;
-	terminalReportedAppearance = mode;
-	reevaluateAutoTheme("terminal appearance", event);
-}
-
-export function setThemeInstance(themeInstance: Theme): void {
-	autoDetectedTheme = false;
-	assignTheme(themeInstance);
-	currentThemeName = "<in-memory>";
-	stopThemeWatcher();
-	notifyThemeChange({ ephemeral: true });
-}
-
-/**
- * Set the symbol preset override, recreating the theme with the new preset.
- */
-export async function setSymbolPreset(preset: SymbolPreset): Promise<void> {
-	currentSymbolPresetOverride = preset;
-	if (!currentThemeName) return;
-
-	const requestId = ++themeLoadRequestId;
-	try {
-		const loadedTheme = await loadTheme(currentThemeName, getCurrentThemeOptions());
-		if (requestId !== themeLoadRequestId) return;
-		assignTheme(loadedTheme);
-	} catch {
-		if (requestId !== themeLoadRequestId) return;
-		// Fall back to dark theme with new preset
-		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
-		if (requestId !== themeLoadRequestId) return;
-	}
-	notifyThemeChange({ ephemeral: true });
-}
-
-/**
- * Get the current symbol preset override.
- */
-export function getSymbolPresetOverride(): SymbolPreset | undefined {
-	return currentSymbolPresetOverride;
-}
-
-/**
- * Force `preset` while a Tern Surface Protocol surface is live (the terminal's
- * font carries every Nerd Font glyph, so icons need no Glyph Protocol
- * registration); `undefined` restores the user's preset. Process-local and
- * never persisted. Rebuilds the active theme synchronously so the next frame
- * already uses it, and notifies theme listeners like a preset change. Returns
- * whether the active theme was rebuilt (callers invalidate render caches).
- */
-export function setNativeSymbolPreset(preset: SymbolPreset | undefined): boolean {
-	if (nativeSymbolPreset === preset) return false;
-	nativeSymbolPreset = preset;
-	if (!currentThemeName || typeof theme === "undefined") return false;
-	++themeLoadRequestId;
-	try {
-		assignTheme(loadThemeSync(currentThemeName, getCurrentThemeOptions()));
-	} catch (error) {
-		// In-memory themes can't be rebuilt by name; they keep their symbols.
-		logger.debug("Native symbol preset: theme rebuild skipped", { theme: currentThemeName, error: String(error) });
-		return false;
-	}
-	notifyThemeChange({ ephemeral: true });
-	return true;
-}
-
-/**
- * Set color blind mode, recreating the theme with the new setting.
- * When enabled, uses blue instead of green for diff additions.
- */
-export async function setColorBlindMode(enabled: boolean): Promise<void> {
-	currentColorBlindMode = enabled;
-	if (!currentThemeName) return;
-
-	const requestId = ++themeLoadRequestId;
-	try {
-		const loadedTheme = await loadTheme(currentThemeName, getCurrentThemeOptions());
-		if (requestId !== themeLoadRequestId) return;
-		assignTheme(loadedTheme);
-	} catch {
-		if (requestId !== themeLoadRequestId) return;
-		// Fall back to dark theme
-		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
-		if (requestId !== themeLoadRequestId) return;
-	}
-	notifyThemeChange({ ephemeral: true });
-}
-
-/**
- * Get the current color blind mode setting.
- */
-export function getColorBlindMode(): boolean {
-	return currentColorBlindMode;
-}
-
-export function onThemeChange(callback: (event: ThemeChangeEvent) => void): () => void {
-	onThemeChangeCallback = callback;
-	return () => {
-		if (onThemeChangeCallback === callback) {
-			onThemeChangeCallback = undefined;
-		}
-	};
-}
-
-/**
- * Monotonic counter bumped on any theme-affecting change that should invalidate
- * cached renders: theme swaps and reloads (including the invalid-theme dark
- * fallback), theme previews, symbol-preset changes, and color-blind-mode
- * changes — everything that routes through {@link notifyThemeChange}. Consumers
- * key cached renders on it so the next render re-shapes their output.
- */
-export function getThemeEpoch(): number {
-	return themeEpoch;
-}
-
-/** Bump the theme epoch and notify the registered theme-change listener. */
-function notifyThemeChange(event: ThemeChangeEvent = {}): void {
-	themeEpoch++;
-	onThemeChangeCallback?.(event);
-}
-
-async function startThemeWatcher(): Promise<void> {
-	stopThemeWatcher();
-
-	// Only watch if it's a custom theme (not built-in)
-	if (!currentThemeName || currentThemeName === "dark" || currentThemeName === "light") {
-		return;
-	}
-
-	const customThemesDir = getCustomThemesDir();
-	const watchedThemeName = currentThemeName;
-	const watchedFileName = `${watchedThemeName}.json`;
-	const themeFile = path.join(customThemesDir, watchedFileName);
-
-	// Only watch if the file exists
-	if (!fs.existsSync(themeFile)) {
-		return;
-	}
-
-	const scheduleReload = () => {
-		if (themeReloadTimer) {
-			clearTimeout(themeReloadTimer);
-		}
-		themeReloadTimer = setTimeout(() => {
-			themeReloadTimer = undefined;
-
-			// Ignore stale timers after switching themes or stopping the watcher
-			if (currentThemeName !== watchedThemeName) {
-				return;
-			}
-
-			// Keep the last successfully loaded theme active if the file is temporarily missing
-			if (!fs.existsSync(themeFile)) {
-				return;
-			}
-
-			loadTheme(watchedThemeName, getCurrentThemeOptions())
-				.then(loadedTheme => {
-					assignTheme(loadedTheme);
-					notifyThemeChange({ ephemeral: true });
-				})
-				.catch(() => {
-					// Ignore errors (file might be in invalid state while being edited)
-				});
-		}, 100);
-	};
-
-	try {
-		themeWatcher = fs.watch(customThemesDir, (_eventType, filename) => {
-			if (currentThemeName !== watchedThemeName) {
-				return;
-			}
-			if (!filename) {
-				scheduleReload();
-				return;
-			}
-			const changedFile = String(filename);
-			if (changedFile !== watchedFileName) {
-				return;
-			}
-			scheduleReload();
+		this.#palette = Array.from({ length: 16 }, (_, slot) => fgSgr(ansi?.[slot] ?? slot, depth));
+		this.#paletteHex = Array.from({ length: 16 }, (_, slot) => {
+			const value = ansi?.[slot];
+			return value === undefined || value === "" ? undefined : colorHex(value, light);
 		});
-	} catch {
-		// Ignore errors starting watcher
-	}
-}
-
-/**
- * Load and apply an already-resolved auto-theme name.
- */
-function applyResolvedAutoTheme(resolved: string, debugLabel: string, event: ThemeChangeEvent): void {
-	if (resolved === currentThemeName) return;
-	currentThemeName = resolved;
-	const requestId = ++themeLoadRequestId;
-	loadTheme(resolved, getCurrentThemeOptions())
-		.then(loadedTheme => {
-			if (requestId !== themeLoadRequestId) return;
-			assignTheme(loadedTheme);
-			notifyThemeChange(event);
-		})
-		.catch(err => {
-			if (requestId !== themeLoadRequestId) return;
-			logger.debug(`Theme switch on ${debugLabel} failed`, { error: String(err) });
+		this.symbols = new ThemeSymbols({
+			preset: options.symbolPreset ?? json.symbols?.preset ?? "unicode",
+			overrides: json.symbols?.overrides,
+			spinnerFrames: json.symbols?.spinnerFrames,
+			emoji: options.emoji,
 		});
-}
+	}
 
-/**
- * Shared logic for re-evaluating the auto-detected theme.
- * An explicit appearance is provisional input and does not alter terminal-reported state.
- */
-function reevaluateAutoTheme(debugLabel: string, event: ThemeChangeEvent = {}, appearance?: "dark" | "light"): void {
-	if (!autoDetectedTheme) return;
-	const resolved =
-		appearance === undefined ? getDefaultTheme() : appearance === "dark" ? autoDarkTheme : autoLightTheme;
-	applyResolvedAutoTheme(resolved, debugLabel, event);
-}
+	/** Foreground SGR of a color key; throws for unknown keys. */
+	fgSgr(color: string): string {
+		const sgr = this.#fg[color];
+		if (sgr === undefined) throw new Error(`Unknown theme color: ${color}`);
+		return sgr;
+	}
 
-function reevaluateAutoThemeForAppearance(debugLabel: string, appearance?: "dark" | "light"): void {
-	reevaluateAutoTheme(debugLabel, { ephemeral: true }, appearance);
-}
+	/** Background SGR of a background key; throws for unknown keys. */
+	bgSgr(color: string): string {
+		const sgr = this.#bg[color];
+		if (sgr === undefined) throw new Error(`Unknown theme background color: ${color}`);
+		return sgr;
+	}
 
-// ============================================================================
-// macOS Appearance Fallback Observer
-// ============================================================================
+	/** Hex a color key stands for (terminal-default colors guess black/near-white by theme brightness). */
+	hex(color: string): string {
+		const value = this.#colors[color];
+		if (value === undefined) throw new Error(`Unknown theme color: ${color}`);
+		if (value === "" && BACKGROUND_KEY_SET[color]) return this.dark ? "#000000" : "#ffffff";
+		return colorHex(value, !this.dark);
+	}
 
-type MacOSAppearanceReprobeTerminal = Pick<
-	Terminal,
-	"appearance" | "onAppearanceChange" | "onAppearanceReport" | "onPrivateModeReport" | "refreshAppearance"
->;
+	/** Hex of `terminal.ansi` slot `slot`, when the theme declares it. */
+	paletteHex(slot: number): string | undefined {
+		return this.#paletteHex[slot];
+	}
 
-const MACOS_APPEARANCE_REPROBE_DELAYS_MS = [25, 50, 100, 250, 500, 1000] as const;
-const MACOS_APPEARANCE_RECONCILE_DELAY_MS = 1100;
+	fg(color: string, text: string): string {
+		return wrapForeground(this.fgSgr(color), text);
+	}
 
-/**
- * Fall back to native macOS appearance notifications when the terminal
- * explicitly confirms that Mode 2031 notifications are unsupported.
- *
- * Native notifications provisionally repaint from the host appearance and
- * synchronously trigger an OSC 11 probe, followed by a bounded burst of six
- * retries. A changed terminal classification cancels the sequence; otherwise
- * a confirmed terminal classification is restored at the validation deadline.
- */
-export function startMacOSAppearanceReprobeFallback(terminal: MacOSAppearanceReprobeTerminal): () => void {
-	let disposed = false;
-	let observerStartAttempted = false;
-	let observer: MacAppearanceObserver | undefined;
-	let probeGeneration = 0;
-	let probeSequenceActive = false;
-	let probeBaseline: TerminalAppearance | undefined;
-	let probeResponseConfirmed = false;
-	const probeTimers = new Set<Timer>();
-	let reconciliationTimer: Timer | undefined;
+	fgResolved(color: string, text: string): string {
+		const sgr = this.#fgResolved[color];
+		if (sgr === undefined) throw new Error(`Unknown theme color: ${color}`);
+		return wrapForeground(sgr, text);
+	}
 
-	const cancelProbeSequence = (): void => {
-		probeGeneration++;
-		probeSequenceActive = false;
-		probeBaseline = undefined;
-		probeResponseConfirmed = false;
-		if (reconciliationTimer) {
-			clearTimeout(reconciliationTimer);
-			reconciliationTimer = undefined;
-		}
-		for (const timer of probeTimers) {
-			clearTimeout(timer);
-		}
-		probeTimers.clear();
-	};
+	bg(color: string, text: string): string {
+		return `${this.bgSgr(color)}${text}${BG_DEFAULT}`;
+	}
 
-	const scheduleProbeSequence = (): void => {
-		cancelProbeSequence();
-		if (disposed || !autoDetectedTheme) return;
+	/** Background that resumes after nested full or background resets (rows holding styled text). */
+	bgFill(color: string, text: string): string {
+		const sgr = this.bgSgr(color);
+		return `${sgr}${text.replace(BACKGROUND_RESET, `$&${sgr}`)}${BG_DEFAULT}`;
+	}
 
-		probeSequenceActive = true;
-		probeBaseline = terminal.appearance;
-		probeResponseConfirmed = false;
-		const generation = probeGeneration;
-		terminal.refreshAppearance?.();
-		if (disposed || generation !== probeGeneration || !autoDetectedTheme) return;
-		for (const delay of MACOS_APPEARANCE_REPROBE_DELAYS_MS) {
-			const timer = setTimeout(() => {
-				probeTimers.delete(timer);
-				if (disposed || generation !== probeGeneration) return;
-				if (!autoDetectedTheme) {
-					cancelProbeSequence();
-					return;
-				}
-				terminal.refreshAppearance?.();
-			}, delay);
-			timer.unref?.();
-			probeTimers.add(timer);
-		}
-		reconciliationTimer = setTimeout(() => {
-			reconciliationTimer = undefined;
-			if (disposed || generation !== probeGeneration) return;
-			const appearance = probeResponseConfirmed ? terminal.appearance : undefined;
-			cancelProbeSequence();
-			if (!autoDetectedTheme || !appearance) return;
-			reevaluateAutoThemeForAppearance("macOS appearance reconciliation", appearance);
-		}, MACOS_APPEARANCE_RECONCILE_DELAY_MS);
-		reconciliationTimer.unref?.();
-	};
+	palette(slot: number, text: string): string {
+		const sgr = this.#palette[slot];
+		if (sgr === undefined) throw new Error(`Invalid palette slot: ${slot}`);
+		return wrapForeground(sgr, text);
+	}
 
-	const unsubscribeAppearanceReport = terminal.onAppearanceReport?.(() => {
-		if (disposed || !probeSequenceActive) return;
-		probeResponseConfirmed = true;
-	});
+	has(color: string): boolean {
+		const sgr = this.#fg[color] ?? this.#bg[color];
+		return sgr !== undefined && sgr !== FG_DEFAULT && sgr !== BG_DEFAULT;
+	}
 
-	terminal.onAppearanceChange(appearance => {
-		if (disposed || !probeSequenceActive || appearance === probeBaseline) return;
-		cancelProbeSequence();
-	});
+	/** Language icon tinted with the language's brand color, else muted. */
+	langIconStyled(lang: string | undefined): string {
+		const icon = this.symbols.langIcon(lang);
+		if (!icon) return icon;
+		const brand = LANGUAGE_BRAND_COLORS[languageKey(lang) ?? ""];
+		return brand === undefined ? this.fg("muted", icon) : wrapForeground(fgSgr(brand, this.depth), icon);
+	}
 
-	terminal.onPrivateModeReport?.((mode, supported, confirmed) => {
-		if (disposed || observerStartAttempted || mode !== 2031 || supported || confirmed !== true) {
-			return;
-		}
-
-		observerStartAttempted = true;
-		try {
-			observer = MacAppearanceObserver.start((err, appearance) => {
-				if (disposed) return;
-				if (err) {
-					cancelProbeSequence();
-					return;
-				}
-				if (appearance === "dark" || appearance === "light") {
-					reevaluateAutoThemeForAppearance("macOS provisional appearance", appearance);
-				}
-				scheduleProbeSequence();
-			});
-		} catch (err) {
-			logger.warn("Failed to start macOS appearance reprobe observer", { err });
-		}
-	});
-
-	return () => {
-		if (disposed) return;
-		disposed = true;
-		cancelProbeSequence();
-		if (unsubscribeAppearanceReport) unsubscribeAppearanceReport();
-		const activeObserver = observer;
-		observer = undefined;
-		if (!activeObserver) return;
-		try {
-			activeObserver.stop();
-		} catch (err) {
-			logger.debug("Failed to stop macOS appearance reprobe observer", { err });
-		}
-	};
-}
-
-var macObserver: { stop(): void } | undefined;
-
-function startMacAppearanceObserver(): void {
-	stopMacAppearanceObserver();
-	if (isTerminalBackgroundQueryTrusted()) return;
-	try {
-		macOSReportedAppearance = detectMacOSAppearance() ?? undefined;
-		macObserver = MacAppearanceObserver.start((err, appearance) => {
-			if (!err && (appearance === "dark" || appearance === "light")) {
-				const changed = appearance !== macOSReportedAppearance;
-				macOSReportedAppearance = appearance;
-				if (changed) {
-					// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may unsubscribe while reporting
-					for (const listener of [...backgroundFallbackListeners]) {
-						try {
-							listener();
-						} catch (err) {
-							// Debug-level: a listener failure must not break sibling
-							// listeners or the appearance observer. Visible only in
-							// local debug logs, never in normal runs.
-							logger.debug("macOS appearance fallback listener failed", { err });
-						}
-					}
-				}
-				reevaluateAutoThemeForAppearance("macOS fallback");
+	style(tokens: string | undefined, text: string): string {
+		if (!tokens) return text;
+		let color: string | undefined;
+		let semantic: { readonly color: string; readonly rank: number } | undefined;
+		let background: string | undefined;
+		let attributes: Attribute[] | undefined;
+		for (const token of tokens.split(" ")) {
+			if (token === "") continue;
+			if (token === "hide") return "";
+			const attribute = ATTRIBUTE_TOKENS[token];
+			if (attribute !== undefined) (attributes ??= []).push(attribute);
+			else if (this.#fg[token] !== undefined) color = token;
+			else if (TONE_COLORS[token] !== undefined) color = TONE_COLORS[token];
+			else if (this.#bg[token] !== undefined) background = token;
+			else if (token === "mark") background = "selectedBg";
+			else {
+				const meaning = SEMANTIC_COLORS[token];
+				if (meaning !== undefined && (semantic === undefined || meaning.rank > semantic.rank)) semantic = meaning;
 			}
-		});
-	} catch (err) {
-		logger.warn("Failed to start macOS appearance observer", { err });
-	}
-}
-
-function stopMacAppearanceObserver(): void {
-	if (macObserver) {
-		macObserver.stop();
-		macObserver = undefined;
-	}
-	macOSReportedAppearance = undefined;
-}
-
-// ============================================================================
-// SIGWINCH Listener
-// ============================================================================
-
-/** Re-check appearance on SIGWINCH and switch dark/light when using auto-detected theme. */
-function startSigwinchListener(): void {
-	stopSigwinchListener();
-	sigwinchHandler = () => {
-		reevaluateAutoThemeForAppearance("SIGWINCH");
-	};
-	process.on("SIGWINCH", sigwinchHandler);
-	startMacAppearanceObserver();
-}
-
-function stopSigwinchListener(): void {
-	if (sigwinchHandler) {
-		process.removeListener("SIGWINCH", sigwinchHandler);
-		sigwinchHandler = undefined;
-	}
-	stopMacAppearanceObserver();
-}
-
-export function stopThemeWatcher(): void {
-	if (themeReloadTimer) {
-		clearTimeout(themeReloadTimer);
-		themeReloadTimer = undefined;
-	}
-	if (themeWatcher) {
-		themeWatcher.close();
-		themeWatcher = undefined;
-	}
-	stopSigwinchListener();
-	terminalReportedAppearance = undefined;
-}
-
-// ============================================================================
-// HTML Export Helpers
-// ============================================================================
-
-/**
- * Classify a parsed theme JSON as light/dark by the perceived luminance of its
- * status-line background. Mirrors {@link Theme.isLight} so the synchronous
- * helpers below stay in lockstep with the runtime classifier — see the comment
- * on `Theme.statusLineLuminance` for why `statusLineBg` is the source of truth
- * (themes like `porcelain` style a dark chat bubble on an otherwise-light
- * theme, so `userMessageBg` is unreliable).
- */
-function isLightThemeJson(themeJson: ThemeJson): boolean {
-	try {
-		const resolved = resolveVarRefs(themeJson.colors.statusLineBg, themeJson.vars ?? {});
-		const luminance = colorLuma(resolved);
-		return luminance !== undefined && luminance > 0.5;
-	} catch {
-		return false;
-	}
-}
-
-function getHtmlDefaultTextForSurface(surface: string | number | undefined): string {
-	const luminance = surface === undefined ? undefined : colorLuma(surface);
-	return luminance !== undefined && luminance > 0.5 ? "#000000" : "#e5e5e7";
-}
-
-function resolveThemeExportColors(themeJson: ThemeJson): {
-	pageBg?: string;
-	cardBg?: string;
-	infoBg?: string;
-} {
-	const exportSection = themeJson.export;
-	if (!exportSection) return {};
-
-	const vars = themeJson.vars ?? {};
-	const resolve = (value: string | number | undefined): string | undefined => {
-		if (value === undefined) return undefined;
-		if (typeof value === "number") return ansi256ToHex(value);
-		if (value === "" || value.startsWith("#")) return value;
-		const varName = value.startsWith("$") ? value.slice(1) : value;
-		if (varName in vars) {
-			const resolved = resolveVarRefs(varName, vars);
-			return typeof resolved === "number" ? ansi256ToHex(resolved) : resolved;
 		}
-		return value;
-	};
-
-	return {
-		pageBg: resolve(exportSection.pageBg),
-		cardBg: resolve(exportSection.cardBg),
-		infoBg: resolve(exportSection.infoBg),
-	};
-}
-
-/**
- * Get resolved theme colors as CSS-compatible hex strings.
- * Used by HTML export to generate CSS custom properties.
- */
-export async function getResolvedThemeColors(themeName?: string): Promise<Record<string, string>> {
-	const name = themeName ?? getDefaultTheme();
-	const themeJson = await loadThemeJson(name);
-	const exportColors = resolveThemeExportColors(themeJson);
-	const resolved = resolveThemeColors(themeJson.colors, themeJson.vars);
-
-	// Empty foreground tokens use the terminal default color. In HTML export,
-	// that default must contrast the export surface, not the TUI status line:
-	// custom light themes can still export dark transcript cards when they omit
-	// `export`, because generateThemeVars derives those cards from userMessageBg.
-	const defaultText = getHtmlDefaultTextForSurface(
-		exportColors.cardBg ?? exportColors.pageBg ?? resolved.userMessageBg,
-	);
-
-	const cssColors: Record<string, string> = {};
-	for (const [key, value] of Object.entries(resolved)) {
-		if (typeof value === "number") {
-			cssColors[key] = ansi256ToHex(value);
-		} else if (value === "") {
-			// Empty means default terminal color - use sensible fallback for HTML
-			cssColors[key] = defaultText;
-		} else {
-			cssColors[key] = value;
+		let out = text;
+		if (attributes !== undefined) {
+			for (const attribute of ATTRIBUTE_ORDER)
+				if (attributes.includes(attribute)) out = withAttribute(attribute, out);
 		}
+		color ??= semantic?.color;
+		if (color !== undefined) out = this.fg(color, out);
+		if (background !== undefined) out = this.bg(background, out);
+		return out;
 	}
-	return cssColors;
 }
 
-/** One appearance variant of {@link NativeThemePalette}: token name → `#rrggbb`. */
-export type NativeThemeVariant = Record<string, string>;
-
-/** omp's resolved theme for a Tern Surface Protocol terminal (the `t` verb body minus `sf`). */
-export interface NativeThemePalette {
-	dark?: NativeThemeVariant;
-	light?: NativeThemeVariant;
-	name: { dark?: string; light?: string };
-}
-
-/**
- * Cheap identity of everything {@link getNativeThemePalette} depends on;
- * recompute the palette only when it changes.
- */
-export function getNativeThemePaletteKey(): string {
-	return `${themeEpoch}|${autoDetectedTheme}|${autoDarkTheme}|${autoLightTheme}|${currentThemeName}|${previewThemeName}|${currentColorBlindMode}`;
-}
-
-/** Every token of theme `name` as hex (terminal-default tokens omitted), plus its export colours. */
-function nativeThemeVariant(name: string): { light: boolean; colors: NativeThemeVariant } {
-	const themeJson = loadThemeJsonSync(name);
-	const built = createTheme(themeJson, getCurrentThemeOptions());
-	const raw = resolveThemeColors(themeJson.colors, themeJson.vars);
-	const colors: NativeThemeVariant = {};
-	for (const key in raw) {
-		// Terminal-default tokens stay unset; keys outside the schema are ignored like the theme does.
-		if (raw[key as keyof typeof raw] === "") continue;
-		if (isValidThemeColor(key)) colors[key] = built.getColorHex(key);
-		else if (isValidThemeBg(key)) colors[key] = built.getBgHex(key);
-	}
-	const exported = resolveThemeExportColors(themeJson);
-	for (const key of ["pageBg", "cardBg", "infoBg"] as const) {
-		const value = exported[key];
-		if (value) colors[key] = value;
-	}
-	return { light: isLightThemeJson(themeJson), colors };
-}
-
-/**
- * omp's theme for a native surface: with auto theme, the configured dark and
- * light themes; otherwise (or while the theme selector previews one) the
- * active theme under its own appearance only. Themes without a loadable
- * definition (in-memory instances) contribute nothing.
- */
-export function getNativeThemePalette(): NativeThemePalette {
-	const palette: NativeThemePalette = { name: {} };
-	const add = (name: string, as?: "dark" | "light"): void => {
-		try {
-			const variant = nativeThemeVariant(name);
-			const slot = as ?? (variant.light ? "light" : "dark");
-			palette[slot] = variant.colors;
-			palette.name[slot] = name;
-		} catch (error) {
-			logger.debug("Native theme palette: theme not loadable", { name, error: String(error) });
-		}
-	};
-	const single = previewThemeName ?? (autoDetectedTheme ? undefined : currentThemeName);
-	if (single !== undefined) add(single);
-	else {
-		add(autoDarkTheme, "dark");
-		add(autoLightTheme, "light");
-	}
-	return palette;
-}
-
-/**
- * Check if a theme is a "light" theme by analyzing its status-line background
- * luminance. Loads theme JSON synchronously (built-in or custom file on disk)
- * for callers in synchronous flows (settings migration, setup wizard).
- */
-export function isLightTheme(themeName?: string): boolean {
-	const name = themeName ?? "dark";
-	const builtinThemes = getBuiltinThemes();
-	let themeJson: ThemeJson | undefined;
-	if (name in builtinThemes) {
-		themeJson = builtinThemes[name];
-	} else {
-		try {
-			const customPath = path.join(getCustomThemesDir(), `${name}.json`);
-			const content = fs.readFileSync(customPath, "utf-8");
-			themeJson = JSON.parse(content) as ThemeJson;
-		} catch {
-			return false;
-		}
-	}
-	return isLightThemeJson(themeJson);
-}
-
-/**
- * Get explicit export colors from theme JSON, if specified.
- * Returns undefined for each color that isn't explicitly set.
- */
-export async function getThemeExportColors(themeName?: string): Promise<{
-	pageBg?: string;
-	cardBg?: string;
-	infoBg?: string;
-}> {
-	const name = themeName ?? getDefaultTheme();
-	try {
-		const themeJson = await loadThemeJson(name);
-		return resolveThemeExportColors(themeJson);
-	} catch {
-		return {};
-	}
+/** Resolve a theme file. Throws on unresolvable variables or invalid colors. */
+export function createTheme(json: ThemeJson, options: ThemeOptions = {}): ResolvedTheme {
+	return new ResolvedTheme(json, options);
 }

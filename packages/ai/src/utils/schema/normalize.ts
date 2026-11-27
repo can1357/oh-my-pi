@@ -1,32 +1,27 @@
 /**
  * Provider-specific JSON Schema normalization used in the request path.
  *
- * Google's Schema proto, Cloud Code Assist's Claude bridge, and MCP/AJV
- * validation all reject different subsets of standard JSON Schema. This module
+ * Google's Schema proto, Moonshot, and MCP/AJV validation all reject
+ * different subsets of standard JSON Schema. This module
  * exposes one option-driven core plus thin dispatchers that pin the option set
  * for each target.
  */
 import { parseLocalRefPointer } from "@oh-my-pi/omptype";
-import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import { dereferenceJsonSchema } from "./dereference";
 import { upgradeJsonSchemaTo202012 } from "./draft";
-import { areJsonValuesEqual, mergeCompatibleEnumSchemas, mergePropertySchemas } from "./equality";
+import { areJsonValuesEqual, mergePropertySchemas } from "./equality";
 import {
-	ALL_CCA_TYPE_SPECIFIC_KEYS,
-	CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS,
-	CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS,
+	ALL_TYPE_SPECIFIC_SCHEMA_KEYS,
 	COMBINATOR_KEYS,
 	LIFTABLE_TO_DESCRIPTION_FIELDS,
 	NON_STRUCTURAL_SCHEMA_KEYS,
+	TYPE_SPECIFIC_SCHEMA_KEYS,
 	UNSUPPORTED_SCHEMA_FIELDS,
 } from "./fields";
-import { isValidJsonSchema } from "./meta-validator";
 import { type DescriptionSpillFormat, spillToDescription } from "./spill";
 import { enter, epochNext, exit, once, stamp } from "./stamps";
 import { isJsonObject, isJsonObjectEmpty, type JsonObject } from "./types";
-
-export type ResidualSchemaIncompatibility = "type-array" | "type-null" | "nullable" | "combiners" | "not";
 
 export interface NormalizeSchemaOptions {
 	/**
@@ -51,17 +46,10 @@ export interface NormalizeSchemaOptions {
 				keys?: (key: string) => boolean;
 				format?: DescriptionSpillFormat;
 		  };
-	mergeObjectCombiners: boolean;
-	collapseSameTypeCombiners: boolean;
-	collapseMixedTypeCombiners: boolean;
-	stripResidualCombinersFixpoint: boolean;
-	extractNullableFromUnions: boolean;
 	inferTypeForBareEnum: boolean;
 	foldOneOfIntoAnyOf: boolean;
 	dropNonScalarEnum: boolean;
 	stringEnumsOnly?: boolean;
-	rejectResidualIncompatibilities?: ReadonlyArray<ResidualSchemaIncompatibility>;
-	validateAndFallback?: { fallback: unknown };
 }
 
 interface NormalizeSchemaWalkOptions extends NormalizeSchemaOptions {
@@ -73,14 +61,6 @@ interface NormalizeSchemaWalkOptions extends NormalizeSchemaOptions {
 	 * keyword slot (`nullable`, `enum` entries, `additionalProperties`) it stays.
 	 */
 	booleanIsSubschema: boolean;
-}
-
-interface ResidualIncompatibilityChecks {
-	typeArray: boolean;
-	typeNull: boolean;
-	nullable: boolean;
-	combiners: boolean;
-	not: boolean;
 }
 
 const SNAKE_TO_CAMEL_RENAMES = new Map<string, string>([
@@ -195,11 +175,6 @@ function hasUnrepresentableGoogleEnumConstraint(
 	return false;
 }
 
-const CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA = {
-	type: "object",
-	properties: {},
-} as const;
-
 function isGoogleUnsupportedSchemaField(key: string): boolean {
 	return Object.hasOwn(UNSUPPORTED_SCHEMA_FIELDS, key);
 }
@@ -313,13 +288,13 @@ function splitTypeArrayIntoAnyOf(obj: JsonObject): JsonObject {
 	if (types.length < 2) return obj;
 	const branches = types.map(type => {
 		const schema: JsonObject = { type };
-		return { schema, keys: CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[type] ?? {} };
+		return { schema, keys: TYPE_SPECIFIC_SCHEMA_KEYS[type] ?? {} };
 	});
 	const out: JsonObject = {};
 	for (const key in obj) {
 		if (!Object.hasOwn(obj, key) || key === "type") continue;
 		const value = obj[key];
-		if (!Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key)) {
+		if (!Object.hasOwn(ALL_TYPE_SPECIFIC_SCHEMA_KEYS, key)) {
 			out[key] = value;
 			continue;
 		}
@@ -334,9 +309,9 @@ function splitTypeArrayIntoAnyOf(obj: JsonObject): JsonObject {
 
 /** Deletes keywords that constrain a JSON type other than `type`, e.g. `items` on a string node. */
 function dropForeignTypeKeywords(schema: JsonObject, type: string): void {
-	const allowed = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[type] ?? {};
+	const allowed = TYPE_SPECIFIC_SCHEMA_KEYS[type] ?? {};
 	for (const key in schema) {
-		if (Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key) && !Object.hasOwn(allowed, key)) delete schema[key];
+		if (Object.hasOwn(ALL_TYPE_SPECIFIC_SCHEMA_KEYS, key) && !Object.hasOwn(allowed, key)) delete schema[key];
 	}
 }
 
@@ -542,7 +517,10 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 		if (typeof result.type === "string") dropForeignTypeKeywords(result, result.type);
 	}
 	if (constValue !== undefined) {
-		const existingEnum = Array.isArray(result.enum) ? result.enum : [];
+		// Copy before pushing: `result.enum` may alias the caller's array (the
+		// keyword copy above reuses the input's value for non-schema keywords),
+		// and pushing into it would mutate the caller's schema in place.
+		const existingEnum = Array.isArray(result.enum) ? [...result.enum] : [];
 		pushEnumValue(existingEnum, constValue);
 		result.enum = existingEnum;
 		if (!result.type) {
@@ -593,11 +571,6 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 
 function applyNodePostProcessing(schema: JsonObject, options: NormalizeSchemaWalkOptions): JsonObject {
 	let current = schema;
-	for (const combiner of JSON_SCHEMA_COMBINERS) {
-		if (options.mergeObjectCombiners) current = mergeObjectCombinerVariants(current, combiner);
-		if (options.collapseMixedTypeCombiners) current = collapseMixedTypeCombinerVariants(current, combiner);
-		if (options.collapseSameTypeCombiners) current = collapseSameTypeCombinerVariants(current, combiner);
-	}
 	if (options.foldOneOfIntoAnyOf) current = foldOneOfIntoAnyOf(current);
 	if (options.dropNonScalarEnum) current = dropNonScalarEnumForMfjs(current);
 	if (options.stringEnumsOnly && options.booleanIsSubschema) current = dropNonStringEnumForGoogle(current);
@@ -735,394 +708,6 @@ function mergeObjectCombinerVariants(schema: JsonObject, combiner: SchemaCombine
 	}
 
 	return nextSchema;
-}
-
-function collapseMixedTypeCombinerVariants(schema: JsonObject, combiner: "anyOf" | "oneOf"): JsonObject {
-	const variantsRaw = schema[combiner];
-	if (!Array.isArray(variantsRaw) || variantsRaw.length === 0) {
-		return schema;
-	}
-
-	const seenTypes = new Set<string>();
-	const variantTypes: string[] = [];
-	const mergedVariantFields: JsonObject = {};
-	for (const entry of variantsRaw) {
-		if (!isJsonObject(entry) || typeof entry.type !== "string") {
-			return schema;
-		}
-
-		const variantType = entry.type;
-		if (seenTypes.has(variantType)) {
-			return schema;
-		}
-
-		const allowedKeys = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[variantType];
-		if (!allowedKeys) {
-			return schema;
-		}
-
-		for (const key in entry) {
-			if (!Object.hasOwn(entry, key)) continue;
-			const variantValue = entry[key];
-			if (key === "type") continue;
-			if (!Object.hasOwn(allowedKeys, key) && !Object.hasOwn(CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS, key)) {
-				return schema;
-			}
-
-			const existingValue = mergedVariantFields[key];
-			if (existingValue !== undefined && !areJsonValuesEqual(existingValue, variantValue)) {
-				if (key !== "description") return schema;
-				// Descriptions are annotations, so merge branch-local spill text instead of
-				// treating it as a structural incompatibility.
-				mergedVariantFields[key] = mergeSchemaDescriptions(existingValue, variantValue);
-				continue;
-			}
-			mergedVariantFields[key] = variantValue;
-		}
-
-		seenTypes.add(variantType);
-		variantTypes.push(variantType);
-	}
-
-	if (variantTypes.length < 2 || variantTypes.every(type => type === "object")) {
-		return schema;
-	}
-	const nextSchema = copySchemaWithout(schema, combiner);
-	const nonNullTypes = variantTypes.filter(t => t !== "null");
-	const chosenType: string = nonNullTypes[0] ?? variantTypes[0];
-	nextSchema.type = chosenType;
-	const chosenTypeAllowedKeys = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[chosenType] ?? {};
-	// Sibling keys copied from the parent may belong to a different type.
-	dropForeignTypeKeywords(nextSchema, chosenType);
-
-	for (const key in mergedVariantFields) {
-		if (!Object.hasOwn(mergedVariantFields, key)) continue;
-		// Drop type-specific keys that don't belong to the chosen type
-		if (!Object.hasOwn(chosenTypeAllowedKeys, key) && !Object.hasOwn(CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS, key)) {
-			continue;
-		}
-		const value = mergedVariantFields[key];
-		const existingValue = nextSchema[key];
-		if (existingValue !== undefined && !areJsonValuesEqual(existingValue, value)) {
-			if (key !== "description") return schema;
-			nextSchema[key] = mergeSchemaDescriptions(existingValue, value);
-			continue;
-		}
-		if (existingValue === undefined) {
-			nextSchema[key] = value;
-		}
-	}
-	return nextSchema;
-}
-
-function mergeSchemaDescriptions(existing: unknown, incoming: unknown): string {
-	if (typeof existing !== "string") return typeof incoming === "string" ? incoming : "";
-	if (typeof incoming !== "string" || incoming.length === 0 || existing === incoming) return existing;
-	if (existing.length === 0) return incoming;
-	return `${existing}\n\n${incoming}`;
-}
-
-function collapseSameTypeCombinerVariants(schema: JsonObject, combiner: "anyOf" | "oneOf"): JsonObject {
-	const variantsRaw = schema[combiner];
-	if (!Array.isArray(variantsRaw) || variantsRaw.length === 0) return schema;
-	let commonType: string | undefined;
-	const variants: JsonObject[] = [];
-	for (const entry of variantsRaw) {
-		if (!isJsonObject(entry) || typeof entry.type !== "string") return schema;
-		if (commonType === undefined) commonType = entry.type;
-		else if (entry.type !== commonType) return schema;
-		variants.push(entry);
-	}
-	const firstEntry = variants[0];
-	if (!firstEntry) return schema;
-
-	// Same-type collapse otherwise keeps only the first variant's keys, silently
-	// dropping the other branches' `enum` members (e.g. an anyOf of two string
-	// enums collapsing to just the first).
-	const enumVariantCount = variants.reduce((n, variant) => n + (Array.isArray(variant.enum) ? 1 : 0), 0);
-
-	let collapsed: JsonObject;
-	if (enumVariantCount === variants.length) {
-		// Every branch is an `enum` schema: fold them with
-		// `mergeCompatibleEnumSchemas`, which unions the members only when the
-		// branches agree on `type` and every non-`enum` field, returning null
-		// otherwise. Bail to the untouched schema on any disagreement so the
-		// residual-combiner fallback handles it instead of mislabeling.
-		let merged: JsonObject | null = firstEntry;
-		for (let i = 1; i < variants.length && merged !== null; i++) {
-			merged = mergeCompatibleEnumSchemas(merged, variants[i]);
-		}
-		if (merged === null) return schema;
-		collapsed = merged;
-	} else if (enumVariantCount > 0) {
-		// Mixed branches: at least one is unconstrained by `enum` and is therefore
-		// broader. Collapse onto the first such branch so the result keeps its
-		// (broader) keys — never narrowing to an enum branch's members or leaking
-		// its metadata (description/default).
-		collapsed = variants.find(variant => !Array.isArray(variant.enum)) ?? firstEntry;
-	} else {
-		// No `enum` branches: keep the original first-wins behavior.
-		collapsed = firstEntry;
-	}
-
-	const nextSchema = copySchemaWithout(schema, combiner);
-	for (const key in collapsed) {
-		if (Object.hasOwn(collapsed, key) && !outHasOwn(nextSchema, key)) nextSchema[key] = collapsed[key];
-	}
-	return nextSchema;
-}
-
-/**
- * Recursively strip any remaining anyOf/oneOf that same-type or mixed-type
- * collapse can handle. This is needed because object-combiner merging can
- * create new anyOf in merged subtrees after child normalization already ran.
- */
-export function stripResidualCombiners(value: unknown, epoch: number = epochNext()): unknown {
-	return stripResidualCombinersNode(value, epoch, false);
-}
-
-function stripResidualCombinersNode(value: unknown, epoch: number, insideSchemaMap: boolean): unknown {
-	if (Array.isArray(value)) {
-		if (!once(value, epoch)) return [];
-		return value.map(entry => stripResidualCombinersNode(entry, epoch, false));
-	}
-	if (!isJsonObject(value)) return value;
-	if (!once(value, epoch)) return {};
-	const result: JsonObject = {};
-	for (const key in value) {
-		if (!Object.hasOwn(value, key)) continue;
-		const entry = value[key];
-		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
-		result[key] = childKind ? stripResidualCombinersNode(entry, epoch, childKind === "map") : entry;
-	}
-	if (insideSchemaMap) return result;
-
-	let current: JsonObject = result;
-	let changed = true;
-	while (changed) {
-		changed = false;
-		for (const combiner of JSON_SCHEMA_COMBINERS) {
-			const sameType = collapseSameTypeCombinerVariants(current, combiner);
-			if (sameType !== current) {
-				current = sameType;
-				changed = true;
-			}
-			const mixed = collapseMixedTypeCombinerVariants(current, combiner);
-			if (mixed !== current) {
-				current = mixed;
-				changed = true;
-			}
-		}
-	}
-	return current;
-}
-
-interface NullableExtractionResult {
-	schema: unknown;
-	nullable: boolean;
-}
-
-function extractNullableUnionSchema(schema: unknown): NullableExtractionResult {
-	if (!isJsonObject(schema)) {
-		return { schema, nullable: false };
-	}
-
-	if (schema.nullable === true) {
-		const nextSchema = { ...schema };
-		delete nextSchema.nullable;
-		return { schema: nextSchema, nullable: true };
-	}
-
-	if (Array.isArray(schema.type)) {
-		const typeVariants = schema.type.filter((entry): entry is string => typeof entry === "string");
-		const nonNullTypes = typeVariants.filter(entry => entry !== "null");
-		if (typeVariants.includes("null") && nonNullTypes.length === 1) {
-			const nextSchema = { ...schema, type: nonNullTypes[0] };
-			return { schema: nextSchema, nullable: true };
-		}
-	}
-
-	for (const combiner of JSON_SCHEMA_COMBINERS) {
-		const variantsRaw = schema[combiner];
-		if (!Array.isArray(variantsRaw)) continue;
-
-		let hasNullVariant = false;
-		const nonNullVariants: unknown[] = [];
-		for (const variant of variantsRaw) {
-			if (isJsonObject(variant) && variant.type === "null") {
-				let keyCount = 0;
-				for (const k in variant) {
-					if (!Object.hasOwn(variant, k)) continue;
-					if (++keyCount > 1) break;
-				}
-				if (keyCount === 1) {
-					hasNullVariant = true;
-					continue;
-				}
-			}
-			nonNullVariants.push(variant);
-		}
-
-		if (!hasNullVariant || nonNullVariants.length !== 1 || !isJsonObject(nonNullVariants[0])) {
-			continue;
-		}
-
-		const nextSchema = copySchemaWithout(schema, combiner);
-		const nonNullVariant = nonNullVariants[0];
-		for (const key in nonNullVariant) {
-			if (!Object.hasOwn(nonNullVariant, key)) continue;
-			const value = nonNullVariant[key];
-			const existingValue = nextSchema[key];
-			if (existingValue !== undefined && !areJsonValuesEqual(existingValue, value)) {
-				return { schema, nullable: false };
-			}
-			if (existingValue === undefined) {
-				nextSchema[key] = value;
-			}
-		}
-		return { schema: nextSchema, nullable: true };
-	}
-
-	return { schema, nullable: false };
-}
-
-interface NullableNormalizationResult {
-	schema: unknown;
-	nullable: boolean;
-}
-
-function normalizeNullablePropertiesForCloudCodeAssist(
-	value: unknown,
-	isPropertySchema = false,
-	epoch: number = epochNext(),
-	insideSchemaMap = false,
-): NullableNormalizationResult {
-	if (Array.isArray(value)) {
-		if (!once(value, epoch)) {
-			return { schema: [], nullable: false };
-		}
-		return {
-			schema: value.map(entry => normalizeNullablePropertiesForCloudCodeAssist(entry, false, epoch).schema),
-			nullable: false,
-		};
-	}
-	if (!isJsonObject(value)) {
-		return { schema: value, nullable: false };
-	}
-	if (!once(value, epoch)) {
-		return { schema: {}, nullable: false };
-	}
-
-	const normalized: JsonObject = {};
-	for (const key in value) {
-		if (!Object.hasOwn(value, key)) continue;
-		const entry = value[key];
-		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
-		normalized[key] = childKind
-			? normalizeNullablePropertiesForCloudCodeAssist(entry, false, epoch, childKind === "map").schema
-			: entry;
-	}
-	if (insideSchemaMap) return { schema: normalized, nullable: false };
-
-	if (isJsonObject(normalized.properties)) {
-		const properties = normalized.properties;
-		const required = new Set(
-			Array.isArray(normalized.required)
-				? normalized.required.filter((entry): entry is string => typeof entry === "string")
-				: [],
-		);
-		const nextProperties: JsonObject = {};
-		for (const name in properties) {
-			if (!Object.hasOwn(properties, name)) continue;
-			const normalizedProperty = normalizeNullablePropertiesForCloudCodeAssist(properties[name], true, epoch);
-			nextProperties[name] = normalizedProperty.schema;
-			if (normalizedProperty.nullable) {
-				required.delete(name);
-			}
-		}
-		normalized.properties = nextProperties;
-		if (Array.isArray(normalized.required)) {
-			normalized.required = Array.from(required);
-		}
-	}
-
-	if (!isPropertySchema) {
-		return { schema: normalized, nullable: false };
-	}
-
-	return extractNullableUnionSchema(normalized);
-}
-
-function createResidualIncompatibilityChecks(
-	checks: ReadonlyArray<ResidualSchemaIncompatibility> | undefined,
-): ResidualIncompatibilityChecks | undefined {
-	if (!checks || checks.length === 0) return undefined;
-	const result: ResidualIncompatibilityChecks = {
-		typeArray: false,
-		typeNull: false,
-		nullable: false,
-		combiners: false,
-		not: false,
-	};
-	for (const check of checks) {
-		switch (check) {
-			case "type-array":
-				result.typeArray = true;
-				break;
-			case "type-null":
-				result.typeNull = true;
-				break;
-			case "nullable":
-				result.nullable = true;
-				break;
-			case "not":
-				result.not = true;
-				break;
-			case "combiners":
-				result.combiners = true;
-				break;
-		}
-	}
-	return result;
-}
-
-function hasResidualSchemaIncompatibilities(
-	value: unknown,
-	checks: ResidualIncompatibilityChecks,
-	epoch: number = epochNext(),
-	insideSchemaMap = false,
-): boolean {
-	if (Array.isArray(value)) {
-		if (!once(value, epoch)) return false;
-		return value.some(entry => hasResidualSchemaIncompatibilities(entry, checks, epoch, false));
-	}
-	if (!isJsonObject(value)) {
-		return false;
-	}
-	if (!once(value, epoch)) {
-		return false;
-	}
-
-	if (!insideSchemaMap) {
-		if (checks.typeArray && Array.isArray(value.type)) return true;
-		if (checks.typeNull && value.type === "null") return true;
-		if (checks.nullable && Object.hasOwn(value, "nullable")) return true;
-		if (checks.not && Object.hasOwn(value, "not")) return true;
-		if (checks.combiners) {
-			for (const combiner of SCHEMA_COMPOSITION_COMBINERS) {
-				if (Array.isArray(value[combiner])) return true;
-			}
-		}
-	}
-	for (const key in value) {
-		if (!Object.hasOwn(value, key)) continue;
-		const entry = value[key];
-		const childKind = classifySchemaChild(key, entry, insideSchemaMap);
-		if (childKind && hasResidualSchemaIncompatibilities(entry, checks, epoch, childKind === "map")) {
-			return true;
-		}
-	}
-	return false;
 }
 
 /**
@@ -1269,27 +854,11 @@ export function sanitizeSchemaForCursor(schema: JsonObject): JsonObject {
 export function normalizeSchema(value: unknown, options: NormalizeSchemaOptions): unknown {
 	const upgraded = upgradeJsonSchemaTo202012(value);
 	const dereferenced = dereferenceJsonSchema(upgraded);
-	let normalized = normalizeSchemaNode(dereferenced, {
+	return normalizeSchemaNode(dereferenced, {
 		...options,
 		insideSchemaMap: false,
 		booleanIsSubschema: true,
 	});
-	if (options.stripResidualCombinersFixpoint) {
-		normalized = stripResidualCombiners(normalized);
-	}
-	if (options.extractNullableFromUnions) {
-		normalized = normalizeNullablePropertiesForCloudCodeAssist(normalized).schema;
-	}
-	const residualChecks = createResidualIncompatibilityChecks(options.rejectResidualIncompatibilities);
-	if (residualChecks && hasResidualSchemaIncompatibilities(normalized, residualChecks)) {
-		logger.debug("Schema has residual provider incompatibilities, using fallback");
-		return options.validateAndFallback?.fallback ?? normalized;
-	}
-	if (options.validateAndFallback && !isValidJsonSchema(normalized)) {
-		logger.debug("Schema failed validation, using fallback");
-		return options.validateAndFallback.fallback;
-	}
-	return normalized;
 }
 
 export function normalizeSchemaForGoogle(value: unknown): unknown {
@@ -1303,39 +872,10 @@ export function normalizeSchemaForGoogle(value: unknown): unknown {
 		autoPropertyOrdering: true,
 		ensureObjectProperties: true,
 		liftStrippedToDescription: { format: "spill" },
-		mergeObjectCombiners: false,
-		collapseSameTypeCombiners: false,
-		collapseMixedTypeCombiners: false,
-		stripResidualCombinersFixpoint: false,
-		extractNullableFromUnions: false,
 		inferTypeForBareEnum: true,
 		dropNonScalarEnum: false,
 		stringEnumsOnly: true,
 		foldOneOfIntoAnyOf: false,
-	});
-}
-
-export function normalizeSchemaForCCA(value: unknown): unknown {
-	return normalizeSchema(value, {
-		coerceBooleanSubschemas: "standard",
-		unsupportedFields: isGoogleUnsupportedSchemaField,
-		normalizeFieldNames: true,
-		collapseNullFields: false,
-		scalarizeTypeArrays: true,
-		stripNullableKeyword: true,
-		autoPropertyOrdering: false,
-		ensureObjectProperties: true,
-		liftStrippedToDescription: { format: "spill" },
-		mergeObjectCombiners: true,
-		collapseSameTypeCombiners: true,
-		collapseMixedTypeCombiners: true,
-		stripResidualCombinersFixpoint: true,
-		extractNullableFromUnions: true,
-		inferTypeForBareEnum: true,
-		dropNonScalarEnum: false,
-		foldOneOfIntoAnyOf: false,
-		rejectResidualIncompatibilities: ["type-array", "type-null", "nullable", "combiners", "not"],
-		validateAndFallback: { fallback: CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA },
 	});
 }
 
@@ -1350,11 +890,6 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
 		autoPropertyOrdering: false,
 		ensureObjectProperties: false,
 		liftStrippedToDescription: false,
-		mergeObjectCombiners: false,
-		collapseSameTypeCombiners: false,
-		collapseMixedTypeCombiners: false,
-		stripResidualCombinersFixpoint: false,
-		extractNullableFromUnions: false,
 		inferTypeForBareEnum: false,
 		dropNonScalarEnum: false,
 	});
@@ -1402,11 +937,6 @@ export function normalizeSchemaForMoonshot(value: unknown): unknown {
 		autoPropertyOrdering: false,
 		ensureObjectProperties: false,
 		liftStrippedToDescription: { format: "spill" },
-		mergeObjectCombiners: false,
-		collapseSameTypeCombiners: false,
-		collapseMixedTypeCombiners: false,
-		stripResidualCombinersFixpoint: false,
-		extractNullableFromUnions: false,
 		inferTypeForBareEnum: true,
 		dropNonScalarEnum: true,
 		foldOneOfIntoAnyOf: true,
@@ -1662,8 +1192,15 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
 /**
  * OpenAI Responses rejects `oneOf` in tool schemas even when strict mode is
  * disabled, and rejects every schema node with `type: "object"` unless it has
- * a `properties` member. Normalize only schema-valued positions so literal
- * payloads under `enum`, `const`, `default`, and `examples` remain unchanged.
+ * a `properties` member. Codex opts into repairing arrays without `items` with
+ * explicit open `items: true`, including the default open tail after
+ * `prefixItems`, which makes strict adaptation fall back to non-strict.
+ * The repair is off by default: other Responses routes include grammar
+ * backends that cannot compile boolean subschemas. If `unevaluatedItems`
+ * appears in any schema position, repair is disabled for the whole tool:
+ * references and composition can carry evaluated-item effects across subtrees.
+ * Normalize only schema-valued positions so literal payloads under `enum`,
+ * `const`, `default`, and `examples` remain unchanged.
  *
  * Identity-preserving: returns the input reference unchanged when no rewrite
  * occurred so callers can dedupe via reference equality (and the strict-mode
@@ -1671,34 +1208,79 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
  * concatenated (the wire payload accepts a single union; preserving both
  * would not survive).
  */
-export function sanitizeSchemaForOpenAIResponses(schema: JsonObject): JsonObject {
-	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap()) as JsonObject;
+export function sanitizeSchemaForOpenAIResponses(
+	schema: JsonObject,
+	options?: { repairArrayItems?: boolean },
+): JsonObject {
+	const repairArrayItems = options?.repairArrayItems === true && !containsUnevaluatedItems(schema);
+	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap(), repairArrayItems) as JsonObject;
+}
+
+function containsUnevaluatedItems(value: unknown, epoch: number = epochNext()): boolean {
+	if (Array.isArray(value)) {
+		if (!once(value, epoch)) return false;
+		for (const entry of value) {
+			if (containsUnevaluatedItems(entry, epoch)) return true;
+		}
+		return false;
+	}
+	if (!isJsonObject(value) || !once(value, epoch)) return false;
+	if (Object.hasOwn(value, "unevaluatedItems")) return true;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const child = value[key];
+		if (OPENAI_RESPONSES_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
+			for (const name in child) {
+				if (Object.hasOwn(child, name) && containsUnevaluatedItems(child[name], epoch)) return true;
+			}
+		} else if (
+			(OPENAI_RESPONSES_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) ||
+			OPENAI_RESPONSES_SCHEMA_VALUE_KEYS.has(key)
+		) {
+			if (containsUnevaluatedItems(child, epoch)) return true;
+		}
+	}
+	return false;
 }
 
 /**
  * Alias for {@link sanitizeSchemaForOpenAIResponses} matching the
  * `normalizeSchemaFor*` dispatcher naming used elsewhere in this module.
  */
-export const normalizeSchemaForOpenAIResponses: (schema: JsonObject) => JsonObject = sanitizeSchemaForOpenAIResponses;
+export const normalizeSchemaForOpenAIResponses: typeof sanitizeSchemaForOpenAIResponses =
+	sanitizeSchemaForOpenAIResponses;
 const OPENAI_UNSUPPORTED_REGEX_LOOKAROUNDS = new Set(["=", "!", "<=", "<!"]);
 const OPENAI_RESPONSES_PATTERN_PROPERTIES_FALLBACK = ".*";
 
-function hasOpenAIUnsupportedRegexLookaround(pattern: string): boolean {
-	let groupStart = pattern.indexOf("(?");
-	while (groupStart !== -1) {
-		let escapes = 0;
-		for (let i = groupStart - 1; i >= 0 && pattern[i] === "\\"; i--) escapes++;
-		if (escapes % 2 === 0) {
-			const operator =
-				pattern[groupStart + 2] === "<" ? pattern.slice(groupStart + 2, groupStart + 4) : pattern[groupStart + 2];
+/**
+ * Whether OpenAI's tool-schema regex validator rejects `pattern` although ECMAScript accepts it:
+ * lookaround groups, or an unescaped `[` inside a character class (a literal in ECMAScript, a
+ * nested class for OpenAI, which then reports the outer class as unclosed — e.g. `^[^[\]]*$`).
+ */
+function isOpenAIUnsupportedRegex(pattern: string): boolean {
+	let inClass = false;
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i];
+		if (char === "\\") {
+			i++;
+		} else if (inClass) {
+			if (char === "]") inClass = false;
+			else if (char === "[") return true;
+		} else if (char === "[") {
+			inClass = true;
+		} else if (char === "(" && pattern[i + 1] === "?") {
+			const operator = pattern[i + 2] === "<" ? pattern.slice(i + 2, i + 4) : pattern[i + 2];
 			if (OPENAI_UNSUPPORTED_REGEX_LOOKAROUNDS.has(operator)) return true;
 		}
-		groupStart = pattern.indexOf("(?", groupStart + 2);
 	}
 	return false;
 }
 
-function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonObject, unknown>): unknown {
+function normalizeOpenAIResponsesSchemaNode(
+	value: unknown,
+	cache: WeakMap<JsonObject, unknown>,
+	repairArrayItems: boolean,
+): unknown {
 	if (!isJsonObject(value)) return value;
 
 	// `{}` (empty JSON Schema) ≡ `true` (JSON Schema draft 2020-12 §4.3.1).
@@ -1734,11 +1316,7 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 			changed = true;
 			continue;
 		}
-		if (
-			key === "pattern" &&
-			typeof value.pattern === "string" &&
-			hasOpenAIUnsupportedRegexLookaround(value.pattern)
-		) {
+		if (key === "pattern" && typeof value.pattern === "string" && isOpenAIUnsupportedRegex(value.pattern)) {
 			changed = true;
 			continue;
 		}
@@ -1746,21 +1324,27 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 		const child = value[key];
 		let next: unknown = child;
 		if (key === "patternProperties" && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, true);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, true, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, false);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, false, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-			next = normalizeOpenAIResponsesSchemaArray(child, cache);
+			next = normalizeOpenAIResponsesSchemaArray(child, cache, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_VALUE_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaNode(child, cache);
+			next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		}
 
 		if (next !== child) changed = true;
-		output[key] = next;
+		// Match cloneJsonTree's hardened copy: JSON keys must not invoke the
+		// legacy __proto__ setter on the accumulator.
+		if (key === "__proto__") {
+			Object.defineProperty(output, key, { value: next, enumerable: true, writable: true, configurable: true });
+		} else {
+			output[key] = next;
+		}
 	}
 
 	if (Array.isArray(value.oneOf)) {
-		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache);
+		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache, repairArrayItems);
 		const existingAnyOf = output.anyOf;
 		output.anyOf = Array.isArray(existingAnyOf)
 			? [...existingAnyOf, ...(rewrittenOneOf as unknown[])]
@@ -1772,6 +1356,23 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 	// properties requirement.
 	if (declaresObjectType(value.type) && !Object.hasOwn(value, "properties")) {
 		output.properties = {};
+		// A bare object is open in JSON Schema. The placeholder `properties: {}` alone reads
+		// as a declared empty shape, which strict adaptation would close (issue #10125).
+		if (isBareOpenObject(value)) output.additionalProperties = true;
+		changed = true;
+	}
+
+	// An omitted `items` permits any element, including the tail after
+	// `prefixItems`; make that default explicit without changing the tuple.
+	// Strict sanitization also infers arrays from typeless `prefixItems`.
+	if (
+		repairArrayItems &&
+		(value.type === "array" ||
+			(Array.isArray(value.type) && value.type.includes("array")) ||
+			(value.type === undefined && Array.isArray(value.prefixItems))) &&
+		value.items === undefined
+	) {
+		output.items = true;
 		changed = true;
 	}
 
@@ -1793,10 +1394,29 @@ function declaresObjectType(type: unknown): boolean {
 	return false;
 }
 
-function normalizeOpenAIResponsesSchemaArray(value: unknown[], cache: WeakMap<JsonObject, unknown>): unknown[] {
+/**
+ * An object node with no `properties`, no `additionalProperties`, and no
+ * `$ref`/combinator supplying its shape: open in JSON Schema, but strict
+ * enforcement would close it to `{}`-only (issue #10125).
+ */
+function isBareOpenObject(schema: Record<string, unknown>): boolean {
+	return (
+		declaresObjectType(schema.type) &&
+		!isJsonObject(schema.properties) &&
+		!Object.hasOwn(schema, "additionalProperties") &&
+		!Object.hasOwn(schema, "$ref") &&
+		!COMBINATOR_KEYS.some(key => Array.isArray(schema[key]))
+	);
+}
+
+function normalizeOpenAIResponsesSchemaArray(
+	value: unknown[],
+	cache: WeakMap<JsonObject, unknown>,
+	repairArrayItems: boolean,
+): unknown[] {
 	let changed = false;
 	const output = value.map(item => {
-		const next = normalizeOpenAIResponsesSchemaNode(item, cache);
+		const next = normalizeOpenAIResponsesSchemaNode(item, cache, repairArrayItems);
 		if (next !== item) changed = true;
 		return next;
 	});
@@ -1807,20 +1427,25 @@ function normalizeOpenAIResponsesSchemaMap(
 	schemaMap: JsonObject,
 	cache: WeakMap<JsonObject, unknown>,
 	stripUnsupportedRegexKeys: boolean,
+	repairArrayItems: boolean,
 ): JsonObject {
 	let changed = false;
 	const output: JsonObject = {};
 	for (const key in schemaMap) {
 		if (!Object.hasOwn(schemaMap, key)) continue;
 		const child = schemaMap[key];
-		const next = normalizeOpenAIResponsesSchemaNode(child, cache);
+		const next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		if (next !== child) changed = true;
-		if (stripUnsupportedRegexKeys && hasOpenAIUnsupportedRegexLookaround(key)) {
+		if (stripUnsupportedRegexKeys && isOpenAIUnsupportedRegex(key)) {
 			changed = true;
 			appendOpenAIResponsesFallbackPatternProperty(output, next);
 			continue;
 		}
-		output[key] = next;
+		if (key === "__proto__") {
+			Object.defineProperty(output, key, { value: next, enumerable: true, writable: true, configurable: true });
+		} else {
+			output[key] = next;
+		}
 	}
 	return changed ? output : schemaMap;
 }
@@ -1946,6 +1571,9 @@ function isUnrepresentableStrictBranch(value: unknown): boolean {
  *  - `patternProperties` (open keyset matched by regex),
  *  - `additionalProperties: true` or `additionalProperties: <schema>` (open
  *    keyset with optional further constraint).
+ *  - an object with no `properties`, `additionalProperties`, `$ref` or
+ *    combinator supplying its shape: open in
+ *    JSON Schema, but `enforceStrictSchema` would close it to `{}`-only.
  *  - boolean schemas (`true`/`false`) inside `anyOf`/`oneOf`/`allOf`/`items`/
  *    `prefixItems` — strict providers (OpenAI/Codex) reject the unconstrained
  *    branch, and `enforceStrictSchema` would otherwise wave the non-object
@@ -1972,6 +1600,7 @@ function hasUnrepresentableStrictObjectMap(schema: Record<string, unknown>, epoc
 	if (hasPatternProperties || hasSchemaAdditionalProperties) {
 		return true;
 	}
+	if (isBareOpenObject(schema)) return true;
 
 	if (isJsonObject(schema.properties)) {
 		const properties = schema.properties;

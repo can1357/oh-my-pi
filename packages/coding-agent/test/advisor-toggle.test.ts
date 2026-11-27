@@ -16,6 +16,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { __resetDirsFromEnvForTests, getProjectAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function restoreEnv(key: string, value: string | undefined): void {
@@ -87,7 +88,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 	});
 
@@ -187,6 +187,63 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.formatAdvisorStatus()).toContain("Advisor is enabled (anthropic/claude-sonnet-4-5)");
 	});
 
+	it("uses current WATCHDOG.yml imports after /advisor off and on", async () => {
+		const cwd = tempDir.path();
+		const agentDir = tempDir.join("watchdog-agent");
+		const config = path.join(agentDir, "WATCHDOG.yml");
+		const rule = path.join(agentDir, "rule.md");
+		const settings = Settings.isolated({ "advisor.enabled": true, "async.enabled": false });
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		await Bun.write(config, "instructions: '@./rule.md'\nadvisors:\n  - name: Reviewer\n");
+		await Bun.write(rule, "Original shared watchdog rule.");
+
+		const { session: watchdogSession } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: SessionManager.inMemory(cwd),
+			authStorage,
+			modelRegistry,
+			settings,
+			model,
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			skills: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		try {
+			let output = "";
+			const runtime = {
+				session: watchdogSession,
+				sessionManager: watchdogSession.sessionManager,
+				settings,
+				cwd,
+				output: (text: string) => {
+					output = text;
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			};
+			await executeAcpBuiltinSlashCommand("/advisor dump raw", runtime);
+			expect(output).toContain("Original shared watchdog rule.");
+
+			await executeAcpBuiltinSlashCommand("/advisor off", runtime);
+			await Bun.write(rule, "Updated shared watchdog rule.");
+			await Bun.write(path.join(agentDir, "specialization.md"), "New advisor-specific rule.");
+			await Bun.write(
+				config,
+				"instructions: '@./rule.md'\nadvisors:\n  - name: Reviewer\n    instructions: '@./specialization.md'\n",
+			);
+			await executeAcpBuiltinSlashCommand("/advisor on", runtime);
+			await executeAcpBuiltinSlashCommand("/advisor dump raw", runtime);
+			expect(output).toContain("Updated shared watchdog rule.");
+			expect(output).toContain("New advisor-specific rule.");
+			expect(output).not.toContain("Original shared watchdog rule.");
+		} finally {
+			await watchdogSession.dispose();
+		}
+	});
+
 	it("explicit enable rebuilds the runtime when the advisor role changes", () => {
 		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -284,7 +341,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		try {
@@ -324,7 +380,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager,
 			settings: session.settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 		expect(customSession.isAdvisorEnabled()).toBe(false);
 
@@ -390,7 +445,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager,
 			settings,
 			modelRegistry: registry,
-			advisorTools: [],
 		});
 		try {
 			expect(raceSession.isAdvisorEnabled()).toBe(true);
@@ -424,14 +478,12 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager,
 			settings: sharedSettings,
 			modelRegistry,
-			advisorTools: [],
 		});
 		const sessionB = new AgentSession({
 			agent: session.agent,
 			sessionManager,
 			settings: sharedSettings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		expect(sessionA.isAdvisorEnabled()).toBe(false);
@@ -492,7 +544,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		try {
@@ -527,7 +578,7 @@ describe("AgentSession advisor toggle", () => {
 		// #10131: with the runtime gone, isUsingSubscription() must read the
 		// attribution captured as spend accrued, not fall back to a per-render
 		// getAvailable() catalog scan (which reads credential files per provider).
-		const oauthSpy = vi.spyOn(modelRegistry, "isUsingOAuth").mockReturnValue(true);
+		const subscriptionSpy = vi.spyOn(modelRegistry, "isUsingSubscription").mockReturnValue(true);
 		try {
 			const advisor = enableAdvisor();
 			appendAdvisorCost(advisor, 0.5, 1);
@@ -540,23 +591,25 @@ describe("AgentSession advisor toggle", () => {
 			expect(scanSpy).not.toHaveBeenCalled();
 			scanSpy.mockRestore();
 		} finally {
-			oauthSpy.mockRestore();
+			subscriptionSpy.mockRestore();
 		}
 	});
-	it("does not attribute paid spend to a subscription after a zero-cost OAuth turn", () => {
-		let usingOAuth = false;
-		const oauthSpy = vi.spyOn(modelRegistry, "isUsingOAuth").mockImplementation(() => usingOAuth);
+	it("does not attribute paid spend to a subscription after a zero-cost subscription turn", () => {
+		let usingSubscription = false;
+		const subscriptionSpy = vi
+			.spyOn(modelRegistry, "isUsingSubscription")
+			.mockImplementation(() => usingSubscription);
 		try {
 			const advisor = enableAdvisor();
 			appendAdvisorCost(advisor, 0.5, 1);
-			usingOAuth = true;
+			usingSubscription = true;
 			appendAdvisorCost(advisor, 0, 2);
 			session.setAdvisorEnabled(false);
 
 			expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 			expect(session.isAdvisorUsingSubscription()).toBe(false);
 		} finally {
-			oauthSpy.mockRestore();
+			subscriptionSpy.mockRestore();
 		}
 	});
 	it("retains total advisor cost after the live roster changes", () => {
@@ -730,9 +783,9 @@ describe("AgentSession advisor toggle", () => {
 	it("attributes restored advisor spend to a subscription without a catalog scan", () => {
 		// #10131 follow-up: with no live runtime, subscription attribution comes
 		// from the providers that billed the restored spend, re-derived via the
-		// current OAuth credentials — never a per-render getAvailable() scan.
-		const oauthSpy = vi
-			.spyOn(authStorage.credentials, "hasOAuth")
+		// current subscription credentials — never a per-render getAvailable() scan.
+		const subscriptionSpy = vi
+			.spyOn(authStorage.credentials, "hasSubscription")
 			.mockImplementation(provider => provider === "anthropic");
 		const scanSpy = vi.spyOn(modelRegistry, "getAvailable");
 		try {
@@ -743,17 +796,17 @@ describe("AgentSession advisor toggle", () => {
 			expect(scanSpy).not.toHaveBeenCalled();
 		} finally {
 			scanSpy.mockRestore();
-			oauthSpy.mockRestore();
+			subscriptionSpy.mockRestore();
 		}
 	});
-	it("does not attribute restored advisor spend to a subscription without OAuth on its provider", () => {
-		const oauthSpy = vi.spyOn(authStorage.credentials, "hasOAuth").mockReturnValue(false);
+	it("does not attribute restored advisor spend to a subscription without subscription credentials", () => {
+		const subscriptionSpy = vi.spyOn(authStorage.credentials, "hasSubscription").mockReturnValue(false);
 		try {
 			session.restoreInitialAdvisorCosts(new Map([["", 0.5]]), new Map(), new Map([["", new Set(["anthropic"])]]));
 			expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 			expect(session.isAdvisorUsingSubscription()).toBe(false);
 		} finally {
-			oauthSpy.mockRestore();
+			subscriptionSpy.mockRestore();
 		}
 	});
 	it("adds a turn billed while the resume scan is running to persisted spend", async () => {
@@ -942,21 +995,23 @@ describe("AgentSession advisor toggle", () => {
 		await session.dispose();
 		expect((await loadAdvisorTranscriptCosts(previousSessionFile)).get("")).toBeCloseTo(0.75, 8);
 	});
-	it("resets advisor runtimes after an in-place handoff compaction", async () => {
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
-		const advisor = enableAdvisor();
-		prepareHandoffConversation(advisor);
-		cfgCompactionKeepRecentTokens.set(session.settings, 1);
-		const sessionFile = session.sessionFile;
+	it("commits a handoff on the same branch while an advisor is attached", async () => {
+		const generate = vi.spyOn(compactionModule, "generateHandoffFromContext");
+		generate.mockResolvedValue("## Goal\nContinue from here");
+		try {
+			const advisor = enableAdvisor();
+			prepareHandoffConversation(advisor);
+			cfgCompactionKeepRecentTokens.set(session.settings, 1);
+			const sessionFile = session.sessionFile;
 
-		const result = await session.handoff();
-
-		expect(result?.document).toContain("Continue from here");
-		expect(session.sessionFile).toBe(sessionFile);
-		const compaction = sessionManager.getBranch().at(-1);
-		expect(compaction).toMatchObject({ type: "compaction" });
-		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
-		expect(compaction.summary).toContain("Continue from here");
+			await session.compact(undefined, { mode: "handoff" });
+			expect(session.sessionFile).toBe(sessionFile);
+			const compaction = sessionManager.getBranch().at(-1);
+			if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
+			expect(compaction.summary).toContain("Continue from here");
+		} finally {
+			generate.mockRestore();
+		}
 	});
 	it("clears advisor cost when a branch skips conversation restore", async () => {
 		const extensionRunner = {
@@ -972,7 +1027,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: branchManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
-			advisorTools: [],
 			extensionRunner,
 		});
 		try {
@@ -1015,7 +1069,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: branchManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
-			advisorTools: [],
 			extensionRunner,
 		});
 		try {
@@ -1065,7 +1118,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		try {
@@ -1137,7 +1189,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		try {
@@ -1160,7 +1211,9 @@ describe("AgentSession advisor toggle", () => {
 
 			expect(markUsageLimitReached).toHaveBeenCalledTimes(1);
 			expect(markUsageLimitReached.mock.calls[0]?.[0]).toBe(model.provider);
-			expect(quotaSession.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
+			const quotaStatus = quotaSession.getAdvisorStatusOverview().advisors[0];
+			expect(quotaStatus).toMatchObject({ yielded: true });
+			expect(quotaStatus?.backlog).toBeGreaterThan(0);
 			// A quota-paused runtime cannot accept work either — the streaming
 			// mask must not reopen its eye mid-turn.
 			quotaSession.agent.state.isStreaming = true;
@@ -1269,5 +1322,40 @@ describe("AgentSession advisor toggle", () => {
 		// Settings (2) overrides the default (4) when shared and per-advisor are undefined.
 		expect(session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined)).toBe(1);
 		await exerciseBudget("settings", 2);
+	});
+
+	it("filters WATCHDOG.yml advisors by scope (main vs subagent vs all)", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const roster = [
+			{ name: "Main Guard", scope: "main" as const },
+			{ name: "Subagent Verifier", scope: "subagent" as const, includeReasoning: false },
+			{ name: "Universal Guard", scope: "all" as const },
+		];
+
+		// Top-level main session builds main + all (2 advisors)
+		expect(session.applyAdvisorConfigs(roster, undefined)).toBe(2);
+		expect(session.getAdvisorStats().advisors.map(a => a.name)).toEqual(["Main Guard", "Universal Guard"]);
+
+		// Subagent session builds subagent + all (2 advisors)
+		const subAgent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Subagent"],
+				tools: [],
+				messages: [],
+			},
+		});
+		const subSettings = Settings.isolated({ "compaction.enabled": false, "advisor.enabled": true });
+		subSettings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const subSession = new AgentSession({
+			agent: subAgent,
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: subSettings,
+			modelRegistry,
+			agentKind: "sub",
+			advisorConfigs: roster,
+		});
+		expect(subSession.getAdvisorStats().advisors.map(a => a.name)).toEqual(["Subagent Verifier", "Universal Guard"]);
 	});
 });

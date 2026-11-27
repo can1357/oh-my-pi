@@ -18,6 +18,7 @@ import type { BashResult } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import type { RpcGoalResult } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
 import type { RpcMessagesPage } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-messages";
+import type { RpcModelPickerRole, RpcModelPickerRow } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-model-picker";
 import type {
 	RpcAbortAndRestoreQueueResult,
 	RpcAgentSessionEventFrame,
@@ -25,8 +26,12 @@ import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcBtwDeltaFrame,
+	RpcBtwHistoryRecord,
 	RpcBtwRecordFrame,
 	RpcCommand,
+	RpcDictationEndFrame,
+	RpcDictationStateFrame,
+	RpcDictationTranscriptFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHostToolCallRequest,
@@ -58,12 +63,12 @@ import type {
 import type * as Wire from "@oh-my-pi/pi-coding-agent/modes/rpc/wire/rpc-wire.generated";
 import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { SessionStats } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { BtwHistoryRecord, BtwHistoryTurn } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import type { BtwHistoryTurn } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import type { UsageLimitState } from "@oh-my-pi/pi-coding-agent/session/usage-limit";
-import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
-import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ContextUsage } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/types";
+import type { LogoutAccount } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/logout-account-selector";
+import type { Goal } from "@oh-my-pi/pi-coding-agent/tools/details/goal";
+import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 
 type Assert<T extends true> = T;
 type Leaf = string | number | boolean | null;
@@ -210,6 +215,9 @@ export type Frames = Assert<
 		liveLevels: Outbound<RpcLiveLevelsFrame, Wire.LiveLevelsEvent>;
 		liveTranscript: Outbound<RpcLiveTranscriptFrame, Wire.LiveTranscriptEvent>;
 		liveEnd: Outbound<RpcLiveEndFrame, Wire.LiveEndEvent>;
+		dictationState: Outbound<RpcDictationStateFrame, Wire.DictationStateEvent>;
+		dictationTranscript: Outbound<RpcDictationTranscriptFrame, Wire.DictationTranscriptEvent>;
+		dictationEnd: Outbound<RpcDictationEndFrame, Wire.DictationEndEvent>;
 		btwDelta: Outbound<RpcBtwDeltaFrame, Wire.BtwDeltaEvent>;
 		btwRecord: Outbound<RpcBtwRecordFrame, Wire.BtwRecordEvent>;
 		hostToolCall: Outbound<RpcHostToolCallRequest, Wire.HostToolCallRequest>;
@@ -229,6 +237,7 @@ export type Frames = Assert<
 		uiConfirm: Inbound<Wire.ConfirmUiResponse, Extract<RpcExtensionUIResponse, { confirmed: unknown }>>;
 		uiCancel: Inbound<Wire.CancelUiResponse, Extract<RpcExtensionUIResponse, { cancelled: unknown }>>;
 		uiAnswers: Inbound<Wire.AnswersUiResponse, Extract<RpcExtensionUIResponse, { answers: unknown }>>;
+		uiData: Inbound<Wire.DataUiResponse, Extract<RpcExtensionUIResponse, { data: unknown }>>;
 		responseFailure: Outbound<Extract<RpcResponse, { success: false }>, Wire.RpcResponse>;
 	}>
 >;
@@ -253,6 +262,8 @@ export type State = Assert<
 		todoPhaseInbound: Inbound<Wire.TodoPhase, TodoPhase>;
 		todoItemInbound: Inbound<Wire.TodoItem, TodoItem>;
 		goal: Outbound<Goal, Wire.Goal>;
+		modelPickerRow: Outbound<RpcModelPickerRow, Wire.ModelPickerRow>;
+		modelPickerRole: Outbound<RpcModelPickerRole, Wire.ModelPickerRole>;
 		goalModeState: Outbound<GoalModeState, Wire.GoalModeState>;
 		goalResult: Outbound<RpcGoalResult, Wire.GoalResult>;
 		usageLimitLowPriority: Outbound<Extract<UsageLimitState, { stage: "low_priority" }>, Wire.UsageLimitLowPriority>;
@@ -271,7 +282,7 @@ export type State = Assert<
 		slashSubcommand: Outbound<NonNullable<RpcAvailableSlashCommand["subcommands"]>[number], Wire.SlashSubcommand>;
 		subagentSnapshot: Outbound<RpcSubagentSnapshot, Wire.SubagentSnapshot>;
 		subagentMessages: Outbound<RpcSubagentMessagesResult, Wire.SubagentMessages>;
-		btwHistoryRecord: Outbound<BtwHistoryRecord, Wire.BtwHistoryRecord>;
+		btwHistoryRecord: Outbound<RpcBtwHistoryRecord, Wire.BtwHistoryRecord>;
 		btwHistoryTurn: Outbound<BtwHistoryTurn, Wire.BtwHistoryTurn>;
 		logoutAccount: Outbound<LogoutAccount, Wire.LogoutAccount>;
 		btwStatuses: Same<BtwHistoryTurn["status"], Wire.BtwStatus>;

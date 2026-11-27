@@ -63,10 +63,19 @@ interface StreamRetryOptions {
 	acceptEmptyResponse?: boolean;
 }
 
+/**
+ * Error messages whose transient HTTP status (408, 429, 5xx) the transport
+ * owned: it either spent its retry budget on it or declined to retry it
+ * (`x-should-retry: false`, a zero-limit 429). A replay would multiply or
+ * override that decision, so the provider marks them. In-band errors inside a
+ * 200 stream are not marked and keep their one replay.
+ */
+export const transportExhaustedMessages = new WeakSet<AssistantMessage>();
+
 /** Controls which replay-safe provider results may issue a fresh request. */
 export interface ReplaySafeStreamRetryPolicy {
 	/** Retry benign terminal stops that contain no visible output. */
-	retryEmptyCompletion?: boolean;
+	retryEmptyCompletion?: boolean | (() => boolean);
 	/** Retry transient provider errors before output is committed. */
 	retryProviderErrors?: boolean;
 	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
@@ -136,7 +145,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
 			const retryEmpty =
-				policy.retryEmptyCompletion === true &&
+				(typeof policy.retryEmptyCompletion === "function"
+					? policy.retryEmptyCompletion()
+					: policy.retryEmptyCompletion === true) &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
 				completedMessage !== undefined &&
@@ -154,6 +165,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
+				!transportExhaustedMessages.has(failedMessage) &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
 				);

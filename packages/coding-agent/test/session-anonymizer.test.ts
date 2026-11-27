@@ -14,6 +14,21 @@ function at(value: unknown, ...path: Array<string | number>): unknown {
 }
 
 describe("SessionAnonymizer", () => {
+	test("redacts parent IRC provenance without losing the transcript card's sender and body fields", () => {
+		const output = new SessionAnonymizer().entry({
+			type: "message",
+			message: {
+				role: "user",
+				content: "model-facing envelope with launch codes",
+				parentIrc: { from: "Main", body: "secret launch codes" },
+				timestamp: 1,
+			},
+		});
+		expect(at(output, "message", "parentIrc", "from")).toBeDefined();
+		expect(at(output, "message", "parentIrc", "body")).toMatch(/^\[redacted #\d+:/);
+		expect(JSON.stringify(output)).not.toContain("launch codes");
+	});
+
 	test("redacts turn content, keeps metadata, and maps tool args consistently across copies", () => {
 		const usage = { input: 120, output: 30, cacheRead: 0, cacheWrite: 0, totalTokens: 150, cost: { total: 0.01 } };
 		const records = [
@@ -166,6 +181,66 @@ describe("SessionAnonymizer", () => {
 		expect(at(toolResult, "message", "details")).toEqual({ matchCount: 1, searchPath: cwd });
 	});
 
+	test("keeps a retry fallback's models and trigger but redacts its reason like a provider error", () => {
+		const entry = new SessionAnonymizer().entry({
+			type: "model_change",
+			id: "a1b2c3d4",
+			parentId: null,
+			timestamp: "2026-09-22T15:12:03.629Z",
+			model: "openai/gpt-4o-mini",
+			role: "fallback",
+			resolvedModelIsFallback: true,
+			fallback: {
+				from: "anthropic/claude-sonnet-4-5:high",
+				trigger: "request-error",
+				reason: "400 prompt contained password=hunter2 for user alice@example.com",
+			},
+		});
+		expect(at(entry, "model")).toBe("openai/gpt-4o-mini");
+		expect(at(entry, "fallback", "from")).toBe("anthropic/claude-sonnet-4-5:high");
+		expect(at(entry, "fallback", "trigger")).toBe("request-error");
+		expect(at(entry, "fallback", "reason")).toMatch(/^400 \[redacted #\d+: \d+ chars, 1 line\]$/);
+	});
+
+	test("keeps a journaled side channel's measurements and none of its content", () => {
+		const stateId = "3fa9c1d2e4b5a6978877665544332211ffeeddccbbaa99887766554433221100";
+		const anonymizer = new SessionAnonymizer();
+		const judged = anonymizer.entry({
+			type: "model_usage",
+			purpose: "judge_batch",
+			duration: 212,
+			judgment: {
+				state: stateId,
+				answers: { mentions_acme: 0.46, verdict: ["hunter2 leaked", 0.41], grade: [1.7, 0.31] },
+				cached: 1,
+			},
+		});
+		const titled = anonymizer.entry({
+			type: "model_usage",
+			purpose: "title",
+			duration: 640,
+			ttft: 410,
+			completion: { prompt: "<user>\nfind the launch codes\n</user>", reply: "<title>Find launch codes</title>" },
+		});
+
+		const serialized = JSON.stringify([judged, titled]);
+		for (const word of [...SECRET_WORDS, stateId]) expect(serialized).not.toContain(word);
+		// Timings, probabilities, scores, and counts are measurements, not content.
+		expect(judged).toMatchObject({ purpose: "judge_batch", duration: 212 });
+		expect(at(judged, "judgment", "cached")).toBe(1);
+		expect(at(judged, "judgment", "state")).toMatch(/^PLACEHOLDER_\d+$/);
+		const answers = at(judged, "judgment", "answers") as Record<string, unknown>;
+		expect(Object.keys(answers)).toEqual([
+			expect.stringMatching(/^PLACEHOLDER_\d+$/),
+			expect.stringMatching(/^PLACEHOLDER_\d+$/),
+			expect.stringMatching(/^PLACEHOLDER_\d+$/),
+		]);
+		expect(Object.values(answers)).toEqual([0.46, [expect.stringMatching(/^PLACEHOLDER_\d+$/), 0.41], [1.7, 0.31]]);
+		expect(titled).toMatchObject({ purpose: "title", duration: 640, ttft: 410 });
+		expect(at(titled, "completion", "prompt")).toMatch(/^\[redacted #\d+: \d+ chars, 3 lines\]$/);
+		expect(at(titled, "completion", "reply")).toMatch(/^\[redacted #\d+: \d+ chars, 1 line\]$/);
+	});
+
 	test("preserves the suppressed Bash timing flag", () => {
 		const anonymizer = new SessionAnonymizer();
 		const result = anonymizer.entry({
@@ -174,6 +249,38 @@ describe("SessionAnonymizer", () => {
 		});
 
 		expect(at(result, "message", "details")).toEqual({ wallTimeNoticeEmitted: false });
+	});
+
+	test.each([null, "high"])("preserves per-call revival metadata with %s thinking", perCallThinkingLevel => {
+		const anonymizer = new SessionAnonymizer();
+		const metadata = {
+			type: "session_init",
+			perCallModel: true,
+			perCallModelIdentity: "openrouter/anthropic/claude-sonnet-4-5@anthropic",
+			perCallThinkingLevel,
+		};
+
+		expect(anonymizer.entry(metadata)).toEqual(metadata);
+		expect(anonymizer.entry({ type: "session_init", perCallModel: false })).toEqual({
+			type: "session_init",
+			perCallModel: false,
+		});
+	});
+
+	test("keeps a session_init's mounted tool-command list beside its tool list", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = anonymizer.entry({
+			type: "session_init",
+			tools: ["read", "ast_grep", "mcp__acme__search"],
+			mountedTools: ["ast_grep", "mcp__acme__search"],
+		});
+		const tools = at(result, "tools") as string[];
+		const mounted = at(result, "mountedTools") as string[];
+
+		expect(tools.slice(0, 2)).toEqual(["read", "ast_grep"]);
+		expect(mounted).toHaveLength(2);
+		expect(mounted[0]).toBe("ast_grep");
+		expect(mounted[1]).toBe(tools[2]);
 	});
 
 	test("rewrites shell commands keeping programs, flags, and operators", () => {
@@ -403,13 +510,18 @@ describe("SessionAnonymizer", () => {
 					toolCallId: "toolu_01abcdef",
 					toolName: "mcp__crm_lookup",
 					details: 987654321,
-					content: [{ type: "image", data: "AAAA", mimeType: "image/png", status: "customer-acme" }],
+					content: [
+						{ type: "image", data: "AAAA", mimeType: "image/png", status: "customer-acme" },
+						{ type: "acmeBlock", text: "s" },
+					],
 				},
 			}),
 			// Usage counters stay even though `input` is also the tool-call arguments key.
 			anonymizer.entry({ type: "message", message: { role: "assistant", usage: { input: 120, output: 30 } } }),
 		]);
 		for (const secret of ["123456789", "987654321", "acme", "status"]) expect(json).not.toContain(secret);
+		// Replay tells text from image blocks by `type`; an unknown block type stays opaque.
+		expect(json).toContain('{"type":"image",');
 		expect(json).toContain('"mimeType":"image/png"');
 		expect(json).toContain('"usage":{"input":120,"output":30}');
 	});
@@ -478,5 +590,16 @@ describe("SessionAnonymizer", () => {
 		expect(JSON.stringify(first)).not.toMatch(/acme|3f2a9c01/);
 		// Equal stamps stay comparable after anonymization, so build changes remain visible.
 		expect(at(second, "runtime")).toEqual(at(first, "runtime"));
+	});
+
+	test("keeps an edit's error kind and replaces a value outside the engine's kinds", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = (errorKind: string) =>
+			anonymizer.entry({
+				type: "message",
+				message: { role: "toolResult", toolName: "edit", isError: true, details: { diff: "", errorKind } },
+			});
+		expect(at(result("unseen_lines"), "message", "details", "errorKind")).toBe("unseen_lines");
+		expect(JSON.stringify(result("customer-acme"))).not.toContain("acme");
 	});
 });

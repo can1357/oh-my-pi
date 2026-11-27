@@ -20,7 +20,10 @@
  *
  * In both modes the synthesis session (worker, player) opens lazily on the
  * first speakable segment, and an idle timer speaks buffered text when
- * generation stalls (tool call, thinking block). One
+ * generation stalls (tool call, thinking block). The session is local Phonon
+ * streaming unless `speech.cloud` is on and the speech role chain starts with
+ * an explicitly configured cloud model, which then synthesizes each segment as WAV
+ * ({@link createCloudSpeechStream}). One
  * {@link StreamingAudioPlayer} per utterance plays chunks back gaplessly;
  * utterance playback is chained so sequential utterances never overlap.
  *
@@ -37,18 +40,22 @@
  * questions); the event controller wires the per-session model source and
  * enhancer via {@link Vocalizer.setModelSource} and {@link Vocalizer.setEnhancer}.
  */
-import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import type { Api, ApiKeyResolver, Model } from "@oh-my-pi/pi-ai";
+import { isSpeechApi, speechModelSupportsFormat } from "@oh-my-pi/pi-ai/speech";
+import type { ModelBrowserRegistry } from "../modes/view-model/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { type Settings, settings } from "../config/settings";
+import { createCloudSpeechStream } from "./cloud-stream";
 import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS } from "./models";
 import { SpeakableStream } from "./speakable";
 import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
 
-import { cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechSpeed, cfgSpeechVoice } from "./settings";
+import { cfgSpeechCloud, cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechSpeed, cfgSpeechVoice } from "./settings";
 
 /** Quiet time on the delta stream before the buffered partial is spoken. */
 const IDLE_FLUSH_MS = 1000;
@@ -57,18 +64,52 @@ const COALESCE_MIN_CHARS = 400;
 /** Bounded rewrite concurrency across utterances. */
 const MAX_REWRITES_IN_FLIGHT = 2;
 
+/**
+ * How long a cloud speech model that failed permanently (missing key, 4xx) is
+ * skipped. Bounded rather than session-long so a fixed key or `models.yml` takes
+ * effect without a restart, while a broken model costs one request per window.
+ */
+const CLOUD_FAILURE_COOLDOWN_MS = 5 * 60_000;
+
+/** Registry surface the vocalizer resolves the speech role and cloud credentials through. */
+export interface VocalizerRegistry extends ModelBrowserRegistry {
+	resolver(model: Model<Api>, sessionId?: string): ApiKeyResolver;
+}
+
 export interface VocalizerModelSource {
 	settings: Settings;
-	registry: ModelBrowserRegistry;
+	registry: VocalizerRegistry;
+	getSessionProvider?: () => string | undefined;
+	/** Session whose credential affinity cloud synthesis uses. */
+	getSessionId?: () => string | undefined;
 }
 
 /** Resolve the first speech-role candidate that the local streaming worker can run. */
 export function resolveLocalSpeechModelId(source: VocalizerModelSource): string {
-	const pool = roleCandidatePool("speech", source.settings, source.registry);
-	const local = resolveRoleChain("speech", source.settings, pool).find(
-		candidate => candidate.model.api === "local-inference",
+	return (
+		resolveVocalizerSpeechChain(source).find(model => model.api === "local-inference")?.id ?? TTS_LOCAL_MODELS[0].key
 	);
-	return local?.model.id ?? TTS_LOCAL_MODELS[0].key;
+}
+
+/**
+ * Speech-role candidates the vocalizer can play, in chain order: local models,
+ * plus (with `speech.cloud` on) explicitly configured cloud speech models that
+ * return WAV. With `speech.cloud` off, or for unconfigured cloud defaults,
+ * speech stays on-device. `models.offline` admits only the session provider's
+ * models, as for {@link resolveLocalSpeechModelId}.
+ */
+export function resolveVocalizerSpeechChain(source: VocalizerModelSource): Model<Api>[] {
+	const pool = roleCandidatePool("speech", source.settings, source.registry);
+	const allowCloud = cfgSpeechCloud.get(source.settings);
+	const offline = cfgOffline.get(source.settings);
+	return resolveRoleChain("speech", source.settings, pool)
+		.filter(
+			({ model, explicit }) =>
+				(!offline || model.provider === source.getSessionProvider?.()) &&
+				(model.api === "local-inference" ||
+					(explicit && allowCloud && isSpeechApi(model.api) && speechModelSupportsFormat(model, "wav"))),
+		)
+		.map(candidate => candidate.model);
 }
 
 export interface VocalizerPlayer {
@@ -111,6 +152,8 @@ export class Vocalizer {
 	#enhancer: SpeechEnhancer | null = null;
 	/** Live per-session settings and registry used to resolve the speech role. */
 	#modelSource: VocalizerModelSource | null = null;
+	/** Cloud speech models (`provider/id`) that failed permanently, mapped to when they may be tried again. */
+	#cloudCooldowns = new Map<string, number>();
 	/** Fires when the delta stream goes quiet mid-sentence; speaks the partial. */
 	#idleTimer: NodeJS.Timeout | null = null;
 	/** Abort controllers of every not-yet-finished utterance; all aborted on {@link clear}. */
@@ -137,9 +180,21 @@ export class Vocalizer {
 		this.#enhancer = enhancer;
 	}
 
-	/** Wire (or drop) the live per-session model source used by local speech synthesis. */
+	/** Wire (or drop) the live per-session model source that resolves the speech role. */
 	setModelSource(source: VocalizerModelSource | null): void {
+		this.clear();
 		this.#modelSource = source;
+		this.#cloudCooldowns.clear();
+	}
+
+	/** Stop any active local synthesis when the session provider no longer permits it. */
+	enforceProviderPolicy(): boolean {
+		const source = this.#modelSource;
+		if (cfgOffline.get(source?.settings ?? settings) && source?.getSessionProvider?.() !== "local") {
+			this.clear();
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -167,7 +222,7 @@ export class Vocalizer {
 	 */
 	pushDelta(text: string): void {
 		const speechSettings = this.#modelSource?.settings ?? settings;
-		if (this.#suspensions > 0 || !cfgSpeechEnabled.get(speechSettings)) return;
+		if (!this.enforceProviderPolicy() || this.#suspensions > 0 || !cfgSpeechEnabled.get(speechSettings)) return;
 		if (!text) return;
 		if (this.#enhanced || (!this.#speakable && this.#enhancer && cfgSpeechEnhanced.get(speechSettings))) {
 			this.#pushEnhanced(text);
@@ -189,6 +244,7 @@ export class Vocalizer {
 	 * utterance may already be streaming.
 	 */
 	flush(): void {
+		if (!this.enforceProviderPolicy()) return;
 		this.#clearIdleTimer();
 		const utterance = this.#enhanced;
 		if (utterance) {
@@ -320,7 +376,7 @@ export class Vocalizer {
 		const result = this.#boundedRewrite(block, utterance.abort.signal);
 		utterance.order = utterance.order.then(async () => {
 			const rewritten = await result;
-			if (utterance.abort.signal.aborted) return;
+			if (utterance.abort.signal.aborted || !this.enforceProviderPolicy()) return;
 			// Empty string: the model judged the block unspeakable (pure code).
 			if (rewritten === "") return;
 			// Null: rewrite failed/timed out — mechanical cleanup of the raw
@@ -364,7 +420,7 @@ export class Vocalizer {
 
 	/** Mechanical mode: feed ready segments, opening the session lazily. */
 	#pushSegments(segments: string[]): void {
-		if (segments.length === 0) return;
+		if (segments.length === 0 || !this.enforceProviderPolicy()) return;
 		if (!this.#handle) {
 			const abort = new AbortController();
 			this.#liveAborts.add(abort);
@@ -379,11 +435,29 @@ export class Vocalizer {
 	 */
 	#openSession(abort: AbortController): TtsStreamHandle {
 		const source = this.#modelSource;
-		const modelKey = source ? resolveLocalSpeechModelId(source) : TTS_LOCAL_MODELS[0].key;
 		const sessionSettings = source?.settings ?? settings;
 		const voice = cfgSpeechVoice.get(sessionSettings) || DEFAULT_TTS_VOICE;
 		const speed = cfgSpeechSpeed.get(sessionSettings);
-		const handle = ttsClient.synthesizeStream(modelKey, { voice, speed, signal: abort.signal });
+		const now = Date.now();
+		const chain = source
+			? resolveVocalizerSpeechChain(source).filter(
+					model => (this.#cloudCooldowns.get(`${model.provider}/${model.id}`) ?? 0) <= now,
+				)
+			: [];
+		const first = chain[0];
+		// A local head streams through the worker; a cloud head synthesizes per segment.
+		const handle =
+			source && first && first.api !== "local-inference"
+				? createCloudSpeechStream({
+						chain,
+						resolveApiKey: model => source.registry.resolver(model, source.getSessionId?.()),
+						localVoice: voice,
+						localSpeed: speed,
+						onPermanentFailure: model =>
+							this.#cloudCooldowns.set(`${model.provider}/${model.id}`, Date.now() + CLOUD_FAILURE_COOLDOWN_MS),
+						signal: abort.signal,
+					})
+				: ttsClient.synthesizeStream(first?.id ?? TTS_LOCAL_MODELS[0].key, { voice, speed, signal: abort.signal });
 		const player = this.#createPlayer();
 		player.setGain(this.#ducked ? DUCK_GAIN : 1);
 		this.#liveAborts.add(abort);

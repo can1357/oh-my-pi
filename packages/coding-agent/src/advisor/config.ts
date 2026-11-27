@@ -3,27 +3,30 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { createFileReader } from "../capability/fs";
 import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
 import {
+	ADVISOR_SESSION_SCOPES,
 	ADVISOR_SYNC_BACKLOG_MODES,
 	type AdvisorConfig,
 	type AdvisorConfigScope,
 	type AdvisorSyncBacklog,
 	type WatchdogConfigDoc,
-} from "@oh-my-pi/pi-tui/overlays/advisor-config";
+} from "./advisor-config-types";
 
-export { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-export type { AdvisorReviewMode, AdvisorSyncBacklog } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-
+export { ADVISOR_REVIEW_MODES, ADVISOR_SESSION_SCOPES, ADVISOR_SYNC_BACKLOG_MODES } from "./advisor-config-types";
+export type { AdvisorReviewMode, AdvisorSessionScope, AdvisorSyncBacklog } from "./advisor-config-types";
 /**
  * Runtime health of a single advisor, surfaced in stats and the status line.
  * - `running` — actively processing primary turns
  * - `paused` — user-toggled off via per-advisor switch (runtime disposed)
- * - `quota_exhausted` — provider returned a quota/rate-limit error; the
- *   runtime auto-retries after a cooldown so it can resume without user action
+ * - `quota_exhausted` — provider returned a quota/usage-limit error that host
+ *   recovery could not absorb; the runtime stays paused, batch retained, until
+ *   it is reset or rebuilt (compaction, image drop, shake, session switch,
+ *   `/advisor` rebuild, config reload, restart). No timer resumes it.
  * - `error` — repeated transient failures; backlog dropped to prevent stall
  * - `no_model` — no model resolved for this advisor's role/explicit model
  */
@@ -48,7 +51,7 @@ export interface DiscoveredAdvisors {
 
 const reviewIntervalSchema = type("1 <= number.integer <= 9007199254740991");
 const syncBacklogSchema = type.enumerated(...ADVISOR_SYNC_BACKLOG_MODES);
-/** Unquoted `syncBacklog: 3` parses as a number; accept the numeric thresholds alongside the string enum. */
+const sessionScopeSchema = type.enumerated(...ADVISOR_SESSION_SCOPES);
 const syncBacklogEntrySchema = type.enumerated(...ADVISOR_SYNC_BACKLOG_MODES, 1, 3, 5);
 const SYNC_BACKLOG_NUMERIC_THRESHOLDS = { 1: "1", 3: "3", 5: "5" } as const;
 
@@ -68,6 +71,8 @@ const advisorEntrySchema = type({
 	"instructions?": "string",
 	"enabled?": "boolean",
 	"maxNotesPerUpdate?": "number",
+	"scope?": sessionScopeSchema,
+	"includeReasoning?": "boolean",
 });
 
 type AdvisorYamlEntry = typeof advisorEntrySchema.infer;
@@ -133,7 +138,7 @@ const ADVISOR_PROVIDER_SESSION_KEY_SEPARATOR = "\u0000";
 /**
  * Returns a stable provider-facing UUIDv7 for one advisor within one primary session.
  *
- * Codex treats `session_id`/`conversation_id` as a UUID-shaped routing identity,
+ * Codex treats `session-id` as a UUID-shaped routing identity,
  * so advisor labels such as `-advisor` stay local-only.
  */
 export function getOrCreateAdvisorProviderSessionId(
@@ -187,6 +192,7 @@ function filterAdvisorTools(tools: string[] | undefined, sourcePath: string): st
  */
 export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Promise<DiscoveredAdvisors> {
 	const items = await collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
+	const imports = { readFile: createFileReader() };
 	const advisors = new Map<string, AdvisorConfig>();
 	const sharedParts: string[] = [];
 	let sharedMaxNotesPerUpdate: number | undefined;
@@ -217,7 +223,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 		for (const message of docWarnings) warn(message, { path: item.path });
 
 		if (instructions?.trim()) {
-			const expanded = (await expandAtImports(instructions, item.path)).trim();
+			const expanded = (await expandAtImports(instructions, item.path, imports)).trim();
 			if (expanded) sharedParts.push(expanded);
 		}
 
@@ -226,7 +232,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 		for (const entry of entries) {
 			const slug = slugifyAdvisorName(entry.name);
 			const entryInstructions = entry.instructions?.trim()
-				? (await expandAtImports(entry.instructions, item.path)).trim() || undefined
+				? (await expandAtImports(entry.instructions, item.path, imports)).trim() || undefined
 				: undefined;
 			advisors.set(slug, {
 				name: entry.name,
@@ -242,6 +248,8 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 						? Math.trunc(entry.maxNotesPerUpdate)
 						: undefined,
 				enabled: entry.enabled,
+				scope: entry.scope,
+				includeReasoning: entry.includeReasoning,
 				instructions: entryInstructions,
 			});
 		}
@@ -330,6 +338,8 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
 			advisor.maxNotesPerUpdate = Math.trunc(a.maxNotesPerUpdate);
 		}
+		if (a.scope !== undefined) advisor.scope = a.scope;
+		if (a.includeReasoning !== undefined) advisor.includeReasoning = a.includeReasoning;
 		return advisor;
 	});
 	const doc: WatchdogConfigDoc = { advisors };
@@ -412,6 +422,13 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 			if (advisor.reviewInterval !== undefined) {
 				reviewIntervalSchema.assert(advisor.reviewInterval);
 				lines.push(`    reviewInterval: ${advisor.reviewInterval}`);
+			}
+			if (advisor.scope !== undefined) {
+				sessionScopeSchema.assert(advisor.scope);
+				lines.push(`    scope: ${YAML.stringify(advisor.scope)}`);
+			}
+			if (advisor.includeReasoning !== undefined) {
+				lines.push(`    includeReasoning: ${advisor.includeReasoning}`);
 			}
 		}
 	}

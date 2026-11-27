@@ -516,6 +516,15 @@ async def triage_issue(
         # from default — the same teardown the maintainer directive-reopen uses.
         log.info("reopen re-triage", extra={"key": key, "from_state": existing.state})
         await _run_workspace_op(sandbox.remove_workspace, repo=repo.full_name, number=issue.number)
+        if existing.classification:
+            # A reopen overrides the earlier verdict (e.g. a maintainer undoing a
+            # duplicate close): drop it so `classify_issue` triages from scratch
+            # instead of replaying the old workflow.
+            db.set_issue_classification(key, None)
+            try:
+                await github.remove_issue_label(repo.full_name, issue.number, existing.classification)
+            except GitHubError as exc:
+                log.warning("stale primary label removal failed", extra={"key": key, "err": str(exc)})
     db.upsert_issue(key=key, repo=repo.full_name, number=issue.number, state="reproducing")
     clone_url = repo.clone_url
     workspace = await _run_workspace_op(
@@ -601,6 +610,9 @@ async def review_pr(
         clone_url=repo.clone_url,
         default_branch=repo.default_branch,
         pr_head=pr_number,
+        pr_head_ref=pr.head_ref or None,
+        pr_head_sha=pr.head_sha or None,
+        pr_head_same_repo=(pr.head_repo == repo.full_name),
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
         slot_uid=slot_uid,
@@ -698,6 +710,11 @@ async def handle_comment(
     if existing.state in ("merged", "closed", "abandoned"):
         if directive is None:
             log.info("skip: comment on finalized issue", extra={"key": key, "state": existing.state})
+            if existing.classification == "duplicate":
+                # The close comment asked for what differs so a maintainer can
+                # reopen; the canned "reopen" reply would contradict it, since a
+                # reporter cannot reopen an issue someone else closed.
+                return
             try:
                 await github.post_comment(
                     repo.full_name,

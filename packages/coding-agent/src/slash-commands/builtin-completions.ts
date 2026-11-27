@@ -1,20 +1,21 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import type { AutocompleteItem } from "../autocomplete/autocomplete";
+import { getMCPConfigPath, getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { cfgCycleOrder } from "../config/model-settings";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
+import { InternalUrlRouter } from "../internal-urls";
+import { replaceTabs } from "../utils/text-width";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { encodeLocalPath } from "../modes/local-file-editor";
 import { createModelBrowserSource } from "../modes/model-browser-source";
-import {
-	createModelMentionSource,
-	type ModelMentionCandidateSource,
-} from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
-import { getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { getConfiguredThinkingLevelMetadata } from "../thinking/levels";
 import { expandTilde } from "../tools/path-utils";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
+import { createModelMentionSource, type ModelMentionCandidateSource } from "../autocomplete/model-mention";
 
 /** Options shared by the declarative subcommand completers. */
 interface SubcommandCompletionOptions {
@@ -137,7 +138,7 @@ const MCP_DISABLED_CONFIG_ELIGIBLE_SUBCOMMANDS: Readonly<Record<string, true>> =
  * followed by a space. `remove` gets its own scope-aware completions (see
  * {@link buildMcpRemoveCompletions}) since — unlike the others —
  * it only ever succeeds against a config-file entry. Subcommands with a
- * different argument shape (add, smithery-search, ...) get no argument
+ * different argument shape (add, ...) get no argument
  * completion.
  */
 export function buildMcpArgumentCompletions(
@@ -305,6 +306,8 @@ export function buildModelSelectorCompletions(
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
 			});
+			// Later keystrokes list whatever a retry of failed provider discovery recovers.
+			void rankModels.retryDiscovery?.();
 			for (const { selector, model } of rankModels(query)) {
 				matches.push({ value: `${selector}${suffix} `, label: selector, description: model.name });
 			}
@@ -376,6 +379,37 @@ export function buildDirectoryArgumentCompletions(): (prefix: string) => Promise
 		}
 	};
 }
+
+/** `/local` argument: session local:// file names (accepts a `local://` / `local:/` prefix). */
+export function buildLocalFileArgumentCompletions(
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => Promise<AutocompleteItem[] | null> {
+	return async (argumentPrefix: string) => {
+		const query = argumentPrefix
+			.trim()
+			.replace(/^local:\/{0,2}/i, "")
+			.toLowerCase();
+		try {
+			const files = await InternalUrlRouter.instance().complete("local", query, {
+				localProtocolOptions: sessionLocalProtocolOptions(runtime.ctx.sessionManager),
+			});
+			const matches = (files ?? [])
+				.filter(file => file.value.toLowerCase().startsWith(query))
+				// `value` is the inserted argument: encode it as a `local://` URL so names
+				// with whitespace or URL metacharacters survive `parseSlashCommand`
+				// trimming unchanged. `label` is display-only; sanitize it so artifact
+				// names with ANSI/C0 bytes cannot escape into the completion popup.
+				.map(file => ({
+					value: `local://${encodeLocalPath(file.value)}`,
+					label: replaceTabs(sanitizeText(file.value)),
+				}));
+			return matches.length > 0 ? matches : null;
+		} catch {
+			return null;
+		}
+	};
+}
+
 function buildDirectoryCompletionDisplayValue(
 	prefix: string,
 	isAbsolute: boolean,

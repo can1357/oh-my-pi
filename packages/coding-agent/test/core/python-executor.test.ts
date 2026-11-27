@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { disposeAllKernelSessions, executePythonWithKernel } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { spillTo } from "../helpers/spill";
 import { FakeKernel } from "./helpers";
 
 describe("executePythonWithKernel", () => {
@@ -16,7 +17,7 @@ describe("executePythonWithKernel", () => {
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stdinRequested).toBe(true);
-		expect(result.output).toContain("Kernel requested stdin; interactive input is not supported.");
+		expect(result.output).toContain("[stdin unsupported]");
 	});
 
 	it("maps error status to exit code 1", async () => {
@@ -59,7 +60,7 @@ describe("executePythonWithKernel", () => {
 
 		expect(result.exitCode).toBeUndefined();
 		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("eval cell timed out after 4s");
+		expect(result.output).toContain("[timed out after 4s; kernel interrupted, state kept]");
 	});
 
 	it("returns cancelled result without timeout annotation", async () => {
@@ -75,7 +76,7 @@ describe("executePythonWithKernel", () => {
 		expect(result.exitCode).toBeUndefined();
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("cancelled output");
-		expect(result.output).not.toContain("Command timed out");
+		expect(result.output).not.toContain("timed out");
 	});
 
 	it("truncates large output and stores full output artifact", async () => {
@@ -96,8 +97,7 @@ describe("executePythonWithKernel", () => {
 		const artifactPath = path.join(tempDir.path(), "0.python.txt");
 
 		const result = await executePythonWithKernel(kernel, "print('big')", {
-			artifactPath,
-			artifactId: "0",
+			allocateArtifact: spillTo(artifactPath, "0"),
 		});
 
 		expect(result.truncated).toBe(true);

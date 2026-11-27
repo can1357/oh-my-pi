@@ -108,259 +108,75 @@ export function lexShellCommand(command: string): ShellToken[] {
 	return tokens;
 }
 
-/** A command in a conservative, flat `&&` chain. */
-interface LiteralShellCommandSegment {
-	/** Original segment text with quoting and escaping preserved. */
-	text: string;
-	/** Literal argv after shell quote removal. */
-	argv: string[];
+const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
+const SHELL_ASSIGNMENT_NAME = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/u;
+
+/** Whether `word` begins with a POSIX shell variable assignment prefix (`NAME=` or `NAME+=`). */
+export function isShellEnvironmentAssignment(word: string): boolean {
+	return SHELL_ASSIGNMENT.test(word);
 }
-const SHELL_STATEFUL_COMMANDS = new Set([
-	"!",
-	".",
-	// Bash test -v evaluates array subscripts, including command substitutions.
-	"test",
-	"[",
-	"[[",
-	// Zsh also runs behind the Bash tool; its builtins can mutate shell state.
-	"-",
-	"autoload",
-	"bindkey",
-	"bye",
-	"chdir",
-	"disable",
-	"emulate",
-	"functions",
-	"limit",
-	"print",
-	"rehash",
-	"sched",
-	"setopt",
-	"unfunction",
-	"unhash",
-	"unlimit",
-	"unsetopt",
-	"vared",
-	"zle",
-	"zmodload",
-	"zparseopts",
-	"zstyle",
-	"alias",
-	"bg",
-	"break",
-	"builtin",
-	"case",
-	"cd",
-	"command",
-	"coproc",
-	"continue",
-	"declare",
-	"dirs",
-	"disown",
-	"do",
-	"done",
-	"elif",
-	"else",
-	"enable",
-	"esac",
-	"eval",
-	"exec",
-	"exit",
-	"export",
-	"fc",
-	"fg",
-	"fi",
-	"for",
-	"function",
-	"getopts",
-	"hash",
-	"history",
-	"if",
-	"in",
-	"jobs",
-	"let",
-	"logout",
-	"mapfile",
-	"local",
-	"popd",
-	// Bash's printf -v can write BASH_CMDS and retarget a later command.
-	"printf",
-	"pushd",
-	"readonly",
-	"read",
-	"readarray",
-	"return",
-	"select",
-	"set",
-	"shift",
-	"shopt",
-	"source",
-	"suspend",
-	"then",
-	"time",
-	"times",
-	"trap",
-	"typeset",
-	"ulimit",
-	"umask",
-	"unalias",
-	"unset",
-	"until",
-	"wait",
-	"while",
-]);
 
-const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
-	ash: true,
-	bash: true,
-	busybox: true,
-	csh: true,
-	dash: true,
-	env: true,
-	nocorrect: true,
-	noglob: true,
-	fish: true,
-	ksh: true,
-	sh: true,
-	sudo: true,
-	tcsh: true,
-	zsh: true,
-};
-
-const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/u;
-const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
-
-/**
- * Parses the deliberately small command language eligible for compound-command
- * approval: two or more literal argv commands joined only by `&&`.
- *
- * Anything that needs shell interpretation beyond quote removal is rejected.
- * In particular, this excludes expansion, globbing, redirection, comments,
- * assignments, control flow, shell wrappers/interpreters, and commands that
- * mutate the current shell. Rejection is a normal result: callers must retain
- * their existing approval behavior.
- */
-export function extractLiteralAndChainSegments(command: string): LiteralShellCommandSegment[] | null {
-	for (let i = 0; i < command.length; i++) {
-		const code = command.charCodeAt(i);
-		if ((code < 0x20 && code !== 0x09) || code === 0x7f) return null;
-	}
-	const segments: LiteralShellCommandSegment[] = [];
-	let argv: string[] = [];
-	let token = "";
-	let tokenStarted = false;
-	let quote: "'" | '"' | undefined;
-	let segmentStart = 0;
-
-	const pushToken = () => {
-		if (!tokenStarted) return;
-		argv.push(token);
-		token = "";
-		tokenStarted = false;
-	};
-	const pushSegment = (end: number): boolean => {
-		pushToken();
-		if (argv.length === 0) return false;
-		const executable = argv[0];
-		if (executable.length === 0) return false;
-		const commandName = executable.slice(Math.max(executable.lastIndexOf("/"), executable.lastIndexOf("\\")) + 1);
-		if (
-			argv.some(argument => SHELL_ASSIGNMENT.test(argument)) ||
-			argv.some((argument, index) => index > 0 && SHELL_REINTERPRET_OPTION.test(argument)) ||
-			SHELL_STATEFUL_COMMANDS.has(commandName) ||
-			Object.hasOwn(SHELL_INTERPRETER_COMMANDS, commandName)
-		) {
-			return false;
-		}
-		segments.push({ text: command.slice(segmentStart, end).trim(), argv });
-		argv = [];
-		return true;
-	};
-
-	for (let i = 0; i < command.length; i++) {
+/** Finds the end of a shell word, respecting quotes and escapes; returns null for incomplete syntax. */
+function skipShellWord(command: string, start: number): number | null {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = start; i < command.length; i++) {
 		const ch = command[i];
-		if (quote === "'") {
-			if (ch === "'") {
-				quote = undefined;
-			} else {
-				token += ch;
-			}
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
 			continue;
 		}
-		if (quote === '"') {
-			if (ch === '"') {
-				quote = undefined;
-				continue;
-			}
-			if (ch === "$" || ch === "`" || ch === "\n" || ch === "\r") return null;
+		if (inDouble) {
 			if (ch === "\\") {
-				const next = command[i + 1];
-				if (next === undefined || next === "\n" || next === "\r") return null;
-				if (next === '"' || next === "\\" || next === "$" || next === "`") {
-					token += next;
-					i++;
-				} else {
-					token += ch;
-				}
+				if (i + 1 >= command.length) return null;
+				i++;
 				continue;
 			}
-			token += ch;
+			if (ch === '"') inDouble = false;
 			continue;
 		}
-
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			tokenStarted = true;
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
 			continue;
 		}
 		if (ch === "\\") {
-			const next = command[i + 1];
-			if (next === undefined || next === "\n" || next === "\r") return null;
-			token += next;
-			tokenStarted = true;
+			if (i + 1 >= command.length) return null;
 			i++;
 			continue;
 		}
-		if (ch === " " || ch === "\t") {
-			pushToken();
-			continue;
-		}
-		if (ch === "&" && command[i + 1] === "&") {
-			if (!pushSegment(i)) return null;
-			i++;
-			segmentStart = i + 1;
-			continue;
-		}
-		if (
-			ch === "\n" ||
-			ch === "\r" ||
-			ch === "&" ||
-			ch === "|" ||
-			ch === ";" ||
-			ch === "<" ||
-			ch === ">" ||
-			ch === "`" ||
-			ch === "$" ||
-			ch === "(" ||
-			ch === ")" ||
-			ch === "*" ||
-			ch === "?" ||
-			ch === "[" ||
-			ch === "]" ||
-			ch === "{" ||
-			ch === "}" ||
-			ch === "~" ||
-			(ch === "#" && !tokenStarted)
-		) {
-			return null;
-		}
-		if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) return null;
-		token += ch;
-		tokenStarted = true;
+		if (ch === " " || ch === "\t") return i;
 	}
+	return inSingle || inDouble ? null : command.length;
+}
 
-	if (quote || !pushSegment(command.length) || segments.length < 2) return null;
-	return segments;
+/**
+ * Removes leading `NAME=value` (or `NAME+=value`) assignments without interpreting shell syntax.
+ * When `allowName` is supplied, every leading assignment variable name must satisfy it or `null` is returned.
+ */
+export function withoutLeadingEnvironmentAssignments(
+	command: string,
+	allowName?: (name: string) => boolean,
+): string | null {
+	let index = 0;
+	let foundAssignment = false;
+	while (index < command.length) {
+		while (command[index] === " " || command[index] === "\t") index++;
+		const match = SHELL_ASSIGNMENT_NAME.exec(command.slice(index));
+		if (!match) break;
+		if (allowName && !allowName(match[1])) return null;
+		const wordEnd = skipShellWord(command, index + match[0].length);
+		if (wordEnd === null) return null;
+		foundAssignment = true;
+		index = wordEnd;
+	}
+	if (!foundAssignment) return null;
+	const commandWithoutAssignments = command.slice(index).trimStart();
+	if (commandWithoutAssignments.length === 0 || SHELL_ASSIGNMENT.test(commandWithoutAssignments)) return null;
+	return commandWithoutAssignments;
 }
 
 /**
@@ -512,22 +328,27 @@ const CD_TARGET_TERMINATORS: Record<string, true> = {
 	")": true,
 };
 
+const CD_TARGET_EXPANSION_CHARS = "$`()*?[]{}";
+
 /**
- * Parses a leading `cd <path> && ...` prefix so the bash tool can route the
- * target through its structured `cwd` parameter when the model omits it.
+ * Parses a leading `cd <path> && ...` or `cd <path>; ...` prefix so the bash
+ * tool can route the target through its structured `cwd` parameter when the
+ * model omits it.
  *
  * Returns the single path token (quotes and backslash escapes resolved to their
- * literal value) and the command remainder after the top-level `&&`, or `null`
- * when the command does not begin with exactly `cd`, one path token, and a
- * top-level `&&`. The scanner deliberately bails on anything else in the prefix
- * — redirects (`cd /tmp 2>/dev/null && ...`), extra arguments, or paths needing
- * shell expansion (`$`, backticks, `(`) — leaving the whole command for the
- * shell instead of absorbing shell syntax into `cwd`.
+ * literal value), the command remainder after the separator, and which
+ * separator it was, or `null` when the command does not begin with exactly
+ * `cd`, one path token, and a top-level `&&` or `;`. The scanner deliberately
+ * bails on anything else in the prefix — redirects (`cd /tmp 2>/dev/null && ...`),
+ * extra arguments, or paths needing shell expansion (`$`, backticks, `(`) —
+ * leaving the whole command for the shell instead of absorbing shell syntax
+ * into `cwd`.
  */
-export function extractLeadingCdTarget(command: string): { path: string; rest: string } | null {
+export function extractLeadingCdTarget(command: string): { path: string; rest: string; separator: "&&" | ";" } | null {
 	const prefix = /^cd[ \t]+/.exec(command);
 	if (!prefix) return null;
 	let i = prefix[0].length;
+	const hasUnquotedLeadingTilde = command[i] === "~";
 	let path = "";
 	let inSingle = false;
 	let inDouble = false;
@@ -557,6 +378,7 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 				inDouble = false;
 				continue;
 			}
+			if (ch === "$" || ch === "`") return null;
 			path += ch;
 			continue;
 		}
@@ -575,20 +397,33 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 			i++;
 			continue;
 		}
+		if (CD_TARGET_EXPANSION_CHARS.includes(ch)) return null;
 		if (CD_TARGET_TERMINATORS[ch]) break;
 		path += ch;
 	}
 	// Unterminated quote or empty target: leave the command for the shell.
 	if (inSingle || inDouble || path.length === 0) return null;
-	// A path needing shell expansion can't be resolved literally through cwd.
-	if (/[$`(]/.test(path)) return null;
-	// Skip inter-token whitespace, then require a top-level `&&` (a single `&`,
-	// `||`, `;`, `|`, or a redirect all mean this is not a bare `cd <path>`).
+	// These operands depend on shell directory-stack state rather than naming a
+	// literal directory, even when their spelling was quoted.
+	if (path === "-" || /^[+-]\d+$/.test(path)) return null;
+	// Only the current user's home is resolved outside the shell. A named-user
+	// (or other special) tilde prefix needs the shell's own expansion rules.
+	if (hasUnquotedLeadingTilde && path !== "~" && !path.startsWith("~/")) return null;
+	// Skip inter-token whitespace, then require a top-level `&&` or `;` (a single
+	// `&`, `||`, `|`, a `case` terminator `;;`/`;&`, or a redirect all mean this
+	// is not a bare `cd <path>`).
 	while (command[i] === " " || command[i] === "\t") i++;
-	if (command[i] !== "&" || command[i + 1] !== "&") return null;
-	i += 2;
+	let separator: "&&" | ";";
+	if (command[i] === "&" && command[i + 1] === "&") {
+		separator = "&&";
+	} else if (command[i] === ";" && command[i + 1] !== ";" && command[i + 1] !== "&") {
+		separator = ";";
+	} else {
+		return null;
+	}
+	i += separator.length;
 	while (command[i] === " " || command[i] === "\t") i++;
-	return { path, rest: command.slice(i) };
+	return { path, rest: command.slice(i), separator };
 }
 
 /**

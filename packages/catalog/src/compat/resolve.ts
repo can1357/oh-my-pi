@@ -17,9 +17,9 @@
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { hostMatchesUrl, modelMatchesHost } from "../hosts";
-import { withoutUnverifiedThinking } from "../model-thinking";
 import type {
 	Api,
+	CatalogPolicyInputs,
 	CompatOf,
 	ModelSpec,
 	OpenAICompat,
@@ -122,18 +122,18 @@ class IdentityFacts {
 
 /**
  * The id a spec resolves identity and rules under: its own, unless that names
- * no model and the row sends a model that does on the wire. A Devin Fusion
- * pairing runs only its lead, so the lead's reviewed rules (cache-write rate,
- * long-context tier) apply to it at build time.
+ * no model and the row sends a model that does on the wire. A custom alias
+ * (`review-alias` → `gpt-6-luna`) thereby gets the wire model's reviewed rules
+ * at build time.
  */
-function policyModelId<TApi extends Api>(spec: ModelSpec<TApi>): string {
+function policyModelId(spec: CatalogPolicyInputs): string {
 	const wireId = spec.requestModelId;
 	if (wireId === undefined || wireId === spec.id) return spec.id;
 	if (classifyModel(spec.provider, spec.id).class !== "unknown") return spec.id;
 	return classifyModel(spec.provider, wireId).class === "unknown" ? spec.id : wireId;
 }
 
-function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
+function resolveIdentity(spec: CatalogPolicyInputs): ModelIdentity {
 	// Strict on purpose: ambiguous identity is a rule-authoring defect surfaced
 	// at build/CI time, never silently degraded to `unknown`. Discovery
 	// normalization opts into leniency through `classifyModel` directly.
@@ -271,7 +271,7 @@ const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
 	vllm: true,
 	ollama: true,
 };
-const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true };
+const PROXY_OPENAI_COMPAT_PROVIDERS: Record<string, true> = { litellm: true, bifrost: true };
 function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return false;
 	let hostname: string;
@@ -536,6 +536,8 @@ function detectOpenAICompat(
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
 		requiresAssistantAfterToolResult: isMistral,
+		foldUserAfterToolResult: false,
+		splitToolCalls: false,
 		requiresThinkingAsText: isMistral,
 		requiresMistralToolIds: isMistral,
 		thinkingFormat,
@@ -543,7 +545,7 @@ function detectOpenAICompat(
 		reasoningDisableMode: d.isVenice ? "venice-disable-thinking" : resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: d.isOpenRouter && isAnthropicModel,
+		filterReasoningHistory: false,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
 		reasoningContentField: "reasoning_content",
 		mistralReasoningContentParts: undefined,
@@ -597,17 +599,25 @@ function detectOpenAICompat(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader: detectPromptCacheSessionHeader(baseUrl),
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,
 		clampOutputToModelMax: d.isLocalOpenAICompatBackend,
 		stripImageInput: false,
-		thinkingLoopGuard: undefined,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
 		supportsPromptCacheKey: false,
 	};
+}
+
+/** Worker-affinity header a host routes on to keep a conversation on its cached prefix. */
+function detectPromptCacheSessionHeader(
+	baseUrl: string | undefined,
+): ResolvedOpenAISharedCompat["promptCacheSessionHeader"] {
+	if (hostMatchesUrl(baseUrl, "xai")) return "x-grok-conv-id";
+	if (hostMatchesUrl(baseUrl, "morph")) return "x-session-id";
+	return undefined;
 }
 
 /**
@@ -623,9 +633,11 @@ function detectStreamMarkupHealing(
 	baseUrl: string,
 ): ResolvedOpenAISharedCompat["streamMarkupHealingPattern"] {
 	// The dedicated Kimi grammar targets the K2 chat template; K3 and unranked
-	// Kimi ids keep the generic healer, matching the census.
+	// Kimi ids keep the generic healer, matching the census. The Kimi Code
+	// providers own the pattern in their provider rules instead
+	// (`stream-markup-healing-pattern "kimi"` in rules/providers/kimi-code*.kdl).
 	const isKimiK2 = facts.is("kimi") && facts.identity.family?.startsWith("k2") === true;
-	if (provider === "kimi-code" || provider === "moonshot" || isKimiK2) return "kimi";
+	if (provider === "moonshot" || isKimiK2) return "kimi";
 	if (facts.is("deepseek")) return "dsml";
 	if (isOfficialOpenAIEndpoint(provider, baseUrl)) return undefined;
 	return "thinking";
@@ -759,9 +771,9 @@ function resolveOpenAIResponsesPolicy(
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
 		supportsSteering: false,
+		uncachedInstructions: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
-		thinkingLoopGuard: undefined,
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
 		supportsSamplingParams: true,
@@ -770,7 +782,7 @@ function resolveOpenAIResponsesPolicy(
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: isOpenRouter && isAnthropicModel,
+		filterReasoningHistory: false,
 		disableReasoningOnForcedToolChoice: facts.is("kimi"),
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		disableReasoningWithTools: false,
@@ -791,6 +803,8 @@ function resolveOpenAIResponsesPolicy(
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
+		foldUserAfterToolResult: false,
+		splitToolCalls: false,
 		requiresAssistantContentForToolCalls: facts.is("kimi"),
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
@@ -819,7 +833,7 @@ function resolveOpenAIResponsesPolicy(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader: detectPromptCacheSessionHeader(baseUrl),
 		streamFirstEventTimeoutMs: isLocalServingBackend ? 0 : spec.compat?.streamFirstEventTimeoutMs,
 		streamIdleTimeoutMs: isLocalServingBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
@@ -871,10 +885,12 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		storeResponses: compat.storeResponses,
+		toolNamePrefix: compat.toolNamePrefix,
 		connectionBoundNativeHistory: compat.connectionBoundNativeHistory,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,
+		uncachedInstructions: compat.uncachedInstructions,
 		officialEndpoint: compat.officialEndpoint,
 		harmonyLeakMitigation: compat.harmonyLeakMitigation,
 		cacheControlFormat: compat.cacheControlFormat,
@@ -904,6 +920,7 @@ function resolveAnthropicPolicy(
 		signingEndpoint,
 		supportsContextManagement: true,
 		supportsServerCompaction: false,
+		supportsMessageThreads: false,
 		firstPartyProvider: false,
 		honorsClaudeCodeBetaKillSwitch: false,
 		supportsOutputEffort: true,
@@ -924,6 +941,7 @@ function resolveAnthropicPolicy(
 		supportsSamplingParams: true,
 		requiresToolResultId: false,
 		requiresThinkingEnabled,
+		requiresThinkingPresence: false,
 		replayUnsignedThinking:
 			!signingEndpoint && (compatReasoning(spec, axes) || modelMatchesHost(spec, "deepseekFamily")),
 		escapeBuiltinToolNames: false,
@@ -934,10 +952,10 @@ function resolveAnthropicPolicy(
 		// user-authored `compat` block to override them.
 		maxImageDimension: undefined,
 		maxImagePayloadBytes: undefined,
-		thinkingLoopGuard: undefined,
 		// Present as keys so models.yml `compat` can set them; unset unless a rule assigns them.
 		stripThinkingHistory: undefined,
 		fastMode: undefined,
+		disabledThinking: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 	};
 	applyWireAxes(compat, axes.wire, "anthropic-messages");
@@ -981,6 +999,7 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 		trustExplicitThinkingOnly: false,
 		modelRouter: false,
 		supportsParallelToolCalls: false,
+		temperatureFloor: undefined,
 	};
 	applyWireAxes(compat, axes.wire, "devin-agent");
 	applyCompatOverrides(compat, spec.compat);
@@ -988,24 +1007,21 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 }
 
 function resolveGooglePolicy(
-	spec: ModelSpec<"google-generative-ai" | "google-vertex" | "google-gemini-cli">,
+	spec: ModelSpec<"google-generative-ai" | "google-vertex">,
 	axes: ResolvedAxes,
 ): ResolvedGoogleCompat {
 	const compat: ResolvedGoogleCompat = {
 		supportsFunctionPartId: false,
 		requiresSkipThoughtSignature: false,
 		requiresSkipThoughtSignatureOnFirstFunctionCall: false,
-		dropUnsignedThinking: false,
-		ccaLegacyParametersSchema: false,
 		multimodalFunctionResponse: false,
-		flashStreamLeakWorkaround: false,
-		claudeThinkingBetaHeader: false,
-		antigravityClaudeToolMode: false,
 		stripImageInput: false,
 		// Unset means "no image contract": images go out as sent. Keys exist so
 		// a KDL rule or a user `compat` block can declare one.
 		maxImageDimension: undefined,
 		maxImagePayloadBytes: undefined,
+		// Unset keeps the bundled catalog rows byte-identical; the key must exist for `compat` overrides to apply.
+		base64SkipThoughtSignature: undefined,
 	};
 	applyWireAxes(compat, axes.wire, spec.api);
 	applyCompatOverrides(compat, spec.compat);
@@ -1044,7 +1060,6 @@ const FIREWORKS_THINKING_EFFORT_MAP: Readonly<Partial<Record<Effort, string>>> =
 function defaultThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>, facts: IdentityFacts): ThinkingConfig["mode"] {
 	switch (spec.api) {
 		case "google-generative-ai":
-		case "google-gemini-cli":
 		case "google-vertex":
 			// Gemini 3+ `google-level` is a `thinking-mode` rule in classes/gemini.kdl.
 			return "budget";
@@ -1144,12 +1159,11 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 /**
  * Compat-time reasoning capability. `axes.reasoning` also promotes targets on
  * reviewed effort corrections (the cascade's thinking-axis gate), but compat
- * may only be repaired where the matching contract opted in with
- * `thinking-upgrade-neutral`; everywhere else a spec that reports no reasoning
- * stays the authoritative capability surface.
+ * repairs missing or stale capability evidence only where the matching contract
+ * opted in with `thinking-upgrade-neutral`. Otherwise explicit false is authoritative.
  */
 function compatReasoning<TApi extends Api>(spec: ModelSpec<TApi>, axes: ResolvedAxes): boolean {
-	if (spec.reasoning) return true;
+	if (spec.reasoning === true) return true;
 	return axes.reasoning && readRuleThinking(axes).upgradeNeutral === true;
 }
 
@@ -1180,20 +1194,32 @@ function resolveThinkingPolicy<TApi extends Api>(
 		spec.thinking !== undefined && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0
 			? spec.thinking
 			: undefined;
-	// An explicit wire vocabulary is authoritative when discovery reports no
-	// reasoning (e.g. Synthetic's `none`-only off-switch): reviewed KDL must
-	// not re-expand it into an unadvertised ladder. Absent metadata is
-	// repaired only where KDL opts in with `thinking-upgrade-neutral`
-	// alongside a reviewed `thinking-efforts` ladder (the cascade upgrade for
-	// stale source capability data). On deployments whose discovery reports no
-	// capabilities (`thinking-unverified`), an unclassified neutral spec — nothing
-	// says whether it reasons — gets an unverified ladder the user may opt into.
-	const unverified = !compatReasoning(spec, axes);
+	// Reviewed neutral-upgrade rules may repair stale false capability data;
+	// reviewed unverified rules also preserve their existing provisional opt-in
+	// for capability-less seeds. An explicit vocabulary remains authoritative.
 	if (
-		unverified &&
-		(explicitThinking !== undefined || facts.identity.class !== "unknown" || rule.unverified !== true)
+		spec.reasoning === false &&
+		!compatReasoning(spec, axes) &&
+		(rule.unverified !== true || explicitThinking !== undefined)
 	) {
 		return undefined;
+	}
+	const unverified = !compatReasoning(spec, axes) && explicitThinking === undefined;
+	if (unverified) {
+		const supportedApi =
+			spec.api === "openai-completions" ||
+			spec.api === "openrouter" ||
+			spec.api === "openai-responses" ||
+			spec.api === "azure-openai-responses" ||
+			spec.api === "anthropic-messages" ||
+			spec.api === "google-generative-ai" ||
+			spec.api === "google-vertex";
+		if ((spec.kind ?? "chat") !== "chat" || (!supportedApi && rule.unverified !== true)) return undefined;
+		return {
+			mode: rule.mode ?? defaultThinkingMode(spec, facts),
+			efforts: THINKING_EFFORTS,
+			unverified: true,
+		};
 	}
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
 	if (explicitThinking !== undefined) {
@@ -1212,11 +1238,6 @@ function resolveThinkingPolicy<TApi extends Api>(
 	}
 	const effortMap = mergeEffortMap(spec, rule.effortMap, compat, config.efforts);
 	if (effortMap !== undefined) config.effortMap = effortMap;
-	if (unverified) {
-		// Off-by-default opt-in: no default level, mandatory effort, or wire off-switch.
-		config.unverified = true;
-		return config;
-	}
 	if (rule.defaultLevel !== undefined) config.defaultLevel = rule.defaultLevel;
 	if (rule.effortBudgets !== undefined) config.effortBudgets = rule.effortBudgets;
 	const supportsDisplay = rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts);
@@ -1254,7 +1275,28 @@ function mergeEffortMap(
 			: undefined;
 	const configured = readCompatEffortMap(compat);
 	if (detected === undefined && ruleMap === undefined && configured === undefined) return undefined;
-	return filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const served = filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const aliases = ruleMap === undefined ? undefined : effortAliases(ruleMap, efforts);
+	return aliases === undefined ? served : { ...served, ...aliases };
+}
+
+/**
+ * `thinking-effort-map` entries that send an unserved effort to a served tier
+ * (`medium "high"` on a low/high/max ladder); `clampThinkingLevelForModel`
+ * follows them instead of stepping down. Wire-value maps never alias.
+ */
+function effortAliases(
+	map: Partial<Record<Effort, string>>,
+	efforts: readonly Effort[],
+): Partial<Record<Effort, string>> | undefined {
+	let aliases: Partial<Record<Effort, string>> | undefined;
+	for (const effort of THINKING_EFFORTS) {
+		const target = effortValue(map[effort]);
+		if (efforts.includes(effort) || target === undefined || !efforts.includes(target)) continue;
+		aliases ??= {};
+		aliases[effort] = target;
+	}
+	return aliases;
 }
 
 /**
@@ -1305,8 +1347,8 @@ function fillExplicitThinking<TApi extends Api>(
 // Entry
 // ---------------------------------------------------------------------------
 
-function buildResolveTarget<TApi extends Api>(
-	spec: ModelSpec<TApi>,
+function buildResolveTarget(
+	spec: CatalogPolicyInputs,
 	identity: ModelIdentity,
 	providerType = spec.providerType ?? spec.provider,
 ): ResolveTarget {
@@ -1338,8 +1380,10 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
  * {@link resolveModelPolicy} without resolving the compat and thinking
  * policies, which dominate its cost on catalog-wide scans.
  */
-export function resolveCatalogAxes(spec: ModelSpec<Api>): Record<string, unknown> {
-	return resolveCascade(buildResolveTarget(spec, resolveIdentity(spec))).catalog;
+export function resolveCatalogAxes(spec: CatalogPolicyInputs, route?: ResolveRoute): Record<string, unknown> {
+	const target = buildResolveTarget(spec, resolveIdentity(spec));
+	target.upstream = route?.upstream;
+	return resolveCascade(target).catalog;
 }
 
 /**
@@ -1351,7 +1395,7 @@ export function resolveModelPolicy<TApi extends Api>(
 	route?: ResolveRoute,
 ): ResolvedModelPolicy<TApi>;
 export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute): ResolvedModelPolicy<Api> {
-	const spec = withoutUnverifiedThinking(input);
+	const spec = input.thinking?.unverified ? { ...input, reasoning: undefined, thinking: undefined } : input;
 	const identity = resolveIdentity(spec);
 	const facts = new IdentityFacts(identity);
 	const target = buildResolveTarget(spec, identity);
@@ -1378,11 +1422,7 @@ export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute):
 		compat = resolveOllamaPolicy(spec, axes);
 	} else if (specUsesApi(spec, "devin-agent")) {
 		compat = resolveDevinPolicy(spec, axes);
-	} else if (
-		specUsesApi(spec, "google-generative-ai") ||
-		specUsesApi(spec, "google-vertex") ||
-		specUsesApi(spec, "google-gemini-cli")
-	) {
+	} else if (specUsesApi(spec, "google-generative-ai") || specUsesApi(spec, "google-vertex")) {
 		compat = resolveGooglePolicy(spec, axes);
 	} else {
 		compat = undefined;

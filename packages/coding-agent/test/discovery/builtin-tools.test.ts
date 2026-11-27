@@ -8,8 +8,10 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { discoverCustomToolPaths, loadCustomTools } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/loader";
+import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "../helpers/settings-test-state";
+import { SYMLINKS_USABLE } from "../helpers/symlink-support";
 
 function toolSource(name: string): string {
 	return `export default api => ({
@@ -64,6 +66,8 @@ describe("native executable custom tool discovery", () => {
 		restoreEnvValue("PI_PROFILE", originalPiProfileEnv);
 		restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDirEnv);
 		__resetDirsFromEnvForTests();
+		// Loading the fixtures opens the legacy extension parse cache under the temp HOME; Windows can't remove it while open.
+		__closeExtensionParseCacheForTests();
 		await removeWithRetries(root);
 	});
 
@@ -98,6 +102,29 @@ describe("native executable custom tool discovery", () => {
 		expect(definitions.items.find(tool => tool.path === notesPath)?.description).toBe("Declarative tool metadata");
 	});
 
+	test("explicit-only discovery skips ambient tool dirs but keeps explicit extension package tools", async () => {
+		const explicitPackage = path.join(root, "explicit-pkg");
+		await fs.mkdir(path.join(explicitPackage, "tools"), { recursive: true });
+		await Promise.all([
+			fs.writeFile(path.join(projectTools, "project-module.ts"), toolSource("project_module")),
+			fs.writeFile(path.join(userTools, "user-module.ts"), toolSource("user_module")),
+			fs.writeFile(path.join(explicitPackage, "tools", "explicit-module.ts"), toolSource("explicit_module")),
+		]);
+
+		const discoveredPaths = await discoverCustomToolPaths([], project, undefined, {
+			ambient: false,
+			extensionRoots: {
+				explicit: [explicitPackage],
+				mode: "explicit-only",
+				configured: [],
+				configuredLevel: "user",
+			},
+		});
+		const loaded = await loadCustomTools(discoveredPaths, project, []);
+		expect(loaded.errors).toEqual([]);
+		expect(loaded.tools.map(tool => tool.tool.name)).toEqual(["explicit_module"]);
+	});
+
 	test("reports explicitly configured metadata instead of silently skipping it", async () => {
 		const packagePath = path.join(projectTools, "package.json");
 		await fs.writeFile(packagePath, JSON.stringify({ type: "module" }));
@@ -108,5 +135,19 @@ describe("native executable custom tool discovery", () => {
 		expect(loaded.errors).toHaveLength(1);
 		expect(loaded.errors[0]).toMatchObject({ path: packagePath, source: { provider: "config" } });
 		expect(loaded.errors[0]?.error).toMatch(/cannot be loaded as executable modules/);
+	});
+
+	// A shared tool package is linked into the tools dir; `readdir(withFileTypes)` reports
+	// that entry as a link rather than a directory, so the index.ts probe never ran.
+	test.skipIf(!SYMLINKS_USABLE)("loads a tool package linked into the tools dir", async () => {
+		const shared = path.join(root, "shared-tool");
+		await fs.mkdir(shared, { recursive: true });
+		await fs.writeFile(path.join(shared, "index.ts"), toolSource("linked_tool"));
+		await fs.symlink(shared, path.join(userTools, "linked-tool"), "dir");
+
+		const definitions = await loadCapability<CustomTool>(toolCapability.id, { cwd: project, providers: ["native"] });
+		expect(definitions.items.find(tool => tool.name === "linked-tool")?.path).toBe(
+			path.join(userTools, "linked-tool", "index.ts"),
+		);
 	});
 });

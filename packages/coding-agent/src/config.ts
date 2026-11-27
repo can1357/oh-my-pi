@@ -1,19 +1,9 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
-import { isUserSourceEnabled } from "./capability";
-import { resolveClaudePaths } from "./config/claude-paths";
+import { CONFIG_DIR_NAME, getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
 import { expandTilde } from "./tools/path-utils";
 
 export * from "./config/config-file";
-
-const priorityList = [
-	{ dir: CONFIG_DIR_NAME, globalAgentDir: getConfigAgentDirName },
-	{ dir: ".claude" },
-	{ dir: ".codex" },
-	{ dir: ".gemini" },
-];
 
 // =============================================================================
 // Package Directory (for optional external docs/examples)
@@ -78,23 +68,11 @@ export function getChangelogPath(): string | undefined {
 // =============================================================================
 
 /**
- * User-level: ~/.omp/agent, Claude's active config directory, ~/.codex, ~/.gemini
- * Project-level: .omp, .claude, .codex, .gemini
+ * omp's config directories: user-level is the agent dir (`getAgentDir()`: profile,
+ * `PI_CONFIG_DIR`, and `PI_CODING_AGENT_DIR` aware); project-level is `<cwd>/.omp`.
  */
-const USER_CONFIG_BASES = priorityList.map(({ dir, globalAgentDir }) => ({
-	base: () =>
-		dir === ".claude" ? resolveClaudePaths().configDir : path.join(os.homedir(), globalAgentDir?.() ?? dir),
-	name: dir,
-}));
-
-const PROJECT_CONFIG_BASES = priorityList.map(({ dir }) => ({
-	base: dir,
-	name: dir,
-}));
-
 export interface ConfigDirEntry {
 	path: string;
-	source: string; // e.g., ".omp", ".claude"
 	level: "user" | "project";
 }
 
@@ -119,7 +97,7 @@ export interface GetConfigDirsOptions {
  * @example
  * // Get all command directories
  * getConfigDirs("commands")
- * // → [{ path: "~/.omp/agent/commands", source: ".omp", level: "user" }, ...]
+ * // → [{ path: "~/.omp/agent/commands", level: "user" }, { path: "<cwd>/.omp/commands", level: "project" }]
  *
  * @example
  * // Get only existing project skill directories
@@ -129,26 +107,19 @@ export function getConfigDirs(subpath: string, options: GetConfigDirsOptions = {
 	const { user = true, project = true, cwd = getProjectDir(), existingOnly = false } = options;
 	const results: ConfigDirEntry[] = [];
 
-	// User-level directories (highest priority)
+	// User-level directory (highest priority)
 	if (user) {
-		for (const { base, name } of USER_CONFIG_BASES) {
-			if (name !== CONFIG_DIR_NAME && !isUserSourceEnabled(name.replace(/^\./, ""))) {
-				continue;
-			}
-			const resolvedPath = path.resolve(base(), subpath);
-			if (!existingOnly || fs.existsSync(resolvedPath)) {
-				results.push({ path: resolvedPath, source: name, level: "user" });
-			}
+		const resolvedPath = path.resolve(getAgentDir(), subpath);
+		if (!existingOnly || fs.existsSync(resolvedPath)) {
+			results.push({ path: resolvedPath, level: "user" });
 		}
 	}
 
-	// Project-level directories
+	// Project-level directory
 	if (project) {
-		for (const { base, name } of PROJECT_CONFIG_BASES) {
-			const resolvedPath = path.resolve(cwd, base, subpath);
-			if (!existingOnly || fs.existsSync(resolvedPath)) {
-				results.push({ path: resolvedPath, source: name, level: "project" });
-			}
+		const resolvedPath = path.resolve(cwd, CONFIG_DIR_NAME, subpath);
+		if (!existingOnly || fs.existsSync(resolvedPath)) {
+			results.push({ path: resolvedPath, level: "project" });
 		}
 	}
 
@@ -161,13 +132,6 @@ export function getConfigDirs(subpath: string, options: GetConfigDirsOptions = {
  */
 export function getConfigDirPaths(subpath: string, options: GetConfigDirsOptions = {}): string[] {
 	return getConfigDirs(subpath, options).map(e => e.path);
-}
-
-export interface ConfigFileResult<T> {
-	path: string;
-	source: string;
-	level: "user" | "project";
-	content: T;
 }
 
 /**
@@ -187,61 +151,23 @@ export function findConfigFile(subpath: string, options: GetConfigDirsOptions = 
 	return undefined;
 }
 
-/**
- * Find the first existing config file with metadata.
- */
-export function findConfigFileWithMeta(
-	subpath: string,
-	options: GetConfigDirsOptions = {},
-): Omit<ConfigFileResult<never>, "content"> | undefined {
-	const dirs = getConfigDirs("", { ...options, existingOnly: false });
-
-	for (const { path: base, source, level } of dirs) {
-		const filePath = path.join(base, subpath);
-		if (fs.existsSync(filePath)) {
-			return { path: filePath, source, level };
-		}
-	}
-
-	return undefined;
-}
-
 // =============================================================================
 // Walk-Up Config Discovery (for monorepo scenarios)
 // =============================================================================
 
 /**
- * Find all nearest config directories by walking up from cwd.
- * Returns one entry per config base (.omp, .claude) - the nearest one found.
- * Results are in priority order (highest first).
+ * Find the nearest project config directory (`.omp/<subpath>`) by walking up from cwd.
+ * Returns it as a single entry, or an empty array when no ancestor has one.
  */
 export function findAllNearestProjectConfigDirs(subpath: string, cwd: string = getProjectDir()): ConfigDirEntry[] {
-	const results: ConfigDirEntry[] = [];
-	const foundBases = new Set<string>();
-
 	let currentDir = cwd;
-
-	while (foundBases.size < PROJECT_CONFIG_BASES.length) {
-		for (const { base, name } of PROJECT_CONFIG_BASES) {
-			if (foundBases.has(name)) continue;
-
-			const candidate = path.join(currentDir, base, subpath);
-			try {
-				if (fs.statSync(candidate).isDirectory()) {
-					results.push({ path: candidate, source: name, level: "project" });
-					foundBases.add(name);
-				}
-			} catch {}
-		}
-
+	while (true) {
+		const candidate = path.join(currentDir, CONFIG_DIR_NAME, subpath);
+		try {
+			if (fs.statSync(candidate).isDirectory()) return [{ path: candidate, level: "project" }];
+		} catch {}
 		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) break;
+		if (parentDir === currentDir) return [];
 		currentDir = parentDir;
 	}
-
-	// Sort by priority order
-	const order = PROJECT_CONFIG_BASES.map(b => b.name);
-	results.sort((a, b) => order.indexOf(a.source) - order.indexOf(b.source));
-
-	return results;
 }

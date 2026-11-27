@@ -48,29 +48,6 @@ function usageLimitError(): Error & { status: number } {
 	});
 }
 
-const GOOGLE_CAPACITY_EXHAUSTED_MESSAGE = `Cloud Code Assist API error (429): ${JSON.stringify({
-	error: {
-		code: 429,
-		message: "You have exhausted your capacity on this model. Resets in 0s.",
-		status: "RESOURCE_EXHAUSTED",
-		details: [
-			{
-				"@type": "type.googleapis.com/google.rpc.ErrorInfo",
-				reason: "RATE_LIMIT_EXCEEDED",
-				domain: "cloudcode-pa.googleapis.com",
-				metadata: {
-					model: "gemini-3.7-flash-medium",
-					quotaResetDelay: "835.150299ms",
-				},
-			},
-			{
-				"@type": "type.googleapis.com/google.rpc.RetryInfo",
-				retryDelay: "0.835150299s",
-			},
-		],
-	},
-})}`;
-
 function model(): Model<Api> {
 	return {
 		id: "test-model",
@@ -101,6 +78,57 @@ function ok(stream: AssistantMessageEventStream): void {
 describe("streamSimple resolver auth retry", () => {
 	afterEach(() => {
 		unregisterCustomApis(SOURCE_ID);
+	});
+
+	it("surfaces an exact Anthropic model 404 after text without replaying partial output", async () => {
+		const keys: unknown[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const requestedModel = { ...model(), provider: "anthropic", id: "claude-mythos-5-2" };
+		const failure = {
+			...assistantError(
+				`404 ${JSON.stringify({
+					type: "error",
+					error: { type: "not_found_error", message: `model: ${requestedModel.id}` },
+				})}`,
+				404,
+			),
+			provider: requestedModel.provider,
+			model: requestedModel.id,
+			content: [{ type: "text" as const, text: "partial" }],
+		};
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "partial",
+						partial: { ...failure, stopReason: "stop" },
+					});
+					stream.push({ type: "error", reason: "error", error: failure });
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(requestedModel, context, {
+			apiKey: ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "denied-key" : "sibling-key";
+			},
+		});
+		const deltas: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "text_delta") deltas.push(event.delta);
+		}
+		expect(await stream.result()).toEqual(failure);
+		expect(deltas).toEqual(["partial"]);
+		expect(keys).toEqual(["denied-key"]);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false]);
 	});
 
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {
@@ -188,7 +216,7 @@ describe("streamSimple resolver auth retry", () => {
 						? stream.fail(
 								new OAuthError("OAuth token expired before request", {
 									kind: "token-refresh",
-									provider: "google-antigravity",
+									provider: "openai-codex",
 								}),
 							)
 						: ok(stream),
@@ -220,11 +248,11 @@ describe("streamSimple resolver auth retry", () => {
 		const contexts: ApiKeyResolveContext[] = [];
 		const firstError = new OAuthError("First token expired before request", {
 			kind: "token-refresh",
-			provider: "google-antigravity",
+			provider: "openai-codex",
 		});
 		const secondError = new OAuthError("Refreshed token also expired before request", {
 			kind: "token-refresh",
-			provider: "google-antigravity",
+			provider: "openai-codex",
 		});
 		let providerCalls = 0;
 		registerCustomApi(
@@ -265,7 +293,7 @@ describe("streamSimple resolver auth retry", () => {
 		const contexts: ApiKeyResolveContext[] = [];
 		const configurationError = new OAuthError("OAuth provider is misconfigured", {
 			kind: "configuration",
-			provider: "google-antigravity",
+			provider: "openai-codex",
 		});
 		let providerCalls = 0;
 		registerCustomApi(
@@ -541,6 +569,41 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["old-key", "switch-key"]);
 	});
 
+	it("surfaces the Z.AI reset rather than a stale sibling's 401 after rotation runs out", async () => {
+		const quota = Object.assign(
+			new Error("429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]"),
+			{ status: 429 },
+		);
+		const stale = Object.assign(new Error('401 {"error":{"message":"Authentication Failed","type":"1000"}}'), {
+			status: 401,
+		});
+		const keys: string[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(options?.apiKey === "valid" ? quota : stale));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(model(), context, {
+			apiKey: ctx =>
+				ctx.error === undefined ? "valid" : ctx.lastChance ? (keys.length === 1 ? "stale" : undefined) : "stale",
+		});
+		let caught: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+		} catch (error) {
+			caught = error;
+		}
+		expect(keys).toEqual(["valid", "stale"]);
+		expect(caught).toBe(quota);
+	});
+
 	it("retries a thrown usage-limit error and passes the cause to the resolver", async () => {
 		const keys: unknown[] = [];
 		const errors: unknown[] = [];
@@ -571,6 +634,45 @@ describe("streamSimple resolver auth retry", () => {
 		// The cause carries the original 429 so the resolver can branch usage-limit vs 401.
 		expect((errors[0] as { status?: number }).status).toBe(429);
 		expect((errors[0] as Error).message).toMatch(/usage limit/i);
+	});
+
+	it("emits the Z.AI 429 error event after a sibling emits a 401 error event", async () => {
+		const keys: string[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error:
+							options?.apiKey === "valid"
+								? assistantError(
+										"429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]",
+										429,
+									)
+								: assistantError("401 Authentication Failed (type=1000)", 401),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(model(), context, {
+			apiKey: ctx =>
+				ctx.error === undefined ? "valid" : ctx.lastChance ? (keys.length === 1 ? "stale" : undefined) : "stale",
+		});
+		const errors: AssistantMessage[] = [];
+		for await (const event of stream) {
+			if (event.type === "error") errors.push(event.error);
+		}
+		expect(keys).toEqual(["valid", "stale"]);
+		expect(errors.map(error => [error.errorStatus, error.errorMessage])).toEqual([
+			[429, "429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]"],
+		]);
 	});
 
 	it("retries a usage-limit error event before content", async () => {
@@ -780,6 +882,10 @@ describe("streamSimple resolver auth retry", () => {
 			{ message: '{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}' },
 			{ message: '{"error":{"code":"usage_limit_reached","message":"usage limit reached"}}' },
 			{ message: "Upstream request failed: Insufficient account funds", status: 402 },
+			{
+				message: "422 Budget has been exceeded! Key=analytics-team Current cost: 0.06, Max budget: 0.05",
+				status: 422,
+			},
 		];
 		let activePayload = payloads[0]!;
 		let keys: unknown[] = [];
@@ -829,7 +935,7 @@ describe("streamSimple resolver auth retry", () => {
 
 	it("does not rotate or refresh on informative transient 429 bodies", async () => {
 		const transient429Bodies = [
-			"Cloud Code Assist API error (429): Too many requests",
+			"Google API error (429): Too many requests",
 			"Please retry in 5s",
 			"Service overloaded 529",
 		];
@@ -879,51 +985,6 @@ describe("streamSimple resolver auth retry", () => {
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain(body);
 		}
-	});
-
-	it("rotates on short Google account capacity exhaustion before content", async () => {
-		const keys: unknown[] = [];
-		const retryContexts: ApiKeyResolveContext[] = [];
-		registerCustomApi(
-			API,
-			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
-				pushKey(keys, options);
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					if (options?.apiKey === "next-key") {
-						ok(stream);
-						return;
-					}
-					stream.push({ type: "start", partial: assistant() });
-					stream.push({
-						type: "error",
-						reason: "error",
-						error: assistantError(GOOGLE_CAPACITY_EXHAUSTED_MESSAGE, 429),
-					});
-				});
-				return stream;
-			},
-			SOURCE_ID,
-		);
-
-		const stream = streamSimple(model(), context, {
-			apiKey: async ctx => {
-				if (ctx.error !== undefined) retryContexts.push(ctx);
-				return ctx.error === undefined ? "old-key" : ctx.lastChance ? "next-key" : "old-key";
-			},
-		});
-		for await (const _event of stream) {
-			// drain
-		}
-
-		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
-		expect(keys).toEqual(["old-key", "next-key"]);
-		expect(retryContexts.map(ctx => ({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined }))).toEqual([
-			{ lastChance: true, hasError: true },
-		]);
-		const retryError = retryContexts[0]?.error;
-		if (!(retryError instanceof Error)) throw new Error("Expected credential retry error");
-		expect(retryError.message).toContain("exhausted your capacity");
 	});
 
 	it("surfaces the original error when the resolver declines every retry", async () => {

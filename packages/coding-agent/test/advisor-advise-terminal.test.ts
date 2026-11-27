@@ -5,16 +5,19 @@
  * advises AND keeps investigating is untouched — the loop continues normally.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import { type FetchImpl, streamSimple } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInMemoryAuthStorage, fixedAdvisorTools } from "./helpers/agent-session-setup";
 
 const ADVISE_CALL = {
 	type: "toolCall",
@@ -72,7 +75,7 @@ describe("advisor advise-only turn terminates the review", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			advisorTools: [readTool],
+			advisorTools: fixedAdvisorTools(readTool),
 			advisorStreamFn: advisorMock.stream,
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
@@ -163,5 +166,71 @@ describe("advisor advise-only turn terminates the review", () => {
 		const cards = advisorCards(live).join("\n");
 		expect(cards).toContain("Check the null path before the retry.");
 		expect(cards).toContain("The retry budget is never decremented.");
+	});
+});
+
+describe("advisor silent review on Gemini", () => {
+	it("keeps Gemini 3.6 advisor context and accepts a silent review", async () => {
+		const temp = TempDir.createSync("@pi-advisor-gemini-silent-review-");
+		const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));
+		auth.keys.setRuntime("google", "test-key");
+		const registry = new ModelRegistry(auth);
+		const model = getBundledModel("google", "gemini-3.6-flash");
+		if (!model) throw new Error("missing bundled model");
+		const bodies: unknown[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			bodies.push(JSON.parse(String(init?.body)));
+			const chunk = {
+				candidates: [
+					{
+						content: { role: "model", parts: [{ thought: true, text: "Analyzing only" }] },
+						finishReason: "STOP",
+					},
+				],
+				usageMetadata: {
+					promptTokenCount: 10,
+					candidatesTokenCount: 5,
+					thoughtsTokenCount: 5,
+					totalTokenCount: 15,
+				},
+			};
+			return new Response(`data: ${JSON.stringify(chunk)}\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const advisorStreamFn: StreamFn = (requestModel, context, options) =>
+			streamSimple(requestModel, context, { ...options, fetch: fetchMock });
+		const agent = new Agent({ initialState: { model, systemPrompt: ["Primary"], tools: [] } });
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.create(temp.path(), temp.path()),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: registry,
+			advisorStreamFn,
+		});
+		try {
+			session.settings.setModelRole("advisor", "google/gemini-3.6-flash");
+			expect(session.setAdvisorEnabled(true)).toBe(true);
+			const advisor = session.getAdvisorAgent();
+			if (!advisor) throw new Error("advisor did not start");
+			await advisor.prompt("### Session update [in progress — more steps follow]\nImplement an order book.");
+			expect(advisor.state.error).toBeUndefined();
+			expect(bodies).toHaveLength(1);
+			expect(bodies[0]).toMatchObject({
+				systemInstruction: {
+					parts: [{ text: expect.any(String) }],
+				},
+				tools: [
+					{
+						functionDeclarations: [{ name: "advise" }],
+					},
+				],
+			});
+		} finally {
+			await session.dispose();
+			auth.close();
+			await temp.remove();
+		}
 	});
 });

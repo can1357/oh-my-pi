@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
+import { encodeStream } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
+	AssistantMessageEventStream,
 	Context,
 	FetchImpl,
 	Model,
@@ -166,6 +168,23 @@ afterEach(() => {
 });
 
 describe("streamPiNative request shape", () => {
+	it.each([
+		["Bearer from-headers", "Bearer from-headers"],
+		["", "Bearer gw-bearer"],
+	])("sends one credential for lowercase authorization %j and an API key", async (authorization, expected) => {
+		const captured: { headers?: Headers } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.headers = new Headers(init?.headers);
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamPiNative(fakeModel({ headers: { authorization } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(captured.headers?.get("authorization")).toBe(expected);
+	});
 	it("POSTs `{modelId, context, options, stream:true}` to `<baseUrl>/v1/pi/stream`", async () => {
 		const final = baseAssistant();
 		const captured: { url?: string; init?: RequestInit } = {};
@@ -188,6 +207,9 @@ describe("streamPiNative request shape", () => {
 		expect(headers["Content-Type"]).toBe("application/json");
 		expect(headers.Accept).toBe("text/event-stream");
 		expect(headers.Authorization).toBe("Bearer gw-bearer");
+		// Bun's fetch otherwise cuts a response still silent after ~300 s, before
+		// the configurable first-event watchdog can govern it (issue #17363).
+		expect(captured.init).toMatchObject({ timeout: false });
 
 		const body = JSON.parse(captured.init?.body as string);
 		// Provider-qualified to avoid cross-provider id collisions; the gateway
@@ -271,10 +293,11 @@ describe("streamPiNative request shape", () => {
 		expect(body.options.headers).toEqual({ "user-agent": "from-caller" });
 	});
 
-	it("strips non-wire fields (signal, apiKey, fetch, callbacks) from `options`", async () => {
+	it("sends only gateway-accepted fields in `options`", async () => {
 		// `apiKey` must ride in the Authorization header, never the body — sending
-		// it twice would let a logged request leak the gateway bearer. The other
-		// fields are non-serializable function/runtime handles.
+		// it twice would let a logged request leak the gateway bearer. Callbacks are
+		// runtime handles; server-tier data (`providerOptions`, `cwd`) the gateway
+		// drops anyway, so shipping it only inflates every request.
 		const captured: { init?: RequestInit } = {};
 		let responseMetadata: ProviderResponseMetadata | undefined;
 		const fetchImpl: FetchImpl = (async (_input, init) => {
@@ -301,6 +324,8 @@ describe("streamPiNative request shape", () => {
 			},
 			onSseEvent: () => undefined,
 			providerSessionState: new Map(),
+			providerOptions: { region: "eu" },
+			cwd: "/repo",
 			maxTokens: 1024,
 		});
 		await stream.result();
@@ -313,6 +338,8 @@ describe("streamPiNative request shape", () => {
 		expect("onResponse" in body.options).toBe(false);
 		expect("onSseEvent" in body.options).toBe(false);
 		expect("providerSessionState" in body.options).toBe(false);
+		expect("providerOptions" in body.options).toBe(false);
+		expect("cwd" in body.options).toBe(false);
 		// And the legitimate options survive
 		expect(body.options.maxTokens).toBe(1024);
 		expect(responseMetadata).toMatchObject({
@@ -521,6 +548,46 @@ describe("streamPiNative event flow", () => {
 		const errorId = AIError.classify(error);
 		expect(AIError.is(errorId, AIError.Flag.Transient)).toBe(true);
 		expect(AIError.retriable(errorId)).toBe(true);
+	});
+
+	it("bounds a gateway that never sends response headers by the first-event timeout", async () => {
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+			return promise;
+		}) as FetchImpl;
+
+		const stream = streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			fetch: fetchImpl,
+			streamFirstEventTimeoutMs: 20,
+			streamIdleTimeoutMs: 20,
+		});
+
+		await expect(stream.result()).rejects.toThrow(/timed out/);
+	});
+
+	it("resolves the gateway's payload-less failure frame as an error result", async () => {
+		// `encodeStream` emits `{type:"error",errorMessage}` without the
+		// `AssistantMessage` when the upstream iterator throws mid-turn.
+		const broken = (async function* () {
+			yield { type: "start", partial: baseAssistant() } satisfies AssistantMessageEvent;
+			throw new Error("upstream connection reset");
+		})() as unknown as AssistantMessageEventStream;
+		const fetchImpl: FetchImpl = (async () =>
+			new Response(encodeStream(broken), {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			})) as FetchImpl;
+
+		const result = await streamPiNative(fakeModel(), baseContext, { apiKey: "k", fetch: fetchImpl }).result();
+
+		expect(result).toMatchObject({
+			stopReason: "error",
+			errorMessage: "upstream connection reset",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		});
 	});
 
 	it("fails fast when the caller's signal is already aborted before fetch fires", async () => {

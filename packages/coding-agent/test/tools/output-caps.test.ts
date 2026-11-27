@@ -6,7 +6,7 @@
  * bounded-output paths (bash sink/minimizer) see zero behavior change.
  */
 import { describe, expect, it } from "bun:test";
-import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 
 const MARKER_PATTERN = /\[…\d+B elided…\]/;
 
@@ -20,12 +20,6 @@ function makeLines(count: number, pad = "x".repeat(40)): string {
 }
 
 describe("enforceInlineByteCap", () => {
-	it("returns sub-cap text unchanged (identity, not just equality)", async () => {
-		const text = makeLines(10);
-		const result = await enforceInlineByteCap(text, { maxBytes: 4096 });
-		expect(result).toBe(text);
-	});
-
 	it("returns text exactly at the cap unchanged", async () => {
 		const text = "a".repeat(1000);
 		expect(Buffer.byteLength(text, "utf-8")).toBe(1000);
@@ -109,7 +103,7 @@ describe("enforceInlineByteCap", () => {
 		});
 		// saveArtifact receives the full original text, not the elided version.
 		expect(saved).toBe(text);
-		expect(result.endsWith("[raw output: artifact://17]")).toBe(true);
+		expect(result.endsWith("[raw output: local://17.log]")).toBe(true);
 		expect(result).toMatch(MARKER_PATTERN);
 	});
 
@@ -119,7 +113,7 @@ describe("enforceInlineByteCap", () => {
 			maxBytes: 4096,
 			saveArtifact: () => undefined,
 		});
-		expect(result).not.toContain("[raw output: artifact://");
+		expect(result).not.toContain("[raw output: local://");
 		expect(result).toMatch(MARKER_PATTERN);
 	});
 

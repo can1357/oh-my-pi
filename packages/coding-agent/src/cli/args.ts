@@ -4,11 +4,14 @@
 import * as path from "node:path";
 import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { MotionMode } from "../config/motion-presets";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ApprovalMode } from "../tools/approval";
-import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
+	EXTENSION_SHADOWABLE_STRING_FLAGS,
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
 	type ParseDeps,
@@ -36,6 +39,8 @@ export interface Args {
 	smol?: string;
 	slow?: string;
 	plan?: string;
+	/** `--preset` starts on a saved model preset's roles and default thinking level (ephemeral). */
+	preset?: string;
 	/** Objective for a fresh interactive goal session. */
 	goal?: string;
 	prewalk?: boolean;
@@ -44,6 +49,8 @@ export interface Args {
 	planYolo?: boolean;
 	planYoloInto?: string;
 	maxTime?: number;
+	warnCost?: number;
+	maxCost?: number;
 	apiKey?: string;
 	systemPrompt?: string;
 	systemPromptTemplate?: string;
@@ -52,6 +59,8 @@ export interface Args {
 	serviceTier?: ServiceTierOpenAISettingValue;
 	hideThinking?: boolean;
 	advisor?: boolean;
+	/** Print mode: wake the session with background-job results before exiting (`async.printWake`). */
+	waitAsync?: boolean;
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
@@ -77,6 +86,9 @@ export interface Args {
 	noTools?: boolean;
 	noLsp?: boolean;
 	noPty?: boolean;
+	noJudge?: boolean;
+	noSpotlight?: boolean;
+	offline?: boolean;
 	hooks?: string[];
 	extensions?: string[];
 	trustedExtensions?: string[];
@@ -88,7 +100,14 @@ export interface Args {
 	noSkills?: boolean;
 	skills?: string[];
 	noRules?: boolean;
+	noContextFiles?: boolean;
 	noTitle?: boolean;
+	/** `--spinner-interval <ms>`: ephemeral `tui.spinnerInterval` override for every spinner (0 = static). */
+	spinnerInterval?: number;
+	/** `--max-fps <n>`: ephemeral `tui.maxFps` override — the ceiling on how often the TUI repaints. */
+	maxFps?: number;
+	/** `--motion <full|reduced|none>`: ephemeral `tui.motion` override — one switch over every animation. */
+	motion?: MotionMode;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
 	autoApprove?: boolean;
@@ -282,7 +301,9 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		// value-taking built-in (`--plan`, `--model`, …) that branch would consume
 		// the following token — eating the user's message and setting the wrong
 		// built-in field — so registered flags shadow same-named built-ins here.
-		const extFlag = arg.startsWith("--") ? extensionFlags?.get(arg.slice(2)) : undefined;
+		// `--preset` is reserved by the built-in launch flag: the preset applies
+		// before extensions load, so a same-named extension flag cannot claim it.
+		const extFlag = arg.startsWith("--") && arg !== "--preset" ? extensionFlags?.get(arg.slice(2)) : undefined;
 		if (extFlag) {
 			const flagName = arg.slice(2);
 			if (extFlag.type === "boolean") {
@@ -295,23 +316,38 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 					result.unknownFlags.set(flagName, args[++i]);
 				}
 			}
+		} else if (EXTENSION_SHADOWABLE_STRING_FLAGS.has(arg)) {
+			// Bare `--plan` mirrors extension string-flag consumption before
+			// extensions load: a value-like token (`--plan opus`) sets the built-in
+			// field, while a flag-looking token (`--plan --restore sid`,
+			// `--plan --model opus`) stays a flag of its own. Inline `--plan=value`
+			// always consumes its explicit value.
+			if (
+				i + 1 < args.length &&
+				args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG &&
+				(equalsValueIndex !== -1 || !args[i + 1].startsWith("-"))
+			) {
+				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
+				i = consumed.index;
+				STRING_SETTERS[arg](result, consumed.value, parseDeps);
+			}
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
 			if (arg === "--trusted-extension") trustedFlagCount++;
 			// Built-in string flags consume the next token even when it is flag-looking
-			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile").
-			// The one token they must never absorb is the profile bootstrap's internal
-			// boundary sentinel: an extension-shadowable built-in like `--plan` (parsed
-			// here only when its boolean extension is NOT loaded) would otherwise swallow
-			// the marker as its value and drop the user's trailing message.
+			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile"),
+			// except for the profile bootstrap's internal boundary sentinel.
 			if (
-				arg === "--goal" &&
+				(arg === "--goal" || arg === "--preset") &&
 				(i + 1 >= args.length ||
 					args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG ||
 					(equalsValueIndex === -1 && args[i + 1].startsWith("-")))
 			) {
-				result.invalidFlagValues.push("--goal requires an objective.");
-				// Like every string flag, a flag-looking token after `--goal` is its (rejected)
-				// value, never a flag of its own: `--goal --profile work` must not activate a profile.
+				result.invalidFlagValues.push(
+					arg === "--goal" ? "--goal requires an objective." : "--preset requires a preset name.",
+				);
+				// Like every string flag, a flag-looking token after `--goal` or `--preset` is
+				// its (rejected) value, never a flag of its own: `--preset --profile work`
+				// must not activate a profile.
 				if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) i++;
 				continue;
 			}
@@ -356,10 +392,18 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noLsp = true;
 		} else if (arg === "--no-pty") {
 			result.noPty = true;
+		} else if (arg === "--no-judge") {
+			result.noJudge = true;
+		} else if (arg === "--no-spotlight") {
+			result.noSpotlight = true;
+		} else if (arg === "--offline") {
+			result.offline = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {
 			result.advisor = true;
+		} else if (arg === "--wait-async") {
+			result.waitAsync = true;
 		} else if (arg === "--external-thinking") {
 			result.externalThinking = true;
 		} else if (arg === "--prewalk") {
@@ -378,6 +422,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noSkills = true;
 		} else if (arg === "--no-rules") {
 			result.noRules = true;
+		} else if (arg === "--no-context-files") {
+			result.noContextFiles = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
 		} else if (arg === "--no-ui") {
@@ -433,6 +479,14 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		if (!path.isAbsolute(trustedPath)) {
 			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
 		}
+	}
+
+	// A --no-tools session loads no extensions; an explicit one would be silently ignored.
+	if (
+		result.noTools &&
+		((result.extensions?.length ?? 0) > 0 || (result.hooks?.length ?? 0) > 0 || trustedFlagCount > 0)
+	) {
+		throw new CliUsageError("--no-tools cannot be combined with --extension, -e, --hook, or --trusted-extension");
 	}
 
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {

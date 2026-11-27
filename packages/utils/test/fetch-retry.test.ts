@@ -206,6 +206,44 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, "429 Monthly usage limit reached. Resets in 1 day.")).toBe(24 * 60 * 60_000);
 	});
 
+	it("keeps a credential blocked for the full 71h48m47s reset instead of retrying it early", () => {
+		expect(extractRetryHint(undefined, "API error (429): Individual quota reached. Resets in 71h48m47s.")).toBe(
+			((71 * 60 + 48) * 60 + 47) * 1000,
+		);
+	});
+
+	it("honors a compound quotaResetDelay so an exhausted credential is not retried early", () => {
+		expect(extractRetryHint(undefined, '{"metadata":{"quotaResetDelay":"17h48m25.5s"}}')).toBe(64105500);
+	});
+
+	it("honors a millisecond quotaResetDelay", () => {
+		// Floor Google's fractional metadata to whole milliseconds.
+		expect(extractRetryHint(undefined, '{"metadata":{"quotaResetDelay":"835.150299ms"}}')).toBe(835);
+	});
+
+	it.each([
+		["30m", 1_800_000],
+		["1h", 3_600_000],
+		["1.5h", 5_400_000],
+		["1h30m", 5_400_000],
+	])("prefers structured quotaResetDelay %s to earlier display text", (quotaResetDelay, expected) => {
+		const body = `Google API error (429): {"error":{"status":"RESOURCE_EXHAUSTED","message":"Resets in 3h0m0s.","details":[{"metadata":{"quotaResetDelay":"${quotaResetDelay}"}}]}}`;
+		expect(extractRetryHint(undefined, body)).toBe(expected);
+	});
+
+	it.each([
+		[
+			"retryDelay before quotaResetDelay",
+			'{"details":[{"retryDelay":"5s"},{"metadata":{"quotaResetDelay":"3600s"}}]}',
+		],
+		[
+			"quotaResetDelay before retryDelay",
+			'{"details":[{"metadata":{"quotaResetDelay":"3600s"}},{"retryDelay":"5s"}]}',
+		],
+	])("waits for the longer structured delay when %s", (_label, body) => {
+		expect(extractRetryHint(undefined, body)).toBe(3_600_000);
+	});
+
 	// A quota body can carry both a generic retry hint and the account reset
 	// window ("Please retry in 5s. Your limit will reset in 13 minutes"). The
 	// account-reset hint must take precedence so the exhausted credential stays
@@ -332,5 +370,15 @@ describe("extractRetryHint", () => {
 	it("still returns undefined when only elapsed account resets are present", () => {
 		const past = new Date(Date.now() - 60_000).toISOString();
 		expect(extractRetryHint(undefined, `Your limit will reset at ${past}`)).toBeUndefined();
+		expect(extractRetryHint(undefined, `429 rests until ${past} (quota)`)).toBeUndefined();
+	});
+
+	it("parses 'rests until <ISO-8601>' quota reset timestamps", () => {
+		const targetMs = Date.now() + 120_000;
+		const iso = new Date(targetMs).toISOString().replace(/\.\d{3}Z$/, "Z");
+		const expected = Date.parse(iso) - Date.now();
+		const hint = extractRetryHint(undefined, `429 rests until ${iso} (quota)`);
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - expected)).toBeLessThan(100);
 	});
 });

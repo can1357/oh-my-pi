@@ -18,12 +18,14 @@
  * the probe down instead of leaking the subprocess.
  */
 
+import { Process } from "@oh-my-pi/pi-natives";
+
 /** Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * Cancellation controls threaded from the eval tool through
- * `resolveBackend` → `ExecutorBackend.isAvailable` → `checkXKernelAvailability`
+ * `resolveBackend` → `ExecutorBackend.checkAvailability` → `checkXKernelAvailability`
  * so backend discovery is bounded by the same timeout and turn abort as the
  * eval cell that triggered it.
  */
@@ -86,52 +88,25 @@ export async function runBoundedProbe(
 		windowsHide: true,
 		detached,
 	});
+	const root = detached ? null : Process.fromPid(proc.pid);
 	let timedOut = false;
 	let aborted = false;
-	const killDirectChild = (): void => {
+	const forceKill = (): void => {
+		if (detached) {
+			// Bun makes the spawned PID the group ID. Signal it even if the
+			// leader has exited, because its interpreter can still be in the group.
+			if (Process.killGroup(proc.pid)) return;
+		} else {
+			root?.killTree();
+			if (root?.status() === "exited") return;
+		}
+		// If native teardown could not reach the root, use the original Bun
+		// spawn handle rather than trying to reopen its numeric PID.
 		try {
 			proc.kill("SIGKILL");
 		} catch {
 			// Already exited; nothing to reap.
 		}
-	};
-	const forceKill = (): void => {
-		// Availability probes own no persistent state. Kill their whole process
-		// tree so a shim cannot strand the real interpreter after the bound.
-		if (detached) {
-			try {
-				process.kill(-proc.pid, "SIGKILL");
-				return;
-			} catch (error) {
-				if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return;
-				// Fall back to the direct child if the group signal is denied.
-			}
-		} else {
-			try {
-				const killer = Bun.spawn(["taskkill.exe", "/PID", String(proc.pid), "/T", "/F"], {
-					stdin: "ignore",
-					stdout: "ignore",
-					stderr: "ignore",
-					windowsHide: true,
-				});
-				const fallback = setTimeout(killDirectChild, 1_000);
-				fallback.unref();
-				void killer.exited.then(
-					exitCode => {
-						clearTimeout(fallback);
-						if (exitCode !== 0) killDirectChild();
-					},
-					() => {
-						clearTimeout(fallback);
-						killDirectChild();
-					},
-				);
-				return;
-			} catch {
-				// taskkill unavailable; at least bound the direct child.
-			}
-		}
-		killDirectChild();
 	};
 	const timer = setTimeout(() => {
 		timedOut = true;
@@ -159,10 +134,18 @@ export interface ProbeCandidate {
 	env: Record<string, string | undefined>;
 	/** Human-readable identifier (typically the interpreter path). */
 	label: string;
+	/** Explains a non-zero exit code in failure messages (e.g. a rejected interpreter version). */
+	describeExit?: (exitCode: number) => string | undefined;
+}
+
+function describeProbeExit(candidate: ProbeCandidate, exitCode: number | null): string {
+	return (exitCode !== null && candidate.describeExit?.(exitCode)) || `exit code ${exitCode}`;
 }
 
 /** Outcome of probing an ordered candidate list under one shared deadline. */
-export type CandidateProbeResult = { ok: true; index: number } | { ok: false; aborted: boolean; failures: string[] };
+export type CandidateProbeResult =
+	| { ok: true; index: number }
+	| { ok: false; aborted: boolean; timedOut?: boolean; failures: string[] };
 
 /**
  * Probe candidates in priority order and return the first that exits 0, sharing
@@ -178,6 +161,7 @@ export async function probeCandidates(
 	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS);
 	const deadline = Date.now() + bound;
 	const failures: string[] = [];
+	let timedOut = false;
 	for (let index = 0; index < candidates.length; index++) {
 		const candidate = candidates[index];
 		if (signal?.aborted) return { ok: false, aborted: true, failures };
@@ -186,6 +170,7 @@ export async function probeCandidates(
 			// Discovery budget exhausted by earlier candidates; stop rather than
 			// let each remaining candidate spend the full timeout again.
 			failures.push(`${candidate.label} (probe budget exhausted)`);
+			timedOut = true;
 			break;
 		}
 		try {
@@ -197,14 +182,15 @@ export async function probeCandidates(
 			});
 			if (probe.exitCode === 0) return { ok: true, index };
 			if (probe.aborted) return { ok: false, aborted: true, failures };
+			if (probe.timedOut) timedOut = true;
 			failures.push(
 				probe.timedOut
 					? `${candidate.label} (probe timed out)`
-					: `${candidate.label} (exit code ${probe.exitCode})`,
+					: `${candidate.label} (${describeProbeExit(candidate, probe.exitCode)})`,
 			);
 		} catch (err) {
 			failures.push(`${candidate.label} (${err instanceof Error ? err.message : String(err)})`);
 		}
 	}
-	return { ok: false, aborted: false, failures };
+	return { ok: false, aborted: false, ...(timedOut ? { timedOut: true } : {}), failures };
 }

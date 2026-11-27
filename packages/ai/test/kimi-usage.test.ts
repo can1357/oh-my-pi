@@ -1,7 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
-import { kimiUsageProvider } from "@oh-my-pi/pi-ai/usage/kimi";
+import { kimiGlobalUsageProvider, kimiUsageProvider } from "@oh-my-pi/pi-ai/usage/kimi";
 
 function makeCredential(accountId?: string): UsageFetchParams["credential"] {
 	return {
@@ -17,6 +17,29 @@ function makeCtx(payload: unknown): UsageFetchContext {
 			status: 200,
 			headers: { "content-type": "application/json" },
 		});
+	return { fetch };
+}
+
+const ORIGINAL_KIMI_CODE_BASE_URL = Bun.env.KIMI_CODE_BASE_URL;
+
+afterEach(() => {
+	if (ORIGINAL_KIMI_CODE_BASE_URL === undefined) {
+		delete Bun.env.KIMI_CODE_BASE_URL;
+	} else {
+		Bun.env.KIMI_CODE_BASE_URL = ORIGINAL_KIMI_CODE_BASE_URL;
+	}
+});
+
+function makeRequestCtx(
+	payload: unknown,
+	requests: { url: string; authorization: string | null }[],
+): UsageFetchContext {
+	const fetch: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+		requests.push({ url, authorization: headers.get("authorization") });
+		return Response.json(payload);
+	};
 	return { fetch };
 }
 
@@ -182,5 +205,127 @@ describe("kimi usage provider", () => {
 		expect(report).not.toBeNull();
 		expect(report!.limits).toHaveLength(1);
 		expect(report!.limits[0]!.label).toBe("Weekly limit");
+	});
+
+	it("treats an account without a Kimi Code plan as nothing to meter, not an invalid response", async () => {
+		const warnings: string[] = [];
+		const logger = { debug() {}, warn: (message: string) => warnings.push(message) };
+		const fetchUsage = (payload: unknown) =>
+			kimiUsageProvider.fetchUsage(
+				{ provider: "kimi-code", credential: makeCredential() },
+				{ ...makeCtx(payload), logger },
+			);
+
+		expect(await fetchUsage({})).toBeNull();
+		expect(warnings).toEqual([]);
+
+		expect(await fetchUsage({ usage: "garbled" })).toBeNull();
+		expect(warnings).toEqual(["Kimi usage response invalid"]);
+	});
+
+	it("sends API-key and OAuth bearers to each regional endpoint", async () => {
+		delete Bun.env.KIMI_CODE_BASE_URL;
+		const cases = [
+			{
+				id: "kimi-code",
+				provider: kimiUsageProvider,
+				url: "https://api.kimi.com/coding/v1/usages",
+			},
+			{
+				id: "kimi-code-global",
+				provider: kimiGlobalUsageProvider,
+				url: "https://api.kimi.ai/coding/v1/usages",
+			},
+		] as const;
+		const payload = { usage: { limit: "100", used: "28", remaining: "72" }, limits: [] };
+
+		for (const { id, provider, url } of cases) {
+			for (const credential of [
+				{ type: "api_key", apiKey: "kimi-api-key" },
+				{ type: "oauth", accessToken: "kimi-oauth-token" },
+			] as const) {
+				const bearer = credential.type === "api_key" ? credential.apiKey : credential.accessToken;
+				const requests: { url: string; authorization: string | null }[] = [];
+				expect(provider.supports?.({ provider: id, credential })).toBe(true);
+				const report = await provider.fetchUsage!({ provider: id, credential }, makeRequestCtx(payload, requests));
+
+				expect(report?.provider).toBe(id);
+				expect(requests).toEqual([{ url, authorization: `Bearer ${bearer}` }]);
+			}
+		}
+	});
+
+	it("honors the mainland base URL override without redirecting global usage", async () => {
+		Bun.env.KIMI_CODE_BASE_URL = "https://override.example/coding/v1/";
+		const payload = { usage: { limit: "100", used: "28", remaining: "72" }, limits: [] };
+		const requests: { url: string; authorization: string | null }[] = [];
+
+		await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: { type: "api_key", apiKey: "mainland-key" } },
+			makeRequestCtx(payload, requests),
+		);
+		await kimiGlobalUsageProvider.fetchUsage!(
+			{ provider: "kimi-code-global", credential: { type: "api_key", apiKey: "global-key" } },
+			makeRequestCtx(payload, requests),
+		);
+
+		expect(requests).toEqual([
+			{ url: "https://override.example/coding/v1/usages", authorization: "Bearer mainland-key" },
+			{ url: "https://api.kimi.ai/coding/v1/usages", authorization: "Bearer global-key" },
+		]);
+	});
+
+	it("does not probe either regional usage endpoint when a credential has no bearer token", async () => {
+		const cases = [
+			{ id: "kimi-code", provider: kimiUsageProvider },
+			{ id: "kimi-code-global", provider: kimiGlobalUsageProvider },
+		] as const;
+		const missingCredentials: UsageFetchParams["credential"][] = [{ type: "api_key" }, { type: "oauth" }];
+		let requests = 0;
+		const ctx: UsageFetchContext = {
+			fetch: async () => {
+				requests++;
+				return Response.json({});
+			},
+		};
+
+		for (const { id, provider } of cases) {
+			for (const credential of missingCredentials) {
+				expect(provider.supports?.({ provider: id, credential })).toBe(false);
+				await expect(provider.fetchUsage!({ provider: id, credential }, ctx)).resolves.toBeNull();
+			}
+		}
+		expect(requests).toBe(0);
+	});
+
+	it("continues to skip expired OAuth tokens without probing either region", async () => {
+		const cases = [
+			{ id: "kimi-code", provider: kimiUsageProvider },
+			{ id: "kimi-code-global", provider: kimiGlobalUsageProvider },
+		] as const;
+		let requests = 0;
+		const ctx: UsageFetchContext = {
+			fetch: async () => {
+				requests++;
+				return Response.json({});
+			},
+		};
+
+		for (const { id, provider } of cases) {
+			await expect(
+				provider.fetchUsage!(
+					{
+						provider: id,
+						credential: {
+							type: "oauth",
+							accessToken: "expired-token",
+							expiresAt: Date.now() - 1,
+						},
+					},
+					ctx,
+				),
+			).resolves.toBeNull();
+		}
+		expect(requests).toBe(0);
 	});
 });

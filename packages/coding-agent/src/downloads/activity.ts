@@ -1,11 +1,13 @@
 /**
- * Process-wide registry of automatic downloads and installs: model weights,
- * tool binaries, browsers, side runtimes. The interactive TUI renders them in
- * its download HUD so a feature waiting on a first-use fetch is visibly busy
- * (or visibly failed) instead of silently idle.
+ * Process-wide registry of automatic background work: downloads and installs
+ * (model weights, tool binaries, browsers, side runtimes) and optimization
+ * passes counted in steps (skill descriptions). The interactive TUI renders
+ * them in its download HUD so a feature waiting on a first-use fetch is
+ * visibly busy (or visibly failed) instead of silently idle.
  *
  * Producers wrap the work in {@link withDownload} (or drive a
- * {@link DownloadTracker} from {@link trackDownload}); the HUD subscribes with
+ * {@link DownloadTracker} from {@link trackDownload}); work made of many
+ * concurrent steps counts each with {@link trackStep}. The HUD subscribes with
  * {@link onDownloadActivity}. Headless modes simply have no subscriber.
  *
  * @example
@@ -14,18 +16,23 @@
  * );
  */
 
-/** Snapshot of one download or install. */
+/** What a {@link DownloadActivity}'s `loaded` and `total` count. */
+export type DownloadUnit = "bytes" | "steps";
+
+/** Snapshot of one download, install or optimization pass. */
 export interface DownloadActivity {
 	/** Unique for the lifetime of the process. */
 	id: number;
-	/** What is being fetched, e.g. `SmolLM2-135M` or `yt-dlp`. */
+	/** What is being fetched, e.g. `SmolLM2-135M` or `Chromium`. */
 	label: string;
 	/** Current step or file, e.g. `model.safetensors` or `installing mlx-lm`. */
 	detail?: string;
-	/** Bytes received so far, when known. */
+	/** Amount finished so far in {@link unit}s, when known. */
 	loaded?: number;
-	/** Total bytes, when known. */
+	/** Expected amount in {@link unit}s, when known. */
 	total?: number;
+	/** Bytes when omitted; `steps` are whole units of work, shown as `3/12`. */
+	unit?: DownloadUnit;
 	state: "running" | "done" | "failed";
 	/** Failure reason when `state` is `failed`. */
 	error?: string;
@@ -36,6 +43,8 @@ export interface DownloadProgressUpdate {
 	loaded?: number;
 	total?: number;
 	detail?: string;
+	/** Set with the first report. */
+	unit?: DownloadUnit;
 }
 
 /** Handle for one tracked download; `done`/`fail` end it and later calls are ignored. */
@@ -47,7 +56,7 @@ export interface DownloadTracker {
 
 type Listener = (activity: DownloadActivity) => void;
 
-/** Byte progress is coalesced to this cadence; state and detail changes emit immediately. */
+/** Byte progress is coalesced to this cadence; state, detail and step changes emit immediately. */
 const PROGRESS_INTERVAL_MS = 100;
 
 const listeners = new Set<Listener>();
@@ -74,7 +83,9 @@ export function trackDownload(label: string, initial: DownloadProgressUpdate = {
 			const detailChanged = progress.detail !== undefined && progress.detail !== activity.detail;
 			Object.assign(activity, progress);
 			const now = Date.now();
-			if (!detailChanged && now - lastEmit < PROGRESS_INTERVAL_MS) return;
+			// The next byte count replaces a skipped one within the interval; a step count can stand for minutes.
+			const coalesced = activity.unit !== "steps" && !detailChanged;
+			if (coalesced && now - lastEmit < PROGRESS_INTERVAL_MS) return;
 			lastEmit = now;
 			emit(activity);
 		},
@@ -110,4 +121,51 @@ export async function withDownload<T>(
 		tracker.fail(error);
 		throw error;
 	}
+}
+
+/** One open {@link trackStep} row. */
+interface StepRow {
+	tracker: DownloadTracker;
+	total: number;
+	settled: number;
+	failed: number;
+	/** Reason the first failed step gave. */
+	failure?: string;
+}
+
+const stepRows = new Map<string, StepRow>();
+
+/**
+ * Count one step of the work labelled `label` in a row shared by every step
+ * pending under that label (`Optimizing skills 3/12`). The row opens with the
+ * first step and ends once none is pending: done, or failed with the first
+ * failure and how many steps failed. A step begun after that opens a new row.
+ * A row holding one step has no fraction to show and reports no count.
+ *
+ * @returns Settles the step; call it once, with the reason when the step failed.
+ */
+export function trackStep(label: string): (failure?: string) => void {
+	let open = stepRows.get(label);
+	if (open) {
+		open.total++;
+		open.tracker.update({ loaded: open.settled, total: open.total });
+	} else {
+		open = { tracker: trackDownload(label, { unit: "steps" }), total: 1, settled: 0, failed: 0 };
+		stepRows.set(label, open);
+	}
+	const row = open;
+	return failure => {
+		row.settled++;
+		if (failure !== undefined) {
+			row.failed++;
+			row.failure ??= failure;
+		}
+		if (row.settled < row.total) {
+			row.tracker.update({ loaded: row.settled });
+			return;
+		}
+		stepRows.delete(label);
+		if (row.failed === 0) row.tracker.done();
+		else row.tracker.fail(row.failed === row.total ? row.failure : `${row.failed} of ${row.total}: ${row.failure}`);
+	};
 }

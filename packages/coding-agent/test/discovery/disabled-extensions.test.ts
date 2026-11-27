@@ -3,9 +3,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
-import { isShadowedExtension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
+import {
+	disableProvider,
+	enableProvider,
+	initializeWithSettings,
+	loadCapability,
+} from "@oh-my-pi/pi-coding-agent/discovery";
+import { discoverExtensionPaths } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { isShadowedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/inventory/types";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -27,13 +34,9 @@ describe("disabledExtensions runtime filtering", () => {
 	let originalOmpProfileEnv: string | undefined;
 	let originalPiProfileEnv: string | undefined;
 	let originalUserProfile: string | undefined;
-	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
-		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-		delete process.env.CLAUDE_CONFIG_DIR;
-		delete Bun.env.CLAUDE_CONFIG_DIR;
 		originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 		originalOmpProfileEnv = process.env.OMP_PROFILE;
 		originalPiProfileEnv = process.env.PI_PROFILE;
@@ -66,7 +69,6 @@ describe("disabledExtensions runtime filtering", () => {
 		restoreEnvValue("PI_PROFILE", originalPiProfileEnv);
 		restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDirEnv);
 		restoreEnvValue("USERPROFILE", originalUserProfile);
-		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		__resetDirsFromEnvForTests();
 		await removeWithRetries(tempHomeDir);
 		await removeWithRetries(tempDir);
@@ -91,75 +93,149 @@ describe("disabledExtensions runtime filtering", () => {
 	test("keeps the runtime context winner active in the dashboard when its competitor is disabled", async () => {
 		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
 		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# active project instructions\n");
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# disabled project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# disabled project instructions\n");
 
-		const disabledExtensions = ["context-file:project:GEMINI.md", "context-file:user:GEMINI.md"];
+		const disabledExtensions = ["context-file:project:CLAUDE.md", "context-file:user:CLAUDE.md"];
 		const settings = Settings.isolated({ disabledExtensions });
 		initializeWithSettings(settings);
 
 		const runtime = await loadCapability<ContextFile>(contextFileCapability.id, { cwd: tempDir });
 		const dashboard = await loadAllExtensions(tempDir, disabledExtensions);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(runtime.items.map(file => path.basename(file.path))).toContain("AGENTS.md");
 		expect(agents?.state).toBe("active");
-		expect(gemini?.state).toBe("disabled");
+		expect(claude?.state).toBe("disabled");
 	});
 
 	test("deduplicates against the caller's session-local disabled list, not global settings", async () => {
 		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
 		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# active project instructions\n");
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# session-disabled project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# session-disabled project instructions\n");
 
 		// Process-global settings disable nothing; the disablement is session-local.
 		initializeWithSettings(Settings.isolated({ disabledExtensions: [] }));
 
-		const disabledIds = ["context-file:project:GEMINI.md", "context-file:user:GEMINI.md"];
+		const disabledIds = ["context-file:project:CLAUDE.md", "context-file:user:CLAUDE.md"];
 		const dashboard = await loadAllExtensions(tempDir, disabledIds);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(agents?.state).toBe("active");
-		expect(gemini?.state).toBe("disabled");
+		expect(claude?.state).toBe("disabled");
 	});
 
 	test("deduplicates against an empty snapshot when the caller omits disabled IDs", async () => {
 		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
 		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# lower-priority project instructions\n");
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# higher-priority project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# higher-priority project instructions\n");
 
-		initializeWithSettings(Settings.isolated({ disabledExtensions: ["context-file:project:GEMINI.md"] }));
+		initializeWithSettings(Settings.isolated({ disabledExtensions: ["context-file:project:CLAUDE.md"] }));
 
 		const dashboard = await loadAllExtensions(tempDir);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(agents?.state).toBe("shadowed");
-		expect(gemini?.state).toBe("active");
+		expect(claude?.state).toBe("active");
 	});
 
 	test("marks a disabled lower-priority row shadowed when an enabled higher-priority item owns the key", async () => {
 		// Enabled builtin .omp/AGENTS.md (priority 100) already exists at project
-		// depth 0 from beforeEach; add a lower-priority .gemini/GEMINI.md at the
+		// depth 0 from beforeEach; add a lower-priority .claude/CLAUDE.md at the
 		// same depth and disable it.
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# disabled lower-priority instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# disabled lower-priority instructions\n");
 
-		const disabledIds = ["context-file:project:GEMINI.md"];
+		const disabledIds = ["context-file:project:CLAUDE.md"];
 		initializeWithSettings(Settings.isolated({ disabledExtensions: disabledIds }));
 
 		const dashboard = await loadAllExtensions(tempDir, disabledIds);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, ".omp", "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(agents?.state).toBe("active");
-		expect(gemini?.state).toBe("disabled");
+		expect(claude?.state).toBe("disabled");
 		// The disabled loser must stay shadowed so the dashboard does not treat
 		// it as an independently toggleable row.
-		expect(gemini && isShadowedExtension(gemini)).toBe(true);
+		expect(claude && isShadowedExtension(claude)).toBe(true);
+	});
+
+	test("lists configured package modules exactly as the loader gates them (#17736)", async () => {
+		const fleet = path.join(tempDir, "fleet");
+		const hello = path.join(fleet, "extensions", "hello.ts");
+		const loose = path.join(tempDir, "loose.ts");
+		await Bun.write(
+			path.join(fleet, "package.json"),
+			JSON.stringify({ omp: { extensions: ["./extensions/hello.ts"] } }),
+		);
+		await Bun.write(hello, "export default function hello() {}\n");
+		await Bun.write(loose, "export default function loose() {}\n");
+		const roots: EffectiveExtensionRoots = {
+			explicit: [],
+			mode: "merge",
+			configured: [fleet, loose],
+			configuredLevel: "project",
+		};
+		const moduleRows = async (disabledIds: string[]) =>
+			(await loadAllExtensions(tempDir, disabledIds, roots)).filter(row => row.kind === "extension-module");
+
+		// The provider switch does not stop the loader from importing configured
+		// modules, so it must not mark their rows disabled either.
+		disableProvider("omp-plugins");
+		try {
+			const rows = await moduleRows([]);
+			expect(rows.map(row => [row.id, row.path, row.source.provider, row.source.level, row.state])).toEqual([
+				["extension-module:hello", hello, "omp-plugins", "project", "active"],
+			]);
+		} finally {
+			enableProvider("omp-plugins");
+		}
+
+		// Toggling the row's id removes the module from the load set; the configured
+		// file path stays loaded regardless, which is why it has no row.
+		const disabledIds = ["extension-module:hello"];
+		const [disabledRow] = await moduleRows(disabledIds);
+		expect([disabledRow?.state, disabledRow?.disabledReason]).toEqual(["disabled", "item-disabled"]);
+		const loaded = await discoverExtensionPaths([...roots.configured], tempDir, disabledIds);
+		expect(loaded).not.toContain(hello);
+		expect(loaded).toContain(loose);
+	});
+
+	test("omits a package module the package's hook factory already loads", async () => {
+		const fleet = path.join(tempDir, "fleet");
+		const guard = path.join(fleet, "hooks", "pre", "guard.ts");
+		await Bun.write(
+			path.join(fleet, "package.json"),
+			JSON.stringify({ omp: { extensions: ["./hooks/pre/guard.ts"] } }),
+		);
+		await Bun.write(guard, "export default function guard() {}\n");
+		// The loader's hook discovery reads configured package roots from disk.
+		await Bun.write(path.join(tempHomeDir, ".omp", "agent", "config.yml"), `extensions:\n  - ${fleet}\n`);
+		const roots: EffectiveExtensionRoots = {
+			explicit: [],
+			mode: "merge",
+			configured: [fleet],
+			configuredLevel: "user",
+		};
+		const moduleIds = async (disabledIds: string[]) =>
+			(await loadAllExtensions(tempDir, disabledIds, roots))
+				.filter(row => row.kind === "extension-module")
+				.map(row => row.id);
+
+		// Hook discovery adds the file first, so the module id cannot unload it: no row.
+		expect(await discoverExtensionPaths([fleet], tempDir, ["extension-module:guard"])).toContain(guard);
+		expect(await moduleIds([])).toEqual([]);
+
+		// With the hook disabled, only the package lane loads the file and the module id gates it.
+		const hookOff = ["hook:pre:guard:guard.ts"];
+		expect(await moduleIds(hookOff)).toEqual(["extension-module:guard"]);
+		expect(await discoverExtensionPaths([fleet], tempDir, [...hookOff, "extension-module:guard"])).not.toContain(
+			guard,
+		);
 	});
 });

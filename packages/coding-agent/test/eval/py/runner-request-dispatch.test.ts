@@ -10,6 +10,9 @@ interface RunnerFrame {
 	revision?: number;
 	digest?: string;
 	admissionRejected?: boolean;
+	cancelled?: boolean;
+	ename?: string;
+	evalue?: string;
 }
 
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
@@ -211,6 +214,32 @@ describe("Python runner request dispatch", () => {
 			});
 			const [assertion] = await collectDoneOrder(runner, new Set(["assert"]));
 			expect(assertion.status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("drops a stray await on a sync prelude helper only while its name binds the helper", async () => {
+		const runner = spawnRunner();
+		const run = async (id: string, code: string): Promise<RunnerFrame> => {
+			runner.send({ id, code });
+			const [done] = await collectDoneOrder(runner, new Set([id]));
+			return done;
+		};
+		try {
+			expect(
+				(await run("setup", "def sh(command):\n    return command.upper()\n__omp_register_sync_helpers(sh)"))
+					.status,
+			).toBe("ok");
+			// JS-style `await sh(...)` used to raise "'str' object can't be awaited".
+			expect((await run("awaited", 'assert await sh("ok") == "OK"')).status).toBe("ok");
+			// Rebinding in the same cell keeps the `await`: the run-time binding is async.
+			expect(
+				(await run("same-cell", 'async def sh(command):\n    return command\nassert await sh("ok") == "ok"'))
+					.status,
+			).toBe("ok");
+			// The retained async rebinding is no longer the registered helper.
+			expect((await run("later-cell", 'assert await sh("ok") == "ok"')).status).toBe("ok");
 		} finally {
 			await runner.dispose();
 		}
@@ -583,6 +612,163 @@ describe("Python runner request dispatch", () => {
 				operations: [],
 				barrier: expect.anything(),
 			});
+		} finally {
+			await runner.dispose();
+		}
+	});
+	it("interrupts a cell whose interrupt request arrives before its task starts", async () => {
+		if (process.platform === "win32") return; // Windows dispatches serially by design; see _serve_windows.
+		const runner = spawnRunner();
+		try {
+			runner.send({
+				id: "setup",
+				code: [
+					"import threading",
+					"from types import SimpleNamespace",
+					"seed = 41",
+					"gate = threading.Event()",
+					"__omp_tools__ = {'release': SimpleNamespace(fn=lambda: gate.set())}",
+				].join("\n"),
+			});
+			const [setup] = await collectDoneOrder(runner, new Set(["setup"]));
+			expect(setup.status).toBe("ok");
+
+			runner.send({ id: "hold", code: "print('holding', flush=True)\ngate.wait()" });
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.type === "stdout" && frame.id === "hold" && frame.data?.includes("holding")) break;
+			}
+
+			// A late interrupt for an already-settled cell (`setup`) must be
+			// ignored instead of sticking in `_STATE.interrupt_ids`.
+			runner.send({ id: "setup", type: "interrupt" });
+
+			// While `hold` occupies the main thread, `aborted` and `setup-err`
+			// stay queued in `queue` without a running task when the reader
+			// thread processes their `interrupt` requests and then `release`.
+			runner.send({ id: "aborted", code: "seed = 0" });
+			runner.send({ id: "aborted", type: "interrupt" });
+			// A NUL byte makes `os.chdir` raise ValueError: a setup error (a missing cwd only warns).
+			runner.send({ id: "setup-err", code: "seed = 0", cwd: "/tmp/omp\u0000setup-err" });
+			runner.send({ id: "setup-err", type: "interrupt" });
+			runner.send({ id: "release", type: "tool", op: "call", name: "release", args: {} });
+
+			const errors: RunnerFrame[] = [];
+			const dones = new Map<string, RunnerFrame>();
+			while (dones.size < 4) {
+				const frame = await runner.nextFrame();
+				if (frame.type === "error" && frame.id === "aborted") {
+					errors.push(frame);
+				}
+				if (
+					frame.type === "done" &&
+					frame.id &&
+					(frame.id === "hold" || frame.id === "aborted" || frame.id === "setup-err" || frame.id === "release")
+				) {
+					dones.set(frame.id, frame);
+				}
+			}
+
+			expect(dones.get("hold")).toMatchObject({ type: "done", id: "hold", status: "ok", cancelled: false });
+			expect(errors).toEqual([
+				expect.objectContaining({
+					type: "error",
+					id: "aborted",
+					ename: "KeyboardInterrupt",
+					evalue: "Execution interrupted",
+				}),
+			]);
+			expect(dones.get("aborted")).toMatchObject({
+				type: "done",
+				id: "aborted",
+				status: "error",
+				cancelled: true,
+			});
+			expect(dones.get("setup-err")).toMatchObject({
+				type: "done",
+				id: "setup-err",
+				status: "error",
+				cancelled: false,
+			});
+
+			// Neither the late interrupt for `setup` nor the early-return
+			// setup-error cell may leave its id in `_STATE.interrupt_ids`.
+			runner.send({ id: "setup", code: "seed += 1" });
+			const [reusedSetup] = await collectDoneOrder(runner, new Set(["setup"]));
+			expect(reusedSetup).toMatchObject({ type: "done", id: "setup", status: "ok", cancelled: false });
+
+			runner.send({ id: "setup-err", code: "seed += 2" });
+			const [reusedSetupErr] = await collectDoneOrder(runner, new Set(["setup-err"]));
+			expect(reusedSetupErr).toMatchObject({ type: "done", id: "setup-err", status: "ok", cancelled: false });
+			runner.send({ id: "verify", code: "assert seed == 44" });
+			const [verify] = await collectDoneOrder(runner, new Set(["verify"]));
+			expect(verify.status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("runs a cell whose session cwd no longer exists, with a warning", async () => {
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "gone", code: "print('ran')", cwd: "/nonexistent/omp-missing-cwd" });
+			const frames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.id !== "gone") continue;
+				frames.push(frame);
+				if (frame.type === "done") break;
+			}
+			expect(frames.find(frame => frame.type === "stderr")?.data).toContain(
+				"session cwd /nonexistent/omp-missing-cwd is unavailable",
+			);
+			expect(frames.find(frame => frame.type === "stdout")?.data).toContain("ran");
+			expect(frames.at(-1)).toMatchObject({ type: "done", status: "ok" });
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("preserves source code in linecache for inspect.getsource across consecutive cells", async () => {
+		const runner = spawnRunner();
+		try {
+			runner.send({
+				id: "def-cell",
+				code: "def sample_worker(val):\n    # Return scaled\n    return val * 42\n",
+			});
+			const defFrames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.id === "def-cell") {
+					defFrames.push(frame);
+					if (frame.type === "done") break;
+				}
+			}
+			const defDone = defFrames.find(f => f.type === "done");
+			expect(defDone?.status).toBe("ok");
+
+			runner.send({
+				id: "inspect-cell",
+				code: "import inspect\nsource = inspect.getsource(sample_worker)\nprint('INSPECT_OUTPUT:', repr(source))",
+			});
+			const inspectFrames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.id === "inspect-cell") {
+					inspectFrames.push(frame);
+					if (frame.type === "done") break;
+				}
+			}
+			const inspectDone = inspectFrames.find(f => f.type === "done");
+			const stdout = inspectFrames
+				.filter(f => f.type === "stdout")
+				.map(f => f.data ?? "")
+				.join("");
+
+			expect(inspectDone?.status).toBe("ok");
+			expect(stdout).toContain("INSPECT_OUTPUT:");
+			expect(stdout).toContain("def sample_worker(val):");
+			expect(stdout).toContain("return val * 42");
 		} finally {
 			await runner.dispose();
 		}

@@ -8,6 +8,8 @@ Host -> wrapper:
   {"id": str, "code": str, "silent": bool?, "storeHistory": bool?, "cwd": str?, "filename": str?, "env": dict?}
   {"type": "tool", "id": str, "op": "describe", "names": [str]}
   {"type": "tool", "id": str, "op": "call", "name": str, "args": dict}
+  {"type": "tool_cancel", "id": str}              # caller gave up: cancel an async tool call
+  {"type": "interrupt", "id": str}                # interrupt this cell; a SIGINT follows
   {"type": "exit"}                                # graceful shutdown
 
 Wrapper -> host:
@@ -214,6 +216,15 @@ class _RunnerState:
         self.last_install_marker: int = 0
         self.loop: asyncio.AbstractEventLoop | None = None
         self.active_executions: int = 0
+        # In-flight cells by request id (``None`` while queued on the control
+        # channel, then the running ``asyncio.Task``), the ids the host asked
+        # to interrupt, and the tasks cancelled while parked on an ``await``.
+        self.executing_tasks: dict[str, asyncio.Task | None] = {}
+        self.interrupt_ids: set[str] = set()
+        self.interrupted_tasks: set[asyncio.Task] = set()
+        # POSIX reads interrupt requests while cells run, so a SIGINT acts only
+        # on the cells they name. Windows runs one cell at a time.
+        self.targeted_interrupts: bool = False
         # Best-effort attribution target for captured fd-1 bytes (child
         # processes inheriting stdout). With overlapping requests the most
         # recently started one wins — strictly better than dropping the bytes.
@@ -609,7 +620,7 @@ def _emit_shadow_plan(req: dict) -> None:
     # cell binds `__omp_with_call_site__` anywhere, authoritative execution
     # runs zero instrumented calls, so the planner must admit zero operations
     # (per-call scoping is undecidable across call order; fail closed).
-    if _cell_binds_call_site_helper(module):
+    if _CALL_SITE_HELPER_NAME in _cell_bound_names(module):
         _emit(
             {
                 "type": "shadow_plan",
@@ -1004,6 +1015,28 @@ def _magic_line_indices(lines: list[str]) -> set[int]:
     return indices
 
 
+# Blank lines plus `//`, `/* */`, and `#` comments, matched from the start of a cell.
+_COMMENT_PREAMBLE_RE = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/|#[^\n]*)*", re.DOTALL)
+
+
+def _strip_c_comment_preamble(source: str) -> str:
+    """Blank the C-style comment preamble some models put atop Python cells.
+
+    Only text before the first statement is touched, and only when it contains a
+    ``//`` or ``/* */`` comment (neither can open valid Python). Stripped spans
+    become newlines so traceback line numbers still match the submitted source.
+    """
+    end = _COMMENT_PREAMBLE_RE.match(source).end()
+    # Keep the first statement's own indentation; Python reports it as before.
+    line_start = source.rfind("\n", 0, end) + 1
+    if not source[line_start:end].strip():
+        end = line_start
+    preamble = source[:end]
+    if "//" not in preamble and "/*" not in preamble:
+        return source
+    return "\n" * preamble.count("\n") + source[end:]
+
+
 def transform_cell(source: str) -> str:
     """Translate IPython-style magics + shell escapes into plain Python.
 
@@ -1021,8 +1054,12 @@ def transform_cell(source: str) -> str:
     Python tokenization identifies command lines outside strings and comments.
     Real command payloads are skipped before resuming lexical scanning so shell
     quoting cannot change how subsequent Python source is interpreted.
+
+    A leading ``//`` / ``/* */`` comment preamble is blanked first; see
+    :func:`_strip_c_comment_preamble`.
     """
 
+    source = _strip_c_comment_preamble(source)
     if "%" not in source and "!" not in source:
         return source
 
@@ -1152,8 +1189,8 @@ _SHELL_OUTPUT_MAX_LINES = 3000
 _SHELL_RESULT_CAPTURE_BYTES = _SHELL_OUTPUT_MAX_BYTES
 _PIP_LINE_SCAN_CHARS = 64 * 1024
 _SHELL_TRUNCATION_NOTICE = (
-    f"[output truncated: shell helper exceeded {_SHELL_OUTPUT_MAX_BYTES} bytes "
-    f"or {_SHELL_OUTPUT_MAX_LINES} lines; remaining output discarded]\n"
+    f"[shell output truncated: over {_SHELL_OUTPUT_MAX_BYTES} bytes "
+    f"or {_SHELL_OUTPUT_MAX_LINES} lines]\n"
 )
 
 
@@ -1329,11 +1366,30 @@ def _has_pip() -> bool:
         return False
 
 
+def _procfs_usable() -> bool:
+    # /proc can be missing, unreadable or an empty unmounted directory (some
+    # containers and chroots); a mounted procfs lists this process. One
+    # inherited from a parent PID namespace lists outer pids, which can collide
+    # with ours (init is 1 in both) but never match its parents to our children:
+    # its /proc/self is this process under another pid.
+    try:
+        if str(os.getpid()) not in os.listdir("/proc"):
+            return False
+        with open("/proc/self/stat", "rb") as stat:
+            return int(stat.read().split(b" ", 1)[0]) == os.getpid()
+    except (OSError, ValueError):
+        return False
+
+
 def _child_pids() -> dict[int, list[int]]:
     """Map each live pid to the pids of its children."""
     children: dict[int, list[int]] = {}
     if sys.platform.startswith("linux"):
-        for entry in os.listdir("/proc"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return children
+        for entry in entries:
             if not entry.isdigit():
                 continue
             try:
@@ -1401,6 +1457,8 @@ def _run_installer(
     on_text: Callable[[str], None] | None = None,
     env: dict[str, str] | None = None,
 ) -> int:
+    if sys.platform.startswith("linux") and not _procfs_usable():
+        return _run_guarded_installer(cmd, on_text, env)
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
@@ -1416,6 +1474,58 @@ def _run_installer(
         # Cancelling the cell interrupts only the kernel: stop the installer too.
         _kill_process_tree(proc)
         raise
+
+
+# Parent of the installer in a session of its own. Its stdin is a pipe only the
+# kernel writes to, which reads EOF once the kernel closes it or exits by any
+# means (SIGKILL included); the whole group dies with it then.
+_INSTALLER_GUARD = """\
+import os, signal, subprocess, sys, threading
+def guard():
+    while os.read(0, 1):
+        pass
+    os.killpg(0, signal.SIGKILL)
+threading.Thread(target=guard, daemon=True).start()
+code = subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL)
+sys.exit(code if code >= 0 else 128 - code)
+"""
+
+
+def _run_guarded_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None,
+    env: dict[str, str] | None,
+) -> int:
+    # Without procfs nothing on Linux can list processes (ps reads /proc too),
+    # so the installer cannot stay in the kernel's group to be walked: it runs
+    # in a group of its own, under a guard that kills the group when the kernel
+    # goes, since kernel shutdown sweeps only the kernel's group.
+    read_end, write_end = os.pipe()
+    proc: subprocess.Popen | None = None
+    try:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", _INSTALLER_GUARD, *cmd],
+                stdin=read_end,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        finally:
+            os.close(read_end)
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    finally:
+        # Ends the guard, so a cancel landing inside Popen still stops the tree.
+        os.close(write_end)
+        if proc is not None:
+            # A cancel, or what the installer left running once it exited.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
 
 
 def _bootstrap_pip() -> int:
@@ -1436,6 +1546,11 @@ def _run_pip(argv: list[str], args: str) -> None:
     if not _has_pip():
         code = _bootstrap_pip()
         if code != 0:
+            sys.stderr.write(
+                f"%pip: {sys.executable} has no pip and it could not be bootstrapped"
+                " (ensurepip failed and `uv` is not on PATH). Install `uv`, or your distribution's"
+                " python3-pip/python3-venv package, then retry.\n"
+            )
             _emit_status("pip", args=args, installed=[], exit_code=code)
             return
     installed_packages: list[str] = []
@@ -1628,8 +1743,13 @@ def _resolve_bash() -> str:
 
 
 @cell_magic("bash")
-def _magic_cell_bash(args: str, body: str) -> int:
-    return _run_shell_body(body, shell_arg=_resolve_bash())
+def _magic_cell_bash(args: str, body: str) -> None:
+    # Like IPython's %%bash the cell has no value: a returned status would be
+    # displayed as the cell's result, a stray `0` after every run. A failure
+    # is still reported, since a command can fail without printing anything.
+    code = _run_shell_body(body, shell_arg=_resolve_bash())
+    if code != 0:
+        sys.stderr.write(f"%%bash: exit status {code}\n")
 
 
 @cell_magic("capture")
@@ -1744,18 +1864,19 @@ def __omp_shell(cmd: str) -> _ShellResult:
 #
 # `print` and the trailing-expression echo write plain text to stdout, which is
 # all the model sees. Images additionally go out as `image` frames (model and
-# user); data frames, Markdown objects and large structures go out as `view`
-# frames carrying the exact text they printed, which the host shows in place
-# of that text.
+# user); data frames, Markdown objects, large structures and strings holding a
+# JSON object or array go out as `view` frames carrying the exact text they
+# printed, which the host shows in place of that text.
 
 
 _REAL_PRINT = builtins.print
 _PLAIN_TEXT_TYPES = frozenset({str, int, float, complex, bool, bytes, type(None)})
-# Structured values get a JSON view only when their text is long or multi-line.
+# Structured values and JSON text get a JSON view only when their text is long or multi-line.
 _JSON_VIEW_MIN_CHARS = 80
 # The host drops views whose JSON exceeds 32 KiB; don't build hopeless ones.
 _JSON_VIEW_MAX_CHARS = 32 * 1024
 _MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+_JSON_TEXT_START_RE = re.compile(r"\s*[\[{]")
 _ELLIPSIS = "\u2026"
 # Polars' table defaults when its POLARS_FMT_* variables are unset.
 _POLARS_DEFAULT_MAX_ROWS = 10
@@ -1918,11 +2039,20 @@ def _json_view(value: Any, text: str) -> dict | None:
     value_type = type(value)
     if value_type.__repr__ is not base.__repr__ or value_type.__str__ is not base.__str__:
         return None
-    if len(text) <= _JSON_VIEW_MIN_CHARS and "\n" not in text:
-        return None
-    if len(text) > _JSON_VIEW_MAX_CHARS:
+    if not _json_view_sized(text):
         return None
     return {"kind": "json", "value": _json_safe(value)}
+
+
+def _json_text_view(value: str, text: str) -> dict | None:
+    """JSON view of a string holding a JSON object or array; ``text`` is what it printed as."""
+    if not _json_view_sized(text) or not _JSON_TEXT_START_RE.match(value):
+        return None
+    return {"kind": "json", "value": _json_safe(json.loads(value))}
+
+
+def _json_view_sized(text: str) -> bool:
+    return (len(text) > _JSON_VIEW_MIN_CHARS or "\n" in text) and len(text) <= _JSON_VIEW_MAX_CHARS
 
 
 def _module_instance(value: Any, module: Any, name: str) -> bool:
@@ -2195,6 +2325,10 @@ def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
 
 def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tuple[str, dict]]]:
     """The text ``value`` contributes to the output, plus its images and views."""
+    if type(value) is str:
+        text = to_text(value)
+        view = _guarded(_json_text_view, value, text)
+        return text, [] if view is None else [("view", view)]
     if type(value) in _PLAIN_TEXT_TYPES:
         return to_text(value), []
     image = _omp_image(value)
@@ -2294,14 +2428,30 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 # ---------------------------------------------------------------------------
 
 
+# Genuine prelude helpers that are synchronous in Python but awaited in JS,
+# keyed by name. Models carry `await sh(...)` across languages; awaiting the
+# plain return value raises TypeError after the cell's earlier statements ran,
+# so `_compile_source` drops that `await` while the name binds the helper.
+_SYNC_HELPERS: dict[str, Callable[..., Any]] = {}
+
+
+def _register_sync_helpers(*helpers: Callable[..., Any]) -> None:
+    """Prelude hook: record the helpers `_compile_source` may un-await."""
+    for helper in helpers:
+        _SYNC_HELPERS[helper.__name__] = helper
+
+
 def _install_builtins(ns: dict) -> None:
     ns["__omp_emit_status"] = _emit_status
+    ns["__omp_register_sync_helpers"] = _register_sync_helpers
     ns["__omp_emit_image"] = _emit_image_dict
     ns["__omp_magic"] = __omp_magic
     ns["__omp_magic_async"] = __omp_magic_async
     ns["__omp_magic_cell"] = __omp_magic_cell
     ns["__omp_shell"] = __omp_shell
-    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get()
+    # Plain threads (ThreadPoolExecutor) do not inherit the ContextVar: fall back
+    # to the request currently executing, the same target fd-1 capture uses.
+    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get() or _STATE.capture_rid
 
 
 _install_builtins(_STATE.user_ns)
@@ -2382,25 +2532,24 @@ def _restore_call_site_helper(ns: dict) -> None:
         ns[_CALL_SITE_HELPER_NAME] = trusted
 
 
-def _cell_binds_call_site_helper(module: ast.Module) -> bool:
-    """Whether the cell binds the reserved helper name in any scope."""
+def _cell_bound_names(module: ast.Module) -> set[str]:
+    """Names the cell may bind in any scope; `*` when it star-imports."""
+    names: set[str] = set()
     for node in ast.walk(module):
         if isinstance(node, ast.Name):
-            if node.id == _CALL_SITE_HELPER_NAME and isinstance(node.ctx, (ast.Store, ast.Del)):
-                return True
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == _CALL_SITE_HELPER_NAME:
-                return True
-        elif isinstance(node, ast.arg):
-            if node.arg == _CALL_SITE_HELPER_NAME:
-                return True
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
         elif isinstance(node, ast.alias):
-            if node.asname == _CALL_SITE_HELPER_NAME:
-                return True
-        elif isinstance(node, ast.ExceptHandler):
-            if node.name == _CALL_SITE_HELPER_NAME:
-                return True
-    return False
+            names.add(node.asname or node.name.partition(".")[0])
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        else:
+            # defs, classes, `except ... as`, match captures and `**rest`
+            for attr in ("name", "rest"):
+                value = getattr(node, attr, None)
+                if isinstance(value, str):
+                    names.add(value)
+    return names
 
 class _ShadowCallSiteTransformer(ast.NodeTransformer):
     def __init__(self, line_offsets: list[int]) -> None:
@@ -2435,15 +2584,41 @@ class _ShadowCallSiteTransformer(ast.NodeTransformer):
         return ast.copy_location(wrapped, node)
 
 
+class _SyncHelperAwaitStripper(ast.NodeTransformer):
+    """Rewrite `await helper(...)` to `helper(...)` for the given helper names."""
+
+    def __init__(self, names: frozenset[str]) -> None:
+        self._names = names
+
+    def visit_Await(self, node: ast.Await) -> ast.AST:
+        self.generic_visit(node)
+        call = node.value
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in self._names:
+            return call
+        return node
+
+
 def _compile_source(
-    source: str, filename: str = "<cell>"
+    source: str, ns: dict, filename: str = "<cell>"
 ) -> tuple[Any, Any | None, bool]:
     module = ast.parse(source, filename, "exec")
     line_offsets = [0]
     for line in source.splitlines(keepends=True):
         line_offsets.append(line_offsets[-1] + len(line))
-    if _CALL_SITE_HELPER_NAME not in source or not _cell_binds_call_site_helper(module):
+    bound = _cell_bound_names(module)
+    if _CALL_SITE_HELPER_NAME not in bound:
         module = _ShadowCallSiteTransformer(line_offsets).visit(module)
+    # After call-site instrumentation, which skips calls with awaited arguments
+    # exactly as the shadow planner does. A name the cell may rebind keeps its
+    # `await`: the binding at run time could be async.
+    if "*" not in bound:
+        sync = frozenset(
+            name
+            for name, helper in _SYNC_HELPERS.items()
+            if name not in bound and ns.get(name) is helper
+        )
+        if sync:
+            module = _SyncHelperAwaitStripper(sync).visit(module)
     ast.fix_missing_locations(module)
     if not module.body:
         return None, None, False
@@ -2468,20 +2643,21 @@ def _prepare_file_source(
     if display_source and (not lines or not lines[-1].endswith(("\n", "\r"))):
         lines[-1] += "\n"
     linecache.cache[filename] = (len(display_source), None, lines, filename)
-    ns["__file__"] = filename
-    script_dir = os.path.dirname(filename)
-    if script_dir:
-        try:
-            sys.path.remove(script_dir)
-        except ValueError:
-            pass
-        sys.path.insert(0, script_dir)
+    if not (filename.startswith("<") and filename.endswith(">")):
+        ns["__file__"] = filename
+        script_dir = os.path.dirname(filename)
+        if script_dir:
+            try:
+                sys.path.remove(script_dir)
+            except ValueError:
+                pass
+            sys.path.insert(0, script_dir)
 
 
 def _exec_source(source: str, ns: dict) -> None:
     """Synchronous source execution for legacy magic helpers."""
     _restore_call_site_helper(ns)
-    body_code, expr_code, has_expr = _compile_source(source)
+    body_code, expr_code, has_expr = _compile_source(source, ns)
     if body_code is None:
         return
     _run_compiled_sync(body_code, ns, want_value=False)
@@ -2503,9 +2679,8 @@ async def _exec_source_async(
     Top-level ``await`` / ``async for`` / ``async with`` is permitted; awaited
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
-    body_code, expr_code, has_expr = _compile_source(source, filename)
-    if filename != "<cell>":
-        _prepare_file_source(source, ns, filename, linecache_source)
+    body_code, expr_code, has_expr = _compile_source(source, ns, filename)
+    _prepare_file_source(source, ns, filename, linecache_source)
     if body_code is None:
         return
     await _run_compiled_async(body_code, ns, want_value=False)
@@ -2528,9 +2703,57 @@ def _install_idle_sigint() -> None:
         pass
 
 
+def _exec_sigint_handler(signum: int, frame: Any) -> None:
+    """Raise into the sync cell the host named (on Windows, the running cell);
+    cancel named cells parked on an ``await`` instead, since raising in the idle
+    event loop would unwind it and end the kernel."""
+    loop = _STATE.loop
+    if loop is None:
+        raise KeyboardInterrupt
+    current = asyncio.current_task(loop)
+    running = (
+        next((rid for rid, task in _STATE.executing_tasks.items() if task is current), None)
+        if current is not None
+        else None
+    )
+    if running is not None and (not _STATE.targeted_interrupts or running in _STATE.interrupt_ids):
+        _STATE.interrupt_ids.discard(running)
+        raise KeyboardInterrupt
+    _cancel_parked_cells()
+
+
+def _cancel_parked_cells() -> None:
+    for rid, task in list(_STATE.executing_tasks.items()):
+        if task is None:
+            continue
+        if _STATE.targeted_interrupts and rid not in _STATE.interrupt_ids:
+            continue
+        _STATE.interrupt_ids.discard(rid)
+        _STATE.interrupted_tasks.add(task)
+        task.cancel()
+
+
+def _request_interrupt(loop: asyncio.AbstractEventLoop, rid: str) -> None:
+    """Interrupt cell ``rid`` from the stdin reader thread. The signal reaches it
+    in sync code; the queued cancel reaches it if a sibling's sync code holds
+    the main thread; a pending interrupt is held until the named cell registers.
+    Each interrupt is delivered once."""
+    if rid not in _STATE.executing_tasks:
+        return
+    _STATE.interrupt_ids.add(rid)
+    if rid not in _STATE.executing_tasks:
+        _STATE.interrupt_ids.discard(rid)
+        return
+    task = _STATE.executing_tasks.get(rid)
+    if task is None:
+        return
+    loop.call_soon_threadsafe(_cancel_parked_cells)
+    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+
 def _install_exec_sigint() -> None:
     try:
-        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGINT, _exec_sigint_handler)
     except (OSError, ValueError):
         pass
 
@@ -2557,10 +2780,29 @@ _MANAGED_ENV_KEYS = (
 )
 
 
-def _apply_request_runtime(req: dict) -> None:
+def _apply_request_runtime(req: dict, rid: str) -> None:
     cwd = req.get("cwd")
     if isinstance(cwd, str) and cwd:
-        os.chdir(cwd)
+        try:
+            os.chdir(cwd)
+        except OSError as exc:
+            # The session cwd was moved or removed (e.g. a deleted worktree): keep running
+            # in the last valid directory instead of failing every cell.
+            try:
+                fallback = os.getcwd()
+            except OSError:
+                # The process cwd is gone too (usually the same deleted directory).
+                fallback = os.path.expanduser("~")
+                os.chdir(fallback)
+            _emit(
+                {
+                    "type": "stderr",
+                    "id": rid,
+                    "data": f"Warning: session cwd {cwd} is unavailable ({exc.strerror or exc}); this cell runs in {fallback}\n",
+                }
+            )
+            cwd = None
+    if isinstance(cwd, str) and cwd:
         try:
             sys.path.remove(cwd)
         except ValueError:
@@ -2612,6 +2854,77 @@ def _start_parent_watchdog() -> None:
 # ---------------------------------------------------------------------------
 
 
+_TOOL_LOOP: asyncio.AbstractEventLoop | None = None
+_TOOL_LOOP_LOCK = threading.Lock()
+
+
+def _tool_loop() -> asyncio.AbstractEventLoop:
+    """The event loop every async kernel-defined tool runs on, started on first use.
+
+    Concurrent calls share kernel-global asyncio primitives (a cell's
+    ``asyncio.Lock()`` serializing a tool across subagents, say), so they must
+    share one loop: with a private loop per call, a release from another
+    call's thread never wakes the waiter's selector and the waiting call hangs
+    forever. It is not the cell loop, which a cell blocked in ``wait()`` on
+    this tool's caller would deadlock.
+    """
+    global _TOOL_LOOP
+    with _TOOL_LOOP_LOCK:
+        if _TOOL_LOOP is None:
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="omp-tool-loop", daemon=True).start()
+            _TOOL_LOOP = loop
+        return _TOOL_LOOP
+
+
+async def _await_tool_result(awaitable: Any) -> Any:
+    return await awaitable
+
+
+# In-flight tool requests by id: ``None`` until an async call is on the tool
+# loop, then its future. A cancel drops the entry, so a call that has not
+# reached the loop yet sees itself cancelled when it gets there.
+_TOOL_CALLS: dict[str, Any] = {}
+_TOOL_CALLS_LOCK = threading.Lock()
+
+
+def _start_tool_request(req: dict) -> None:
+    """Register a tool request, then serve it on its own thread.
+
+    Registration happens on the reader thread, before any later
+    ``tool_cancel`` line for the same id is read.
+    """
+    rid = str(req.get("id"))
+    with _TOOL_CALLS_LOCK:
+        _TOOL_CALLS[rid] = None
+    threading.Thread(
+        target=_handle_tool_request,
+        args=(req,),
+        name=f"omp-tool-{rid}",
+        daemon=True,
+    ).start()
+
+
+def _cancel_tool_request(rid: str) -> None:
+    """Cancel an async tool call whose caller gave up; a finished or sync call is left alone."""
+    with _TOOL_CALLS_LOCK:
+        future = _TOOL_CALLS.pop(rid, None)
+    if future is not None:
+        future.cancel()
+
+
+def _run_async_tool(rid: str, awaitable: Any) -> Any:
+    """Await ``awaitable`` on the shared tool loop, honouring a cancel of request ``rid``."""
+    with _TOOL_CALLS_LOCK:
+        if rid not in _TOOL_CALLS:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise asyncio.CancelledError()
+        future = asyncio.run_coroutine_threadsafe(_await_tool_result(awaitable), _tool_loop())
+        _TOOL_CALLS[rid] = future
+    return future.result()
+
+
 def _jsonable(value: Any) -> Any:
     """Convert a tool result into a JSON-safe value without failing the request."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -2646,7 +2959,7 @@ def _handle_tool_request(req: dict) -> None:
                 raise KeyError(f"tool {name!r} is not defined")
             result = spec.fn(**(req.get("args") or {}))
             if inspect.isawaitable(result):
-                result = asyncio.run(result)
+                result = _run_async_tool(rid, result)
             envelope = {"ok": True, "value": _jsonable(result)}
         else:
             raise ValueError(f"unknown tool operation {op!r}")
@@ -2655,6 +2968,8 @@ def _handle_tool_request(req: dict) -> None:
         status = "error"
         _emit_error(rid, exc)
     finally:
+        with _TOOL_CALLS_LOCK:
+            _TOOL_CALLS.pop(rid, None)
         _flush_stream_proxies(rid)
         _emit(
             {
@@ -2690,17 +3005,17 @@ async def _handle_request_async(req: dict) -> None:
 
     try:
         try:
-            _apply_request_runtime(req)
+            _apply_request_runtime(req, rid)
             source = req.get("code", "")
-            transformed = transform_cell(source)
             requested_filename = req.get("filename")
             filename = (
                 requested_filename
                 if isinstance(requested_filename, str) and requested_filename
-                else "<cell>"
+                else f"<cell-{execution_count}>"
             )
+            transformed = transform_cell(source)
         except SyntaxError as exc:
-            _emit_error(rid, exc)
+            _emit_error(rid, exc, source_filename=filename)
             _emit(
                 {
                     "type": "done",
@@ -2729,7 +3044,12 @@ async def _handle_request_async(req: dict) -> None:
         else:
             _begin_exec_sigint()
         execution_started = True
+        task = asyncio.current_task()
+        _STATE.executing_tasks[rid] = task
         try:
+            if rid in _STATE.interrupt_ids:
+                _STATE.interrupt_ids.discard(rid)
+                raise KeyboardInterrupt
             await _exec_source_async(
                 transformed,
                 _STATE.user_ns,
@@ -2740,6 +3060,10 @@ async def _handle_request_async(req: dict) -> None:
             cancelled = True
             status = "error"
             _emit_error(rid, KeyboardInterrupt("Execution interrupted"))
+        except asyncio.CancelledError as exc:
+            status = "error"
+            cancelled = task in _STATE.interrupted_tasks
+            _emit_error(rid, KeyboardInterrupt("Execution interrupted") if cancelled else exc)
         except SystemExit as exc:
             status = "error"
             _emit_error(rid, exc)
@@ -2747,6 +3071,16 @@ async def _handle_request_async(req: dict) -> None:
             status = "error"
             _emit_error(rid, exc, source_filename=filename)
         finally:
+            _STATE.executing_tasks.pop(rid, None)
+            _STATE.interrupt_ids.discard(rid)
+            if task in _STATE.interrupted_tasks:
+                _STATE.interrupted_tasks.discard(task)
+                # On Windows cells run on the long-lived serve task; clear the
+                # cancel requests it absorbed (Python 3.11+).
+                uncancel = getattr(task, "uncancel", None)
+                if uncancel is not None:
+                    while uncancel():
+                        pass
             _end_exec_sigint()
             try:
                 _flush_matplotlib_figures()
@@ -2764,6 +3098,8 @@ async def _handle_request_async(req: dict) -> None:
             }
         )
     finally:
+        _STATE.executing_tasks.pop(rid, None)
+        _STATE.interrupt_ids.discard(rid)
         if _STATE.capture_rid == rid:
             _STATE.capture_rid = None
         _flush_stream_proxies(rid)
@@ -2773,8 +3109,8 @@ async def _handle_request_async(req: dict) -> None:
             _end_exec_sigint()
 
 
-def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
-    if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
+def _emit_error(rid: str, exc: BaseException, source_filename: str | None = None) -> None:
+    if isinstance(exc, SyntaxError) and source_filename is not None and exc.filename == source_filename:
         # Syntax error in the executed source itself: every stack frame is
         # runner machinery, so emit only the caret display, like a REPL.
         tb_lines = traceback.format_exception_only(type(exc), exc)
@@ -2815,10 +3151,13 @@ def _admit_shadow_run(req: dict) -> bool:
             and expected_digest == _shadow_snapshot_digest(values)
         )
         if not eligible:
+            rid = str(req.get("id"))
+            _STATE.executing_tasks.pop(rid, None)
+            _STATE.interrupt_ids.discard(rid)
             _emit(
                 {
                     "type": "done",
-                    "id": str(req.get("id")),
+                    "id": rid,
                     "status": "ok",
                     "executionCount": _STATE.execution_count,
                     "cancelled": False,
@@ -2870,13 +3209,16 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
         if req is None:
             continue
         if req.get("type") == "tool":
-            threading.Thread(
-                target=_handle_tool_request,
-                args=(req,),
-                name=f"omp-tool-{req.get('id')}",
-                daemon=True,
-            ).start()
+            _start_tool_request(req)
             continue
+        if req.get("type") == "tool_cancel":
+            _cancel_tool_request(str(req.get("id")))
+            continue
+        if req.get("type") == "interrupt":
+            _request_interrupt(loop, str(req.get("id")))
+            continue
+        if req.get("type") not in ("exit", "shadow_snapshot", "shadow_plan"):
+            _STATE.executing_tasks[str(req.get("id"))] = None
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
 
@@ -2893,6 +3235,7 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
     native-extension imports on Windows (see ``_serve_windows``).
     """
     queue: asyncio.Queue = asyncio.Queue()
+    _STATE.targeted_interrupts = True
     reader = threading.Thread(
         target=_read_stdin,
         args=(loop, queue, stdin),
@@ -2933,6 +3276,8 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        _STATE.executing_tasks.clear()
+        _STATE.interrupt_ids.clear()
 
 
 async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
@@ -2968,13 +3313,13 @@ async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
             _emit_shadow_plan(req)
             continue
         if req.get("type") == "tool":
-            threading.Thread(
-                target=_handle_tool_request,
-                args=(req,),
-                name=f"omp-tool-{req.get('id')}",
-                daemon=True,
-            ).start()
+            _start_tool_request(req)
             continue
+        if req.get("type") == "tool_cancel":
+            _cancel_tool_request(str(req.get("id")))
+            continue
+        if req.get("type") == "interrupt":
+            continue  # read only between cells, after the cell it named settled
         if not _admit_shadow_run(req):
             continue
         try:

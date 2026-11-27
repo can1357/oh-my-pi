@@ -1,6 +1,7 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
-import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { ToolError } from "./tool-errors";
 
 const SQLITE_MAGIC = new Uint8Array([
 	0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00,
@@ -347,6 +348,20 @@ function getPrimaryKeyColumns(db: Database, table: string): SqliteTableInfoRow[]
 		.sort((left, right) => left.pk - right.pk);
 }
 
+/** A declared column shadows the corresponding hidden rowid alias, even when generated. */
+function resolveRowIdColumn(db: Database, table: string): string {
+	const columns = new Set(
+		db
+			.query<Pick<SqliteTableInfoRow, "name">, []>(`PRAGMA table_xinfo(${quoteSqliteIdentifier(table)})`)
+			.all()
+			.map(column => column.name.toLowerCase()),
+	);
+	for (const alias of ["rowid", "_rowid_", "oid"]) {
+		if (!columns.has(alias)) return quoteSqliteIdentifier(alias);
+	}
+	throw new ToolError(`SQLite table '${table}' shadows all ROWID aliases; row-key access is unavailable`);
+}
+
 function coerceIntegerKey(key: string, label: string): number | bigint {
 	const trimmed = key.trim();
 	if (!/^-?\d+$/.test(trimmed)) {
@@ -553,6 +568,26 @@ export function parseSqlitePathCandidates(filePath: string): SqlitePathCandidate
 	}
 
 	return candidates.sort((left, right) => right.sqlitePath.length - left.sqlitePath.length);
+}
+
+/**
+ * Splits of `filePath` at each `:`/`?` selector boundary, for SQLite files without a database extension
+ * (`state.vscdb?q=…`, Chrome's `History:urls`). Only the file header can confirm one, so callers sniff it.
+ */
+export function parseSqliteSelectorBoundaryCandidates(filePath: string): SqlitePathCandidate[] {
+	const normalized = filePath.replace(/\\/g, "/");
+	const queryStart = normalized.indexOf("?");
+	const end = queryStart === -1 ? normalized.length : queryStart + 1;
+	const candidates: SqlitePathCandidate[] = [];
+	for (let i = 1; i < end; i++) {
+		const ch = normalized[i];
+		if (ch !== ":" && ch !== "?") continue;
+		// `C:/…` is a drive, `scheme://` a URL: neither ends a file path.
+		if (ch === ":" && (i === 1 || normalized.startsWith("//", i + 1))) continue;
+		const { subPath, queryString } = splitSqliteRemainder(normalized.slice(i));
+		candidates.push({ sqlitePath: filePath.slice(0, i), subPath, queryString });
+	}
+	return candidates.reverse();
 }
 
 export async function isSqliteFile(absolutePath: string): Promise<boolean> {
@@ -788,7 +823,9 @@ export function getRowByRowId(db: Database, table: string, key: string): Record<
 	getTableMasterRow(db, table);
 	const binding = coerceIntegerKey(key, "SQLite ROWID");
 	return db
-		.query<SqliteRow, SQLQueryBindings[]>(`SELECT * FROM ${quoteSqliteIdentifier(table)} WHERE rowid = ? LIMIT 1`)
+		.query<SqliteRow, SQLQueryBindings[]>(
+			`SELECT * FROM ${quoteSqliteIdentifier(table)} WHERE ${resolveRowIdColumn(db, table)} = ? LIMIT 1`,
+		)
 		.get(binding);
 }
 
@@ -890,7 +927,7 @@ export function updateRowByRowId(db: Database, table: string, key: string, data:
 	const bindings = entries.map(([, value]) => value);
 	bindings.push(coerceIntegerKey(key, "SQLite ROWID"));
 	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
-		`UPDATE ${quoteSqliteIdentifier(table)} SET ${assignments} WHERE rowid = ?`,
+		`UPDATE ${quoteSqliteIdentifier(table)} SET ${assignments} WHERE ${resolveRowIdColumn(db, table)} = ?`,
 	);
 	return statement.run(...bindings).changes;
 }
@@ -913,7 +950,7 @@ export function deleteRowByRowId(db: Database, table: string, key: string): numb
 	getTableMasterRow(db, table);
 	const binding = coerceIntegerKey(key, "SQLite ROWID");
 	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
-		`DELETE FROM ${quoteSqliteIdentifier(table)} WHERE rowid = ?`,
+		`DELETE FROM ${quoteSqliteIdentifier(table)} WHERE ${resolveRowIdColumn(db, table)} = ?`,
 	);
 	return statement.run(binding).changes;
 }

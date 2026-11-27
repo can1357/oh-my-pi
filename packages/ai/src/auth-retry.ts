@@ -1,7 +1,15 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
+import type {
+	CredentialRotation,
+	LimitsApi,
+	OAuthAccess,
+	OAuthApi,
+	OAuthRefreshReason,
+	OAuthRequestIdentity,
+} from "./auth/types";
+import type { ServiceTier } from "./types";
 import * as AIError from "./error";
-import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
+import { isAuthRetryableError, isInvalidatedOAuthTokenError, isRevokedOAuthBearerError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 
@@ -32,6 +40,11 @@ export interface ApiKeyResolveContext {
 	previousKey?: string;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
+	/**
+	 * Service tier the request will ask for, so resolution can prefer a
+	 * credential that offers it. Stamped by {@link withRequestServiceTier}.
+	 */
+	serviceTier?: ServiceTier;
 }
 
 /**
@@ -43,6 +56,13 @@ export interface ResolvedApiKey {
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
 	/**
+	 * The OAuth access token behind this bearer, when the bearer came from a
+	 * stored OAuth credential. A provider whose API key wraps the token in a
+	 * structured document makes the two differ, so a 401 recovery names this
+	 * one as the token the provider rejected.
+	 */
+	oauthAccess?: string;
+	/**
 	 * Resolved after `LimitsApi.rotate` slept out a sibling's short block
 	 * (`afterSiblingWait`): the driver accepts this bearer even if the request
 	 * already sent it before that block.
@@ -50,11 +70,35 @@ export interface ResolvedApiKey {
 	afterSiblingWait?: boolean;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
 	oauthIdentity?: OAuthRequestIdentity;
+	/**
+	 * The request's {@link ApiKeyResolveContext.serviceTier} is known not to be
+	 * offered by this credential (not entitled, or refused it recently), and no
+	 * credential that offers it was available. The driver sends the request
+	 * without the tier instead of provoking a rejection.
+	 */
+	serviceTierUnavailable?: boolean;
 }
 
 export type ApiKeyResolution = string | ResolvedApiKey | undefined;
 
 export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<ApiKeyResolution> | ApiKeyResolution;
+
+/**
+ * Stamp `serviceTier` on every resolve of `key`, so the credential a request
+ * gets is chosen for the tier it will ask for. Static keys and tierless
+ * requests pass through untouched.
+ */
+export function withRequestServiceTier<K extends ApiKey | undefined>(key: K, serviceTier: ServiceTier | undefined): K;
+export function withRequestServiceTier(
+	key: ApiKey | undefined,
+	serviceTier: ServiceTier | undefined,
+): ApiKey | undefined {
+	if (!isApiKeyResolver(key) || serviceTier === undefined) return key;
+	return ctx => key({ ...ctx, serviceTier });
+}
+
+/** Tag on an assistant message's `disabledFeatures` when the serving credential did not offer the requested service tier. */
+export const SERVICE_TIER_UNAVAILABLE_FEATURE = "service-tier";
 
 /** Extract the bearer while preserving optional credential provenance for streaming callers. */
 export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undefined {
@@ -62,16 +106,84 @@ export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undef
 }
 
 /**
- * Mark a post-rotation resolution as following a sibling-unblock wait so the
- * retry driver may resend a bearer it already tried. Used by the rotating
- * resolvers (`KeyCascade.resolver`, coding-agent `createApiKeyResolver`).
+ * Step (c) after {@link LimitsApi.rotate}: re-resolve the session credential,
+ * or return `undefined` when quota exhaustion found no sibling, so the outer
+ * retry layer honours the recorded backoff instead of resending a blocked
+ * fallback. Other declines re-resolve: a peer may have refreshed the failed
+ * bearer. A resolution after a sibling-unblock wait is marked so the retry
+ * driver may resend a bearer it already tried. Shared by every rotating
+ * resolver (`KeyCascade.resolver`, the auth gateway, coding-agent
+ * `createApiKeyResolver`).
  */
-export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResolution {
+export function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ResolvedApiKey | undefined>,
+): Promise<ResolvedApiKey | undefined>;
+export function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ApiKeyResolution>,
+): Promise<ApiKeyResolution>;
+export async function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ApiKeyResolution>,
+): Promise<ApiKeyResolution> {
+	if (!rotation.switched) {
+		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		if (isUsageLimit(error) || isUsageLimitOutcome(AIError.status(error), message)) return undefined;
+	}
+	const resolved = await resolve();
 	const apiKey = resolvedApiKeyBearer(resolved);
-	if (apiKey === undefined) return resolved;
+	if (!rotation.afterSiblingWait || apiKey === undefined) return resolved;
 	return typeof resolved === "string"
 		? { apiKey, afterSiblingWait: true }
 		: { ...resolved, apiKey, afterSiblingWait: true };
+}
+
+/** Bearers a resolver served recently, each with the OAuth access token behind it. */
+const OAUTH_PROVENANCE_LIMIT = 8;
+
+/**
+ * Remembers which OAuth access token produced each bearer a resolver served,
+ * so a 401 recovery can name the token of the request that actually failed.
+ * A resolver serves many requests, and they fail out of order: the last
+ * resolution is not that request's identity. Used by every resolver that
+ * serves more than one request ({@link KeyCascade.resolver}, the coding
+ * agent's `createApiKeyResolver`, the auth gateway's resolver).
+ */
+export function createOAuthProvenance(): {
+	record: (resolved: ApiKeyResolution) => void;
+	accessFor: (bearer: string | undefined) => string | undefined;
+} {
+	const byBearer = new Map<string, string>();
+	return {
+		record(resolved) {
+			if (typeof resolved !== "object" || resolved === undefined) return;
+			const access = resolved.oauthAccess;
+			if (access === undefined) return;
+			byBearer.delete(resolved.apiKey);
+			byBearer.set(resolved.apiKey, access);
+			while (byBearer.size > OAUTH_PROVENANCE_LIMIT) {
+				const oldest = byBearer.keys().next();
+				if (oldest.done) break;
+				byBearer.delete(oldest.value);
+			}
+		},
+		accessFor(bearer) {
+			return bearer === undefined ? undefined : byBearer.get(bearer);
+		},
+	};
+}
+
+/**
+ * Refresh reason for the same-login retry after `error`: `"auth-recovery"` when
+ * the provider refused the bearer itself (a 401, or a revoked-token 403), so the
+ * refresher adopts a newer stored token before exchanging the grant again.
+ */
+export function refreshReasonFor(error: unknown): OAuthRefreshReason | undefined {
+	return AIError.status(error) === 401 || isRevokedOAuthBearerError(error) ? "auth-recovery" : undefined;
 }
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
@@ -135,6 +247,8 @@ export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
 export const AUTH_RETRY_MAX_ATTEMPTS = 64;
 
 function isDirectCredentialRotationError(error: unknown): boolean {
+	// A revoked bearer gets the same-login refresh a 401 gets, whatever else its body says.
+	if (isRevokedOAuthBearerError(error)) return false;
 	if (isAccountPolicyError(error)) return true;
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
@@ -147,6 +261,15 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 		(status === undefined && message !== undefined && extractHttpStatusFromError({ message }) === 403);
 	if (isForbidden && !isConcurrencyCapExclusion(status, message)) return true;
 	return isUsageLimitOutcome(status, message);
+}
+
+/** Keep a quota reset actionable when a rotated sibling fails authentication. */
+export function preferAuthRetryError(reported: unknown, next: unknown): unknown {
+	const message = reported instanceof Error ? reported.message : typeof reported === "string" ? reported : undefined;
+	return (isUsageLimit(reported) || isUsageLimitOutcome(AIError.status(reported), message)) &&
+		AIError.status(next) === 401
+		? reported
+		: next;
 }
 
 /** Resolve a single retry step, swallowing resolver failures into `undefined`. */
@@ -276,6 +399,9 @@ async function runOAuthAttempt<T>(
  *   enters sibling rotation. Ordinary 401/auth failures get one refresh-same,
  *   then rotate through distinct siblings; 403/usage-limit failures skip the
  *   refresh and rotate directly.
+ * - A resolver that throws on the initial resolve surfaces its cause (a
+ *   broker/OAuth/network failure) instead of reading as a missing key; only a
+ *   resolver that resolves without a credential is a "No API key" case.
  *
  * Used by non-streaming consumers (image generation, web search, completion
  * helpers). The streaming driver in `stream.ts` implements the same policy with
@@ -296,16 +422,30 @@ export async function withAuth<T>(
 
 	const resolver = key;
 	const signal = opts?.signal;
-	const initialKey = await resolveRetryKey(resolver, false, undefined, signal);
+	let initialKey: string | undefined;
+	try {
+		initialKey = await resolveApiKeyOnce(resolver, signal);
+	} catch (error) {
+		// A resolver that deliberately reports a missing key keeps that type.
+		if (error instanceof AIError.MissingApiKeyError) throw error;
+		// A thrown resolver is a broker/OAuth/network failure, not a missing
+		// key — surface the cause instead of masking it as "No API key".
+		throw new AIError.ConfigurationError(
+			`Failed to resolve API key: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
+	}
 	if (initialKey === undefined) throw missingKey();
 
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;
+	let reportedError: unknown;
 	try {
 		return await attempt(initialKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
+		reportedError = error;
 	}
 
 	while (true) {
@@ -316,10 +456,11 @@ export async function withAuth<T>(
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;
+			reportedError = preferAuthRetryError(reportedError, error);
 		}
 	}
 
-	throw lastError;
+	throw reportedError;
 }
 
 /**
@@ -394,6 +535,7 @@ export async function withOAuthAccess<T>(
 	if (attemptResult.ok) return attemptResult.result;
 
 	let lastError = attemptResult.error;
+	let reportedError: unknown = lastError;
 	while (true) {
 		let next: OAuthAccess | undefined;
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
@@ -403,7 +545,11 @@ export async function withOAuthAccess<T>(
 			tokenRefreshReplayUsed = true;
 			refreshedCurrent = true;
 			try {
-				next = await storage.oauth.access(provider, sessionId, { forceRefresh: true, signal });
+				next = await storage.oauth.access(provider, sessionId, {
+					forceRefresh: true,
+					rejectedAccessToken: lastAccess.accessToken,
+					signal,
+				});
 			} catch {
 				next = undefined;
 			}
@@ -417,6 +563,7 @@ export async function withOAuthAccess<T>(
 			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 			if (attemptResult.ok) return attemptResult.result;
 			lastError = attemptResult.error;
+			reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 			continue;
 		}
 
@@ -427,7 +574,8 @@ export async function withOAuthAccess<T>(
 				try {
 					next = await storage.oauth.access(provider, sessionId, {
 						forceRefresh: true,
-						refreshReason: AIError.status(lastError) === 401 ? "auth-recovery" : undefined,
+						refreshReason: refreshReasonFor(lastError),
+						rejectedAccessToken: lastAccess.accessToken,
 						signal,
 					});
 				} catch {
@@ -444,6 +592,7 @@ export async function withOAuthAccess<T>(
 						attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 						if (attemptResult.ok) return attemptResult.result;
 						lastError = attemptResult.error;
+						reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 						continue;
 					}
 				}
@@ -482,7 +631,8 @@ export async function withOAuthAccess<T>(
 		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;
+		reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 	}
 
-	throw lastError;
+	throw reportedError;
 }

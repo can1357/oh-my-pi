@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { OmpErrors, type } from "@oh-my-pi/omptype";
 import type { ProviderFileReference } from "@oh-my-pi/pi-ai";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { errorMessage, isEnoent } from "@oh-my-pi/pi-utils";
 import type { RemoteDeleteAction } from "./publication";
 
 /** Model providers whose official APIs support reusable uploaded-file references. */
@@ -133,6 +133,21 @@ const PersistedIndexSchema = type({
 	entries: PersistedEntrySchema.array(),
 });
 
+/** Whether a schema-valid persisted entry is consistent: matching providers and well-formed digests. */
+function isConsistentEntry(entry: ProviderFileCacheEntry): boolean {
+	return (
+		entry.handle.provider === entry.provider &&
+		SHA256_HEX_PATTERN.test(entry.credentialHash) &&
+		SHA256_HEX_PATTERN.test(entry.contentHash)
+	);
+}
+
+/** Validate one entry of a persisted provider file cache index; `undefined` when malformed. */
+export function parsePersistedProviderFileEntry(value: unknown): ProviderFileCacheEntry | undefined {
+	const entry = PersistedEntrySchema(value);
+	return entry instanceof OmpErrors || !isConsistentEntry(entry) ? undefined : entry;
+}
+
 /** Return a lowercase SHA-256 digest without retaining the supplied credential. */
 export function hashProviderFileCredential(credential: string): string {
 	return Bun.SHA256.hash(credential, "hex");
@@ -163,10 +178,6 @@ function normalizeContentHash(contentHash: string): string {
 		throw new Error("Provider file content hash must be a lowercase or uppercase SHA-256 hex digest");
 	}
 	return normalized;
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function containsCredential(value: string, credential: string): boolean {
@@ -391,12 +402,7 @@ export class ProviderFileCache {
 		}
 		let discarded = 0;
 		for (const entry of checked.entries) {
-			if (
-				entry.handle.provider !== entry.provider ||
-				!SHA256_HEX_PATTERN.test(entry.credentialHash) ||
-				!SHA256_HEX_PATTERN.test(entry.contentHash) ||
-				this.#expired(entry.handle)
-			) {
+			if (!isConsistentEntry(entry) || this.#expired(entry.handle)) {
 				discarded++;
 				continue;
 			}

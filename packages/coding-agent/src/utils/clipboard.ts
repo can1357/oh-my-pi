@@ -4,7 +4,8 @@ import {
 	readImageFromClipboard as nativeReadImageFromClipboard,
 	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
+import { isSsh } from "@oh-my-pi/pi-tui/driver/mux/detect";
+import { activeTerminalDriver, writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
@@ -36,7 +37,7 @@ async function spawnCapture(
 	const timeoutMs = options.timeoutMs ?? 2000;
 	const proc = Bun.spawn(cmd, {
 		stdout: "pipe",
-		stderr: "ignore",
+		stderr: "pipe",
 		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
 		...(options.env ? { env: options.env } : {}),
 	});
@@ -46,6 +47,7 @@ async function spawnCapture(
 		proc.kill();
 	}, timeoutMs);
 	try {
+		const stderr = new Response(proc.stderr).text().catch(() => "");
 		const response = new Response(proc.stdout);
 		const stdout =
 			options.encoding === "bytes" ? new Uint8Array(await response.arrayBuffer()) : await response.text();
@@ -54,7 +56,8 @@ async function spawnCapture(
 			throw new Error(`${cmd[0]} timed out after ${timeoutMs}ms`);
 		}
 		if (proc.exitCode !== 0) {
-			throw new Error(`${cmd[0]} exited with code ${proc.exitCode}`);
+			const detail = (await stderr).trim();
+			throw new Error(`${cmd[0]} exited with code ${proc.exitCode}${detail ? `: ${detail}` : ""}`);
 		}
 		return stdout;
 	} finally {
@@ -64,6 +67,17 @@ async function spawnCapture(
 
 function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+/**
+ * True when the clipboard this process reads is the one the user's terminal copies into.
+ * Over SSH every backend reads a clipboard of the remote host (macOS `pbpaste`, the Windows host
+ * behind WSL, Termux, a host-side X11/Wayland desktop). Even an X11-forwarded `DISPLAY` cannot be
+ * trusted: a tmux session on the host keeps a stale `localhost:10.0` whose port a later SSH
+ * session (possibly another user's) can own, so SSH never reads the system clipboard.
+ */
+export function isClipboardTerminalLocal(env: NodeJS.ProcessEnv = process.env): boolean {
+	return !isSsh(env);
 }
 
 /**
@@ -113,9 +127,23 @@ let macClipboardWrite = Promise.resolve();
  * frame; from a worker thread it is skipped and only the native copy runs.
  *
  * @param text - UTF-8 text to place on the clipboard.
+ * @param options - Fullscreen selection can target the client terminal alone (SSH),
+ * and request its active driver’s multiplexer envelope. Other callers keep their ordinary route.
  */
-export async function copyToClipboard(text: string): Promise<void> {
-	if (process.stdout.isTTY) writeTerminalSequence(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+export async function copyToClipboard(
+	text: string,
+	options?: { terminalOnly?: boolean; passthrough?: boolean },
+): Promise<void> {
+	if (process.stdout.isTTY) {
+		const osc = `\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`;
+		const driver = options?.passthrough ? activeTerminalDriver() : null;
+		const wrapped = driver?.passthrough(osc) ?? osc;
+		// tmux may accept OSC 52 into its paste buffer even when passthrough is disabled.
+		writeTerminalSequence(wrapped !== osc && driver?.capabilities.multiplexer === "tmux" ? osc + wrapped : wrapped);
+	}
+
+	// A selection made over SSH belongs to the client, never to a desktop on the server.
+	if (options?.terminalOnly) return;
 
 	// Keep pbcopy, document-header writes, and native fallbacks in invocation order.
 	let releaseWrite: (() => void) | undefined;
@@ -145,7 +173,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 		// process teardown, or to another app that writes at the same moment. The
 		// copy itself is best-effort and the failure is swallowed here, but the
 		// AppKit line still lands in the user's terminal. The child's stderr is
-		// discarded by spawnCapture, and `pbcopy` ships with every macOS.
+		// kept off the terminal by spawnCapture, and `pbcopy` ships with every macOS.
 		//
 		// Two `pbcopy(1)` behaviours are worked around. It types input by sniffing
 		// the leading bytes: text opening with a PDF, EPS, or RTF header lands on the
@@ -289,6 +317,10 @@ async function readTextViaPowerShell(): Promise<string | null> {
 	}
 }
 
+// wl-paste's "nothing to paste" messages: wl-clipboard 2.2+, then the 1.0–2.1 wording.
+const WL_PASTE_NO_TEXT =
+	/Nothing is copied|Clipboard content is not available as requested type|No selection|No suitable type of content copied/;
+
 async function readTextFromX11Clipboard(): Promise<string> {
 	try {
 		return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
@@ -395,9 +427,16 @@ export async function readTextFromClipboard(): Promise<string> {
 		if (hasWaylandDisplay) {
 			try {
 				return await spawnCapture(["wl-paste", "--type", "text", "--no-newline"]);
-			} catch {
+			} catch (wlError) {
 				if (hasX11Display) {
-					return await readTextFromX11Clipboard();
+					try {
+						return await readTextFromX11Clipboard();
+					} catch (error) {
+						// wl-paste found no text (empty or image-only clipboard), so the X11
+						// tools failing too (often just a missing xsel) is not worth a warning.
+						if (WL_PASTE_NO_TEXT.test(String(wlError))) return "";
+						throw error;
+					}
 				}
 			}
 		} else if (hasX11Display) {

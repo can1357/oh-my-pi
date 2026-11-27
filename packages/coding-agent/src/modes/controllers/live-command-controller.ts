@@ -1,19 +1,20 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { batch } from "@oh-my-pi/pi-tui";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LIVE_MODEL } from "../../live/protocol";
-import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { vocalizer } from "../../tts/vocalizer";
-import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "../types";
-import { createAssistantMessageComponent } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
-
-import { cfgLiveVoice } from "../../live/settings";
+import type { AssistantView, InteractiveModeContext } from "../types";
+import type { OverlayHandle } from "../../ui/shell";
+import { createLiveCallModel, type LiveCallModel, LiveVisualizer } from "../../ui/apps/live-visualizer";
+import { canonicalKeyId } from "../../config/keybindings/key-id";
+import type { ExtensionLiveSession, ExtensionLiveStartOptions } from "../../extensibility/extensions/types";
+import { resolveLiveVoice } from "../../live/settings";
 
 const ANIMATION_INTERVAL_MS = 80;
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionController;
+/** A started session, or the connect failure `#finish` has already shown and cleaned up. */
+type LiveStartOutcome = { session: LiveSessionController } | { error: Error };
 
 const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {
 	input: 0,
@@ -23,24 +24,29 @@ const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-function errorFrom(cause: unknown): Error {
-	return cause instanceof Error ? cause : new Error(String(cause));
+
+/** Runs an extension's live observer; its failures are logged, never turned into a session failure. */
+function notifyRemote(callback: () => void): void {
+	try {
+		callback();
+	} catch (cause) {
+		logger.warn("Live session observer threw", { error: toError(cause).message });
+	}
 }
 
-/** Owns the editor-replacing visualizer and realtime session lifecycle for `/live`. */
+/** Owns the composer-replacing visualizer and realtime session lifecycle for `/live`. */
 export class LiveCommandController {
 	readonly #ctx: InteractiveModeContext;
 	readonly #createSession: LiveSessionFactory | undefined;
 
 	#session: LiveSessionController | undefined;
 	#settling: Promise<void> | undefined;
-	#visualizer: LiveVisualizer | undefined;
-	#detachedEditor: CustomEditor | undefined;
+	#visualizer: LiveCallModel | undefined;
+	/** The visualizer in the composer's place; closing it brings the composer back. */
+	#visualizerHandle: OverlayHandle | undefined;
 	#animationInterval: NodeJS.Timeout | undefined;
-	#previousShowHardwareCursor: boolean | undefined;
-	#previousUseTerminalCursor: boolean | undefined;
 	#resumeVocalizer: (() => void) | undefined;
-	#assistantTranscriptComponent: AssistantMessageComponent | undefined;
+	#assistantTranscript: AssistantView | undefined;
 	#assistantTranscriptTurn = 0;
 	#assistantTranscriptStartedAt = 0;
 
@@ -60,8 +66,37 @@ export class LiveCommandController {
 			await this.stop();
 			return;
 		}
-		if (this.#settling) await this.#settling;
-		await this.#start();
+		while (this.#settling) await this.#settling;
+		// Another start may have claimed the slot while the previous session finished closing.
+		if (this.#session) return;
+		// A connect failure was already shown; anything else (factory, mounting) propagates.
+		await this.#start(resolveLiveVoice(this.#ctx.settings));
+	}
+
+	/**
+	 * Start a live session whose audio runs on a caller-owned WebRTC peer. The visualizer shows
+	 * it as it shows `/live`, and `/live` or the stop key ends it.
+	 */
+	async startRemote(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession> {
+		// Untyped callers: without an offer the controller would open the host microphone instead.
+		if (typeof options.sdpOffer !== "string" || !options.sdpOffer.trim()) {
+			throw new Error("startLive requires a non-empty sdpOffer");
+		}
+		while (this.#settling) await this.#settling;
+		const voice = resolveLiveVoice(this.#ctx.settings, options.voice);
+		const outcome = await this.#start(voice, options);
+		if ("error" in outcome) throw outcome.error;
+		const { session } = outcome;
+		const stop = async (): Promise<void> => {
+			if (this.#session === session) await this.stop();
+			else await session.stop();
+		};
+		const sdpAnswer = session.sdpAnswer;
+		if (sdpAnswer === undefined) {
+			await stop();
+			throw new Error("The live session stopped before its SDP answer was available");
+		}
+		return { sdpAnswer, voice, stop };
 	}
 
 	/** Stop the active live session and restore the editor. */
@@ -74,7 +109,7 @@ export class LiveCommandController {
 		try {
 			await session.stop();
 		} catch (cause) {
-			this.#finish(session, errorFrom(cause));
+			this.#finish(session, toError(cause));
 		} finally {
 			this.#finish(session);
 		}
@@ -86,73 +121,84 @@ export class LiveCommandController {
 		if (session) {
 			this.#finish(session);
 			void session.stop().catch(cause => {
-				logger.debug("Live session teardown failed", { error: errorFrom(cause).message });
+				logger.debug("Live session teardown failed", { error: toError(cause).message });
 			});
 		} else {
 			this.#restoreEditor();
 		}
 	}
 
-	async #start(): Promise<void> {
+	/**
+	 * Starts a session. A connect failure is shown, cleaned up and returned; the slot check and
+	 * claim (`#session = session`) run synchronously, so concurrent starts cannot both win.
+	 */
+	async #start(voice: string, remote?: ExtensionLiveStartOptions): Promise<LiveStartOutcome> {
+		if (this.#session) throw new Error("A live session is already active");
 		this.#assistantTranscriptTurn = 0;
 		this.#assistantTranscriptStartedAt = 0;
-		const visualizer = new LiveVisualizer({
-			onStop: () => {
-				void this.stop().catch(cause => this.#ctx.showError(errorFrom(cause).message));
-			},
-			onToggleMute: () => this.#session?.toggleMute(),
-			stopKeys: this.#ctx.keybindings.getKeys("app.live.toggle"),
-		});
+		const visualizer = createLiveCallModel();
 		this.#mountVisualizer(visualizer);
 
 		const options: LiveSessionControllerOptions = {
 			session: this.#ctx.session,
 			extractAssistantText: message => this.#ctx.extractAssistantText(message),
-			voice: cfgLiveVoice.get(this.#ctx.settings),
+			voice,
+			instructions: remote?.instructions,
+			sdpOffer: remote?.sdpOffer,
 			callbacks: {
 				onPhase: phase => {
+					notifyRemote(() => remote?.onPhase?.(phase));
 					if (this.#visualizer !== visualizer) return;
 					visualizer.setPhase(phase);
-					this.#ctx.ui.requestComponentRender(visualizer);
 				},
 				onLevels: input => {
 					if (this.#visualizer !== visualizer) return;
-					// Stored only: the ANIMATION_INTERVAL_MS ticker already renders the
-					// visualizer, so a render per mic chunk just hit the 30fps cap.
 					visualizer.setInputLevel(input);
 				},
 				onTranscript: transcript => {
+					if (transcript) notifyRemote(() => remote?.onTranscript?.(transcript));
 					if (this.#visualizer !== visualizer) return;
 					if (!transcript) {
 						visualizer.clearTranscript();
-						this.#ctx.ui.requestComponentRender(visualizer);
 					} else if (transcript.role === "user") {
 						visualizer.setTranscript(transcript.text);
-						this.#ctx.ui.requestComponentRender(visualizer);
 					} else {
 						this.#presentAssistantTranscript(transcript);
 					}
 				},
-				onTerminal: error => this.#finish(session, error),
+				onTerminal: error => {
+					this.#finish(session, error);
+					notifyRemote(() => remote?.onEnd?.(error));
+				},
 			},
 		};
-		const session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
+		let session: LiveSessionController;
+		try {
+			session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
+		} catch (cause) {
+			// No session to finish: put the editor back before the failure propagates.
+			this.#restoreEditor();
+			throw cause;
+		}
 		this.#session = session;
 
 		try {
 			await session.start();
 		} catch (cause) {
+			const error = toError(cause);
 			if (this.#session === session) {
 				await session.stop();
-				this.#finish(session, errorFrom(cause));
+				this.#finish(session, error);
 			}
+			return { error };
 		}
+		return { session };
 	}
 
 	#presentAssistantTranscript(transcript: LiveTranscript): void {
 		if (
 			transcript.turn < this.#assistantTranscriptTurn ||
-			(transcript.turn === this.#assistantTranscriptTurn && !this.#assistantTranscriptComponent)
+			(transcript.turn === this.#assistantTranscriptTurn && !this.#assistantTranscript)
 		) {
 			return;
 		}
@@ -161,13 +207,7 @@ export class LiveCommandController {
 			this.#assistantTranscriptTurn = transcript.turn;
 		}
 
-		let component = this.#assistantTranscriptComponent;
-		if (!component) {
-			component = createAssistantMessageComponent(this.#ctx);
-			component.setTextColorTransform(text => theme.fg("borderAccent", text));
-			this.#assistantTranscriptComponent = component;
-			this.#assistantTranscriptStartedAt = Date.now();
-		}
+		if (!this.#assistantTranscript) this.#assistantTranscriptStartedAt = Date.now();
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: transcript.text }],
@@ -178,56 +218,56 @@ export class LiveCommandController {
 			stopReason: "stop",
 			timestamp: this.#assistantTranscriptStartedAt,
 		};
-		component.updateContent(message, { transient: !transcript.final });
+		// The spoken reply reads in the accent, apart from typed turns.
+		const view = this.#assistantTranscript ?? this.#ctx.presentAssistant(message, { tone: "accent" });
+		this.#assistantTranscript = view;
+		batch(() => {
+			view.message.set(message);
+			view.transient.set(!transcript.final);
+		});
 		if (transcript.final) {
-			component.markTranscriptBlockFinalized();
-			this.#assistantTranscriptComponent = undefined;
+			view.finalized.set(true);
+			this.#assistantTranscript = undefined;
 			this.#assistantTranscriptStartedAt = 0;
-		}
-		if (!this.#ctx.chatContainer.children.includes(component)) {
-			this.#ctx.present(component);
-		} else {
-			this.#ctx.ui.requestComponentRender(component);
 		}
 	}
 
 	#finalizeAssistantTranscript(): void {
-		const component = this.#assistantTranscriptComponent;
-		if (!component) return;
-		component.markTranscriptBlockFinalized();
-		this.#assistantTranscriptComponent = undefined;
+		const view = this.#assistantTranscript;
+		if (!view) return;
+		view.finalized.set(true);
+		this.#assistantTranscript = undefined;
 		this.#assistantTranscriptStartedAt = 0;
-		this.#ctx.ui.requestComponentRender(component);
 	}
 
-	#mountVisualizer(visualizer: LiveVisualizer): void {
+	#mountVisualizer(visualizer: LiveCallModel): void {
 		this.#visualizer = visualizer;
-		this.#detachedEditor = this.#ctx.editor;
-		this.#previousShowHardwareCursor = this.#ctx.ui.getShowHardwareCursor();
-		this.#previousUseTerminalCursor = this.#ctx.editor.getUseTerminalCursor();
-		this.#ctx.ui.setShowHardwareCursor(false);
-		this.#ctx.editor.setUseTerminalCursor(false);
-		this.#ctx.editorContainer.clear();
-		this.#ctx.editorContainer.addChild(visualizer);
-		this.#ctx.ui.setFocus(visualizer);
+		const stopKeys = this.#ctx.keybindings.keysFor("app.live.toggle").map(canonicalKeyId);
+		this.#visualizerHandle = this.#ctx.showEditorAreaDialog(() =>
+			LiveVisualizer({
+				model: visualizer,
+				onStop: () => {
+					void this.stop().catch(cause => this.#ctx.showError(toError(cause).message));
+				},
+				onToggleMute: () => this.#session?.toggleMute(),
+				stopKeys,
+			}),
+		);
 		this.#resumeVocalizer = vocalizer.suspend();
 		let frame = 0;
 		this.#animationInterval = setInterval(() => {
 			if (this.#visualizer !== visualizer) return;
 			frame += 1;
 			visualizer.setFrame(frame);
-			this.#ctx.ui.requestComponentRender(visualizer);
 		}, ANIMATION_INTERVAL_MS);
-		this.#ctx.ui.requestRender();
 	}
-
 	#finish(session: LiveSessionController, error?: Error): void {
 		if (this.#session !== session) return;
 		this.#session = undefined;
 		this.#restoreEditor();
 		if (error) this.#ctx.showError(error.message);
 		const settling = session.stop().catch(cause => {
-			logger.debug("Live session cleanup failed", { error: errorFrom(cause).message });
+			logger.debug("Live session cleanup failed", { error: toError(cause).message });
 		});
 		this.#settling = settling;
 		void settling.finally(() => {
@@ -243,21 +283,9 @@ export class LiveCommandController {
 		}
 		this.#resumeVocalizer?.();
 		this.#resumeVocalizer = undefined;
-		const editor = this.#detachedEditor;
-		this.#detachedEditor = undefined;
 		this.#visualizer = undefined;
-		if (!editor) return;
-		this.#ctx.editorContainer.clear();
-		this.#ctx.editorContainer.addChild(editor);
-		if (this.#previousShowHardwareCursor !== undefined) {
-			this.#ctx.ui.setShowHardwareCursor(this.#previousShowHardwareCursor);
-		}
-		if (this.#previousUseTerminalCursor !== undefined) {
-			editor.setUseTerminalCursor(this.#previousUseTerminalCursor);
-		}
-		this.#previousShowHardwareCursor = undefined;
-		this.#previousUseTerminalCursor = undefined;
-		this.#ctx.ui.setFocus(editor);
-		this.#ctx.ui.requestRender();
+		const handle = this.#visualizerHandle;
+		this.#visualizerHandle = undefined;
+		handle?.close();
 	}
 }

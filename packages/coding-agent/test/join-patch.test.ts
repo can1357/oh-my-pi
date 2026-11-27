@@ -33,6 +33,18 @@ describe("joinPatch", () => {
 	});
 });
 
+describe("parseFileDiffs path parsing", () => {
+	test("keeps edits visible for quoted Unicode filenames", () => {
+		const diff =
+			'diff --git "a/emoji 😀 \\"name\\".txt" "b/emoji 😀 \\"name\\".txt"\n' +
+			'--- "a/emoji 😀 \\"name\\".txt"\n' +
+			'+++ "b/emoji 😀 \\"name\\".txt"\n' +
+			"@@ -1 +1 @@\n-old\n+new\n";
+
+		expect(parseFileDiffs(diff).map(file => file.filename)).toEqual(['emoji 😀 "name".txt']);
+	});
+});
+
 describe("parseFileDiffs + patch.join binary round-trip", () => {
 	// git's `GIT binary patch` block is terminated by a blank line that
 	// `git apply --binary` requires. parseFileDiffs → patch.join must preserve

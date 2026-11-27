@@ -4,9 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool, getEditStore, type PatchParams } from "@oh-my-pi/pi-coding-agent/edit";
-import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { formatHashlineHeader } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditMode } from "@oh-my-pi/pi-coding-agent/tools/details/edit";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const MODEL = "openai/gpt-5.6";
@@ -93,6 +93,22 @@ describe("edit parse-regression blackbox", () => {
 
 		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
 		expect(text).not.toMatch(/no longer parses/);
+	});
+
+	test("does not warn when tree-sitter misreads valid Markdown", async () => {
+		const table = "| case | before | after |\n|---|---|---|\n| a | 1 | 2 |\n";
+		await Bun.write(path.join(tempDir, "notes.md"), table);
+
+		const result = await new EditTool(session, "replace").execute("markdown", {
+			path: "notes.md",
+			old_string: "| a | 1 | 2 |",
+			new_string: "| a | 1 | 2 |\n| b |||",
+		});
+
+		expect(await Bun.file(path.join(tempDir, "notes.md")).text()).toBe(`${table}| b |||\n`);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		expect(text).not.toMatch(/no longer parses/);
+		expect(await Bun.file(logPath).exists()).toBe(false);
 	});
 
 	test("appends valid-to-invalid transitions from every edit variant", async () => {

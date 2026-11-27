@@ -22,6 +22,8 @@ import { classifyProviderHttpError, withHardTimeout } from "./utils";
  * stay low regardless of the selected model's configured thinking level.
  */
 export const XAI_SEARCH_REASONING_EFFORT = "low";
+/** Hosted search turns per request: one tool round plus a follow-up when a call misfires. */
+export const XAI_SEARCH_MAX_TURNS = 2;
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
 /** Messages at least this long are treated as substantive content, not relay narration. */
@@ -234,6 +236,12 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 			{ role: "user", content: query },
 		],
 		tools: searchTools(parsed, params.recency),
+		// Every request here is a search. Under the default `auto`, Grok often
+		// answers keyword queries from its weights without calling a hosted tool;
+		// that answer has no sources, so the pipeline discards it and falls back
+		// to engines that cannot read X posts.
+		tool_choice: "required",
+		max_turns: XAI_SEARCH_MAX_TURNS,
 		reasoning: { effort: XAI_SEARCH_REASONING_EFFORT },
 	};
 
@@ -248,7 +256,7 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 }
 
 /** Credentialed request context for one xAI Responses call. */
-export type XAIRequest = Pick<
+type XAIRequest = Pick<
 	SearchParams,
 	"model" | "modelRegistry" | "authStorage" | "sessionId" | "signal" | "timeoutMs" | "fetch"
 >;
@@ -519,14 +527,13 @@ function parseResponse(
 
 /**
  * POST one Responses request with `request.model`'s provider credentials,
- * resolved through the model registry. Shared by xAI search and the X reader
- * (`web/scrapers/twitter.ts`).
+ * resolved through the model registry.
  *
  * @throws SearchProviderError when the model is not an xAI model, when official
  * xAI OAuth credentials would reach a custom endpoint, on HTTP errors, and on
  * invalid JSON.
  */
-export async function requestXAIResponses(
+async function requestXAIResponses(
 	request: XAIRequest,
 	body: Record<string, unknown>,
 ): Promise<{ response: XAIResponsesResponse; authMode: "api_key" | "oauth" }> {

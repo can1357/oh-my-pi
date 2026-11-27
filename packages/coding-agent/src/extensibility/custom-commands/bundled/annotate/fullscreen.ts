@@ -1,27 +1,30 @@
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { TUI } from "@oh-my-pi/pi-tui";
-import { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
+import { jsx, nativeRendering } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { KeybindingsManager } from "../../../../config/keybindings/keybindings";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
+import type { ExtensionUiHost } from "../../../../extensibility/extensions/render-types";
+import { AnnotationReview, annotationReviewSheet } from "../../../../ui/overlays/panels/annotation-review";
+import { sheetView } from "../../../../ui/overlays/sheet";
+import {
+	type AnnotationReviewCallbacks,
+	type AnnotationReviewInput,
+	AnnotationReviewModel,
+	type AnnotationReviewOptions,
+} from "../../../../ui/overlays/panels/annotation-review-model";
+import { getEditorCommand, openEditorOnPath, openInEditor } from "../../../../utils/external-editor";
+import type { ResolvedReviewTarget } from "../review/target";
 import type {
 	CodeReviewOverlayResult,
 	TextReviewOverlayResult,
 	TextReviewSource,
 	TextReviewSourceProvenance,
-} from "@oh-my-pi/pi-tui/overlays/annotation-types";
-import type { ResolvedReviewTarget } from "../review/target";
-import { getEditorCommand, openEditorOnPath, openInEditor } from "../../../../utils/external-editor";
+} from "./annotation-types";
+import { type AnnotationDraft, type OpenAnnotationDraft, openAnnotationDraft } from "./draft-store";
 
 /** What the overlay host reads: the UI surface plus the live session cwd for editor paths. */
 export type AnnotationOverlayContext = Pick<CustomCommandContext, "ui" | "cwd" | "sessionManager">;
-
-const ANNOTATION_OVERLAY_OPTIONS = {
-	width: "100%",
-	maxHeight: "100%",
-	margin: 0,
-	fullscreen: true,
-	mouseTracking: false,
-} as const;
 
 const MISSING_EDITOR = "Set $VISUAL or $EDITOR to edit in an external editor.";
 
@@ -31,15 +34,13 @@ function requireEditor(): string {
 	return editor;
 }
 
-async function editAnnotationDraft(tui: TUI, draft: string, commit: (text: string | null) => void): Promise<void> {
+async function editAnnotationDraft(
+	ui: ExtensionUiHost,
+	draft: string,
+	commit: (text: string | null) => void,
+): Promise<void> {
 	const editor = requireEditor();
-	tui.stop();
-	try {
-		commit(await openInEditor(editor, draft, { extension: ".md" }));
-	} finally {
-		tui.start();
-		tui.requestRender(true);
-	}
+	commit(await ui.suspend(() => openInEditor(editor, draft, { extension: ".md" })));
 }
 
 /**
@@ -50,30 +51,26 @@ async function editAnnotationDraft(tui: TUI, draft: string, commit: (text: strin
 type EditableProvenance = Extract<TextReviewSourceProvenance, { kind: "file" } | { kind: "prompt" }>;
 
 async function editTextSource(
-	tui: TUI,
+	ui: ExtensionUiHost,
 	ctx: AnnotationOverlayContext,
-	overlay: AnnotationOverlay,
+	review: AnnotationReviewModel,
 	provenance: EditableProvenance,
 ): Promise<void> {
 	const editor = requireEditor();
-	const current = overlay.textSourceText() ?? "";
-	tui.stop();
-	let next: string | null;
-	let exitCode = 0;
-	try {
+	const current = review.textSourceText() ?? "";
+	const { next, exitCode } = await ui.suspend(async () => {
 		if (provenance.kind === "file") {
-			exitCode = await openEditorOnPath(editor, provenance.path);
-			next = await Bun.file(provenance.path).text();
-		} else {
-			next = await openInEditor(editor, current, { extension: ".txt", trimTrailingNewline: false });
+			const exitCode = await openEditorOnPath(editor, provenance.path);
+			return { next: await Bun.file(provenance.path).text(), exitCode };
 		}
-	} finally {
-		tui.start();
-		tui.requestRender(true);
-	}
+		return {
+			next: await openInEditor(editor, current, { extension: ".txt", trimTrailingNewline: false }),
+			exitCode: 0,
+		};
+	});
 	if (exitCode !== 0) ctx.ui.notify(`Editor exited with code ${exitCode}; using what it saved.`, "warning");
 	if (next === null || next === current) return;
-	const dropped = overlay.replaceTextSource(next);
+	const dropped = review.replaceTextSource(next);
 	if (dropped > 0) {
 		ctx.ui.notify(
 			dropped === 1
@@ -84,75 +81,120 @@ async function editTextSource(
 	}
 }
 
-async function editReviewedFile(tui: TUI, ctx: AnnotationOverlayContext, overlay: AnnotationOverlay): Promise<void> {
-	const relative = overlay.reviewFilePath();
+async function editReviewedFile(
+	ui: ExtensionUiHost,
+	ctx: AnnotationOverlayContext,
+	review: AnnotationReviewModel,
+	repository: string | undefined,
+): Promise<void> {
+	const relative = review.reviewFilePath();
 	if (!relative) throw new Error("No file to open.");
 	const editor = requireEditor();
 	// Diff paths are repository-relative and exact, so resolve them from the repo root, not the session cwd.
 	const cwd = ctx.sessionManager.getCwd?.() ?? ctx.cwd;
-	const absolute = path.resolve(vcs.repo(cwd)?.root() ?? cwd, relative);
+	const absolute = path.resolve(repository ?? vcs.repo(cwd)?.root() ?? cwd, relative);
 	if (!(await Bun.file(absolute).exists())) {
 		throw new Error(`${relative} is not on disk. The review still uses the frozen diff.`);
 	}
-	tui.stop();
-	let exitCode: number;
-	try {
-		exitCode = await openEditorOnPath(editor, absolute);
-	} finally {
-		tui.start();
-		tui.requestRender(true);
-	}
+	const exitCode = await ui.suspend(() => openEditorOnPath(editor, absolute));
 	if (exitCode !== 0) ctx.ui.notify(`Editor exited with code ${exitCode}.`, "warning");
 	ctx.ui.notify(`Opened ${relative}. The review still uses the frozen diff.`, "info");
 }
 
-/** Mount the frozen diff in the TUI overlay surface owned by the command host. */
-export function showCodeReviewOverlay(
-	ctx: AnnotationOverlayContext,
-	target: ResolvedReviewTarget,
-): Promise<CodeReviewOverlayResult | undefined> {
-	return ctx.ui.custom<CodeReviewOverlayResult | undefined>(
-		(tui, theme, keybindings, done) => {
-			const overlay: AnnotationOverlay = new AnnotationOverlay(
-				tui,
-				theme,
-				keybindings,
-				target.snapshot.files,
-				target.mode,
-				{
-					onComplete: done,
-					onWarning: message => ctx.ui.notify(message, "warning"),
-					onAnnotationExternalEditor: (draft, commit) => editAnnotationDraft(tui, draft, commit),
-					// PR and caller-supplied diffs need not match the local checkout, so only local reviews open the working-tree file.
-					onExternalEditor:
-						target.kind === "pr" || target.kind === "patch"
-							? undefined
-							: () => editReviewedFile(tui, ctx, overlay),
-				},
-			);
-			return overlay;
-		},
-		{ overlay: true, overlayOptions: ANNOTATION_OVERLAY_OPTIONS },
-	);
+/** The review's close and external-editor keys from the host keymap. */
+function reviewKeys(keybindings: KeybindingsManager): AnnotationReviewOptions {
+	return {
+		cancelKey: keybindings.keysFor("tui.select.cancel")[0],
+		externalEditorKey: keybindings.keysFor("app.editor.external")[0],
+	};
 }
 
-/** Mount a frozen text source in the same annotation overlay UX. */
-export function showTextReviewOverlay(
+/**
+ * Show the annotation review fullscreen until it completes, resuming `draft`'s saved notes.
+ * `callbacks` builds the review's host callbacks once the model exists.
+ */
+async function showAnnotationReview<T>(
+	ctx: AnnotationOverlayContext,
+	input: AnnotationReviewInput,
+	draft: OpenAnnotationDraft,
+	callbacks: (
+		ui: ExtensionUiHost,
+		review: () => AnnotationReviewModel,
+	) => Omit<AnnotationReviewCallbacks, "onComplete">,
+): Promise<T | undefined> {
+	let review: AnnotationReviewModel | undefined;
+	try {
+		return await ctx.ui.custom<T | undefined>(
+			(ui, _theme, keybindings, done) => {
+				review = new AnnotationReviewModel(
+					input,
+					{
+						...callbacks(ui, () => review!),
+						onComplete: result => done(result as T | undefined),
+						onWarning: message => ctx.ui.notify(message, "warning"),
+					},
+					{ theme: currentTheme, size: () => ui.size() },
+					reviewKeys(keybindings),
+				);
+				draft.restore(review);
+				return sheetView(
+					nativeRendering(),
+					annotationReviewSheet(review),
+					jsx(AnnotationReview, { model: review }),
+				);
+			},
+			{ overlay: true, fullscreen: true },
+		);
+	} finally {
+		review?.dispose();
+	}
+}
+
+/** Mount the frozen diff in the review overlay owned by the command host, resuming its saved draft. */
+export async function showCodeReviewOverlay(
+	ctx: AnnotationOverlayContext,
+	target: ResolvedReviewTarget,
+	focus?: string,
+	resumed?: AnnotationDraft,
+): Promise<CodeReviewOverlayResult | undefined> {
+	const draft = await openAnnotationDraft(ctx.sessionManager, { kind: "diff", target, focus }, resumed);
+	if (draft.restored && !resumed) ctx.ui.notify("Restored the saved annotation draft.", "info");
+	const result = await showAnnotationReview<CodeReviewOverlayResult>(
+		ctx,
+		{ kind: "diff", files: target.snapshot.files, mode: target.mode },
+		draft,
+		(ui, review) => ({
+			onAnnotationExternalEditor: (text, commit) => editAnnotationDraft(ui, text, commit),
+			// PR and caller-supplied diffs need not match the local checkout, so only local reviews open the working-tree file.
+			onExternalEditor:
+				target.kind === "pr" || target.kind === "patch"
+					? undefined
+					: () => editReviewedFile(ui, ctx, review(), target.repository),
+		}),
+	);
+	await draft.close(result).catch(error => ctx.ui.notify(`Could not save the annotation draft: ${error}`, "warning"));
+	return result;
+}
+
+/** Mount a frozen text source in the same annotation review, resuming its saved draft. */
+export async function showTextReviewOverlay(
 	ctx: AnnotationOverlayContext,
 	source: TextReviewSource,
+	resumed?: AnnotationDraft,
 ): Promise<TextReviewOverlayResult | undefined> {
-	return ctx.ui.custom<TextReviewOverlayResult | undefined>(
-		(tui, theme, keybindings, done) => {
-			const provenance = source.provenance;
-			const editable = provenance?.kind === "file" || provenance?.kind === "prompt" ? provenance : undefined;
-			const overlay: AnnotationOverlay = new AnnotationOverlay(tui, theme, keybindings, source, {
-				onComplete: done,
-				onWarning: message => ctx.ui.notify(message, "warning"),
-				onAnnotationExternalEditor: (draft, commit) => editAnnotationDraft(tui, draft, commit),
-				onExternalEditor: editable ? () => editTextSource(tui, ctx, overlay, editable) : undefined,
-			});
-			return overlay;
-		},
-		{ overlay: true, overlayOptions: ANNOTATION_OVERLAY_OPTIONS },
+	const draft = await openAnnotationDraft(ctx.sessionManager, { kind: "text", source }, resumed);
+	if (draft.restored && !resumed) ctx.ui.notify("Restored the saved annotation draft.", "info");
+	const provenance = source.provenance;
+	const editable = provenance?.kind === "file" || provenance?.kind === "prompt" ? provenance : undefined;
+	const result = await showAnnotationReview<TextReviewOverlayResult>(
+		ctx,
+		{ kind: "text", source },
+		draft,
+		(ui, review) => ({
+			onAnnotationExternalEditor: (text, commit) => editAnnotationDraft(ui, text, commit),
+			onExternalEditor: editable ? () => editTextSource(ui, ctx, review(), editable) : undefined,
+		}),
 	);
+	await draft.close(result).catch(error => ctx.ui.notify(`Could not save the annotation draft: ${error}`, "warning"));
+	return result;
 }

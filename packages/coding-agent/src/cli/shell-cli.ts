@@ -1,7 +1,7 @@
 /**
  * Shell CLI command handlers.
  *
- * Handles `omp shell` subcommand for testing the native brush-core shell.
+ * Handles `omp shell` subcommand for testing the native embedded bash engine.
  */
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -17,30 +17,6 @@ export interface ShellCommandArgs {
 	cwd?: string;
 	timeoutMs?: number;
 	noSnapshot?: boolean;
-}
-
-export function parseShellArgs(args: string[]): ShellCommandArgs | undefined {
-	if (args.length === 0 || args[0] !== "shell") {
-		return undefined;
-	}
-
-	const result: ShellCommandArgs = {};
-
-	for (let i = 1; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === "--cwd" || arg === "-C") {
-			result.cwd = args[++i];
-		} else if (arg === "--timeout" || arg === "-t") {
-			const parsed = Number.parseInt(args[++i], 10);
-			if (Number.isFinite(parsed)) {
-				result.timeoutMs = parsed;
-			}
-		} else if (arg === "--no-snapshot") {
-			result.noSnapshot = true;
-		}
-	}
-
-	return result;
 }
 
 export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
@@ -79,7 +55,7 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 
 ` +
 				`${chalk.bold("Notes:")}
-  Runs in a persistent brush-core shell session.
+  Runs in a persistent embedded bash session.
   Variables and functions defined in one command persist for the next.
 
 `,
@@ -155,23 +131,4 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 		process.off("SIGINT", interruptHandler);
 		rl.close();
 	}
-}
-
-export function printShellHelp(): void {
-	process.stdout.write(`${chalk.bold(`${APP_NAME} shell`)} - Interactive shell console for testing
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} shell [options]
-
-${chalk.bold("Options:")}
-  --cwd, -C <path>     Set working directory for commands
-  --timeout, -t <ms>   Timeout per command in milliseconds
-  --no-snapshot        Skip sourcing snapshot from user shell
-  -h, --help           Show this help
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} shell
-  ${APP_NAME} shell --cwd ./tmp
-  ${APP_NAME} shell --timeout 2000
-`);
 }

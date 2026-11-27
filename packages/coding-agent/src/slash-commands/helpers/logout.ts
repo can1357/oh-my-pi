@@ -1,8 +1,8 @@
 import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
-import type { ModelRegistry } from "../../config/model-registry";
+import type { AgentSession } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
+import type { LogoutAccount } from "../../modes/view-model/overlays/logout-account-selector";
 
 interface LogoutAccountOptions {
 	activeIdentity?: OAuthAccountIdentity;
@@ -69,7 +69,7 @@ function oauthMatchesActiveIdentity(
 		}
 	}
 	// When both sides carry an email it decides: Codex Team seats share an
-	// account id and Antigravity accounts share one Google project.
+	// account id.
 	if (activeIdentity.email !== undefined && credential.email !== undefined) {
 		return credential.email === activeIdentity.email;
 	}
@@ -121,26 +121,35 @@ export async function listLogoutAccounts(
 }
 
 /**
- * Removes one stored credential and refreshes the provider's models.
- * `removed: false` means the credential was already gone; `remainingSource`
- * names the auth source that still authenticates the provider, if any.
+ * Removes one stored credential (its provider forgets the account's secrets on
+ * this machine and revokes its grant upstream) and refreshes the provider's
+ * models. `removed: false` means the credential was already gone;
+ * `remainingSource` names the auth source that still authenticates the
+ * provider, if any; `signOutError` says why the provider's sign-out failed
+ * (the credential is removed regardless).
  */
 export async function logoutCredential(
-	modelRegistry: ModelRegistry,
+	session: Pick<AgentSession, "modelRegistry" | "sessionId" | "refreshScopedModels">,
 	loginProvider: string,
 	credentialId: number,
-	sessionId: string,
-): Promise<{ removed: boolean; remainingSource?: string }> {
+): Promise<{ removed: boolean; remainingSource?: string; signOutError?: string }> {
 	const provider = getOAuthCredentialProvider(loginProvider);
+	const modelRegistry = session.modelRegistry;
 	const authStorage = modelRegistry.authStorage;
 	// Reload so an id stored by another process is found, not reported missing.
 	await authStorage.credentials.reload();
-	if (!(await authStorage.credentials.removeById(provider, credentialId))) return { removed: false };
+	const { removed, signOutError } = await authStorage.oauth.signOut(provider, credentialId);
+	if (!removed) return { removed: false };
 	// Provider-scoped online refresh so the removed credential's stale
 	// endpoint/deployment models are invalidated deterministically; the
 	// default all-provider `online-if-uncached` would reuse the fresh
 	// authoritative cache row and keep showing models the credential
 	// unlocked (#5780). Other providers are left untouched.
 	await modelRegistry.refreshProvider(provider, "online");
-	return { removed: true, remainingSource: authStorage.keys.describe(provider, sessionId) };
+	await session.refreshScopedModels();
+	return {
+		removed: true,
+		remainingSource: authStorage.keys.describe(provider, session.sessionId),
+		...(signOutError === undefined ? {} : { signOutError }),
+	};
 }

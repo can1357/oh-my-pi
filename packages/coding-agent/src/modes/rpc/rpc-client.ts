@@ -8,17 +8,20 @@ import { isPromise } from "node:util/types";
 import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { isRecord, ptree, readJsonl, toError } from "@oh-my-pi/pi-utils";
+import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
+import type { TodoPhase } from "../../tools/details/todo";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
-import type { BtwHistoryRecord } from "../../session/btw-history";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
+import type { WireSessionEvent } from "../../session/loop-end-wire";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
+import type { SessionLeaseReport } from "../../session/session-storage";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
+import type { RpcModelPickerResult } from "./rpc-model-picker";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
 	RPC_MESSAGES_PAGE_STALE_ERROR,
@@ -29,9 +32,11 @@ import type {
 	RpcAbortAndRestoreQueueResult,
 	RpcAvailableCommandsUpdateFrame,
 	RpcBtwDeltaFrame,
+	RpcBtwHistoryRecord,
 	RpcBtwRecordFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
+	RpcDictationFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHandoffResult,
@@ -41,6 +46,7 @@ import type {
 	RpcHostToolResult,
 	RpcHostToolUpdate,
 	RpcLiveFrame,
+	RpcNavigateTreeResult,
 	RpcOpenSessionResult,
 	RpcPromptResultFrame,
 	RpcRemoveQueuedMessageResult,
@@ -116,6 +122,7 @@ export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCom
 export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
 export type RpcLiveListener = (frame: RpcLiveFrame) => void;
+export type RpcDictationListener = (frame: RpcDictationFrame) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -143,40 +150,47 @@ export function defineRpcClientTool<
 	return tool;
 }
 
-const agentEventTypes = new Set<AgentEvent["type"]>([
-	"agent_start",
-	"agent_end",
-	"turn_start",
-	"turn_end",
-	"message_start",
-	"message_update",
-	"message_end",
-	"tool_execution_start",
-	"tool_execution_update",
-	"tool_stream_update",
-	"tool_execution_end",
-]);
+// Exhaustively keyed on the event-type unions so adding a session event without
+// listing it here fails type-checking instead of silently dropping the frame.
+const agentEventTypes: Record<AgentEvent["type"], true> = {
+	agent_start: true,
+	agent_end: true,
+	turn_start: true,
+	turn_end: true,
+	message_start: true,
+	message_update: true,
+	message_end: true,
+	tool_execution_start: true,
+	tool_execution_update: true,
+	tool_stream_update: true,
+	tool_execution_end: true,
+};
 
-const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
+const sessionEventTypes: Record<WireSessionEvent["type"], true> = {
 	...agentEventTypes,
-	"auto_compaction_start",
-	"auto_compaction_end",
-	"auto_retry_start",
-	"auto_retry_end",
-	"cache_warming_start",
-	"cache_warming_end",
-	"retry_fallback_applied",
-	"retry_fallback_succeeded",
-	"ttsr_triggered",
-	"todo_reminder",
-	"todo_auto_clear",
-	"irc_message",
-	"notice",
-	"thinking_level_changed",
-	"model_changed",
-	"goal_updated",
-	"queue_update",
-]);
+	auto_compaction_start: true,
+	auto_compaction_end: true,
+	manual_compaction_start: true,
+	manual_compaction_end: true,
+	auto_retry_start: true,
+	auto_retry_end: true,
+	cache_warming_start: true,
+	cache_warming_end: true,
+	retry_fallback_applied: true,
+	retry_fallback_succeeded: true,
+	model_changed: true,
+	config_warnings_changed: true,
+	advisor_cost_changed: true,
+	advisor_yielded: true,
+	ttsr_triggered: true,
+	todo_reminder: true,
+	todo_auto_clear: true,
+	irc_message: true,
+	notice: true,
+	thinking_level_changed: true,
+	goal_updated: true,
+	queue_update: true,
+};
 
 function isRpcResponse(value: unknown): value is RpcResponse {
 	if (!isRecord(value)) return false;
@@ -204,14 +218,14 @@ function isAgentEvent(value: unknown): value is AgentEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return agentEventTypes.has(type as AgentEvent["type"]);
+	return Object.hasOwn(agentEventTypes, type);
 }
 
 function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return sessionEventTypes.has(type as AgentSessionEvent["type"]);
+	return Object.hasOwn(sessionEventTypes, type);
 }
 
 function isRpcSubagentLifecycleFrame(value: unknown): value is RpcSubagentLifecycleFrame {
@@ -247,6 +261,16 @@ const LIVE_FRAME_TYPES: Record<string, true> = {
 
 function isRpcLiveFrame(value: unknown): value is RpcLiveFrame {
 	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(LIVE_FRAME_TYPES, value.type);
+}
+
+const DICTATION_FRAME_TYPES: Record<string, true> = {
+	dictation_state: true,
+	dictation_transcript: true,
+	dictation_end: true,
+};
+
+function isRpcDictationFrame(value: unknown): value is RpcDictationFrame {
+	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(DICTATION_FRAME_TYPES, value.type);
 }
 
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
@@ -331,10 +355,11 @@ export class RpcClient {
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#btwDeltaListeners = new Set<(frame: RpcBtwDeltaFrame) => void>();
-	#btwRecordListeners = new Set<(record: BtwHistoryRecord) => void>();
+	#btwRecordListeners = new Set<(record: RpcBtwHistoryRecord) => void>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	#liveListeners = new Set<RpcLiveListener>();
+	#dictationListeners = new Set<RpcDictationListener>();
 	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
 	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
 	/** Same-id failures that arrive after the success ack removed the pending request. */
@@ -345,6 +370,7 @@ export class RpcClient {
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
+	#supportsBashExcludeFromContext = false;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#abortController = new AbortController();
 
@@ -370,6 +396,7 @@ export class RpcClient {
 		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
 		this.#protocolVersion = 1;
+		this.#supportsBashExcludeFromContext = false;
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
@@ -412,6 +439,7 @@ export class RpcClient {
 
 			this.#process = null;
 			this.#abortController.abort(error);
+			this.#rejectPromptWaiters(error);
 			const pendingRequests = Array.from(this.#pendingRequests.values());
 			this.#pendingRequests.clear();
 			for (const pendingCall of this.#pendingHostToolCalls.values()) pendingCall.controller.abort(error);
@@ -432,6 +460,7 @@ export class RpcClient {
 			for await (const line of lines) {
 				if (!readySettled && isRecord(line) && line.type === "ready") {
 					protocolV2Supported = supportsRpcProtocolV2(line);
+					this.#supportsBashExcludeFromContext = line.supportsBashExcludeFromContext === true;
 					readySettled = true;
 					readyResolve();
 					continue;
@@ -473,7 +502,7 @@ export class RpcClient {
 							});
 			await reapAfterOutputFailure(error);
 		})().catch(async (cause: unknown) => {
-			const error = cause instanceof Error ? cause : new Error(String(cause));
+			const error = toError(cause);
 			if (!readySettled) {
 				readySettled = true;
 				readyReject(error);
@@ -525,7 +554,7 @@ export class RpcClient {
 		} catch (cause) {
 			// Startup failed after spawning the child. Reap it before returning
 			// so a retry cannot inherit a live worker or its session lock.
-			const error = cause instanceof Error ? cause : new Error(String(cause));
+			const error = toError(cause);
 			await reapAfterOutputFailure(error);
 			throw cause;
 		} finally {
@@ -548,6 +577,7 @@ export class RpcClient {
 		}
 		this.#abortController.abort(error);
 		this.#process = null;
+		this.#rejectPromptWaiters(error);
 		for (const request of this.#pendingRequests.values()) request.reject(error);
 		this.#pendingRequests.clear();
 		for (const pendingCall of this.#pendingHostToolCalls.values()) {
@@ -555,6 +585,16 @@ export class RpcClient {
 		}
 		this.#pendingHostToolCalls.clear();
 		return this.#waitForExit(child);
+	}
+
+	/** Fail prompts that were acknowledged but whose `prompt_result` can no longer arrive. */
+	#rejectPromptWaiters(error: Error): void {
+		for (const [id, reject] of this.#promptErrorWaiters) {
+			// Still-unacknowledged prompts fail through their pending request instead.
+			if (!this.#pendingRequests.has(id)) reject(error);
+		}
+		this.#promptErrorWaiters.clear();
+		this.#promptResultWaiters.clear();
 	}
 
 	/**
@@ -641,7 +681,7 @@ export class RpcClient {
 	}
 
 	/** Subscribe to `btw_record` frames: a side question's full record on every lifecycle change. */
-	onBtwRecord(listener: (record: BtwHistoryRecord) => void): () => void {
+	onBtwRecord(listener: (record: RpcBtwHistoryRecord) => void): () => void {
 		this.#btwRecordListeners.add(listener);
 		return () => this.#btwRecordListeners.delete(listener);
 	}
@@ -670,6 +710,14 @@ export class RpcClient {
 		this.#liveListeners.add(listener);
 		return () => {
 			this.#liveListeners.delete(listener);
+		};
+	}
+
+	/** Subscribe to draft-only dictation state, full preview, and terminal frames. */
+	onDictation(listener: RpcDictationListener): () => void {
+		this.#dictationListeners.add(listener);
+		return () => {
+			this.#dictationListeners.delete(listener);
 		};
 	}
 
@@ -747,6 +795,24 @@ export class RpcClient {
 	 */
 	async abortAndPrompt(message: string, images?: ImageContent[]): Promise<void> {
 		await this.#send({ type: "abort_and_prompt", message, images });
+	}
+
+	/**
+	 * Abort the current run and continue it with the queued input (the TUI's empty Enter).
+	 * Returns false, doing nothing, when no run was streaming with queued input.
+	 */
+	async abortAndDeliverQueue(): Promise<boolean> {
+		const response = await this.#send({ type: "abort_and_deliver_queue" });
+		return this.#getData<{ aborted: boolean }>(response).aborted;
+	}
+
+	/**
+	 * Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first.
+	 * Rejects when there is no conversation to continue.
+	 */
+	async resume(): Promise<void> {
+		const response = await this.#send({ type: "resume" });
+		this.#getData(response);
 	}
 
 	/**
@@ -854,6 +920,25 @@ export class RpcClient {
 		return this.#getData(response);
 	}
 
+	/**
+	 * Start a GPT live voice session whose audio runs on the caller's own WebRTC peer
+	 * (one Opus audio track plus an `oai-events` data channel). Send the peer's SDP offer and
+	 * apply the returned answer; omp keeps signaling, delegation and transcripts, and opens
+	 * no host microphone or speaker. Frames arrive through {@link onLive}; `live_levels` are not sent.
+	 */
+	async liveConnect(
+		sdpOffer: string,
+		options?: { voice?: string; instructions?: string },
+	): Promise<{ voice: string; sdpAnswer: string }> {
+		const response = await this.#send({
+			type: "live_connect",
+			sdpOffer,
+			voice: options?.voice,
+			instructions: options?.instructions,
+		});
+		return this.#getData(response);
+	}
+
 	/** Stop the live voice session, if any; resolves once it has stopped. */
 	async liveStop(): Promise<void> {
 		const response = await this.#send({ type: "live_stop" });
@@ -863,6 +948,26 @@ export class RpcClient {
 	/** Set microphone mute, or toggle it when `muted` is omitted. Fails without an active session. */
 	async liveMute(muted?: boolean): Promise<{ muted: boolean }> {
 		const response = await this.#send({ type: "live_mute", muted });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Start draft-only dictation; resolves once recording, with frames delivered to onDictation.
+	 * The deadline defaults to 10 minutes for cold model initialization. A timeout does not
+	 * cancel the server operation; call dictationStop() to stop a pending or active capture.
+	 */
+	async dictationStart(captureId: string, timeoutMs = 600_000): Promise<void> {
+		const response = await this.#send({ type: "dictation_start", captureId }, timeoutMs);
+		this.#getData(response);
+	}
+
+	/**
+	 * Stop and flush dictation, returning the accumulated draft. The deadline defaults to
+	 * 10 minutes for transcription; a timeout does not cancel the server operation, and
+	 * its terminal transcript can still be received via onDictation().
+	 */
+	async dictationStop(timeoutMs = 600_000): Promise<{ text: string }> {
+		const response = await this.#send({ type: "dictation_stop" }, timeoutMs);
 		return this.#getData(response);
 	}
 
@@ -950,6 +1055,14 @@ export class RpcClient {
 	}
 
 	/**
+	 * Model picker rows as omp's session picker orders them; a query starting with `@` lists quick roles.
+	 */
+	async getModelPicker(query?: string, limit?: number): Promise<RpcModelPickerResult> {
+		const response = await this.#send({ type: "get_model_picker", query, limit });
+		return this.#getData<RpcModelPickerResult>(response);
+	}
+
+	/**
 	 * Get list of available slash commands.
 	 */
 	async getAvailableCommands(): Promise<RpcAvailableSlashCommand[]> {
@@ -987,7 +1100,7 @@ export class RpcClient {
 	/**
 	 * Set thinking level.
 	 */
-	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
+	async setThinkingLevel(level: ConfiguredThinkingLevel): Promise<void> {
 		await this.#send({ type: "set_thinking_level", level });
 	}
 
@@ -1049,10 +1162,14 @@ export class RpcClient {
 	}
 
 	/**
-	 * Execute a bash command.
+	 * Execute a bash command, optionally keeping its output out of model context.
+	 * Excluded commands require an explicitly advertised runtime capability.
 	 */
-	async bash(command: string): Promise<BashResult> {
-		const response = await this.#send({ type: "bash", command });
+	async bash(command: string, options?: { excludeFromContext?: boolean }): Promise<BashResult> {
+		if (options?.excludeFromContext === true && !this.#supportsBashExcludeFromContext) {
+			throw new Error("RPC runtime does not support bash context exclusion");
+		}
+		const response = await this.#send({ type: "bash", command, excludeFromContext: options?.excludeFromContext });
 		return this.#getData(response);
 	}
 
@@ -1072,12 +1189,21 @@ export class RpcClient {
 	}
 
 	/**
+	 * Which of `sessionIds` a running process (this one included) owns, probed
+	 * without taking ownership. Ids in neither list are free.
+	 */
+	async getSessionLease(sessionIds: string[]): Promise<SessionLeaseReport> {
+		const response = await this.#send({ type: "get_session_lease", sessionIds });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Ask a side question (`/btw`), or a follow-up in topic `recordId`. Resolves with the
 	 * running record; the answer streams via {@link onBtwDelta} and {@link onBtwRecord}.
 	 */
-	async btw(question: string, recordId?: string): Promise<BtwHistoryRecord> {
+	async btw(question: string, recordId?: string): Promise<RpcBtwHistoryRecord> {
 		const response = await this.#send({ type: "btw", question, ...(recordId === undefined ? {} : { recordId }) });
-		return this.#getData<{ record: BtwHistoryRecord }>(response).record;
+		return this.#getData<{ record: RpcBtwHistoryRecord }>(response).record;
 	}
 
 	/** Cancel the running side question (only if it is `recordId`, when given). */
@@ -1087,9 +1213,9 @@ export class RpcClient {
 	}
 
 	/** This session's side questions, newest first. */
-	async getBtwHistory(): Promise<readonly BtwHistoryRecord[]> {
+	async getBtwHistory(): Promise<readonly RpcBtwHistoryRecord[]> {
 		const response = await this.#send({ type: "get_btw_history" });
-		return this.#getData<{ records: readonly BtwHistoryRecord[] }>(response).records;
+		return this.#getData<{ records: readonly RpcBtwHistoryRecord[] }>(response).records;
 	}
 
 	/**
@@ -1146,6 +1272,25 @@ export class RpcClient {
 	async fork(entryId?: string): Promise<{ cancelled: boolean }> {
 		const response = await this.#send({ type: "fork", entryId });
 		return this.#getData(response);
+	}
+
+	/** Move the leaf to `entryId` in the same session file, optionally summarizing the branch it leaves. */
+	async navigateTree(
+		entryId: string,
+		options: { summarize?: boolean; customInstructions?: string } = {},
+	): Promise<RpcNavigateTreeResult> {
+		// A branch summary is a model call; it ends early only through `abortBranchSummary`.
+		return this.#getData(await this.#send({ type: "navigate_tree", entryId, ...options }, 600_000));
+	}
+
+	/** Stop a running `navigateTree` summary; that navigation resolves `{ cancelled: true, aborted: true }`. */
+	async abortBranchSummary(): Promise<void> {
+		this.#getData(await this.#send({ type: "abort_branch_summary" }));
+	}
+
+	/** Set an entry's label, or clear it with `undefined`. */
+	async setLabel(entryId: string, label: string | undefined): Promise<void> {
+		this.#getData(await this.#send({ type: "set_label", entryId, label }));
 	}
 
 	/**
@@ -1264,7 +1409,10 @@ export class RpcClient {
 							onOpenUrl?.(req.url, req.instructions, req.launchUrl);
 							return;
 						}
-						if (req.method !== "input" || !onManualCodeInput) return;
+						// Provider login rejects secret prompts on the server, so any `secret: true`
+						// input frame is an unrelated concurrent extension dialog and must not be
+						// intercepted as unmasked OAuth code input.
+						if (req.method !== "input" || req.secret || !onManualCodeInput) return;
 						// The prompt can outlive the agent (e.g. a broken stdin pipe stops the client); drop the reply
 						// instead of throwing "Client not started" out of a detached promise chain.
 						void Promise.resolve(onManualCodeInput({ title: req.title, placeholder: req.placeholder })).then(
@@ -1295,8 +1443,9 @@ export class RpcClient {
 	}
 
 	/**
-	 * Remove one stored credential. Rejects when it is no longer stored.
-	 * `remainingSource` names what still authenticates the provider (another stored credential, env var, config).
+	 * Remove one stored credential, revoking it at the provider when one supports it. Rejects when it is no
+	 * longer stored. `remainingSource` names what still authenticates the provider (another stored credential,
+	 * env var, config).
 	 */
 	async logout(providerId: string, credentialId: number): Promise<{ remainingSource?: string }> {
 		const response = await this.#send({ type: "logout", providerId, credentialId });
@@ -1506,6 +1655,13 @@ export class RpcClient {
 			return;
 		}
 
+		if (isRpcDictationFrame(data)) {
+			for (const listener of this.#dictationListeners) {
+				listener(data);
+			}
+			return;
+		}
+
 		if (isRpcSessionSettledFrame(data)) {
 			for (const listener of this.#sessionSettledListeners) {
 				listener();
@@ -1594,7 +1750,7 @@ export class RpcClient {
 		try {
 			this.#writeFrame(fullCommand, fail);
 		} catch (err) {
-			fail(err instanceof Error ? err : new Error(String(err)));
+			fail(toError(err));
 		}
 		return promise;
 	}
@@ -1667,7 +1823,7 @@ export class RpcClient {
 		const line = `${JSON.stringify(frame)}\n`;
 		// A broken stdin pipe is terminal: fail this frame's request, then stop so start() can relaunch.
 		const failed = (err: unknown) => {
-			onError?.(err instanceof Error ? err : new Error(String(err)));
+			onError?.(toError(err));
 			if (this.#process === child) void this.stop();
 		};
 		try {

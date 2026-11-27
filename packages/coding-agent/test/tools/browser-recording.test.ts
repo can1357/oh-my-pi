@@ -20,6 +20,8 @@ const session: ToolSession = {
 	getSessionFile: () => null,
 	getSessionSpawns: () => "*",
 	settings: Settings.isolated({
+		// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+		"browser.webkit": false,
 		"browser.enabled": true,
 		"browser.headless": true,
 		"browser.cmux": false,
@@ -94,19 +96,12 @@ async function probeVideo(filePath: string): Promise<ProbeResult> {
 	return JSON.parse(stdout) as ProbeResult;
 }
 
+// A CSS animation repaints every frame without DOM mutations, so look-settling (ariaSnapshot) is not held for its 3 s bound.
 const html = `<!doctype html><html><head><style>
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-body { display: grid; place-items: center; font: 64px system-ui; }
-</style></head><body><output id="counter">0</output><script>
-const started = performance.now();
-function animate(now) {
-  const elapsed = now - started;
-  document.querySelector('#counter').textContent = String(Math.floor(elapsed / 50));
-  document.body.style.background = 'hsl(' + Math.floor(elapsed / 5) % 360 + ' 80% 70%)';
-  if (elapsed < 5000) requestAnimationFrame(animate);
-}
-requestAnimationFrame(animate);
-</script></body></html>`;
+body { animation: hue 1s linear infinite; }
+@keyframes hue { 0% { background: #f88; } 33% { background: #8f8; } 66% { background: #88f; } 100% { background: #f88; } }
+</style></head><body></body></html>`;
 
 afterAll(async () => {
 	await releaseAllTabs({ kill: true });
@@ -136,7 +131,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE || !FFMPEG_AVAILABLE)("browser video recordi
 				code: `await page.mouse.move(121, 87);
 await page.mouse.down();
 await page.mouse.up();
-await wait(1550);
+await wait(650);
 const root = await page.$('#__omp_recording_cursor__');
 if (!root) return { overlay: false };
 const transform = await root.evaluate(el => el.shadowRoot?.querySelector('.pointer')?.style.transform ?? '');
@@ -152,7 +147,7 @@ return { overlay: true, transform };`,
 			const stoppedCall = await call("recordStop");
 			const stopped = valueFrom<StopResult>(stoppedCall);
 			expect(stopped).toMatchObject({ path: started.path, contactSheet: `${started.path}.contact.png` });
-			expect(stopped.durationMs).toBeGreaterThanOrEqual(1_000);
+			expect(stopped.durationMs).toBeGreaterThanOrEqual(500);
 			expect(stopped.frames).toBeGreaterThan(1);
 			expect(stopped.bytes).toBeGreaterThan(0);
 			expect(stoppedCall.content.some(block => block.type === "image")).toBe(true);
@@ -163,7 +158,7 @@ return { overlay: true, transform };`,
 			const webmProbe = await probeVideo(stopped.path);
 			const webmStream = webmProbe.streams?.find(stream => stream.codec_type === "video");
 			expect(webmStream?.codec_name === "vp9" || webmStream?.codec_name === "vp8").toBe(true);
-			expect(Number.parseFloat(webmProbe.format?.duration ?? "0")).toBeGreaterThanOrEqual(1);
+			expect(Number.parseFloat(webmProbe.format?.duration ?? "0")).toBeGreaterThanOrEqual(0.5);
 			expect(webmStream?.avg_frame_rate).toBe("10/1");
 
 			const contactBytes = await fs.readFile(stopped.contactSheet!);
@@ -189,13 +184,13 @@ return { overlay: true, transform };`,
 			expect((inactiveError as Error).message).toContain("requires an active recording");
 
 			const mp4Start = await value<{ path: string; fps: number }>("recordStart", ["capture.mp4", { fps: 10 }]);
-			await invoke({ action: "run", name: "recording", code: "await wait(1550); return true" });
+			await invoke({ action: "run", name: "recording", code: "await wait(650); return true" });
 			const mp4Stop = await value<StopResult>("recordStop");
 			expect(mp4Stop.path).toBe(mp4Start.path);
 			const mp4Probe = await probeVideo(mp4Stop.path);
 			const mp4Stream = mp4Probe.streams?.find(stream => stream.codec_type === "video");
 			expect(mp4Stream?.codec_name).toBe("h264");
-			expect(Number.parseFloat(mp4Probe.format?.duration ?? "0")).toBeGreaterThanOrEqual(1);
+			expect(Number.parseFloat(mp4Probe.format?.duration ?? "0")).toBeGreaterThanOrEqual(0.5);
 			expect(mp4Stream?.width && mp4Stream.width % 2).toBe(0);
 			expect(mp4Stream?.height && mp4Stream.height % 2).toBe(0);
 
@@ -203,7 +198,7 @@ return { overlay: true, transform };`,
 				"restart-source.webm",
 				{ fps: 5 },
 			]);
-			await invoke({ action: "run", name: "recording", code: "await wait(1100); return true" });
+			await invoke({ action: "run", name: "recording", code: "await wait(600); return true" });
 			const restartTarget = await value<{ path: string; fps: number }>("recordRestart", [
 				"close-finalized.webm",
 				{ fps: 5 },
@@ -211,13 +206,13 @@ return { overlay: true, transform };`,
 			expect(restartTarget).toEqual({ path: path.join(root, "close-finalized.webm"), fps: 5 });
 			expect(
 				Number.parseFloat((await probeVideo(restartSource.path)).format?.duration ?? "0"),
-			).toBeGreaterThanOrEqual(0.8);
+			).toBeGreaterThanOrEqual(0.4);
 			expect(await value("recording")).toMatchObject({ active: true, path: restartTarget.path, fps: 5 });
-			await invoke({ action: "run", name: "recording", code: "await wait(1100); return true" });
+			await invoke({ action: "run", name: "recording", code: "await wait(600); return true" });
 			await invoke({ action: "close", name: "recording" });
 			expect(
 				Number.parseFloat((await probeVideo(restartTarget.path)).format?.duration ?? "0"),
-			).toBeGreaterThanOrEqual(0.8);
+			).toBeGreaterThanOrEqual(0.4);
 		} finally {
 			await invoke({ action: "close", name: "recording", kill: true }).catch(() => undefined);
 		}

@@ -1,4 +1,7 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
@@ -24,7 +27,9 @@ import {
 import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
 import { Effort } from "../src/effort";
 import { providerEntry } from "../src/compat/providers";
-import { calculateUncachedInputCost, getTimeBasedPricingPeriod } from "../src/models";
+import { readModelCache, writeModelCache } from "../src/model-cache";
+import { resolveProviderModels } from "../src/model-manager";
+import { calculateUncachedInputCost, getEffectiveTokenCost, getTimeBasedPricingPeriod } from "../src/models";
 import { devinModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec, ThinkingConfig } from "../src/types";
 
@@ -43,6 +48,8 @@ interface ConfigInit {
 	harnessUids?: string[];
 	/** `ClientModelConfig.maxTokens` — the context window. */
 	contextWindow?: number;
+	/** `ModelInfo.maxTokens` — where current catalogs carry the context window. */
+	modelInfoContextWindow?: number;
 	maxOutputTokens?: number;
 	features?: {
 		supportsThinking?: boolean;
@@ -150,6 +157,7 @@ function config(init: ConfigInit): ClientModelConfig {
 						modelUid: init.uid,
 						displayOption: init.displayOption ?? DisplayOption.UNSPECIFIED,
 						maxOutputTokens: init.maxOutputTokens ?? 64_000,
+						maxTokens: init.modelInfoContextWindow ?? 0,
 						isModelRouter: init.isModelRouter ?? false,
 						harnessUids: init.harnessUids ?? [],
 						...(init.features !== undefined ? { modelFeatures: create(ModelFeaturesSchema, init.features) } : {}),
@@ -333,6 +341,12 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 		features: { supportsThinking: true, supportsToolCalls: true },
 	}),
 	config({
+		uid: "info-context",
+		label: "Info Context",
+		contextWindow: 0,
+		modelInfoContextWindow: 1_048_576,
+	}),
+	config({
 		uid: "priced-model",
 		label: "Priced Model",
 		features: {
@@ -482,7 +496,7 @@ describe("devin native discovery request", () => {
 			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
 		};
 		const discovered = await fetchDevinModels({ apiKey: "sk-ws-01-legacy", fetch: fetchImpl });
-		expect(discovered?.map(entry => entry.id)).toEqual(["swe-1-6", "swe-1-6-fast"]);
+		expect(discovered?.map(entry => entry.id)).toEqual(["swe-1-6"]);
 		expect(identities).toEqual(["chisel"]);
 	});
 
@@ -506,6 +520,57 @@ describe("devin native discovery request", () => {
 		const fetchImpl: FetchImpl = async () =>
 			new Response(filteredPayload, { status: 200, headers: { "content-type": "application/proto" } });
 		expect(await fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: fetchImpl })).toBeNull();
+	});
+
+	describe("default request timeout", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		// `GetCliModelConfigs` routinely takes 7-15s before sending headers; a
+		// shorter default silently drops discovery back to the seed models.
+		function slowCatalog() {
+			const payload = toBinary(
+				GetCliModelConfigsResponseSchema,
+				create(GetCliModelConfigsResponseSchema, {
+					clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
+				}),
+			);
+			let signal: AbortSignal | undefined;
+			const headers = Promise.withResolvers<Response>();
+			const fetchImpl: FetchImpl = (_input, init) => {
+				signal = init?.signal ?? undefined;
+				signal?.addEventListener("abort", () => headers.reject(signal?.reason));
+				return headers.promise;
+			};
+			return {
+				fetch: fetchImpl,
+				signal: () => signal,
+				respond: () =>
+					headers.resolve(
+						new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+					),
+			};
+		}
+
+		it("keeps waiting for a catalog whose headers arrive after 5s", async () => {
+			vi.useFakeTimers();
+			const catalog = slowCatalog();
+			const pending = fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: catalog.fetch });
+			vi.advanceTimersByTime(14_999);
+			expect(catalog.signal()?.aborted).toBe(false);
+			catalog.respond();
+			expect((await pending)?.map(entry => entry.id)).toEqual(["swe-1-6"]);
+		});
+
+		it("gives up at 15s and reports failed discovery", async () => {
+			vi.useFakeTimers();
+			const catalog = slowCatalog();
+			const pending = fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: catalog.fetch });
+			vi.advanceTimersByTime(15_000);
+			expect(catalog.signal()?.aborted).toBe(true);
+			expect(await pending).toBeNull();
+		});
 	});
 });
 
@@ -537,41 +602,14 @@ describe("devin native display filtering", () => {
 		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
 	});
 
-	it("sends Fusion pairings through an available lead rather than the composite uid", async () => {
-		const pairing = (uid: string, init: Partial<ConfigInit> = {}) =>
-			config({ uid, isModelRouter: true, harnessUids: ["fusion"], ...init });
+	it("drops Fusion pairings, which would only re-list their lead", async () => {
+		const composite = (uid: string) => config({ uid, isModelRouter: true, harnessUids: ["fusion"] });
 		const configs = [
-			config({
-				uid: "gpt-6-sol-high",
-				contextWindow: 400_000,
-				maxOutputTokens: 128_000,
-				features: { supportsToolCalls: true, supportsImages: true },
-				dimensions: [
-					{ label: "Input", value: 2 },
-					{ label: "Output", value: 8 },
-				],
-			}),
-			config({ uid: "gpt-6-sol-high-priority" }),
-			config({ uid: "claude-opus-5-high" }),
-			config({ uid: "claude-opus-5-high-priority", disabled: true }),
-			config({ uid: "swe-1-6-fast" }),
-			config({ uid: "swe-1-6-priority" }),
-			config({ uid: "swe-2-high" }),
-			config({ uid: "kimi-k3", disabled: true }),
-			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
-				contextWindow: 1_000_000,
-				maxOutputTokens: 256_000,
-				dimensions: [
-					{ label: "Input", value: 10 },
-					{ label: "Output", value: 50 },
-				],
-			}),
-			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
-			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
-			pairing("fusion-sidekick-swe-2-high"),
-			pairing("fusion"),
+			config({ uid: "gpt-6-sol-high" }),
+			composite("fusion-gpt-6-sol-high-sidekick-swe-2-high"),
+			composite("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high"),
+			// No lead in the uid: a composite of its own, not a pairing.
+			composite("fusion-sidekick-swe-2-high"),
 		];
 		const payload = toBinary(
 			GetCliModelConfigsResponseSchema,
@@ -581,32 +619,7 @@ describe("devin native display filtering", () => {
 			apiKey: SESSION_TOKEN,
 			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
 		});
-		const find = (id: string) => fetched?.find(entry => entry.id === id);
-		const wireId = (id: string) => find(id)?.requestModelId;
-		expect(wireId("fusion-gpt-6-sol-high-sidekick-swe-2-high")).toBe("gpt-6-sol-high");
-		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
-		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
-		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
-		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
-		// No live lead: the composite uid is unservable, so the pairing is not listed.
-		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
-		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
-		expect(wireId("fusion")).toBeUndefined();
-		// Only the lead runs, so limits and pricing are the lead's, not the
-		// composite card's. Discovery carries the lead's card as reported; the
-		// lead's own cache-write rate and long-context tier apply at build.
-		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
-		expect(routed?.contextWindow).toBe(400_000);
-		expect(routed?.maxTokens).toBe(128_000);
-		expect(routed?.input).toEqual(["text", "image"]);
-		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
-		expect(buildModel(routed!).cost).toEqual({
-			input: 2,
-			output: 8,
-			cacheRead: 0,
-			cacheWrite: 2.5,
-			longContext: { inputThreshold: 272_000, input: 4, output: 12, cacheRead: 0, cacheWrite: 5 },
-		});
+		expect(fetched?.map(entry => entry.id).sort()).toEqual(["fusion-sidekick-swe-2-high", "gpt-6-sol-high"]);
 	});
 
 	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
@@ -621,6 +634,10 @@ describe("devin server metadata normalization", () => {
 		expect(longOutput.maxTokens).toBe(128_000);
 		expect(longOutput.contextWindow).toBe(1_000_000);
 		expect(longOutput.reasoning).toBe(true);
+	});
+
+	it("takes the context window from modelInfo.maxTokens when the config leaves its own unset", () => {
+		expect(model("info-context").contextWindow).toBe(1_048_576);
 	});
 
 	it("reads costs, parallel tool support and image support from server metadata", () => {
@@ -640,9 +657,8 @@ describe("devin server metadata normalization", () => {
 		expect(model("legacy-plain").reasoning).toBe(false);
 	});
 
-	it("strips the image modality from the SWE-1.6 lanes despite the server flag", () => {
+	it("strips the image modality from SWE-1.6 despite the server flag", () => {
 		expect(model("swe-1-6").input).toEqual(["text"]);
-		expect(model("swe-1-6-fast").input).toEqual(["text"]);
 	});
 
 	it("keeps the server's blurb and badges, and leaves them unset otherwise", () => {
@@ -698,7 +714,6 @@ describe("devin server-declared family collapsing", () => {
 		// The server's default tier becomes the family's default effort.
 		expect(mercury.defaultLevel).toBe(Effort.High);
 		expect(thinking("gemini-3-7-flash").defaultLevel).toBe(Effort.Medium);
-		expect(thinking("claude-opus-5-fast").defaultLevel).toBe(Effort.High);
 	});
 
 	it("routes the family default wire uid and keeps the widest member limits", () => {
@@ -725,20 +740,23 @@ describe("devin server-declared family collapsing", () => {
 		expect(thinking("gemini-3-7-flash").requiresEffort).toBe(true);
 	});
 
-	it("splits Fast Mode order 1 into a -fast sibling with its own default", () => {
+	it("folds the Fast Mode lane into its standard row as the /fast route", () => {
+		expect(models.some(entry => entry.id.endsWith("-fast"))).toBe(false);
 		expect(thinking("claude-opus-5").effortRouting).toEqual({
 			medium: "claude-opus-5-medium",
 			high: "claude-opus-5-high",
 		});
 		expect(model("claude-opus-5").requestModelId).toBe("claude-opus-5-medium");
-		expect(model("claude-opus-5-fast").name).toBe("Claude Opus 5 Fast");
-		expect(thinking("claude-opus-5-fast").effortRouting).toEqual({
-			medium: "claude-opus-5-medium-fast",
-			high: "claude-opus-5-high-fast",
+		// Each effort's wire uid pairs with the fast uid serving the same effort.
+		expect(model("claude-opus-5").priorityLane).toMatchObject({
+			id: "claude-opus-5-fast",
+			routes: {
+				"claude-opus-5-medium": "claude-opus-5-medium-fast",
+				"claude-opus-5-high": "claude-opus-5-high-fast",
+			},
 		});
-		// Server truth wins over the static fallback table's five-tier ladder.
-		expect(thinking("claude-opus-5-fast").efforts).toEqual([Effort.Medium, Effort.High]);
-		expect(model("claude-opus-5-fast").requestModelId).toBe("claude-opus-5-high-fast");
+		// Rows without an effort ladder pair their single wire uids.
+		expect(model("swe-1-6").priorityLane?.routes).toEqual({ "swe-1-6": "swe-1-6-fast" });
 	});
 
 	it("splits context lanes and maps the Thinking axis onto off and high routes", () => {
@@ -769,32 +787,75 @@ describe("devin server-declared family collapsing", () => {
 });
 
 describe("devin catalog seed", () => {
-	it("seeds both live SWE-1.6 lanes so the descriptor default resolves offline", () => {
+	it("seeds the live SWE-1.6 lane so the descriptor default resolves offline", () => {
 		const descriptor = providerEntry("devin");
 		expect(descriptor?.defaultModel).toBe("swe-1-6");
-		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
-		expect(seedModels("devin").some(model => model.id === descriptor?.defaultModel)).toBe(true);
+		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6"]);
 
-		const fast = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
-		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
-		expect(fast.contextWindow).toBe(200_000);
-		expect(fast.maxTokens).toBe(128_000);
-		expect(fast.compat.supportsParallelToolCalls).toBe(true);
+		const seeded = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
+		expect(seeded.contextWindow).toBe(200_000);
+		expect(seeded.maxTokens).toBe(128_000);
+		expect(seeded.compat.supportsParallelToolCalls).toBe(true);
 		// Image-blind lanes ship text-only (see DEVIN_IMAGE_BLIND_UIDS).
-		expect(fast.input).toEqual(["text"]);
+		expect(seeded.input).toEqual(["text"]);
 		// One wire uid per lane: Cascade encodes effort in the uid, so a seeded
 		// lane reasons without exposing a selectable ladder.
-		expect(fast.thinking).toBeUndefined();
-		expect(fast.reasoning).toBe(true);
+		expect(seeded.thinking).toBeUndefined();
+		expect(seeded.reasoning).toBe(true);
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
 		expect(devinModelManagerOptions().staticModels).toBe(seedModels("devin"));
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
-		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
-			"https://cascade.internal",
-			"https://cascade.internal",
-		]);
+		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual(["https://cascade.internal"]);
+	});
+
+	it("refetches a catalog cached before context windows came from modelInfo", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-devin-context-cache-"));
+		const scratchDbPath = path.join(tempDir, "scratch.db");
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const payload = toBinary(
+				GetCliModelConfigsResponseSchema,
+				create(GetCliModelConfigsResponseSchema, {
+					clientModelConfigs: [
+						config({ uid: "info-context", contextWindow: 0, modelInfoContextWindow: 1_048_576 }),
+					],
+				}),
+			);
+			let fetches = 0;
+			const options = devinModelManagerOptions({
+				apiKey: "fixture-token",
+				fetch: async () => {
+					fetches++;
+					return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+				},
+			});
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("Devin cache provider id is missing");
+			// Discover once into a scratch cache for the row and its fingerprint.
+			const online = await resolveProviderModels({ ...options, cacheDbPath: scratchDbPath }, "online");
+			const current = online.models.find(model => model.id === "info-context");
+			const written = readModelCache(cacheProviderId, Number.POSITIVE_INFINITY, Date.now, scratchDbPath);
+			if (!current || !written) throw new Error("Devin discovery wrote no cache");
+			// The fresh authoritative cache a release reading only
+			// `ClientModelConfig.maxTokens` left behind: the row holds the 200K fallback.
+			writeModelCache(
+				"devin:models-v2",
+				Date.now(),
+				[{ ...current, contextWindow: 200_000 }],
+				true,
+				written.staticFingerprint,
+				cacheDbPath,
+			);
+			fetches = 0;
+
+			const upgraded = await resolveProviderModels({ ...options, cacheDbPath }, "online-if-uncached");
+			expect(fetches).toBe(1);
+			expect(upgraded.models.find(model => model.id === "info-context")?.contextWindow).toBe(1_048_576);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -817,19 +878,95 @@ describe("devin catalog pricing", () => {
 		};
 	}
 
-	const PROMO_ENDS = Date.parse("2027-01-01T00:00:00Z");
+	const PROMO_ENDS = Date.parse("2027-01-01T08:00:00Z");
 	// Input cost of one million uncached prompt tokens: the input rate in force.
 	const inputRateAt = (model: Model<Api>, timestamp: number) =>
 		calculateUncachedInputCost(model.cost, 1_000_000, timestamp);
 
-	it("prices plan-included SWE-2 at the promo fallback and bills list from the promo's end", () => {
-		const model = buildModel(spec("swe-2"));
-		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 });
-		// A dated card is not a peak/off-peak tariff.
-		expect(getTimeBasedPricingPeriod(model.cost, PROMO_ENDS)).toBeUndefined();
-		// A row built during the promo still bills list once it ends.
-		expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
-		expect(inputRateAt(model, PROMO_ENDS)).toBeCloseTo(3, 10);
+	it("keeps SWE-2 Flash, SWE-2 and SWE-2 Fast billing separate across their promo cutoffs", () => {
+		// SWE-2 Flash was billed at SWE-2 rates, 7.5x its real price, and SWE-2 Fast at half its own.
+		const now = Date.parse("2026-11-06T00:00:00Z");
+		const clock = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			// Each family's logical id and a raw effort uid that arrives without family metadata.
+			for (const [ids, promoEnds, promo, list] of [
+				[
+					["swe-2-flash", "swe-2-flash-max"],
+					Date.parse("2026-11-18T18:00:00Z"),
+					{ input: 0.075, output: 0.375, cacheRead: 0.0075, cacheWrite: 0.09375 },
+					{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+				],
+				[
+					["swe-2", "swe-2-high"],
+					PROMO_ENDS,
+					{ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0 },
+					{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+				],
+				[
+					// No dated card: Devin publishes no end date or list price for SWE-2 Fast.
+					["swe-2-fast", "swe-2-high-lightning"],
+					PROMO_ENDS,
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+				],
+			] as const) {
+				for (const id of ids) {
+					const model = buildModel(spec(id));
+					expect(model.cost).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, now)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds - 1)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds)).toMatchObject(list);
+					// A dated card is not a peak/off-peak tariff.
+					expect(getTimeBasedPricingPeriod(model.cost, promoEnds)).toBeUndefined();
+				}
+			}
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("switches Gemini promo prices that discovery reports to list when each promo ends", () => {
+		const now = Date.parse("2026-11-17T00:00:00Z");
+		const flashPromo = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
+		const gemini4Promo = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
+		const gemini4List = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };
+		const clock = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const [id, reported, ends, list] of [
+				[
+					"gemini-3-8-flash",
+					flashPromo,
+					"2027-01-01T08:00:00Z",
+					{ ...flashPromo, input: 1.5, output: 7.5, cacheRead: 0.15 },
+				],
+				["gemini-4-argon", gemini4Promo, "2026-12-01T08:00:00Z", gemini4List],
+				// An account billed below the public promo keeps its own rate until the promo ends.
+				[
+					"gemini-4-argon-low",
+					{ input: 1, output: 5, cacheRead: 0.05, cacheWrite: 0 },
+					"2026-12-01T08:00:00Z",
+					gemini4List,
+				],
+				// A raw effort uid that arrives without family metadata.
+				["gemini-4-carbon-high", gemini4Promo, "2026-11-24T16:00:00Z", gemini4List],
+			] as const) {
+				const model = buildModel(spec(id, reported));
+				expect(model.cost, id).toMatchObject(reported);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends) - 1), id).toMatchObject(reported);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends)), id).toMatchObject(list);
+			}
+			// Hydrogen shares Argon's and Carbon's class rank; Gemini 3.6 Flash sits below the promo revisions.
+			for (const [id, upstream] of [
+				["gemini-4-hydrogen", { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 }],
+				["gemini-3-6-flash", { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 }],
+			] as const) {
+				const model = buildModel(spec(id, upstream));
+				expect(model.cost, id).toMatchObject(upstream);
+				expect(model.cost.timeBased, id).toBeUndefined();
+			}
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
 	it("switches the SWE-2 fallback to list after the promo ends, including on rows rebuilt from promo-era rows", () => {
@@ -840,7 +977,7 @@ describe("devin catalog pricing", () => {
 			for (const model of [buildModel(spec("swe-2")), buildModel(promoEra)]) {
 				expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
 				// Requests made during the promo keep the promo price.
-				expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
+				expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.5, 10);
 			}
 		} finally {
 			clock.mockRestore();
@@ -881,19 +1018,53 @@ describe("devin catalog pricing", () => {
 		});
 	});
 
-	it("tiers the standard GPT-5.6 lanes but not their undocumented Fast lanes", () => {
-		const standard = buildModel(spec("gpt-5-6-sol-high", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
-		expect(standard.cost.longContext).toEqual({
+	it("prices a folded fast lane under its own listed id's rules", () => {
+		const sol = buildModel({
+			...spec("gpt-5-6-sol", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }),
+			priorityLane: {
+				id: "gpt-5-6-sol-fast",
+				routes: { "gpt-5-6-sol-high": "gpt-5-6-sol-high-priority" },
+				cost: { input: 10, output: 60, cacheRead: 1, cacheWrite: 0 },
+			},
+		});
+		expect(sol.cost.longContext).toMatchObject({ input: 8, output: 30 });
+		// Fast Sol's published tier, not the standard lane's, and its own cache-write rate.
+		expect(sol.priorityLane?.cost).toMatchObject({
+			cacheWrite: 12.5,
+			longContext: { inputThreshold: 272_000, input: 16, output: 60, cacheRead: 1.6, cacheWrite: 20 },
+		});
+	});
+
+	it("tiers GPT-5.6 lanes, Fast included, at Devin's published long-context rates", () => {
+		const fast = buildModel(
+			spec("gpt-5-6-terra-high-priority", { input: 4, output: 24, cacheRead: 0.4, cacheWrite: 0 }),
+		);
+		expect(fast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 36,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+		// Sol's published tier did not follow its standard-context price rise.
+		const sol = buildModel(spec("gpt-5-6-sol-high", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(sol.cost.longContext).toEqual({
 			inputThreshold: 272_000,
 			input: 8,
 			output: 30,
 			cacheRead: 0.8,
 			cacheWrite: 10,
 		});
-		const fast = buildModel(
-			spec("gpt-5-6-sol-high-priority", { input: 8, output: 40, cacheRead: 0.8, cacheWrite: 0 }),
+		const solFast = buildModel(
+			spec("gpt-5-6-sol-max-priority", { input: 10, output: 60, cacheRead: 1, cacheWrite: 0 }),
 		);
-		expect(fast.cost.longContext).toBeUndefined();
+		expect(solFast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 16,
+			output: 60,
+			cacheRead: 1.6,
+			cacheWrite: 20,
+		});
 	});
 
 	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
@@ -929,7 +1100,15 @@ describe("devin catalog pricing", () => {
 	});
 
 	it("leaves models Devin publishes no tier for untiered", () => {
-		for (const id of ["gpt-7-sol", "gpt-6-mini", "gpt-6-nano", "gemini-3-pro", "gemini-4-pro", "grok-5"]) {
+		for (const id of [
+			"gpt-7-sol",
+			"gpt-6-mini",
+			"gpt-6-nano",
+			"gpt-5-5-high-priority",
+			"gemini-3-pro",
+			"gemini-4-pro",
+			"grok-5",
+		]) {
 			const model = buildModel(spec(id, { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
 			expect(model.cost.longContext).toBeUndefined();
 		}

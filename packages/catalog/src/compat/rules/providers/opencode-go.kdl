@@ -7,6 +7,34 @@ provider "opencode-go" {
 	// Replaces the provider check that disabled forced tool choice on Responses.
 	on-api "openai-responses" {
 		supports-forced-tool-choice #false
+		// Go's x-opencode-session is the gateway's cache-affinity handle; on
+		// Responses the body prompt_cache_key carries the same shared key.
+		// Opt-in criterion: a cold / different-family / same-family probe
+		// (control sent BEFORE the family repeat) must warm on the repeated
+		// key and stay cold under the different key. 2026-10-26, 3 trials,
+		// cached tokens family vs control: Spark 1.3 Contributor 2/3 vs 0/3,
+		// Spark 1.2 Contributor 3/3 vs 1/3, gpt-5.6-luna 3/3 vs 0/3,
+		// gpt-6-luna 3/3 vs 0/3, grok-4.6 3/3 vs 0/3. Off: grok-4.7 (control
+		// warmed 2/3, key-independent) and the gateway-only standard Spark
+		// 1.3/1.2 ids (never lane-verified).
+		models "muse-spark-1.3-contributor" "muse-spark-1.2-contributor" "gpt-5.6-luna" "gpt-6-luna" "grok-4.6" {
+			shared-prompt-cache #true
+		}
+	}
+	// Chat Completions sends no prompt_cache_key body field here (the gateway
+	// leaves the compat flag unset), so the shared key rides only
+	// x-opencode-session. Same probe, 2026-10-26: deepseek-v4-pro 3/3 vs
+	// 0/3, omen-alpha 4/4 vs 0/4. Off as key-independent or inconsistent:
+	// glm-5.1 (control 3/5), glm-5.3-flash (family 2/7, control 1/7),
+	// kimi-k2.7-code (control 4/5), mimo-v2.6-flash (control 2/2, family
+	// 1/2), deepseek-v4.1-flash (control 2/2); also qwen3.6-plus and
+	// gemini-4-argon (no material warm hit) and mimo-v2.5-pro (upstream 400).
+	// Anthropic Messages: claude-haiku-5-5 warmed under any key (control
+	// 2/2), so no Messages lane opts in.
+	on-api "openai-completions" {
+		models "deepseek-v4-pro" "omen-alpha" {
+			shared-prompt-cache #true
+		}
 	}
 
 	// The Flash lanes accept images despite their IDs lacking a vision suffix;
@@ -37,9 +65,9 @@ provider "opencode-go" {
 			max-tokens 384000
 		}
 	}
-	// Live Go discovery lists Argon without capabilities; its native Gemini
-	// endpoint requires a thinking level and accepts LOW, MEDIUM, or HIGH.
-	models "gemini-4-argon-contributor" {
+	// Go rosters can list either Argon ID without capabilities; the native
+	// Gemini endpoint requires a thinking level and accepts LOW, MEDIUM, or HIGH.
+	models "gemini-4-argon" "gemini-4-argon-contributor" {
 		thinking-upgrade-neutral #true
 		thinking-mode "google-level"
 		thinking-efforts "low" "medium" "high"
@@ -84,18 +112,6 @@ provider "opencode-go" {
 	class "kimi" {
 		thinking-mode "effort"
 	}
-	// The Go gateway proxies Muse Spark's Responses lane to Meta but cannot
-	// round-trip encrypted reasoning: the upstream issues `encrypted_content`
-	// bound to the gateway's own caller, so replaying it on a later step 400s
-	// with "reasoning `encrypted_content` was not issued to this caller"
-	// (#11928). Stop requesting it and drop native reasoning items from replay
-	// so multi-step tool-call turns stop failing.
-	class "meta" {
-		family "muse-spark" {
-			include-encrypted-reasoning #false
-			filter-reasoning-history #true
-		}
-	}
 	class "mimo" {
 		family "v2" {
 			thinking-mode "effort"
@@ -111,6 +127,13 @@ provider "opencode-go" {
 		revision ">=3.7 <3.9" {
 			thinking-efforts "minimal" "low" "medium" "high" 
 			thinking-mode "effort"
+		}
+	}
+	// Step 5 Preview uses low/medium/high on this gateway (#14987).
+	class "stepfun" {
+		family "step" {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
 		}
 	}
 	// LongCat exposes a reasoning toggle, not selectable effort tiers.
@@ -165,5 +188,21 @@ provider "opencode-go" {
 			high "adaptive"
 		}
 		thinking-mode "anthropic-adaptive"
+	}
+	// Go's roster has no System One models, but a Go key is a Console key: the
+	// Console System One endpoint serves the limited-time free Jev to it
+	// (opencode.ai/docs/console/models#jev). The Go gateway path is not that
+	// endpoint, so this row keeps its own base URL.
+	seed api="typesafe" bundle="always" base-url="https://opencode.ai/inference/systemone" {
+		model "jev-1.13-free" name="Jev 1.13 Free" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+	models "jev-1.13-free" {
+		kind "judge"
 	}
 }

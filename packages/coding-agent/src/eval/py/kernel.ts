@@ -3,13 +3,15 @@
  *
  * Speaks NDJSON with `runner.py` over stdin/stdout. One subprocess per kernel
  * instance; sessions reuse a single subprocess across executions. Cancellation
- * is `kill("SIGINT")` which raises a real `KeyboardInterrupt` inside user
- * code. Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
+ * writes `{"type":"interrupt","id":…}` naming the execution, then sends
+ * `kill("SIGINT")`, which interrupts that cell with a `KeyboardInterrupt`.
+ * Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
  * timeout.
  */
 import * as path from "node:path";
-import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
+import { registerOnBoard } from "../../daemon/client";
 import {
 	BaseKernel,
 	getRemainingTimeMs,
@@ -51,6 +53,8 @@ const STARTUP_TIMEOUT_MS = 10_000;
 // generous: a clean interrupt is far preferable to losing the persistent
 // kernel's state, so we only kill as a last-resort recovery path.
 const INTERRUPT_ESCALATION_MS = 5_000;
+/** Bounds interrupt escalation plus the three shutdown grace windows before ACP abandons a session. */
+export const PYTHON_KERNEL_CANCEL_BUDGET_MS = INTERRUPT_ESCALATION_MS + 3 * SHUTDOWN_GRACE_MS;
 
 const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
 	__omp_tools__: true,
@@ -82,6 +86,8 @@ export interface PythonKernelAvailability {
 	reason?: string;
 	/** The probed-working runtime, when one was found. */
 	runtime?: PythonRuntime;
+	/** Cancellation or an exhausted probe budget does not establish runtime unavailability. */
+	transient?: boolean;
 }
 
 export interface PythonPreludeSource {
@@ -105,11 +111,31 @@ interface PythonKernelExecuteOptions extends KernelExecuteOptions {
 	expectedShadowDigest?: string;
 }
 
-// Cache successful probes per resolved cwd + explicit interpreter: every cell
-// otherwise pays one (or two — backend.isAvailable + ensureKernelAvailable)
-// interpreter spawns even when the kernel is already hot. Failures are not
-// cached so installing a Python mid-session is picked up on the next attempt.
-const availabilityCache = new Map<string, Promise<PythonKernelAvailability>>();
+// Retain definitive results for synchronous capability advertisement. Execution
+// reuses only successes: failed probes are retried on an explicit invocation, so
+// installing Python mid-session remains discoverable without restarting.
+const availabilityCache = new Map<string, PythonKernelAvailability>();
+
+function availabilityKey(cwd: string, interpreter?: string): string {
+	return [
+		path.resolve(cwd),
+		interpreter ?? "",
+		$env.PATH,
+		$env.VIRTUAL_ENV,
+		$env.CONDA_PREFIX,
+		$env.HOME,
+		$env.PYTHONPATH,
+		$env.LD_LIBRARY_PATH,
+	].join("\0");
+}
+
+/** Read the last definitive probe without spawning or awaiting interpreter discovery. */
+export function getCachedPythonKernelAvailability(
+	cwd: string,
+	interpreter?: string,
+): PythonKernelAvailability | undefined {
+	return availabilityCache.get(availabilityKey(cwd, interpreter));
+}
 
 export async function checkPythonKernelAvailability(
 	cwd: string,
@@ -120,14 +146,26 @@ export async function checkPythonKernelAvailability(
 		return { ok: true };
 	}
 	const resolvedCwd = path.resolve(cwd);
-	const key = `${resolvedCwd}\0${interpreter ?? ""}`;
+	const key = availabilityKey(resolvedCwd, interpreter);
 	const cached = availabilityCache.get(key);
-	if (cached) return await cached;
+	if (!options?.forceProbe && cached?.ok) return cached;
 	// Probe controls belong to one caller. Do not share an in-flight promise:
 	// aborting one eval must not cancel a concurrent session's availability check.
 	const result = await probePythonKernelAvailability(resolvedCwd, interpreter, options);
-	if (result.ok) availabilityCache.set(key, Promise.resolve(result));
+	if (!result.transient && !options?.signal?.aborted) availabilityCache.set(key, result);
 	return result;
+}
+
+/** Minimum interpreter version: the runner is UTF-8 source and the prelude uses `asyncio.to_thread`. */
+const MIN_PYTHON_MINOR = 9;
+const TOO_OLD_EXIT_BASE = 200;
+/** Exits 0 on Python 3.9+, otherwise `200 + 10*major + minor` so the host can name the rejected version. */
+const PYTHON_VERSION_PROBE = `import sys;v=sys.version_info;sys.exit(0 if v>=(3,${MIN_PYTHON_MINOR}) else ${TOO_OLD_EXIT_BASE}+min(v[0],3)*10+min(v[1],9))`;
+
+function describePythonProbeExit(exitCode: number): string | undefined {
+	const encoded = exitCode - TOO_OLD_EXIT_BASE;
+	if (encoded < 20 || encoded > 39) return undefined;
+	return `Python ${Math.floor(encoded / 10)}.${encoded % 10} is too old; 3.${MIN_PYTHON_MINOR}+ required`;
 }
 
 async function probePythonKernelAvailability(
@@ -147,9 +185,10 @@ async function probePythonKernelAvailability(
 		}
 		const result = await probeCandidates(
 			runtimes.map(runtime => ({
-				command: [runtime.pythonPath, "-c", "import sys;sys.exit(0)"],
+				command: [runtime.pythonPath, "-c", PYTHON_VERSION_PROBE],
 				env: runtime.env,
 				label: runtime.pythonPath,
+				describeExit: describePythonProbeExit,
 			})),
 			{ cwd, signal: probeOpts?.signal, timeoutMs: probeOpts?.timeoutMs },
 		);
@@ -158,16 +197,28 @@ async function probePythonKernelAvailability(
 			return { ok: true, pythonPath: runtime.pythonPath, runtime };
 		}
 		if (result.aborted) {
-			return { ok: false, pythonPath: runtimes[0].pythonPath, reason: "Python availability probe was cancelled." };
+			return {
+				ok: false,
+				pythonPath: runtimes[0].pythonPath,
+				reason: "Python availability probe was cancelled.",
+				transient: true,
+			};
 		}
 		return {
 			ok: false,
 			pythonPath: runtimes[0].pythonPath,
 			reason: `No working Python interpreter found. Tried: ${result.failures.join("; ")}`,
+			...(result.timedOut ? { transient: true } : {}),
 		};
 	} catch (err) {
-		return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+		return { ok: false, reason: err instanceof Error ? err.message : String(err), transient: true };
 	}
+}
+
+/** {@link PythonKernel.start} options. */
+export interface PythonKernelStartOptions extends KernelStartOptions {
+	/** Agent session the kernel process is listed under on the daemon board. */
+	sessionId?: string;
 }
 
 export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
@@ -182,6 +233,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 			languageName: "Python",
 			traceIpc: TRACE_IPC,
 			exitPayload: JSON.stringify({ type: "exit" }),
+			interruptPayload: msgId => JSON.stringify({ type: "interrupt", id: msgId }),
 			interruptEscalationMs: INTERRUPT_ESCALATION_MS,
 			shutdownGraceMs: SHUTDOWN_GRACE_MS,
 			buildPayload: (code, msgId, opts) =>
@@ -199,10 +251,15 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		});
 	}
 
-	/** Describe or invoke a tool defined in this retained Python kernel. */
+	/** Describe or invoke a tool defined in this retained Python kernel; cancelling it cancels an async tool's coroutine. */
 	async invokeTool(request: PythonToolRequest, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
 		const id = options?.id ?? Snowflake.next();
-		return await this.submitRequest(id, JSON.stringify({ type: "tool", id, ...request }), options);
+		return await this.submitRequest(
+			id,
+			JSON.stringify({ type: "tool", id, ...request }),
+			options,
+			JSON.stringify({ type: "tool_cancel", id }),
+		);
 	}
 
 	/** Synchronize enabled capability snippets before the next user cell. */
@@ -274,7 +331,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		}
 	}
 
-	static async start(options: KernelStartOptions): Promise<PythonKernel> {
+	static async start(options: PythonKernelStartOptions): Promise<PythonKernel> {
 		const availability = await logger.time(
 			"PythonKernel.start:availabilityCheck",
 			checkPythonKernelAvailability,
@@ -301,6 +358,9 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		}
 		spawnEnv.PYTHONUNBUFFERED = "1";
 		spawnEnv.PYTHONIOENCODING = "utf-8";
+		// UTF-8 mode: text-mode subprocess pipes otherwise decode with the ANSI code page on
+		// Windows, and a decode error in CPython's pipe reader thread yields `stdout=None`.
+		spawnEnv.PYTHONUTF8 = "1";
 
 		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
 		const kernel = new PythonKernel(Snowflake.next(), runtime.pythonPath);
@@ -319,6 +379,15 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		});
 
 		kernel.setProcess(proc);
+		const board = registerOnBoard({
+			kind: "external",
+			scope: { kind: "session", id: options.sessionId || `process-${process.pid}` },
+			key: `python-eval:${proc.pid}`,
+			label: `python eval (${path.basename(runtime.pythonPath)})`,
+			pid: proc.pid,
+		});
+		// Exit covers every teardown path: shutdown, kill, and crashes.
+		void proc.exited.finally(() => board.dispose());
 
 		const startup = { signal: options.signal, deadlineMs: options.deadlineMs };
 		const startupBudget = Math.min(getRemainingTimeMs(startup.deadlineMs) ?? STARTUP_TIMEOUT_MS, STARTUP_TIMEOUT_MS);

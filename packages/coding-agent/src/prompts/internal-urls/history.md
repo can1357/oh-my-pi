@@ -1,1 +1,1 @@
-`history://<id>`: read-only transcript; bare lists registered agents, not persisted unregistered top-level sessions.
+history://<id>: read-only transcript, numbered by user turn: user and agent text whole, one line per tool call, thinking and results left out. Query as `archive.transcript`: `?budget=4000` compacts to fit; `?detail=brief` or `user:full,thinking:brief,result:normal`; `?turns=-1` or `3,5`. Bare history:// lists registered and retained on-disk agents, not persisted unregistered top-level sessions.

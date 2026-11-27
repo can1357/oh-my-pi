@@ -3,6 +3,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { readOpenAIErrorEnvelope } from "../utils/openai-http";
 import type { TranscriptionRequest, TranscriptionResult, TranscriptionSegment, TranscriptionWord } from "./types";
 
 export interface TranscriptionOptions {
@@ -37,7 +38,8 @@ function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function decodeUsage(model: Model<Api>, raw: unknown): { usage: Usage; seconds?: number } {
+/** Normalize provider-reported transcription usage; absent tokens/cost price through the catalog row. */
+export function decodeTranscriptionUsage(model: Model<Api>, raw: unknown): { usage: Usage; seconds?: number } {
 	const upstream = raw && typeof raw === "object" ? (raw as UpstreamUsage) : {};
 	const input = finiteNumber(upstream.input_tokens) ?? 0;
 	const output = finiteNumber(upstream.output_tokens) ?? 0;
@@ -55,22 +57,16 @@ function decodeUsage(model: Model<Api>, raw: unknown): { usage: Usage; seconds?:
 	return { usage, seconds: finiteNumber(upstream.seconds) };
 }
 
-async function responseError(response: Response, model: Model<Api>): Promise<TranscriptionApiError> {
-	const text = await response.text();
-	let detail = text;
-	let code: string | undefined;
-	try {
-		const parsed: unknown = JSON.parse(text);
-		if (parsed && typeof parsed === "object" && "error" in parsed) {
-			const error = parsed.error;
-			if (error && typeof error === "object") {
-				const envelope = error as { message?: unknown; code?: unknown; type?: unknown };
-				if (typeof envelope.message === "string") detail = envelope.message;
-				if (typeof envelope.code === "string") code = envelope.code;
-				else if (typeof envelope.type === "string") code = envelope.type;
-			}
-		}
-	} catch {}
+/**
+ * Build a {@link TranscriptionApiError} from a non-2xx response. Decodes the
+ * OpenAI `{ error: { message, code | type } }` envelope and xAI's flat
+ * `{ code, error: "message" }` envelope.
+ */
+export async function transcriptionResponseError(
+	response: Response,
+	model: Model<Api>,
+): Promise<TranscriptionApiError> {
+	const { detail, code } = await readOpenAIErrorEnvelope(response);
 	return new TranscriptionApiError(
 		`${model.provider}/${model.id} transcription API error (${response.status}): ${detail || response.statusText}`,
 		response.status,
@@ -106,7 +102,7 @@ export async function transcribeOpenAI(
 				body: form,
 				signal: options.signal,
 			});
-			if (!attempt.ok) throw await responseError(attempt, model);
+			if (!attempt.ok) throw await transcriptionResponseError(attempt, model);
 			return attempt;
 		},
 		{ signal: options.signal },
@@ -120,7 +116,7 @@ export async function transcribeOpenAI(
 			{ provider: model.provider, kind: "envelope" },
 		);
 	}
-	const decoded = decodeUsage(model, parsed.usage);
+	const decoded = decodeTranscriptionUsage(model, parsed.usage);
 	return {
 		text: parsed.text,
 		...(parsed.language !== undefined && { language: parsed.language }),

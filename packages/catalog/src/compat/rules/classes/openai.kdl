@@ -65,6 +65,27 @@ class "openai" {
 	revision ">=6 <7" {
 		supports-configuration-update #true
 	}
+	// GPT-6.2 never reads or writes the prompt cache for the top-level Responses
+	// `instructions` field (openai/codex#62312): it bills at the full input rate
+	// every turn, on API keys and ChatGPT sign-in alike, while a leading
+	// `developer` input item with the same text caches. GPT-6.1 caches both.
+	revision "=6.2" {
+		uncached-instructions #true
+	}
+	// GPT-6.2 drops a reasoning item from a later request when content before it
+	// was inserted or edited; the API reports the drop as `input_transformations`
+	// with `prefix_mismatch`. Prefix-bound models keep already-sent tool results
+	// unchanged. `<10` keeps separator-collapsed ids (`gpt-52-codex` parses as 52) off it.
+	// https://developers.openai.com/api/docs/guides/reasoning#reasoning-item-removal-across-requests
+	// https://developers.openai.com/api/docs/guides/keep-prefix-unchanged
+	// Scoped to the Responses APIs that replay reasoning items: the flag also drives
+	// Claude-only paths (Bedrock Converse, Anthropic-wire gateways), which would send
+	// Anthropic's thinking-binding controls for a GPT model.
+	on-api "openai-responses" "openai-codex-responses" "azure-openai-responses" {
+		revision ">=6.2 <10" {
+			thinking-prefix-binding #true
+		}
+	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the
 	// true prompt window is 272K. Spark budgets are its own family's.
 	family "codex" {
@@ -84,14 +105,14 @@ class "openai" {
 	on-api "openai-responses" {
 		revision ">=5" {
 			web-search "openai"
-			web-search-model "gpt-5.6-luna"
+			web-search-model "gpt-6-luna"
 			hosted-image #true
 			image-model "gpt-image-2"
 		}
 	}
 	on-api "openai-codex-responses" {
 		revision ">=5" {
-			web-search-model "gpt-5.6-luna"
+			web-search-model "gpt-6-luna"
 			hosted-image #true
 			image-model "gpt-image-2"
 		}

@@ -1,51 +1,78 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { CodexResetFireworksEvent } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
-import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
-import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-
+import type { SessionStatusLine } from "@oh-my-pi/pi-coding-agent/modes/interactive/status-line";
 import { cfgTuiCodexResetFireworks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import type { CodexResetFireworksEvent } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/codex-reset-fireworks";
+import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/types";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { disposeStatusLines, lineText, statusLine, statusSession } from "./helpers/session-status-line";
 
 async function flushMicrotasks(): Promise<void> {
-	await Promise.resolve();
-	await Promise.resolve();
+	for (let i = 0; i < 6; i++) await Promise.resolve();
+}
+
+/** The status line waits this long after a paint before it fetches usage (startup paints first). */
+const FETCH_DELAY_MS = 1_500;
+
+/** The interactive status line over `session`, driven the way its host drives it. */
+class StatusLineComponent {
+	readonly line: SessionStatusLine;
+
+	constructor(session: AgentSession) {
+		this.line = statusLine(session);
+	}
+
+	/** A session event and the repaint after it: reading the facts starts a due usage fetch. */
+	refreshUsageInBackground(): void {
+		this.line.refresh();
+		this.line.facts();
+	}
+
+	getTopBorder(width: number): { content: string } {
+		return { content: lineText(this.line, width) };
+	}
+
+	updateSettings(settings: Partial<StatusLineSettings>): void {
+		this.line.previewSettings(settings);
+	}
+
+	setResetExpiryNoticeHandler(handler: (notice: string) => void): void {
+		this.line.onResetExpiryNotice = handler;
+	}
+
+	setCodexResetFireworksHandler(handler: (event: CodexResetFireworksEvent) => void): void {
+		this.line.onCodexResetFireworks = handler;
+	}
+
+	setSession(session: AgentSession, focusedAgentId?: string): void {
+		this.line.setSession(session, focusedAgentId);
+	}
+
+	dispose(): void {
+		this.line.dispose();
+	}
 }
 
 function makeSession(
 	fetchUsageReports: (signal?: AbortSignal) => Promise<unknown>,
 	getSessionId: () => string = () => "conversation-1",
 ): AgentSession {
-	const messages: unknown[] = [];
-	return {
+	const model = {
+		id: "model",
+		provider: "anthropic",
+		contextWindow: 200_000,
+		input: ["text"],
+	};
+	return statusSession({
 		fetchUsageReports,
-		messages,
-		state: { messages, model: { contextWindow: 200_000 } },
-		model: { contextWindow: 200_000 },
-		isStreaming: false,
-		isFastModeActive: () => false,
-		sessionManager: {
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-			getSessionName: () => "test",
-			getSessionId,
-		},
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		getContextUsage: () => undefined,
-		contextUsageRevision: 0,
-	} as unknown as AgentSession;
+		state: { messages: [], model },
+		model,
+		sessionManager: { getSessionName: () => "test", getSessionId },
+	}) as unknown as AgentSession;
 }
 
 function usageReport(percent: number): unknown[] {
@@ -119,7 +146,10 @@ function codexUsageReport(
 						label: "7d",
 						resetsAt: state.sevenDayResetAt,
 					},
-					amount: { unit: "percent", usedFraction: state.sevenDayPercent / 100 },
+					amount: {
+						unit: "percent",
+						usedFraction: state.sevenDayPercent / 100,
+					},
 				},
 			],
 		},
@@ -128,7 +158,11 @@ function codexUsageReport(
 
 function makeCodexSession(
 	fetchUsageReports: (signal?: AbortSignal) => Promise<unknown>,
-	resolveActiveIdentity: () => { accountId: string; email?: string; orgId?: string } = () => ({
+	resolveActiveIdentity: () => {
+		accountId: string;
+		email?: string;
+		orgId?: string;
+	} = () => ({
 		accountId: "account-1",
 		email: "codex@example.com",
 	}),
@@ -136,12 +170,16 @@ function makeCodexSession(
 ): AgentSession {
 	const session = makeSession(fetchUsageReports, getSessionId) as unknown as Record<string, unknown>;
 	session.sessionId = "session-1";
-	session.state = {
-		messages: [],
-		model: { contextWindow: 200_000, provider: "openai-codex" },
+	const model = {
+		id: "gpt-5",
+		contextWindow: 200_000,
+		provider: "openai-codex",
+		input: ["text"],
 	};
-	session.model = { contextWindow: 200_000, provider: "openai-codex" };
+	session.state = { messages: [], model };
+	session.model = model;
 	session.modelRegistry = {
+		isUsingSubscription: () => false,
 		authStorage: {
 			oauth: { identity: resolveActiveIdentity },
 		},
@@ -152,7 +190,7 @@ function makeCodexSession(
 async function refreshUsage(component: StatusLineComponent, advanceMs = 0): Promise<void> {
 	if (advanceMs > 0) vi.advanceTimersByTime(advanceMs);
 	component.refreshUsageInBackground();
-	vi.advanceTimersByTime(0);
+	vi.advanceTimersByTime(FETCH_DELAY_MS);
 	await flushMicrotasks();
 }
 
@@ -160,15 +198,15 @@ function plain(text: string): string {
 	return stripVTControlCharacters(text);
 }
 
-describe("StatusLineComponent usage refresh", () => {
+describe("status line usage refresh", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		await initTheme();
 		vi.useFakeTimers();
 	});
 
 	afterEach(() => {
+		disposeStatusLines();
 		vi.useRealTimers();
 		resetSettingsForTest();
 	});
@@ -180,13 +218,12 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return [];
 			}),
-			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
 		expect(calls).toBe(0);
 
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 
 		expect(calls).toBe(1);
@@ -199,11 +236,10 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return [];
 			}),
-			statusLineHost,
 		);
 		component.dispose();
 		component.getTopBorder(120);
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 		expect(calls).toBe(0);
 	});
@@ -215,11 +251,10 @@ describe("StatusLineComponent usage refresh", () => {
 				signal = nextSignal;
 				return [];
 			}),
-			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 
 		expect(signal).toBeInstanceOf(AbortSignal);
@@ -232,11 +267,10 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return Promise.withResolvers<unknown>().promise;
 			}),
-			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 		expect(calls).toBe(1);
 
@@ -247,7 +281,7 @@ describe("StatusLineComponent usage refresh", () => {
 		await flushMicrotasks();
 
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 
 		expect(calls).toBe(1);
@@ -255,10 +289,7 @@ describe("StatusLineComponent usage refresh", () => {
 
 	it("applies late usage reports that resolve after the startup timeout", async () => {
 		const late = Promise.withResolvers<unknown>();
-		const component = new StatusLineComponent(
-			makeSession(() => late.promise),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeSession(() => late.promise));
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["usage"],
@@ -267,7 +298,7 @@ describe("StatusLineComponent usage refresh", () => {
 		});
 
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 		vi.advanceTimersByTime(2_000);
 		await flushMicrotasks();
@@ -302,10 +333,7 @@ describe("StatusLineComponent usage refresh", () => {
 				},
 			],
 		};
-		const component = new StatusLineComponent(
-			makeSession(async () => reports),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeSession(async () => reports));
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["usage"],
@@ -352,10 +380,7 @@ describe("StatusLineComponent usage refresh", () => {
 				grant("cedar", "cedar_ember", ["anthropic:7d"], 6),
 			],
 		};
-		const component = new StatusLineComponent(
-			makeSession(async () => reports),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeSession(async () => reports));
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["usage"],
@@ -370,9 +395,21 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it.each([
-		{ name: "keeps a reset beyond 7 days plain", expiresInHours: 8 * 24, text: "✦ 1 exp 8d" },
-		{ name: "flags a reset expiring within 7 days", expiresInHours: 5 * 24, text: "✦ 1 ▲ 1 exp 5d" },
-		{ name: "flags a reset expiring within 24 hours", expiresInHours: 6, text: "✦ 1 ▲ 1 exp 6h" },
+		{
+			name: "keeps a reset beyond 7 days plain",
+			expiresInHours: 8 * 24,
+			text: "✦ 1 exp 8d",
+		},
+		{
+			name: "flags a reset expiring within 7 days",
+			expiresInHours: 5 * 24,
+			text: "✦ 1 ▲ 1 exp 5d",
+		},
+		{
+			name: "flags a reset expiring within 24 hours",
+			expiresInHours: 6,
+			text: "✦ 1 ▲ 1 exp 6h",
+		},
 	])("$name in the active account's usage segment", async ({ expiresInHours, text }) => {
 		const state: CodexUsageState = {
 			sevenDayPercent: 60,
@@ -380,11 +417,12 @@ describe("StatusLineComponent usage refresh", () => {
 			savedResets: 1,
 			creditExpiresAt: [Date.now() + expiresInHours * 3_600_000],
 		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
-		component.updateSettings({ preset: "custom", leftSegments: ["usage"], rightSegments: [] });
+		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+		});
 
 		await refreshUsage(component);
 
@@ -392,165 +430,224 @@ describe("StatusLineComponent usage refresh", () => {
 		component.dispose();
 	});
 
-	it("warns once per conversation about another account's reset expiring within 24 hours", async () => {
-		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
-		let fetches = 0;
-		const reports = () => {
-			fetches++;
-			return [
-				...codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt }),
-				...codexUsageReport(
-					{ sevenDayPercent: 60, sevenDayResetAt, savedResets: 1, creditExpiresAt: [Date.now() + 6 * 3_600_000] },
-					"account-2",
-					"codex@example.com",
-					"ws-team",
-				),
-			];
-		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => reports()),
-			statusLineHost,
-		);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+	describe("saved-reset expiry warning", () => {
+		let noticeDir: TempDir | undefined;
 
-		await refreshUsage(component);
-		await refreshUsage(component, 5 * 60_000);
+		afterEach(async () => {
+			AgentStorage.close();
+			await noticeDir?.remove();
+			noticeDir = undefined;
+		});
 
-		expect(fetches).toBe(2);
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain("Saved Codex reset on codex@example.com (ws-team) expires in 6h");
-		expect(notices[0]).toContain("/usage");
-		component.dispose();
-	});
+		/** agent.db where the host records which saved resets it has warned about. */
+		function noticeDbPath(): string {
+			noticeDir ??= TempDir.createSync("@omp-reset-notice-");
+			return path.join(noticeDir.path(), "agent.db");
+		}
 
-	it("warns about a banked Claude reset the provider will not spend yet", async () => {
-		const claude = () => ({
-			provider: "anthropic",
-			fetchedAt: Date.now(),
-			metadata: { email: "claude@example.com" },
-			limits: [
-				{
-					id: "anthropic:7d",
-					label: "Claude 7 Day",
-					scope: { provider: "anthropic", windowId: "7d" },
-					window: { id: "7d", label: "7d", resetsAt: Date.now() + 80 * 3_600_000 },
-					amount: { unit: "percent", usedFraction: 0.5 },
-				},
-			],
-			resetCredits: {
-				availableCount: 2,
-				redeemableCount: 0,
-				nextCreditId: "paused",
-				credits: [
+		/** A Codex session whose settings carry `storage`, as an interactive omp session's do. */
+		function noticeSession(
+			fetchUsageReports: () => Promise<unknown>,
+			storage: AgentStorage,
+			getSessionId?: () => string,
+		): AgentSession {
+			const session = makeCodexSession(fetchUsageReports, undefined, getSessionId) as unknown as Record<
+				string,
+				unknown
+			>;
+			session.settings = Settings.isolated({}, { storage });
+			return session as unknown as AgentSession;
+		}
+
+		it("warns about another account's reset in its final 6 hours once, not on every refresh", async () => {
+			const sevenDayResetAt = Date.now() + 80 * 3_600_000;
+			// Half a minute of slack: the clock keeps running while the refresh resolves.
+			const creditExpiresAt = [Date.now() + 5 * 3_600_000 + 30_000];
+			let fetches = 0;
+			const reports = async () => {
+				fetches++;
+				return [
+					...codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt }),
+					...codexUsageReport(
+						{
+							sevenDayPercent: 60,
+							sevenDayResetAt,
+							savedResets: 1,
+							creditExpiresAt,
+						},
+						"account-2",
+						"codex@example.com",
+						"ws-team",
+					),
+				];
+			};
+			const component = new StatusLineComponent(noticeSession(reports, await AgentStorage.open(noticeDbPath())));
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+			await refreshUsage(component);
+			await refreshUsage(component, 5 * 60_000);
+
+			expect(fetches).toBe(2);
+			expect(notices).toEqual(["Saved Codex reset on codex@example.com (ws-team) expires in 5h · /usage"]);
+			component.dispose();
+		});
+
+		it("warns about a banked Claude reset the provider will not spend yet", async () => {
+			const claude = () => ({
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				metadata: { email: "claude@example.com" },
+				limits: [
 					{
-						id: "paused",
-						program: "cedar_ember",
-						remainingCount: 2,
-						usable: false,
-						requiresLimit: false,
-						clears: ["anthropic:5h", "anthropic:7d"],
-						blocking: [],
-						usedFractions: {},
-						expiresAt: new Date(Date.now() + 6 * 3_600_000).toISOString(),
-						status: "paused",
+						id: "anthropic:7d",
+						label: "Claude 7 Day",
+						scope: { provider: "anthropic", windowId: "7d" },
+						window: {
+							id: "7d",
+							label: "7d",
+							resetsAt: Date.now() + 80 * 3_600_000,
+						},
+						amount: { unit: "percent", usedFraction: 0.5 },
 					},
 				],
-			},
+				resetCredits: {
+					availableCount: 2,
+					redeemableCount: 0,
+					nextCreditId: "paused",
+					credits: [
+						{
+							id: "paused",
+							program: "cedar_ember",
+							remainingCount: 2,
+							usable: false,
+							requiresLimit: false,
+							clears: ["anthropic:5h", "anthropic:7d"],
+							blocking: [],
+							usedFractions: {},
+							expiresAt: new Date(Date.now() + 6 * 3_600_000).toISOString(),
+							status: "paused",
+						},
+					],
+				},
+			});
+			const codex = codexUsageReport({
+				sevenDayPercent: 10,
+				sevenDayResetAt: Date.now() + 80 * 3_600_000,
+			});
+			const component = new StatusLineComponent(
+				noticeSession(async () => [...codex, claude()], await AgentStorage.open(noticeDbPath())),
+			);
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+			await refreshUsage(component);
+
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("2 saved Claude resets on claude@example.com expire, soonest in 6h");
+			component.dispose();
 		});
-		const codex = codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt: Date.now() + 80 * 3_600_000 });
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => [...codex, claude()]),
-			statusLineHost,
-		);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
 
-		await refreshUsage(component);
-
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain("2 saved Claude resets on claude@example.com expire, soonest in 6h");
-		component.dispose();
-	});
-
-	it("warns each conversation that /new or /resume opens in place, once", async () => {
-		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
-		let conversation = "conversation-1";
-		const session = makeCodexSession(
-			async () =>
+		it("warns about each saved reset once across conversations and omp processes", async () => {
+			const sevenDayResetAt = Date.now() + 80 * 3_600_000;
+			const creditExpiresAt = [Date.now() + 5 * 3_600_000];
+			const reports = async () =>
 				codexUsageReport({
 					sevenDayPercent: 60,
 					sevenDayResetAt,
 					savedResets: 1,
-					creditExpiresAt: [Date.now() + 6 * 3_600_000],
-				}),
-			undefined,
-			() => conversation,
-		);
-		const component = new StatusLineComponent(session, statusLineHost);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+					creditExpiresAt,
+				});
+			let conversation = "conversation-1";
+			const notices: string[] = [];
+			const openWindow = (storage: AgentStorage) => {
+				const component = new StatusLineComponent(noticeSession(reports, storage, () => conversation));
+				component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+				return component;
+			};
 
-		await refreshUsage(component);
-		conversation = "conversation-2"; // /new
-		await refreshUsage(component, 5 * 60_000);
-		conversation = "conversation-3"; // /resume of a conversation not warned yet
-		await refreshUsage(component, 5 * 60_000);
-		conversation = "conversation-1"; // /resume of the first one
-		await refreshUsage(component, 5 * 60_000);
+			const first = openWindow(await AgentStorage.open(noticeDbPath()));
+			await refreshUsage(first);
+			conversation = "conversation-2"; // /new
+			await refreshUsage(first, 5 * 60_000);
+			const second = openWindow(await AgentStorage.open(noticeDbPath())); // another omp window
+			await refreshUsage(second);
+			first.dispose();
+			second.dispose();
+			AgentStorage.close();
+			const later = openWindow(await AgentStorage.open(noticeDbPath())); // a later omp process
+			await refreshUsage(later);
 
-		expect(notices).toHaveLength(3);
-		component.dispose();
-	});
+			expect(notices).toHaveLength(1);
 
-	it("does not warn again when focus moves to a subagent and back", async () => {
-		let fetches = 0;
-		const reports = async () => {
-			fetches++;
-			return codexUsageReport({
+			// The warned reset was spent; another one comes due.
+			creditExpiresAt[0] = Date.now() + 5 * 60_000 + 2 * 3_600_000 + 30_000;
+			await refreshUsage(later, 5 * 60_000);
+
+			expect(notices).toHaveLength(2);
+			expect(notices[1]).toBe("Saved Codex reset on codex@example.com expires in 2h · /usage");
+			later.dispose();
+		});
+
+		it("does not warn again when focus moves to a subagent and back", async () => {
+			let fetches = 0;
+			const creditExpiresAt = [Date.now() + 5 * 3_600_000];
+			const reports = async () => {
+				fetches++;
+				return codexUsageReport({
+					sevenDayPercent: 60,
+					sevenDayResetAt: Date.now() + 80 * 3_600_000,
+					savedResets: 1,
+					creditExpiresAt,
+				});
+			};
+			const storage = await AgentStorage.open(noticeDbPath());
+			const main = noticeSession(reports, storage);
+			const subagent = noticeSession(reports, storage, () => "subagent-1");
+			const component = new StatusLineComponent(main);
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+			await refreshUsage(component);
+			component.setSession(subagent, "agent-1");
+			await refreshUsage(component);
+			component.setSession(main);
+			await refreshUsage(component);
+
+			expect(fetches).toBe(3);
+			expect(notices).toHaveLength(1);
+			component.dispose();
+		});
+
+		it("waits until a reset is 6 hours from expiry", async () => {
+			const state: CodexUsageState = {
 				sevenDayPercent: 60,
 				sevenDayResetAt: Date.now() + 80 * 3_600_000,
 				savedResets: 1,
-				creditExpiresAt: [Date.now() + 6 * 3_600_000],
+				creditExpiresAt: [Date.now() + 7 * 3_600_000],
+			};
+			const component = new StatusLineComponent(
+				noticeSession(async () => codexUsageReport(state), await AgentStorage.open(noticeDbPath())),
+			);
+			component.updateSettings({
+				preset: "custom",
+				leftSegments: ["usage"],
+				rightSegments: [],
 			});
-		};
-		const main = makeCodexSession(reports);
-		const subagent = makeCodexSession(reports, undefined, () => "subagent-1");
-		const component = new StatusLineComponent(main, statusLineHost);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
 
-		await refreshUsage(component);
-		component.setSession(subagent, "agent-1");
-		await refreshUsage(component);
-		component.setSession(main);
-		await refreshUsage(component);
+			await refreshUsage(component);
 
-		expect(fetches).toBe(3);
-		expect(notices).toHaveLength(1);
-		component.dispose();
-	});
+			// The status line keeps flagging it meanwhile.
+			expect(plain(component.getTopBorder(120).content)).toContain("▲ 1 exp 7h");
+			expect(notices).toEqual([]);
 
-	it("does not warn about a reset that expires in more than 24 hours", async () => {
-		const state: CodexUsageState = {
-			sevenDayPercent: 60,
-			sevenDayResetAt: Date.now() + 80 * 3_600_000,
-			savedResets: 1,
-			creditExpiresAt: [Date.now() + 25 * 3_600_000],
-		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
-		component.updateSettings({ preset: "custom", leftSegments: ["usage"], rightSegments: [] });
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+			await refreshUsage(component, 61 * 60_000);
 
-		await refreshUsage(component);
-
-		expect(plain(component.getTopBorder(120).content)).toContain("▲ 1 exp 1d 1h");
-		expect(notices).toEqual([]);
-		component.dispose();
+			expect(notices).toHaveLength(1);
+			component.dispose();
+		});
 	});
 
 	it("re-fetches usage immediately when the session rotates to another org under the same email", async () => {
@@ -563,9 +660,15 @@ describe("StatusLineComponent usage refresh", () => {
 		// Same provider + email + account throughout — only the org rotates.
 		base.state = {
 			messages: [],
-			model: { contextWindow: 200_000, provider: "anthropic" },
+			model: {
+				id: "model",
+				contextWindow: 200_000,
+				provider: "anthropic",
+				input: ["text"],
+			},
 		};
 		base.modelRegistry = {
+			isUsingSubscription: () => false,
 			authStorage: {
 				oauth: {
 					identity: () => ({
@@ -576,23 +679,23 @@ describe("StatusLineComponent usage refresh", () => {
 				},
 			},
 		};
-		const component = new StatusLineComponent(base as unknown as AgentSession, statusLineHost);
+		const component = new StatusLineComponent(base as unknown as AgentSession);
 
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 		expect(calls).toBe(1);
 
 		// Same org within the cache TTL: served from cache, no refetch.
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 		expect(calls).toBe(1);
 
 		// Org rotation under the same email/account must invalidate the cache.
 		orgId = "org-max";
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 		expect(calls).toBe(2);
 	});
@@ -604,10 +707,7 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -632,10 +732,7 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -684,10 +781,7 @@ describe("StatusLineComponent usage refresh", () => {
 			tier: "spark",
 			plan: "pro",
 		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -698,7 +792,11 @@ describe("StatusLineComponent usage refresh", () => {
 
 		state = { ...state, sevenDayPercent: 42, tier: "spark" };
 		await refreshUsage(component, 5 * 60_000);
-		state = { ...state, sevenDayPercent: 2, sevenDayResetAt: sevenDayResetAt + 7 * 24 * 3_600_000 };
+		state = {
+			...state,
+			sevenDayPercent: 2,
+			sevenDayResetAt: sevenDayResetAt + 7 * 24 * 3_600_000,
+		};
 		await refreshUsage(component, 5 * 60_000);
 		expect(events).toEqual([{ kind: "unscheduled-weekly-reset" }]);
 		component.dispose();
@@ -731,7 +829,6 @@ describe("StatusLineComponent usage refresh", () => {
 				async () => reports,
 				() => ({ accountId: identityLookups.shift() ?? "account-a" }),
 			),
-			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
@@ -761,7 +858,11 @@ describe("StatusLineComponent usage refresh", () => {
 						workspaceId,
 					),
 					...codexUsageReport(
-						{ sevenDayPercent: 22, sevenDayResetAt, savedResets: bobSavedResets },
+						{
+							sevenDayPercent: 22,
+							sevenDayResetAt,
+							savedResets: bobSavedResets,
+						},
 						workspaceId,
 						"bob@example.com",
 						workspaceId,
@@ -773,7 +874,6 @@ describe("StatusLineComponent usage refresh", () => {
 					orgId: workspaceId,
 				}),
 			),
-			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
@@ -794,10 +894,7 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 1,
 		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -822,10 +919,7 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 1,
 		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -848,10 +942,7 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
+		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -883,13 +974,12 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return calls === 1 ? stale.promise : codexUsageReport(current);
 			}),
-			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
 		component.refreshUsageInBackground();
-		vi.advanceTimersByTime(0);
+		vi.advanceTimersByTime(FETCH_DELAY_MS);
 		await flushMicrotasks();
 		vi.advanceTimersByTime(2_000);
 		await flushMicrotasks();

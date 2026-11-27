@@ -4,6 +4,7 @@ import { ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { renderToolCallLoopRedirect } from "../session/tool-call-loop-redirect";
+import { toolCommandCallName } from "../tools/tool-commands";
 
 import {
 	cfgModelToolCallLoopGuardEnabled,
@@ -57,6 +58,7 @@ export class AdvisorLoopGuard {
 			message: context.message,
 			toolResults: context.toolResults,
 			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
+			unresolvedToolCallIds: context.unresolvedToolCallIds,
 		});
 		if (!detection) return;
 		if (this.#redirectIssued) {
@@ -106,7 +108,7 @@ export class AdvisorLoopGuard {
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#guard || this.#guardSettingsKey !== settingsKey) {
-			this.#guard = new ToolCallLoopGuard({ threshold, exemptTools });
+			this.#guard = new ToolCallLoopGuard({ threshold, exemptTools, exemptionAlias: toolCommandCallName });
 			this.#guardSettingsKey = settingsKey;
 		}
 		return this.#guard;

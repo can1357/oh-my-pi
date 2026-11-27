@@ -1,18 +1,20 @@
-import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { getKeybindings, setKeybindings, TUI } from "@oh-my-pi/pi-tui";
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
+import type { ExtensionRender, ExtensionUiHost } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/render-types";
 import type {
+	ExtensionCustomFactory,
 	ExtensionCustomOptions,
 	ExtensionUIContext,
-	ExtensionUiComponent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { extensionOutput, extensionTheme, singleNode } from "../../../src/ui/extensions/render-output";
 import type { SessionPick } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/text-source";
 import {
 	AnnotateCommand,
@@ -23,6 +25,7 @@ import {
 	showCodeReviewOverlay,
 	showTextReviewOverlay,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/fullscreen";
+import { loadAnnotationDrafts } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/draft-store";
 import * as externalEditor from "@oh-my-pi/pi-coding-agent/utils/external-editor";
 import type {
 	CustomCommandAPI,
@@ -40,15 +43,49 @@ import type {
 	CodeReviewAnnotation,
 	TextReviewAnnotation,
 	TextReviewSource,
-} from "@oh-my-pi/pi-tui/overlays/annotation-types";
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/annotation-types";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
 
 const ENTER = "\r";
 const UP = "\x1b[A";
 const RIGHT = "\x1b[C";
 const CTRL_E = "\x05";
+
+/** Raw input of the keys these tests press, as key ids. */
+const RAW_KEYS: Readonly<Record<string, string>> = {
+	"\r": "enter",
+	"\x1b": "escape",
+	"\t": "tab",
+	"\x1b[A": "up",
+	"\x1b[B": "down",
+	"\x1b[C": "right",
+	"\x05": "ctrl+e",
+};
+
+/** The UI host a custom view receives (no terminal to hand to an editor: `suspend` just runs). */
+const HOST: ExtensionUiHost = {
+	requestRender() {},
+	size: () => ({ columns: 120, rows: 40 }),
+	suspend: run => run(),
+};
+
+/** Mount a custom view the way the host's overlay does: one root node holding keyboard focus. */
+function mountView(output: ExtensionRender): TestTerminal {
+	const adapted = extensionOutput(output);
+	if (adapted === undefined) throw new Error("custom view drew nothing");
+	const node = singleNode(adapted);
+	const term = createTestTerminal(() => ({ layer: node }), { columns: 120, rows: 40 });
+	term.focus(node);
+	return term;
+}
+
+/** Feed one raw input chunk: a known key sequence as that key, anything else typed. */
+function feed(term: TestTerminal, raw: string): void {
+	const id = RAW_KEYS[raw];
+	if (id) term.press(id);
+	else term.type(raw);
+}
 
 const SAMPLE_DIFF = `diff --git a/src/value.ts b/src/value.ts
 --- a/src/value.ts
@@ -82,33 +119,31 @@ function createContext(options: ContextOptions = {}) {
 	const pickedSelections: SessionPick[] = [];
 	let customCalls = 0;
 	const custom: ExtensionUIContext["custom"] = async <T>(
-		factory: (
-			tui: TUI,
-			uiTheme: Theme,
-			keybindings: KeybindingsManager,
-			done: (result: T) => void,
-		) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
+		factory: ExtensionCustomFactory<T>,
 		_options?: ExtensionCustomOptions,
 	): Promise<T> => {
 		customCalls++;
-		const terminal = new VirtualTerminal(120, 30);
-		const tui = new TUI(terminal);
 		const completion = Promise.withResolvers<T>();
+		let settled = false;
 		const done = (result: T): void => {
 			if (typeof result === "object" && result !== null && "entry" in result && "content" in result) {
 				pickedSelections.push(result as unknown as SessionPick);
 			}
+			settled = true;
 			completion.resolve(result);
 		};
-		const component = await factory(tui, theme, KeybindingsManager.inMemory(), done);
-		if (component instanceof CopySelectorComponent) {
-			component.render(120);
-			for (const key of options.customKeys ?? [ENTER]) component.handleInput?.(key);
-		} else {
-			if (options.customResult === undefined) throw new Error("test custom result missing");
+		const output = await factory(HOST, extensionTheme(currentTheme()), KeybindingsManager.inMemory(), done);
+		if (options.customResult !== undefined) {
 			done(options.customResult as T);
+			return completion.promise;
 		}
-		component.dispose?.();
+		const term = mountView(output);
+		try {
+			for (const key of options.customKeys ?? [ENTER]) feed(term, key);
+		} finally {
+			term.dispose();
+		}
+		if (!settled) throw new Error("custom view did not complete");
 		return completion.promise;
 	};
 	const ctx = {
@@ -118,6 +153,7 @@ function createContext(options: ContextOptions = {}) {
 			getBranch: () => branch,
 			getCwd: () => options.cwd ?? "/workspace",
 			getSessionId: () => "session-1",
+			getArtifactsDir: () => null,
 		},
 		ui: { select, input, editor, custom, pasteToEditor, notify, setStatus },
 	} as unknown as CustomCommandContext;
@@ -192,35 +228,42 @@ async function driveEditorOverlay<T>(
 	cwd: string,
 	keys: readonly string[],
 	show: (ctx: CustomCommandContext) => Promise<T | undefined>,
+	artifactsDir: string | null = null,
 ): Promise<T | undefined> {
-	const previous = getKeybindings();
-	setKeybindings(KeybindingsManager.inMemory({ "app.editor.external": "ctrl+e" }));
-	const tui = { terminal: { rows: 40 }, requestRender() {}, stop() {}, start() {} } as unknown as TUI;
 	const ctx = {
 		cwd,
-		sessionManager: { getCwd: () => cwd },
+		sessionManager: {
+			getCwd: () => cwd,
+			getSessionId: () => "session-1",
+			getArtifactsDir: () => artifactsDir,
+			ensureOnDisk: async () => {},
+		},
 		ui: {
 			notify: vi.fn(),
-			custom: async (factory: Parameters<ExtensionUIContext["custom"]>[0]) => {
-				let result: unknown;
-				const component = await factory(tui, theme, KeybindingsManager.inMemory(), value => {
-					result = value;
-				});
-				component.render(120);
-				for (const key of keys) {
-					component.handleInput?.(key);
-					await new Promise<void>(resolve => setImmediate(resolve));
-					component.render(120);
+			custom: async <R>(factory: ExtensionCustomFactory<R>) => {
+				let result: R | undefined;
+				const output = await factory(
+					HOST,
+					extensionTheme(currentTheme()),
+					KeybindingsManager.inMemory({ "app.editor.external": "ctrl+e" }),
+					value => {
+						result = value;
+					},
+				);
+				const term = mountView(output);
+				try {
+					for (const key of keys) {
+						feed(term, key);
+						await new Promise<void>(resolve => setImmediate(resolve));
+					}
+				} finally {
+					term.dispose();
 				}
 				return result;
 			},
 		},
 	} as unknown as CustomCommandContext;
-	try {
-		return await show(ctx);
-	} finally {
-		setKeybindings(previous);
-	}
+	return await show(ctx);
 }
 
 function countOccurrences(text: string, value: string): number {
@@ -236,20 +279,43 @@ async function withTempDir<T>(callback: (directory: string) => Promise<T>): Prom
 	}
 }
 
-beforeAll(async () => {
-	await initTheme();
-});
-
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
 describe("/annotate contracts", () => {
+	it("saves notes from an overlay closed with Escape, restores them on reopen, and drops them on discard", async () => {
+		await withTempDir(async artifactsDir => {
+			const source = { id: "p", kind: "prompt", label: "Prompt", text: "alpha\nbeta" } as const;
+			const session = {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "session-1",
+				ensureOnDisk: async () => {},
+			};
+			const show = (ctx: CustomCommandContext) => showTextReviewOverlay(ctx, source);
+			await driveEditorOverlay("/w", ["A", "kept", ENTER, "a", "half", "\x1b"], show, artifactsDir);
+			const [saved] = await loadAnnotationDrafts(session);
+			expect(saved?.state).toMatchObject({
+				annotations: [{ annotation: { note: "kept" } }],
+				editor: { text: "half" },
+			});
+
+			// Reopened, the unfinished note is back in the editor; Enter commits it, then paste keeps the draft.
+			const result = await driveEditorOverlay("/w", [ENTER, "\t", ENTER], show, artifactsDir);
+			expect(result?.annotations.map(annotation => annotation.note)).toEqual(["kept", "half"]);
+
+			// Discard needs a second Enter; the draft is gone once it closes.
+			await driveEditorOverlay("/w", ["\t", "\x1b[B", ENTER, ENTER], show, artifactsDir);
+			expect(await loadAnnotationDrafts(session)).toEqual([]);
+		});
+	});
+
 	it("resolves the selected local target in the live session cwd and pastes code notes without submitting", async () => {
 		const { ctx, select, pasteToEditor } = createContext({
 			selectResults: ["Code review", "2. Review uncommitted changes"],
 			cwd: "/live-worktree",
 		});
+		spyOn(vcs, "repo").mockReturnValue({} as VcsRepo);
 		const target = localTarget();
 		const resolveLocalReviewTarget = vi.fn(
 			async (kind: "base-branch" | "uncommitted" | "commit", cwd: string, _ui: ReviewTargetUI) => {
@@ -278,7 +344,7 @@ describe("/annotate contracts", () => {
 		expect(select).toHaveBeenCalledTimes(2);
 		expect(resolveLocalReviewTarget).toHaveBeenCalledTimes(1);
 		expect(showCodeReviewOverlay).toHaveBeenCalledTimes(1);
-		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
+		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target, undefined, undefined);
 		expect(pasteToEditor).toHaveBeenCalledTimes(1);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(annotation.note);
 	});
@@ -288,6 +354,7 @@ describe("/annotate contracts", () => {
 			selectResults: ["Code review", "4. Review a specific PR/MR", "#42  Fix login  @octocat"],
 			cwd: "/live-worktree",
 		});
+		spyOn(vcs, "repo").mockReturnValue({} as VcsRepo);
 		const repoSpy = spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("acme/project");
 		spyOn(github, "json").mockResolvedValue([{ number: 42, title: "Fix login", author: { login: "octocat" } }]);
 		const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff");
@@ -305,7 +372,7 @@ describe("/annotate contracts", () => {
 		expect(resolvePrReviewTarget).toHaveBeenCalledTimes(1);
 		expect(resolvePrReviewTarget.mock.calls[0]?.[0]).toBe("/live-worktree");
 		expect(resolvePrReviewTarget.mock.calls[0]?.[2]).toMatchObject({ repo: "acme/project", number: 42 });
-		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
+		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target, undefined, undefined);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain("picked PR note");
 	});
 
@@ -348,7 +415,7 @@ describe("/annotate contracts", () => {
 		expect(prompt).toBeDefined();
 		expect(resolvePrReviewTarget).toHaveBeenCalledTimes(1);
 		expect(showCodeReviewOverlay).toHaveBeenCalledTimes(1);
-		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
+		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target, "focus on this line", undefined);
 		expect(prompt).toContain(contextInstruction);
 		expect(prompt).not.toContain("MAY read full file context as needed via `read`");
 		expect(countOccurrences(prompt!, "focus on this line")).toBe(1);

@@ -117,7 +117,7 @@ describe("model cache write churn", () => {
 		expect(entry?.updatedAt).toBe(3_000);
 		expect(entry?.authoritative).toBe(false);
 		const db = new Database(dbPath, { readonly: true });
-		const refreshRows = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache_refresh").get();
+		const refreshRows = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache_freshness").get();
 		db.close();
 		expect(refreshRows?.count).toBe(0);
 	});
@@ -170,6 +170,90 @@ describe("model cache write churn", () => {
 			"a",
 			"legacy",
 		]);
+	});
+
+	/** Copy this build's `rewrite-test` row under `policy`, the way another build's `INSERT OR REPLACE` lands. */
+	function writeAsOtherBuild(policy: string, updatedAt: number): void {
+		const db = new Database(dbPath);
+		db.run(
+			`INSERT OR REPLACE INTO model_cache (
+				provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
+				header_omitted_model_ids, unrestorable_header_model_ids, header_restore_version, models
+			)
+			SELECT provider_id, version, ?, ?, authoritative, static_fingerprint,
+				header_omitted_model_ids, unrestorable_header_model_ids, header_restore_version, ?
+			FROM model_cache WHERE provider_id = 'rewrite-test' LIMIT 1`,
+			[policy, updatedAt, payloadFor(["other-build"])],
+		);
+		db.close();
+	}
+
+	function policyRows(): string[] {
+		const db = new Database(dbPath, { readonly: true });
+		try {
+			return db
+				.query<{ policy: string }, []>(
+					"SELECT materialization_policy AS policy FROM model_cache WHERE provider_id = 'rewrite-test' ORDER BY updated_at",
+				)
+				.all()
+				.map(row => row.policy);
+		} finally {
+			db.close();
+		}
+	}
+
+	it("keeps this build's row when another app version writes the same provider", () => {
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		writeAsOtherBuild("app-0.0.0:builder-1:rules-other", 2_000);
+
+		expect(readModelCache("rewrite-test", TTL_MS, () => 2_000, dbPath)?.models.map(m => m.id)).toEqual(["a"]);
+		// An unchanged rewrite by this build only advances freshness; the other build's row stays.
+		const before = payloadWrites();
+		writeModelCache("rewrite-test", 3_000, [model("a")], true, "fp", dbPath);
+		expect(payloadWrites()).toBe(before);
+		expect(policyRows()).toHaveLength(2);
+	});
+
+	it("prunes other builds' rows to the most recently written ones on a payload write", () => {
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		for (let i = 1; i <= 4; i++) writeAsOtherBuild(`app-0.0.${i}:builder-1:rules-other`, 1_000 + i);
+
+		writeModelCache("rewrite-test", 9_000, [model("a"), model("b")], true, "fp", dbPath);
+		const rows = policyRows();
+		expect(rows).toHaveLength(3);
+		expect(rows.slice(0, 2)).toEqual(["app-0.0.3:builder-1:rules-other", "app-0.0.4:builder-1:rules-other"]);
+		expect(readModelCache("rewrite-test", TTL_MS, () => 9_000, dbPath)?.models.map(m => m.id)).toEqual(["a", "b"]);
+	});
+
+	it("rekeys a provider-keyed table from an older build without losing its rows", () => {
+		const db = new Database(dbPath);
+		db.run(`
+			CREATE TABLE model_cache (
+				provider_id TEXT PRIMARY KEY,
+				version INTEGER NOT NULL,
+				materialization_policy TEXT NOT NULL DEFAULT '',
+				updated_at INTEGER NOT NULL,
+				authoritative INTEGER NOT NULL DEFAULT 0,
+				static_fingerprint TEXT NOT NULL DEFAULT '',
+				header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
+				unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
+				header_restore_version INTEGER NOT NULL DEFAULT 0,
+				models_hash TEXT NOT NULL DEFAULT '',
+				models TEXT NOT NULL
+			)
+		`);
+		db.run(
+			"INSERT INTO model_cache (provider_id, version, materialization_policy, updated_at, models) VALUES (?, 15, ?, 500, '[]')",
+			["rewrite-test", "app-0.0.0:builder-1:rules-old"],
+		);
+		db.close();
+
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		expect(policyRows()).toEqual(["app-0.0.0:builder-1:rules-old", expect.stringMatching(/^app-/)]);
+		// The older build's provider-keyed upsert now replaces only its own row.
+		writeAsOtherBuild("app-0.0.0:builder-1:rules-old", 2_000);
+		expect(readModelCache("rewrite-test", TTL_MS, () => 2_000, dbPath)?.models.map(m => m.id)).toEqual(["a"]);
+		expect(policyRows()).toHaveLength(2);
 	});
 
 	it("re-reads and rewrites a payload edited in place", () => {
@@ -251,5 +335,89 @@ describe("model cache write churn", () => {
 		await resolveProviderModels(options, "online");
 		expect(payloadWrites()).toBe(before);
 		expect(readModelCache("azure", TTL_MS, Date.now, dbPath)?.models.length).toBe(bundled.length);
+	});
+});
+
+async function foldWalIntoMainDb(dbPath: string): Promise<void> {
+	const db = new Database(dbPath);
+	db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+	db.close();
+	await removeWithRetries(`${dbPath}-wal`);
+	await removeWithRetries(`${dbPath}-shm`);
+}
+
+/** Clobber every byte after the 100-byte header — a valid header over garbage pages yields SQLITE_CORRUPT. */
+async function corruptDbPages(dbPath: string): Promise<void> {
+	await foldWalIntoMainDb(dbPath);
+	const buf = await fs.readFile(dbPath);
+	buf.fill(0xff, 100);
+	await fs.writeFile(dbPath, buf);
+}
+
+async function quarantinedFiles(dir: string): Promise<string[]> {
+	const entries = await fs.readdir(dir);
+	return entries.filter(name => name.startsWith("models.db.corrupt-"));
+}
+
+// A physically corrupt models.db must not permanently disable the model cache.
+// On an unrecoverable SQLITE_CORRUPT/NOTADB failure the shared cache quarantines
+// the broken file, recreates a fresh database, and retries the operation once.
+describe("model cache corruption self-heal", () => {
+	let tempDir = "";
+	let dbPath = "";
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-corrupt-cache-"));
+		dbPath = path.join(tempDir, "models.db");
+	});
+
+	afterEach(async () => {
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+			dbPath = "";
+		}
+	});
+
+	it("quarantines a SQLITE_CORRUPT cache and persists the authoritative catalog", async () => {
+		writeModelCache("runtime-ext", Date.now(), [model("bootstrap", "runtime-ext")], true, "fp1", dbPath);
+		await corruptDbPages(dbPath);
+
+		// A read of the corrupt file must not throw and must self-heal to an empty cache.
+		expect(readModelCache<"openai-completions">("runtime-ext", TTL_MS, Date.now, dbPath)).toBeNull();
+		expect((await quarantinedFiles(tempDir)).length).toBeGreaterThan(0);
+
+		// The successful live catalog now persists into the recreated database...
+		writeModelCache(
+			"runtime-ext",
+			Date.now(),
+			[model("discovered-a", "runtime-ext"), model("discovered-b", "runtime-ext")],
+			true,
+			"fp2",
+			dbPath,
+		);
+
+		// ...and a later process (fresh read) sees it instead of a permanent miss.
+		const healed = readModelCache<"openai-completions">("runtime-ext", TTL_MS, Date.now, dbPath);
+		expect(healed?.models.map(entry => entry.id)).toEqual(["discovered-a", "discovered-b"]);
+	});
+
+	it("recreates a SQLITE_NOTADB cache on write so discovery can persist", async () => {
+		writeModelCache("runtime-ext", Date.now(), [model("bootstrap", "runtime-ext")], true, "fp1", dbPath);
+		// Overwrite with bytes that are not a SQLite database at all.
+		await fs.writeFile(dbPath, Buffer.from("not a database".repeat(64)));
+
+		writeModelCache("runtime-ext", Date.now(), [model("discovered", "runtime-ext")], true, "fp2", dbPath);
+
+		expect((await quarantinedFiles(tempDir)).length).toBeGreaterThan(0);
+		const healed = readModelCache<"openai-completions">("runtime-ext", TTL_MS, Date.now, dbPath);
+		expect(healed?.models.map(entry => entry.id)).toEqual(["discovered"]);
+	});
+
+	it("never quarantines a healthy cache", async () => {
+		writeModelCache("runtime-ext", Date.now(), [model("bootstrap", "runtime-ext")], true, "fp1", dbPath);
+		const cached = readModelCache<"openai-completions">("runtime-ext", TTL_MS, Date.now, dbPath);
+		expect(cached?.models.map(entry => entry.id)).toEqual(["bootstrap"]);
+		expect(await quarantinedFiles(tempDir)).toEqual([]);
 	});
 });

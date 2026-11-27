@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { probeCandidates, runBoundedProbe } from "../../src/eval/probe";
 
 // A cross-platform "hangs forever" command: re-invoke the running Bun to sleep.
@@ -13,6 +14,10 @@ const bun = process.execPath;
 const HANG = [bun, "-e", "await Bun.sleep(60_000)"];
 const IGNORE_TERM = [bun, "-e", 'process.on("SIGTERM", () => {}); await Bun.sleep(60_000)'];
 const baseEnv = (): Record<string, string | undefined> => ({ ...process.env });
+
+async function expectExited(child: Process | null): Promise<void> {
+	if (child) expect(await child.waitForExit({ timeoutMs: 2_000 })).toBe(true);
+}
 
 describe("runBoundedProbe", () => {
 	test("a hung probe is bounded by its timeout instead of hanging (regression: #9466)", async () => {
@@ -35,7 +40,7 @@ describe("runBoundedProbe", () => {
 
 	test("kills descendants spawned by an interpreter shim", async () => {
 		const pidFile = join(tmpdir(), `omp-probe-grandchild-${process.pid}-${Date.now()}.pid`);
-		let grandchildPid: number | undefined;
+		let grandchild: Process | null = null;
 		const wrapper = [
 			bun,
 			"-e",
@@ -48,26 +53,36 @@ describe("runBoundedProbe", () => {
 				timeoutMs: 1_000,
 			});
 			expect(result).toEqual({ exitCode: null, timedOut: true, aborted: false });
-			grandchildPid = Number(await Bun.file(pidFile).text());
-			const deadline = Date.now() + 2_000;
-			while (Date.now() < deadline) {
-				try {
-					process.kill(grandchildPid, 0);
-					await Bun.sleep(25);
-				} catch {
-					break;
-				}
-			}
-			expect(() => process.kill(grandchildPid!, 0)).toThrow();
+			const grandchildPid = Number(await Bun.file(pidFile).text());
+			expect(grandchildPid).toBeGreaterThan(0);
+			grandchild = Process.fromPid(grandchildPid);
+			await expectExited(grandchild);
 		} finally {
-			if (grandchildPid !== undefined) {
-				try {
-					process.kill(grandchildPid, "SIGKILL");
-				} catch {
-					// Expected when the process-tree teardown succeeded.
-				}
-			}
+			if (grandchild?.status() === ProcessStatus.Running) grandchild.killTree();
 			await rm(pidFile, { force: true });
+		}
+	});
+
+	test.skipIf(process.platform === "win32")("kills a probe group after its leader exits", async () => {
+		const leader = Bun.spawn(
+			[
+				bun,
+				"-e",
+				`const child = Bun.spawn(${JSON.stringify(HANG)}, { stdio: ["ignore", "ignore", "ignore"] });
+				child.unref();
+				console.log(child.pid);`,
+			],
+			{ detached: true, stdout: "pipe" },
+		);
+		try {
+			const pid = Number((await new Response(leader.stdout).text()).trim());
+			expect(await leader.exited).toBe(0);
+			const orphan = Process.fromPid(pid);
+			expect(orphan?.status()).toBe(ProcessStatus.Running);
+			expect(Process.killGroup(leader.pid)).toBe(true);
+			await expectExited(orphan);
+		} finally {
+			Process.killGroup(leader.pid);
 		}
 	});
 
@@ -121,7 +136,7 @@ describe("probeCandidates", () => {
 			{ cwd: process.cwd(), timeoutMs: 300 },
 		);
 		const elapsed = Date.now() - start;
-		expect(result).toEqual({ ok: false, aborted: false, failures: expect.any(Array) });
+		expect(result).toEqual({ ok: false, aborted: false, timedOut: true, failures: expect.any(Array) });
 		// One 300ms budget total, not 3×: the whole discovery stays well under the
 		// combined per-candidate cost it would incur without a shared deadline.
 		expect(elapsed).toBeLessThan(900);

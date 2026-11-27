@@ -5,7 +5,7 @@ import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings"
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { all, lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
-import { getSettingDef } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { getSettingDef } from "@oh-my-pi/pi-coding-agent/config/settings-defs";
 import { createSettingsHost } from "../src/config/settings-ui";
 
 describe("credential settings", () => {
@@ -60,11 +60,6 @@ describe("credential masking reaches every surface", () => {
 		for (const path of ["auth.broker.token", "searxng.token", "dev.autoqaPush.token"] as const) {
 			expect(getSettingDef(createSettingsHost().entries, path)).toBeUndefined();
 		}
-	});
-
-	it("leaves ordinary text settings unmasked", () => {
-		const def = getSettingDef(createSettingsHost().entries, "shellPath");
-		if (def?.type === "text") expect(def.secret).toBe(false);
 	});
 });
 

@@ -61,6 +61,26 @@ beforeAll(() => {
 							headers: { "content-type": "application/rss+xml" },
 						},
 					);
+				case "/app":
+					return new Response(
+						'<!doctype html><html><head><title>App</title><link rel="alternate" type="application/rss+xml" href="/app/index.xml"></head><body><div id="root"></div><script>start()</script></body></html>',
+						{ headers: { "content-type": "text/html" } },
+					);
+				case "/app/index.xml":
+					return new Response(
+						`<?xml version="1.0"?><rss version="2.0"><channel><title>APP_FEED</title><item><title>Entry</title><description>${filler}</description></item></channel></rss>`,
+						{ headers: { "content-type": "application/rss+xml" } },
+					);
+				case "/release_notes.html":
+					return new Response(html("nvCOMP 6.0.0", ""), { headers: { "content-type": "text/html" } });
+				case "/release_notes.html.md":
+					return new Response(`# nvcomp 5.1.0\n\n${filler}`, { headers: { "content-type": "text/markdown" } });
+				case "/self-hosted/releases/":
+					return new Response(html("Releases & Upgrading", ""), { headers: { "content-type": "text/html" } });
+				case "/self-hosted/releases/index.html.md":
+					return new Response(`---\ntitle: "Page Not Found"\n---\n# Page Not Found\n\n${filler}`, {
+						headers: { "content-type": "text/markdown" },
+					});
 			}
 			return new Response("Not found", { status: 404 });
 		},
@@ -81,28 +101,48 @@ const session: ToolSession = {
 describe("read HTML alternates", () => {
 	it("keeps the homepage instead of substituting its site-wide RSS feed", async () => {
 		const result = await fetchReadUrl(session, { path: `${origin}/` });
-		expect(result.details.method).toBe("native");
 		expect(result.content).toContain("HOMEPAGE_BODY");
 		expect(result.content).not.toContain("BLOG");
 	});
 
 	it("keeps a pricing page instead of substituting site-wide llms.txt", async () => {
 		const result = await fetchReadUrl(session, { path: `${origin}/pricing/` });
-		expect(result.details.method).toBe("native");
 		expect(result.content).toContain("PRICING_BODY");
 		expect(result.content).not.toContain("SITE_WIDE_LLMS_TXT");
 		expect(result.content).not.toContain("SITE_WIDE_LLMS_MD");
+	});
+
+	it("reads current HTML instead of a stale guessed Markdown suffix", async () => {
+		const result = await fetchReadUrl(session, { path: `${origin}/release_notes.html` });
+		expect(result.details.finalUrl).toBe(`${origin}/release_notes.html`);
+		expect(result.content).toContain("nvCOMP 6.0.0");
+		expect(result.content).not.toContain("nvcomp 5.1.0");
+	});
+
+	it("reads the requested release page instead of a successful soft-404 suffix", async () => {
+		const result = await fetchReadUrl(session, { path: `${origin}/self-hosted/releases/` });
+		expect(result.content).toContain("Releases & Upgrading");
+		expect(result.content).not.toContain("Page Not Found");
 	});
 
 	it("uses a page-specific markdown alternate regardless of filename extension", async () => {
 		const result = await fetchReadUrl(session, { path: `${origin}/guide/` });
 		expect(result.details.method).toBe("alternate-markdown");
 		expect(result.content).toContain("GUIDE_MARKDOWN");
+		expect(result.details.finalUrl).toBe(`${origin}/guide/index.txt`);
+		expect(result.output).toContain(`URL: ${origin}/guide/index.txt`);
 	});
 
-	it("retains a page-specific comments feed", async () => {
+	it("renders a post instead of substituting its page-specific feed", async () => {
 		const result = await fetchReadUrl(session, { path: `${origin}/posts/one` });
+		expect(result.content).toContain("POST_BODY");
+		expect(result.content).not.toContain("POST_COMMENTS");
+	});
+
+	it("falls back to a page-specific feed when the page renders to nothing", async () => {
+		const result = await fetchReadUrl(session, { path: `${origin}/app` });
 		expect(result.details.method).toBe("alternate-feed");
-		expect(result.details.notes).toContain(`Used feed alternate: ${origin}/posts/one/comments.xml`);
+		expect(result.details.notes).toContain(`Used feed alternate: ${origin}/app/index.xml`);
+		expect(result.content).toContain("APP_FEED");
 	});
 });

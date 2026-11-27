@@ -111,6 +111,17 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	return sanitized ?? items;
 }
 
+/** Remove Codex-rejected backend metadata; preserve clean-item identity by default, or copy while keeping/dropping id. */
+export function stripOpenAIResponsesInternalMetadataForReplay<
+	TItem extends { id?: unknown; internal_chat_message_metadata_passthrough?: unknown },
+>(item: TItem, mode: "preserve" | "copy" | "drop-id" = "preserve"): TItem {
+	if (mode === "preserve" && !Object.hasOwn(item, "internal_chat_message_metadata_passthrough")) return item;
+	const sanitized = { ...item };
+	delete sanitized.internal_chat_message_metadata_passthrough;
+	if (mode === "drop-id") delete sanitized.id;
+	return sanitized;
+}
+
 /**
  * Clamp `detail: "original"` only where Responses input_image parts live —
  * top-level items and `message.content[]`. Avoids a deep tree walk/clone of
@@ -614,8 +625,10 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	if (item.type === "reasoning") {
 		return sanitizeOpenAIResponsesReasoningItemForReplay(item, preserveReasoningItemIds);
 	}
-	const { id: _id, ...sanitizedItem } = item;
-	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
+	const sanitizedItem = stripOpenAIResponsesInternalMetadataForReplay(
+		item,
+		item.type === "computer_call" && typeof item.id === "string" ? "copy" : "drop-id",
+	);
 	if (item.type === "function_call") sanitizedItem.arguments = replayFunctionCallArguments(item);
 
 	return clampReplayItemImageDetail(
@@ -624,16 +637,30 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	) as unknown as OpenAIResponsesReplayItem;
 }
 
+/**
+ * Keep the replay-relevant fields of a reasoning item. Item ids are dropped
+ * (stateless servers reject ids they no longer hold) unless a computer call
+ * needs them, or the item carries OpenRouter's `format` tag: OpenRouter only
+ * hands the upstream reasoning back to the model from an item's `id`, `format`
+ * and `signature`. A Gemini thought signature arrives as an encrypted item whose
+ * `id` is its function call's `call_id`; stripped of either field, OpenRouter
+ * silently drops the blob and Gemini stops thinking a few steps into a tool loop.
+ */
 function sanitizeOpenAIResponsesReasoningItemForReplay(
 	item: Record<string, unknown>,
 	preserveItemId: boolean,
 ): OpenAIResponsesReplayItem {
 	const sanitizedItem: Record<string, unknown> = { type: "reasoning" };
-	if (preserveItemId && typeof item.id === "string") sanitizedItem.id = item.id;
+	const openRouterFormat = typeof item.format === "string" ? item.format : undefined;
+	if ((preserveItemId || openRouterFormat) && typeof item.id === "string") sanitizedItem.id = item.id;
 	if (Array.isArray(item.summary)) sanitizedItem.summary = item.summary;
 	if (Array.isArray(item.content)) sanitizedItem.content = item.content;
 	if (typeof item.encrypted_content === "string" || item.encrypted_content === null) {
 		sanitizedItem.encrypted_content = item.encrypted_content;
+	}
+	if (openRouterFormat) {
+		sanitizedItem.format = openRouterFormat;
+		if (typeof item.signature === "string") sanitizedItem.signature = item.signature;
 	}
 	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
 }
@@ -684,6 +711,52 @@ export function getOpenAIResponsesHistoryItems(
 	fallbackProvider?: string,
 ): Array<Record<string, unknown>> | undefined {
 	return getOpenAIResponsesHistoryPayload(providerPayload, currentProvider, fallbackProvider)?.items;
+}
+
+/**
+ * Apply extension-rewritten assistant text to a native Responses history
+ * payload. Same-model replay sends the payload's items verbatim, so without
+ * this sync a documented `assistant_message` rewrite silently never reaches
+ * the wire (#18312). Text blocks pair positionally with the payload `message`
+ * items' `output_text` entries — the same flatten the capture produced; on any
+ * shape mismatch the payload is left alone rather than half-updated.
+ *
+ * Returns a new payload when at least one entry changed, else `undefined`.
+ */
+export function syncOpenAIResponsesHistoryTexts(
+	providerPayload: ProviderPayload | undefined,
+	texts: readonly string[],
+): OpenAIResponsesHistoryPayload | undefined {
+	if (providerPayload?.type !== "openaiResponsesHistory" || !Array.isArray(providerPayload.items)) {
+		return undefined;
+	}
+	let targetCount = 0;
+	for (const item of providerPayload.items) {
+		if ((item as { type?: unknown }).type !== "message") continue;
+		const content = (item as { content?: unknown }).content;
+		if (!Array.isArray(content)) return undefined;
+		for (const part of content) {
+			const outputText = part as { type?: unknown; text?: unknown };
+			if (outputText.type !== "output_text" || typeof outputText.text !== "string") return undefined;
+			targetCount += 1;
+		}
+	}
+	if (targetCount !== texts.length) return undefined;
+	let changed = false;
+	let index = 0;
+	const items = providerPayload.items.map(item => {
+		if ((item as { type?: unknown }).type !== "message") return item;
+		const content = (item as { content?: unknown }).content as Array<Record<string, unknown>>;
+		const nextContent = content.map(part => {
+			const text = texts[index++];
+			if (text === part.text) return part;
+			changed = true;
+			return { ...part, text };
+		});
+		return { ...(item as Record<string, unknown>), content: nextContent };
+	});
+	if (!changed) return undefined;
+	return { ...providerPayload, items };
 }
 
 /**

@@ -7,9 +7,8 @@ remains in `packages/ai/src/providers/anthropic.ts`. The operational contract is
 `packages/ai/src/utils/schema/CONSTRAINTS.md`.
 
 There is no separate `strict-mode.ts` module — OpenAI strict-mode sanitization,
-OpenAI Responses rewriting, Google/Vertex/Gemini-CLI sanitization, Cloud Code
-Assist Claude sanitization, MCP sanitization, and Cursor projection are
-consolidated in `normalize.ts`. Google, CCA, MCP, and Moonshot use its
+OpenAI Responses rewriting, Google/Vertex sanitization, MCP sanitization, and Cursor projection are
+consolidated in `normalize.ts`. Google, MCP, and Moonshot use its
 option-driven `normalizeSchema` walk; the other paths have specialized walkers.
 Apple Foundation Models lowering lives in `foundation-models.ts`.
 
@@ -18,8 +17,7 @@ Apple Foundation Models lowering lives in `foundation-models.ts`.
 All exports live under `@oh-my-pi/pi-ai/utils/schema`:
 
 - `normalizeSchema(value, options)` — generic option-driven walker.
-- `normalizeSchemaForGoogle(value)` — Gemini / Vertex / Gemini CLI.
-- `normalizeSchemaForCCA(value)` — Cloud Code Assist Claude (Antigravity + GCA).
+- `normalizeSchemaForGoogle(value)` — Gemini / Vertex.
 - `normalizeSchemaForMCP(value)` — MCP inputSchemas before they enter the
   custom-tool registry. `tool-bridge.ts` runs every MCP `inputSchema` through
   this dispatcher.
@@ -52,33 +50,29 @@ All exports live under `@oh-my-pi/pi-ai/utils/schema`:
 Removed in the unified-flow refactor:
 
 - `strict-mode.ts` (merged into `normalize.ts`).
-- `sanitize-google.ts` and `normalize-cca.ts` (replaced by
+- `sanitize-google.ts` (replaced by
   `normalizeSchemaFor*` dispatchers).
 - `StringEnum` helper — use `type.enumerated(...)`; omptype emits
   provider-compatible JSON Schema.
-- `sanitizeSchemaFor{Google,CCA,MCP}` / `prepareSchemaForCCA` — renamed to
-  `normalizeSchemaFor{Google,CCA,MCP}`.
+- `sanitizeSchemaFor{Google,MCP}` — renamed to
+  `normalizeSchemaFor{Google,MCP}`.
 
 ## Dispatcher mapping
 
-| Provider transport(s)                                              | Dispatcher                                                                   |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `openai-completions`                                               | `adaptSchemaForStrict` (sanitize + enforce when strict mode is enabled)      |
-| `openai-responses`, `openai-codex-responses`                       | `sanitizeSchemaForOpenAIResponses` before strict-mode adaptation             |
-| `azure-openai-responses`                                           | `sanitizeSchemaForOpenAIResponses`; emits `strict: false` without adaptation |
-| Moonshot/Kimi native hosts using MFJS (`toolSchemaFlavor: "moonshot-mfjs"`) | `normalizeSchemaForMoonshot`                                |
-| Grammar-flavored OpenAI-compatible hosts (`toolSchemaFlavor: "grammar"`) | `sanitizeSchemaForGrammar`                                     |
-| `ollama-chat` (`ollama` / `ollama-cloud`) tool parameters           | `toolWireSchema` → `sanitizeSchemaForOllama`                                 |
-| `cursor-agent` with `requiresCursorToolSchemaProjection: true`     | `toolWireSchema` → `sanitizeSchemaForCursor`                                |
-| `google-generative-ai`, `google-vertex`, Gemini CLI                | `normalizeSchemaForGoogle`                                                   |
-| Google-family models with `compat.ccaLegacyParametersSchema`       | `normalizeSchemaForCCA` on the legacy `parameters` path                     |
-| `apple-foundation-models`                                         | `toolWireSchema` → `toFoundationModelsSchema`; argument decoding afterward  |
-| MCP `inputSchema` ingestion                                        | `normalizeSchemaForMCP`                                                      |
-| `anthropic-messages` (native, not CCA)                             | per-provider whitelist in `anthropic.ts`                                     |
-
-Gemini CLI / Antigravity CCA MUST run the full `normalizeSchemaForCCA`
-pipeline (not just the first keyword-stripping pass) to keep parity with the
-shared Google Claude path.
+| Provider transport(s)                                                       | Dispatcher                                                                   |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `openai-completions`                                                        | `adaptSchemaForStrict` (sanitize + enforce when strict mode is enabled)      |
+| `openai-responses`, `openai-codex-responses`                                | `sanitizeSchemaForOpenAIResponses` before strict-mode adaptation             |
+| `azure-openai-responses`                                                    | `sanitizeSchemaForOpenAIResponses`; emits `strict: false` without adaptation |
+| Moonshot/Kimi native hosts using MFJS (`toolSchemaFlavor: "moonshot-mfjs"`) | `normalizeSchemaForMoonshot`                                                 |
+| Grammar-flavored OpenAI-compatible hosts (`toolSchemaFlavor: "grammar"`)    | `sanitizeSchemaForGrammar`                                                   |
+| Gemini behind an OpenAI-compatible host (`toolSchemaFlavor: "google"`, GitHub Copilot) | `normalizeSchemaForGoogle`                                     |
+| `ollama-chat` (`ollama` / `ollama-cloud`) tool parameters                   | `toolWireSchema` → `sanitizeSchemaForOllama`                                 |
+| `cursor-agent` with `requiresCursorToolSchemaProjection: true`              | `toolWireSchema` → `sanitizeSchemaForCursor`                                 |
+| `google-generative-ai`, `google-vertex`                         | `normalizeSchemaForGoogle`                                                   |
+| `apple-foundation-models`                                                   | `toolWireSchema` → `toFoundationModelsSchema`; argument decoding afterward   |
+| MCP `inputSchema` ingestion                                                 | `normalizeSchemaForMCP`                                                      |
+| `anthropic-messages`                                                        | per-provider whitelist in `anthropic.ts`                                     |
 
 ## Walk semantics
 
@@ -97,16 +91,11 @@ options, each node:
    (`spill.ts`). Structural/meta keys (`$ref`, `$defs`,
    `additionalProperties`) are not spilled.
 4. Normalizes type unions (`type: ["T", "null"]` → `type: "T"` + nullable
-   marker on Google, plain `type: "T"` on CCA).
+   marker on Google).
    Google additionally emits property ordering and retains only string-valued
    enums; other dispatchers use their own enum policy.
-5. Collapses object-only / same-type combiners, optionally lossy-collapses
-   mixed-type combiners (CCA only), and runs the residual-combiner fixpoint.
-6. Validates with the in-house structural validator (`isValidJsonSchema`
-   from `meta-validator.ts`) when `validateAndFallback` is set (CCA path)
-   and emits the per-tool fallback `{ "type": "object", "properties": {} }`
-   on residual incompatibility — `type` array, `type: "null"`, `nullable`
-   key, or any remaining `anyOf`/`oneOf`/`allOf`/`not`.
+5. Collapses object-only / same-type combiners and runs the residual-combiner
+   fixpoint.
 
 ## OpenAI strict-mode pipeline
 

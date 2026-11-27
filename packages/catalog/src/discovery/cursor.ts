@@ -89,9 +89,13 @@ export interface CursorModelDiscoveryOptions {
 
 /**
  * Joins Cursor's account-scoped model RPCs:
- * - `AvailableModels` supplies rich base models, parameter axes, variants,
- *   capabilities, aliases, and cost-multiplier metadata.
- * - `GetUsableModels` supplies the exact legacy wire slugs the account can run.
+ * - `AvailableModels` is the account's authoritative roster: rich base models,
+ *   parameter axes, variants, capabilities, aliases and cost multipliers.
+ *   cursor-agent runs every model it lists, including ones `GetUsableModels`
+ *   omits.
+ * - `GetUsableModels` is the fallback roster when the endpoint does not
+ *   implement `AvailableModels` (HTTP 404) or returns an empty one. It
+ *   also contributes usable slugs the rich roster does not describe.
  * - `GetDefaultModelForCli` identifies the account's current default.
  *
  * Per-token rates come from the reviewed `providers/cursor.kdl` rate card and
@@ -157,12 +161,10 @@ export async function fetchCursorUsableModels(
 		parsedUsable instanceof type.errors
 			? []
 			: normalizeCursorModels(parsedUsable.models, options.baseUrl, references);
-	const usableModelIds = usable === null ? undefined : new Set(legacyModels.map(model => model.id));
 	if (available === null) return availablePayload === CURSOR_RPC_UNIMPLEMENTED ? legacyModels : null;
 	if (available.models.length === 0) return legacyModels;
 	const richModels = normalizeRichCursorModels(
 		available.models,
-		usableModelIds,
 		options.baseUrl,
 		references,
 		defaultModel?.modelId,
@@ -531,15 +533,9 @@ function resolveRichCursorCardCost(
 function resolveCursorCardAxes(slug: string): { patch?: ModelCost; fallback?: ModelCost } {
 	const axes = resolveCatalogAxes({
 		id: slug,
-		name: slug,
 		api: "cursor-agent",
 		provider: "cursor",
-		baseUrl: CURSOR_DEFAULT_BASE_URL,
 		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: DEFAULT_CONTEXT_WINDOW,
-		maxTokens: DEFAULT_MAX_TOKENS,
 	});
 	// Dated cards ride along as a schedule, so a lane priced from a sibling
 	// slug's card (whose own id no rule matches) still changes price on time.
@@ -562,7 +558,6 @@ function resolveCursorCardAxes(slug: string): { patch?: ModelCost; fallback?: Mo
 
 function normalizeRichCursorModels(
 	models: readonly AvailableModelsResponse_ModelDetails[],
-	usableModelIds: ReadonlySet<string> | undefined,
 	baseUrlOverride: string | undefined,
 	references: Map<string, ModelSpec<"cursor-agent">>,
 	defaultModelId: string | undefined,
@@ -575,8 +570,11 @@ function normalizeRichCursorModels(
 		// OMP always sends Cursor's zero-data-retention header. Advertising a
 		// retention-required model would expose a route every invocation rejects.
 		if (details.requiresDataRetention === true) continue;
+		// AvailableModels is not filtered by GetUsableModels, so models Cursor
+		// hides from its own picker or serves only to inline Cmd-K edits stay out.
+		if (details.isHidden === true || details.onlySupportsCmdK === true) continue;
 
-		const variants = normalizeRichCursorVariants(details, baseId, usableModelIds);
+		const variants = normalizeRichCursorVariants(details, baseId);
 		if (variants.length === 0) continue;
 		// The bare lane id belongs to Cursor's flagged default configuration, so
 		// seed axis defaults from it before falling back to first-seen values;
@@ -636,11 +634,8 @@ function normalizeRichCursorModels(
 function normalizeRichCursorVariants(
 	details: AvailableModelsResponse_ModelDetails,
 	baseId: string,
-	usableModelIds: ReadonlySet<string> | undefined,
 ): NormalizedRichVariant[] {
 	if (details.variants.length === 0) {
-		const candidates = [baseId, ...details.legacySlugs, ...details.idAliases];
-		if (usableModelIds !== undefined && !candidates.some(id => usableModelIds.has(id))) return [];
 		return [{ id: baseId, parameters: [], variant: undefined, effort: undefined }];
 	}
 
@@ -656,10 +651,6 @@ function normalizeRichCursorVariants(
 			variant.legacySlug?.trim() ||
 			variant.variantStringRepresentation?.trim() ||
 			(parameterSuffix ? `${baseId}@${parameterSuffix}` : `${baseId}@variant-${index + 1}`);
-		const entitlementIds = [variant.legacySlug?.trim(), id, baseId, ...details.idAliases].filter(
-			(candidate): candidate is string => Boolean(candidate),
-		);
-		if (usableModelIds !== undefined && !entitlementIds.some(candidate => usableModelIds.has(candidate))) continue;
 		const routeSignature = `${parameterSuffix}\u0000${variant.isMaxMode === true ? "max" : "standard"}`;
 		if (seenRoutes.has(routeSignature)) continue;
 		seenRoutes.add(routeSignature);

@@ -9,6 +9,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { asGlobalFetch } from "./helpers/fetch-mock";
+import { rejectionOf } from "./helpers/rejection";
 
 interface MessagesRequest {
 	system?: unknown;
@@ -94,11 +95,15 @@ function withoutCacheControl(value: unknown): unknown {
 
 describe("AgentSession Anthropic native compaction", () => {
 	const previousProxy = Bun.env.PI_PROXY_ANTHROPIC;
+	const previousThreads = Bun.env.PI_ANTHROPIC_MESSAGE_THREADS;
 
 	beforeEach(() => {
 		// A provider proxy moves first-party requests off the Cowork transport
 		// onto `globalThis.fetch`, where the spy below answers them.
 		Bun.env.PI_PROXY_ANTHROPIC = "http://proxy.example.test:8080";
+		// These compare the compaction request with a live request's full
+		// replay; a message-thread turn sends only its new messages.
+		Bun.env.PI_ANTHROPIC_MESSAGE_THREADS = "0";
 		__resetProxyCache();
 	});
 
@@ -106,6 +111,8 @@ describe("AgentSession Anthropic native compaction", () => {
 		vi.restoreAllMocks();
 		if (previousProxy === undefined) delete Bun.env.PI_PROXY_ANTHROPIC;
 		else Bun.env.PI_PROXY_ANTHROPIC = previousProxy;
+		if (previousThreads === undefined) delete Bun.env.PI_ANTHROPIC_MESSAGE_THREADS;
+		else Bun.env.PI_ANTHROPIC_MESSAGE_THREADS = previousThreads;
 		__resetProxyCache();
 	});
 
@@ -138,7 +145,12 @@ describe("AgentSession Anthropic native compaction", () => {
 			sessionManager,
 			authStorage,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			settings: Settings.isolated({ "compaction.methodOrder": ["remote"], "compaction.keepRecentTokens": 1 }),
+			// Intent tracing is off by default outside the interactive TUI; the prefix check needs its field.
+			settings: Settings.isolated({
+				"compaction.methodOrder": ["remote"],
+				"compaction.keepRecentTokens": 1,
+				"tools.intentTracing": true,
+			}),
 			model,
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -160,7 +172,7 @@ describe("AgentSession Anthropic native compaction", () => {
 
 	it("sends the summarized prefix with the live turn's system prompt, tools and message bytes", async () => {
 		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-");
-		// Two live turns answer; the compaction request is only captured.
+		// Two live turns answer; the native compaction request and its soft fallback are only captured.
 		const { session, requests, close } = await openSession(tempDir, request =>
 			request <= 2 ? answer(request) : captured(),
 		);
@@ -172,7 +184,6 @@ describe("AgentSession Anthropic native compaction", () => {
 			await close();
 		}
 
-		expect(requests).toHaveLength(3);
 		const [, live, compaction] = requests;
 		// The live turn carries the injected intent field and the first-turn
 		// date/cwd reminder; the compaction request must carry them too.
@@ -210,7 +221,6 @@ describe("AgentSession Anthropic native compaction", () => {
 			await opened.close();
 		}
 
-		expect(requests).toHaveLength(5);
 		const [, , , live, compaction] = requests;
 		// The cut keeps only the last answer: the request is exactly what the
 		// "third question" turn sent, the inserted control included.
@@ -220,8 +230,10 @@ describe("AgentSession Anthropic native compaction", () => {
 
 	it("replays a later compaction's prefix as sent, without disturbing the live reminder state", async () => {
 		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-second-");
+		// The second compaction (native request, then its soft fallback) is only captured.
+		let capturing = false;
 		const opened = await openSession(tempDir, request =>
-			request === 3 ? compactionAnswer() : request === 6 ? captured() : answer(request),
+			request === 3 ? compactionAnswer() : capturing ? captured() : answer(request),
 		);
 		const { session, requests } = opened;
 		try {
@@ -231,15 +243,17 @@ describe("AgentSession Anthropic native compaction", () => {
 			await session.prompt("third question");
 			opened.moveCwd();
 			await session.prompt("fourth question");
+			capturing = true;
 			await expect(session.compact()).rejects.toThrow("captured");
+			capturing = false;
 			await session.prompt("fifth question");
 		} finally {
 			await opened.close();
 		}
 
-		expect(requests).toHaveLength(7);
 		const live = requests[4]!;
-		const [compaction, next] = requests.slice(5);
+		const compaction = requests[5]!;
+		const next = requests.at(-1)!;
 		expect(withoutCacheControl(compaction.messages)).toEqual(
 			withoutCacheControl(live.messages.slice(0, compaction.messages.length)),
 		);
@@ -247,5 +261,70 @@ describe("AgentSession Anthropic native compaction", () => {
 		expect(withoutCacheControl(next.messages.slice(0, live.messages.length))).toEqual(
 			withoutCacheControl(live.messages),
 		);
+	});
+
+	it("leaves out other models' reasoning the session stopped sending after a refusal", async () => {
+		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-stripped-");
+		const refusal = sse([
+			{
+				type: "message_start",
+				message: { id: "msg_refused", model: "claude-opus-5-5", usage: { input_tokens: 10 } },
+			},
+			{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+			{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Considering" } },
+			{ type: "content_block_stop", index: 0 },
+			{
+				type: "message_delta",
+				delta: {
+					stop_reason: "refusal",
+					stop_details: { type: "refusal", category: "reasoning_extraction", explanation: null },
+				},
+				usage: { output_tokens: 5 },
+			},
+			{ type: "message_stop" },
+		]);
+		const { session, requests, close } = await openSession(tempDir, request =>
+			request === 1 ? refusal : request === 2 ? answer(request) : captured(),
+		);
+		try {
+			// An earlier Kimi turn: its reasoning reaches Claude as text.
+			const user = { role: "user" as const, content: "Plan the migration", timestamp: 1 };
+			const kimiTurn = {
+				role: "assistant" as const,
+				api: "anthropic-messages" as const,
+				provider: "kimi-code",
+				model: "k3",
+				content: [
+					{ type: "thinking" as const, thinking: "kimi private plan", thinkingSignature: "sig-kimi" },
+					{ type: "text" as const, text: "Kimi answer" },
+				],
+				stopReason: "stop" as const,
+				timestamp: 2,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			for (const message of [user, kimiTurn]) {
+				session.sessionManager.appendMessage(message);
+				session.agent.appendMessage(message);
+			}
+			await session.prompt("Continue");
+			expect(String(await rejectionOf(session.compact()))).toContain("captured");
+		} finally {
+			await close();
+		}
+
+		const [refused, live, compaction] = requests;
+		expect(JSON.stringify(refused.messages)).toContain("kimi private plan");
+		expect(JSON.stringify(live.messages)).not.toContain("kimi private plan");
+		expect(withoutCacheControl(compaction.messages)).toEqual(
+			withoutCacheControl(live.messages.slice(0, compaction.messages.length)),
+		);
+		expect(JSON.stringify(compaction.messages)).not.toContain("kimi private plan");
 	});
 });

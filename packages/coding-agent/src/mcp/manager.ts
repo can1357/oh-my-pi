@@ -4,23 +4,26 @@
  * Discovers, connects to, and manages MCP servers.
  * Handles tool loading and lifecycle.
  */
-import * as path from "node:path";
-import * as url from "node:url";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
-import { resolveConfigValue } from "../config/resolve-config-value";
+import { invalidateCommandConfig, isCommandConfigValue, resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import {
-	MCPConnectionTimeoutError,
+	buildServerSpec,
 	connectToServer,
 	disconnectServer,
+	discoverServer,
 	getPrompt,
+	type HostedMCPConnection,
 	listPrompts,
 	listResources,
 	listResourceTemplates,
 	listTools,
+	MCP_DEFAULT_IDLE_MS,
+	MCPConnectionTimeoutError,
+	projectRoots,
 	readResource,
 	serverSupportsPrompts,
 	serverSupportsResources,
@@ -34,6 +37,9 @@ import {
 	loadAllMCPConfigs,
 	validateServerConfig,
 } from "./config";
+import { type McpHostAccess, type McpUpstreamStatus, mcpIdentity } from "./host/contract";
+import type { HostLinkReattach } from "./link";
+import { setGeneratedHeader } from "./host/header-policy";
 import {
 	lookupMcpOAuthCredential,
 	type MCPOAuthCredentialLookup,
@@ -43,10 +49,9 @@ import type { MCPStoredOAuthCredential } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
-import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
-import { DeferredMCPTool, MCPTool } from "./tool-bridge";
-import type { MCPToolCache } from "./tool-cache";
-import { setGeneratedHeader } from "./transports/header-policy";
+import type { MCPToolDetails } from "../tools/details/mcp";
+import { type MCPReconnect, type MCPReconnectOptions, MCPTool, type MCPToolCallObserver } from "./tool-bridge";
+import type { MCPDroppedServer, MCPTransformContext } from "./transforms";
 import type {
 	MCPAuthChallenge,
 	MCPGetPromptResult,
@@ -58,7 +63,6 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 	MCPToolDefinition,
-	MCPTransport,
 } from "./types";
 import { MCPNotificationMethods } from "./types";
 
@@ -66,17 +70,48 @@ export type McpCatalogChangeEvent = { serverName: string; kind: "resources" | "p
 export type MCPConfigLoader = (cwd: string, options?: LoadMCPConfigsOptions) => Promise<LoadMCPConfigsResult>;
 
 type ToolLoadResult = {
-	connection: MCPServerConnection;
+	connection: HostedMCPConnection;
 	serverTools: MCPToolDefinition[];
 };
 
-interface AuthRefreshableMCPTransport extends MCPTransport {
-	onAuthError?: () => Promise<Record<string, string> | null>;
+/**
+ * The `!command` values {@link MCPManager} executes when it resolves `config`:
+ * remote `headers` or stdio `env`, minus the entries a literal policy keeps verbatim.
+ */
+function commandValues(config: MCPServerConfig): string[] {
+	const values: string[] = [];
+	if (config.type === "http" || config.type === "sse") {
+		if (!config.headers || config.headerPolicy === "origin-locked") return values;
+		for (const key in config.headers) {
+			const value = config.headers[key];
+			if (isCommandConfigValue(value)) values.push(value);
+		}
+		return values;
+	}
+	if (!config.env || config.envPolicy === "literal") return values;
+	const literalKeys = new Set(config.envLiteralKeys);
+	for (const key in config.env) {
+		const value = config.env[key];
+		if (!literalKeys.has(key) && isCommandConfigValue(value)) values.push(value);
+	}
+	return values;
 }
 
-function isAuthRefreshableMCPTransport(transport: MCPTransport): transport is AuthRefreshableMCPTransport {
-	return "onAuthError" in transport;
+/**
+ * Drop the process-cached results of `config`'s `!command` values so the next
+ * resolution runs them again — a command that mints a short-lived token
+ * (e.g. an OAuth2 `client_credentials` grant) must not resend an expired one.
+ */
+function invalidateCommandValues(config: MCPServerConfig): void {
+	for (const value of commandValues(config)) invalidateCommandConfig(value);
 }
+
+/** Abort of one server's connect, tied to the manager's own. */
+interface ServerScope {
+	controller: AbortController;
+	signal: AbortSignal;
+}
+
 type TrackedPromise<T> = {
 	promise: Promise<T>;
 	status: "pending" | "fulfilled" | "rejected";
@@ -84,66 +119,21 @@ type TrackedPromise<T> = {
 	reason?: unknown;
 };
 
+/**
+ * One session's view over a shared {@link MCPManager}, keyed by the session's
+ * id; see {@link MCPManagerApi.getTools}. Opened with
+ * {@link MCPManagerApi.openToolScope}; the owning session's view needs none.
+ */
+export type MCPToolScope = string;
+
+/** Scope of the session that owns the manager. */
+const OWNER_TOOL_SCOPE: MCPToolScope = "owner";
+
 function createMcpStartupFailure(serverName: string, error: string, source?: SourceMeta): McpConnectionStatusEvent {
 	return source
 		? { type: "failed", serverName, error, sourcePath: source.path }
 		: { type: "failed", serverName, error };
 }
-
-/**
- * Per-server reconnect-storm circuit breaker.
- *
- * `transport.onClose` (wired in {@link MCPManager.connectServers} and
- * {@link MCPManager.#connectAndWireServer}) fires `reconnectServer` on every
- * clean process exit, so a stdio MCP server that completes the
- * `initialize` + `tools/list` handshake and then exits will pull the agent
- * into a fork loop with no rate limit. That pathology shipped in issue #1592
- * (a `php`-shebang MCP fork-bombing macOS, parented directly to the agent's
- * `bun` PID via shebang exec).
- *
- * We keep the sliding window short — older crashes age out so a single
- * transient failure stays cheap — but cap the burst tightly enough that the
- * agent never spawns more than `RECONNECT_BURST_LIMIT * #doReconnect retries`
- * (≤ 25) processes per stuck server per window. Manual `/mcp reconnect`
- * resets the window so users can recover after fixing the underlying
- * misconfiguration.
- */
-const RECONNECT_BURST_WINDOW_MS = 30_000;
-const RECONNECT_BURST_LIMIT = 5;
-
-/**
- * How {@link MCPManager} paces reconnects after a transport is lost.
- *
- * `ladderMs` are the sleeps between the attempts one `reconnectServer` call
- * makes before giving up; every caller that awaits a reconnect (tool calls,
- * `/mcp reconnect`, {@link MCPManager.waitForConnection}) is bounded by it.
- *
- * When the ladder fails for an `http`/`sse` server that was connected and
- * then lost, the manager keeps trying on its own: one quiet attempt after
- * `retryBaseMs`, doubling up to `retryMaxMs`, until the server answers or the
- * server is disconnected or reconfigured. A remote server that is merely
- * restarting (a redeploy, a laptop waking with the network not yet back)
- * comes back on its own schedule, and until it does the manager's resource
- * subscriptions are dead while nothing else would reconnect them: without the
- * schedule the server stays "not connected" until a tool call happens to hit
- * it or the user notices. Each scheduled attempt is a full connect — auth
- * resolution included — lasting up to the server's `timeout`; a reconnect
- * requested meanwhile shares it, and the server reads `connecting` for that
- * long. Stdio servers stop at the ladder: a process that exited is not
- * brought back by waiting, and re-spawning it on a timer is the fork storm
- * {@link RECONNECT_BURST_LIMIT} exists to stop.
- */
-export interface MCPReconnectPolicy {
-	readonly ladderMs: readonly number[];
-	readonly retryBaseMs: number;
-	readonly retryMaxMs: number;
-}
-
-const DEFAULT_RECONNECT_POLICY: MCPReconnectPolicy = {
-	ladderMs: [500, 1000, 2000, 4000],
-	retryBaseMs: 15_000,
-	retryMaxMs: 5 * 60_000,
-};
 
 /**
  * Bounded buffer for notifications received before any listener attaches.
@@ -224,6 +214,8 @@ export interface MCPDiscoverOptions {
 	filterBrowser?: boolean;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
+	/** What the session offers natively, for built-in transforms; omitted: none applies. */
+	builtinTransforms?: MCPTransformContext;
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 	/** Non-blocking discovery window in milliseconds; environment override wins. */
@@ -239,17 +231,84 @@ function isAbortedHandshake(signal: AbortSignal, error: unknown): boolean {
 }
 
 /**
+ * Surface of an {@link MCPManager} that sessions reusing a manager (subagents, `mcp://` and
+ * `skill://` handlers) use. Subagent worker threads receive a remote implementation whose calls
+ * run on the main thread's manager, so connections and server processes stay single-owner.
+ */
+export interface MCPManagerApi {
+	/**
+	 * Tools `scope` sees (omitted: the owning session). A tool a server adds
+	 * while a call to it runs reaches a session only once that session's own
+	 * call to the server completes, so one session loading tools never rewrites
+	 * another's tool list, prompt, or provider cache prefix. Tools present at
+	 * connect, and tools a server adds while no call to it runs, every session sees.
+	 */
+	getTools(scope?: MCPToolScope): CustomTool<TSchema, MCPToolDetails>[];
+	/**
+	 * Open the view of the session `scope` names. A view opened for the first
+	 * time starts from `seed`'s (default: the owner's), so a child sees what its
+	 * spawner saw; reopening a view (a revived session) keeps what it was granted,
+	 * so the revived session renders the tools its earlier requests were cached against.
+	 */
+	openToolScope(scope: MCPToolScope, seed?: MCPToolScope): void;
+	/**
+	 * Attribute one tool call, by tool-call id, to `scope` until the returned
+	 * callback runs. Calls not attributed belong to the owning session.
+	 */
+	trackToolCall(scope: MCPToolScope, toolCallId: string): () => void;
+	/** Subscribe to tool-set changes; returns an unsubscribe fn. */
+	addToolsChangedListener(listener: () => void): () => void;
+	/** Subscribe to every server notification frame; returns an unsubscribe fn. */
+	addNotificationListener(listener: (serverName: string, method: string, params: unknown) => void): () => void;
+	/** Names of currently connected servers. */
+	getConnectedServers(): string[];
+	/** Cached resources/templates of one server. */
+	getServerResources(name: string): { resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined;
+	/** Wait until one server's resource catalog is loaded. */
+	ensureServerResources(name: string): Promise<void>;
+	/** Wait for in-flight connection attempts. */
+	waitForPendingConnections(): Promise<void>;
+	/** Read one resource from a server. */
+	readServerResource(
+		name: string,
+		uri: string,
+		options?: MCPRequestOptions,
+	): Promise<MCPResourceReadResult | undefined>;
+	/** Server-provided instructions by server name. */
+	getServerInstructions(): Map<string, string>;
+	/** Apply the browser-MCP filter after the built-in browser capability toggled. */
+	reconcileBrowserFilter(enabled: boolean): Promise<void>;
+}
+
+/** Process-global MCP manager accessors a subagent worker installs in place of its own (empty) slot. */
+export interface MCPManagerGlobal {
+	instance(): MCPManagerApi | undefined;
+	load(): Promise<MCPManagerApi | undefined>;
+	available(): boolean;
+}
+
+/**
  * MCP Server Manager.
  *
  * Manages connections to MCP servers and provides tools to the agent.
  */
-export class MCPManager {
+export class MCPManager implements MCPManagerApi {
 	static #instance: MCPManager | undefined;
 	static #deferred: (() => Promise<MCPManager>) | undefined;
 	static #deferredLoad: Promise<MCPManager> | undefined;
+	static #global: MCPManagerGlobal | undefined;
+
+	/**
+	 * Route {@link instance}/{@link load}/{@link available} to another thread's manager.
+	 * Subagent worker bootstrap only: a worker never owns MCP connections.
+	 */
+	static installGlobal(global: MCPManagerGlobal): void {
+		MCPManager.#global = global;
+	}
 
 	/** Process-global instance shared by internal URL protocol handlers and tools. */
-	static instance(): MCPManager | undefined {
+	static instance(): MCPManagerApi | undefined {
+		if (MCPManager.#global) return MCPManager.#global.instance();
 		return MCPManager.#instance;
 	}
 
@@ -269,11 +328,13 @@ export class MCPManager {
 
 	/** Whether {@link load} can yield an instance: one is installed or a deferred loader is set. */
 	static available(): boolean {
+		if (MCPManager.#global) return MCPManager.#global.available();
 		return MCPManager.#instance !== undefined || MCPManager.#deferred !== undefined;
 	}
 
 	/** The process-global instance, running the deferred loader once if none is installed yet. */
-	static async load(): Promise<MCPManager | undefined> {
+	static async load(): Promise<MCPManagerApi | undefined> {
+		if (MCPManager.#global) return MCPManager.#global.load();
 		if (MCPManager.#instance) return MCPManager.#instance;
 		if (!MCPManager.#deferred) return undefined;
 		if (!MCPManager.#deferredLoad) {
@@ -293,14 +354,36 @@ export class MCPManager {
 		MCPManager.setDeferredInstance(undefined);
 	}
 
-	#connections = new Map<string, MCPServerConnection>();
+	/** Owner id of this manager's handshake-era units: one server process per manager, kept across re-attaches. */
+	readonly #owner = Bun.randomUUIDv7();
+	#connections = new Map<string, HostedMCPConnection>();
+	/** Newest upstream status the host reported per server, from the first attach on. */
+	#runtimes = new Map<string, McpUpstreamStatus>();
+	/**
+	 * Servers whose discovery and tool list succeeded on their current
+	 * attachment. A server can be attached without being usable (its reload
+	 * failed) and can keep stale tools without being attached; neither is ready.
+	 */
+	#ready = new Set<string>();
+	/**
+	 * Per server, the scope of its newest connect: aborting it ends that
+	 * connect and whatever reload runs for the server, and callbacks of a link
+	 * are honoured only while its scope is the registered one.
+	 */
+	#serverScopes = new Map<string, ServerScope>();
+	/** Reloads started because a link re-attached on its own, by server. */
+	#pendingReloads = new Map<string, Promise<void>>();
 	#tools: CustomTool<TSchema, MCPToolDetails>[] = [];
-	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
+	#pendingConnections = new Map<string, Promise<HostedMCPConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#startupUpdates = new Map<string, Promise<void>>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
+	/** Newest connect/reconnect failure per server, cleared when it connects; explains "not connected". */
+	#lastConnectErrors = new Map<string, string>();
 	#sources = new Map<string, SourceMeta>();
+	/** Servers the newest config load left unconnected because a built-in transform dropped them. */
+	#builtinDrops = new Map<string, MCPDroppedServer>();
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
 	#notificationListeners = new Set<(serverName: string, method: string, params: unknown) => void>();
@@ -332,31 +415,44 @@ export class MCPManager {
 	#browserFilterMutationTail: Promise<void> = Promise.resolve();
 	/** Settles when the latest {@link MCPManager.discoverAndConnect} call does; reconciles wait on it. */
 	#discoveryInFlight: Promise<unknown> = Promise.resolve();
-	/**
-	 * Timestamps of recent reconnectServer invocations per server, used by the
-	 * crash-storm circuit breaker (see {@link RECONNECT_BURST_LIMIT}).
-	 */
-	#reconnectHistory = new Map<string, number[]>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
 	/** Aborts the handshakes of the current epoch; replaced on disconnectAll. */
 	#connectAbort = new AbortController();
+	/** Views opened so far; never forgotten, so a revived session reopens its own. */
+	#toolScopes = new Set<MCPToolScope>();
+	/** Scope of each attributed tool call still running, by tool-call id. */
+	#toolCallScopes = new Map<string, MCPToolScope>();
+	/** Tool calls running per server. */
+	#inFlightToolCalls = new Map<string, number>();
+	/** Servers whose pending `tools/list` refresh answers a `list_changed` received during a call. */
+	#callProvokedToolRefreshes = new Set<string>();
 	/**
-	 * Remote servers that were connected and then lost, with the backoff
-	 * schedule that keeps trying to bring them back (see
-	 * {@link MCPReconnectPolicy}). An entry exists from the moment a live
-	 * connection is being replaced until a reconnect succeeds or the server
-	 * is disconnected or reconfigured; `timer` is set while a scheduled
-	 * attempt is pending.
+	 * Per server, tool name → scopes that see it, for tools a server added while
+	 * a call to it ran. Tools absent here are visible to every scope.
 	 */
-	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
+	#scopedTools = new Map<string, Map<string, Set<MCPToolScope>>>();
+	/** Bumped whenever any session's view of the tools may have changed; starts above a worker's empty cache (0). */
+	#toolViewsRevision = 1;
 
 	constructor(
 		private cwd: string,
-		private toolCache: MCPToolCache | null = null,
 		private loadConfigs: MCPConfigLoader = loadAllMCPConfigs,
-		private reconnectPolicy: MCPReconnectPolicy = DEFAULT_RECONNECT_POLICY,
+		/** Linger of an unleased modern server unit, in milliseconds (`mcp.idleStopMinutes`). */
+		private idleMs: number = MCP_DEFAULT_IDLE_MS,
+		/** Where this manager's servers are hosted; the process-wide host when absent. Tests script their own. */
+		private hostAccess?: McpHostAccess,
 	) {}
+
+	/**
+	 * Re-point project config discovery and the advertised roots at `cwd` after
+	 * the owning session moved. Every link gets the new roots at once; a stdio
+	 * server keeps the working directory it was started in until it is reconnected.
+	 */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+		for (const connection of this.#connections.values()) connection.transport.setRoots();
+	}
 
 	/**
 	 * Register a listener for MCP connection lifecycle events
@@ -373,6 +469,8 @@ export class MCPManager {
 	}
 
 	#emitConnectionStatus(event: McpConnectionStatusEvent): void {
+		if (event.type === "failed") this.#lastConnectErrors.set(event.serverName, event.error);
+		else if (event.type === "connected") this.#lastConnectErrors.delete(event.serverName);
 		if (event.type === "failed" && this.#startupServers.has(event.serverName)) {
 			this.#startupFailures.set(event.serverName, event.error);
 		} else if (event.type === "connected") {
@@ -431,7 +529,17 @@ export class MCPManager {
 		};
 	}
 
+	/**
+	 * Changes whenever any session's view of the tools may have changed: a server's
+	 * tools were replaced or removed, or a session was granted tools. Lets a
+	 * worker skip re-fetching views that cannot have changed.
+	 */
+	get toolViewsRevision(): number {
+		return this.#toolViewsRevision;
+	}
+
 	#emitToolsChanged(): void {
+		this.#toolViewsRevision++;
 		for (const listener of this.#toolsChangedListeners) {
 			try {
 				listener();
@@ -530,7 +638,7 @@ export class MCPManager {
 				do {
 					this.#ownerToolsDirty = false;
 					try {
-						await this.#onToolsChanged?.(this.#tools);
+						await this.#onToolsChanged?.(this.getTools());
 						failed = false;
 					} catch (error) {
 						failure = error;
@@ -653,11 +761,12 @@ export class MCPManager {
 		this.#discoverOptions = options ? { ...options } : undefined;
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
-			loadedConfigs = await this.loadConfigs(this.cwd, {
+			loadedConfigs = await this.#discoverConfigs({
 				enableProjectConfig: options?.enableProjectConfig,
 				filterExa: options?.filterExa,
 				filterBrowser: options?.filterBrowser,
 				extensionRoots: options?.extensionRoots,
+				builtinTransforms: options?.builtinTransforms,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -670,6 +779,18 @@ export class MCPManager {
 		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs);
 		result.exaApiKeys = exaApiKeys;
 		return result;
+	}
+
+	/** Load configs and remember which servers built-in transforms dropped. */
+	async #discoverConfigs(options: LoadMCPConfigsOptions): Promise<LoadMCPConfigsResult> {
+		const loaded = await this.loadConfigs(this.cwd, options);
+		this.#builtinDrops.clear();
+		const dropped = loaded.dropped ?? {};
+		for (const name in dropped) {
+			const drop = dropped[name];
+			if (drop) this.#builtinDrops.set(name, drop);
+		}
+		return loaded;
 	}
 
 	/**
@@ -700,11 +821,12 @@ export class MCPManager {
 		const options = this.#discoverOptions;
 		if (!options || (options.enableProjectConfig ?? true) === enabled) return;
 		this.#discoverOptions = { ...options, enableProjectConfig: enabled };
-		const loaded = await this.loadConfigs(this.cwd, {
+		const loaded = await this.#discoverConfigs({
 			enableProjectConfig: enabled,
 			filterExa: options.filterExa,
 			filterBrowser: options.filterBrowser,
 			extensionRoots: options.extensionRoots,
+			builtinTransforms: options.builtinTransforms,
 		});
 		// Every server whose resolution depends on the flag: project-level ones
 		// known now, plus project-level ones the enabled load resolves.
@@ -734,11 +856,12 @@ export class MCPManager {
 
 	async #applyBrowserFilter(enabled: boolean): Promise<void> {
 		const options = this.#discoverOptions;
-		const loaded = await this.loadConfigs(this.cwd, {
+		const loaded = await this.#discoverConfigs({
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: false,
 			extensionRoots: options?.extensionRoots,
+			builtinTransforms: options?.builtinTransforms,
 		});
 		const browserConfigs: Record<string, MCPServerConfig> = {};
 		const browserSources: Record<string, SourceMeta> = {};
@@ -804,6 +927,8 @@ export class MCPManager {
 
 		for (const [name, config] of Object.entries(configs)) {
 			this.#startupServers.add(name);
+			// Connecting a server by name (`/mcp enable`) ends its built-in drop.
+			this.#builtinDrops.delete(name);
 			if (sources[name]) {
 				this.#sources.set(name, sources[name]);
 				const existing = this.#connections.get(name);
@@ -838,26 +963,16 @@ export class MCPManager {
 				continue;
 			}
 
-			// Save config early so reconnection works even if the initial connect times out
-			// and falls back to cached/deferred tools. A new config supersedes any
-			// retry schedule still trying to bring back the old one.
-			this.#forgetLostServer(name);
+			// Save config early so reconnection works even if the initial connect times out.
 			this.#serverConfigs.set(name, config);
 			const connectionEpoch = this.#epoch;
-			const connectSignal = this.#connectAbort.signal;
+			const scope = this.#beginConnect(name);
+			const connectSignal = scope.signal;
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config, { signal: connectSignal });
-				return connectToServer(name, resolvedConfig, {
-					signal: connectSignal,
-					onNotification: (method, params) => {
-						this.#handleServerNotification(name, method, params);
-					},
-					onRequest: (method, params) => {
-						return this.#handleServerRequest(method, params);
-					},
-				});
+				return this.#connect(name, config, resolvedConfig, scope);
 			})().then(
 				async connection => {
 					// Store original config (without resolved tokens) to keep
@@ -877,30 +992,7 @@ export class MCPManager {
 					this.#connections.set(name, connection);
 					this.#serverConfigs.set(name, config);
 
-					// Wire auth refresh for HTTP-like transports so 401s trigger token refresh.
-					// Gate on a resolvable managed credential, not on the auth block:
-					// definition-only configs (url-keyed fallback) get Bearer injection
-					// too and need the same mid-session refresh hook.
-					if (
-						isAuthRefreshableMCPTransport(connection.transport) &&
-						lookupMcpOAuthCredential(this.#authStorage, config)
-					) {
-						connection.transport.onAuthError = async () => {
-							const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
-							if (refreshed.type === "http" || refreshed.type === "sse") {
-								return refreshed.headers ?? null;
-							}
-							return null;
-						};
-					}
-
-					// Re-establish connection if the transport closes (server restart,
-					// network interruption).
-					connection.transport.onClose = () => {
-						logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
-						this.#emitConnectionStatus({ type: "reconnecting", serverName: name });
-						void this.reconnectServer(name);
-					};
+					this.#wireLink(name, connection);
 
 					return connection;
 				},
@@ -919,7 +1011,7 @@ export class MCPManager {
 					return { connection, serverTools };
 				} catch (error) {
 					// Detach and delete synchronously, then close in the background:
-					// awaiting a slow HTTP close (session DELETE) here would keep
+					// awaiting the close here would keep
 					// toolsPromise pending past the startup race, so connectServers
 					// would return with no error while #pendingToolLoads stayed set
 					// and future connects for this server were skipped.
@@ -937,18 +1029,14 @@ export class MCPManager {
 				.then(async ({ connection, serverTools }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
-					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
-						this.reconnectServer(name, options);
-					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-					this.#replaceServerTools(name, customTools);
+					this.#publishServerTools(name, connection, serverTools);
 					await this.#notifyOwnerToolsChanged();
-					void this.toolCache?.set(name, config, serverTools);
 
 					notify({ type: "connected", serverName: name });
 					void this.#loadServerResourcesAndPrompts(name, connection);
 				})
 				.catch(error => {
-					// disconnectAll aborted this handshake: torn down, not failed.
+					// disconnectAll or disconnectServer aborted this connect: torn down, not failed.
 					if (isAbortedHandshake(connectSignal, error) || this.#pendingToolLoads.get(name) !== toolsPromise)
 						return;
 					this.#pendingToolLoads.delete(name);
@@ -991,28 +1079,12 @@ export class MCPManager {
 			if (windowMs === 0) await initialLoads;
 			else await Promise.race([initialLoads, Bun.sleep(windowMs)]);
 
-			const cachedTools = new Map<string, MCPToolDefinition[]>();
-			const pendingTasks = connectionTasks.filter(task => task.tracked.status === "pending");
-
-			if (pendingTasks.length > 0 && this.toolCache) {
-				await Promise.all(
-					pendingTasks.map(async task => {
-						const cached = await this.toolCache?.get(task.name, task.config);
-						if (cached) {
-							cachedTools.set(task.name, cached);
-						}
-					}),
-				);
-			}
-
-			// Pending tasks without cached tools used to be awaited synchronously here,
-			// which gated the entire UI on the slowest server's per-request timeout
-			// (issue #2100: a single unresponsive MCP server blocked startup for the
-			// full 30 s `OMP_MCP_TIMEOUT_MS`). Leave them in flight — the background
-			// `void toolsPromise.then(...)` chain above registers their tools and
-			// fires `#onToolsChanged` once the connect finishes, or logs the failure
-			// after `allowBackgroundLogging` flips below.
-
+			// Tasks still pending are left in flight: awaiting them would gate the
+			// UI on the slowest server (issue #2100). The `startupUpdate` chain
+			// above registers their tools and fires `#onToolsChanged` once the
+			// connect finishes, or logs the failure after `allowBackgroundLogging`
+			// flips below. A server the host already knows answers from its store
+			// well inside the window; an unknown one has nothing to publish yet.
 			for (const task of connectionTasks) {
 				const { name } = task;
 				if (task.tracked.status === "fulfilled") {
@@ -1020,8 +1092,8 @@ export class MCPManager {
 					if (!value) continue;
 					const { connection, serverTools } = value;
 					connectedServers.add(name);
-					const reconnect = () => this.reconnectServer(name);
-					this.#replaceServerTools(name, MCPTool.fromTools(connection, serverTools, reconnect));
+					// The startup update publishes them too; a disconnect in between already dropped the server.
+					if (this.#connections.get(name) === connection) this.#publishServerTools(name, connection, serverTools);
 				} else if (task.tracked.status === "rejected") {
 					// disconnectAll aborted this handshake inside the startup window: torn down, not failed.
 					if (isAbortedHandshake(task.connectSignal, task.tracked.reason)) continue;
@@ -1029,16 +1101,6 @@ export class MCPManager {
 						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
 					errors.set(name, message);
 					reportedErrors.add(name);
-				} else {
-					const cached = cachedTools.get(name);
-					if (cached) {
-						const source = this.#sources.get(name);
-						const reconnect = () => this.reconnectServer(name);
-						this.#replaceServerTools(
-							name,
-							DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source, reconnect),
-						);
-					}
 				}
 			}
 		}
@@ -1046,7 +1108,7 @@ export class MCPManager {
 		allowBackgroundLogging = true;
 
 		return {
-			tools: this.#tools,
+			tools: this.getTools(),
 			errors,
 			connectedServers: Array.from(connectedServers),
 			exaApiKeys: [], // Will be populated by discoverAndConnect
@@ -1065,7 +1127,80 @@ export class MCPManager {
 		// Stable sort by name so reconnect order does not perturb the array.
 		// See `sortMCPToolsByName` for the cache-stability rationale.
 		sortMCPToolsByName(this.#tools);
+		const scoped = this.#scopedTools.get(name);
+		if (scoped) {
+			const present = new Set(tools.map(tool => tool.mcpToolName));
+			for (const toolName of scoped.keys()) {
+				if (!present.has(toolName)) scoped.delete(toolName);
+			}
+			if (scoped.size === 0) this.#scopedTools.delete(name);
+		}
 		this.#emitToolsChanged();
+	}
+
+	/**
+	 * Observer for `name`'s tools. A call completes only after the tool refresh
+	 * it provoked lands, then its session sees every tool the server now serves.
+	 */
+	#observeToolCall(name: string): MCPToolCallObserver {
+		return toolCallId => {
+			const scope = this.#toolCallScopes.get(toolCallId) ?? OWNER_TOOL_SCOPE;
+			this.#inFlightToolCalls.set(name, (this.#inFlightToolCalls.get(name) ?? 0) + 1);
+			return async () => {
+				const remaining = (this.#inFlightToolCalls.get(name) ?? 1) - 1;
+				if (remaining > 0) this.#inFlightToolCalls.set(name, remaining);
+				else this.#inFlightToolCalls.delete(name);
+				// A `list_changed` sent during the call already started this refresh.
+				await this.#toolRefreshes.get(name)?.promise.catch(() => {});
+				this.#grantServerTools(name, scope);
+			};
+		};
+	}
+
+	/** Let `scope` see every tool `name` serves; notify it when that changed its view. */
+	#grantServerTools(name: string, scope: MCPToolScope): void {
+		const scoped = this.#scopedTools.get(name);
+		if (!scoped) return;
+		let granted = false;
+		for (const scopes of scoped.values()) {
+			if (scopes.has(scope)) continue;
+			scopes.add(scope);
+			granted = true;
+		}
+		if (!granted) return;
+		this.#toolViewsRevision++;
+		if (scope === OWNER_TOOL_SCOPE) {
+			this.#notifyOwnerToolsChanged().catch(error => logger.debug("MCP tools-changed handler failed", { error }));
+		} else {
+			this.#emitToolsChanged();
+		}
+	}
+
+	openToolScope(scope: MCPToolScope, seed: MCPToolScope = OWNER_TOOL_SCOPE): void {
+		if (this.#toolScopes.has(scope)) return;
+		this.#toolScopes.add(scope);
+		for (const scoped of this.#scopedTools.values()) {
+			for (const scopes of scoped.values()) {
+				if (scopes.has(seed)) scopes.add(scope);
+			}
+		}
+	}
+
+	trackToolCall(scope: MCPToolScope, toolCallId: string): () => void {
+		this.#toolCallScopes.set(toolCallId, scope);
+		return () => {
+			if (this.#toolCallScopes.get(toolCallId) === scope) this.#toolCallScopes.delete(toolCallId);
+		};
+	}
+
+	/** Tools in `tools` that `name` does not serve yet start visible to no scope. */
+	#scopeAddedTools(name: string, tools: readonly CustomTool<TSchema, MCPToolDetails>[]): void {
+		const previous = new Set(this.#tools.filter(tool => tool.mcpServerName === name).map(tool => tool.mcpToolName));
+		const scoped = this.#scopedTools.get(name) ?? new Map<string, Set<MCPToolScope>>();
+		for (const tool of tools) {
+			if (tool.mcpToolName !== undefined && !previous.has(tool.mcpToolName)) scoped.set(tool.mcpToolName, new Set());
+		}
+		if (scoped.size > 0) this.#scopedTools.set(name, scoped);
 	}
 
 	#triggerNotificationRefresh(serverName: string, kind: "tools" | "resources" | "prompts"): Promise<void> {
@@ -1096,7 +1231,11 @@ export class MCPManager {
 		let refreshPromise: Promise<void> | undefined;
 		switch (method) {
 			case MCPNotificationMethods.TOOLS_LIST_CHANGED:
-				if (connectionKnown) refreshPromise = this.#triggerNotificationRefresh(serverName, "tools");
+				if (connectionKnown) {
+					// A change announced during a call belongs to the sessions whose calls see it through.
+					if (this.#inFlightToolCalls.has(serverName)) this.#callProvokedToolRefreshes.add(serverName);
+					refreshPromise = this.#triggerNotificationRefresh(serverName, "tools");
+				}
 				break;
 			case MCPNotificationMethods.RESOURCES_LIST_CHANGED:
 				if (connectionKnown) refreshPromise = this.#triggerNotificationRefresh(serverName, "resources");
@@ -1149,34 +1288,12 @@ export class MCPManager {
 		}
 	}
 
-	/** Handle server-to-client JSON-RPC requests (e.g. ping, roots/list). */
-	async #handleServerRequest(method: string, _params: unknown): Promise<unknown> {
-		switch (method) {
-			case "ping":
-				return {};
-			case "roots/list":
-				return this.#getRoots();
-			default:
-				throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
-		}
-	}
-
-	#getRoots(): { roots: Array<{ uri: string; name: string }> } {
-		return {
-			roots: [
-				{
-					uri: url.pathToFileURL(this.cwd).href,
-					name: path.basename(this.cwd),
-				},
-			],
-		};
-	}
-
-	/**
-	 * Get all loaded tools.
-	 */
-	getTools(): CustomTool<TSchema, MCPToolDetails>[] {
-		return this.#tools;
+	getTools(scope: MCPToolScope = OWNER_TOOL_SCOPE): CustomTool<TSchema, MCPToolDetails>[] {
+		if (this.#scopedTools.size === 0) return this.#tools;
+		return this.#tools.filter(tool => {
+			const scopes = this.#scopedTools.get(tool.mcpServerName ?? "")?.get(tool.mcpToolName ?? "");
+			return scopes === undefined || scopes.has(scope);
+		});
 	}
 
 	/**
@@ -1188,7 +1305,11 @@ export class MCPManager {
 	async waitForStartup(timeoutMs: number): Promise<MCPStartupStatus> {
 		const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : Infinity;
 		for (;;) {
-			const pending = [...this.#startupUpdates.values(), ...this.#pendingReconnections.values()];
+			const pending = [
+				...this.#startupUpdates.values(),
+				...this.#pendingReconnections.values(),
+				...this.#pendingReloads.values(),
+			];
 			if (pending.length === 0 || Date.now() >= deadline) break;
 
 			const { promise, resolve } = Promise.withResolvers<void>();
@@ -1207,10 +1328,11 @@ export class MCPManager {
 				this.#startupUpdates.has(name) ||
 				this.#pendingToolLoads.has(name) ||
 				this.#pendingConnections.has(name) ||
-				this.#pendingReconnections.has(name)
+				this.#pendingReconnections.has(name) ||
+				this.#pendingReloads.has(name)
 			) {
 				status.pending.push(name);
-			} else if (this.#connections.get(name)?.tools !== undefined) {
+			} else if (this.#ready.has(name) && this.#connections.get(name)?.transport.connected) {
 				status.connected.push(name);
 			} else {
 				status.failed.push({
@@ -1230,14 +1352,21 @@ export class MCPManager {
 	}
 
 	/**
-	 * Get current connection status for a server.
+	 * Connection status of a server: `connected` only while its link is
+	 * attached to the host and its tools were loaded on that attachment,
+	 * `connecting` while a connect, a reconnect, the link's own re-attach or
+	 * the reload after it is in flight. A server whose link is detached or
+	 * whose reload failed is `disconnected` even though its tools stay registered.
 	 */
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected" {
-		if (this.#connections.has(name)) return "connected";
+		const link = this.#connections.get(name)?.transport;
+		if (link?.connected && this.#ready.has(name)) return "connected";
 		if (
+			link?.reattaching ||
 			this.#pendingConnections.has(name) ||
 			this.#pendingToolLoads.has(name) ||
-			this.#pendingReconnections.has(name)
+			this.#pendingReconnections.has(name) ||
+			this.#pendingReloads.has(name)
 		)
 			return "connecting";
 		return "disconnected";
@@ -1251,6 +1380,15 @@ export class MCPManager {
 	}
 
 	/**
+	 * Servers the newest config load left unconnected because a built-in
+	 * transform dropped them, by name. `/mcp list` and the extensions dashboard
+	 * report them; connecting one by name removes it.
+	 */
+	getBuiltinDrops(): ReadonlyMap<string, MCPDroppedServer> {
+		return this.#builtinDrops;
+	}
+
+	/**
 	 * Get the preserved (pre-auth) config for a known server — whether currently
 	 * connected or merely discovered (a connect was attempted but may have failed,
 	 * e.g. an OAuth server that has not been authorized yet). Mirrors the
@@ -1259,6 +1397,28 @@ export class MCPManager {
 	 */
 	getServerConfig(name: string): MCPServerConfig | undefined {
 		return this.#connections.get(name)?.config ?? this.#serverConfigs.get(name);
+	}
+
+	/**
+	 * Replace a stored server definition in place — used when its credentials
+	 * were refreshed outside the manager (e.g. `/mcp reauth` wrote a fresh
+	 * url-keyed credential row and the next auth resolution must pick it up).
+	 *
+	 * Updates both the stored definition and any live connection's `config`
+	 * ({@link reconnectServer} prefers the live connection's copy over the
+	 * stored map).
+	 *
+	 * Returns the in-flight reconnection for the server, if one was pending:
+	 * it captured the old definition and aborts on its next identity check.
+	 * Callers that intend to reconnect must await it first, or
+	 * {@link reconnectServer} merely joins the dying attempt instead of
+	 * starting a fresh one against the new definition.
+	 */
+	updateServerConfig(name: string, config: MCPServerConfig): Promise<MCPServerConnection | null> | undefined {
+		this.#serverConfigs.set(name, config);
+		const connection = this.#connections.get(name);
+		if (connection) connection.config = config;
+		return this.#pendingReconnections.get(name);
 	}
 
 	/**
@@ -1275,7 +1435,16 @@ export class MCPManager {
 			const result = await reconnecting;
 			if (result) return result;
 		}
-		throw new Error(`MCP server not connected: ${name}`);
+		throw new Error(this.#describeNotConnected(name));
+	}
+
+	/** Why `name` has no connection and what happens next, for the failing call. */
+	#describeNotConnected(name: string): string {
+		const parts = [`MCP server not connected: ${name}`];
+		const lastError = this.#lastConnectErrors.get(name);
+		if (lastError) parts.push(`last connect error: ${lastError}`);
+		if (!this.#serverConfigs.has(name)) parts.push("the server is not configured in this session");
+		return parts.join("; ");
 	}
 
 	/**
@@ -1341,6 +1510,7 @@ export class MCPManager {
 		connection.transport.onClose = undefined;
 		if (this.#connections.get(name) === connection) {
 			this.#connections.delete(name);
+			this.#ready.delete(name);
 		}
 	}
 
@@ -1349,7 +1519,7 @@ export class MCPManager {
 	 *
 	 * Use only where blocking on the close is acceptable (owned disconnects,
 	 * dispose). On reject-fast paths detach synchronously and close in the
-	 * background so a slow `close()` (HTTP session DELETE) cannot delay the
+	 * background so a slow `close()` cannot delay the
 	 * rejection — see the `tools/list` failure handler in `connectServers`.
 	 */
 	async #discardConnection(name: string, connection: MCPServerConnection): Promise<void> {
@@ -1370,8 +1540,14 @@ export class MCPManager {
 		this.#sources.delete(name);
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
-		this.#reconnectHistory.delete(name);
-		this.#forgetLostServer(name);
+		this.#pendingReloads.delete(name);
+		this.#ready.delete(name);
+		// A connect still in flight holds a unit lease; nothing else would ever give it back.
+		this.#serverScopes.get(name)?.controller.abort();
+		this.#serverScopes.delete(name);
+		this.#runtimes.delete(name);
+		this.#callProvokedToolRefreshes.delete(name);
+		this.#scopedTools.delete(name);
 
 		const connection = this.#connections.get(name);
 
@@ -1403,14 +1579,11 @@ export class MCPManager {
 	async disconnectAll(): Promise<void> {
 		// Invalidate any in-flight reconnection attempts that outlive this call.
 		// They captured the old epoch; after increment they'll detect staleness.
-		// A scheduled retry that fired during the teardown below would sample
-		// the new epoch and survive it, so end every schedule first. Abort the
-		// handshakes still in flight too: a stalled one would otherwise keep its
-		// transport (and a stdio child) alive until its own timeout, or forever.
+		// Abort the connects still in flight too: a stalled one would otherwise
+		// keep its unit lease until its own timeout, or forever.
 		this.#epoch++;
 		this.#connectAbort.abort();
 		this.#connectAbort = new AbortController();
-		for (const name of this.#lostRemoteServers.keys()) this.#forgetLostServer(name);
 		const promises = Array.from(this.#connections, ([name, connection]) => this.#discardConnection(name, connection));
 		await Promise.allSettled(promises);
 
@@ -1422,157 +1595,67 @@ export class MCPManager {
 		this.#pendingReconnections.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
+		this.#builtinDrops.clear();
+		// The next connect (`/mcp reload` rediscovery) runs every `!command` again.
+		for (const config of this.#serverConfigs.values()) invalidateCommandValues(config);
 		this.#serverConfigs.clear();
+		this.#callProvokedToolRefreshes.clear();
+		this.#scopedTools.clear();
 		const hadTools = this.#tools.length > 0;
 		this.#tools = [];
 		if (hadTools) this.#emitToolsChanged();
 		this.#subscribedResources.clear();
-		this.#reconnectHistory.clear();
+		this.#runtimes.clear();
+		this.#ready.clear();
+		this.#serverScopes.clear();
+		this.#pendingReloads.clear();
 	}
 
 	/**
-	 * Reconnect to a server after a connection failure.
+	 * Reconnect to a server after a failure, or on request.
 	 *
-	 * Tears down the stale connection, re-resolves auth, establishes a new
-	 * connection, reloads tools, and notifies consumers. Concurrent calls for
-	 * the same server share one reconnection attempt. Returns the new
-	 * connection, or `null` if reconnection failed or the per-server crash
-	 * burst limit (see {@link RECONNECT_BURST_LIMIT}) is exceeded. A failed
-	 * reconnect of a remote server that was connected keeps being retried in
-	 * the background (see {@link MCPReconnectPolicy}).
-	 * @param options.manual - When `true`, resets the crash-burst window so a
-	 *   user-driven retry (e.g. `/mcp reconnect`) is never blocked by an
-	 *   earlier storm. Defaults to `false`; the transport `onClose` callback
-	 *   and the per-tool-call retry path in `tool-bridge` MUST NOT set it.
+	 * A server that never connected is connected from scratch. A connected one
+	 * keeps its link: auth is re-resolved, and when that names another server
+	 * identity (a refreshed token, a moved working directory) or the link lost
+	 * its attachment, the link attaches to the unit of the new one. Then the
+	 * server is discovered again and its catalogs reloaded. Concurrent calls
+	 * for the same server share one attempt. Returns the connection, or `null`
+	 * when the reconnect failed or the server was disconnected meanwhile.
+	 * @param options.manual - When `true` (`/mcp reconnect`), the host also
+	 *   stops the upstream and forgets its crash history, so the next request
+	 *   starts a fresh one; when the host itself is elsewhere by now
+	 *   (`mcp.shared` was toggled) the link moves there instead. The link-loss
+	 *   and tool-call retry paths MUST NOT set it: a modern upstream is shared
+	 *   with other sessions.
+	 * @param options.staleSession - The server lost the protocol session it
+	 *   held for this manager. A handshake-era upstream, which no other manager
+	 *   uses, is restarted so the retry starts a new session.
 	 */
 	async reconnectServer(
 		name: string,
-		options?: { manual?: boolean; authChallenge?: MCPAuthChallenge },
+		options?: MCPReconnectOptions & { manual?: boolean },
 	): Promise<MCPServerConnection | null> {
-		if (options?.manual) {
-			this.#reconnectHistory.delete(name);
-		}
-
 		const pending = this.#pendingReconnections.get(name);
 		if (pending) return pending;
-
-		if (this.#tripReconnectBreaker(name)) {
-			return null;
-		}
-
-		return this.#trackReconnect(name, this.#doReconnect(name, { authChallenge: options?.authChallenge }));
-	}
-
-	/**
-	 * Register an in-flight reconnect so concurrent callers share it, and
-	 * settle the lost-server schedule on its outcome: a new connection ends the
-	 * schedule, a failure while the server is still lost arms the next attempt.
-	 */
-	#trackReconnect(name: string, attempt: Promise<MCPServerConnection | null>): Promise<MCPServerConnection | null> {
+		const attempt = this.#doReconnect(name, options ?? {});
 		this.#pendingReconnections.set(name, attempt);
-		return attempt
-			.finally(() => {
-				if (this.#pendingReconnections.get(name) === attempt) {
-					this.#pendingReconnections.delete(name);
-				}
-			})
-			.then(
-				connection => {
-					if (connection) this.#forgetLostServer(name);
-					else if (this.#lostRemoteServers.has(name)) this.#scheduleLostServerRetry(name);
-					return connection;
-				},
-				error => {
-					if (this.#lostRemoteServers.has(name)) this.#scheduleLostServerRetry(name);
-					throw error;
-				},
-			);
-	}
-
-	/**
-	 * Arm the next quiet attempt for a lost remote server, doubling the delay
-	 * each time up to the policy ceiling. An explicit reconnect that lands
-	 * first takes the usual path; the timer then finds it pending and stands
-	 * down, and that reconnect's outcome settles the schedule instead.
-	 */
-	#scheduleLostServerRetry(name: string): void {
-		const state = this.#lostRemoteServers.get(name);
-		if (!state) return;
-		clearTimeout(state.timer);
-		const delayMs = state.delayMs;
-		state.delayMs = Math.min(delayMs * 2, this.reconnectPolicy.retryMaxMs);
-		state.timer = setTimeout(() => {
-			state.timer = undefined;
-			if (this.#lostRemoteServers.get(name) !== state || this.#pendingReconnections.has(name)) return;
-			void this.#trackReconnect(name, this.#doReconnect(name, { scheduled: true }));
-		}, delayMs);
-		state.timer.unref();
-		logger.debug("MCP reconnect scheduled", { path: `mcp:${name}`, delayMs });
-	}
-
-	/** End a lost server's retry schedule: it reconnected, or it was disconnected or reconfigured. */
-	#forgetLostServer(name: string): void {
-		const state = this.#lostRemoteServers.get(name);
-		if (!state) return;
-		clearTimeout(state.timer);
-		this.#lostRemoteServers.delete(name);
-	}
-
-	/**
-	 * Record a reconnect attempt against the per-server crash window and report
-	 * whether the circuit breaker is now open. Sliding window: entries older
-	 * than {@link RECONNECT_BURST_WINDOW_MS} are pruned before the new
-	 * timestamp is appended, so a single transient failure ages out cheaply
-	 * but repeated rapid crashes accumulate until the limit is hit.
-	 */
-	#tripReconnectBreaker(name: string): boolean {
-		const now = Date.now();
-		const previous = this.#reconnectHistory.get(name) ?? [];
-		const recent = previous.filter(ts => now - ts < RECONNECT_BURST_WINDOW_MS);
-		recent.push(now);
-		this.#reconnectHistory.set(name, recent);
-
-		if (recent.length > RECONNECT_BURST_LIMIT) {
-			logger.error("MCP server crashed too many times; suspending automatic reconnects", {
-				path: `mcp:${name}`,
-				crashes: recent.length,
-				windowMs: RECONNECT_BURST_WINDOW_MS,
-			});
-			// Tear down the stale connection so `getConnectionStatus()` no
-			// longer reports it as "connected" and `waitForConnection()` does
-			// not hand a closed transport to callers. Tools stay registered
-			// in `#tools` — the user can recover with `/mcp reconnect <name>`
-			// once they've fixed the underlying misconfiguration. Mirrors the
-			// teardown in `#doReconnect`: detach `onClose` first so the
-			// transport's own `close()` cannot re-arm this path.
-			const stale = this.#connections.get(name);
-			if (stale) {
-				void this.#discardConnection(name, stale).catch(() => {});
-			}
-			this.#pendingConnections.delete(name);
-			this.#pendingToolLoads.delete(name);
-			this.#forgetLostServer(name);
-			this.#emitConnectionStatus({
-				type: "failed",
-				serverName: name,
-				error: "MCP server crashed too many times; automatic reconnects suspended",
-			});
-			return true;
+		try {
+			return await attempt;
+		} finally {
+			if (this.#pendingReconnections.get(name) === attempt) this.#pendingReconnections.delete(name);
 		}
-		return false;
 	}
 
 	async #doReconnect(
 		name: string,
-		options: { authChallenge?: MCPAuthChallenge; scheduled?: boolean },
+		options: MCPReconnectOptions & { manual?: boolean },
 	): Promise<MCPServerConnection | null> {
-		const { authChallenge, scheduled = false } = options;
-		const oldConnection = this.#connections.get(name);
-		let config = oldConnection?.config ?? this.#serverConfigs.get(name);
-		const source = this.#sources.get(name) ?? oldConnection?._source;
+		const connection = this.#connections.get(name);
+		let config = connection?.config ?? this.#serverConfigs.get(name);
+		const source = this.#sources.get(name) ?? connection?._source;
 		if (!config) return null;
 
-		if (authChallenge) {
+		if (options.authChallenge) {
 			if (!this.#authHandler) {
 				logger.error("MCP auth challenge cannot be handled; no auth handler is configured", {
 					path: `mcp:${name}`,
@@ -1580,10 +1663,11 @@ export class MCPManager {
 				return null;
 			}
 			try {
-				const refreshedConfig = await this.#authHandler(name, authChallenge);
+				const refreshedConfig = await this.#authHandler(name, options.authChallenge);
 				if (!refreshedConfig) return null;
 				config = refreshedConfig;
 				this.#serverConfigs.set(name, config);
+				if (connection) connection.config = config;
 			} catch (error) {
 				logger.error("MCP auth challenge handling failed", { path: `mcp:${name}`, error });
 				return null;
@@ -1591,76 +1675,182 @@ export class MCPManager {
 		}
 
 		logger.debug("MCP reconnecting", { path: `mcp:${name}` });
+		// A reconnect follows a lost or rejected connection; a cached `!command`
+		// token may be what the server rejected, so mint fresh values once.
+		invalidateCommandValues(config);
 
-		// Close the old transport without removing tools or notifying consumers.
-		// Tools stay available (stale) while we establish the new connection.
-		// Fire-and-forget: don't await the close — HttpTransport.close() sends a
-		// DELETE with config.timeout (30s default), and blocking here delays the
-		// reconnect loop by that amount on every server restart.
 		const reconnectEpoch = this.#epoch;
-		if (oldConnection) {
-			// From here the live remote connection is gone: the server is lost
-			// until a reconnect succeeds, and the schedule outlives this attempt.
-			// Stdio stops at the ladder (see MCPReconnectPolicy). A server that
-			// never connected is not lost — a startup timeout or a typo'd URL
-			// stays a one-shot failure.
-			if ((config.type === "http" || config.type === "sse") && !this.#lostRemoteServers.has(name)) {
-				this.#lostRemoteServers.set(name, { timer: undefined, delayMs: this.reconnectPolicy.retryBaseMs });
-			}
-			void this.#discardConnection(name, oldConnection).catch(() => {});
-		}
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
-
-		// Retry with backoff — the server may still be starting up. A scheduled
-		// attempt is a single quiet probe; its pacing is the schedule itself.
-		const delays = scheduled ? [] : this.reconnectPolicy.ladderMs;
-		for (let attempt = 0; attempt <= delays.length; attempt++) {
+		try {
+			let live: MCPServerConnection;
+			if (connection) {
+				await this.#relinkServer(name, connection, config, options);
+				live = connection;
+			} else {
+				live = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
+			}
+			logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: live.tools?.length ?? 0 });
+			this.#emitConnectionStatus({ type: "connected", serverName: name });
+			return live;
+		} catch (error) {
 			if (this.#epoch !== reconnectEpoch || this.#serverConfigs.get(name) !== config) {
-				logger.debug("MCP reconnect aborted before attempt after configuration changed", {
+				logger.debug("MCP reconnect aborted after configuration changed", {
 					path: `mcp:${name}`,
 					storedEpoch: reconnectEpoch,
 					currentEpoch: this.#epoch,
 				});
 				return null;
 			}
-			try {
-				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
-				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
-				this.#emitConnectionStatus({ type: "connected", serverName: name });
-				return connection;
-			} catch (error) {
-				if (this.#epoch !== reconnectEpoch || this.#serverConfigs.get(name) !== config) {
-					logger.debug("MCP reconnect aborted after configuration changed", {
-						path: `mcp:${name}`,
-						storedEpoch: reconnectEpoch,
-						currentEpoch: this.#epoch,
-					});
-					return null;
-				}
-
-				const msg = error instanceof Error ? error.message : String(error);
-				if (attempt < delays.length) {
-					logger.debug("MCP reconnect attempt failed, retrying", {
-						path: `mcp:${name}`,
-						attempt: attempt + 1,
-						error: msg,
-					});
-					await Bun.sleep(delays[attempt]);
-				} else if (scheduled) {
-					logger.debug("MCP scheduled reconnect attempt failed", { path: `mcp:${name}`, error: msg });
-				} else {
-					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
-					this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg });
-					// Don't remove stale tools — keep them in the registry so they
-					// remain selected. Calls will fail with MCP errors, which
-					// triggers the tool-level reconnect, or the user can run
-					// /mcp reconnect <name> manually. A lost remote server is also
-					// retried on the schedule (#trackReconnect arms it).
-				}
-			}
+			// Stale tools stay registered so they remain selected: a later call
+			// retries the reconnect, or the user runs /mcp reconnect <name>.
+			const msg = error instanceof Error ? error.message : String(error);
+			logger.error("MCP reconnect failed", { path: `mcp:${name}`, error: msg });
+			this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg });
+			return null;
 		}
-		return null;
+	}
+
+	/** Bring a connected server's link back in line with its config and the current host, then reload what the server offers. */
+	async #relinkServer(
+		name: string,
+		connection: HostedMCPConnection,
+		config: MCPServerConfig,
+		options: MCPReconnectOptions & { manual?: boolean },
+	): Promise<void> {
+		this.#ready.delete(name);
+		const signal = this.#serverScopes.get(name)?.signal ?? this.#connectAbort.signal;
+		const link = connection.transport;
+		// The config may have gained or lost refreshable credentials since the link was wired (`/mcp reauth`).
+		link.onAuthError = this.#authRefreshHook(config);
+		const resolvedConfig = await this.#resolveAuthConfig(config, { signal });
+		const spec = buildServerSpec(resolvedConfig, this.cwd);
+		const elsewhere =
+			!link.connected ||
+			mcpIdentity(spec) !== mcpIdentity(link.spec) ||
+			(options.manual === true && (await link.hostMoved()));
+		if (elsewhere) {
+			await link.retarget(spec, signal);
+		} else if (options.manual || (options.staleSession && link.status?.era === "legacy")) {
+			await link.restart();
+		}
+		await this.#reloadServer(name, connection, signal);
+	}
+
+	/**
+	 * Discover the server again and replace everything memoized from it: tools
+	 * now, resources and prompts in the background. The server is not ready
+	 * while this runs, and stays so when it fails.
+	 */
+	async #reloadServer(name: string, connection: HostedMCPConnection, signal?: AbortSignal): Promise<void> {
+		this.#ready.delete(name);
+		await discoverServer(connection, { signal });
+		const serverTools = await listTools(connection, { signal });
+		if (this.#connections.get(name) !== connection) return;
+		this.#publishServerTools(name, connection, serverTools);
+		this.#notifyOwnerToolsChanged().catch(error => logger.debug("MCP tools-changed handler failed", { error }));
+		// A listing begun before the reload describes what the server offered then.
+		this.#pendingResourceRefresh.delete(name);
+		void this.#loadServerResourcesAndPrompts(name, connection);
+	}
+
+	/** Register `serverTools` as what `name` offers on its current attachment; the server is ready from here. */
+	#publishServerTools(name: string, connection: MCPServerConnection, serverTools: MCPToolDefinition[]): void {
+		const reconnect: MCPReconnect = options => this.reconnectServer(name, options);
+		this.#replaceServerTools(
+			name,
+			MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name)),
+		);
+		this.#ready.add(name);
+	}
+
+	/**
+	 * Start a connect of `name`, ending the one it may still have: the scope's
+	 * signal aborts with the server's own disconnect or the manager's.
+	 */
+	#beginConnect(name: string): ServerScope {
+		this.#serverScopes.get(name)?.controller.abort();
+		const controller = new AbortController();
+		const scope = { controller, signal: AbortSignal.any([this.#connectAbort.signal, controller.signal]) };
+		this.#serverScopes.set(name, scope);
+		return scope;
+	}
+
+	/** Connect `name` through the host as this manager: its instance, its roots, its notification handling. */
+	#connect(
+		name: string,
+		config: MCPServerConfig,
+		resolvedConfig: MCPServerConfig,
+		scope: ServerScope,
+	): Promise<HostedMCPConnection> {
+		return connectToServer(name, resolvedConfig, {
+			signal: scope.signal,
+			cwd: this.cwd,
+			instance: this.#owner,
+			idleMs: this.idleMs,
+			access: this.hostAccess,
+			roots: () => projectRoots(this.cwd),
+			onNotification: (method, params) => {
+				this.#handleServerNotification(name, method, params);
+			},
+			// A connect given up on may still attach and report; only the registered one speaks for the server.
+			onStatus: status => {
+				if (this.#serverScopes.get(name) === scope) this.#runtimes.set(name, status);
+			},
+			onReattach: change => this.#linkReattached(name, change),
+			// From the first attach on: the era probe is where a stale token is refused first.
+			onAuthError: this.#authRefreshHook(config),
+		});
+	}
+
+	/**
+	 * The link took a new attachment (the host was replaced, a credential
+	 * refresh or a reconnect retargeted it): what the server offers may differ,
+	 * so reload it, unless a reconnect in flight does. The returned promise
+	 * settles with that reload, which is what the link counts as the recovery.
+	 */
+	#linkReattached(name: string, change: HostLinkReattach): Promise<void> | undefined {
+		const connection = this.#connections.get(name);
+		if (!connection) return undefined;
+		// Subscriptions named resources of the old identity; the reload derives the new ones from its catalog.
+		if (change.identityChanged) this.#subscribedResources.delete(name);
+		const reconnecting = this.#pendingReconnections.get(name);
+		if (reconnecting) {
+			return reconnecting.then(
+				() => undefined,
+				() => undefined,
+			);
+		}
+		logger.debug("MCP host link re-attached", { path: `mcp:${name}` });
+		const signal = this.#serverScopes.get(name)?.signal ?? this.#connectAbort.signal;
+		const reload: Promise<void> = this.#reloadServer(name, connection, signal)
+			.then(
+				() => {
+					if (this.#ready.has(name)) this.#emitConnectionStatus({ type: "connected", serverName: name });
+				},
+				error => {
+					if (signal.aborted || this.#connections.get(name) !== connection) return;
+					const message = error instanceof Error ? error.message : String(error);
+					logger.debug("Failed to reload MCP server after re-attach", { path: `mcp:${name}`, error: message });
+					this.#emitConnectionStatus({ type: "failed", serverName: name, error: message });
+				},
+			)
+			.finally(() => {
+				if (this.#pendingReloads.get(name) === reload) this.#pendingReloads.delete(name);
+			});
+		this.#pendingReloads.set(name, reload);
+		return reload;
+	}
+
+	/** Wire a stored connection's link: one reconnect when the link cannot re-attach by itself. */
+	#wireLink(name: string, connection: HostedMCPConnection): void {
+		connection.transport.onClose = () => {
+			this.#ready.delete(name);
+			if (this.#pendingReconnections.has(name)) return;
+			logger.debug("MCP host link lost, triggering reconnect", { path: `mcp:${name}` });
+			this.#emitConnectionStatus({ type: "reconnecting", serverName: name });
+			void this.reconnectServer(name);
+		};
 	}
 
 	/** Establish a new connection to a server, wire handlers, load tools. */
@@ -1670,18 +1860,10 @@ export class MCPManager {
 		source: SourceMeta | undefined,
 		reconnectEpoch: number,
 	): Promise<MCPServerConnection> {
-		// Capture before resolving credentials: a disconnectAll during that wait must abort this handshake too.
-		const connectSignal = this.#connectAbort.signal;
-		const resolvedConfig = await this.#resolveAuthConfig(config, { signal: connectSignal });
-		const connection = await connectToServer(name, resolvedConfig, {
-			signal: connectSignal,
-			onNotification: (method, params) => {
-				this.#handleServerNotification(name, method, params);
-			},
-			onRequest: (method, params) => {
-				return this.#handleServerRequest(method, params);
-			},
-		});
+		// Opened before resolving credentials: a disconnect during that wait must abort this connect too.
+		const scope = this.#beginConnect(name);
+		const resolvedConfig = await this.#resolveAuthConfig(config, { signal: scope.signal });
+		const connection = await this.#connect(name, config, resolvedConfig, scope);
 
 		connection.config = config;
 		if (source) connection._source = source;
@@ -1695,35 +1877,16 @@ export class MCPManager {
 		}
 
 		this.#connections.set(name, connection);
-
-		// Wire auth refresh for HTTP-like transports, and reconnect for any transport.
-		// Same gate as connectServers: any resolvable managed credential.
-		if (isAuthRefreshableMCPTransport(connection.transport) && lookupMcpOAuthCredential(this.#authStorage, config)) {
-			connection.transport.onAuthError = async () => {
-				const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
-				if (refreshed.type === "http" || refreshed.type === "sse") {
-					return refreshed.headers ?? null;
-				}
-				return null;
-			};
-		}
-		connection.transport.onClose = () => {
-			logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
-			this.#emitConnectionStatus({ type: "reconnecting", serverName: name });
-			void this.reconnectServer(name);
-		};
+		this.#wireLink(name, connection);
 		try {
-			const serverTools = await listTools(connection);
-			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
-			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-			void this.toolCache?.set(name, config, serverTools);
-			this.#replaceServerTools(name, customTools);
+			const serverTools = await listTools(connection, { signal: scope.signal });
+			this.#publishServerTools(name, connection, serverTools);
 			this.#notifyOwnerToolsChanged().catch(error => logger.debug("MCP tools-changed handler failed", { error }));
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			return connection;
 		} catch (error) {
 			// Detach synchronously and close in the background so a slow close
-			// cannot delay the rejection (and the retry backoff that follows).
+			// cannot delay the rejection.
 			this.#detachConnection(name, connection);
 			void disconnectServer(connection).catch(() => {});
 			throw error;
@@ -1800,11 +1963,20 @@ export class MCPManager {
 		// Clear cached tools
 		connection.tools = undefined;
 
-		// Reload tools
-		const serverTools = await listTools(connection);
-		const reconnect = () => this.reconnectServer(name);
-		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		// Claimed before the request: only a list requested after a call's notice
+		// can hold the tools that call made the server add. A pass already in
+		// flight leaves the flag to the re-run the notice queued.
+		const callProvoked = this.#callProvokedToolRefreshes.delete(name);
+		let serverTools: MCPToolDefinition[];
+		try {
+			serverTools = await listTools(connection);
+		} catch (error) {
+			if (callProvoked) this.#callProvokedToolRefreshes.add(name);
+			throw error;
+		}
+		const reconnect: MCPReconnect = options => this.reconnectServer(name, options);
+		const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#observeToolCall(name));
+		if (callProvoked) this.#scopeAddedTools(name, customTools);
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
@@ -2019,6 +2191,30 @@ export class MCPManager {
 		return {
 			enabled: this.#notificationsEnabled,
 			subscriptions: this.#subscribedResources as Map<string, ReadonlySet<string>>,
+		};
+	}
+
+	/**
+	 * The upstream of `name` as the host last reported it: state, pid, how many
+	 * sessions share it, how it last exited. Undefined before the first attach.
+	 */
+	getServerRuntime(name: string): McpUpstreamStatus | undefined {
+		return this.#runtimes.get(name);
+	}
+
+	/**
+	 * How a link of `config`'s server recovers from an HTTP/SSE 401/403: a
+	 * managed OAuth credential is force-refreshed and `!command` headers run
+	 * again, and the link retries on the server those headers name. Undefined
+	 * for servers with neither, which keep the plain auth error.
+	 */
+	#authRefreshHook(config: MCPServerConfig): (() => Promise<Record<string, string> | null>) | undefined {
+		if (config.type !== "http" && config.type !== "sse") return undefined;
+		if (commandValues(config).length === 0 && !lookupMcpOAuthCredential(this.#authStorage, config)) return undefined;
+		return async () => {
+			invalidateCommandValues(config);
+			const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
+			return refreshed.type === "http" || refreshed.type === "sse" ? (refreshed.headers ?? null) : null;
 		};
 	}
 

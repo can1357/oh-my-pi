@@ -12,26 +12,22 @@ import type {
 	ServiceTierByFamily,
 } from "@oh-my-pi/pi-ai";
 import { resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
-import {
-	renderTableRow,
-	replaceTabs,
-	type TableCell,
-	type TableColumn,
-	truncateToWidth,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue } from "../config/model-selector";
 import { formatModelStringWithRouting } from "../config/model-resolver";
-import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
+import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
+import { Settings } from "../config/settings";
+import { resolveWebsocketPreference } from "../session/settings-stream-fn";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
 import chatTemplate from "../prompts/bench/chat.md" with { type: "text" };
 import generationTemplate from "../prompts/bench/generation.md" with { type: "text" };
 import prefillInstruction from "../prompts/bench/prefill-instruction.md" with { type: "text" };
-import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
 import {
 	type BenchRuntime,
 	type BenchTarget,
@@ -39,10 +35,10 @@ import {
 	resolveBenchTargets,
 	type StreamSimpleFn,
 } from "./bench-runtime";
-import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
-import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+import { createLiveBoard, type LiveBoardOutput } from "../modes/view-model/chrome/live-board";
+import { formatCost } from "../modes/view-model/overlays/agent-hub-renderer";
 
-import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "../session/settings";
+import { cfgTiers } from "../session/settings";
 
 const DEFAULT_PAR = 4;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
@@ -132,6 +128,8 @@ export interface BenchCommandArgs {
 		prompt?: string;
 		/** Service-tier setting value (`none` omits); overrides the configured `serviceTier` setting. */
 		serviceTier?: string;
+		/** One-based OAuth account position for each selected provider. */
+		account?: number;
 		json?: boolean;
 		par?: number;
 		/** Benchmark workload: a challenge kind (default `chat`), or `mix` to rotate through every kind. */
@@ -150,6 +148,8 @@ export interface BenchCommandArgs {
 
 export interface BenchRunSuccess {
 	ok: true;
+	/** Observed response transport; absent when the provider exposes no metadata. */
+	transport?: "http" | "websocket";
 	/** Challenge kind this run exercised; absent in `--cache` mode. */
 	challenge?: BenchChallengeKind;
 	/** `--detailed` phase this run belongs to. */
@@ -669,6 +669,7 @@ async function runBenchRequest(
 ): Promise<BenchRunResult> {
 	const startedAt = now();
 	let firstTokenAt: number | undefined;
+	let transport: "http" | "websocket" | undefined;
 	const providerSessionState = new Map<string, ProviderSessionState>();
 	try {
 		const context: Context = {
@@ -693,17 +694,21 @@ async function runBenchRequest(
 						return undefined;
 					}
 				: undefined,
-			onResponse: options.cacheCapture
-				? response => {
-						options.cacheCapture!.requestIdObserved = Boolean(response.requestId);
-						options.cacheCapture!.responseCacheHit = RESPONSE_CACHE_STATUS_HEADERS.some(
-							header => response.headers[header]?.trim().toLowerCase() === "hit",
-						);
-					}
-				: undefined,
+			onResponse: response => {
+				transport = response.metadata?.transport === "websocket" ? "websocket" : "http";
+				// A handshake can describe the connection, never this generation's
+				// request ID or response-cache hit. Usage remains measurable on WS.
+				if (transport === "websocket" || !options.cacheCapture) return;
+				options.cacheCapture.requestIdObserved = Boolean(response.requestId);
+				options.cacheCapture.responseCacheHit = RESPONSE_CACHE_STATUS_HEADERS.some(
+					header => response.headers[header]?.trim().toLowerCase() === "hit",
+				);
+			},
 			disableReasoning: options.disableReasoning,
 			serviceTier: options.serviceTier,
 			providerSessionState,
+			// Keep Codex bench runs on WS as before; the settings wrapper still
+			// gates standard Responses on `providers.openaiResponsesWebsockets`.
 			preferWebsockets: true,
 			// pi-ai opts every OpenRouter request into response caching (1h TTL).
 			// Bench sends a byte-identical request each run, so within the TTL
@@ -727,6 +732,9 @@ async function runBenchRequest(
 		message ??= await stream.result();
 		if (message.stopReason === "error" || message.errorMessage) {
 			return { ok: false, error: message.errorMessage ?? "request failed" };
+		}
+		if (options.serviceTier === "priority" && message.disabledFeatures?.includes("priority")) {
+			return { ok: false, error: "Provider rejected priority service; request fell back to standard speed" };
 		}
 		const rawDuration = message.duration ?? now() - startedAt;
 		const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
@@ -756,6 +764,7 @@ async function runBenchRequest(
 		const generationMs = Math.max(0, durationMs - ttftMs);
 		return {
 			ok: true,
+			transport,
 			ttftMs,
 			generationMs,
 			durationMs,
@@ -994,26 +1003,38 @@ function formatBenchTable(rows: readonly BenchTableRow[], spec: BenchTableSpec, 
 	const texts = ranked.map(({ row }) =>
 		columns.map(column => column.value(row.report) ?? (row.state === "done" ? "-" : PENDING_CELL)),
 	);
-	const layout = columns.map((column, index): TableColumn => ({
-		width: Math.max(visibleWidth(column.header), ...texts.map(cells => visibleWidth(cells[index]!))),
-		align: "left",
-		overflow: "allow",
-	}));
-	// Unpadded trailing status: progress, queue position, or failures.
-	layout.push({ width: 0, align: "left", overflow: "allow" });
-	const table: TableCell[][] = [columns.map(column => ({ text: column.header, style: chalk.dim }))];
+	const widths = columns.map((column, index) =>
+		Math.max(visibleWidth(column.header), ...texts.map(cells => visibleWidth(cells[index]!))),
+	);
+	// A cell padded to its column; the trailing status (progress, queue position, failures) stays unpadded.
+	const cell = (text: string, index: number, style?: (text: string) => string): string => {
+		const pad = " ".repeat(Math.max(0, (widths[index] ?? 0) - visibleWidth(text)));
+		return `${style ? style(text) : text}${pad}`;
+	};
+	const lines = [
+		columns
+			.map((column, index) => cell(column.header, index, chalk.dim))
+			.join("  ")
+			.trimEnd(),
+	];
 	for (const [index, { row, rate }] of ranked.entries()) {
-		const cells = texts[index]!.map((text): TableCell => ({
-			text,
-			style: text === PENDING_CELL ? chalk.dim : undefined,
-		}));
-		// Green marks the leader: the top row once it has a headline rate.
-		if (index === 0 && rate > Number.NEGATIVE_INFINITY) cells[0] = { text: cells[0]!.text, style: chalk.green };
+		const cells = texts[index]!.map((text, column) =>
+			// Green marks the leader: the top row once it has a headline rate.
+			cell(
+				text,
+				column,
+				column === 0 && index === 0 && rate > Number.NEGATIVE_INFINITY
+					? chalk.green
+					: text === PENDING_CELL
+						? chalk.dim
+						: undefined,
+			),
+		);
 		const status = formatRowStatus(row, spinner);
-		if (status) cells.push({ text: status });
-		table.push(cells);
+		if (status) cells.push(status);
+		lines.push(cells.join("  ").trimEnd());
 	}
-	return table.map(cells => renderTableRow(cells, layout, undefined, { gap: "  " }).trimEnd());
+	return lines;
 }
 
 function assertCacheModeSupported(targets: BenchTarget[]): void {
@@ -1111,7 +1132,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		((code: number) => {
 			process.exitCode = code;
 		});
-	const streamFn = deps.streamSimple ?? streamSimple;
+	const baseStreamFn = deps.streamSimple ?? streamSimple;
 	const now = deps.now ?? (() => performance.now());
 	const interactive = deps.stdoutIsTTY ?? process.stdout.isTTY === true;
 	if (command.models.length === 0) {
@@ -1149,7 +1170,14 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		else writeStdout(`${text}\n`);
 	};
 
+	if (command.flags.account !== undefined) normalizePositiveInteger("account", command.flags.account, 1);
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
+	const settings = runtime.settings ?? Settings.isolated({});
+	const streamFn: StreamSimpleFn = (model, context, options) =>
+		baseStreamFn(model, context, {
+			...options,
+			preferWebsockets: resolveWebsocketPreference(settings, model, options?.preferWebsockets),
+		});
 	try {
 		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
@@ -1159,11 +1187,9 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		const flagTier = command.flags.serviceTier ? serviceTierSettingToTier(command.flags.serviceTier) : undefined;
 		const serviceTierByFamily = command.flags.serviceTier
 			? serviceTierForAllFamilies(flagTier)
-			: buildServiceTierByFamily(
-					(runtime.settings ? cfgTierOpenai.get(runtime.settings) : undefined) ?? "none",
-					(runtime.settings ? cfgTierAnthropic.get(runtime.settings) : undefined) ?? "none",
-					(runtime.settings ? cfgTierGoogle.get(runtime.settings) : undefined) ?? "none",
-				);
+			: runtime.settings
+				? cfgTiers.get(runtime.settings)
+				: {};
 		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
 		const total = cacheMode ? cachePairs! : runs;
 		rows = targets.map(({ selector, model, thinking }): BenchTableRow => ({
@@ -1186,7 +1212,32 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			// This matches the old sequential break behavior exactly and avoids launching/printing
 			// multiple failures.
 			const testSessionId = randomSessionId();
-			const preflightKey = await runtime.modelRegistry.getApiKey(model, testSessionId);
+			let selectedResolver: ApiKeyResolver | undefined;
+			if (command.flags.account !== undefined) {
+				const oauth = runtime.oauth;
+				if (!oauth) throw new Error("OAuth account selection is unavailable");
+				const accounts = oauth.accounts(model.provider);
+				const account = accounts[command.flags.account - 1];
+				if (!account) {
+					throw new Error(
+						`Invalid --account ${command.flags.account}: provider "${model.provider}" has ${accounts.length} OAuth account(s)`,
+					);
+				}
+				selectedResolver = async ({ error, lastChance }) => {
+					if (lastChance) return undefined;
+					const result = await oauth.accessById(model.provider, account.credentialId, {
+						forceRefresh: error !== undefined,
+					});
+					if (!result?.ok)
+						throw new Error(
+							`Could not get token for account ${command.flags.account} of "${model.provider}": ${result?.error ?? "no OAuth credential available"}`,
+						);
+					return result.apiKey;
+				};
+			}
+			const preflightKey = selectedResolver
+				? await selectedResolver({ error: undefined, lastChance: false })
+				: await runtime.modelRegistry.getApiKey(model, testSessionId);
 			if (!preflightKey) {
 				const failure: BenchRunFailure = {
 					ok: false,
@@ -1221,7 +1272,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						// Provider-session state is still recreated by runBenchRequest and
 						// stateful Responses chaining is disabled below.
 						const credentialAffinitySessionId = pairIndex === 0 ? testSessionId : randomSessionId();
-						const credentialResolver = runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
+						const credentialResolver =
+							selectedResolver ?? runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
 						const coldResult = await runBenchRequest(
 							model,
 							{
@@ -1324,7 +1376,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						...(await runBenchRequest(
 							model,
 							{
-								apiKey: runtime.modelRegistry.resolver(model, sessionId),
+								apiKey: selectedResolver ?? runtime.modelRegistry.resolver(model, sessionId),
 								sessionId,
 								messages: challenge.messages,
 								maxTokens: challenge.maxTokens,

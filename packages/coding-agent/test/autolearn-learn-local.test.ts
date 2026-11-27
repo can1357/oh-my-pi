@@ -13,7 +13,9 @@ import { localBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/local-bac
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getManagedSkillsDir, readManagedSkillProvenance } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import { parseFrontmatter, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -389,12 +391,37 @@ describe("learn tool (local backend)", () => {
 				memory: "A cross-project lesson must not become project-local.",
 				scope: "global",
 			}),
-		).rejects.toThrow(/only available with the Mnemopi backend/i);
+		).rejects.toThrow(/not available with the local memory backend/i);
 		expect(await Bun.file(learnedFile).exists()).toBe(false);
 	});
 
 	it("execute throws when the lesson is empty after sanitization", async () => {
 		await expect(new LearnTool(localSession()).execute("2", { memory: "   " })).rejects.toThrow(/empty/i);
 		expect(await Bun.file(learnedFile).exists()).toBe(false);
+	});
+
+	it("stamps the source session and project on a managed skill it creates", async () => {
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		try {
+			await new LearnTool({ ...localSession(), getSessionId: () => "session-learn" }).execute("3", {
+				memory: "Rebuild the bindings after bumping the native crate.",
+				skill: {
+					action: "create",
+					name: "native-bump",
+					description: "When bumping the native crate.",
+					body: "1. Bump\n2. Rebuild bindings",
+				},
+			});
+			const content = await Bun.file(path.join(getManagedSkillsDir(), "native-bump", "SKILL.md")).text();
+			const { frontmatter } = parseFrontmatter(content, { source: "test", rawKeys: true });
+			expect(readManagedSkillProvenance(frontmatter)).toMatchObject({
+				generator: "learn",
+				sessions: ["session-learn"],
+				projects: [projCwd],
+			});
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
 	});
 });

@@ -8,7 +8,7 @@ import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-l
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { getTerminalId } from "@oh-my-pi/pi-coding-agent/utils/ttyid";
 import { getConfigRootDir, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./helpers";
@@ -387,6 +387,63 @@ describe("SessionManager.continueRecent relocation", () => {
 			expect(path.dirname(newFile)).toBe(path.resolve(explicitSessionDir));
 			expect(fs.existsSync(oldFile)).toBe(false);
 			expect(getHeader(await loadEntriesFromFile(newFile))?.cwd).toBe(path.resolve(cwdB));
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("re-roots the copy the breadcrumb session went on in, not the file it names", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "before the move-off", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const oldFile = session.getSessionFile();
+		if (!oldFile) throw new Error("Expected persisted session file");
+		await session.close();
+		// The sibling a move-off leaves: the same entries under a new id whose
+		// header names the old one in `continuationOf`, then a later turn. Its
+		// times are set a second apart, after every entry of the old file.
+		const records = fs
+			.readFileSync(oldFile, "utf8")
+			.split("\n")
+			.filter(line => line.trim())
+			.map(line => JSON.parse(line) as Record<string, unknown>);
+		const header = records.find(record => record.type === "session");
+		if (!header) throw new Error("Expected a session header");
+		const oldId = header.id as string;
+		const newId = crypto.randomUUID();
+		const movedAt = Date.now() + 1_000;
+		Object.assign(header, {
+			id: newId,
+			timestamp: new Date(movedAt).toISOString(),
+			parentSession: oldId,
+			continuationOf: oldId,
+		});
+		const lastEntry = records[records.length - 1];
+		records.push({
+			type: "message",
+			id: "continued-turn",
+			parentId: lastEntry.id,
+			timestamp: new Date(movedAt + 1_000).toISOString(),
+			message: { role: "user", content: "after the move-off", timestamp: movedAt + 1_000 },
+		});
+		const fileTime = new Date(movedAt).toISOString().replace(/[:.]/g, "-");
+		const sibling = path.join(path.dirname(oldFile), `${fileTime}_${newId}.jsonl`);
+		fs.writeFileSync(sibling, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
+
+		writeBreadcrumb(cwdA, oldFile);
+		await renameProjectDir(cwdA, cwdB);
+
+		const followed: string[] = [];
+		const resumed = await SessionManager.continueRecent(cwdB, undefined, undefined, {
+			onSessionContinuation: continuation => followed.push(continuation.session.path),
+		});
+		try {
+			expect(followed).toEqual([sibling]);
+			expect(resumed.getSessionId()).toBe(newId);
+			expect(resumed.getCwd()).toBe(path.resolve(cwdB));
+			expect(JSON.stringify(resumed.getEntries())).toContain("after the move-off");
+			expect(fs.existsSync(oldFile)).toBe(true);
 		} finally {
 			await resumed.close();
 		}

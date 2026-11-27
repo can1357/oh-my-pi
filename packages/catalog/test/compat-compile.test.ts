@@ -359,6 +359,38 @@ describe("auth grammar", () => {
 		expect(compiled.providers[0]?.nativeAuthApis).toEqual(["bedrock-converse-stream", "openai-responses"]);
 	});
 
+	test("a disabled provider keeps its reason, and a blank reason is rejected", () => {
+		const compiled = compileAuth([
+			{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tdisabled "paused for now"\n}' },
+			order(),
+		]);
+		expect(compiled.providers[0]?.disabled).toBe("paused for now");
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tdisabled "  "\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3/);
+	});
+
+	test("connected-name and active-notice compile into auth policy; blank text is rejected", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "Sign in to X"\n\tconnected-name "X plan"\n\tactive-notice "Using your X plan"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]).toMatchObject({
+			name: "Sign in to X",
+			connectedName: "X plan",
+			activeNotice: "Using your X plan",
+		});
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tconnected-name " "\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3/);
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tactive-notice ""\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3/);
+	});
+
 	test("auth identity and OAuth env policy preserve explicit false and reject empty token lists", () => {
 		const compiled = compileAuth([
 			{
@@ -469,6 +501,29 @@ describe("provider catalog grammar", () => {
 		expect(() => compileProviders(src(provider("p", ['\tenv "P_KEY"'])))).toThrow(
 			/providers\/p\.kdl:1.*has catalog nodes but no default-model/,
 		);
+	});
+
+	test("provider base-url compiles with an optional environment override", () => {
+		const compiled = compileProviders([
+			{
+				file: "providers/p.kdl",
+				text: provider("p", [
+					'\tdefault-model "m"',
+					'\tbase-url "https://api.example/v1" {\n\t\tenv "P_BASE_URL"\n\t}',
+				]),
+			},
+			{
+				file: "providers/q.kdl",
+				text: provider("q", ['\tdefault-model "m"', '\tbase-url "https://other.example/v1"']),
+			},
+		]);
+
+		expect(compiled.p).toMatchObject({
+			baseUrl: "https://api.example/v1",
+			baseUrlEnv: "P_BASE_URL",
+		});
+		expect(compiled.q).toMatchObject({ baseUrl: "https://other.example/v1" });
+		expect(compiled.q.baseUrlEnv).toBeUndefined();
 	});
 
 	test("runner seeds and per-kind APIs compile without entering the cascade", () => {

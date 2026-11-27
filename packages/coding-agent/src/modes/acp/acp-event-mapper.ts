@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -12,8 +13,8 @@ import { extractUriScheme } from "../../internal-urls/parse";
 import type { SchemeSpec } from "../../internal-urls/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
-import type { TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
-import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import type { TodoStatus } from "../../tools/details/todo";
+import { canonicalizeMessage } from "../../session/transcript/thinking-display";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -152,10 +153,10 @@ function isInternalAgentMessageTool(toolName: string, args: unknown): boolean {
 }
 
 export function mapToolKind(toolName: string, args?: unknown): ToolKind {
-	// A device write (xd:// tool dispatch, proc:// control) executes something —
-	// "edit" would make ACP clients render it as a file modification to a
-	// nonexistent path (and auto-approve it under edit-tier policies). Reads
-	// stay "read": listing devices or fetching docs is discovery.
+	// A write to a device-backed URL (proc:// control, out:// replies) is an
+	// action, not a file change — "edit" would make ACP clients render it as a
+	// file modification to a nonexistent path (and auto-approve it under edit-tier policies). Reads
+	// stay "read": fetching a URL's content is discovery.
 	if (writeTargetSpec(toolName, args)?.backing === "device") return "execute";
 	switch (toolName) {
 		case "read":
@@ -392,7 +393,6 @@ const todoStatusMap: Record<TodoStatus, "pending" | "in_progress" | "completed">
 	in_progress: "in_progress",
 	completed: "completed",
 	abandoned: "completed",
-	blocked: "pending",
 };
 
 function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "completed" {
@@ -456,13 +456,7 @@ function extractTodoEntries(phases: unknown[]): Array<{ content: string; status:
 }
 
 function isTodoStatus(status: unknown): status is TodoStatus {
-	return (
-		status === "pending" ||
-		status === "in_progress" ||
-		status === "completed" ||
-		status === "abandoned" ||
-		status === "blocked"
-	);
+	return status === "pending" || status === "in_progress" || status === "completed" || status === "abandoned";
 }
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
@@ -475,6 +469,7 @@ export function buildToolCallStartUpdate(input: {
 	const update: ToolCall & { sessionUpdate: "tool_call" } = {
 		sessionUpdate: "tool_call",
 		toolCallId: input.toolCallId,
+		name: input.toolName,
 		title: buildToolTitle(input.toolName, input.args, input.intent),
 		kind: mapToolKind(input.toolName, input.args),
 		status: input.status ?? "pending",
@@ -589,9 +584,10 @@ function buildToolTitle(toolName: string, args: unknown, intent: string | undefi
 		const evalText = buildEvalStartText(args);
 		if (evalText) return evalText;
 	}
-	const trimmedIntent = intent?.trim();
+	const trimmedIntent =
+		intent?.trim() || extractStringProperty<Record<typeof INTENT_FIELD, string>>(args, INTENT_FIELD)?.trim();
 	if (trimmedIntent) {
-		return trimmedIntent;
+		return toolIntentLabel(trimmedIntent);
 	}
 
 	const subject =
@@ -600,7 +596,7 @@ function buildToolTitle(toolName: string, args: unknown, intent: string | undefi
 		extractStringProperty<PatternContainer>(args, "pattern") ??
 		extractStringProperty<QueryContainer>(args, "query");
 	if (subject) {
-		// Internal URLs (xd://github, skill://react, …) name their target fully;
+		// Internal URLs (skill://react, help://read/sources, …) name their target fully;
 		// prefixing the transport tool reads as a file write to a fake path.
 		if (INTERNAL_URL_SUBJECT.test(subject)) return subject;
 		return `${toolName}: ${subject}`;
@@ -625,9 +621,9 @@ function toAcpLocationPath(value: string, cwd?: string): string {
 }
 
 /**
- * Scheme-qualified subjects (`xd://`, `skill://`, `agent://`, `https://`, …)
- * are not local files: resolving them against cwd fabricates paths like
- * `/repo/xd:/github` and makes editors focus nonexistent files.
+ * Scheme-qualified subjects (`skill://`, `agent://`, `https://`, …) are not
+ * local files: resolving them against cwd fabricates paths like
+ * `/repo/skill:/react` and makes editors focus nonexistent files.
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 

@@ -188,18 +188,26 @@ export function mergeByModelKey<T extends { provider: string; id: string }>(
 	combine: (existing: Model<Api> | undefined, entry: T) => Model<Api>,
 ): Model<Api>[] {
 	const merged = [...base];
-	const indexByKey = new Map<string, number>();
-	for (let i = 0; i < merged.length; i += 1) {
-		indexByKey.set(`${merged[i].provider}\u0000${merged[i].id}`, i);
-	}
+	if (incoming.length === 0) return merged;
+	// provider → id → index: no joined key string per row.
+	const indexByKey = new Map<string, Map<string, number>>();
+	const idsOf = (provider: string): Map<string, number> => {
+		let ids = indexByKey.get(provider);
+		if (!ids) {
+			ids = new Map();
+			indexByKey.set(provider, ids);
+		}
+		return ids;
+	};
+	for (let i = 0; i < merged.length; i += 1) idsOf(merged[i].provider).set(merged[i].id, i);
 	for (const entry of incoming) {
-		const key = `${entry.provider}\u0000${entry.id}`;
-		const existingIndex = indexByKey.get(key);
+		const ids = idsOf(entry.provider);
+		const existingIndex = ids.get(entry.id);
 		if (existingIndex !== undefined) {
 			merged[existingIndex] = combine(merged[existingIndex], entry);
 		} else {
 			merged.push(combine(undefined, entry));
-			indexByKey.set(key, merged.length - 1);
+			ids.set(entry.id, merged.length - 1);
 		}
 	}
 	return merged;
@@ -250,6 +258,7 @@ export interface ModelPatch {
 	input?: ("text" | "image")[];
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
 	imageCountBudget?: number;
+	snapcompactShape?: Model<Api>["snapcompactShape"];
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
@@ -259,7 +268,7 @@ export interface ModelPatch {
 	maxContextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
-	/** Whether Codex requests should prefer WebSocket transport. */
+	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
 	preferWebsockets?: boolean;
 	headers?: Record<string, string>;
 	resolveHeaders?: Model<Api>["resolveHeaders"];
@@ -268,6 +277,8 @@ export interface ModelPatch {
 	compactionModel?: string;
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	premiumMultiplier?: number;
+	voice?: string;
+	speechFormats?: Model<Api>["speechFormats"];
 }
 
 /**
@@ -296,6 +307,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
 	if (patch.imageCountBudget !== undefined) result.imageCountBudget = patch.imageCountBudget;
+	if (patch.snapcompactShape !== undefined) result.snapcompactShape = patch.snapcompactShape;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
 	if (patch.promptCache !== undefined) {
 		result.promptCache = patch.promptCache;
@@ -311,6 +323,8 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
 	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
+	if (patch.voice !== undefined) result.voice = patch.voice;
+	if (patch.speechFormats !== undefined) result.speechFormats = patch.speechFormats;
 	if (patch.cost) {
 		const longContext = patch.cost.longContext ?? base.cost.longContext;
 		result.cost = {
@@ -355,7 +369,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.thinking !== undefined && built.thinking !== undefined) {
 		// Config-authored capability metadata owns the explicit surface; build
 		// first so non-reasoning and wire-disabled models still suppress it.
-		built.thinking = patch.thinking;
+		// Prefix binding is a lineage safety invariant, not surface: keep the
+		// rule-derived flag unless the patch sets it.
+		const { prefixBinding } = built.thinking;
+		built.thinking = prefixBinding ? { prefixBinding, ...patch.thinking } : patch.thinking;
 	}
 	// Capacity already includes registry policy and runtime metadata; rebuilding
 	// compat must not replace it with the catalog's baseline limits.

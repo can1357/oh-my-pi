@@ -13,7 +13,7 @@ import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgTaskIsolationEnabled } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -35,10 +35,11 @@ function isEvalAgentResult(value: unknown): value is EvalAgentResult {
 async function runEvalAgentAndWait(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
 	let manager = options.session.asyncJobManager;
 	if (!manager) {
-		manager = new AsyncJobManager({});
-		Object.assign(options.session, { asyncJobManager: manager });
+		const created = new AsyncJobManager({});
+		Object.assign(options.session, { asyncJobManager: created });
+		jobManagers.add(created);
+		manager = created;
 	}
-	jobManagers.add(manager);
 	const handle = await runEvalAgent(args, options);
 	const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, options);
 	const snapshot = waited.items[0];

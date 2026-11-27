@@ -4,12 +4,11 @@
  * Shared by every path-based tool (`read`, `write`, `edit`) so one approved
  * target maps to one key: a filesystem path resolved against the session cwd
  * (case-folded on case-insensitive platforms via {@link approvalCacheKeyForPath}),
- * a registered internal URL (`xd://`, `local://`, …) kept in its normalized
+ * a registered internal URL (`help://`, `local://`, …) kept in its normalized
  * form, or a readable web URL kept as written.
  */
-import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath } from "./details/read";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { approvalCacheKeyForPath } from "./approval-cache";
 import { resolveToCwd } from "./path-utils";
@@ -45,6 +44,8 @@ export function isApprovalPublicUrl(url: string): boolean {
 		}
 	}
 	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+	// An absolute name (`intranet.`, `localhost.`) resolves to the same host as its relative form.
+	host = host.replace(/\.+$/, "");
 	if (host.length === 0) return false;
 	// Intranet names: a single label, or a reserved local suffix.
 	if (!host.includes(".") || host.endsWith(".local") || host.endsWith(".localhost") || host.endsWith(".internal")) {
@@ -90,28 +91,6 @@ export function approvalTargetNamesFile(target: string): boolean {
 		return !fs.statSync(target).isDirectory();
 	} catch {
 		return true;
-	}
-}
-
-/**
- * The directory an exact target covers for a folder answer: a directory target is
- * the folder itself (a directory read must offer its own directory, never the
- * parent that would grant every sibling), a file target's parent is, and a path
- * nothing occupies yet counts as a file so its parent is offered. `undefined`
- * when the target names no filesystem path.
- */
-export function approvalTargetDirectory(target: string): string | undefined {
-	const trimmed = target.replace(/[\\/]+$/, "");
-	if (trimmed.length === 0) return undefined;
-	const router = InternalUrlRouter.instance();
-	if (router.canHandle(router.normalize(trimmed)) || isReadableUrlPath(trimmed)) return undefined;
-	// A filesystem root is its own directory: stripping its separator leaves POSIX "" and Windows
-	// "C:", which names the drive's current directory rather than the root.
-	if (path.parse(target).root === target) return target;
-	try {
-		return fs.statSync(trimmed).isDirectory() ? trimmed : path.dirname(trimmed);
-	} catch {
-		return path.dirname(trimmed);
 	}
 }
 

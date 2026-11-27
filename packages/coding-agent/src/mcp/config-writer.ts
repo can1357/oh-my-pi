@@ -256,7 +256,7 @@ export async function setServerDisabled(filePath: string, name: string, disabled
 
 /**
  * Read the user-level force-enable list (allowlist that overrides a
- * non-writable source config's `enabled: false`).
+ * non-writable source config's `enabled: false` and a built-in transform's drop).
  */
 export async function readEnabledServers(filePath: string): Promise<string[]> {
 	const config = await readMCPConfigFile(filePath);
@@ -265,8 +265,8 @@ export async function readEnabledServers(filePath: string): Promise<string[]> {
 
 /**
  * Add or remove a server name from the user-level force-enable list.
- * The list overrides a discovered server's `enabled: false` flag but does
- * NOT override the `disabledServers` denylist.
+ * The list overrides a discovered server's `enabled: false` flag and a
+ * built-in transform's drop, but does NOT override the `disabledServers` denylist.
  */
 export async function setServerForceEnabled(filePath: string, name: string, force: boolean): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).
@@ -296,7 +296,8 @@ export async function setServerForceEnabled(filePath: string, name: string, forc
 /** Paths and target state for toggling one MCP server across known config files. */
 export interface SetMcpServerEnabledOptions {
 	userPath: string;
-	projectPath: string;
+	/** Omit when project MCP config is disabled so an ignored project file is never written. */
+	projectPath?: string;
 	/**
 	 * Absolute path to the loaded row's source mcp.json. Provide ONLY for
 	 * formats this codebase owns (native `.omp/mcp.json` and `mcp-json`

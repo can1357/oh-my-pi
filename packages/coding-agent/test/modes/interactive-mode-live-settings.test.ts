@@ -4,11 +4,14 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as theme from "@oh-my-pi/pi-tui/theme";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import * as themeService from "@oh-my-pi/pi-coding-agent/ui/theme/service";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createModeTerminal, type ModeTerminal } from "../helpers/mode-terminal";
 
 import {
 	cfgStatusLineContextLine,
@@ -23,9 +26,10 @@ describe("InteractiveMode live settings", () => {
 	let session: AgentSession;
 	let mode: InteractiveMode;
 	let reportGlyphProtocol: (supported: boolean) => void;
+	let term: ModeTerminal;
 
 	beforeAll(async () => {
-		await theme.initTheme();
+		themeService.initTheme();
 	});
 
 	beforeEach(async () => {
@@ -46,20 +50,36 @@ describe("InteractiveMode live settings", () => {
 			settings,
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		vi.spyOn(mode.ui.terminal, "onGlyphProtocolReport").mockImplementation(callback => {
-			reportGlyphProtocol = callback;
+		// The terminal's Glyph Protocol reply arrives as a driver capability change.
+		term = createModeTerminal();
+		await term.start();
+		const driver = term.frame.shell.host!.driver;
+		const identity = driver.identity;
+		let glyphs = false;
+		Object.defineProperty(driver, "identity", { configurable: true, get: () => ({ ...identity, glyphs }) });
+		const listeners: (() => void)[] = [];
+		vi.spyOn(driver, "onCapabilities").mockImplementation(listener => {
+			const notify = () => listener(driver.capabilities);
+			listeners.push(notify);
+			return () => listeners.splice(listeners.indexOf(notify), 1);
 		});
+		reportGlyphProtocol = supported => {
+			glyphs = supported;
+			for (const notify of listeners) notify();
+		};
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 		await mode.init({ suppressWelcomeIntro: true });
 	});
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
 		resetSettingsForTest();
-		await theme.setSymbolPreset("unicode");
+		await themeService.setSymbolPreset("unicode");
 		vi.restoreAllMocks();
 	});
 
@@ -69,23 +89,47 @@ describe("InteractiveMode live settings", () => {
 		cfgHideThinkingBlock.set(session.settings, true);
 		await Promise.resolve();
 
-		const effective = mode.statusLine.getEffectiveSettingsForTest();
+		const effective = mode.statusLine.settings();
 		expect(effective.leftSegments).toEqual(["time", "model"]);
 		expect(effective.contextLine).toBe("off");
 		expect(mode.hideThinkingBlock).toBe(true);
 	});
 
+	it("coalesces restored agent registrations and renders their final state", async () => {
+		const sync = vi.spyOn(mode, "syncRunningSubagentBadge");
+		const badge = vi.spyOn(mode.statusLine, "setRunningSubagents");
+		const registry = AgentRegistry.global();
+		const ids = Array.from({ length: 100 }, (_, index) => `restore-burst-${index}`);
+		vi.useFakeTimers();
+		try {
+			for (const id of ids) {
+				registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
+			}
+			expect(sync).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(100);
+			expect(sync).toHaveBeenCalledTimes(1);
+			expect(badge.mock.calls.at(-1)?.[0]).toEqual(expect.arrayContaining(ids));
+			for (const id of ids) registry.unregister(id);
+			vi.advanceTimersByTime(100);
+			expect(sync).toHaveBeenCalledTimes(2);
+			expect(badge.mock.calls.at(-1)?.[0].some(id => ids.includes(id))).toBe(false);
+		} finally {
+			vi.useRealTimers();
+			for (const id of ids) registry.unregister(id);
+		}
+	});
+
 	it("keeps an explicitly configured unicode status bar after Glyph Protocol confirmation", async () => {
 		cfgSymbolPreset.set(session.settings, "unicode");
-		await theme.setSymbolPreset("unicode");
+		await themeService.setSymbolPreset("unicode");
 		reportGlyphProtocol(true);
-		expect(theme.getSymbolPresetOverride()).toBe("unicode");
-		expect(theme.theme.getSymbolPreset()).toBe("unicode");
+		expect(themeService.getThemePreferences().symbolPreset).toBe("unicode");
+		expect(currentTheme().symbols.preset).toBe("unicode");
 	});
 
 	it("upgrades an unconfigured unicode status bar after Glyph Protocol confirmation", async () => {
-		await theme.setSymbolPreset("unicode");
+		await themeService.setSymbolPreset("unicode");
 		reportGlyphProtocol(true);
-		expect(theme.getSymbolPresetOverride()).toBe("nerd");
+		expect(themeService.getThemePreferences().symbolPreset).toBe("nerd");
 	});
 });

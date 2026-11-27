@@ -1,18 +1,21 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { TextContent } from "@oh-my-pi/pi-ai";
+import { type ImageMetadata, parseImageMetadata, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveFormat,
 	type ArchiveReader,
+	archiveFormatFromPath,
 	formatArchiveEntryLines,
 	openArchive,
 	parseArchivePathCandidates,
+	sniffArchiveFormat,
 } from "@oh-my-pi/pi-utils/ar";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { ToolSession } from "../sdk";
-import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
+import { convertBufferWithMarkit } from "../utils/markit";
+import { truncateHead } from "./streaming-output";
 import { resolveReadPath } from "./path-utils";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "./details/read";
 import {
 	buildInMemorySelectorResult,
 	decodeUtf8Text,
@@ -27,15 +30,77 @@ import {
 	type SuffixMatchCache,
 } from "./read-path-resolution";
 import { isMultiRange, type ParsedSelector, parseSel, resolveTailSelector, selToOffsetLimit } from "./read-selector";
-import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
+import { type PdfImageReadTarget, type PdfPageReadOptions, splitPdfImageReadPath } from "./read-pdf";
+import { cfgReadRenderMarkdown } from "./settings";
+import { formatBytes } from "@oh-my-pi/pi-utils";
 import { throwIfAborted } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
+import { parseJsonSelector, readJson, splitJsonQueryTarget } from "./read-json";
 
 interface ResolvedArchiveReadPath {
 	absolutePath: string;
 	archiveSubPath: string;
 	suffixResolution?: { from: string; to: string };
+	/** Container format, when the file's extension does not name it (`report.docx:word/document.xml`). */
+	format?: ArchiveFormat;
+}
+
+/** An image member, materialized for the read tool's image loader. */
+export interface ArchiveImageReadOptions {
+	readPath: string;
+	absolutePath: string;
+	mimeType: string;
+	imageMetadata: ImageMetadata;
+	fileSize: number;
+	signal?: AbortSignal;
+}
+
+/**
+ * ZIP-container documents. A bare read converts them to text; `doc.docx:word/document.xml` reads a member.
+ * The lookahead requires the `:member` part.
+ */
+const ZIP_DOCUMENT_MEMBER_RE = /\.(?:docx|docm|dotx|xlsx|xlsm|pptx|pptm|odt|ods|odp|epub)(?=:)/gi;
+
+const isZipHeader = (bytes: Uint8Array): boolean => sniffArchiveFormat(bytes) === "zip";
+const isUnixArHeader = (bytes: Uint8Array): boolean => sniffArchiveFormat(bytes) === "ar";
+
+/** Whether the file's first `length` bytes pass `sniff`; an unreadable file does not. */
+async function hasMagic(absolutePath: string, sniff: (bytes: Uint8Array) => boolean, length: number): Promise<boolean> {
+	try {
+		return sniff(await Bun.file(absolutePath).slice(0, length).bytes());
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether the file is the archive its extension names. `.lib` also names text (SPICE models), so an `ar`
+ * extension needs the `!<arch>` header; other extensions are trusted, and a mismatch fails when opened.
+ */
+async function claimsArchiveFormat(archivePath: string, absolutePath: string): Promise<boolean> {
+	return archiveFormatFromPath(archivePath) !== "ar" || hasMagic(absolutePath, isUnixArHeader, 8);
+}
+
+/** `doc.docx:<member>` candidates: an existing ZIP file whose member part is no line selector. */
+async function resolveZipDocumentMember(
+	session: ToolSession,
+	readPath: string,
+): Promise<ResolvedArchiveReadPath | null> {
+	const normalized = readPath.replace(/\\/g, "/");
+	for (const match of normalized.matchAll(ZIP_DOCUMENT_MEMBER_RE)) {
+		const end = (match.index ?? 0) + match[0].length;
+		const subPath = normalized.slice(end + 1);
+		if (subPath.length === 0 || parseSel(subPath).kind !== "none") continue;
+		const absolutePath = resolveReadPath(readPath.slice(0, end), session.cwd);
+		const stat = await Bun.file(absolutePath)
+			.stat()
+			.catch(() => null);
+		if (!stat?.isFile() || !(await hasMagic(absolutePath, isZipHeader, 4))) continue;
+		return { absolutePath, archiveSubPath: subPath, format: "zip" };
+	}
+	return null;
 }
 
 /**
@@ -43,7 +108,7 @@ interface ResolvedArchiveReadPath {
  * reads from disk. Stream containers buffer the whole archive and RAR/7z keep
  * decoded solid blocks, so caching those would pin up to their in-memory limit.
  */
-const CACHEABLE_ARCHIVE_FORMATS: Partial<Record<ArchiveFormat, true>> = { zip: true, asar: true, iso: true };
+const CACHEABLE_ARCHIVE_FORMATS: Partial<Record<ArchiveFormat, true>> = { tar: true, zip: true, asar: true, iso: true };
 
 interface CachedArchiveReader {
 	reader: ArchiveReader;
@@ -67,12 +132,15 @@ const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
 	sizeCalculation: cached => Math.max(1, cached.entryCount),
 });
 
-async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
+async function openArchiveCached(absolutePath: string, format?: ArchiveFormat): Promise<ArchiveReader> {
+	const source = format ? { path: absolutePath, format } : absolutePath;
+	// The clock is read before the stat, so a change landing between the two counts as recent.
+	const checkedAtMs = Date.now();
 	// A vanished or unreadable archive is reported by the opener, as it always has been.
 	const stat = await Bun.file(absolutePath)
 		.stat()
 		.catch(() => null);
-	if (!stat) return openArchive(absolutePath);
+	if (!stat) return openArchive(source);
 	const cached = archiveReaderCache.get(absolutePath);
 	if (
 		cached &&
@@ -83,8 +151,8 @@ async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 	) {
 		return cached.reader;
 	}
-	const reader = await openArchive(absolutePath);
-	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format]) {
+	const reader = await openArchive(source);
+	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format] || checkedAtMs - stat.ctimeMs < RACY_STAMP_WINDOW_MS) {
 		archiveReaderCache.delete(absolutePath);
 		return reader;
 	}
@@ -114,6 +182,7 @@ export async function resolveArchiveReadPath(
 		try {
 			const stat = await Bun.file(absolutePath).stat();
 			if (stat.isDirectory()) continue;
+			if (!(await claimsArchiveFormat(candidate.archivePath, absolutePath))) continue;
 			return {
 				absolutePath,
 				archiveSubPath: candidate.archivePath === readPath ? "" : candidate.subPath,
@@ -128,6 +197,7 @@ export async function resolveArchiveReadPath(
 			try {
 				const retryStat = await Bun.file(suffixMatch.absolutePath).stat();
 				if (retryStat.isDirectory()) continue;
+				if (!(await claimsArchiveFormat(candidate.archivePath, suffixMatch.absolutePath))) continue;
 
 				absolutePath = suffixMatch.absolutePath;
 				suffixResolution = { from: candidate.archivePath, to: suffixMatch.displayPath };
@@ -144,7 +214,7 @@ export async function resolveArchiveReadPath(
 		}
 	}
 
-	return null;
+	return resolveZipDocumentMember(session, readPath);
 }
 async function readArchiveDirectory(
 	archive: ArchiveReader,
@@ -156,27 +226,27 @@ async function readArchiveDirectory(
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	const DEFAULT_LIMIT = 500;
 	const allEntries = archive.listDirectory(subPath);
-	// Selectors address entries with line semantics: `a.zip:dir:50` starts the
+	// Selectors address entries with line semantics: `a.zip:dir:50-` starts the
 	// listing at the 50th entry, `a.zip:dir:-20` lists the last 20.
 	const { offset, limit } = selToOffsetLimit(resolveTailSelector(sel, allEntries.length));
 	const effectiveLimit = limit ?? DEFAULT_LIMIT;
 	const entries = offset !== undefined && offset > 1 ? allEntries.slice(offset - 1) : allEntries;
 
-	const listLimit = applyListLimit(entries, { limit: effectiveLimit });
-	const limitedEntries = listLimit.items;
-	const limitMeta = listLimit.meta;
-
-	for (let index = 0; index < limitedEntries.length; index++) {
-		throwIfAborted(signal);
-	}
+	const limitedEntries = entries.slice(0, effectiveLimit);
+	throwIfAborted(signal);
 	const results = formatArchiveEntryLines(limitedEntries);
 
-	const output = results.length > 0 ? results.join("\n") : "(empty archive directory)";
+	let output = results.length > 0 ? results.join("\n") : "(empty archive directory)";
+	const remaining = limit === undefined ? entries.length - limitedEntries.length : 0;
+	if (remaining > 0) {
+		const next = (offset ?? 1) + limitedEntries.length;
+		output += `\n\n[${remaining} more entries in listing. Use :${next}- to continue]`;
+	}
 	const text = prependSuffixResolutionNotice(output, details.suffixResolution);
 	const truncation = truncateHead(text, { maxLines: Number.MAX_SAFE_INTEGER });
 	const directoryDetails: ReadToolDetails = { ...details, isDirectory: true };
 	const resultBuilder = toolResult<ReadToolDetails>(directoryDetails).text(truncation.content);
-	resultBuilder.sourcePath(archivePath).limits({ resultLimit: limitMeta.resultLimit?.reached });
+	resultBuilder.sourcePath(archivePath);
 	if (truncation.truncated) {
 		directoryDetails.truncation = toReadTruncationStats(truncation);
 		resultBuilder.truncation(truncation, { direction: "head" });
@@ -187,12 +257,14 @@ async function readArchiveDirectory(
 export async function readArchive(
 	session: ToolSession,
 	readPath: string,
-	parsedSel: ParsedSelector,
+	lineSelector: string | undefined,
 	resolvedArchivePath: ResolvedArchiveReadPath,
+	readPdfPage: (options: PdfPageReadOptions) => Promise<AgentToolResult<ReadToolDetails>>,
+	readImage: (options: ArchiveImageReadOptions) => Promise<AgentToolResult<ReadToolDetails>>,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	throwIfAborted(signal);
-	const archive = await openArchiveCached(resolvedArchivePath.absolutePath);
+	const archive = await openArchiveCached(resolvedArchivePath.absolutePath, resolvedArchivePath.format);
 	throwIfAborted(signal);
 
 	const details: ReadToolDetails = markMarkdownContentType(
@@ -205,8 +277,16 @@ export async function readArchive(
 	);
 
 	let archiveSubPath = resolvedArchivePath.archiveSubPath;
-	let sel = parsedSel;
+	let sel = parseSel(lineSelector);
+	let pdfImageRead: PdfImageReadTarget | null = null;
 	let node = archive.getNode(archiveSubPath);
+	// A literal member containing `?` wins; only a miss admits a JSON query.
+	const jsonTarget = node ? null : splitJsonQueryTarget(archiveSubPath);
+	const jsonSelector = jsonTarget ? parseJsonSelector(jsonTarget.queryString) : null;
+	if (jsonTarget && jsonSelector) {
+		archiveSubPath = jsonTarget.jsonPath;
+		node = archive.getNode(archiveSubPath);
+	}
 	if (!node && archiveSubPath) {
 		// `archive.zip:500` / `archive.zip:raw`: the whole subPath is a
 		// selector on the archive root, not a member name. Member names take
@@ -218,11 +298,23 @@ export async function readArchive(
 			sel = wholeSel;
 		}
 	}
+	if (!node && sel.kind === "none") {
+		const candidate = splitPdfImageReadPath(archiveSubPath);
+		const pdfNode = candidate ? archive.getNode(candidate.pdfPath) : undefined;
+		if (candidate && pdfNode && !pdfNode.isDirectory) {
+			pdfImageRead = candidate;
+			archiveSubPath = candidate.pdfPath;
+			node = pdfNode;
+		}
+	}
 	if (!node) {
 		throw new ToolError(`Path '${readPath}' not found inside archive`);
 	}
 
 	if (node.isDirectory) {
+		if (jsonSelector) {
+			throw new ToolError("JSON selectors require a text archive member, not a directory.");
+		}
 		if (isMultiRange(sel)) {
 			throw new ToolError("Multi-range line selectors are not supported for archive directory listings.");
 		}
@@ -230,8 +322,83 @@ export async function readArchive(
 	}
 
 	const entry = await archive.readFile(archiveSubPath);
+	throwIfAborted(signal);
+	if (entry.path.toLowerCase().endsWith(".pdf")) {
+		if (jsonSelector) {
+			throw new ToolError("JSON selectors require a text archive member, not a PDF.");
+		}
+		const memberPath = `${resolvedArchivePath.absolutePath}:${entry.path}`;
+		const pdfDetails: ReadToolDetails = { ...details, resolvedPath: memberPath, fileSize: entry.size };
+		if (pdfImageRead) {
+			// Only the selected, extraction-bounded member is materialized, under
+			// an owned name rather than any untrusted archive path.
+			await using scratch = await TempDir.create("@omp-read-archive-pdf-");
+			const pdfPath = scratch.join("member.pdf");
+			await Bun.write(pdfPath, entry.bytes);
+			throwIfAborted(signal);
+			const result = await readPdfPage({
+				readPath,
+				absolutePdfPath: pdfPath,
+				page: pdfImageRead.page,
+				pdfFileSize: entry.size,
+				suffixResolution: resolvedArchivePath.suffixResolution,
+				signal,
+			});
+			return toolResult<ReadToolDetails>({ ...result.details, ...pdfDetails })
+				.content(result.content)
+				.sourcePath(memberPath)
+				.done();
+		}
+		const converted = await convertBufferWithMarkit(entry.bytes, ".pdf", signal);
+		if (!converted.ok) {
+			return toolResult<ReadToolDetails>(pdfDetails)
+				.text(
+					prependSuffixResolutionNotice(
+						`[Cannot read .pdf file: ${converted.error || "conversion failed"}]`,
+						resolvedArchivePath.suffixResolution,
+					),
+				)
+				.sourcePath(memberPath)
+				.done();
+		}
+		pdfDetails.contentType = cfgReadRenderMarkdown.get(session.settings) ? "text/markdown" : undefined;
+		const result = await buildInMemorySelectorResult(session, converted.content, sel, {
+			details: pdfDetails,
+			sourcePath: memberPath,
+			entityLabel: "document",
+			immutable: true,
+		});
+		const firstText = result.content.find((content): content is TextContent => content.type === "text");
+		if (firstText) {
+			firstText.text = prependSuffixResolutionNotice(firstText.text, resolvedArchivePath.suffixResolution);
+		}
+		return result;
+	}
 	const text = decodeUtf8Text(entry.bytes);
 	if (text === null) {
+		if (jsonSelector) {
+			throw new ToolError("JSON selectors require a text archive member, not a binary entry.");
+		}
+		const imageMetadata = sel.kind === "none" ? parseImageMetadata(entry.bytes) : null;
+		if (imageMetadata?.mimeType) {
+			// The image loader reads files: the selected member gets an owned name, never its archive path.
+			await using scratch = await TempDir.create("@omp-read-archive-image-");
+			const imagePath = scratch.join("member");
+			await Bun.write(imagePath, entry.bytes);
+			const result = await readImage({
+				readPath,
+				absolutePath: imagePath,
+				mimeType: imageMetadata.mimeType,
+				imageMetadata,
+				fileSize: entry.size,
+				signal,
+			});
+			const memberPath = `${resolvedArchivePath.absolutePath}:${entry.path}`;
+			return toolResult<ReadToolDetails>({ ...result.details, ...details, resolvedPath: memberPath })
+				.content(result.content)
+				.sourcePath(memberPath)
+				.done();
+		}
 		return toolResult<ReadToolDetails>(details)
 			.text(
 				prependSuffixResolutionNotice(
@@ -241,6 +408,20 @@ export async function readArchive(
 			)
 			.sourcePath(resolvedArchivePath.absolutePath)
 			.done();
+	}
+
+	if (jsonSelector) {
+		return readJson(
+			session,
+			{
+				absolutePath: `${resolvedArchivePath.absolutePath}:${entry.path}`,
+				content: text,
+				selector: jsonSelector,
+				suffixResolution: resolvedArchivePath.suffixResolution,
+			},
+			lineSelector,
+			signal,
+		);
 	}
 
 	// Archive members are immutable: there is no edit path for bytes inside

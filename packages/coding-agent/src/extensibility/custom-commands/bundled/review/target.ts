@@ -1,4 +1,6 @@
+import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import { parseReviewDiffSnapshot, type ReviewDiffSnapshot } from "./diff";
 
 export type LocalReviewKind = "base-branch" | "uncommitted" | "commit";
@@ -16,6 +18,10 @@ export interface ResolvedReviewTarget {
 	contextInstruction?: string;
 	/** Base URL for per-file slices of the original, unfiltered PR/MR diff. */
 	prDiffUrl?: string;
+	/** Leading `?at=<generation>` when `prDiffUrl` is pinned, otherwise empty. */
+	prDiffQuery?: string;
+	/** Checkout root of a local review run outside the session cwd; diff paths are relative to it. */
+	repository?: string;
 }
 
 export interface ReviewTargetUI {
@@ -38,7 +44,10 @@ export function createResolvedReviewTarget(
 	mode: string,
 	rawDiff: string,
 	emptyMessage: string,
-	options: Pick<ResolvedReviewTarget, "filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl"> = {},
+	options: Pick<
+		ResolvedReviewTarget,
+		"filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl" | "prDiffQuery"
+	> = {},
 ): ResolvedReviewTarget {
 	return {
 		kind,
@@ -58,8 +67,10 @@ export function getReviewTargetIssue(target: ResolvedReviewTarget): string | und
 	return undefined;
 }
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+/** Checkout root for a review whose cwd differs from the session cwd; `undefined` when they match. */
+export function reviewRepository(reviewCwd: string, sessionCwd: string): string | undefined {
+	if (path.resolve(reviewCwd) === path.resolve(sessionCwd)) return undefined;
+	return vcs.repo(reviewCwd)?.root() ?? reviewCwd;
 }
 
 /** Read staged + unstaged (or jj working-copy) changes; throws when no repository is available. */

@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
@@ -18,6 +18,8 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
@@ -26,6 +28,7 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 import {
 	cfgSymbolPreset,
 	cfgDisplayShowTokenUsage,
+	cfgDisplayToolActivity,
 	cfgAskTimeout,
 	cfgThemeDark,
 	cfgTerminalShowProgress,
@@ -45,7 +48,7 @@ import {
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
-	cfgToolsXdev,
+	cfgToolsCommands,
 	cfgTodoReminders,
 	cfgTodoRemindersMax,
 	cfgDevAutoqa,
@@ -57,6 +60,7 @@ import {
 	cfgGrepContextBefore,
 	cfgTodoEager,
 	cfgComputerEnabled,
+	cfgComputerTakeover,
 	cfgImagesQuestionTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import {
@@ -69,6 +73,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgMnemopiDbPath, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgSpeechVoice, cfgTtsLocalVoice } from "@oh-my-pi/pi-coding-agent/tts/settings";
 import { cfgHindsightBankId, cfgHindsightScoping } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgExaEnabled } from "@oh-my-pi/pi-coding-agent/web/settings";
@@ -144,7 +149,6 @@ describe("Settings", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		clearCustomApis();
-		__providerInFlightForTesting.setRoot(undefined);
 		AgentStorage.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
@@ -1820,11 +1824,9 @@ describe("Settings", () => {
 		const MODEL_PRIO = roleDefaultModels();
 		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
-			"google-gemini-cli/gemini-2.5-flash",
-			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
-			"openai-codex/gpt-5.6-luna",
+			"openai-codex/gpt-6-luna",
 			"xai/grok-4.5",
 			"web/exa",
 			"web/tavily",
@@ -1837,7 +1839,6 @@ describe("Settings", () => {
 		const imageOrderedHead = [
 			"openai/gpt-image-2",
 			"openai-codex/gpt-image-2",
-			"google-antigravity/gemini-3-pro-image",
 			"xai/grok-imagine-image",
 			"openrouter/google/gemini-3-pro-image",
 			"google/gemini-3-pro-image",
@@ -1870,19 +1871,12 @@ describe("Settings", () => {
 			[
 				"image order",
 				"providers.imageOrder",
-				["openai", "openai-codex", "antigravity", "xai", "openrouter", "gemini", "deepinfra"],
+				["openai", "openai-codex", "xai", "openrouter", "gemini", "deepinfra"],
 				{ image: imageOrderedCandidates[0] },
 				{ image: imageOrderedCandidates.slice(1) },
 			],
-			["local speech provider", "providers.tts", "local", { speech: "local/kokoro" }, { speech: [] }],
+			["local speech provider", "providers.tts", "local", { speech: "local/phonon-31m" }, { speech: [] }],
 			["xAI speech provider", "providers.tts", "xai", { speech: "xai/grok-tts" }, { speech: [] }],
-			[
-				"DeepInfra speech provider",
-				"providers.tts",
-				"deepinfra",
-				{ speech: "deepinfra/hexgrad/Kokoro-82M" },
-				{ speech: [] },
-			],
 			[
 				"judgment provider",
 				"providers.judgmentProvider",
@@ -1906,7 +1900,7 @@ describe("Settings", () => {
 			],
 			["tiny model", "providers.tinyModel", "lfm2.5-230m", { tiny: "local/lfm2.5-230m" }, {}],
 			["memory model", "providers.memoryModel", "lfm2-1.2b", { memory: "local/lfm2-1.2b" }, {}],
-			["local speech model", "tts.localModel", "kokoro", {}, {}],
+			["local speech model", "tts.localModel", "phonon-31m", {}, {}],
 			["fast dictation model", "stt.modelName", "fast", { dictation: "local/whisper-base" }, {}],
 			["balanced dictation model", "stt.modelName", "balanced", { dictation: "local/whisper-small" }, {}],
 			["turbo dictation model", "stt.modelName", "turbo", { dictation: "local/whisper-large-v3-turbo" }, {}],
@@ -1950,6 +1944,46 @@ describe("Settings", () => {
 			},
 		);
 
+		it("repairs the old generated web fallback pair without changing unrelated chains", async () => {
+			await writeSettings({
+				modelRoles: { web: "web/parallel" },
+				retry: {
+					fallbackChains: {
+						web: [
+							"web/searxng",
+							"openai-codex/gpt-6-luna",
+							"openai-codex/gpt-5.6",
+							"openai-codex/gpt-5.5",
+							"xai/grok-4.5",
+						],
+						slow: ["openai-codex/gpt-5.5"],
+					},
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({
+				web: ["web/searxng", "openai-codex/gpt-6-luna", "openai-codex/gpt-5.6-sol", "xai/grok-4.5"],
+				slow: ["openai-codex/gpt-5.5"],
+			});
+			const codex = getBundledModels("openai-codex").filter(model => model.webSearch);
+			expect(resolveRoleChain("web", settings, codex).map(candidate => candidate.model.id)).toEqual([
+				"gpt-6-luna",
+				"gpt-5.6-sol",
+			]);
+		});
+
+		it("preserves independently configured Codex web selectors", async () => {
+			await writeSettings({
+				retry: { fallbackChains: { web: ["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"] } },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings).web).toEqual(["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"]);
+		});
+
 		it("keeps a legacy Gemini wire tier ahead of non-Gemini fallbacks", async () => {
 			await writeSettings({
 				providers: {
@@ -1960,11 +1994,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 2)]).toEqual([
-				"google-gemini-cli/gemini-3.8-flash-high",
-				"google-antigravity/gemini-3.8-flash-high",
-				"google/gemini-3.8-flash-high",
-			]);
+			expect(settings.getModelRole("web")).toBe("google/gemini-3.8-flash-high");
 		});
 
 		it("drops legacy defaults without materializing kind roles", async () => {
@@ -2183,6 +2213,28 @@ describe("Settings", () => {
 			expect((await readSettings()).computer).toEqual({ enabled: true });
 		});
 
+		it("carries a refusing computer.backgroundFallback over to computer.takeover", async () => {
+			await writeSettings({ computer: { backgroundFallback: "refuse", enabled: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgComputerTakeover.get(settings)).toBe("refuse");
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			expect((await readSettings()).computer).toEqual({ enabled: true, takeover: "refuse" });
+		});
+
+		it("keeps a computer.backgroundFallback of takeover on the same behaviour, the default fallback", async () => {
+			await writeSettings({ computer: { backgroundFallback: "takeover", enabled: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgComputerTakeover.get(settings)).toBe("fallback");
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			expect((await readSettings()).computer).toEqual({ enabled: true });
+		});
+
 		it("normalizes retired local tiny title models before role migration", async () => {
 			await writeSettings({ providers: { tinyModel: "lfm2-350m" } });
 
@@ -2271,6 +2323,26 @@ describe("Settings", () => {
 			expect(cfgMnemopiScoping.get(settings)).toBe("global");
 		});
 
+		it("migrates retired local speech models: Kokoro to Phonon, Parakeet v3 to Fluid Speech Pro", async () => {
+			await writeSettings({
+				tts: { localVoice: "bm_george" },
+				speech: { voice: "af_bella" },
+				modelRoles: { speech: "local/kokoro", dictation: "local/parakeet-tdt-0.6b-v3" },
+				retry: { fallbackChains: { dictation: ["local/parakeet-tdt-0.6b-v3", "openai/gpt-transcribe"] } },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgTtsLocalVoice.get(settings)).toBe("edwin");
+			expect(cfgSpeechVoice.get(settings)).toBe("harper");
+			expect(settings.getModelRole("speech")).toBe("local/phonon-31m");
+			expect(settings.getModelRole("dictation")).toBe("local/fluid-speech-pro");
+			expect(cfgRetryFallbackChains.get(settings).dictation).toEqual([
+				"local/fluid-speech-pro",
+				"openai/gpt-transcribe",
+			]);
+		});
+
 		it("does not clobber an explicit mnemopi block when the legacy mnemosyne block is also present", async () => {
 			await writeSettings({
 				mnemosyne: { dbPath: "/tmp/old.db" },
@@ -2343,6 +2415,31 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("smart");
+		});
+
+		it.each([
+			[true, "hidden"],
+			[false, "detailed"],
+		] as const)("migrates legacy display.hideToolActivity=%p to display.toolActivity %p", async (hide, mode) => {
+			await writeSettings({ display: { hideToolActivity: hide } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe(mode);
+			// The legacy key leaves config.yml on the next save.
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			const display = (await readSettings()).display as Record<string, unknown>;
+			expect("hideToolActivity" in display).toBe(false);
+			expect(display.toolActivity).toBe(mode);
+		});
+
+		it("keeps an explicit display.toolActivity over a quoted-dotted legacy hideToolActivity", async () => {
+			await Bun.write(getConfigPath(), '"display.hideToolActivity": true\ndisplay:\n  toolActivity: concise\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe("concise");
 		});
 
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {
@@ -2517,7 +2614,7 @@ describe("Settings", () => {
 			expect(cfgTodoReminders.get(reloaded)).toBe(true);
 		});
 
-		it("drops dead BM25-discovery keys and leaves tools.xdev at its default", async () => {
+		it("drops dead BM25-discovery keys and leaves tools.commands at its default", async () => {
 			await writeSettings({
 				tools: { discoveryMode: "off", essentialOverride: ["read"] },
 				mcp: { discoveryMode: "auto", discoveryDefaultServers: ["gh"] },
@@ -2525,10 +2622,10 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			// No migration mapping: legacy discovery intent is discarded, xdev
-			// keeps its own default. An explicit xdev value is untouched.
-			expect(cfgToolsXdev.get(settings)).toBe(true);
-			expect(cfgToolsXdev.isConfigured(settings)).toBe(false);
+			// No migration mapping: legacy discovery intent is discarded, toolCommands
+			// keeps its own default. An explicit toolCommands value is untouched.
+			expect(cfgToolsCommands.get(settings)).toBe(true);
+			expect(cfgToolsCommands.isConfigured(settings)).toBe(false);
 		});
 
 		it("migrates from settings.json containing comments", async () => {
@@ -2712,7 +2809,6 @@ describe("Settings", () => {
 			it("applies the effective merged value as the process-wide limit", async () => {
 				const settings = Settings.isolated({ "providers.maxInFlightRequests": { openai: 1 } });
 				bindEffects(settings);
-				__providerInFlightForTesting.setRoot(tempDir.join("provider-inflight"));
 				registerMockApi();
 				const firstStarted = Promise.withResolvers<void>();
 				const releaseFirst = Promise.withResolvers<void>();
@@ -2784,13 +2880,13 @@ describe("Settings", () => {
 	});
 
 	describe("extensionsSourceLevel", () => {
-		it("reports project when a foreign project provider (.claude/settings.json) supplies extensions", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			fs.mkdirSync(path.dirname(claudeSettings), { recursive: true });
-			fs.writeFileSync(claudeSettings, JSON.stringify({ extensions: ["../claude-ext"] }));
+		it("reports project when the project settings.json supplies extensions", async () => {
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+			fs.writeFileSync(projectSettings, JSON.stringify({ extensions: ["../project-ext"] }));
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(cfgExtensions.get(settings)).toContain("../claude-ext");
+			expect(cfgExtensions.get(settings)).toContain("../project-ext");
 			expect(settings.extensionsSourceLevel()).toBe("project");
 		});
 
@@ -2804,31 +2900,31 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("project .claude/settings.json parse warnings", () => {
+	describe("project settings.json parse warnings", () => {
 		it("logs capability warnings when project settings.json fails to parse", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
 			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringMatching(/Settings: \[Claude Code\] Failed to parse JSON in .*settings\.json/),
+				expect.stringMatching(/Settings: \[OMP\] Failed to parse .*settings\.json/),
 			);
 
 			warnSpy.mockRestore();
 		});
 
 		it("drops user-level warnings that #readProjectSettings does not merge", async () => {
-			const projectSettingsJson = path.join(projectDir, ".claude", "settings.json");
+			const projectSettingsJson = path.join(getProjectAgentDir(projectDir), "settings.json");
 			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
 				items: [],
 				all: [],
 				warnings: [
-					`[Claude Code] Failed to parse JSON in ${path.join(tempDir.path(), "home", ".claude", "settings.json")}`,
-					"[Claude Code] Failed to load: boom",
-					`[Claude Code] Failed to parse JSON in ${projectSettingsJson}`,
+					`[OMP] Failed to parse ${path.join(tempDir.path(), "home", ".omp", "agent", "settings.json")}`,
+					"[OMP] Failed to load: boom",
+					`[OMP] Failed to parse ${projectSettingsJson}`,
 				],
 				providers: [],
 			});
@@ -2842,11 +2938,11 @@ describe("Settings", () => {
 
 		it("logs project warnings when the cwd is a filesystem root", async () => {
 			const root = path.parse(projectDir).root;
-			const rootSettingsJson = path.join(root, ".claude", "settings.json");
+			const rootSettingsJson = path.join(getProjectAgentDir(root), "settings.json");
 			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
 				items: [],
 				all: [],
-				warnings: [`[Claude Code] Failed to parse JSON in ${rootSettingsJson}`],
+				warnings: [`[OMP] Failed to parse ${rootSettingsJson}`],
 				providers: [],
 			});
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -2856,30 +2952,30 @@ describe("Settings", () => {
 		});
 
 		it("logs a persistently malformed project file once across reloads", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 
 			await settings.reloadFromDisk();
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 		});
 
 		it("surfaces a project file that becomes malformed after startup", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(0);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(0);
 
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 			await settings.reloadFromDisk();
 
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(claudeSettings));
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettings));
 		});
 	});
 });

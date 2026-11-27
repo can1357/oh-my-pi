@@ -8,8 +8,8 @@ import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import type { EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
-import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/eval";
+import type { MCPProgress } from "@oh-my-pi/pi-coding-agent/tools/mcp-progress";
 import { setAgentDir, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
@@ -130,6 +130,9 @@ describe("MCP progress through the shared Eval tool bridge", () => {
 		const final = await pending;
 		expect(final.details?.cells?.[0]?.status).toBe("complete");
 		expect(final.details?.cells?.[0]?.output).toContain("complete");
+		// Status events are stored once, on the cell that produced them.
+		expect(progressEvents(final.details).length).toBeGreaterThan(0);
+		expect(final.details?.statusEvents).toBeUndefined();
 	});
 
 	it("keeps streaming MCP status into running job frames after auto-backgrounding", async () => {

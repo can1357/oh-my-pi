@@ -14,10 +14,11 @@ import {
 	type UsageProvider,
 	type UsageReport,
 	type UsageWindow,
+	usageSubscriptionPlan,
 } from "../usage";
 import { isRecord } from "../utils";
 import { waitForRetry } from "../utils/retry-wait";
-import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
+import { buildClaudeOAuthHeaders, claudeApiUrl, claudeOAuthBaseUrls } from "./claude-api";
 import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
 import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
@@ -25,11 +26,61 @@ const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
 /** `/usage` stays rate-limited for minutes after a 429, so a failed refresh waits instead of re-polling. */
 const FAILURE_BACKOFF_MS = 60_000;
-/** Shared windows that gate every Claude request, whatever the model. */
-const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
+/**
+ * Shared windows that gate every Claude request, whatever the model, with the
+ * legacy bucket field and the `limits[]` kind that report each one.
+ */
+const CLAUDE_SHARED_GATES = {
+	"5h": { field: "five_hour", kind: "session" },
+	"7d": { field: "seven_day", kind: "weekly_all" },
+} as const;
+const CLAUDE_SHARED_GATE_WINDOW_IDS = Object.keys(CLAUDE_SHARED_GATES) as (keyof typeof CLAUDE_SHARED_GATES)[];
+/** Report metadata key listing shared gates the live payload declared inactive. */
+const INACTIVE_SHARED_GATES_KEY = "inactiveSharedGates";
+/** Report metadata key holding Claude's own answer to "may this account use fast mode". */
+const FAST_MODE_KEY = "fastMode";
+/** Usage-credit ("extra usage") spend row; fast mode bills against nothing else. */
+const EXTRA_USAGE_LIMIT_ID = "anthropic:extra";
+
+/**
+ * Shared gates the payload positively declares inactive: the bucket field is
+ * present and `null`, and the authoritative `limits[]` list carries no row of
+ * that kind. Anthropic answers `five_hour: null` with no `session` row while an
+ * account has no running 5-hour window, so that gate cannot be what blocks it.
+ * A missing field or a payload without `limits[]` proves nothing.
+ */
+function declaredInactiveSharedGates(payload: Record<string, unknown>): string[] {
+	const listed = payload.limits;
+	if (!Array.isArray(listed)) return [];
+	return CLAUDE_SHARED_GATE_WINDOW_IDS.filter(windowId => {
+		const { field, kind } = CLAUDE_SHARED_GATES[windowId];
+		return (
+			Object.hasOwn(payload, field) &&
+			payload[field] === null &&
+			!listed.some(entry => isRecord(entry) && entry.kind === kind)
+		);
+	});
+}
+
+/**
+ * Whether a report accounts for every shared gate: each one either reported a
+ * window or was declared inactive by the live payload. Healing and reset
+ * clearing judge account-wide blocks only from such complete reports.
+ */
+export function claudeReportCoversSharedGates(report: UsageReport): boolean {
+	const inactive = report.metadata?.[INACTIVE_SHARED_GATES_KEY];
+	return CLAUDE_SHARED_GATE_WINDOW_IDS.every(
+		windowId =>
+			report.limits.some(
+				limit =>
+					limit.scope.shared === true && (limit.scope.windowId === windowId || limit.window?.id === windowId),
+			) ||
+			(Array.isArray(inactive) && inactive.includes(windowId)),
+	);
+}
 
 const CLAUDE_USAGE_BETAS =
-	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
+	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
 
 interface ClaudeUsageBucket {
 	utilization?: number;
@@ -366,6 +417,37 @@ interface ClaudeProfile {
 		uuid?: string;
 		email?: string;
 	};
+	organization?: {
+		organization_type?: string;
+		rate_limit_tier?: string;
+	};
+}
+
+const CLAUDE_ORGANIZATION_PLANS: Readonly<Record<string, string>> = {
+	claude_max: "Max",
+	claude_pro: "Pro",
+	claude_team: "Team",
+	claude_enterprise: "Enterprise",
+};
+
+/**
+ * Subscription plan label for a `/profile` response: the organization type
+ * ("Max", "Pro", "Team", "Enterprise") followed by the rate-limit tier's
+ * multiplier when it has one ("Max 5x", "Max 20x", and "Team 5x" for a Team
+ * premium seat, which shares the Max tier). A multiplier with an unrecognised
+ * organization type reads as Max. Undefined when the profile names no
+ * recognised plan.
+ */
+export function claudeProfilePlan(profile: unknown): string | undefined {
+	if (!isRecord(profile) || !isRecord(profile.organization)) return undefined;
+	const { rate_limit_tier: tier, organization_type: type } = profile.organization;
+	const multiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1]?.toLowerCase() : undefined;
+	const key = typeof type === "string" ? type.toLowerCase() : undefined;
+	const plan =
+		(key && Object.hasOwn(CLAUDE_ORGANIZATION_PLANS, key) ? CLAUDE_ORGANIZATION_PLANS[key] : undefined) ??
+		(multiplier ? "Max" : undefined);
+	if (!plan) return undefined;
+	return multiplier ? `${plan} ${multiplier}` : plan;
 }
 
 function extractProfileIdentity(profile: ClaudeProfile | null): { accountId?: string; email?: string } {
@@ -379,6 +461,49 @@ function extractProfileIdentity(profile: ClaudeProfile | null): { accountId?: st
 			(typeof profile.email === "string" && profile.email.trim() ? profile.email.trim() : undefined) ??
 			(typeof account?.email === "string" && account.email.trim() ? account.email.trim() : undefined),
 	};
+}
+
+/**
+ * Ask Claude whether this account may use fast mode (`speed: "fast"`). The
+ * account API owns the answer, since it folds in everything a request would be
+ * refused for: a plan without usage credits turned on, or a Team/Enterprise
+ * organization whose owner has not enabled fast mode. Claude Code makes the
+ * same check before offering `/fast`. `undefined` when the check does not
+ * answer, so the previous answer stands.
+ */
+async function fetchFastModeEnabled(
+	baseUrl: string,
+	accessToken: string,
+	ctx: UsageFetchContext,
+	signal?: AbortSignal,
+): Promise<boolean | undefined> {
+	if (signal?.aborted) return undefined;
+	try {
+		const response = await ctx.fetch(claudeApiUrl(baseUrl, "/api/claude_code_penguin_mode"), {
+			headers: buildClaudeOAuthHeaders(accessToken),
+			signal,
+		});
+		if (!response.ok) return undefined;
+		const payload = (await response.json()) as unknown;
+		return isRecord(payload) && typeof payload.enabled === "boolean" ? payload.enabled : undefined;
+	} catch (error) {
+		if (!isAbortError(error, signal)) {
+			ctx.logger?.debug("Claude fast mode availability check failed", { error: String(error) });
+		}
+		return undefined;
+	}
+}
+
+/**
+ * Whether the account behind a report may use fast mode: Claude's own
+ * availability answer, withdrawn while the usage-credit cap is spent because
+ * fast mode never draws on the plan's included usage. `undefined` until the
+ * availability check has answered.
+ */
+function claudeFastModeGate(report: UsageReport | null): boolean | undefined {
+	const enabled = report?.metadata?.[FAST_MODE_KEY];
+	if (typeof enabled !== "boolean") return undefined;
+	return enabled && !report?.limits.some(limit => limit.id === EXTRA_USAGE_LIMIT_ID && limit.status === "exhausted");
 }
 
 async function fetchProfile(
@@ -500,7 +625,7 @@ function buildClaudeExtraUsageLimit(payload: ClaudeUsageResponse): UsageLimit | 
 				? "exhausted"
 				: usageStatus(amount.usedFraction);
 	return {
-		id: "anthropic:extra",
+		id: EXTRA_USAGE_LIMIT_ID,
 		label: "Claude Extra Usage",
 		scope: {
 			provider: "anthropic",
@@ -547,10 +672,12 @@ function buildUsageLimit(args: {
 }
 
 /**
- * Scoped weekly rows are per-model-family counters, not account-wide windows.
- * They deliberately leave `scope.shared` unset so credential-wide exhaustion
- * gating only considers the shared umbrella windows; an exhausted Fable weekly
- * cap must not block Opus or Sonnet requests on the same credential.
+ * Scoped weekly rows are not account-wide windows. They deliberately leave
+ * `scope.shared` unset so credential-wide exhaustion gating only considers the
+ * shared umbrella windows; a scoped cap must not block Opus or Sonnet requests
+ * on the same credential. Fable and Mythos are the exception: one such row
+ * meters both families (see `isScopedWeeklyRow`), so their requests judge
+ * themselves by it.
  */
 function buildScopedWeeklyUsageLimits(entries: readonly ParsedApiLimitEntry[]): UsageLimit[] {
 	const seenSlugs = new Set<string>();
@@ -685,8 +812,17 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	};
 	let accountId = result.metadata?.accountId ?? credential.accountId;
 	let email = result.metadata?.email ?? credential.email;
-	if ((!accountId || !email) && !params.signal?.aborted) {
-		const profileIdentity = extractProfileIdentity(await fetchProfile(baseUrl, headers, ctx, params.signal));
+	// Fetched every time: the plan can change under a long-lived credential
+	// (upgrade, downgrade), and `/usage` never reports it. A failed probe keeps
+	// the plan the previous report carried.
+	const [profile, fastModeEnabled] = await Promise.all([
+		fetchProfile(baseUrl, headers, ctx, params.signal),
+		fetchFastModeEnabled(baseUrl, accessToken, ctx, params.signal),
+	]);
+	const plan = claudeProfilePlan(profile) ?? usageSubscriptionPlan(ctx.previousReport);
+	const fastMode = fastModeEnabled ?? ctx.previousReport?.metadata?.[FAST_MODE_KEY];
+	if (!accountId || !email) {
+		const profileIdentity = extractProfileIdentity(profile);
 		accountId ??= profileIdentity.accountId;
 		email ??= profileIdentity.email;
 	}
@@ -705,6 +841,8 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		...(accountId ? { accountId } : {}),
 		...(email ? { email } : {}),
 		...(credential.orgId ? { orgId: credential.orgId } : {}),
+		...(plan ? { subscriptionPlan: plan } : {}),
+		...(typeof fastMode === "boolean" ? { [FAST_MODE_KEY]: fastMode } : {}),
 	};
 	return result;
 }
@@ -775,6 +913,7 @@ export function parseClaudeUsagePayload(
 	const payloadIdentity = extractUsageIdentity(payload);
 	const accountId = payloadIdentity.accountId ?? identity.accountId;
 	const email = payloadIdentity.email ?? identity.email;
+	const inactiveSharedGates = declaredInactiveSharedGates(raw);
 	return {
 		provider: "anthropic",
 		fetchedAt,
@@ -784,6 +923,7 @@ export function parseClaudeUsagePayload(
 			...(accountId ? { accountId } : {}),
 			...(email ? { email } : {}),
 			...(identity.orgId ? { orgId: identity.orgId } : {}),
+			...(inactiveSharedGates.length > 0 ? { [INACTIVE_SHARED_GATES_KEY]: inactiveSharedGates } : {}),
 		},
 		raw: payload,
 	};
@@ -810,18 +950,61 @@ function getClaudeModelKind(context: CredentialRankingContext | undefined): Clau
 }
 
 /**
- * Claude model-scoped rows are only relevant to the matching model family.
- * Credential-wide exhaustion checks stay on shared umbrella windows unless the
- * request model parses to a concrete Anthropic kind, preventing a Fable cap from
- * suppressing unrelated Opus/Sonnet traffic. Feeds ranking pressure and the
- * opt-in reserve-health scope (`scopeLimitsForReserve`); credential-wide hard
- * blocks use {@link scopeClaudeLimitsForModelHardBlock} instead.
+ * Whether a row is the model-scoped weekly counter that meters Fable and
+ * Mythos. Anthropic reports it as one `weekly_scoped` row
+ * (`anthropic:7d:<slug>`), labelled with whichever of those families the plan
+ * meters: live payloads say `Fable`, months of samples carry no
+ * `anthropic:7d:mythos` row, and every recorded Mythos 429 returns that row's
+ * reset as its `retry-after` (to the second, on both accounts of a
+ * two-account pool). Opus and Sonnet rows are separate counters and stay out.
+ */
+function isScopedWeeklyRow(limit: UsageLimit): boolean {
+	if (limit.scope.shared === true || !isScopedWeeklyKind(limit.scope.tier)) return false;
+	const windowId = limit.scope.windowId ?? limit.window?.id;
+	return windowId === undefined || windowId === "7d";
+}
+
+/** Claude families metered by the shared model-scoped weekly counter. */
+const SCOPED_WEEKLY_TIER_KINDS = ["fable", "mythos"] as const;
+
+/** Whether a model kind is metered by the shared model-scoped weekly counter. */
+function isScopedWeeklyKind(kind: string | undefined): kind is (typeof SCOPED_WEEKLY_TIER_KINDS)[number] {
+	return kind !== undefined && (SCOPED_WEEKLY_TIER_KINDS as readonly string[]).includes(kind);
+}
+
+/**
+ * The model-scoped weekly rows that gate a request for this model kind. A row
+ * labelled with the request's own family gates it; when the payload carries no
+ * such row, every scoped weekly row does, because the label belongs to the
+ * plan's metering rather than to the model that will be requested.
+ */
+function scopedWeeklyGates(report: UsageReport, kind: ClaudeModelKind | undefined): UsageLimit[] {
+	const scoped = report.limits.filter(isScopedWeeklyRow);
+	if (scoped.length === 0 || !isScopedWeeklyKind(kind)) return [];
+	const labelled = scoped.filter(limit => limit.scope.tier === kind);
+	return labelled.length > 0 ? labelled : scoped;
+}
+
+/**
+ * Claude model-scoped rows gate the families their counter meters. Fable and
+ * Mythos requests read the shared scoped weekly counter (see
+ * {@link scopedWeeklyGates}), which is why a Fable-labelled row caps Mythos
+ * turns too. Opus and Sonnet keep exact match, so their own caps stay
+ * independent. Credential-wide exhaustion checks stay on shared umbrella
+ * windows unless the request model parses to a concrete Anthropic kind,
+ * preventing a scoped cap from suppressing unrelated traffic. Feeds ranking
+ * pressure and the opt-in reserve-health scope (`scopeLimitsForReserve`);
+ * credential-wide hard blocks use {@link scopeClaudeLimitsForModelHardBlock}.
  */
 function scopeClaudeLimitsForModel(report: UsageReport, context: CredentialRankingContext | undefined): UsageLimit[] {
 	const kind = getClaudeModelKind(context);
-	return report.limits.filter(
-		limit => limit.scope.shared === true || (kind !== undefined && limit.scope.tier === kind),
-	);
+	if (!isScopedWeeklyKind(kind)) {
+		return report.limits.filter(
+			limit => limit.scope.shared === true || (kind !== undefined && limit.scope.tier === kind),
+		);
+	}
+	const gates = new Set(scopedWeeklyGates(report, kind));
+	return report.limits.filter(limit => limit.scope.shared === true || gates.has(limit));
 }
 
 /**
@@ -840,25 +1023,28 @@ function isConfirmedExhaustedTierRow(limit: UsageLimit, nowMs: number): boolean 
 }
 
 /**
- * Scope limits for proactive hard-blocking (gating). Fable and Mythos tier
+ * Scope limits for proactive hard-blocking (gating). Fable and Mythos scoped
  * weekly caps participate only when {@link isConfirmedExhaustedTierRow}
  * confirms them, so a confirmed-dead account is skipped up front and a
  * reactive 429 block extends to the tier reset in markUsageLimitReached,
  * while unconfirmed rows remain ranking pressure and opt-in reserve health via
- * scopeClaudeLimitsForModel.
+ * scopeClaudeLimitsForModel. Both families are metered by the shared scoped
+ * counter, so an account at 100% of it is skipped for a Mythos turn instead of
+ * eating a 429 first.
  */
 function scopeClaudeLimitsForModelHardBlock(
 	report: UsageReport,
 	context: CredentialRankingContext | undefined,
 ): UsageLimit[] {
 	const kind = getClaudeModelKind(context);
-	const requireConfirmedTierRow = kind === "fable" || kind === "mythos";
+	if (!isScopedWeeklyKind(kind)) {
+		return report.limits.filter(
+			limit => limit.scope.shared === true || (kind !== undefined && limit.scope.tier === kind),
+		);
+	}
 	const nowMs = Date.now();
-	return report.limits.filter(limit => {
-		if (limit.scope.shared === true) return true;
-		if (kind === undefined || limit.scope.tier !== kind) return false;
-		return !requireConfirmedTierRow || isConfirmedExhaustedTierRow(limit, nowMs);
-	});
+	const gates = new Set(scopedWeeklyGates(report, kind).filter(limit => isConfirmedExhaustedTierRow(limit, nowMs)));
+	return report.limits.filter(limit => limit.scope.shared === true || gates.has(limit));
 }
 
 function rankingUsedFraction(limit: UsageLimit): number {
@@ -916,6 +1102,10 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 * own cache lifetimes are verified.
 	 */
 	stickyWarmMs: 60 * 60_000,
+	// Anthropic realizes `priority` as fast mode, which is an account entitlement.
+	tierGate(context) {
+		return context.serviceTier === "priority" ? claudeFastModeGate : undefined;
+	},
 	findWindowLimits(report, context) {
 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
 		const secondary = findClaudeSecondaryLimit(report, context);
@@ -928,13 +1118,13 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	// a healthy candidate rather than serve until 100%.
 	scopeLimitsForReserve: scopeClaudeLimitsForModel,
 	/**
-	 * Fable/Mythos usage-limit errors map to tier-local weekly counters. Scope
-	 * reactive backoff blocks for those tiers, mirroring the per-counter
-	 * precedent in packages/ai/src/usage/google-antigravity.ts:466-497.
+	 * Fable/Mythos usage-limit errors map to a per-family tier scope.
+	 * The two scopes address one metered counter, which is why healing judges
+	 * both by the same scoped weekly row.
 	 */
 	blockScope(context) {
 		const kind = getClaudeModelKind(context);
-		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
+		return isScopedWeeklyKind(kind) ? `tier:${kind}` : undefined;
 	},
 	/**
 	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
@@ -944,35 +1134,58 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 * weekly row plus the shared umbrella windows — so a healthy report lifts
 	 * the block while a spent shared 5-hour wall keeps it.
 	 *
-	 * Legacy and shared quota errors also leave account-wide blocks. Only a
-	 * complete report with every reported quota healthy can heal that scope.
+	 * Both blocking families are metered by that same scoped counter, which the
+	 * payload labels with whichever family the plan meters: a Mythos block is
+	 * judged by a row headed Fable, and a block whose counter the report omits
+	 * stays put rather than being lifted on partial evidence.
+	 *
+	 * Legacy and shared quota errors also leave account-wide blocks. A
+	 * complete report with every reported quota healthy can heal that scope; a
+	 * report with a single shared window can heal it, and a tier block a spent
+	 * shared wall caused, only when that window's reset matches the stored
+	 * block deadline.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
+		// Model-family rows still gate the account-wide scope alongside shared windows.
+		const globalScope = {
+			blockScope: "",
+			limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
+			healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
+		};
+		// A tier block is judged by the scoped weekly rows that gate its family
+		// (see `scopedWeeklyGates`), plus the shared walls. A payload with no
+		// scoped row leaves nothing this report can judge, so no tier scope is
+		// offered and the block stands until its own clock expires.
+		const scopedWeeklyLimits = report.limits.filter(isScopedWeeklyRow);
+		const tierScopes: { blockScope: string; limits: UsageLimit[] }[] = [];
+		for (const tier of SCOPED_WEEKLY_TIER_KINDS) {
+			const labelled = scopedWeeklyLimits.filter(limit => limit.scope.tier === tier);
+			const gates = labelled.length > 0 ? labelled : scopedWeeklyLimits;
+			if (gates.length === 0) continue;
+			tierScopes.push({ blockScope: `tier:${tier}`, limits: [...sharedLimits, ...gates] });
+		}
 		// The endpoint returns a report as soon as one window parses, and a tier
 		// 429 can be caused by a shared wall. A payload missing a shared gate
-		// leaves the block's cause unknown, so vouch for nothing rather than
-		// clear a block that still holds.
-		const everySharedGateReported = CLAUDE_SHARED_GATE_WINDOW_IDS.every(windowId =>
-			sharedLimits.some(limit => limit.scope.windowId === windowId || limit.window?.id === windowId),
-		);
-		if (!everySharedGateReported) return [];
-		const tiers = new Set<string>();
-		for (const limit of report.limits) {
-			const tier = limit.scope.tier;
-			if (tier === "fable" || tier === "mythos") tiers.add(tier);
+		// leaves the block's cause unknown. One exception: a report exposing a
+		// single shared window may heal a block only when that window's reset is
+		// the exact deadline that created the block; without that match, the
+		// missing window could still be the cap behind the 429. A tier 429 behind
+		// that shared wall stores the same deadline, so its tier scope heals by
+		// the same match once its own weekly row has room. If both windows were
+		// spent, the stored deadline is the later reset, so an early recovery of
+		// that window can still lift a block the other window holds; the next
+		// 429 restores it.
+		if (!claudeReportCoversSharedGates(report)) {
+			if (sharedLimits.length !== 1) return [];
+			// Only shared windows are matched against the block deadline.
+			return [globalScope, ...tierScopes].map(scope => ({
+				...scope,
+				healthy: globalScope.healthy,
+				resetMatchRequired: true,
+			}));
 		}
-		return [
-			{
-				blockScope: "",
-				limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
-				healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
-			},
-			...[...tiers].map(tier => ({
-				blockScope: `tier:${tier}`,
-				limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
-			})),
-		];
+		return [globalScope, ...tierScopes];
 	},
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

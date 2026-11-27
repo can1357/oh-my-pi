@@ -16,21 +16,24 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, AgentBusyError, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-coding-agent/utils/image-source";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const COLLAB_PROMPT_TYPE = "collab-prompt";
 const IMAGE_SOURCE_PATH = "/tmp/private-project/screenshot.png";
@@ -168,25 +171,98 @@ describe("AgentSession queued steer delivery", () => {
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
 
-	it("rejects a synthetic continue while streaming without queuing a user message", async () => {
-		const { session } = await createSession([{ content: ["host answer"] }]);
-		let checked = false;
-		session.agent.setOnBeforeYield(async () => {
-			if (checked) return;
-			checked = true;
-			expect(session.isStreaming).toBe(true);
-			await expect(session.prompt(manualContinuePrompt, { synthetic: true, userInitiated: true })).rejects.toThrow(
-				AgentBusyError,
-			);
-			expect(session.agent.popLastSteer()).toBeUndefined();
-			expect(session.agent.popLastFollowUp()).toBeUndefined();
-		});
+	it("delivers an extension follow-up as the first idle turn after a custom message", async () => {
+		const { session, mock } = await createSession([{ content: ["ready"] }, { content: ["awake"] }]);
+		await session.prompt("Warm up");
+		await session.sendCustomMessage({ customType: "digest", content: "DIGEST", display: true });
 
-		await session.prompt("hello");
-		expect(checked).toBe(true);
-		expect(
-			session.state.messages.some(message => message.role === "user" && message.content === manualContinuePrompt),
-		).toBe(false);
+		await session.sendUserMessage("WAKE", { deliverAs: "followUp" });
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[1].context.messages.slice(-2)).toMatchObject([
+			{ role: "developer", content: [{ type: "text", text: "DIGEST" }] },
+			{ role: "user", content: [{ type: "text", text: "WAKE" }] },
+		]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+	});
+
+	it("delivers an idle follow-up when compaction left only its summary in context", async () => {
+		const { session, sessionManager, mock } = await createSession([{ content: ["awake"] }]);
+		sessionManager.appendCompaction("The build is ready.", undefined, "", 1_000);
+		session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+
+		await session.sendUserMessage("Run the tests.", { deliverAs: "followUp" });
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0].context.messages.slice(-2)).toMatchObject([
+			{ role: "user", content: [{ type: "text", text: expect.stringContaining("The build is ready.") }] },
+			{ role: "user", content: [{ type: "text", text: "Run the tests." }] },
+		]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+	});
+
+	// `.`/`c` on a running turn interrupts it and continues. A host driving the
+	// session to a result (the subagent executor) awaits the interrupted prompt,
+	// then waitForIdle(): reporting idle between the interrupt and the
+	// continuation would end its run on the interrupted turn.
+	it("resume interrupts a streaming request and reruns the unanswered prompt without an idle gap", async () => {
+		const turnStarted = Promise.withResolvers<void>();
+		const { session, mock } = await createSession([
+			() => {
+				turnStarted.resolve();
+				return { content: ["slow response"], delayMs: 60_000 };
+			},
+			{ content: ["resumed"] },
+		]);
+
+		const run = session.prompt("hello");
+		await turnStarted.promise;
+		const resumed = session.resume();
+		await run;
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
+		expect(JSON.stringify(mock.calls[1].context.messages)).not.toContain("<system-notice>");
+		expect(session.getLastAssistantMessage()?.content).toEqual([{ type: "text", text: "resumed" }]);
+		await resumed;
+	});
+
+	it("resume interrupts a running tool and continues with the hidden directive without an idle gap", async () => {
+		const toolStarted = Promise.withResolvers<void>();
+		const { session, mock } = await createSession([
+			{ content: ["checking", { type: "toolCall", id: "pause", name: "pause", arguments: {} }] },
+			{ content: ["resumed"] },
+		]);
+		const schema = type({});
+		const tool: AgentTool<typeof schema> = {
+			name: "pause",
+			label: "Pause",
+			description: "Wait for interruption",
+			parameters: schema,
+			async execute(_id, _params, signal) {
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				toolStarted.resolve();
+				await aborted.promise;
+				return { content: [{ type: "text", text: "interrupted" }], details: {} };
+			},
+		};
+		session.agent.setTools([tool]);
+
+		const run = session.prompt("hello");
+		await withTimeout(toolStarted.promise, 2_000, "tool did not start");
+		const resumed = session.resume();
+		await run;
+		await withTimeout(session.waitForIdle(), 2_000, "continuation did not finish");
+
+		expect(mock.calls.length).toBe(2);
+		expect(JSON.stringify(mock.calls[1].context.messages)).toContain(
+			JSON.stringify(manualContinuePrompt).slice(1, -1),
+		);
+		expect(session.getLastAssistantMessage()?.content).toEqual([{ type: "text", text: "resumed" }]);
+		await resumed;
 	});
 
 	it("persists an agent-authored steer with its steering marker", async () => {
@@ -303,6 +379,41 @@ describe("AgentSession queued steer delivery", () => {
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
 
+	it("rewinds a streaming prompt without delivering its queued input to the edited turn", async () => {
+		const started = Promise.withResolvers<void>();
+		const { session, sessionManager, mock } = await createSession([
+			() => {
+				started.resolve();
+				return { content: ["abandoned answer"], delayMs: 60_000 };
+			},
+			{ content: ["new answer"] },
+		]);
+		const pending = { text: "original", submittedAt: Date.now() - 100, started: true, cancelled: false };
+		const ctx = createInteractiveModeContext({
+			session,
+			sessionManager,
+			eventController: { resetTranscriptAnchors: () => {} },
+			cancelPendingSubmission: () => false,
+			cancelGoalContinuation: () => {},
+		});
+		const run = session.prompt(pending.text, { submittedAt: pending.submittedAt });
+		await started.promise;
+		await session.steer("abandoned steer");
+		await session.followUp("abandoned follow-up");
+
+		await new SelectorController(ctx).runTurnAction("edit", { role: "user", at: pending.submittedAt }, pending);
+		await run;
+		expect(ctx.composer.text()).toBe("original");
+		expect(sessionManager.getBranch().filter(e => e.type === "message" && e.message.role === "user")).toEqual([]);
+		expect(mock.calls).toHaveLength(1);
+
+		await session.prompt("replacement");
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[1]!.context.messages.filter(m => m.role === "user").map(m => m.content)).toEqual([
+			[{ type: "text", text: "replacement" }],
+		]);
+	});
+
 	it("drains steering left after aborting an auto-continued queued turn", async () => {
 		const { session, mock } = await createSession([
 			{ content: ["initial response"] },
@@ -333,21 +444,23 @@ describe("AgentSession queued steer delivery", () => {
 	});
 
 	// Interrupt-and-send (empty Enter with a queued steer): the abort's own drain
-	// resumes the run, so its settle must not read as a stop — otherwise the UI
+	// resumes the run, so the interrupted loop only pauses it — otherwise the UI
 	// flips to idle (title, OSC 7501, loader) for one frame before the steer runs.
-	it("settles an interrupt non-terminally when a queued steer resumes the run", async () => {
+	it("pauses the run on an interrupt when a queued steer resumes it", async () => {
 		const { session } = await createSession([
 			{ content: ["slow response"], delayMs: 1_000 },
 			{ content: ["steered response"] },
 		]);
-		const settles: Array<boolean | undefined> = [];
+		const settles: string[] = [];
+		const runStates: string[] = [];
+		session.subscribeRunState(state => runStates.push(state));
 		const streaming = Promise.withResolvers<void>();
 		const steered = Promise.withResolvers<void>();
 		session.subscribe(event => {
 			if (event.type === "message_start" && event.message.role === "assistant") streaming.resolve();
-			if (event.type !== "agent_end") return;
-			settles.push(event.isTerminal);
-			if (settles.length === 2) steered.resolve();
+			if (event.type !== "agent_end" && event.type !== "agent_pause") return;
+			settles.push(event.type);
+			if (event.type === "agent_end") steered.resolve();
 		});
 
 		const run = session.prompt("hello").catch(() => {});
@@ -357,7 +470,8 @@ describe("AgentSession queued steer delivery", () => {
 		await withTimeout(steered.promise, 2_000, "queued steer never resumed the run");
 		await run;
 
-		expect(settles).toEqual([false, true]);
+		expect(settles).toEqual(["agent_pause", "agent_end"]);
+		expect(runStates).toEqual(["running", "idle"]);
 	});
 
 	// A host driving the session to a result (the subagent executor) awaits the
@@ -386,13 +500,151 @@ describe("AgentSession queued steer delivery", () => {
 		await interrupt;
 	});
 
-	it("settles an interrupt terminally when nothing is queued to resume it", async () => {
+	it("answers a message submitted and forced with Enter while a tool is running", async () => {
+		const { session, mock } = await createSession([
+			{ content: [{ type: "toolCall", id: "pause", name: "pause", arguments: {} }] },
+			{ content: ["answered steering"] },
+		]);
+		const toolStarted = Promise.withResolvers<void>();
+		const releaseTool = Promise.withResolvers<void>();
+		const schema = type({});
+		const tool: AgentTool<typeof schema> = {
+			name: "pause",
+			label: "Pause",
+			description: "Wait for interruption",
+			parameters: schema,
+			async execute(_id, _params, signal) {
+				signal?.addEventListener("abort", () => releaseTool.resolve(), { once: true });
+				toolStarted.resolve();
+				await releaseTool.promise;
+				return { content: [{ type: "text", text: "interrupted" }], details: {} };
+			},
+		};
+		session.agent.setTools([tool]);
+		const ctx = createInteractiveModeContext({
+			session,
+			sessionManager: session.sessionManager,
+			withLocalSubmission: async (_text, submit) => submit(),
+			hasActiveBtw: () => false,
+			hasActiveOmfg: () => false,
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		const run = session.prompt("start");
+		try {
+			await withTimeout(toolStarted.promise, 2_000, "tool did not start");
+			await ctx.composer.onSubmit?.("change direction");
+			await ctx.composer.onSubmit?.("");
+			await withTimeout(session.waitForIdle(), 2_000, "steer did not finish");
+			await run;
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("change direction");
+			expect(session.getLastAssistantMessage()?.stopReason).toBe("stop");
+		} finally {
+			releaseTool.resolve();
+		}
+	});
+
+	it("answers a queued follow-up when an empty submit interrupts the running tool", async () => {
+		const { session, mock } = await createSession([
+			{ content: [{ type: "toolCall", id: "pause", name: "pause", arguments: {} }] },
+			{ content: ["answered follow-up"] },
+		]);
+		const toolStarted = Promise.withResolvers<void>();
+		const releaseTool = Promise.withResolvers<void>();
+		const schema = type({});
+		const tool: AgentTool<typeof schema> = {
+			name: "pause",
+			label: "Pause",
+			description: "Wait for interruption",
+			parameters: schema,
+			async execute(_id, _params, signal) {
+				signal?.addEventListener("abort", () => releaseTool.resolve(), { once: true });
+				toolStarted.resolve();
+				await releaseTool.promise;
+				return { content: [{ type: "text", text: "interrupted" }], details: {} };
+			},
+		};
+		session.agent.setTools([tool]);
+		const run = session.prompt("start");
+		try {
+			await withTimeout(toolStarted.promise, 2_000, "tool did not start");
+			await session.followUp("change direction");
+			await withTimeout(
+				session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true }),
+				2_000,
+				"interrupt did not finish",
+			);
+			await withTimeout(session.waitForIdle(), 2_000, "follow-up did not finish");
+			await run;
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("change direction");
+			expect(session.getLastAssistantMessage()?.stopReason).toBe("stop");
+		} finally {
+			releaseTool.resolve();
+		}
+	});
+
+	for (const throwOnAbort of [false, true]) {
+		it(`answers a steer interrupted during model preparation (${throwOnAbort ? "abort error" : "gate stop"})`, async () => {
+			const { session, mock } = await createSession([
+				{ content: [{ type: "toolCall", id: "pause", name: "pause", arguments: {} }] },
+				{ content: ["answered steering"] },
+			]);
+			const toolStarted = Promise.withResolvers<void>();
+			const releaseTool = Promise.withResolvers<void>();
+			const preparing = Promise.withResolvers<void>();
+			const releasePreparation = Promise.withResolvers<void>();
+			const schema = type({});
+			const tool: AgentTool<typeof schema> = {
+				name: "pause",
+				label: "Pause",
+				description: "Wait for release",
+				parameters: schema,
+				async execute() {
+					toolStarted.resolve();
+					await releaseTool.promise;
+					return { content: [{ type: "text", text: "finished" }], details: {} };
+				},
+			};
+			session.agent.setTools([tool]);
+			let calls = 0;
+			const removeHook = session.agent.addBeforeModelCallHook(async signal => {
+				if (++calls !== 2) return;
+				preparing.resolve();
+				await releasePreparation.promise;
+				if (throwOnAbort) signal?.throwIfAborted();
+			});
+			const run = session.prompt("start");
+			try {
+				await withTimeout(toolStarted.promise, 2_000, "tool did not start");
+				await session.steer("change direction");
+				releaseTool.resolve();
+				await withTimeout(preparing.promise, 2_000, "steered call was not prepared");
+				expect(session.hasInterruptibleInput).toBe(true);
+				const interrupt = session.abort({ reason: USER_INTERRUPT_LABEL });
+				releasePreparation.resolve();
+				await withTimeout(interrupt, 2_000, "interrupt did not finish");
+				await withTimeout(session.waitForIdle(), 2_000, "steer did not finish");
+				await run;
+				expect(mock.calls).toHaveLength(2);
+				expect(JSON.stringify(mock.calls[1].context.messages)).toContain("change direction");
+				expect(session.getLastAssistantMessage()?.stopReason).toBe("stop");
+			} finally {
+				releaseTool.resolve();
+				releasePreparation.resolve();
+				removeHook();
+			}
+		});
+	}
+
+	it("ends the run on an interrupt when nothing is queued to resume it", async () => {
 		const { session } = await createSession([{ content: ["slow response"], delayMs: 1_000 }]);
-		const settles: Array<boolean | undefined> = [];
+		const settles: string[] = [];
 		const streaming = Promise.withResolvers<void>();
 		session.subscribe(event => {
 			if (event.type === "message_start" && event.message.role === "assistant") streaming.resolve();
-			if (event.type === "agent_end") settles.push(event.isTerminal);
+			if (event.type === "agent_end" || event.type === "agent_pause") settles.push(event.type);
 		});
 
 		const run = session.prompt("hello").catch(() => {});
@@ -401,7 +653,7 @@ describe("AgentSession queued steer delivery", () => {
 		await session.waitForIdle();
 		await run;
 
-		expect(settles).toEqual([true]);
+		expect(settles).toEqual(["agent_end"]);
 	});
 
 	it("dequeuing an ultrathink prompt mid-stream restores the text and drops its companion notice", async () => {
@@ -572,6 +824,8 @@ describe("AgentSession queued steer delivery", () => {
 			injected = true;
 			await tryRunRpcSkillCommand(
 				{
+					buildUserSkillPrompt: session.buildUserSkillPrompt.bind(session),
+					renderUserSkillPrompt: session.renderUserSkillPrompt.bind(session),
 					skillsSettings: { enableSkillCommands: true },
 					skills: [
 						{
@@ -668,7 +922,9 @@ describe("AgentSession queued steer delivery", () => {
 				]);
 				expect(removed).toBe(true);
 				expect(remaining).toEqual(queued.slice(2));
-				expect(pendingAtFirstRecord).toEqual([]);
+				// The claimed message stays listed until the transcript records it (its companion
+				// comes first), but removal can no longer reach it.
+				expect(pendingAtFirstRecord).toEqual([chip("keep B")]);
 				expect(removedAfterClaim).toBe(false);
 				const notices = session.messages.filter(
 					(message): message is CustomMessage =>
@@ -837,6 +1093,8 @@ describe("AgentSession queued steer delivery", () => {
 				injected = true;
 				await tryRunRpcSkillCommand(
 					{
+						buildUserSkillPrompt: session.buildUserSkillPrompt.bind(session),
+						renderUserSkillPrompt: session.renderUserSkillPrompt.bind(session),
 						skillsSettings: { enableSkillCommands: true },
 						skills: [
 							{
@@ -890,6 +1148,8 @@ describe("AgentSession queued steer delivery", () => {
 				const queued = Promise.withResolvers<void>();
 				void tryRunRpcSkillCommand(
 					{
+						buildUserSkillPrompt: session.buildUserSkillPrompt.bind(session),
+						renderUserSkillPrompt: session.renderUserSkillPrompt.bind(session),
 						skillsSettings: { enableSkillCommands: true },
 						skills: [
 							{

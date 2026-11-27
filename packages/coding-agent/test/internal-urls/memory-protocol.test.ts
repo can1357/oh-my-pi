@@ -11,7 +11,7 @@ import {
 	MnemopiSessionState,
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
-import { getInternalUrlSuggestions } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
+import { getInternalUrlSuggestions } from "@oh-my-pi/pi-coding-agent/internal-urls/completion";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -19,6 +19,10 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { getAgentDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 // Mnemopi state is loaded lazily; preload so `new MnemopiSessionState(...)` can
 // resolve the module synchronously in the fixtures below.
@@ -816,6 +820,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
  */
 function withHindsightSession(fn: () => Promise<void>): Promise<void> {
 	const session = {
+		hindsightActive: true,
 		getHindsightSessionState: () => ({ bankId: "test-bank" }),
 	} as unknown as AgentSession;
 	AgentRegistry.global().register({

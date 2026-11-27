@@ -1,4 +1,4 @@
-import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
+import type { AstEditToolDetails } from "./details/ast-edit";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -15,7 +15,7 @@ import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
-import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { formatHashlineHeader } from "./hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 
@@ -24,18 +24,15 @@ import { missingGrammarsNote, rerunWithGrammars } from "../utils/grammars";
 import type { ToolSession } from ".";
 import { resolveToolTier, strictestApproval, truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
+import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
-import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
+import { formatGroupedFiles } from "./grouped-file-output";
 
-import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
-import {
-	capParseErrors,
-	formatCodeFrameLine,
-	formatCount,
-	formatParseErrors,
-} from "@oh-my-pi/pi-tui/render/render-utils";
+import { relativeSearchResultPath, resolveTargetResultPath, resolveToolSearchScope } from "./path-utils";
+import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "../utils/render-utils";
+import { formatCount } from "@oh-my-pi/pi-utils";
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 const astEditOpSchema = type({
@@ -74,7 +71,7 @@ interface AstEditAggregatedResult {
 }
 
 async function runAstEditTargets(
-	targets: Array<{ basePath: string; glob?: string }>,
+	targets: Array<{ basePath: string; glob?: string; isDirectory: boolean }>,
 	commonBasePath: string,
 	options: AstEditCallOptions,
 ): Promise<AstEditAggregatedResult> {
@@ -86,6 +83,22 @@ async function runAstEditTargets(
 	let filesSearched = 0;
 	let limitReached = false;
 	let applied = !options.dryRun;
+	// Stage every target before writing any: a target whose rewrite fails
+	// (an ambiguous overlap) must not leave the targets before it written.
+	if (!options.dryRun && targets.length > 1) {
+		for (const target of targets) {
+			await astEdit({
+				rewrites: options.rewrites,
+				path: target.basePath,
+				glob: target.glob,
+				dryRun: true,
+				maxFiles: options.maxFiles,
+				failOnParseError: options.failOnParseError,
+				signal: options.signal,
+				filesystem: options.filesystem,
+			});
+		}
+	}
 	for (const target of targets) {
 		const targetResult = await astEdit({
 			rewrites: options.rewrites,
@@ -104,11 +117,11 @@ async function runAstEditTargets(
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
 		for (const change of targetResult.changes) {
-			const absolute = resolveSearchResultPath(target.basePath, change.path);
+			const absolute = resolveTargetResultPath(target, change.path);
 			aggregatedChanges.push({ ...change, path: relativeSearchResultPath(commonBasePath, absolute) });
 		}
 		for (const fileChange of targetResult.fileChanges) {
-			const absolute = resolveSearchResultPath(target.basePath, fileChange.path);
+			const absolute = resolveTargetResultPath(target, fileChange.path);
 			const rebased = relativeSearchResultPath(commonBasePath, absolute);
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
@@ -131,7 +144,7 @@ async function runAstEditTargets(
 }
 
 function runAstEditOnce(
-	targets: Array<{ basePath: string; glob?: string }> | undefined,
+	targets: Array<{ basePath: string; glob?: string; isDirectory: boolean }> | undefined,
 	resolvedSearchPath: string,
 	globFilter: string | undefined,
 	options: AstEditCallOptions,
@@ -186,7 +199,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 		return lines;
 	};
 	readonly label = "AST Edit";
-	readonly summary = "Perform AST-aware code edits (structural refactoring)";
+	readonly summary = "Perform AST-aware code edits (SHOULD be preferred for codemods)";
 	readonly description: string;
 	readonly parameters = astEditSchema;
 	readonly strict = true;
@@ -443,6 +456,15 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					apply: async (_reason: string) => {
 						// The apply outlives the preview call: its filesystem carries no signal.
 						const applyContext = sessionResolveContext(this.session);
+						// Snapshot the previewed files so each rewrite is journaled with its before/after.
+						const journaled: Array<{ path: string; before: FileSnapshot }> = [];
+						if (this.session.recordFileChange) {
+							for (const relativePath of fileList) {
+								const absolute = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
+								const before = absolute === undefined ? undefined : await readSnapshot(absolute);
+								if (absolute !== undefined && before) journaled.push({ path: absolute, before });
+							}
+						}
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: false,
@@ -450,6 +472,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							failOnParseError: false,
 							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
 						});
+						for (const { path: file, before } of journaled) {
+							const after = await readSnapshot(file);
+							if (!after || after.text === before.text) continue;
+							this.session.recordFileChange?.({
+								path: file,
+								tool: "ast_edit",
+								before: before.text,
+								after: after.text,
+							});
+						}
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
 							applyResult.parseErrors,
 						);

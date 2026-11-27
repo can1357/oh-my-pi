@@ -25,6 +25,7 @@ const makeConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	bankId: "personal",
 	bankIdPrefix: "",
 	scoping: "per-project-tagged",
+	globalScope: false,
 	bankMission: "",
 	retainMission: null,
 	autoRecall: true,
@@ -132,7 +133,7 @@ describe("Hindsight conversation source timestamps", () => {
 	});
 
 	it("keeps user/assistant SessionEntry timestamps and drops thinking/tool entries", () => {
-		const extracted = extractMessages({ getEntries: () => conversationEntries() });
+		const extracted = extractMessages(conversationEntries());
 		expect(extracted).toEqual([
 			{
 				role: "user",
@@ -174,7 +175,7 @@ describe("Hindsight conversation source timestamps", () => {
 			banksSet: new Set(["personal"]),
 		});
 
-		const first = extractMessages({ getEntries: () => entries });
+		const first = extractMessages(entries);
 		await state.retainSession(first);
 		const laterEntries = [
 			...entries,
@@ -190,7 +191,7 @@ describe("Hindsight conversation source timestamps", () => {
 				},
 			} as SessionEntry,
 		];
-		await state.retainSession(extractMessages({ getEntries: () => laterEntries }));
+		await state.retainSession(extractMessages(laterEntries));
 
 		expect(bodies).toHaveLength(2);
 		expectSameInstant(firstItem(bodies[0]).timestamp, SESSION_START);
@@ -228,7 +229,7 @@ describe("Hindsight conversation source timestamps", () => {
 			banksSet: new Set(["personal"]),
 		});
 
-		await state.retainSession(extractMessages({ getEntries: () => entries }));
+		await state.retainSession(extractMessages(entries));
 		expect(bodies).toHaveLength(1);
 		expect(firstItem(bodies[0]).timestamp).not.toBe("not-a-date");
 		expect(Number.isNaN(Date.parse(String(firstItem(bodies[0]).timestamp)))).toBe(false);

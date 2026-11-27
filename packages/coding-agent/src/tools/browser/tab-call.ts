@@ -1,5 +1,8 @@
-import { renderCallChain, renderRunArg } from "../run-code";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { ToolError } from "../tool-errors";
+import { CELL_BUDGET_SLACK_MS } from "../run-scope";
+import { compileRunFunction, materializeRunArg, renderCallChain, renderRunArg } from "../run-code";
+import { TOOL_TIMEOUTS } from "../tool-timeouts";
 
 /** One allowlisted method invocation in a tab call chain. */
 export interface TabCallStep {
@@ -170,6 +173,22 @@ const DIRECT_METHODS_DESCRIPTION = [...TAB_VALUE_METHODS, ...TAB_PRESENCE_METHOD
 const ELEMENT_METHODS_DESCRIPTION = ELEMENT_METHODS.join(", ");
 const FRAME_METHODS_DESCRIPTION = FRAME_METHODS.join(", ");
 
+/** Validated shape of a helper call chain, shared by code rendering and direct in-process dispatch. */
+export type ParsedTabCall =
+	| { kind: "value"; step: TabCallStep }
+	| { kind: "presence"; step: TabCallStep }
+	| { kind: "handle"; handle: TabCallStep; step: TabCallStep; isFrame: boolean };
+
+function normalizeWaitStep(step: TabCallStep): TabCallStep {
+	if (!step.method.startsWith("waitFor")) return step;
+	const options = step.args.at(-1);
+	if (!isRecord(options) || options.timeout !== Number.POSITIVE_INFINITY) return step;
+	// JSON.stringify turns Infinity into null; zero is the equivalent bounded disable sentinel.
+	const args = step.args.slice();
+	args[args.length - 1] = { ...options, timeout: 0 };
+	return { method: step.method, args };
+}
+
 function renderElementStep(step: TabCallStep): string {
 	if (step.method !== "evaluate" || typeof step.args[0] !== "string") return renderCallChain([step]);
 	const [source, ...args] = step.args;
@@ -177,8 +196,8 @@ function renderElementStep(step: TabCallStep): string {
 	return `evaluate((${source})${renderedArgs})`;
 }
 
-/** Render an allowlisted tab helper or element-handle call for browser execution. */
-export function renderTabCall(chain: readonly TabCallStep[]): string {
+/** Validate and classify an allowlisted tab helper or handle call chain. */
+export function parseTabCall(chain: readonly TabCallStep[]): ParsedTabCall {
 	if (chain.length === 0) {
 		throw new ToolError("Action 'call' requires a non-empty 'chain'.");
 	}
@@ -193,7 +212,7 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 				`Only tab.id(n)/tab.ref(id)/tab.frame(selector) results accept a chained call; got tab.${root.method}().`,
 			);
 		}
-		return `return await tab.${renderCallChain([root])};`;
+		return { kind: "value", step: normalizeWaitStep(root) };
 	}
 	if (TAB_PRESENCE_METHODS.includes(root.method)) {
 		if (chain.length === 2) {
@@ -201,29 +220,80 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 				`Only tab.id(n)/tab.ref(id)/tab.frame(selector) results accept a chained call; got tab.${root.method}().`,
 			);
 		}
-		return `return (await tab.${renderCallChain([root])}) !== null;`;
+		return { kind: "presence", step: normalizeWaitStep(root) };
 	}
 	if (TAB_HANDLE_METHODS.includes(root.method)) {
-		const frameHandle = root.method === "frame";
+		const isFrame = root.method === "frame";
 		if (chain.length === 1) {
 			throw new ToolError(
-				frameHandle
+				isFrame
 					? 'tab.frame() returns a frame handle; call a method on it (tab.frame("#pay").click("#submit")) or use tab.run(fn).'
 					: `tab.${root.method}() returns an element handle; call a method on it (tab.id(5).click()) or use tab.run(fn).`,
 			);
 		}
 		const handleStep = chain[1]!;
-		const methods = frameHandle ? FRAME_METHODS : ELEMENT_METHODS;
+		const methods = isFrame ? FRAME_METHODS : ELEMENT_METHODS;
 		if (!methods.includes(handleStep.method)) {
-			const description = frameHandle ? FRAME_METHODS_DESCRIPTION : ELEMENT_METHODS_DESCRIPTION;
+			const description = isFrame ? FRAME_METHODS_DESCRIPTION : ELEMENT_METHODS_DESCRIPTION;
 			throw new ToolError(
-				`Unknown ${frameHandle ? "frame" : "element"} method "${handleStep.method}". ${frameHandle ? "Frame" : "Element"} handles support: ${description}.`,
+				`Unknown ${isFrame ? "frame" : "element"} method "${handleStep.method}". ${isFrame ? "Frame" : "Element"} handles support: ${description}.`,
 			);
 		}
-		return `return await (await tab.${renderCallChain([root])}).${renderElementStep(handleStep)};`;
+		return {
+			kind: "handle",
+			handle: root,
+			step: isFrame ? normalizeWaitStep(handleStep) : handleStep,
+			isFrame,
+		};
 	}
 
 	throw new ToolError(
 		`Unknown tab helper "${root.method}". Direct helpers: ${DIRECT_METHODS_DESCRIPTION}; handles via tab.id(n)/tab.ref(id)/tab.frame(selector).`,
 	);
+}
+
+/** Materialize arguments for one step in a parsed call chain without source evaluation. */
+export function materializeTabCallArgs(step: TabCallStep, isElementStep = false): unknown[] {
+	if (isElementStep && step.method === "evaluate" && typeof step.args[0] === "string") {
+		const [source, ...rest] = step.args;
+		return [compileRunFunction(source), ...rest.map(value => materializeRunArg(value))];
+	}
+	return step.args.map(value => materializeRunArg(value));
+}
+
+/** Render an allowlisted tab helper or element-handle call for browser execution. */
+export function renderTabCall(chain: readonly TabCallStep[]): string {
+	const parsed = parseTabCall(chain);
+	switch (parsed.kind) {
+		case "value":
+			return `return await tab.${renderCallChain([parsed.step])};`;
+		case "presence":
+			return `return (await tab.${renderCallChain([parsed.step])}) !== null;`;
+		case "handle":
+			return `return await (await tab.${renderCallChain([parsed.handle])}).${parsed.isFrame ? renderCallChain([parsed.step]) : renderElementStep(parsed.step)};`;
+	}
+}
+
+/**
+ * Tool budget in seconds for a `run` or `call` that passes no `timeout` of its own, or `undefined` for the
+ * tool default. The eval cell's timeout (`cellTimeoutMs`) counts, since the cell's watchdog is suspended while
+ * the call runs; so does a call chain's trailing `{ timeout }` (ms), which wait helpers clamp to the budget
+ * less {@link CELL_BUDGET_SLACK_MS}. A cell without a timeout (`0`) and the disable sentinels take the browser
+ * tool's maximum bounded budget. The larger applies, never below the tool default.
+ */
+export function tabCallBudgetSeconds(
+	chain: readonly TabCallStep[] | undefined,
+	cellTimeoutMs?: number,
+): number | undefined {
+	let budget: number | undefined;
+	if (cellTimeoutMs === 0) budget = TOOL_TIMEOUTS.browser.max;
+	else if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budget = Math.ceil(cellTimeoutMs / 1000);
+	const options = chain?.at(-1)?.args.at(-1);
+	const timeout = isRecord(options) ? options.timeout : undefined;
+	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) {
+		budget = Math.max(budget ?? 0, TOOL_TIMEOUTS.browser.max);
+	} else if (typeof timeout === "number" && Number.isFinite(timeout) && timeout >= 0) {
+		budget = Math.max(budget ?? 0, Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
+	}
+	return budget === undefined ? undefined : Math.max(TOOL_TIMEOUTS.browser.default, budget);
 }

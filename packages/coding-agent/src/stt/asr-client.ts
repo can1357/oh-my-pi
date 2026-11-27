@@ -1,18 +1,5 @@
-import {
-	type ModelWorkerMessage,
-	ModelWorkerHost,
-	spawnRefCountedWorker,
-	wrapRefCountedSubprocess,
-} from "../subprocess/model-worker-host";
-import {
-	createWorkerSubprocess,
-	type RefCountedWorkerHandle,
-	resolveWorkerSpawnCmd,
-	SMOKE_TEST_TIMEOUT_MS,
-	type SpawnedSubprocess,
-	smokeTestWorker,
-} from "../subprocess/worker-client";
-import { tinyWorkerEnv } from "../tiny/title-client";
+import { type ModelWorkerMessage, ModelWorkerHost } from "../subprocess/model-worker-host";
+import { SMOKE_TEST_TIMEOUT_MS } from "../subprocess/worker-client";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
 import { getSttModelSpec, type SttModelKey } from "./models";
 
@@ -55,12 +42,21 @@ export interface SttStreamOptions {
 	onPartial?: (text: string) => void;
 	/** A finalized segment, emitted once when the endpointer commits it. */
 	onSegment?: (text: string, index: number) => void;
+	/** The accelerated device failed to load the model; the worker runs on `fallbackDevice` instead. */
+	onDeviceFallback?: (fallback: SttDeviceFallback) => void;
+}
+
+export interface SttDeviceFallback {
+	device: string;
+	fallbackDevice: string;
+	error: string;
 }
 
 interface StreamState {
 	modelKey: SttModelKey;
 	onPartial: ((text: string) => void) | undefined;
 	onSegment: ((text: string, index: number) => void) | undefined;
+	onDeviceFallback: ((fallback: SttDeviceFallback) => void) | undefined;
 	resolve: (text: string) => void;
 	reject: (error: Error) => void;
 	/** Run `apply` (resolve/reject) once, then unregister the stream. */
@@ -68,35 +64,21 @@ interface StreamState {
 }
 
 /**
- * Hidden subcommand on the main CLI that boots the speech-recognition worker in
- * the spawned subprocess. Kept in sync with the dispatch in `cli.ts`.
+ * Hidden subcommand on the main CLI that boots the speech-recognition worker
+ * (spawned by the daemon `speech` module). Kept in sync with the dispatch in `cli.ts`.
  */
 export const STT_WORKER_ARG = "__omp_worker_stt";
-
-/**
- * Spawn the speech worker as a subprocess. Exported for tests and the smoke
- * probe; production callers go through {@link spawnSttWorker}.
- */
-export function createSttSubprocess(): SpawnedSubprocess<SttWorkerOutbound> {
-	return createWorkerSubprocess<SttWorkerOutbound>({
-		spawnCommand: resolveWorkerSpawnCmd(STT_WORKER_ARG),
-		env: tinyWorkerEnv(),
-		exitLabel: "stt subprocess",
-	});
-}
-
-function spawnSttWorker(): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
-	return spawnRefCountedWorker(createSttSubprocess, "stt", "stt worker spawn failed; speech-to-text disabled");
-}
 
 export class SttClient {
 	#streams = new Map<string, StreamState>();
 	#host: ModelWorkerHost<SttModelKey, SttWorkerInbound, SttWorkerOutbound, TranscribeRequest, SttProgressEvent>;
 
-	constructor(spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> = spawnSttWorker) {
+	/** `smoke`: a private unit the daemon stops once {@link terminate} releases it. */
+	constructor(options: { smoke?: boolean } = {}) {
 		this.#host = new ModelWorkerHost({
 			name: "stt",
-			spawnWorker,
+			smoke: options.smoke,
+			workerArg: STT_WORKER_ARG,
 			modelLabel: modelKey => getSttModelSpec(modelKey)?.label ?? modelKey,
 			handleMessage: message => this.#handleMessage(message),
 			failRequest: (request, error) => request.reject(error),
@@ -110,9 +92,9 @@ export class SttClient {
 	}
 
 	/**
-	 * Transcribe 16 kHz mono audio on the warm worker. Rejects with the worker
-	 * error on failure and with an `AbortError` when the signal fires (the warm
-	 * worker keeps the model loaded across calls — the model is never reloaded).
+	 * Transcribe 16 kHz mono audio on the shared warm worker in the omp daemon.
+	 * Rejects with the worker error on failure and with an `AbortError` when the
+	 * signal fires (the warm worker keeps the model loaded across calls).
 	 */
 	async transcribe(modelKey: SttModelKey, audio: Float32Array, options: SttTranscribeOptions = {}): Promise<string> {
 		options.signal?.throwIfAborted();
@@ -149,18 +131,17 @@ export class SttClient {
 			settled = true;
 			this.#streams.delete(id);
 			signal?.removeEventListener("abort", onAbort);
-			this.#host.syncWorkerRef();
 			apply();
 		};
 		this.#streams.set(id, {
 			modelKey,
 			onPartial: options.onPartial,
 			onSegment: options.onSegment,
+			onDeviceFallback: options.onDeviceFallback,
 			resolve,
 			reject,
 			finish,
 		});
-		this.#host.syncWorkerRef();
 		worker.send({ type: "stream_start", id, modelKey, language: options.language });
 		const handle: SttStreamHandle = {
 			pushAudio: audio => {
@@ -185,11 +166,21 @@ export class SttClient {
 		return this.#host.downloadModel(modelKey, options);
 	}
 
+	/** Round-trip a `ping` to the worker. */
+	ping(timeoutMs: number): Promise<void> {
+		return this.#host.ping(timeoutMs);
+	}
+
 	terminate(): Promise<void> {
 		return this.#host.terminate();
 	}
 
 	#handleMessage(message: ModelWorkerMessage<SttWorkerOutbound>): void {
+		if (message.type === "device_fallback") {
+			const { device, fallbackDevice, error } = message;
+			this.#streams.get(message.id)?.onDeviceFallback?.({ device, fallbackDevice, error });
+			return;
+		}
 		if (message.type === "partial" || message.type === "segment" || message.type === "stream_done") {
 			const stream = this.#streams.get(message.id);
 			if (!stream) return;
@@ -216,6 +207,10 @@ export class SttClient {
 			return;
 		}
 		// message.type === "error"
+		if (pending.kind === "ping") {
+			pending.reject(new Error(message.error));
+			return;
+		}
 		this.#host.emitProgress({ modelKey: pending.modelKey, status: "error" }, message.error);
 		if (pending.kind === "transcribe") pending.reject(new Error(message.error));
 		else pending.resolve({ ok: false, error: message.error });
@@ -235,14 +230,16 @@ export async function shutdownSttClient(): Promise<void> {
 	await sttClient.terminate();
 }
 
+/** `omp --smoke-test` probe: start the STT worker under the daemon, ping it, and let the daemon stop it. */
 export async function smokeTestSttWorker({
 	timeoutMs = SMOKE_TEST_TIMEOUT_MS,
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	await smokeTestWorker(
-		wrapRefCountedSubprocess<SttWorkerInbound, SttWorkerOutbound>(createSttSubprocess(), "stt"),
-		"stt worker",
-		timeoutMs,
-	);
+	const client = new SttClient({ smoke: true });
+	try {
+		await client.ping(timeoutMs);
+	} finally {
+		await client.terminate();
+	}
 }

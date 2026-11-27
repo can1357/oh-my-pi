@@ -1,11 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
 	AssistantMessage,
 	DeveloperMessage,
+	KnownApi,
 	Message,
 	Model,
 	ToolCall,
@@ -19,6 +22,7 @@ import {
 	kSyntheticUser,
 	type SyntheticUserCarrier,
 } from "../utils/block-symbols";
+import { dropReasoningDetailsEnvelopes } from "../utils/reasoning-source";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -504,6 +508,24 @@ export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): bool
 	);
 }
 
+/** Whether `msg` carries mid-conversation Anthropic request controls (`clearAt`, `effort`, `toolChanges`). */
+export function hasAnthropicMessageControls(msg: Message): boolean {
+	if (msg.role !== "developer" || msg.providerPayload?.type !== "anthropicMessage") return false;
+	const { clearAt, effort, toolChanges } = msg.providerPayload;
+	return clearAt !== undefined || effort !== undefined || (toolChanges !== undefined && toolChanges.length > 0);
+}
+
+/**
+ * Whether a `user` or `developer` message emits a non-tool-result wire turn
+ * that ends an assistant tool loop instead of being dropped as empty.
+ */
+export function isReplayTurnBoundary(msg: Message): boolean {
+	if (msg.role === "assistant" || msg.role === "toolResult") return false;
+	if (hasAnthropicMessageControls(msg)) return true;
+	if (typeof msg.content === "string") return msg.content.trim().length > 0;
+	return msg.content.some(block => (block.type === "text" && block.text.trim().length > 0) || block.type === "image");
+}
+
 function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
@@ -527,6 +549,49 @@ export function isSameModelTurn(
 }
 
 /**
+ * Whether an API's encoder runs {@link transformMessages} against the target
+ * model itself, so {@link isSameModelTurn} decides what replays. Agent proxies
+ * encode through an inner model or their own path; extension APIs are not
+ * listed and count as `false`. Exhaustive, so a new API must decide.
+ */
+const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
+	"openai-completions": true,
+	"openai-responses": true,
+	openrouter: true,
+	"openai-codex-responses": true,
+	"azure-openai-responses": true,
+	"anthropic-messages": true,
+	"bedrock-converse-stream": true,
+	"google-generative-ai": true,
+	"google-vertex": true,
+	"google-interactions": true,
+	"ollama-chat": true,
+	"apple-foundation-models": true,
+	"cursor-agent": false,
+	"factory-droid-agent": false,
+	"gitlab-duo-agent": false,
+	"devin-agent": false,
+	"antigravity-acp": false,
+	"kiro-api": true,
+};
+
+/**
+ * Whether {@link transformMessages} certainly drops `turn`'s opaque reasoning
+ * payload (thinking signatures, redacted thinking) on its way to `model`:
+ * another model's turn on a directly encoded wire keeps neither, except
+ * Anthropic-messages to Anthropic-messages, where deployment and signing
+ * rules may keep them. `false` when the payload may survive.
+ */
+export function dropsForeignReasoningPayload(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: Pick<Model, "provider" | "api" | "id">,
+): boolean {
+	if ((DIRECT_REPLAY_APIS as Partial<Record<Api, boolean>>)[model.api] !== true) return false;
+	if (model.api === "anthropic-messages" && turn.api === "anthropic-messages") return false;
+	return !isSameModelTurn(turn, model);
+}
+
+/**
  * Targets that have proven they read unsigned foreign thinking when replayed
  * natively. This is a semantic-carry allowlist only: OpenAI-compatible
  * `reasoning_content` schema requirements and llama.cpp cache-prefix replay are
@@ -541,6 +606,31 @@ function targetReadsForeignThinking(model: Model, compat: Model["compat"]): bool
 	if (!("thinkingFormat" in compat)) return false;
 	if (compat.requiresThinkingAsText) return false;
 	return model.reasoning && compat.thinkingFormat === "zai";
+}
+
+/**
+ * Whether chat completions (`convertMessages`) writes the model's own past
+ * thinking under `compat`: as Mistral content parts, demoted text, or a
+ * reasoning field. Otherwise it drops it.
+ */
+export function completionsSendsOwnThinking(
+	model: { reasoning?: boolean },
+	compat: Pick<
+		ResolvedOpenAICompat,
+		| "mistralReasoningContentParts"
+		| "requiresThinkingAsText"
+		| "requiresReasoningContentForToolCalls"
+		| "thinkingFormat"
+		| "replayReasoningContent"
+	>,
+): boolean {
+	return Boolean(
+		compat.mistralReasoningContentParts ||
+		compat.requiresThinkingAsText ||
+		compat.requiresReasoningContentForToolCalls ||
+		(compat.thinkingFormat === "zai" && model.reasoning) ||
+		compat.replayReasoningContent,
+	);
 }
 
 /**
@@ -565,13 +655,7 @@ function targetReplaysPlaintextReasoning(model: Model, compat: Model["compat"]):
 	if (!("requiresReasoningContentForToolCalls" in compat)) return false;
 	switch (model.api) {
 		case "openai-completions":
-			return (
-				!compat.requiresThinkingAsText &&
-				(compat.mistralReasoningContentParts === true ||
-					compat.requiresReasoningContentForToolCalls ||
-					compat.thinkingFormat === "zai" ||
-					compat.replayReasoningContent)
-			);
+			return !compat.requiresThinkingAsText && completionsSendsOwnThinking(model, compat);
 		case "openrouter":
 			return !compat.filterReasoningHistory && compat.requiresReasoningContentForToolCalls;
 		case "openai-responses":
@@ -771,6 +855,9 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			let changed = false;
+			// Rewritten thinking or arguments invalidate the turn's `reasoning_details`
+			// envelope, which still holds the original text and call signatures.
+			let replayStateChanged = false;
 			const content = assistantMsg.content.map((block): AssistantMessage["content"][number] => {
 				if (block.type === "text") {
 					const redacted = redactSensitiveCredentials(block.text);
@@ -782,6 +869,7 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 					const redacted = redactSensitiveCredentials(block.thinking);
 					if (redacted !== block.thinking) {
 						changed = true;
+						replayStateChanged = true;
 						return { ...block, thinking: redacted, thinkingSignature: undefined };
 					}
 				} else if (block.type === "toolCall") {
@@ -789,6 +877,7 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 						const { result: redactedArgs, changed: argsChanged } = redactSensitiveInObject(block.arguments);
 						if (argsChanged) {
 							changed = true;
+							replayStateChanged = true;
 							const castArgs =
 								redactedArgs && typeof redactedArgs === "object" && !Array.isArray(redactedArgs)
 									? (redactedArgs as Record<string, unknown>)
@@ -803,7 +892,11 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 				}
 				return block;
 			});
-			return (changed ? { ...assistantMsg, content } : assistantMsg) as Message;
+			if (!changed) return assistantMsg as Message;
+			return {
+				...assistantMsg,
+				content: replayStateChanged ? dropReasoningDetailsEnvelopes(content) : content,
+			} as Message;
 		}
 
 		return msg;
@@ -956,6 +1049,18 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.credentialId !== undefined &&
 				targetCredentialId !== undefined &&
 				assistantMsg.credentialId !== targetCredentialId;
+			// Thinking bound to another credential, or to a prefix a history rewrite
+			// invalidated, is dropped. A model the catalog classes as non-Claude wrote
+			// plain reasoning that neither binding governs, so its visible thinking
+			// stays and replays as demoted text below. Claude's reasoning from another
+			// host or account, and an unclassified model's (an opaque proxy may serve
+			// Claude), keep being dropped.
+			const thinkingBound = foreignCredential || invalidBoundThinkingAssistantIndexes.has(index);
+			const sourceClass = thinkingBound
+				? classifyModel(assistantMsg.provider, assistantMsg.upstreamModel ?? assistantMsg.model, { lenient: true })
+						.class
+				: undefined;
+			const keepsBoundThinking = thinkingBound && sourceClass !== "anthropic" && sourceClass !== "unknown";
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic
@@ -1000,7 +1105,9 @@ export function transformMessages<TApi extends Api>(
 			): boolean => {
 				if (candidate.type !== "thinking") return false;
 				if (!isAnthropicReplay) return false;
-				if (isLatestSurvivingAssistant && abandonedToolUse) return true;
+				if (isLatestSurvivingAssistant && abandonedToolUse) {
+					return !(isSameModel && isSigningAnthropicTarget && !candidate.thinkingSignature?.trim());
+				}
 				const candidateSignatureUntrustworthy =
 					abandonedToolUse || (invalidStopReason && candidateIndex === lastBlockIndex);
 				const replaySignature =
@@ -1020,10 +1127,9 @@ export function transformMessages<TApi extends Api>(
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
-				if (foreignCredential && (block.type === "thinking" || block.type === "redactedThinking")) return [];
 				if (
-					invalidBoundThinkingAssistantIndexes.has(index) &&
-					(block.type === "thinking" || block.type === "redactedThinking")
+					thinkingBound &&
+					(block.type === "redactedThinking" || (block.type === "thinking" && !keepsBoundThinking))
 				) {
 					return [];
 				}
@@ -1052,7 +1158,13 @@ export function transformMessages<TApi extends Api>(
 						// Latest abandoned turn: Anthropic's byte-for-byte rule forbids
 						// even stripping a signature on the latest message — but only
 						// for turns the target's own provider issued.
-						if (isLatestSurvivingAssistant && abandonedToolUse && !crossProviderSource) return block;
+						// The rule binds signed blocks only: an unsigned same-model block
+						// cannot replay natively on a signing target, so it is dropped
+						// like on every other turn (see below), never demoted to text.
+						if (isLatestSurvivingAssistant && abandonedToolUse && !crossProviderSource) {
+							if (isSameModel && isSigningAnthropicTarget && !block.thinkingSignature?.trim()) return [];
+							return block;
+						}
 						// Preserve same-deployment signatures and let Anthropic perform
 						// its one-way model compatibility check. Across deployments,
 						// strip stale signatures so the encoder applies the target's
@@ -1131,7 +1243,7 @@ export function transformMessages<TApi extends Api>(
 					return {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),
-						[kDemotedThinking]: true,
+						[kDemotedThinking]: sanitized.thinking,
 					};
 				}
 
@@ -1513,5 +1625,70 @@ export function transformMessages<TApi extends Api>(
 	flushPendingToolCalls(Date.now());
 	flushPendingAbortedToolCalls();
 
-	return result;
+	const splitsToolCalls =
+		targetCompat !== undefined && "splitToolCalls" in targetCompat && targetCompat.splitToolCalls;
+	const replay = splitsToolCalls ? splitAssistantToolCalls(result) : result;
+	const foldsUserText =
+		targetCompat !== undefined && "foldUserAfterToolResult" in targetCompat && targetCompat.foldUserAfterToolResult;
+	return foldsUserText ? foldUserMessagesIntoToolResults(replay) : replay;
+}
+
+/**
+ * Replay each call of a multi-call assistant turn as its own assistant
+ * message, directly followed by that call's result (`splitToolCalls`): Llama 3
+ * chat templates served by vLLM reject an assistant message holding more than
+ * one tool call. The turn's text and thinking stay with its first call. The
+ * pieces drop the turn's native Responses items, which would replay the calls
+ * side by side again.
+ */
+function splitAssistantToolCalls(messages: Message[]): Message[] {
+	const split: Message[] = [];
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		const calls = msg.role === "assistant" ? msg.content.filter(block => block.type === "toolCall") : [];
+		if (msg.role !== "assistant" || calls.length < 2) {
+			split.push(msg);
+			continue;
+		}
+		const results: ToolResultMessage[] = [];
+		for (let next = messages[i + 1]; next?.role === "toolResult"; next = messages[i + 1]) {
+			results.push(next);
+			i++;
+		}
+		const { providerPayload: _native, ...turn } = msg;
+		const rest = msg.content.filter(block => block.type !== "toolCall");
+		for (const [n, call] of calls.entries()) {
+			split.push({ ...turn, content: n === 0 ? [...rest, call] : [call] });
+			const at = results.findIndex(result => result.toolCallId === call.id);
+			if (at >= 0) split.push(...results.splice(at, 1));
+		}
+		split.push(...results);
+	}
+	return split;
+}
+
+/**
+ * Append each user/developer message that directly follows a tool result to
+ * that result's content, so the request never continues with user text after
+ * a function response (`foldUserAfterToolResult`). Folding every position, not
+ * only the tail, keeps earlier turns byte-stable for prompt caching. Messages
+ * carrying native provider history stay separate turns.
+ */
+function foldUserMessagesIntoToolResults(messages: Message[]): Message[] {
+	const folded: Message[] = [];
+	for (const msg of messages) {
+		const previous = folded.at(-1);
+		if (previous?.role !== "toolResult" || (msg.role !== "user" && msg.role !== "developer") || msg.providerPayload) {
+			folded.push(msg);
+			continue;
+		}
+		const content: ToolResultMessage["content"] =
+			typeof msg.content === "string"
+				? msg.content.trim() === ""
+					? []
+					: [{ type: "text", text: msg.content }]
+				: msg.content;
+		folded[folded.length - 1] = { ...previous, content: [...previous.content, ...content] };
+	}
+	return folded;
 }

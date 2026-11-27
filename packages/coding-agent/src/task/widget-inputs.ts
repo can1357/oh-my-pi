@@ -4,8 +4,8 @@
  * source, every source of the jobs the subagent itself started re-exposed as
  * `<jobId>:<sourceId>`, and a brief read live from the job's progress.
  */
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AgentProgress } from "./task-details";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { TextTap } from "../job-widgets/text-tap";
 import {
 	type JobTextChunk,
@@ -49,7 +49,7 @@ class ChildJobSource implements JobTextSource {
 /** Inputs for {@link createTaskWidgetInputs}. */
 export interface TaskWidgetInputsOptions {
 	/** The root's shared manager, where the subagent's own jobs are registered. */
-	manager: AsyncJobManager;
+	manager: AsyncJobManagerApi;
 	/** Registry id of the subagent: the `ownerId` of the jobs it starts. */
 	agentId: string;
 	/** The run's tool tap, once the run exists; a queued job has none yet. */

@@ -1,17 +1,27 @@
 /**
- * Whole-flow hooks: `login "custom" hook=…` and `refresh hook=…` for providers
- * whose flow is not expressible in the declarative grammar.
+ * Whole-flow hooks: `login "custom" hook=…`, `refresh hook=…` and
+ * `sign-out hook=…` for providers whose flow is not expressible in the
+ * declarative grammar.
  */
-import type { Lazy, LoginHook, RefreshHook } from "./types";
+import { loginMistralVibeSignIn } from "../oauth/mistral-vibe";
+import type { Lazy, LoginHook, RefreshHook, SignOutHook } from "./types";
 
 export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.loginGitHubCopilotHook),
 	cursor: () => import("../oauth/cursor").then(module => module.loginCursorHook),
 	perplexity: () => import("../oauth/perplexity").then(module => module.loginPerplexity),
 	snowflake: () => import("../oauth/snowflake").then(module => module.loginSnowflake),
+	"mistral-vibe-sign-in": async () => loginMistralVibeSignIn,
+	"devin-cli": () => import("../oauth/devin-cli").then(module => module.loginDevinCliHook),
+	"devin-windsurf": () => import("../oauth/devin-windsurf").then(module => module.loginDevinWindsurfHook),
+	"antigravity-cli": () => import("../oauth/antigravity-cli").then(module => module.loginAntigravityCli),
+	"kiro-login": () => import("../oauth/kiro").then(module => module.loginKiroHook),
 };
 export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.refreshGitHubCopilotHook),
 	cursor: () => import("../oauth/cursor").then(module => module.refreshCursorHook),
 	snowflake: () => import("../oauth/snowflake").then(module => module.refreshSnowflakeToken),
+	"antigravity-cli": () => import("../oauth/antigravity-cli").then(module => module.refreshAntigravityCli),
+	"kiro-refresh": () => import("../oauth/kiro").then(module => module.refreshKiroHook),
 };
+export const CUSTOM_SIGN_OUT_HOOKS: Record<string, Lazy<SignOutHook>> = {};

@@ -3,13 +3,9 @@
  *
  * Integrates MCP tool discovery with the custom tools system.
  */
-import { logger } from "@oh-my-pi/pi-utils";
 import type { LoadedCustomTool } from "../extensibility/custom-tools/types";
-import { AgentStorage } from "../session/agent-storage";
 import type { AuthStorage } from "../session/auth-storage";
-import { type MCPLoadResult, MCPManager } from "./manager";
-import type { McpConnectionStatusEvent } from "./startup-events";
-import { MCPToolCache } from "./tool-cache";
+import { type MCPDiscoverOptions, type MCPLoadResult, MCPManager } from "./manager";
 
 /** Result from loading MCP tools */
 export interface MCPToolsLoadResult {
@@ -25,33 +21,12 @@ export interface MCPToolsLoadResult {
 	exaApiKeys: string[];
 }
 
-/** Options for loading MCP tools */
-export interface MCPToolsLoadOptions {
-	/** Called when MCP server connection state changes. */
-	onStatus?: (event: McpConnectionStatusEvent) => void;
-	/** Initial non-blocking discovery window in milliseconds (environment override wins). */
-	startupTimeoutMs?: number;
-	/** Whether to load project-level config (default: true) */
-	enableProjectConfig?: boolean;
-	/** Whether to filter out Exa MCP servers (default: true) */
-	filterExa?: boolean;
-	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
-	filterBrowser?: boolean;
-	/** SQLite storage for MCP tool cache (null disables cache) */
-	cacheStorage?: AgentStorage | null;
+/** Options for loading MCP tools: discovery options plus manager setup. */
+export interface MCPToolsLoadOptions extends MCPDiscoverOptions {
+	/** Linger of an unused shared server in milliseconds (`mcp.idleStopMinutes`); the manager default when absent. */
+	idleStopMs?: number;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
 	authStorage?: AuthStorage;
-}
-
-async function resolveToolCache(storage: AgentStorage | null | undefined): Promise<MCPToolCache | null> {
-	if (storage === null) return null;
-	try {
-		const resolved = storage ?? (await AgentStorage.open());
-		return new MCPToolCache(resolved);
-	} catch (error) {
-		logger.warn("MCP tool cache unavailable", { error: String(error) });
-		return null;
-	}
 }
 
 /**
@@ -62,8 +37,7 @@ async function resolveToolCache(storage: AgentStorage | null | undefined): Promi
  * @returns MCP tools in LoadedCustomTool format for integration
  */
 export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoadOptions): Promise<MCPToolsLoadResult> {
-	const toolCache = await resolveToolCache(options?.cacheStorage);
-	const manager = new MCPManager(cwd, toolCache);
+	const manager = new MCPManager(cwd, undefined, options?.idleStopMs);
 	if (options?.authStorage) {
 		manager.setAuthStorage(options.authStorage);
 	}
@@ -76,6 +50,8 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
+			extensionRoots: options?.extensionRoots,
+			builtinTransforms: options?.builtinTransforms,
 		});
 	} catch (error) {
 		// If discovery fails entirely, return empty result
@@ -91,7 +67,7 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 
 	// Convert MCP tools to LoadedCustomTool format
 	const loadedTools: LoadedCustomTool[] = result.tools.map(tool => {
-		// MCPTool and DeferredMCPTool have these properties
+		// MCPTool has these properties
 		const mcpTool = tool as { mcpServerName?: string };
 		const serverName = mcpTool.mcpServerName;
 

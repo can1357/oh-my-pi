@@ -19,6 +19,17 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
+/** The provider is turned off in its auth rules (`disabled "<reason>"`), so nothing may call it. */
+export class ProviderDisabledError extends MissingApiKeyError {
+	readonly reason: string;
+
+	constructor(provider: string, reason: string) {
+		super(provider, `${provider} is turned off: ${reason}`);
+		this.name = "ProviderDisabledError";
+		this.reason = reason;
+	}
+}
+
 /**
  * Every usable OAuth credential for a provider failed to refresh with a
  * retryable error (network blip, timeout, 5xx). The stored credentials are

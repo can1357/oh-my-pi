@@ -243,6 +243,21 @@ describe("renderMentalModelsBlock", () => {
 		expect(block).toContain("[mental-model snapshot truncated at render budget]");
 	});
 
+	it("retains all models when every model exceeds its per-model share (#17548)", () => {
+		const mk = (name: string, n: number) => ({ id: name, bank_id: "b", name, content: "x".repeat(n) });
+		const models = [
+			mk("Project Conventions", 36_720),
+			mk("Project Decisions", 47_353),
+			mk("User Preferences", 47_745),
+		];
+		const block = renderMentalModelsBlock(models, 16_000);
+		expect(block.length).toBeLessThanOrEqual(16_000);
+		expect(block).toContain("# Project Conventions");
+		expect(block).toContain("# Project Decisions");
+		expect(block).toContain("# User Preferences");
+		expect(block).toContain("[mental-model snapshot truncated at render budget]");
+	});
+
 	it("returns an empty string for an empty model list (callers gate on this)", () => {
 		expect(renderMentalModelsBlock([], 16_000)).toBe("");
 	});

@@ -1,19 +1,19 @@
 # TUI integration for extensions and custom tools
 
-This document covers the **current** TUI contract used by `packages/coding-agent` and `packages/tui` for extension UI, custom tool UI, and custom renderers.
+This document covers the **current** UI contract used by `packages/coding-agent` and `packages/tui` (`@oh-my-pi/pi-tui`) for extension UI, custom tool UI, and custom renderers.
 
 ## What this subsystem is
 
 The runtime has two layers:
 
-- **Rendering engine (`packages/tui`)**: differential terminal renderer, input dispatch, focus, overlays, cursor placement.
-- **Integration layer (`packages/coding-agent`)**: mounts extension/custom-tool components, wires keybindings/theme, and restores editor state.
+- **UI library (`packages/tui`)**: reactive runtime and JSX, the retained node tree, a native backend (Tern Surface Protocol) and a terminal backend (layout, per-kind painters, focus/input widgets, frame writer), the terminal driver (I/O), text and theme.
+- **Integration layer (`packages/coding-agent/src/ui/**`, `src/modes/**`)**: the interactive shell, screens, tool presenters, and the controllers that mount extension/custom-tool views, wire keybindings/theme, and restore the composer.
 
 ## Runtime behavior by mode
 
 | Mode                | `ctx.ui.custom(...)` availability | Notes                                                                                                                          |
 | ------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Interactive TUI     | Supported                         | Component is mounted in the editor area or overlay, focused, and must call `done(result)` to resolve.                          |
+| Interactive TUI     | Supported                         | View is shown in place of the composer or as an overlay, focused, and must call `done(result)` to resolve.                     |
 | Background/headless | Not interactive                   | UI context is no-op (`hasUI === false`).                                                                                       |
 | RPC mode            | Not mounted                       | `custom()` is implemented as unsupported UI and returns `undefined as never`; do not depend on interactive UI in RPC handlers. |
 
@@ -22,9 +22,10 @@ If your extension/tool can run headless, guard with `ctx.hasUI` / `pi.hasUI`. RP
 ## Project-local TUI debug tool
 
 `.omp/tools/tui.ts` provides the repository's `tui` debug tool. `start` accepts
-either a TypeScript/JavaScript `file` (run with Bun) or an executable `bin` with
-separate `args`. Windows uses native ConPTY without requiring a POSIX shell;
-macOS/Linux use Bun's PTY.
+either a TypeScript/JavaScript `file` (run with Bun; under the compiled `omp`
+binary, the `bun` on `PATH`) or an executable `bin` with separate `args`.
+Windows uses native ConPTY without requiring a POSIX shell; macOS/Linux use
+Bun's PTY.
 The debug connection uses a Windows named pipe or a POSIX Unix socket.
 On Windows, `start` and `resize` use the native `normalizePtyDimensions(cols, rows)`
 helper, which returns integer dimensions clamped to 20–400 columns and 5–200 rows.
@@ -32,7 +33,29 @@ The PTY, emulated screen, and reported size use the same effective dimensions.
 
 `screen`, `send`, `resize`, and `stop` also work for programs without an
 `OMP_TUI_DEBUG` server. Renderer queries (`info`, `tree`, `values`, and `frame`)
-require an omp/pi-tui host.
+require an omp/pi-ui host: `startHost` (`packages/tui/src/host.ts`) lazily loads
+the server in `packages/tui/src/debug/server.ts` when `OMP_TUI_DEBUG` is set.
+`packages/tui/examples/debug-demo.tsx` is a minimal host to try them on.
+
+The server answers one JSON object per line:
+
+| Op | Answer |
+| --- | --- |
+| `text` | `lines` on screen in the last presented frame (the fullscreen layer's rows on the alternate screen), `window_top` (history rows above the viewport), `alt_screen`, `cursor` (`{x, y, visible}`, absent when hidden). `no frame painted yet` before the first frame. |
+| `frame` | `lines`: every history row the terminal acknowledged writing, then the screen rows. |
+| `tree` | `root`: a `surface` node holding `main` and `dock` region nodes; `overlays`: one entry per `layer` node with `band` (its `anchor`/`size`) and `hidden`. Nodes carry `kind`, `id` (the node key), `hidden`, `focused`, and `focusable` (the terminal renderer routes keys to the kind's widget). |
+| `values` | For each node with a terminal widget, and the focused node: its wire props (without `term` and function props) and widget state, keyed `kind#key` or `kind[region:index.index…]`. |
+| `info` | `columns`, `rows`, `pid`, `native`, `overlays` (layer nodes), `focused` (kind), `focus` (`region:keypath`), `alt_screen`, `cursor`. |
+| `doc` | `doc`: each region described as its native (TSP) tree (`describeTree`), plus the focus keypath. Served in both renderers. |
+| `tsp` | `native`, and `frames`: the last TSP frames a native surface sent (64 kept; `n` limits). |
+| `keys`, `bytes`, `paste`, `mouse` | Inject input: chords and literals are encoded as terminal bytes, decoded by the driver's input decoder, and delivered to the driver's input listeners, so interceptors, focus routing, and `onKey` see them as real input. `paste` delivers one paste event. |
+| `quit` | Answers, stops the host, exits 0. |
+
+There are no component rects: overlay `band`s are the layer node's
+`anchor`/`size` props, `values` reports props and widget state, and `doc`
+describes the live surface. A native (Tern) surface has no
+terminal frames: `text` and `frame` answer `native surface: the terminal
+renders it`; use `doc`, `tsp`, `tree`, and `values` there.
 
 `send` accepts literal text and `\e`, `\r`, `\n`, `\t`, and `\xNN` escapes.
 On Windows, each payload must contain complete, valid UTF-8; invalid or truncated
@@ -46,90 +69,62 @@ Native PTY API changes require rebuilding the addon with
 Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`. CI runs
 them on Linux only; the Windows-specific cases run only on a local Windows host.
 
-## Core component contract (`@oh-my-pi/pi-tui`)
+## Component model (`@oh-my-pi/pi-tui`)
 
-`packages/tui/src/tui.ts` defines:
+- **Signals** (`packages/tui/src/reactive.ts`): `signal`, `computed`, `effect`, `batch`, `untrack`, `onCleanup`, contexts. Synchronous and glitch-free.
+- **JSX without a compiler** (`jsx-runtime.ts`, `element.ts`): start a `.tsx` file with `/** @jsxImportSource @oh-my-pi/pi-tui */`. Function components run once; a function passed as a prop or child is reactive. Control flow: `Show`, `For`, `Index`, `Switch`/`Match`, `Dynamic` (`flow.ts`).
+- **Nodes** (`node.ts`): lowercase tags create retained `UiNode`s. Their kinds are the TSP wire kinds (`col`, `row`, `text`, `md`, `code`, `card`, `spinner`, `list`, `picker`, `editor`, …) plus the terminal-only `canvas`. A node has reactive props, children, a `key`, and handlers (`onSelect`, `onActivate`, `onAction`, `onChange`, `onEdit`, `onSend`, `onKey`, `onPaste`, …).
+- **Surface** (`surface.ts`): `createSurface(template)` builds three regions: `main` (the transcript flow; `settle(node)` marks a block final so the terminal backend writes it to scrollback once), `dock` (live chrome such as the composer), and `layer` (overlays; fullscreen layers use the alternate screen). The surface owns keyboard focus.
+- **Host** (`host.ts`): `startHost({ surface, theme, onKey, intercept, … })` renders the surface natively when the terminal speaks TSP (Tern), and with the terminal backend everywhere else.
 
-```ts
-export interface Component {
-  render(width: number): readonly string[];
-  handleInput?(data: string): void;
-  wantsKeyRelease?: boolean;
-  invalidate?(): void;
-  releaseRenderCaches?(): void;
-  setIgnoreTight?(ignore: boolean): any;
-  dispose?(): void;
-}
-```
+### Terminal backend: painters, roles, widgets
 
-Render results are component-owned and immutable to callers. An unchanged component may (and should) return the **same array reference** it returned last time; it must return a new array whenever content changes. Reference equality enables container memoization and stable-prefix work avoidance. A component that mutates a previously returned array in place must also implement `RenderStablePrefix` and report how many leading rows survived unchanged.
+- **Painters** (`packages/tui/src/term/paint.ts`, `term/painters/*`): `definePainter(kind, painter)` registers `paint(node, cx) → Block` (`rows`, optional cursor, hit rects, images). Blocks are cached per node by width and the signals they read.
+- **Roles**: `defineRolePainter(kind, role, painter)` overrides a kind's look for nodes whose `role` prop matches; coding-agent uses this for screens that keep a specific look (`packages/coding-agent/src/ui/styles/**`).
+- **Widgets** (`term/widgets.ts`, `term/widgets/*`): `defineWidget(kind, widget)` / `defineRoleWidget` give focusable kinds their `key`, `paste` and `mouse` behaviour. A widget emits the same events a Tern terminal sends (an `editor` edit, a `picker` select/activate, a `button` action).
 
-`releaseRenderCaches()` drops only derived rows, parsing, and formatting state. The next `render()` must reproduce the same rows from retained source state. Do not rebuild eagerly, invoke renderer callbacks, convert images, or replace or dispose children in this hook. The transcript calls it after retirement or replay batches are acknowledged, or immediately when replay has no rows to acknowledge. Semantic full renders and resized tails release committed caches after producing their rows. Tool cards can use `ToolCardOptions.onReleaseRenderCaches` to drop builder-owned memos, and `releaseRenderedStringCache()` clears a `RenderedStringCache` used for formatted strings.
-
-`Focusable` is separate:
-
-```ts
-export interface Focusable {
-  focused: boolean;
-  setUseTerminalCursor?(useTerminalCursor: boolean): void;
-}
-```
-
-Cursor behavior uses `CURSOR_MARKER` (not `getCursorPosition`). Focused components emit the marker in rendered text; `TUI` extracts it and positions the hardware cursor.
-
-Fullscreen overlays opt into the shared hardware cursor only when the user's hardware-cursor preference is enabled and the focused component implements `setUseTerminalCursor`. The focus target must be the top overlay itself or a child it owns via `OverlayFocusOwner.ownsOverlayFocusTarget`; wrappers must forward focus and cursor mode to their input. Emit `CURSOR_MARKER` at the caret without replacing the underlying glyph. With the preference disabled, keep the software cursor; losing focus or removing the marker hides the hardware cursor.
+Coding-agent wraps the surface in `Shell` (`packages/coding-agent/src/ui/shell/shell.ts`): controllers append transcript blocks (`shell.transcript`), fill dock slots (`shell.dock`) and open overlays; they never build regions themselves.
 
 ## Rendering constraints (terminal safety)
 
-Your `render(width)` output must be terminal-safe:
+Nodes are laid out and painted by pi-tui; you only manage width yourself in a rows object (`{ render(width): string[] }`, drawn as a `canvas` node):
 
-1. **Do not intentionally exceed `width` on any line**. The renderer truncates overwide non-image lines as a last-resort guard, but components should still return width-safe output.
-2. **Measure visual width**, not string length: use `visibleWidth()`.
-3. **Truncate/wrap ANSI-aware text** with `truncateToWidth()` / `wrapTextWithAnsi()`.
-4. **Sanitize tabs/content** from external sources using `replaceTabs()` (and higher-level sanitizers in coding-agent render paths).
+1. Rows wider than `width` are cut; return width-safe rows anyway.
+2. **Measure visual width**, not string length: `visibleWidth()`.
+3. **Truncate/wrap ANSI-aware text** with `truncate()` / `wrap()`.
+4. **Sanitize tabs** from external content with `replaceTabs()`.
 
-Minimal pattern:
+All four come from `@oh-my-pi/pi-tui/text/width`.
 
 ```ts
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { replaceTabs, truncate } from "@oh-my-pi/pi-tui/text/width";
 
-render(width: number): readonly string[] {
-  return this.lines.map(line => truncateToWidth(replaceTabs(line), width));
-}
+const rows = { render: (width: number) => lines.map(line => truncate(replaceTabs(line), width)) };
 ```
 
 ## Input handling and keybindings
 
-### Raw key matching
+### Keys
 
-Use `matchesKey(data, "...")` for navigation keys and combos.
+In the terminal backend a key is offered to `onKey(key)` handlers from the focused node up the focus path (return `true` to stop it), then to the focused kind's widget (an `editor` turns it into `edit` events), then to the host's global `onKey`. `KeyEvent.id` is canonical (`ctrl+c`, `shift+enter`, `up`, `a`); `kind` is `press`, `repeat` or `release`. A rows object in `ctx.ui.custom` receives raw input in `handleInput(data)` instead.
 
 ### Match app keybinding actions
 
 Extension UI factories receive a `KeybindingsManager` (interactive mode; an in-memory instance carrying the default bindings, not the user's `keybindings.yml`) so you can match action ids instead of hardcoding keys:
 
 ```ts
-if (keybindings.matches(data, "app.interrupt")) {
-  done(undefined);
-  return;
-}
+<col onKey={key => (keybindings.matches(key, "app.interrupt") ? (done(undefined), true) : false)}>…</col>
 ```
 
-### Key release/repeat events
+### Built-in widgets follow the keymap
 
-Key release events are filtered unless your component sets:
-
-```ts
-wantsKeyRelease = true;
-```
-
-Then use `isKeyRelease()` / `isKeyRepeat()` if needed.
+pi-tui's terminal widgets (`picker`, `prefs`, `menu`, `button`/`buttons`, `editor`/`input`) read their keys from a widget keymap instead of fixed key ids: `select.up`/`down`/`pageUp`/`pageDown`/`confirm`/`cancel` and the `editor.*` motions and edits (`@oh-my-pi/pi-tui/term/keymap`). omp fills it from the user's `tui.select.*`, `tui.editor.*` and `tui.input.newLine` bindings when the keymap loads or reloads (`setWidgetKeymap`), so a list or text field in your UI honours remaps without matching keys itself. A picker action keyed `esc` (or `enter`) also runs on the other `select.cancel` (`select.confirm`) keys.
 
 ## Focus, overlays, and cursor
 
-- `TUI.setFocus(component)` routes input to that component.
-- Overlay APIs exist in `TUI` (`showOverlay`, `OverlayHandle`). In interactive extension/custom UI, `custom(..., { overlay: true })` mounts your component through `TUI.showOverlay(...)`; without `overlay`, it replaces the editor component area directly.
-- By default, overlay custom UI is anchored at `bottom-center` with full terminal width/max height. `overlayOptions` can override positioning and sizing; `onHandle` receives the `OverlayHandle`. The overlay is removed when `done(...)` closes the flow.
+- The surface tracks one focused node; both backends draw the caret/focus ring there and route keys to it.
+- `ctx.ui.custom(factory)` without options shows the view in place of the composer; `{ overlay: true }` draws it over the transcript, `fullscreen: true` on the alternate screen. `onHandle` receives `{ closed, close() }`.
+- An `editor`/`input` node places the terminal cursor itself; rows objects have no cursor.
 
 ### Built-in full-screen surfaces
 
@@ -142,173 +137,102 @@ The coding-agent integration also mounts built-in full-screen surfaces outside `
 Current signature (`extensibility/extensions/types.ts`):
 
 ```ts
-custom<T>(
-  factory: (
-    tui: TUI,
-    theme: Theme,
-    keybindings: KeybindingsManager,
-    done: (result: T) => void,
-  ) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-  options?: ExtensionCustomOptions,
-): Promise<T>
+custom<T>(factory: ExtensionCustomFactory<T>, options?: ExtensionCustomOptions): Promise<T>
+
+type ExtensionCustomFactory<T> = (
+  ui: ExtensionUiHost, // requestRender(), size(), suspend(run)
+  theme: ExtensionTheme,
+  keybindings: KeybindingsManager,
+  done: (result: T) => void,
+) => ExtensionRender | Promise<ExtensionRender>;
 ```
+
+`ExtensionRender` (`extensibility/extensions/render-types.ts`) is pi-tui nodes or a rows object (`render(width)`, optional `handleInput(data)`, `dispose()`).
 
 Behavior in interactive mode (`extension-ui-controller.ts`):
 
-- Saves editor text.
-- Without `options.overlay`, replaces the editor component with your component.
-- With `options.overlay`, mounts your component as an overlay instead of replacing the editor; `overlayOptions` accepts static options or a function evaluated when mounting.
-- `options.onHandle` receives the mounted overlay handle.
-- `options.signal` aborts the flow and rejects its promise with the signal's reason (or `AbortError`); a component returned after cancellation is disposed rather than mounted.
-- Focuses your component.
-- On `done(result)`: calls `component.dispose?.()`, hides the overlay if present, restores editor + text for non-overlay flows, focuses editor, resolves promise.
+- Saves composer text.
+- Without `options.overlay`, shows your view in place of the composer; with it, as an overlay (`fullscreen` for the alternate screen).
+- `options.onHandle` receives the overlay handle.
+- `options.signal` aborts the flow and rejects its promise with the signal's reason (or `AbortError`); a view returned after cancellation is disposed rather than mounted.
+- Focuses your view: a node root takes focus (handle keys with `onKey`); a rows object gets raw input in `handleInput`.
+- On `done(result)`: disposes the view, closes the overlay if present, restores the composer and its text, resolves the promise.
   Call `done(...)` to complete successfully; factory failures and signal cancellation reject the promise.
 
 ## 2) Hook/custom-tool UI context (`HookUIContext`)
 
-Current signature (`extensibility/hooks/types.ts`) matches the interactive
-controller and `ExtensionUIContext.custom`:
-
-```ts
-custom<T>(
-  factory: (
-    tui: TUI,
-    theme: Theme,
-    keybindings: KeybindingsManager,
-    done: (result: T) => void,
-  ) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-): Promise<T>
-```
-
-Use the fourth argument as `done`. The third argument is a `KeybindingsManager`
-(interactive mode uses an in-memory instance with the default bindings). Guard
-terminal-only UI with `pi.hasUI` when the hook may also run headless.
+`custom(factory)` in `extensibility/hooks/types.ts` takes the same factory as
+`ExtensionUIContext.custom` (no options). Guard terminal-only UI with
+`pi.hasUI` when the hook may also run headless.
 
 ## 3) Custom tool call/result renderers
 
-Custom tools and extension tools can return components from:
+Custom tools and extension tools can return an `ExtensionRender` from:
 
 - `renderCall(args, options, theme)`
 - `renderResult(result, options, theme, args?)`
 
-`options` currently includes:
+`options` (`RenderResultOptions`, `tools/details/renderer.ts`) includes `expanded`, `isPartial`, `spinnerFrame?`, and call-state flags such as `argsComplete`.
 
-- `expanded: boolean`
-- `isPartial: boolean`
-- `spinnerFrame?: number`
-
-For `renderCall`, the `options` argument also answers the `Theme` API (`fg`,
-`bold`, `symbol`, …), so renderers ported from upstream pi — declared
-`renderCall(args, theme, context)` — keep working unchanged.
-
-These renderers are mounted by `ToolExecutionComponent`.
-
-On Tern Surface Protocol terminals, tools may additionally supply `describeCall(args, options)` and `describeResult(result, options, args?)`, returning a semantic `NativeToolView` or `undefined`. Custom components can implement `describe(cx)` and `handleNativeEvent(event)`; otherwise the native backend falls back to their rendered rows. See [the core renderer contract](./tui-core-renderer.md#native-rendering-tern-surface-protocol).
+`packages/coding-agent/src/ui/tools/legacy.ts` runs these hooks and draws their parts inside the custom-tool box. Nodes are drawn by the terminal and by Tern; rows objects by the terminal only (Tern keeps the generic tool card). See [Rendering extension points](./extensions.md#rendering-extension-points).
 
 ## Lifecycle and cancellation
 
-- `dispose()` is optional at type level but should be implemented when you own timers, subprocesses, watchers, sockets, or overlays. It must be idempotent: containers propagate disposal, and reset/removal paths may converge.
-- `done(...)` should be called exactly once from your component flow.
-- For cancellable long-running UI, pair `CancellableLoader` with `AbortSignal` and call `done(...)` from `onAbort`.
+- Nodes are disposed with the view; register teardown for timers, subprocesses, watchers or sockets with `onCleanup` inside the view, or `dispose()` on a rows object. Teardown must be idempotent.
+- `done(...)` should be called exactly once from your view.
+- For cancellable long-running UI, pass an `AbortSignal` through `options.signal` or call `done(undefined)` from your own cancel key.
 
-Example cancellation pattern:
+## Pause status
 
-```ts
-const loader = new CancellableLoader(
-  tui,
-  text => theme.fg("accent", text),
-  text => theme.fg("muted", text),
-  "Working...",
-);
-loader.onAbort = () => done(undefined);
-void doWork(loader.signal).then(result => {
-  if (!loader.aborted) done(result);
-});
-return loader;
-```
+The `/pause` screen shows the same local turn-and-job state in ANSI and TSP: draining turns and running jobs count, while parked or finished turns do not. When both counts reach zero, it hides the rows and signals readiness. These counts cover OMP-tracked work only, not device-wide idleness.
 
-## Realistic custom component example (extension command)
+## Realistic custom view example (extension command)
 
-```ts
-import type { Component } from "@oh-my-pi/pi-tui";
-import {
-  SelectList,
-  matchesKey,
-  replaceTabs,
-  truncateToWidth,
-} from "@oh-my-pi/pi-tui";
-import {
-  getSelectListTheme,
-  type ExtensionAPI,
-} from "@oh-my-pi/pi-coding-agent";
-
-class Picker implements Component {
-  list: SelectList;
-  keybindings: any;
-  done: (value: string | undefined) => void;
-
-  constructor(
-    items: Array<{ value: string; label: string }>,
-    keybindings: any,
-    done: (value: string | undefined) => void,
-  ) {
-    this.list = new SelectList(items, 8, getSelectListTheme());
-    this.keybindings = keybindings;
-    this.done = done;
-    this.list.onSelect = (item) => this.done(item.value);
-    this.list.onCancel = () => this.done(undefined);
-  }
-
-  handleInput(data: string): void {
-    if (this.keybindings.matches(data, "app.interrupt")) {
-      this.done(undefined);
-      return;
-    }
-    this.list.handleInput(data);
-  }
-
-  render(width: number): readonly string[] {
-    return this.list
-      .render(width)
-      .map((line) => truncateToWidth(replaceTabs(line), width));
-  }
-
-  invalidate(): void {
-    this.list.invalidate();
-  }
-}
+```tsx
+/** @jsxImportSource @oh-my-pi/pi-tui */
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { signal } from "@oh-my-pi/pi-tui";
 
 export default function extension(pi: ExtensionAPI): void {
-  pi.registerCommand("pick-model", {
-    description: "Pick a model profile",
-    handler: async (_args, ctx) => {
-      if (!ctx.hasUI) return;
+	pi.registerCommand("pick-model", {
+		description: "Pick a model profile",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) return;
 
-      const selected = await ctx.ui.custom<string | undefined>(
-        (tui, theme, keybindings, done) => {
-          const items = [
-            { value: "fast", label: theme.fg("accent", "Fast") },
-            { value: "balanced", label: "Balanced" },
-            { value: "quality", label: "Quality" },
-          ];
-          return new Picker(items, keybindings, done);
-        },
-      );
+			const cursor = signal("fast");
+			const selected = await ctx.ui.custom<string | undefined>((_ui, _theme, keybindings, done) => (
+				<picker
+					items={[
+						{ id: "fast", label: "Fast" },
+						{ id: "balanced", label: "Balanced" },
+						{ id: "quality", label: "Quality" },
+					]}
+					selected={cursor}
+					onSelect={id => cursor.set(id)}
+					onActivate={id => done(id)}
+					onKey={key => (keybindings.matches(key, "app.interrupt") ? (done(undefined), true) : false)}
+				/>
+			));
 
-      if (selected) ctx.ui.notify(`Selected profile: ${selected}`, "info");
-    },
-  });
+			if (selected) ctx.ui.notify(`Selected profile: ${selected}`, "info");
+		},
+	});
 }
 ```
 
 ## Key implementation files
 
-- `packages/tui/src/tui.ts` — `Component`, `Focusable`, cursor marker, focus, overlay, input dispatch.
-- `packages/tui/src/utils.ts` — width/truncation/sanitization primitives.
-- `packages/tui/src/keys.ts` / `keybindings.ts` — key parsing and base TUI action mapping; `app-keybindings.ts` adds coding-agent actions and disk loading.
+- `packages/tui/src/reactive.ts`, `element.ts`, `flow.ts`, `node.ts` — signals, JSX, control flow, the node model.
+- `packages/tui/src/surface.ts` / `host.ts` — regions, focus, settling; native vs terminal rendering.
+- `packages/tui/src/term/paint.ts`, `term/painters/*`, `term/widgets.ts`, `term/widgets/*`, `term/keymap.ts` — painters, roles, widgets, widget keymap.
+- `packages/tui/src/driver/input/*` — terminal input decoding (`keys.ts`: key ids).
+- `packages/tui/src/text/width.ts` — width/truncation/wrapping/tab primitives.
+- `packages/coding-agent/src/config/keybindings/keybindings.ts` / `app-keybindings.ts` — action mapping, disk loading, widget keymap fill.
+- `packages/coding-agent/src/ui/shell/*` — the interactive shell (transcript, dock, overlays).
 - `packages/coding-agent/src/modes/controllers/extension-ui-controller.ts` — interactive mounting/unmounting for extension/hook/custom-tool UI.
-- `packages/coding-agent/src/extensibility/extensions/types.ts` — extension UI and renderer contracts.
+- `packages/coding-agent/src/ui/extensions/render-output.tsx` — turning an `ExtensionRender` into nodes (rows → `canvas`).
+- `packages/coding-agent/src/extensibility/extensions/types.ts`, `render-types.ts` — extension UI and renderer contracts.
 - `packages/coding-agent/src/extensibility/hooks/types.ts` — hook UI contract.
 - `packages/coding-agent/src/extensibility/custom-tools/types.ts` — custom tool execute/render contracts.
-- `packages/tui/src/chat/tool-execution.ts` — mounting `renderCall`/`renderResult` components and partial-state options.
+- `packages/coding-agent/src/ui/tools/legacy.ts` — running `renderCall`/`renderResult` hooks.
 - `packages/coding-agent/src/tools/context.ts` — tool UI context propagation (`hasUI`, `ui`).

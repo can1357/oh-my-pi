@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
+import type { Api, Model, ModelSpec, Provider, Usage } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
@@ -50,6 +51,18 @@ function buildGenerated<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const first = specs[0];
 	if (!first) throw new Error("policy pass dropped the spec");
 	return buildModel(first as ModelSpec<TApi>);
+}
+
+function pricedUsage(model: Model<Api>, input: number, cacheRead: number): Usage["cost"] {
+	const usage: Usage = {
+		input,
+		output: 10_000,
+		cacheRead,
+		cacheWrite: 0,
+		totalTokens: input + cacheRead + 10_000,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	return calculateCost(model, usage);
 }
 
 describe("generated model policies", () => {
@@ -214,9 +227,9 @@ describe("generated model policies", () => {
 			expect(model.compat).toMatchObject({ reasoningDisableMode: "none-effort" });
 			expect(model.cost.longContext?.inputThreshold).toBe(272_000);
 		}
-		expect(models[0]?.cost.longContext).toMatchObject({ input: 10, output: 45 });
+		expect(models[0]?.cost.longContext).toMatchObject({ input: 8, output: 30 });
 		expect(models[1]?.cost.longContext).toMatchObject({ input: 0.4, output: 1.8 });
-		expect(models[2]?.cost.longContext).toMatchObject({ input: 10, output: 45 });
+		expect(models[2]?.cost.longContext).toMatchObject({ input: 8, output: 30 });
 		expect(models[3]?.cost.longContext).toMatchObject({ input: 4, output: 18 });
 		expect(models[4]?.compat).not.toMatchObject({ reasoningDisableMode: "none-effort" });
 		expect(models[4]?.cost.longContext).toBeUndefined();
@@ -270,7 +283,14 @@ describe("generated model policies", () => {
 			createSpec({ id: "gpt-5.6-sol", api: "openai-completions", provider: "openrouter" }),
 		].map(model => buildGenerated(model));
 
-		expect(models[0]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 10, output: 45 });
+		// Sol's $4/$20 card at 2x input/cache and 1.5x output (#16742).
+		expect(models[0]?.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
 		expect(models[1]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 0.4, output: 1.8 });
 		expect(models[2]?.cost.longContext).toBeUndefined();
 	});
@@ -293,6 +313,36 @@ describe("generated model policies", () => {
 		expect(models[1]?.cost.longContext).toBeUndefined();
 		expect(models[1]?.cost).toMatchObject({ cacheWrite: 0 });
 		expect(models[2]?.cost.longContext).toBeUndefined();
+	});
+
+	it("prices GPT-6 Sol and Luna API requests above 272K without charging Codex subscriptions", () => {
+		for (const [id, shortInput, longInput, longOutput, longRead] of [
+			["gpt-6-sol", 2, 4, 15, 0.4],
+			["gpt-6-luna", 0.1, 0.2, 0.75, 0.02],
+		] as const) {
+			const api = buildGenerated(
+				createSpec({
+					id,
+					api: "openai-responses",
+					provider: "openai",
+					cost: {
+						input: shortInput,
+						output: longOutput / 1.5,
+						cacheRead: longRead / 2,
+						cacheWrite: shortInput * 1.25,
+					},
+				}),
+			);
+			const codex = buildGenerated(createSpec({ id, api: "openai-codex-responses", provider: "openai-codex" }));
+			const at = pricedUsage(api, 72_000, 200_000);
+			const over = pricedUsage(api, 72_001, 200_000);
+			expect(at.input).toBeCloseTo((shortInput * 72_000) / 1e6);
+			expect(over.input).toBeCloseTo((longInput * 72_001) / 1e6);
+			expect(over.output).toBeCloseTo((longOutput * 10_000) / 1e6);
+			expect(over.cacheRead).toBeCloseTo((longRead * 200_000) / 1e6);
+			expect(api.cost.longContext?.cacheWrite).toBe(shortInput * 2.5);
+			expect(pricedUsage(codex, 72_001, 200_000).input).toBeCloseTo((shortInput * 72_001) / 1e6);
+		}
 	});
 
 	it("pins Claude Mythos 5 first-party Anthropic catalog metadata", () => {
@@ -627,6 +677,25 @@ describe("generated model policies", () => {
 		expect(models[3]?.maxTokens).toBe(128_000);
 	});
 
+	it("prices MiniMax-M3's whole request at the doubled standard rate above 512K on its own hosts", () => {
+		for (const provider of ["minimax", "minimax-cn", "minimax-code", "minimax-code-cn"] as const) {
+			const model = buildGenerated(
+				createSpec({
+					id: "MiniMax-M3",
+					api: "anthropic-messages",
+					provider,
+					cost: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+				}),
+			);
+			const at = pricedUsage(model, 312_000, 200_000);
+			const over = pricedUsage(model, 312_001, 200_000);
+			expect(at.input).toBeCloseTo((0.3 * 312_000) / 1e6);
+			expect(over.input).toBeCloseTo((0.6 * 312_001) / 1e6);
+			expect(over.output).toBeCloseTo((2.4 * 10_000) / 1e6);
+			expect(over.cacheRead).toBeCloseTo((0.12 * 200_000) / 1e6);
+		}
+	});
+
 	it("normalizes Copilot generated fallback limits", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({
@@ -913,73 +982,6 @@ describe("applyOllamaCloudOutputCap", () => {
 });
 
 describe("applyPricingPeerFallback", () => {
-	it("prices Gemini ids at Google API peers and Claude ids at Vertex, falling back to Anthropic", () => {
-		const googleCost = { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 };
-		const previewCost = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
-		const vertexCost = { input: 6, output: 30, cacheRead: 0.6, cacheWrite: 7.5 };
-		const anthropicCost = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
-		const models: ModelSpec<Api>[] = [
-			createSpec({ id: "gemini-3.5-flash", api: "google-generative-ai", provider: "google", cost: googleCost }),
-			createSpec({
-				id: "gemini-3.1-pro-preview",
-				api: "google-generative-ai",
-				provider: "google",
-				cost: previewCost,
-			}),
-			createSpec({
-				id: "claude-opus-4-6@default",
-				api: "anthropic-messages",
-				provider: "google-vertex",
-				cost: vertexCost,
-			}),
-			createSpec({ id: "claude-opus-4-6", api: "anthropic-messages", provider: "anthropic", cost: anthropicCost }),
-			createSpec({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "anthropic", cost: anthropicCost }),
-			createSpec({ id: "gemini-3.5-flash", api: "google-gemini-cli", provider: "google-antigravity" }),
-			createSpec({ id: "gemini-3.1-pro", api: "google-gemini-cli", provider: "google-antigravity" }),
-			createSpec({ id: "claude-opus-4-6", api: "google-gemini-cli", provider: "google-antigravity" }),
-			createSpec({ id: "claude-sonnet-4-6", api: "google-gemini-cli", provider: "google-antigravity" }),
-		];
-
-		const result = applyPricingPeerFallback(models);
-
-		expect(result[5]?.cost).toEqual(googleCost);
-		expect(result[6]?.cost).toEqual(previewCost);
-		// Vertex list price wins over Anthropic for aliased Claude ids.
-		expect(result[7]?.cost).toEqual(vertexCost);
-		// Dangling Vertex alias (no google-vertex row) falls back to Anthropic.
-		expect(result[8]?.cost).toEqual(anthropicCost);
-	});
-
-	it("keeps zero cost for ids without a priced peer and never overwrites billable antigravity cost", () => {
-		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-		const pricedCost = { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 };
-		const models: ModelSpec<Api>[] = [
-			createSpec({ id: "gemini-3-flash-preview", api: "google-generative-ai", provider: "google", cost: zeroCost }),
-			createSpec({ id: "tab_flash_lite_preview", api: "google-gemini-cli", provider: "google-antigravity" }),
-			createSpec({ id: "gemini-3-flash", api: "google-gemini-cli", provider: "google-antigravity" }),
-			createSpec({
-				id: "gemini-3.6-flash",
-				api: "google-gemini-cli",
-				provider: "google-antigravity",
-				cost: pricedCost,
-			}),
-			createSpec({
-				id: "gemini-3.6-flash",
-				api: "google-generative-ai",
-				provider: "google",
-				cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 },
-			}),
-		];
-
-		const result = applyPricingPeerFallback(models);
-
-		// No billable google peer (zero-cost peer is not a pricing source).
-		expect(result[1]?.cost).toEqual(zeroCost);
-		expect(result[2]?.cost).toEqual(zeroCost);
-		// Already-billable antigravity rows keep their own pricing.
-		expect(result[3]?.cost).toEqual(pricedCost);
-	});
-
 	it("prices MiniMax Token Plan rows at pay-as-you-go peers", () => {
 		const m3Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 };
 		const m27Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 };

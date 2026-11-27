@@ -1,6 +1,8 @@
 import { classifyModel } from "./compat/taxonomy";
-import MODELS from "./models.json" with { type: "json" };
-import { dueEffectiveRate } from "./pricing";
+import { modelMatchesHost } from "./hosts";
+import { getCatalogProvider, getCatalogProviders, openModelCatalog } from "./model-catalog-format";
+import modelsData from "./models.json" with { type: "json" };
+import { dueDatedCard, dueEffectiveRate } from "./pricing";
 import type {
 	Api,
 	EffectiveTokenCost,
@@ -21,20 +23,27 @@ import type {
  *
  * For runtime-aware resolution, use `createModelManager()` / `resolveProviderModels()`.
  */
+const catalog = openModelCatalog(modelsData);
+let bundledCatalogHash: string | undefined;
+
+/** Content identity of the generated catalog, independent of which providers have been decoded. */
+export function getBundledCatalogHash(): string {
+	return (bundledCatalogHash ??= Bun.hash(JSON.stringify(modelsData)).toString(36));
+}
+const bundledProviders: readonly KnownProvider[] = Object.freeze(getCatalogProviders(catalog) as KnownProvider[]);
+const bundledProviderSet = new Set<string>(bundledProviders);
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 
 /** Return one provider's bundled models, materialized by the generator. */
 function getProviderModels(provider: string): Map<string, Model<Api>> | undefined {
 	const cachedModels = modelRegistry.get(provider);
 	if (cachedModels !== undefined) return cachedModels;
-	if (!Object.hasOwn(MODELS, provider)) return undefined;
+	const rawModels = getCatalogProvider(catalog, provider);
+	if (!rawModels) return undefined;
 
 	const providerModels = new Map<string, Model<Api>>();
-	const rawModels = MODELS[provider as keyof typeof MODELS];
 	for (const id in rawModels) {
-		// models.json rows are complete Models emitted by generate-models.ts;
-		// consuming them verbatim keeps startup allocation-free.
-		const row = rawModels[id as keyof typeof rawModels] as unknown as Model<Api>;
+		const row = rawModels[id];
 		// Rows baked before the compat engine (and stale cache snapshots) lack
 		// `identity`; classify lazily so consumers can rely on the field.
 		row.identity ??= classifyModel(provider, id, { lenient: true });
@@ -44,31 +53,91 @@ function getProviderModels(provider: string): Map<string, Model<Api>> | undefine
 	return providerModels;
 }
 
-export type GeneratedProvider = keyof typeof MODELS;
+/** Provider identifier accepted by the bundled model registry. */
+export type GeneratedProvider = string;
 
 /** Whether `provider` has bundled rows in models.json (e.g. a provider id authored in KDL). */
 export function isGeneratedProvider(provider: string): provider is GeneratedProvider {
-	return Object.hasOwn(MODELS, provider);
+	return bundledProviderSet.has(provider);
 }
 
+/** Look up a bundled model; nested catalog values are shared and must not be mutated. */
 export function getBundledModel<TApi extends Api = Api>(provider: GeneratedProvider, modelId: string): Model<TApi> {
 	const providerModels = getProviderModels(provider);
 	return providerModels?.get(modelId) as Model<TApi>;
 }
 
-export function getBundledProviders(): KnownProvider[] {
-	return Object.keys(MODELS) as KnownProvider[];
+/** List providers with bundled rows; the array is shared and frozen. */
+export function getBundledProviders(): readonly KnownProvider[] {
+	return bundledProviders;
 }
 
+/** List a provider's bundled models; nested catalog values are shared and must not be mutated. */
 export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
+
+const bundledSlices = new Map<string, readonly Model<Api>[]>();
+const sharedSlices = new WeakSet<object>();
+const emptySlice: readonly Model<Api>[] = Object.freeze([]);
+
+/** Stable read-only view for consumers that reuse a bundled provider's content identity. */
+export function getBundledModelSlice(provider: GeneratedProvider): readonly Model<Api>[] {
+	const cached = bundledSlices.get(provider);
+	if (cached) return cached;
+	const models = getProviderModels(provider);
+	if (!models) return emptySlice;
+	const slice = Object.freeze(Array.from(models.values()));
+	bundledSlices.set(provider, slice);
+	sharedSlices.add(slice);
+	return slice;
+}
+
+/** Only catalog-owned slices have immutable membership and shared read-only rows. */
+export function isBundledModelSlice(models: readonly unknown[]): boolean {
+	return sharedSlices.has(models);
+}
+
 /** Resolve display semantics without mistaking an absent rate card for a free model. */
 export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingStatus">): ModelPricingStatus {
 	const cost = getEffectiveTokenCost(model.cost);
 	if (cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0) return "fixed";
 	return model.pricingStatus ?? "unknown";
+}
+
+/** Factory Droid credit rate in force at a time, and the next dated change to it. */
+export interface FactoryDroidCreditRate {
+	rate: number;
+	/** The earliest later `credit-rates` card that changes `rate`: the rate it sets and when (Unix ms). */
+	next?: { rate: number; at: number };
+}
+
+/**
+ * Factory Droid Standard Credits rate at `timestamp` (Unix ms, default now):
+ * the `input` of the `credit-rates` card due then (the latest at or before
+ * it, as for cost cards), else the base rate. Undefined for models without a
+ * credit rate.
+ */
+export function getFactoryDroidCreditRate(
+	model: Pick<Model, "factoryDroidCredits" | "factoryDroidCreditCards">,
+	at?: number,
+): FactoryDroidCreditRate | undefined {
+	const base = model.factoryDroidCredits;
+	if (base === undefined) return undefined;
+	const cards = model.factoryDroidCreditCards ?? [];
+	// The clock only matters with dated cards: rows without any skip reading it.
+	if (cards.length === 0) return { rate: base };
+	const timestamp = at ?? Date.now();
+	const rate = dueDatedCard(cards, timestamp)?.input ?? base;
+	let next: FactoryDroidCreditRate["next"];
+	for (const card of cards) {
+		const cardRate = card.input ?? base;
+		if (card.effectiveFrom > timestamp && cardRate !== rate && !(next && next.at <= card.effectiveFrom)) {
+			next = { rate: cardRate, at: card.effectiveFrom };
+		}
+	}
+	return next ? { rate, next } : { rate };
 }
 
 /**
@@ -78,8 +147,9 @@ export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingS
  * when the row was built while bundles, caches, and long sessions outlive it.
  * Applies no long-context tier or peak/off-peak multiplier.
  */
-export function getEffectiveTokenCost(cost: ModelCost, timestamp = Date.now()): TokenCost {
-	return resolveTokenCost(cost, 0, timestamp);
+export function getEffectiveTokenCost(cost: ModelCost, timestamp?: number): TokenCost {
+	// Only dated rate cards depend on the time: rows without any skip reading the clock.
+	return resolveTokenCost(cost, 0, cost.timeBased?.effectiveRates?.length ? (timestamp ?? Date.now()) : timestamp);
 }
 
 function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {
@@ -220,4 +290,35 @@ export function modelsAreEqual<TApi extends Api>(
 ): boolean {
 	if (!a || !b) return false;
 	return a.id === b.id && a.provider === b.provider;
+}
+
+function singleRoutingOnly(routing: unknown): string | undefined {
+	if (!routing || typeof routing !== "object" || !("only" in routing) || !Array.isArray(routing.only)) {
+		return undefined;
+	}
+	if (routing.only.length !== 1) return undefined;
+	const upstream = routing.only[0];
+	return typeof upstream === "string" && upstream ? upstream : undefined;
+}
+
+/**
+ * The single upstream an aggregator model (OpenRouter, Vercel AI Gateway) is pinned to.
+ * Undefined when the model is unpinned or routed across several upstreams.
+ */
+export function getUpstreamPin(model: Model<Api>): string | undefined {
+	const compat = model.compat;
+	if (!compat || typeof compat !== "object") return undefined;
+	if (modelMatchesHost(model, "vercelAIGateway") && "vercelGatewayRouting" in compat) {
+		return singleRoutingOnly(compat.vercelGatewayRouting);
+	}
+	if (modelMatchesHost(model, "openrouter") && "openRouterRouting" in compat) {
+		return singleRoutingOnly(compat.openRouterRouting);
+	}
+	return undefined;
+}
+
+/** {@link modelsAreEqual} that also tells apart one model pinned to different upstreams. */
+export function routedModelsAreEqual(a: Model<Api> | null | undefined, b: Model<Api> | null | undefined): boolean {
+	if (!a || !b) return false;
+	return a === b || (modelsAreEqual(a, b) && getUpstreamPin(a) === getUpstreamPin(b));
 }

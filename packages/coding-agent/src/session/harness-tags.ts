@@ -1,7 +1,7 @@
 /**
- * `<` of a harness tag: `irc` or a `system-*` name (`system-notice`,
- * `system-reminder`, `system-interrupt`, …), opening or closing. The system
- * prompt tells the model these blocks are harness-authored.
+ * `<` of a harness tag: `irc` or a `system-*` name
+ * (`system-notice`, `system-reminder`, `system-interrupt`, …), opening or
+ * closing. The system prompt tells the model these blocks are harness-authored.
  */
 const HARNESS_TAG_START_RE = /<(?=\s*\/?\s*(?:irc|system-[a-z][a-z-]*)(?![\w-]))/gi;
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import {
 	AnthropicMessages,
@@ -10,7 +11,14 @@ import type {
 	ToolSearchToolResultBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { AssistantMessageEvent, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	Model,
+	ModelSpec,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
@@ -150,6 +158,17 @@ function createTextSuccessSseFrames(text: string, preamble: string[] = []): stri
 	return [...preamble, ...createTextSuccessEvents(text).map(event => sseFrame(String(event.type), event))];
 }
 
+/**
+ * A success stream cut before either terminal signal: the content blocks finished
+ * streaming, but no `message_delta` stop_reason and no `message_stop` arrived, so
+ * the envelope is still open when the wire dies.
+ */
+function createOpenMessageSseFrames(text: string): string[] {
+	return createTextSuccessEvents(text)
+		.slice(0, 4)
+		.map(event => sseFrame(String(event.type), event));
+}
+
 function createRejectedMockRequest(error: Error): MockAnthropicRequest {
 	return {
 		async withResponse() {
@@ -169,6 +188,15 @@ function createStrictGrammarTooLargeError(): Error {
 function createOtherInvalidRequestError(): Error {
 	const error = new Error(
 		'400 {"type":"error","error":{"type":"invalid_request_error","message":"Some other validation error."},"request_id":"req_test"}',
+	);
+	(error as Error & { status: number }).status = 400;
+	return error;
+}
+
+function createVertexStructuredOutputsPolicyError(message?: string): Error {
+	const error = new Error(
+		message ??
+			"400 FAILED_PRECONDITION: Organization Policy constraint constraints/vertexai.allowedPartnerModelFeatures violated for `projects/123456789012` attempting to use a disallowed feature structured_outputs for Partner model claude-opus-5-5. Please contact your organization administrator to ask for the feature to be allowed.",
 	);
 	(error as Error & { status: number }).status = 400;
 	return error;
@@ -1391,6 +1419,7 @@ describe("anthropic stream envelope handling", () => {
 				{ status: 400 },
 			),
 		],
+		["a Vertex org-policy denial of structured outputs", createVertexStructuredOutputsPolicyError()],
 	])("retries without strict tools when the endpoint rejects %s", async (_case, rejection) => {
 		const toolContext: Context = {
 			...context,
@@ -1465,6 +1494,27 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(0);
 		expect(strictFlags).toEqual([[true]]);
 		expect(anthropicStrictToolsDisabled(providerSessionState)).toBe(false);
+	});
+
+	it("flags only the Vertex org-policy denial of structured_outputs as a strict-tools rejection", () => {
+		expect(AIError.isGrammarError(createVertexStructuredOutputsPolicyError())).toBe(true);
+		// Another partner feature denied by the same org policy says nothing about `strict`.
+		expect(
+			AIError.isGrammarError(
+				createVertexStructuredOutputsPolicyError(
+					"400 FAILED_PRECONDITION: Organization Policy constraint constraints/vertexai.allowedPartnerModelFeatures violated for `projects/123456789012` attempting to use a disallowed feature web_search for Partner model claude-opus-5-5.",
+				),
+			),
+		).toBe(false);
+		// Both words present but not as the denied feature.
+		expect(
+			AIError.isGrammarError(
+				createVertexStructuredOutputsPolicyError(
+					"400 INVALID_ARGUMENT: disallowed characters in tool name; structured_outputs beta header is malformed.",
+				),
+			),
+		).toBe(false);
+		expect(AIError.isGrammarError(createOtherInvalidRequestError())).toBe(false);
 	});
 
 	it("finalizes a tool call with malformed argument JSON as best-effort content instead of erroring", async () => {
@@ -1623,6 +1673,159 @@ describe("anthropic stream envelope handling", () => {
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "partial" }]);
 	});
 
+	it("reports a transient in-band error frame inside an open message as a stream truncation", async () => {
+		// A gateway or proxy that cuts the upstream stream has no way to send a
+		// terminal frame, so it substitutes an in-band `error` event after the
+		// message already started. The message can never complete: the failure is
+		// stream health, not a completed-turn provider rejection.
+		for (const { error, expectedFields } of [
+			{
+				error: {
+					type: "server_error",
+					code: "upstream_stream_truncated",
+					message: "upstream stream truncated (no completion event)",
+				},
+				expectedFields: "type=server_error code=upstream_stream_truncated",
+			},
+			{
+				error: { type: "overloaded_error", message: "Overloaded" },
+				expectedFields: "type=overloaded_error",
+			},
+		]) {
+			const frames = createOpenMessageSseFrames("Here is the first half");
+			frames.push(sseFrame("error", { type: "error", error }));
+			let created = 0;
+			vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+				created += 1;
+				return createRawSseRequest(frames) as never;
+			});
+
+			const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) {
+				events.push(event);
+			}
+			const result = await stream.result();
+
+			expect(countEvents(events, "done")).toBe(0);
+			expect(countEvents(events, "error")).toBe(1);
+			expect(created).toBe(1);
+			expect(result.stopReason).toBe("error");
+			const errorMessage = result.errorMessage ?? "";
+			expect(errorMessage).toContain("error frame received before message_stop");
+			expect(errorMessage).toContain(expectedFields);
+			expect(AIError.isStreamEnvelopeErrorText(errorMessage)).toBe(true);
+			expect(AIError.isStreamEnvelopeTruncationText(errorMessage)).toBe(true);
+			// No replay of committed text through the provider retry, but the turn
+			// stays continuable instead of ending on an unclassified provider error.
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+			expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "Here is the first half" }]);
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("keeps a deterministic in-band rejection terminal inside an open message", async () => {
+		// The envelope being open says the wire was cut, not that the provider
+		// accepted the request. With nothing streamed yet the provider retry gate is
+		// the only thing standing between a malformed frame and ten backed-off
+		// replays of a request that can never succeed, so a documented rejection must
+		// keep its terminal verdict — and, with text committed, must not be continued.
+		const rejections = [
+			["invalid_request_error", "prompt is too long: 210000 tokens > 200000 maximum"],
+			["authentication_error", "invalid x-api-key"],
+			["billing_error", "Your credit balance is too low to access the Anthropic API"],
+			["permission_error", "You don't have permission to use this model"],
+		] as const;
+		for (const [type, message] of rejections) {
+			const frames = [sseFrame("message_start", createTextSuccessEvents("unused")[0])];
+			frames.push(sseFrame("error", { type: "error", error: { type, message } }));
+			let created = 0;
+			vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+				created += 1;
+				return createRawSseRequest(frames) as never;
+			});
+
+			const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) {
+				events.push(event);
+			}
+			const result = await stream.result();
+
+			expect(countEvents(events, "done")).toBe(0);
+			expect(countEvents(events, "error")).toBe(1);
+			expect(created).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe(`Anthropic stream error (${type}): ${message}`);
+			expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
+			expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("does not treat an error frame after a message_delta stop_reason as a truncation", async () => {
+		// `message_delta` carrying a stop_reason is the consumer's terminal signal;
+		// only the trailing `message_stop` is missing. An error frame after that is a
+		// completed-turn report, so continuing the turn would duplicate an answer
+		// that already ended.
+		const frames = createTextSuccessSseFrames("complete answer").filter(
+			frame => !frame.includes("event: message_stop"),
+		);
+		frames.push(
+			sseFrame("error", {
+				type: "error",
+				error: { type: "server_error", message: "An unexpected error occurred" },
+			}),
+		);
+		let created = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			created += 1;
+			return createRawSseRequest(frames) as never;
+		});
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(created).toBe(1);
+		expect(countEvents(events, "done")).toBe(0);
+		expect(countEvents(events, "error")).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Anthropic stream error (server_error): An unexpected error occurred");
+		expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
+		expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "complete answer" }]);
+	});
+
+	it("keeps an error frame before message_start a terminal provider rejection", async () => {
+		// Nothing streamed yet, so the frame is the provider declining the request
+		// rather than a truncated envelope: it must stay a plain provider error.
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createRawSseRequest([
+					sseFrame("error", { type: "error", error: { type: "api_error", message: "invalid response" } }),
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "done")).toBe(0);
+		expect(countEvents(events, "error")).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Anthropic stream error (api_error): invalid response");
+		expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
+		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
+	});
+
 	it("retries a stream cut before any stop_reason when no content streamed", async () => {
 		const successEvents = createTextSuccessEvents("recovered");
 		let attempt = 0;
@@ -1653,6 +1856,27 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered" }]);
+	});
+
+	it("does not keep an earlier attempt's request id when the retry fails before its stream opens", async () => {
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			attempt += 1;
+			// The first attempt opens a stream (request id `req_mock`) that dies before any content, so it is retried.
+			if (attempt === 1) return createMockRequest([createTextSuccessEvents("unused")[0]]) as never;
+			return createRejectedMockRequest(createOtherInvalidRequestError()) as never;
+		});
+
+		const stream = streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			providerRetryWait: async () => {},
+		});
+		const result = await stream.result();
+
+		expect(attempt).toBe(2);
+		expect(result.stopReason).toBe("error");
+		// `req_mock` belongs to the request that was retried, not to the one that failed.
+		expect(result.requestId).toBeUndefined();
 	});
 
 	it("fails the turn instead of finalizing a clean stop when the stream dies mid-generation", async () => {
@@ -1819,6 +2043,8 @@ describe("anthropic stream envelope handling", () => {
 		expect(result.stopDetails).toEqual({ type: "refusal" });
 		expect(result.errorMessage).toContain("Refusal (no details provided)");
 		expect(result.errorMessage).not.toContain("An unknown error occurred");
+		// Support asks for the request id of a refused request, so it must survive on the error turn.
+		expect(result.requestId).toBe("req_mock");
 		expect(countEvents(events, "error")).toBe(1);
 		expect(countEvents(events, "done")).toBe(0);
 	});
@@ -1996,6 +2222,133 @@ describe("anthropic stream envelope handling", () => {
 		expect(result.fallbackCreditHandle?.prefillClaim).toBe(true);
 		expect(result.fallbackCreditHandle?.params).toBeDefined();
 		expect(result.fallbackCreditHandle?.expiresAt).toBeGreaterThan(Date.now());
+	});
+
+	// Gemini's reasoning crosses APIs and Kimi's signature cannot verify on official
+	// Anthropic, so both replay as text. Opus signed its own turn on this deployment:
+	// the unsigned block beside that signed thinking is the turn's own.
+	const crossModelReasoningContext = (): Context => {
+		const assistant = (
+			api: AssistantMessage["api"],
+			provider: string,
+			id: string,
+			content: AssistantMessage["content"],
+		): AssistantMessage => ({
+			role: "assistant",
+			content,
+			api,
+			provider,
+			model: id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 0,
+		});
+		return {
+			messages: [
+				{ role: "user", content: "Plan the migration", timestamp: 0 },
+				assistant("google-generative-ai", "google", "gemini-3-pro-preview", [
+					{ type: "thinking", thinking: "gemini private plan" },
+					{ type: "text", text: "Gemini answer" },
+				]),
+				{ role: "user", content: "Refine it", timestamp: 0 },
+				assistant("anthropic-messages", "kimi-code", "k3", [
+					{ type: "thinking", thinking: "kimi private plan", thinkingSignature: "kimi-signature" },
+					{ type: "text", text: "Kimi answer" },
+				]),
+				{ role: "user", content: "Check it", timestamp: 0 },
+				assistant("anthropic-messages", "anthropic", "claude-opus-4-5", [
+					{ type: "thinking", thinking: "opus signed plan", thinkingSignature: "sig_opus" },
+					{ type: "thinking", thinking: "opus unsigned note" },
+					{ type: "text", text: "Opus answer" },
+				]),
+				{ role: "user", content: "Ship it", timestamp: 0 },
+			],
+		};
+	};
+	const refusalEvents = (stopDetails: Record<string, unknown>): MockAnthropicEvent[] => [
+		{
+			type: "message_start",
+			message: { id: "msg_reasoning_refusal", usage: { input_tokens: 10, output_tokens: 0 } },
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Considering the plan" } },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: "refusal", stop_sequence: null, stop_details: { type: "refusal", ...stopDetails } },
+			usage: { input_tokens: 10, output_tokens: 4 },
+		},
+		{ type: "message_stop" },
+	];
+	/** A client that refuses every request (as `reasoning_extraction` by default), recording each request body. */
+	const refusingClient = (
+		sent: string[],
+		stopDetails: Record<string, unknown> = { category: "reasoning_extraction", explanation: null },
+	): AnthropicMessagesClientLike => ({
+		messages: {
+			create(params) {
+				sent.push(JSON.stringify(params));
+				return createMockRequest(refusalEvents(stopDetails));
+			},
+		},
+	});
+
+	it("reports the other models' reasoning a refused request replayed as text", async () => {
+		const sent: string[] = [];
+		const result = await streamAnthropic(model, crossModelReasoningContext(), {
+			client: refusingClient(sent),
+		}).result();
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain("gemini private plan");
+		expect(sent[0]).toContain("kimi private plan");
+		expect(sent[0]).toContain("opus unsigned note");
+		expect(result.errorMessage).toBe("Refusal (reasoning_extraction)");
+		expect(result.demotedReasoningBlocks).toBe(2);
+	});
+
+	it("leaves other models' reasoning out under omitDemotedReasoning and keeps a turn's own", async () => {
+		const sent: string[] = [];
+		const result = await streamAnthropic(model, crossModelReasoningContext(), {
+			client: refusingClient(sent),
+			omitDemotedReasoning: true,
+		}).result();
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).not.toContain("gemini private plan");
+		expect(sent[0]).not.toContain("kimi private plan");
+		expect(sent[0]).toContain("Gemini answer");
+		expect(sent[0]).toContain("Kimi answer");
+		expect(sent[0]).toContain("opus signed plan");
+		expect(sent[0]).toContain("opus unsigned note");
+		expect(result.stopReason).toBe("error");
+		expect(result.demotedReasoningBlocks).toBeUndefined();
+	});
+
+	it("keeps the refused request's demoted reasoning count through a fallback-credit redemption", async () => {
+		const sent: string[] = [];
+		const refused = await streamAnthropic(model, crossModelReasoningContext(), {
+			client: refusingClient(sent, { category: "cyber", explanation: null, fallback_credit_token: "fct_carried" }),
+		}).result();
+		expect(refused.fallbackCreditHandle?.demotedReasoningBlocks).toBe(2);
+
+		// The fallback model replays the frozen body, which carries the same reasoning.
+		const redeemed = await streamAnthropic({ ...model, id: "claude-opus-4-8" }, crossModelReasoningContext(), {
+			client: refusingClient(sent),
+			fallbackCreditRedemption: refused.fallbackCreditHandle,
+		}).result();
+
+		expect(sent).toHaveLength(2);
+		expect(sent[1]).toContain("fct_carried");
+		expect(redeemed.errorMessage).toBe("Refusal (reasoning_extraction)");
+		expect(redeemed.demotedReasoningBlocks).toBe(2);
 	});
 
 	it("redeems fallback credit token with frozen request body and continuation prefill", async () => {

@@ -25,13 +25,19 @@ describe("extractLeadingCdTarget", () => {
 		expect(extractLeadingCdTarget("cd /some/dir && echo ok")).toEqual({
 			path: "/some/dir",
 			rest: "echo ok",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget("cd /some/dir; echo ok")).toEqual({
+			path: "/some/dir",
+			rest: "echo ok",
+			separator: ";",
 		});
 	});
 
 	it("resolves quoted and escaped path tokens", () => {
-		expect(extractLeadingCdTarget('cd "/my dir" && ls')).toEqual({ path: "/my dir", rest: "ls" });
-		expect(extractLeadingCdTarget("cd '/a b' && ls")).toEqual({ path: "/a b", rest: "ls" });
-		expect(extractLeadingCdTarget("cd /a\\ b && ls")).toEqual({ path: "/a b", rest: "ls" });
+		expect(extractLeadingCdTarget('cd "/my dir" && ls')).toEqual({ path: "/my dir", rest: "ls", separator: "&&" });
+		expect(extractLeadingCdTarget("cd '/a b' && ls")).toEqual({ path: "/a b", rest: "ls", separator: "&&" });
+		expect(extractLeadingCdTarget("cd /a\\ b && ls")).toEqual({ path: "/a b", rest: "ls", separator: "&&" });
 	});
 
 	it("leaves escaped newlines to the shell", () => {
@@ -40,11 +46,12 @@ describe("extractLeadingCdTarget", () => {
 	});
 
 	it("preserves ~ so resolveToCwd can expand it", () => {
-		expect(extractLeadingCdTarget("cd ~/proj && make")).toEqual({ path: "~/proj", rest: "make" });
+		expect(extractLeadingCdTarget("cd ~/proj && make")).toEqual({ path: "~/proj", rest: "make", separator: "&&" });
 	});
 
-	it("accepts a && with no leading whitespace", () => {
-		expect(extractLeadingCdTarget("cd /tmp&& echo ok")).toEqual({ path: "/tmp", rest: "echo ok" });
+	it("accepts a && or ; with no leading whitespace", () => {
+		expect(extractLeadingCdTarget("cd /tmp&& echo ok")).toEqual({ path: "/tmp", rest: "echo ok", separator: "&&" });
+		expect(extractLeadingCdTarget("cd /tmp;echo ok")).toEqual({ path: "/tmp", rest: "echo ok", separator: ";" });
 	});
 
 	// Regression for #7883: a redirect between the path and `&&` must not be
@@ -65,10 +72,51 @@ describe("extractLeadingCdTarget", () => {
 		expect(extractLeadingCdTarget("cd `pwd` && ls")).toBeNull();
 	});
 
-	it("requires a top-level && separator", () => {
-		expect(extractLeadingCdTarget("cd /tmp; echo ok")).toBeNull();
+	it("leaves glob, brace, and special cd targets to the shell", () => {
+		expect(extractLeadingCdTarget("cd /tmp/demo/*/ && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp/demo/? && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp/demo/[ab] && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp/demo/{a,b} && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd - && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd +1 && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd -1 && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd ~other/project && pwd")).toBeNull();
+	});
+
+	it("keeps quoted and escaped expansion characters literal", () => {
+		expect(extractLeadingCdTarget("cd '/tmp/*?[abc]{x,y}' && ls")).toEqual({
+			path: "/tmp/*?[abc]{x,y}",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget('cd "/tmp/*?[abc]{x,y}" && ls')).toEqual({
+			path: "/tmp/*?[abc]{x,y}",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget(String.raw`cd /tmp/\*\?\[abc\]\{x,y\} && ls`)).toEqual({
+			path: "/tmp/*?[abc]{x,y}",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget("cd '$HOME' && ls")).toEqual({ path: "$HOME", rest: "ls", separator: "&&" });
+		expect(extractLeadingCdTarget(String.raw`cd \$HOME && ls`)).toEqual({
+			path: "$HOME",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget('cd "\\$HOME" && ls')).toEqual({
+			path: "$HOME",
+			rest: "ls",
+			separator: "&&",
+		});
+	});
+
+	it("requires a top-level && or ; separator", () => {
 		expect(extractLeadingCdTarget("cd /foo || echo fail")).toBeNull();
 		expect(extractLeadingCdTarget("cd /tmp &echo")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp;; echo ok")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp;& echo ok")).toBeNull();
 	});
 
 	it("bails when there is no cd target", () => {

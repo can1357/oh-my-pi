@@ -1,7 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { type OpenAICompletionsOptions, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { AssistantMessage, Context, FetchImpl, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	Model,
+	SimpleStreamOptions,
+	ToolResultMessage,
+	Usage,
+} from "@oh-my-pi/pi-ai/types";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -145,11 +153,48 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 		const messages = body.messages;
 		if (!Array.isArray(messages)) throw new Error("Expected Chat Completions messages");
 		expect(messages).toHaveLength(3);
-		expect(messages[0]).toMatchObject({
-			content: [{ type: "text", text: "stable history", prompt_cache_breakpoint: { mode: "explicit" } }],
+		expect(messages[0]).toMatchObject({ content: "stable history" });
+		expect(messages[1]).toMatchObject({
+			content: [{ type: "text", text: "previous answer", prompt_cache_breakpoint: { mode: "explicit" } }],
 		});
-		expect(messages[1]).toMatchObject({ content: "previous answer" });
 		expect(messages[2]).toMatchObject({ content: "current prompt" });
+	});
+
+	it("marks the latest tool result as the stable boundary for a tool loop", async () => {
+		const previousAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "README.md" } }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-5.6",
+			usage: emptyUsage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_read",
+			toolName: "read",
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: 2,
+		};
+		const { body } = await captureSimpleRequest({ promptCache: { mode: "explicit" } }, openAI56CompletionsModel, {
+			messages: [
+				{ role: "user", content: "read README.md", timestamp: 0 },
+				previousAssistant,
+				toolResult,
+				{ role: "user", content: "summarize it", timestamp: 3 },
+			],
+		});
+
+		const messages = body.messages;
+		if (!Array.isArray(messages)) throw new Error("Expected Chat Completions messages");
+		expect(messages[2]).toMatchObject({
+			role: "tool",
+			content: [{ type: "text", text: "file contents", prompt_cache_breakpoint: { mode: "explicit" } }],
+		});
+		expect(messages[3]).toMatchObject({ role: "user", content: "summarize it" });
 	});
 
 	it("leaves boundary selection automatic in implicit mode", async () => {
@@ -161,6 +206,23 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 
 		expect(body.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
 		expect(JSON.stringify(body.messages)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("rejects the Responses-only 12h lifetime before sending a request", async () => {
+		let sent = false;
+		const fetchMock: FetchImpl = async () => {
+			sent = true;
+			return chatCompletionsSse();
+		};
+		const result = await streamOpenAICompletions(openAI56CompletionsModel, context, {
+			apiKey: "test-key",
+			promptCache: { mode: "implicit", ttl: "12h" },
+			fetch: fetchMock,
+		}).result();
+
+		expect(sent).toBe(false);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("12h prompt caching is only available on the Responses API");
 	});
 
 	it("does not synthesize first-turn content or a caller-disabled breakpoint", async () => {

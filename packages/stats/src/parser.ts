@@ -5,6 +5,7 @@ import {
 	type AssistantMessage,
 	coerceServiceTierByFamily,
 	getPremiumServiceTierRequests,
+	type MessageAttribution,
 	parseServiceTier,
 	resolveModelServiceTier,
 	type ServiceTierByFamily,
@@ -21,11 +22,21 @@ import type {
 	SessionMessageEntry,
 	SessionModelUsageEntry,
 	SessionServiceTierChangeEntry,
+	SessionTypedEntry,
+	SnapcompactCompactionStats,
+	ToolApprovalStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
+import {
+	emptySpotlightRows,
+	emptySpotlightState,
+	SpotlightCollector,
+	type SpotlightParseRows,
+	type SpotlightParserState,
+} from "./spotlight-ingest";
 import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
@@ -112,6 +123,89 @@ function isToolResultMessage(entry: SessionEntry): entry is SessionMessageEntry 
 }
 
 /**
+ * Build the row for a snapcompact compaction entry. Entries of other methods,
+ * legacy entries without `tokensAfter`, and malformed ones yield null.
+ */
+function extractSnapcompactCompaction(
+	sessionFile: string,
+	folder: string,
+	entry: SessionEntry,
+): SnapcompactCompactionStats | null {
+	if (entry.type !== "compaction") return null;
+	const { id, timestamp, method, tokensBefore, tokensAfter } = entry as SessionTypedEntry;
+	if (method !== "snapcompact" || typeof id !== "string" || id.length === 0) return null;
+	if (!isFiniteCount(tokensBefore) || !isFiniteCount(tokensAfter)) return null;
+	const ts = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
+	if (!Number.isFinite(ts)) return null;
+	return { sessionFile, entryId: id, folder, timestamp: ts, tokensBefore, tokensAfter };
+}
+
+function parseApprovalTimestamp(value: unknown, fallbackEntryTimestamp?: string): number | undefined {
+	if (typeof value === "string") {
+		const parsed = Date.parse(value);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	if (typeof fallbackEntryTimestamp === "string") {
+		const parsed = Date.parse(fallbackEntryTimestamp);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return undefined;
+}
+
+/**
+ * Extract a partial or complete tool approval record from `tool_approval_requested`
+ * or `tool_approval_resolved` custom journal entries.
+ */
+function extractToolApproval(sessionFile: string, folder: string, entry: SessionEntry): ToolApprovalStats | null {
+	if (entry.type !== "custom") return null;
+	if (!("customType" in entry) || typeof entry.customType !== "string") return null;
+	if (entry.customType !== "tool_approval_requested" && entry.customType !== "tool_approval_resolved") {
+		return null;
+	}
+	if (!("data" in entry) || !entry.data || typeof entry.data !== "object" || Array.isArray(entry.data)) {
+		return null;
+	}
+	const data = entry.data as Record<string, unknown>;
+	const entryTimestamp = "timestamp" in entry && typeof entry.timestamp === "string" ? entry.timestamp : undefined;
+	const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId.trim() : "";
+	const rawToolName = typeof data.toolName === "string" ? data.toolName : "";
+	const toolName = sanitizeToolName(rawToolName);
+	if (!toolCallId || !toolName) return null;
+
+	if (entry.customType === "tool_approval_requested") {
+		const parentToolCallId =
+			typeof data.parentToolCallId === "string" && data.parentToolCallId.length > 0
+				? data.parentToolCallId
+				: undefined;
+		const approvalMode =
+			typeof data.approvalMode === "string" && data.approvalMode.length > 0 ? data.approvalMode : undefined;
+		const requestReason = typeof data.reason === "string" && data.reason.length > 0 ? data.reason : undefined;
+		return {
+			sessionFile,
+			toolCallId,
+			parentToolCallId,
+			folder,
+			toolName,
+			approvalMode,
+			requestedAt: parseApprovalTimestamp(data.requestedAt, entryTimestamp),
+			requestReason,
+		};
+	}
+
+	if (typeof data.approved !== "boolean") return null;
+	const resolveReason = typeof data.reason === "string" && data.reason.length > 0 ? data.reason : undefined;
+	return {
+		sessionFile,
+		toolCallId,
+		folder,
+		toolName,
+		approved: data.approved,
+		resolvedAt: parseApprovalTimestamp(data.resolvedAt, entryTimestamp),
+		resolveReason,
+	};
+}
+
+/**
  * Extract plain text from a user message content payload.
  */
 function extractUserText(content: unknown): string {
@@ -128,11 +222,16 @@ function extractUserText(content: unknown): string {
 }
 
 /**
- * Build user-message stats from an entry. Returns null for empty/synthetic content.
+ * Build user-message stats from an entry. Returns null for empty, synthetic, or agent-attributed content.
  */
 function extractUserStats(sessionFile: string, folder: string, entry: SessionMessageEntry): UserMessageStats | null {
-	const msg = entry.message as { role: "user"; content?: unknown; synthetic?: boolean };
-	if (msg.role !== "user" || msg.synthetic) return null;
+	const msg = entry.message as {
+		role: "user";
+		content?: unknown;
+		synthetic?: boolean;
+		attribution?: MessageAttribution;
+	};
+	if (msg.role !== "user" || msg.synthetic || msg.attribution === "agent") return null;
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);
@@ -302,6 +401,17 @@ function extractStats(
 	};
 }
 
+/**
+ * Stored for a `model_usage` entry whose `purpose` is missing or not a string:
+ * a non-null purpose is what keeps the row off the conversation turns.
+ */
+const UNKNOWN_PURPOSE = "unknown";
+
+/**
+ * Row for a `model_usage` entry (usage of a model call that is not a
+ * conversation turn). It keeps the entry's raw `purpose`, which assistant
+ * messages lack, and the request timings newer entries carry.
+ */
 function extractModelUsageStats(
 	sessionFile: string,
 	folder: string,
@@ -309,7 +419,7 @@ function extractModelUsageStats(
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
-	return extractStats(
+	const stats = extractStats(
 		sessionFile,
 		folder,
 		{
@@ -327,11 +437,16 @@ function extractModelUsageStats(
 				stopReason: entry.stopReason ?? "stop",
 				errorMessage: entry.errorMessage,
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+				duration: isFiniteCount(entry.duration) ? entry.duration : undefined,
+				ttft: isFiniteCount(entry.ttft) ? entry.ttft : undefined,
 			},
 		},
 		undefined,
 		agentType,
 	);
+	if (!stats) return null;
+	stats.purpose = typeof entry.purpose === "string" && entry.purpose.length > 0 ? entry.purpose : UNKNOWN_PURPOSE;
+	return stats;
 }
 
 /** Message timestamp, falling back to the entry's ISO timestamp, then 0. */
@@ -416,6 +531,13 @@ function sanitizeToolName(name: string): string | null {
 	return candidate.length > 0 ? candidate : null;
 }
 
+/** A call the agent loop skipped carries a synthetic `executed: false` result: it never ran, so it is no tool error. */
+function isToolExecutionError(message: { isError?: unknown; details?: unknown }): boolean {
+	if (message.isError !== true) return false;
+	const details = message.details as { __synthetic?: unknown; executed?: unknown } | null | undefined;
+	return !(details?.__synthetic === true && details.executed === false);
+}
+
 /**
  * Build the result linkage for a `toolResult` entry: text characters fed back
  * into context plus the error flag, keyed to the originating call.
@@ -435,7 +557,7 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
-		isError: msg.isError === true,
+		isError: isToolExecutionError(msg),
 	};
 }
 
@@ -483,23 +605,84 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	return entries;
 }
 
-function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+/**
+ * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as the coding agent's
+ * `isUserTurnInitiator` defines them.
+ */
+function startsNewRequest(entry: SessionEntry): boolean {
+	if (entry.type === "reset_boundary") return true;
+	if (entry.type !== "custom_message" || !("customType" in entry) || !("attribution" in entry)) return false;
+	return entry.attribution === "user" && (entry.customType === "skill-prompt" || entry.customType === "collab-prompt");
+}
+
+/**
+ * Links each user message to its reply across tail reads. The agent writes non-message entries (the system-prompt
+ * digest, extension notices, side-model usage, title changes) between a user message and its reply, so the reply is
+ * the first assistant message descending from the user message through such entries. Another message or a new
+ * request on the way ends that branch only; a sibling branch can still carry the reply.
+ */
+class ReplyTracker {
+	/** User messages still awaiting a reply and the non-message entries beneath them, each to its user message. */
+	readonly #waiting: Map<string, string>;
+
+	constructor(waiting?: Record<string, string>) {
+		this.#waiting = new Map(waiting ? Object.entries(waiting) : undefined);
+	}
+
+	get state(): Record<string, string> {
+		return Object.fromEntries(this.#waiting);
+	}
+
+	/** The user message `entry` answers, if `entry` is an assistant message descending from it through non-message entries. */
+	visit(entry: SessionEntry): string | undefined {
+		if (isUserMessage(entry)) {
+			this.#waiting.set(entry.id, entry.id);
+			return undefined;
+		}
+		const parentId = "parentId" in entry ? entry.parentId : undefined;
+		const user = typeof parentId === "string" ? this.#waiting.get(parentId) : undefined;
+		if (!user) return undefined;
+		if (isAssistantMessage(entry)) {
+			for (const [waitingId, waitingUser] of this.#waiting) {
+				if (waitingUser === user) this.#waiting.delete(waitingId);
+			}
+			return user;
+		}
+		if (entry.type !== "message" && !startsNewRequest(entry) && "id" in entry && typeof entry.id === "string") {
+			this.#waiting.set(entry.id, user);
+		}
+		return undefined;
+	}
+}
+
+/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier, the awaited replies and the Spotlight state. */
+function scanPrefixState(
+	bytes: Uint8Array,
+	spotlight: SpotlightCollector,
+	replies: ReplyTracker,
+): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
+		replies.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+		else spotlight.visit(entry);
 	});
 	return currentServiceTier;
 }
 export interface SessionParserState {
 	version: 1;
 	offset: number;
-	dev: number;
 	ino: number;
 	birthtimeMs: number;
 	size: number;
 	mtimeMs: number;
 	checkpoint: string;
 	serviceTier: ServiceTierByFamily | null;
+	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
+	spotlight?: SpotlightParserState;
+	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
+	pendingReplies?: Record<string, string>;
 }
 
 export interface ParseSessionResult {
@@ -508,6 +691,9 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	toolApprovals: ToolApprovalStats[];
+	snapcompactCompactions: SnapcompactCompactionStats[];
+	spotlight: SpotlightParseRows;
 	newOffset: number;
 	parserState?: SessionParserState;
 	reset?: boolean;
@@ -528,8 +714,13 @@ async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8
 	return bytes.subarray(0, read);
 }
 
+/**
+ * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
+ * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
+ * `birthtimeMs` (plus size/mtime at call sites) identify the file.
+ */
 export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
-	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
 }
 
 /** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
@@ -553,11 +744,40 @@ export async function parseSessionFile(
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
+	const approvalsById = new Map<string, ToolApprovalStats>();
+	const snapcompactCompactions: SnapcompactCompactionStats[] = [];
+	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
+	const callsById = new Map<string, ToolCallStats>();
+	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
+	let replies = new ReplyTracker();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
+		const answered = replies.visit(entry);
+		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+			return;
+		}
+		const compaction = extractSnapcompactCompaction(sessionPath, folder, entry);
+		if (compaction) {
+			snapcompactCompactions.push(compaction);
+			return;
+		}
+		const approval = extractToolApproval(sessionPath, folder, entry);
+		if (approval) {
+			const existing = approvalsById.get(approval.toolCallId);
+			if (existing) {
+				if (approval.parentToolCallId !== undefined) existing.parentToolCallId = approval.parentToolCallId;
+				if (approval.approvalMode !== undefined) existing.approvalMode = approval.approvalMode;
+				if (approval.requestedAt !== undefined) existing.requestedAt = approval.requestedAt;
+				if (approval.requestReason !== undefined) existing.requestReason = approval.requestReason;
+				if (approval.approved !== undefined) existing.approved = approval.approved;
+				if (approval.resolvedAt !== undefined) existing.resolvedAt = approval.resolvedAt;
+				if (approval.resolveReason !== undefined) existing.resolveReason = approval.resolveReason;
+			} else {
+				approvalsById.set(approval.toolCallId, approval);
+			}
 			return;
 		}
 		if (isUserMessage(entry)) {
@@ -567,7 +787,13 @@ export async function parseSessionFile(
 		}
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
-			if (link) toolResults.push(link);
+			if (!link) return;
+			toolResults.push(link);
+			const call = callsById.get(link.toolCallId);
+			if (call && call.resultChars === undefined) {
+				call.resultChars = link.resultChars;
+				call.isError = link.isError;
+			}
 			return;
 		}
 		if (isModelUsage(entry)) {
@@ -578,14 +804,16 @@ export async function parseSessionFile(
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
+				toolCalls.push(call);
+				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
+			}
 			// Persist links even when the user entry was ingested in an earlier tail read.
-			const parentId = entry.parentId;
 			const msg = entry.message;
-			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+			if (answered && msg.role === "assistant" && msg.model && msg.provider) {
 				userLinks.push({
 					sessionFile: sessionPath,
-					entryId: parentId,
+					entryId: answered,
 					model: msg.model,
 					provider: msg.provider,
 				});
@@ -608,16 +836,23 @@ export async function parseSessionFile(
 					const previous = await readCheckpoint(handle, fromOffset);
 					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
 				}
-				resume = !reset;
+				// A cursor written before replies were tracked rebuilds its state from the prefix instead.
+				resume = !reset && state.pendingReplies !== undefined;
 			}
 			if (fromOffset > info.size) reset = true;
 			if (replay) resume = false;
 			start = reset || replay ? 0 : Math.max(0, fromOffset);
 			const readStart = resume ? start : 0;
 			bytes = await file.slice(readStart, info.size).bytes();
-			currentServiceTier = resume
-				? (state?.serviceTier ?? undefined)
-				: scanLastServiceTier(bytes.subarray(0, start));
+			if (resume) {
+				currentServiceTier = state?.serviceTier ?? undefined;
+				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+				replies = new ReplyTracker(state?.pendingReplies);
+			} else {
+				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies);
+				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
+			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
 			const newOffset = start + read;
 			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
@@ -631,10 +866,21 @@ export async function parseSessionFile(
 		}
 	} catch (err) {
 		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				toolResults: [],
+				toolApprovals: [],
+				snapcompactCompactions: [],
+				spotlight: emptySpotlightRows(),
+				newOffset: fromOffset,
+			};
 		throw err;
 	}
 
+	await spotlight.finish();
 	const newOffset = start + read;
 	return {
 		stats,
@@ -642,18 +888,22 @@ export async function parseSessionFile(
 		userLinks,
 		toolCalls,
 		toolResults,
+		toolApprovals: [...approvalsById.values()],
+		snapcompactCompactions,
+		spotlight: spotlight.rows,
 		newOffset,
 		reset,
 		parserState: {
 			version: 1,
 			offset: newOffset,
-			dev: info.dev,
 			ino: info.ino,
 			birthtimeMs: info.birthtimeMs,
 			size: info.size,
 			mtimeMs: info.mtimeMs,
 			checkpoint,
 			serviceTier: currentServiceTier ?? null,
+			spotlight: spotlight.state,
+			pendingReplies: replies.state,
 		},
 	};
 }

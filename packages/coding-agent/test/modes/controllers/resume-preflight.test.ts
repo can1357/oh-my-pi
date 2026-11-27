@@ -2,16 +2,25 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as SessionSelector from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { createRoot } from "@oh-my-pi/pi-tui";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import * as SessionSelectorScreen from "../../../src/ui/overlays/pickers/session-selector";
+import { initTheme } from "../../../src/ui/theme/service";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
-beforeAll(async () => {
-	await initTheme();
+beforeAll(() => {
+	initTheme();
 });
+
+/** Calls to `mock` from now on, as a promise of the next one (the picker's resume runs detached from its pick). */
+function nextCall(mock: { mockImplementationOnce(fn: () => void): unknown }): Promise<void> {
+	const called = Promise.withResolvers<void>();
+	mock.mockImplementationOnce(() => called.resolve());
+	return called.promise;
+}
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -29,22 +38,28 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 	const moveTo = vi.fn(async (cwd: string) => {
 		state.cwd = cwd;
 	});
-	const editor = {};
-	let selector: SessionSelector.SessionSelectorComponent | undefined;
-	const hide = vi.fn();
-	const setFocus = vi.fn();
-	const flush = vi.fn(async () => {
+	let picker: SessionSelectorScreen.SessionSelectorProps | undefined;
+	const close = vi.fn();
+	const focus = vi.fn();
+	vi.spyOn(SessionSelectorScreen, "SessionSelector").mockImplementation(props => {
+		picker = props;
+		return [];
+	});
+	// Real settings: the picker reads its worktree scope before resuming.
+	const settings = Settings.isolated();
+	const flush = vi.spyOn(settings, "flush").mockImplementation(async () => {
 		if (opts.flushFails) throw new Error("disk full");
 	});
 	const ctx = {
 		session: { switchSession },
 		sessionManager: {
 			getCwd: () => state.cwd,
+			getRecordedCwd: () => state.cwd,
 			getSessionDir: () => "/tmp",
 			getSessionFile: () => opts.previousSessionFile,
 			moveTo,
 		},
-		settings: { flush },
+		settings,
 		prepareSessionSwitch: vi.fn(async () => {}),
 		resetObserverRegistry: vi.fn(),
 		clearTransientSessionUi: vi.fn(),
@@ -54,18 +69,17 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 		reloadTodos: vi.fn(async () => {}),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
-		statusLine: { invalidate: vi.fn(), resetActiveTime: vi.fn() },
-		ui: {
-			requestRender: vi.fn(),
-			setFocus,
-			terminal: { rows: 24 },
-			showOverlay: vi.fn((component: unknown) => {
-				selector = component as SessionSelector.SessionSelectorComponent;
-				return { hide, setHidden: vi.fn(), isHidden: () => false };
-			}),
+		statusLine: { refresh: vi.fn(), resetActiveTime: vi.fn() },
+		shell: {
+			focus,
+			size: () => ({ columns: 80, rows: 24 }),
+			overlays: {
+				show: vi.fn((factory: () => unknown) => {
+					createRoot(factory);
+					return { node: {}, closed: false, close };
+				}),
+			},
 		},
-		editor,
-		editorContainer: { children: [editor], clear: vi.fn(), addChild: vi.fn() },
 	} as unknown as InteractiveModeContext;
 	return {
 		ctx,
@@ -73,11 +87,10 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 		applyCwdChange,
 		moveTo,
 		state,
-		editor,
-		hide,
-		setFocus,
+		close,
+		focus,
 		flush,
-		getSelector: () => selector,
+		getPicker: () => picker,
 	};
 }
 
@@ -220,47 +233,35 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
-		const OriginalSelector = SessionSelector.SessionSelectorComponent;
-		const selectionPromises: Promise<void>[] = [];
-		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(
-			((
-				sessions: SessionInfo[],
-				onSelect: (session: SessionInfo) => void,
-				onCancel: () => void,
-				onExit: () => void,
-				options: SessionSelector.SessionSelectorOptions<SessionInfo>,
-			) =>
-				new OriginalSelector<SessionInfo>(
-					sessions,
-					selected => {
-						selectionPromises.push(onSelect(selected) as unknown as Promise<void>);
-					},
-					onCancel,
-					onExit,
-					options,
-				)) as never,
-		);
-		const { ctx, switchSession, editor, hide, setFocus, flush, getSelector } = createResumeContext();
+		const listed = [session];
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+			sessions: listed,
+			complete: Promise.resolve(listed),
+		});
+		const { ctx, switchSession, close, focus, flush, getPicker } = createResumeContext();
 		flush.mockRejectedValueOnce(new Error("disk full"));
 		const controller = new SelectorController(ctx);
 		await controller.showSessionSelector();
-		const selector = getSelector();
-		expect(selector).toBeDefined();
+		const picker = getPicker();
+		if (!picker) throw new Error("Expected the session picker");
 
-		selector!.handleInput("\n");
-		expect(selectionPromises).toHaveLength(1);
-		await selectionPromises[0];
+		const failed = nextCall(ctx.showError as never);
+		picker.onSelect(session);
+		expect(picker.locked?.()).toBe(true);
+		await failed;
+		// The failed resume settles before the picker unlocks.
+		await Promise.resolve();
+		expect(picker.locked?.()).toBe(false);
 
-		expect(hide).not.toHaveBeenCalled();
-		expect(setFocus).not.toHaveBeenCalledWith(editor);
+		expect(close).not.toHaveBeenCalled();
+		expect(focus).not.toHaveBeenCalled();
 		expect(switchSession).not.toHaveBeenCalled();
 
-		selector!.handleInput("\n");
-		expect(selectionPromises).toHaveLength(2);
-		await selectionPromises[1];
+		const closed = nextCall(close);
+		picker.onSelect(session);
+		await closed;
 		expect(switchSession).toHaveBeenCalledTimes(1);
-		expect(hide).toHaveBeenCalledTimes(1);
+		expect(close).toHaveBeenCalledTimes(1);
 	});
 
 	it("closes the selector and restores editor focus when switching rejects after preflight", async () => {
@@ -276,38 +277,22 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
-		const OriginalSelector = SessionSelector.SessionSelectorComponent;
-		let selectionPromise: Promise<void> | undefined;
-		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(
-			((
-				sessions: SessionInfo[],
-				onSelect: (session: SessionInfo) => void,
-				onCancel: () => void,
-				onExit: () => void,
-				options: SessionSelector.SessionSelectorOptions<SessionInfo>,
-			) =>
-				new OriginalSelector<SessionInfo>(
-					sessions,
-					selected => {
-						selectionPromise = onSelect(selected) as unknown as Promise<void>;
-					},
-					onCancel,
-					onExit,
-					options,
-				)) as never,
-		);
-		const { ctx, switchSession, editor, hide, setFocus, getSelector } = createResumeContext();
+		const listed = [session];
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+			sessions: listed,
+			complete: Promise.resolve(listed),
+		});
+		const { ctx, switchSession, close, focus, getPicker } = createResumeContext();
 		const switchError = new Error("switch failed");
 		switchSession.mockRejectedValue(switchError);
 		const controller = new SelectorController(ctx);
 		await controller.showSessionSelector();
-		const selector = getSelector();
-		expect(selector).toBeDefined();
+		const picker = getPicker();
+		if (!picker) throw new Error("Expected the session picker");
 
-		selector!.handleInput("\n");
-		expect(selectionPromise).toBeDefined();
-		await selectionPromise;
+		const closed = nextCall(close);
+		picker.onSelect(session);
+		await closed;
 
 		expect(ctx.showError).toHaveBeenCalledWith("switch failed");
 		expect(ctx.settings.flush).toHaveBeenCalledTimes(1);
@@ -315,7 +300,8 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			session.path,
 			expect.objectContaining({ onCwdChange: expect.any(Function) }),
 		);
-		expect(hide).toHaveBeenCalledTimes(1);
-		expect(setFocus).toHaveBeenLastCalledWith(editor);
+		expect(close).toHaveBeenCalledTimes(1);
+		// The keys go back to the editor area (the composer, or a prompt shown in its place).
+		expect(focus).toHaveBeenLastCalledWith(null);
 	});
 });

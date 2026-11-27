@@ -1,4 +1,4 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 
 const NON_SERIALIZABLE_RUN_ARGUMENT = "Run argument is not JSON-serializable; pass plain data";
 
@@ -26,6 +26,88 @@ function hasSoleOwnKey(value: Record<string, unknown>, key: string): boolean {
 	return keys.length === 1 && keys[0] === key;
 }
 
+/** Compile a serialized JavaScript function expression into a callable value without touching `globalThis`. */
+export function compileRunFunction(source: string): unknown {
+	// Trailing newline ensures a single-line comment at the end of `source` does not swallow `)`.
+	// oxlint-disable-next-line no-new-func -- materializes a serialized function expression from the eval bridge
+	return new Function(`return (${source}\n);`)();
+}
+
+function materializeRunArgInner(value: unknown, seen: Set<object>): unknown {
+	if (value === undefined) return undefined;
+
+	if (isPlainObject(value) && hasSoleOwnKey(value, "__omp_fn") && typeof value.__omp_fn === "string") {
+		return compileRunFunction(value.__omp_fn);
+	}
+
+	if (isPlainObject(value) && hasSoleOwnKey(value, "__omp_re")) {
+		const marker = value.__omp_re;
+		if (
+			isPlainObject(marker) &&
+			typeof marker.source === "string" &&
+			(marker.flags === undefined || typeof marker.flags === "string")
+		) {
+			return new RegExp(marker.source, marker.flags ?? "");
+		}
+	}
+
+	// Markers nest inside options (`requests({filter: /x/})`), so containers materialize member by member.
+	if (Array.isArray(value)) {
+		if (seen.has(value)) throw new ToolError(NON_SERIALIZABLE_RUN_ARGUMENT);
+		seen.add(value);
+		try {
+			return value.map(item => (item === undefined ? null : materializeRunArgInner(item, seen)));
+		} finally {
+			seen.delete(value);
+		}
+	}
+	if (isPlainObject(value)) {
+		if (seen.has(value)) throw new ToolError(NON_SERIALIZABLE_RUN_ARGUMENT);
+		seen.add(value);
+		try {
+			const out: Record<string, unknown> = {};
+			for (const key in value) {
+				const item = value[key];
+				if (item === undefined) continue;
+				const materialized = materializeRunArgInner(item, seen);
+				if (key === "__proto__") {
+					Object.defineProperty(out, "__proto__", {
+						value: materialized,
+						writable: true,
+						enumerable: true,
+						configurable: true,
+					});
+				} else {
+					out[key] = materialized;
+				}
+			}
+			return out;
+		} finally {
+			seen.delete(value);
+		}
+	}
+
+	if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) return null;
+		return Object.is(value, -0) ? 0 : value;
+	}
+
+	let rendered: string | undefined;
+	try {
+		rendered = JSON.stringify(value);
+	} catch {
+		throw new ToolError(NON_SERIALIZABLE_RUN_ARGUMENT);
+	}
+	if (rendered === undefined) throw new ToolError(NON_SERIALIZABLE_RUN_ARGUMENT);
+	return JSON.parse(rendered);
+}
+
+/** Materialize one host value for direct execution, matching {@link renderRunArg} without source evaluation. */
+export function materializeRunArg(value: unknown): unknown {
+	return materializeRunArgInner(value, new Set());
+}
+
 /** Renders one host value as a JavaScript argument for an evaluated run. */
 export function renderRunArg(value: unknown): string {
 	if (value === undefined) return "undefined";
@@ -45,6 +127,22 @@ export function renderRunArg(value: unknown): string {
 		}
 	}
 
+	// Markers nest inside options (`requests({filter: /x/})`), so containers render member by member.
+	if (Array.isArray(value)) {
+		return `[${value.map(item => (item === undefined ? "null" : renderRunArg(item))).join(",")}]`;
+	}
+	if (isPlainObject(value)) {
+		const members: string[] = [];
+		for (const key in value) {
+			const item = value[key];
+			if (item === undefined) continue;
+			// A quoted `"__proto__"` key in a literal sets the prototype; a computed one is an own property.
+			const name = key === "__proto__" ? `["__proto__"]` : JSON.stringify(key);
+			members.push(`${name}:${renderRunArg(item)}`);
+		}
+		return `{${members.join(",")}}`;
+	}
+
 	let rendered: string | undefined;
 	try {
 		rendered = JSON.stringify(value);
@@ -58,6 +156,34 @@ export function renderRunArg(value: unknown): string {
 /** Renders a helper call chain (`id(5).click()`) with arguments as JavaScript literals. */
 export function renderCallChain(chain: readonly { method: string; args: readonly unknown[] }[]): string {
 	return chain.map(step => `${step.method}(${step.args.map(renderRunArg).join(", ")})`).join(".");
+}
+
+/** One step of a helper call chain: `id(5)` in `id(5).click()`. */
+export interface CallStep {
+	method: string;
+	args: readonly unknown[];
+}
+
+/**
+ * Renders a call chain for a status line, which the session file keeps and the terminal shows:
+ * {@link renderCallChain}, except that text a helper enters into a page or an app, often a
+ * credential, is shown as `<hidden>`. `textStart` gives the index of the first argument that
+ * carries entered text (every later one is hidden too, since Python passes keywords as a trailing
+ * object), or `undefined` for a step that enters none.
+ */
+export function renderStatusCallChain(
+	chain: readonly CallStep[],
+	textStart: (step: CallStep, index: number) => number | undefined,
+): string {
+	return chain
+		.map((step, index) => {
+			const start = textStart(step, index);
+			const args = step.args.map((arg, position) =>
+				start !== undefined && position >= start ? "<hidden>" : renderRunArg(arg),
+			);
+			return `${step.method}(${args.join(", ")})`;
+		})
+		.join(".");
 }
 
 /** Renders a function invocation with the requested run scope and positional arguments. */

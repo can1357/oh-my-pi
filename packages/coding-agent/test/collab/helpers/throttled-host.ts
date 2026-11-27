@@ -54,7 +54,10 @@ export function makeHostContext(snapshot: Snapshot, seen: HostObservations): Int
 		sessionManager: {
 			getSessionId: () => snapshot.header.id,
 			getCwd: () => snapshot.header.cwd,
-			snapshotForReplication: () => snapshot,
+			// SessionManager deep-clones per call, and the host mutates what it gets
+			// (image stripping) and retains it behind a lazy batch. Sharing one object
+			// would hide both.
+			snapshotForReplication: () => structuredClone(snapshot),
 			onEntryAppended: undefined,
 		},
 		session: {
@@ -83,10 +86,8 @@ export function makeHostContext(snapshot: Snapshot, seen: HostObservations): Int
 			setCollabStatus: (status: { participantCount: number } | null) => {
 				if (status) seen.participantCounts.push(status.participantCount);
 			},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: () => {},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;

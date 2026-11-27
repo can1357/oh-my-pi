@@ -13,6 +13,7 @@
  *   GET  /v1/usage                         → aggregated provider usage (5-min per-credential cache via AuthStorage)
  *   GET  /v1/credentials/check             → per-credential auth probe (diagnose 401s in a multi-account pool)
  *   GET  /v1/models                        → list known models from the registry
+ *   GET  /v1/pi/models                     → the same catalog as pi-native model specs (pi-native clients' rosters)
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
@@ -29,6 +30,8 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { type PiNativeModelsResponse, toPiNativeModelSpec } from "@oh-my-pi/pi-catalog/discovery/pi-native";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
@@ -41,6 +44,7 @@ import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOpti
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
+import { applyCallerTrust } from "./caller-options";
 import { type AuthGatewayClientScope, AuthGatewayClientTable } from "./clients";
 import {
 	type AuthGatewayBootOptions,
@@ -54,12 +58,12 @@ import {
 	resolveGatewayApiKey,
 } from "./dispatch";
 import {
-	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
 	hasMisplacedBearer,
 	isAuthorized,
 	json,
+	noStoreErrorResponse,
 	readBearerToken,
 	resolveClientIdentity,
 	withCors,
@@ -82,10 +86,17 @@ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
-const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
-	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
-	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
-	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
+/** A foreign chat wire the gateway translates: its codec, log label, and the pi-ai api it speaks natively. */
+interface FormatRoute {
+	module: FormatModule;
+	label: string;
+	api: Api;
+}
+
+const FORMAT_ROUTES: Record<string, FormatRoute> = {
+	"/v1/chat/completions": { module: openaiChat, label: "openai-chat", api: "openai-completions" },
+	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages", api: "anthropic-messages" },
+	"/v1/responses": { module: openaiResponses, label: "openai-responses", api: "openai-responses" },
 };
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
@@ -148,6 +159,37 @@ function serializeTools(context: Context): string | undefined {
 	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
 }
 
+/**
+ * Fit a client-requested effort to the resolved model. Clients speak their own
+ * effort vocabulary: omp's `lowest-effort` reasoning-off sends `minimal` to a
+ * generic OpenAI-compatible endpoint, and Claude ladders have no `minimal`.
+ * `streamSimple` throws on an effort the model cannot serve, so clamp it to the
+ * nearest supported tier as in-process callers do. Efforts the model maps onto
+ * its wire values, and models without an effort ladder, pass through unchanged.
+ * Carry the requested tier's budget with a clamp unless the destination tier
+ * already has an explicit budget (including zero).
+ */
+function normalizeGatewayThinking(model: Model<Api>, options: SimpleStreamOptions): void {
+	const requested = options.reasoning;
+	if (requested === undefined) return;
+	const efforts = getSupportedEfforts(model);
+	if (efforts.length === 0 || efforts.includes(requested)) return;
+	if (model.thinking?.effortMap?.[requested] !== undefined) return;
+	if (
+		model.compat &&
+		"reasoningEffortMap" in model.compat &&
+		model.compat.reasoningEffortMap[requested] !== undefined
+	) {
+		return;
+	}
+	const reasoning = clampThinkingLevelForModel(model, requested) ?? requested;
+	options.reasoning = reasoning;
+	const budgets = options.thinkingBudgets;
+	if (reasoning !== requested && budgets?.[requested] !== undefined && budgets[reasoning] === undefined) {
+		options.thinkingBudgets = { ...budgets, [reasoning]: budgets[requested] };
+	}
+}
+
 function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
@@ -203,12 +245,13 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 	if (options.thinkingBudgets) {
 		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
+	normalizeGatewayThinking(model, opts);
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
 		// whichever effort the client requested (or High when unspecified) and
 		// ALSO sets the effort so providers that gate on `reasoning` actually
 		// surface the budget.
-		const effort = options.reasoning ?? Effort.High;
+		const effort = opts.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
 			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
@@ -266,7 +309,7 @@ function chatRouteRejection(model: Model<Api>): string | undefined {
 // (handlePassthrough removed — see note above.)
 
 async function handleFormatEndpoint(
-	route: { module: FormatModule; label: string },
+	route: FormatRoute,
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
@@ -297,7 +340,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
 
-	const model = bootOpts.resolveModel(modelId);
+	const model = bootOpts.resolveModel(modelId, { api: route.api });
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
@@ -314,18 +357,11 @@ async function handleFormatEndpoint(
 	let parsed: ParsedFormatRequest;
 	try {
 		parsed = route.module.parseRequest(body, req.headers);
+		if (route.module === openaiChat) openaiChat.adoptReplayedGeminiSignatures(parsed.context, model);
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
-	}
-	// Merge gateway-captured passthrough headers under the parser's own
-	// captures. Parsers that set `options.headers` themselves win (they may
-	// have stripped or normalized values); the gateway's allow-list fills in
-	// anything they didn't touch.
-	{
-		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -364,11 +400,21 @@ async function handleFormatEndpoint(
 	// expected to resolve the credential and pass it as `options.apiKey`.
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
-	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		parsed.options.serviceTier,
+	);
 	if (controller.signal.aborted) return clientClosedResponse(route);
 	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	const streamOpts = buildStreamOptions(parsed, model, controller.signal);
+	// Only the upstream-bound options: `encodeStream` reads the caller's parsed
+	// request, and the Anthropic encoder answers its `anthropic-beta`.
+	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
 	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
@@ -528,7 +574,7 @@ async function handlePiNative(
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
-	const aborted = (): Response => piNative.formatError(499, "request_aborted", "client closed request");
+	const aborted = (): Response => noStoreErrorResponse(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
 	let body: unknown;
@@ -536,7 +582,7 @@ async function handlePiNative(
 		body = await req.json();
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
-		return piNative.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
+		return noStoreErrorResponse(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
 
@@ -546,15 +592,15 @@ async function handlePiNative(
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		const message = error instanceof Error ? error.message : String(error);
-		return piNative.formatError(400, "invalid_request_error", message);
+		return noStoreErrorResponse(400, "invalid_request_error", message);
 	}
 
 	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
-		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+		return noStoreErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
 	const kindRejection = chatRouteRejection(model);
-	if (kindRejection) return piNative.formatError(400, "invalid_request_error", kindRejection);
+	if (kindRejection) return noStoreErrorResponse(400, "invalid_request_error", kindRejection);
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -566,9 +612,16 @@ async function handlePiNative(
 	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.sessionId = sessionId;
 
-	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		parsed.options.serviceTier,
+	);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return noStoreErrorResponse(apiKey.status, apiKey.type, apiKey.message);
 
 	// Per-session provider learning, owned by this gateway instance. The map is
 	// non-serializable, so `parseRequest` cannot accept one from the wire and
@@ -583,9 +636,8 @@ async function handlePiNative(
 		account: resolveGatewayAccount(apiKey),
 		client: bootOpts.client?.name,
 	});
-	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
-	// trust the client's options (already allow-listed by `parseRequest`) and
-	// only inject server-controlled fields. The sampling strip mirrors
+	// Build the SimpleStreamOptions actually handed to `streamSimple`, then
+	// normalize thinking against the resolved model. The sampling strip mirrors
 	// `buildStreamOptions` — backends with `supportsSamplingParams: false` 400 on them (#3117).
 	const streamOpts: SimpleStreamOptions = {
 		...parsed.options,
@@ -593,6 +645,7 @@ async function handlePiNative(
 		cursorExternalToolExecutor: true,
 		providerSessionState: lease.states,
 	};
+	normalizeGatewayThinking(model, streamOpts);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts,
@@ -614,10 +667,7 @@ async function handlePiNative(
 		delete streamOpts.frequencyPenalty;
 		delete streamOpts.repetitionPenalty;
 	}
-	// Merge gateway-captured passthrough headers under the client's own
-	// headers — the client's values win when they collide.
-	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...streamOpts.headers };
+	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
 	streamOpts.sessionId = sessionId;
 
 	logger.info("auth-gateway request", {
@@ -647,10 +697,10 @@ async function handlePiNative(
 					peer,
 				});
 				if (message.stopReason === "aborted") {
-					return piNative.formatError(499, "request_aborted", errorMessage);
+					return noStoreErrorResponse(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-				return piNative.formatError(classified.status, classified.type, errorMessage);
+				return noStoreErrorResponse(classified.status, classified.type, errorMessage);
 			}
 			return json(
 				200,
@@ -661,7 +711,7 @@ async function handlePiNative(
 			if (controller.signal.aborted) return aborted();
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway non-streaming aborted", { format: "pi-native", error: classified.message, peer });
-			return piNative.formatError(classified.status, classified.type, classified.message);
+			return noStoreErrorResponse(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
 			// client gone — is done with the provider state here.
@@ -687,7 +737,7 @@ async function handlePiNative(
 		} catch (error) {
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
-			return piNative.formatError(classified.status, classified.type, classified.message);
+			return noStoreErrorResponse(classified.status, classified.type, classified.message);
 		}
 		if (controller.signal.aborted) return aborted();
 		void events
@@ -778,15 +828,22 @@ interface ModelListRow {
 	supports_tools?: boolean;
 }
 
-function handleModelsList(opts: AuthGatewayRouteOptions): Response {
+/** Every served model once, keyed by `provider/id`; the first listing of a key wins. */
+function* uniqueListedModels(opts: AuthGatewayRouteOptions): Generator<Model<Api>> {
 	const seen = new Set<string>();
-	const data: ModelListRow[] = [];
 	for (const model of opts.listModels?.() ?? []) {
 		const id = `${model.provider}/${model.id}`;
 		if (seen.has(id)) continue;
 		seen.add(id);
+		yield model;
+	}
+}
+
+function handleModelsList(opts: AuthGatewayRouteOptions): Response {
+	const data: ModelListRow[] = [];
+	for (const model of uniqueListedModels(opts)) {
 		const row: ModelListRow = {
-			id,
+			id: `${model.provider}/${model.id}`,
 			object: "model",
 			owned_by: model.provider,
 			api: model.api,
@@ -800,6 +857,12 @@ function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 		data.push(row);
 	}
 	return json(200, { object: "list", data });
+}
+
+/** `GET /v1/pi/models`: the `/v1/models` catalog as specs, from which pi-native clients build their rosters. */
+function handlePiNativeModelsList(opts: AuthGatewayRouteOptions): Response {
+	const body: PiNativeModelsResponse = { models: [...uniqueListedModels(opts)].map(toPiNativeModelSpec) };
+	return json(200, body);
 }
 
 /** `GET /v1/videos/:id` (poll) and `GET /v1/videos/:id/content` (download); group 1 = id, group 2 = `/content`. */
@@ -822,6 +885,7 @@ const LOGGABLE_PATHS: Record<string, true> = {
 	"/v1/rerank": true,
 	"/v1/videos": true,
 	"/v1/models": true,
+	"/v1/pi/models": true,
 };
 
 /** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
@@ -859,18 +923,11 @@ function scopeRouteOptions(opts: AuthGatewayRouteOptions, client: AuthGatewayCli
 	return {
 		...opts,
 		client,
-		resolveModel: id => {
-			const model = resolveModel(id);
-			if (model) {
-				if (client.allows(model)) return model;
-				// A provider-qualified id names one model: a refused one is never reread as another provider's bare id.
-				if (`${model.provider}/${model.id}` === id) return undefined;
-			}
-			// A bare id whose first match is refused resolves to the first served model of that id the client may call.
-			for (const candidate of listModels?.() ?? []) {
-				if (candidate.id === id && client.allows(candidate)) return candidate;
-			}
-			return undefined;
+		resolveModel: (id, options) => {
+			const accepts = (model: Model<Api>): boolean => client.allows(model) && (options?.accepts?.(model) ?? true);
+			const model = resolveModel(id, { ...options, accepts });
+			// Checked again so a resolver that ignores `accepts` still never serves a refused model.
+			return model && accepts(model) ? model : undefined;
 		},
 		listModels: listModels && (() => [...listModels()].filter(model => client.allows(model))),
 	};
@@ -966,6 +1023,9 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 			// Model catalog.
 			if (req.method === "GET" && pathname === "/v1/models") {
 				return handleModelsList(opts);
+			}
+			if (req.method === "GET" && pathname === "/v1/pi/models") {
+				return handlePiNativeModelsList(opts);
 			}
 
 			// Route-table miss: no format module to defer to, so we emit a

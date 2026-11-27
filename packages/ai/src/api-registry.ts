@@ -25,13 +25,15 @@ const BUILTIN_API_IDS = [
 	"anthropic-messages",
 	"bedrock-converse-stream",
 	"google-generative-ai",
-	"google-gemini-cli",
 	"google-vertex",
+	"google-interactions",
+	"kiro-api",
 	"ollama-chat",
 	"cursor-agent",
 	"factory-droid-agent",
 	"gitlab-duo-agent",
 	"devin-agent",
+	"antigravity-acp",
 	"apple-foundation-models",
 ] as const satisfies readonly KnownApi[];
 
@@ -42,6 +44,11 @@ type _CheckBuiltinApis = _MissingBuiltinApis extends never
 true satisfies _CheckBuiltinApis;
 
 const BUILTIN_APIS = new Set<KnownApi>(BUILTIN_API_IDS);
+
+/** Whether `api` is one of the request adapters built into stream dispatch, not an extension's custom api. */
+export function isBuiltinApi(api: Api): boolean {
+	return BUILTIN_APIS.has(api as KnownApi);
+}
 
 export type CustomStreamFn = (
 	model: Model<Api>,
@@ -63,7 +70,7 @@ export interface RegisteredCustomApi {
 const customApiRegistry = new Map<string, RegisteredCustomApi>();
 
 function assertCustomApiName(api: string): void {
-	if (BUILTIN_APIS.has(api as KnownApi)) {
+	if (isBuiltinApi(api)) {
 		throw new AIError.ConfigurationError(`Cannot register custom API "${api}": built-in API names are reserved.`);
 	}
 }

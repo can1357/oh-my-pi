@@ -1,11 +1,21 @@
 import { describe, expect, it } from "bun:test";
-import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
+import {
+	adoptReplayedGeminiSignatures,
+	encodeResponse,
+	encodeStream,
+	parseRequest,
+} from "@oh-my-pi/pi-ai/providers/openai-chat-server";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { createCodexModel } from "./helpers";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	Model,
 	ToolCall,
 } from "@oh-my-pi/pi-ai/types";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -58,6 +68,41 @@ function emptyAssistant(): AssistantMessage {
 }
 
 describe("auth-gateway openai-chat: parseRequest", () => {
+	for (const strict of [false, true, undefined]) {
+		it(`preserves strict=${strict} through the gateway to Codex`, () => {
+			const parsed = parseRequest({
+				model: "test-model",
+				messages: [{ role: "user", content: "Find the config file" }],
+				tools: [
+					{
+						type: "function",
+						function: {
+							name: "search_files",
+							...(strict !== undefined ? { strict } : {}),
+							parameters: {
+								type: "object",
+								properties: { query: { type: "string" }, path: { type: "string" } },
+								required: ["query"],
+							},
+						},
+					},
+				],
+			});
+			const [wire] = convertOpenAICodexResponsesTools(parsed.context.tools ?? [], createCodexModel("gpt-5.5"));
+			if (wire.type !== "function") throw new Error("Expected function tool");
+			if (strict === undefined) {
+				expect(wire).not.toHaveProperty("strict");
+			} else {
+				expect(wire.strict).toBe(strict);
+			}
+			if (strict === true) {
+				expect(wire.parameters.required).toEqual(["query", "path"]);
+			} else {
+				expect(wire.parameters.required).toEqual(["query"]);
+			}
+		});
+	}
+
 	it("converts a full request into a Context", () => {
 		const parsed = parseRequest({
 			model: "gpt-5.2",
@@ -145,6 +190,80 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(parsed.options.toolChoice).toEqual({ name: "lookup" });
 		expect(parsed.options.responseFormat).toEqual({ type: "json_object" });
 		expect(parsed.options.extra).toEqual({ includeStreamingUsage: true });
+	});
+
+	it("replays a client's Gemini signature to the resolved model in the form its transport sends", () => {
+		const signedTurn = () =>
+			parseRequest({
+				model: "gemini",
+				messages: [
+					{ role: "user", content: "hi" },
+					{
+						role: "assistant",
+						content: null,
+						tool_calls: [
+							{
+								id: "call_1",
+								type: "function",
+								function: { name: "lookup", arguments: "{}" },
+								extra_content: { google: { thought_signature: "sig-123" } },
+							},
+						],
+					},
+					{ role: "tool", tool_call_id: "call_1", content: "ok" },
+				],
+			}).context;
+		const replayedSignature = (model: NonNullable<ReturnType<typeof getBundledModel>>) => {
+			const context = signedTurn();
+			adoptReplayedGeminiSignatures(context, model);
+			const assistant = transformMessages(context.messages, model).find(message => message.role === "assistant");
+			const call =
+				assistant?.role === "assistant" ? assistant.content.find(part => part.type === "toolCall") : undefined;
+			return call?.type === "toolCall" ? call.thoughtSignature : undefined;
+		};
+
+		const native = getBundledModel("google", "gemini-2.5-pro");
+		const compatible = getBundledModel("kilo", "google/gemini-2.5-pro");
+		if (!native || !compatible) throw new Error("expected bundled Gemini models");
+		expect(replayedSignature(native)).toBe("sig-123");
+		expect(JSON.parse(replayedSignature(compatible) ?? "null")).toEqual({
+			perCall: { google: { thought_signature: "sig-123" } },
+		});
+	});
+
+	it("replays a client's function-level Gemini signature in the form each transport sends", () => {
+		const context = parseRequest({
+			model: "gemini",
+			messages: [
+				{ role: "user", content: "hi" },
+				{
+					role: "assistant",
+					content: null,
+					tool_calls: [
+						{
+							id: "call_1",
+							type: "function",
+							function: { name: "lookup", arguments: "{}", thought_signature: "sig-fn" },
+						},
+					],
+				},
+				{ role: "tool", tool_call_id: "call_1", content: "ok" },
+			],
+		}).context;
+		const replayedSignature = (model: Model) => {
+			const adopted = structuredClone(context);
+			adoptReplayedGeminiSignatures(adopted, model);
+			const assistant = transformMessages(adopted.messages, model).find(message => message.role === "assistant");
+			const call =
+				assistant?.role === "assistant" ? assistant.content.find(part => part.type === "toolCall") : undefined;
+			return call?.type === "toolCall" ? call.thoughtSignature : undefined;
+		};
+
+		const native = getBundledModel("google", "gemini-2.5-pro");
+		const compatible = getBundledModel("kilo", "google/gemini-2.5-pro");
+		if (!native || !compatible) throw new Error("expected bundled Gemini models");
+		expect(replayedSignature(native)).toBe("sig-fn");
+		expect(JSON.parse(replayedSignature(compatible) ?? "null")).toEqual({ function: "sig-fn" });
 	});
 
 	it("coerces content:null to empty content for non-function roles (Codex #10956)", () => {
@@ -337,6 +456,61 @@ describe("auth-gateway openai-chat: encodeResponse", () => {
 		});
 	});
 
+	it("emits Google thought signatures in tool-call metadata", () => {
+		const message: AssistantMessage = {
+			...emptyAssistant(),
+			content: [
+				{
+					type: "toolCall",
+					id: "call_google",
+					name: "check",
+					arguments: { value: "test" },
+					thoughtSignature: "sig-google",
+				},
+			],
+			stopReason: "toolUse",
+		};
+		const out = encodeResponse(message, "gemini-test");
+		const choices = out.choices as Array<{
+			message: { tool_calls?: Array<Record<string, unknown>> };
+		}>;
+		expect(choices[0].message.tool_calls).toEqual([
+			{
+				id: "call_google",
+				type: "function",
+				function: { name: "check", arguments: '{"value":"test"}' },
+				extra_content: { google: { thought_signature: "sig-google" } },
+			},
+		]);
+	});
+
+	it("emits a stored function-level Gemini signature on the tool call's function", () => {
+		const message: AssistantMessage = {
+			...emptyAssistant(),
+			content: [
+				{
+					type: "toolCall",
+					id: "call_portkey",
+					name: "check",
+					arguments: { value: "test" },
+					thoughtSignature: JSON.stringify({ function: "sig-fn" }),
+				},
+			],
+			stopReason: "toolUse",
+		};
+		const out = encodeResponse(message, "gemini-test");
+		const choices = out.choices as Array<{
+			message: { tool_calls?: Array<Record<string, unknown>> };
+		}>;
+		expect(choices[0].message.tool_calls).toEqual([
+			{
+				id: "call_portkey",
+				type: "function",
+				function: { name: "check", arguments: '{"value":"test"}', thought_signature: "sig-fn" },
+			},
+		]);
+	});
+
 	it("maps length stop reason and emits null content when text is empty", () => {
 		const message: AssistantMessage = { ...emptyAssistant(), stopReason: "length" };
 		const out = encodeResponse(message, "gpt-test");
@@ -352,7 +526,13 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		// Pre-populate partial.content so toolcall_start can look up id/name by contentIndex.
 		partial.content = [
 			{ type: "text", text: "" },
-			{ type: "toolCall", id: "call_A", name: "tool_a", arguments: {} },
+			{
+				type: "toolCall",
+				id: "call_A",
+				name: "tool_a",
+				arguments: {},
+				thoughtSignature: "sig-stream",
+			},
 			{ type: "toolCall", id: "call_B", name: "tool_b", arguments: {} },
 		];
 		const events: AssistantMessageEvent[] = [
@@ -400,7 +580,12 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(textDeltas.join("")).toBe("Hi there");
 
 		// Collect tool_call deltas; verify index sequence.
-		const toolDeltas: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> = [];
+		const toolDeltas: Array<{
+			index: number;
+			id?: string;
+			function?: { name?: string; arguments?: string };
+			extra_content?: unknown;
+		}> = [];
 		for (const c of chunks) {
 			const tc = c.choices[0].delta.tool_calls;
 			if (Array.isArray(tc)) toolDeltas.push(...(tc as typeof toolDeltas));
@@ -410,6 +595,7 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(starts.map(s => s.index)).toEqual([0, 1]);
 		expect(starts[0].id).toBe("call_A");
 		expect(starts[0].function?.name).toBe("tool_a");
+		expect(starts[0].extra_content).toEqual({ google: { thought_signature: "sig-stream" } });
 		expect(starts[1].id).toBe("call_B");
 		expect(starts[1].function?.name).toBe("tool_b");
 
@@ -461,6 +647,65 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 				],
 			}),
 		);
+	});
+
+	describe("emits a function-level Gemini signature exactly once", () => {
+		const signedCall: ToolCall = {
+			type: "toolCall",
+			id: "call_portkey",
+			name: "check",
+			arguments: { value: "test" },
+			thoughtSignature: JSON.stringify({ function: "sig-fn" }),
+		};
+		const signatureDeltas = async (startCall: ToolCall, settledCall: ToolCall = signedCall) => {
+			const partial = emptyAssistant();
+			partial.content = [startCall];
+			const events: AssistantMessageEvent[] = [
+				{ type: "toolcall_start", contentIndex: 0, partial },
+				{ type: "toolcall_delta", contentIndex: 0, delta: '{"value":"test"}', partial },
+				{ type: "toolcall_end", contentIndex: 0, toolCall: settledCall, partial },
+				{ type: "done", reason: "toolUse", message: { ...partial, content: [settledCall], stopReason: "toolUse" } },
+			];
+			const payloads = (await collectStream(encodeStream(makeEventStream(events, partial), "gemini-test"))).map(
+				parseSseLine,
+			);
+			const toolDeltas: Array<{
+				index: number;
+				id?: string;
+				function?: { thought_signature?: string };
+				extra_content?: unknown;
+			}> = [];
+			for (const payload of payloads) {
+				if (typeof payload !== "object" || payload === null) continue;
+				const choices = Reflect.get(payload, "choices") as Array<{ delta: Record<string, unknown> }>;
+				const tc = choices[0].delta.tool_calls;
+				if (Array.isArray(tc)) toolDeltas.push(...(tc as typeof toolDeltas));
+			}
+			return toolDeltas.filter(t => t.function?.thought_signature !== undefined || t.extra_content !== undefined);
+		};
+
+		it("on the start chunk when the call is signed from the start", async () => {
+			const signed = await signatureDeltas(signedCall);
+			expect(signed).toHaveLength(1);
+			expect(signed[0]).toMatchObject({ id: "call_portkey", function: { thought_signature: "sig-fn" } });
+		});
+
+		it("in the end correction when only the settled call carries it", async () => {
+			const { thoughtSignature: _, ...unsignedCall } = signedCall;
+			const signed = await signatureDeltas(unsignedCall);
+			expect(signed).toEqual([{ index: 0, function: { thought_signature: "sig-fn" } }]);
+		});
+
+		it("in the end correction when the start chunk only carried extra_content", async () => {
+			const perCall = { google: { thought_signature: "sig-google" } };
+			const startCall = { ...signedCall, thoughtSignature: JSON.stringify({ perCall }) };
+			const settledCall = { ...signedCall, thoughtSignature: JSON.stringify({ perCall, function: "sig-fn" }) };
+			const signed = await signatureDeltas(startCall, settledCall);
+			expect(signed).toHaveLength(2);
+			expect(signed[0]).toMatchObject({ id: "call_portkey", extra_content: perCall });
+			expect(signed[0].function?.thought_signature).toBeUndefined();
+			expect(signed[1]).toEqual({ index: 0, function: { thought_signature: "sig-fn" } });
+		});
 	});
 
 	it("emits an error envelope when the stream errors", async () => {

@@ -27,20 +27,30 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import {
 	type AuthBrokerClientConfig,
+	type AuthBrokerStartupRetry,
 	type DiscoverAuthStorageOptions,
 	discoverAuthStorage as discoverAuthStorageShared,
 	getAuthBrokerTokenFilePath,
 	openAuthCredentialStore,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
-import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
-import { combine, type ScopeLike } from "../config/registry";
+import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
+import { providerDeviceBound } from "@oh-my-pi/pi-catalog/compat/auth";
+import { getAgentDbPath, getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
+import type { ModelRegistry } from "../config/model-registry";
+import { combine, effectsSettings, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
-import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
+import {
+	cfgAuthAccountPolicies,
+	cfgAuthBrokerToken,
+	cfgAuthBrokerUrl,
+	cfgOperatorUnpausedProviders,
+} from "../config/model-settings";
 import { cfgRetryUsageReservePct } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
@@ -124,13 +134,44 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
 	return promise;
 }
 
+/**
+ * Where `provider`'s (credential-store id) logins are stored, for the "Credentials saved to …" /
+ * "Credential removed from …" lines after login and logout: the auth broker, or this machine's
+ * agent.db without a broker, for a `device-bound` provider, or for a provider the broker would
+ * not serve (see `HybridAuthCredentialStore`).
+ */
+export async function credentialStoreLabel(provider: string): Promise<string> {
+	const broker = await resolveAuthBrokerConfig();
+	if (!broker || providerDeviceBound(provider)) return getAgentDbPath();
+	const local = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	try {
+		return local.listBrokerLocalProviders().includes(provider) ? getAgentDbPath() : `auth broker ${broker.url}`;
+	} finally {
+		local.close();
+	}
+}
+
 /** Settings a long-lived auth storage follows (see {@link createAuthStorageSettingsSync}). */
 const cfgAuthStorageSettings = combine({
 	brokerUrl: cfgAuthBrokerUrl,
 	brokerToken: cfgAuthBrokerToken,
 	accountPolicies: cfgAuthAccountPolicies,
 	usageReservePct: cfgRetryUsageReservePct,
+	unpausedProviders: cfgOperatorUnpausedProviders,
 });
+
+/**
+ * Applies the operator's `auth.unpausedProviders` (never a project layer's) to this process.
+ * The pause set is process-wide: while a settings instance drives effects (`bindEffects`), its
+ * effect owns it and other instances leave it alone. Commands that build auth storage from
+ * read-only or resolved settings, with nothing bound, call this themselves, or the providers
+ * stay paused there. Loaded credential pools refilter on their next read, so order does not matter.
+ */
+export function applyUnpausedProviders(settings: Settings): void {
+	const owner = effectsSettings();
+	if (owner !== undefined && owner !== settings) return;
+	setUnpausedProviders(cfgOperatorUnpausedProviders.get(settings));
+}
 
 /** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
 export interface AuthStorageSettingsSync {
@@ -143,15 +184,22 @@ export interface AuthStorageSettingsSync {
 /**
  * Keeps a long-lived `authStorage` in step with the auth settings of `scope`:
  * - `auth.accountPolicies` / `retry.usageReservePct` re-apply account routing policy.
+ * - `auth.unpausedProviders` (operator layers only) re-applies which paused providers are back
+ *   on — loaded credential pools refilter on their next read — and refreshes `modelRegistry`'s
+ *   catalog for each newly unpaused provider, as a login does.
  * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
  *   broker with startup precedence (env → config.yml → token file; project layers
  *   never redirect credentials), and swap the credential store in place when the
  *   effective connection changed — the next credential resolution uses it.
  *
- * Changes apply in order (broker before policies within one change); a failing
+ * Changes apply in order (broker, then policies, then paused providers within one change); a failing
  * change is logged and leaves the current configuration active.
  */
-export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: AuthStorage): AuthStorageSettingsSync {
+export function createAuthStorageSettingsSync(
+	scope: ScopeLike,
+	authStorage: AuthStorage,
+	modelRegistry?: Pick<ModelRegistry, "refreshProvider">,
+): AuthStorageSettingsSync {
 	const settings = "settings" in scope ? scope.settings : scope;
 	const agentDir = settings.getAgentDir();
 	const resolveOptions = { agentDir, configValueResolver: resolveConfigValue };
@@ -190,14 +238,27 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
 		}
 	};
 
+	const applyUnpaused = async (added: readonly string[]) => {
+		applyUnpausedProviders(settings);
+		if (!modelRegistry) return;
+		try {
+			await Promise.all(added.map(provider => modelRegistry.refreshProvider(provider, "online")));
+		} catch (error) {
+			logger.warn("Model list refresh after unpausing a provider failed", { error: String(error) });
+		}
+	};
+
 	const stop = cfgAuthStorageSettings.listen(scope, (next, previous) => {
 		const brokerChanged = next.brokerUrl !== previous.brokerUrl || next.brokerToken !== previous.brokerToken;
 		const policiesChanged =
 			next.usageReservePct !== previous.usageReservePct ||
 			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
+		const unpausedChanged = !Bun.deepEquals(next.unpausedProviders, previous.unpausedProviders);
+		const unpausedAdded = next.unpausedProviders.filter(provider => !previous.unpausedProviders.includes(provider));
 		pending = pending.then(async () => {
 			if (brokerChanged) await applyBroker();
 			if (policiesChanged) await applyPolicies();
+			if (unpausedChanged) await applyUnpaused(unpausedAdded);
 		});
 		return pending;
 	});
@@ -210,17 +271,68 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
  * pi-ai so the CLI, subagents, and the catalog generator all see the same
  * credentials.
  *
- * Default `agentDir` is the current configured agent directory.
+ * Default `agentDir` is the current configured agent directory. Interactive omp
+ * fails at once when the broker is unreachable rather than hold the user for the
+ * startup retry window; every other host retries and says so once on stderr.
  */
 export function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
 	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">,
 ): Promise<AuthStorage> {
+	const interactive = isInteractiveHost();
 	return discoverAuthStorageShared({
+		retryUnreachableBroker: !interactive,
+		onBrokerRetry: interactive ? undefined : authBrokerWaitNotice(),
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
 	});
+}
+
+/**
+ * Create an AuthStorage instance.
+ *
+ * Default: local SQLite store at `<agentDir>/agent.db`.
+ *
+ * Broker mode: when `OMP_AUTH_BROKER_URL` is set, credentials are pulled from
+ * a remote auth-broker over the wire. Refresh tokens never leave the broker;
+ * the client receives access tokens with `refresh = "__remote__"` and calls
+ * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
+ * override to re-mint access tokens when needed.
+ *
+ * Account routing (`auth.accountPolicies`, `retry.usageReservePct`) comes from
+ * effective settings: `options.settings` when given, else the matching global
+ * instance, else a read-only load for `options.cwd`; explicit option values win.
+ */
+export async function discoverSessionAuthStorage(
+	agentDir: string = getAgentDir(),
+	options: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver"> &
+		Omit<EffectiveSettingsScope, "agentDir"> = {},
+): Promise<AuthStorage> {
+	const { settings, cwd, ...discoveryOptions } = options;
+	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
+	applyUnpausedProviders(effective);
+	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
+	return discoverAuthStorage(agentDir, {
+		...discoveryOptions,
+		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
+		authStorageOptions: {
+			...discoveryOptions.authStorageOptions,
+			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+		},
+	});
+}
+
+/** Print the first retry of one startup to stderr; the retry is otherwise only in the log file. */
+function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
+	let shown = false;
+	return ({ url, error, budgetMs }) => {
+		if (shown) return;
+		shown = true;
+		process.stderr.write(
+			`Waiting for auth broker at ${url} (${error.message}); retrying for up to ${budgetMs / 1000}s...\n`,
+		);
+	};
 }
 
 /**

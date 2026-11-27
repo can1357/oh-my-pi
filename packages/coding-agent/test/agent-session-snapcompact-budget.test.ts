@@ -29,7 +29,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -116,7 +116,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		authStorage.close();
 	});
 
-	/** Appends a 4.8 MB three-frame archive: over the 3 MB default, inside half of Anthropic's 24 MB inline-image budget. */
+	/** Appends a 4.8 MB three-frame archive: over the 3 MB default, inside half of Anthropic's 120 MB inline-image budget. */
 	function appendFrameArchive(): string {
 		const firstKeptEntryId = sessionManager.getBranch().at(-1)?.id;
 		if (!firstKeptEntryId) throw new Error("Expected branch entry with id");
@@ -497,7 +497,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
 		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
-		const frame = { data: "A".repeat(4_000_000), mimeType: "image/png", cols: 10, rows: 10, chars: 10 };
+		const frame = { data: "A".repeat(20_000_000), mimeType: "image/png", cols: 10, rows: 10, chars: 10 };
 		const archiveResult = (frames: number) => ({
 			summary: "stubbed snapcompact",
 			shortSummary: "stub",
@@ -512,7 +512,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 				},
 			},
 		});
-		// 4 frames of 4 MB overshoot the 12 MB frame budget official Anthropic gets; the re-render fits.
+		// 4 frames of 20 MB overshoot the 60 MB frame budget official Anthropic gets; the re-render fits.
 		const compactSpy = vi
 			.spyOn(snapcompact, "compact")
 			.mockResolvedValueOnce(archiveResult(4))
@@ -521,7 +521,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		await session.compact(undefined, { mode: "snapcompact" });
 
 		expect(compactSpy).toHaveBeenCalledTimes(2);
-		// 4 frames × 12 MB budget / 16 MB rendered = 3 frames.
+		// 4 frames × 60 MB budget / 80 MB rendered = 3 frames.
 		expect(compactSpy.mock.calls[1]?.[1]).toEqual({ ...compactSpy.mock.calls[0]?.[1], maxFrames: 3 });
 		const entry = sessionManager.getBranch().findLast(e => e.type === "compaction");
 		if (entry?.type !== "compaction") throw new Error("Expected the re-rendered archive to be committed");

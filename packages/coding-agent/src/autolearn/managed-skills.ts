@@ -10,7 +10,7 @@
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
 /** Provider id stamped on discovered managed skills (distinguishes them from authored). */
@@ -69,12 +69,113 @@ export function sanitizeManagedDescription(raw: string): string {
 }
 
 /**
- * Serialize the minimal `name`/`description` frontmatter block via the repo's
- * YAML helper (round-trips through `parseFrontmatter`).
+ * Frontmatter key holding a managed skill's provenance. Namespaced (`x-omp-`)
+ * so it never collides with Agent Skills fields; read with `rawKeys` because the
+ * default frontmatter parse camel-cases it to `xOmpProvenance`. Provenance is
+ * never rendered into the system prompt — only `name`/`description` are.
  */
-export function toSkillFrontmatter(name: string, description: string): string {
+export const MANAGED_SKILL_PROVENANCE_KEY = "x-omp-provenance";
+
+/** Most recent contributing sessions/projects kept per managed skill. */
+export const MAX_PROVENANCE_ENTRIES = 20;
+
+/** Tool that wrote a managed skill. */
+export type ManagedSkillGenerator = "manage_skill" | "learn";
+
+/**
+ * Where a managed skill came from: the writing tool, when it was created and
+ * last updated, and the sessions/projects whose work produced it (oldest
+ * first, capped at {@link MAX_PROVENANCE_ENTRIES}). Session ids are the source
+ * episodes a reviewer resumes to see why the skill exists; several projects
+ * mark a procedure learned in more than one context.
+ */
+export interface ManagedSkillProvenance {
+	generator: ManagedSkillGenerator;
+	/** Absent when the skill predates provenance stamping. */
+	created?: string;
+	updated: string;
+	sessions: string[];
+	projects: string[];
+}
+
+/** Identity of one managed-skill write, merged into the stored provenance. */
+export interface ManagedSkillOrigin {
+	generator: ManagedSkillGenerator;
+	sessionId?: string | null;
+	project?: string;
+}
+
+function isGenerator(value: unknown): value is ManagedSkillGenerator {
+	return value === "manage_skill" || value === "learn";
+}
+
+/** Single-line, control-free string from an on-disk provenance value; empty when not a string. */
+function provenanceString(value: unknown): string {
+	return typeof value === "string" ? value.replace(/[\p{Cc}\p{Cf}]/gu, "").trim() : "";
+}
+
+function provenanceList(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.map(provenanceString).filter(entry => entry.length > 0);
+}
+
+/**
+ * Parse the provenance block from raw-keyed frontmatter. Returns undefined when
+ * absent or unusable (hand-placed or pre-provenance skills).
+ */
+export function readManagedSkillProvenance(frontmatter: Record<string, unknown>): ManagedSkillProvenance | undefined {
+	const raw = frontmatter[MANAGED_SKILL_PROVENANCE_KEY];
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const record = raw as Record<string, unknown>;
+	const updated = provenanceString(record.updated);
+	if (!isGenerator(record.generator) || !updated) return undefined;
+	const created = provenanceString(record.created);
+	return {
+		generator: record.generator,
+		...(created ? { created } : {}),
+		updated,
+		sessions: provenanceList(record.sessions),
+		projects: provenanceList(record.projects),
+	};
+}
+
+function appendRecent(list: readonly string[], value: string | null | undefined): string[] {
+	const next = list.filter(entry => entry !== value);
+	if (value) next.push(value);
+	return next.slice(-MAX_PROVENANCE_ENTRIES);
+}
+
+/**
+ * Fold one write into the prior provenance: `created` survives updates, the
+ * writer's session/project move to the most-recent end of their lists.
+ */
+function nextProvenance(
+	action: WriteManagedSkillInput["action"],
+	prior: ManagedSkillProvenance | undefined,
+	origin: ManagedSkillOrigin,
+	now: string,
+): ManagedSkillProvenance {
+	const created = action === "create" ? now : prior?.created;
+	return {
+		generator: origin.generator,
+		...(created ? { created } : {}),
+		updated: now,
+		sessions: appendRecent(prior?.sessions ?? [], origin.sessionId),
+		projects: appendRecent(prior?.projects ?? [], origin.project),
+	};
+}
+
+/**
+ * Serialize the `name`/`description` frontmatter block (plus provenance when
+ * given) via the repo's YAML helper (round-trips through `parseFrontmatter`).
+ */
+export function toSkillFrontmatter(name: string, description: string, provenance?: ManagedSkillProvenance): string {
 	const frontmatter = YAML.stringify(
-		{ name, description: sanitizeManagedDescription(description) },
+		{
+			name,
+			description: sanitizeManagedDescription(description),
+			...(provenance ? { [MANAGED_SKILL_PROVENANCE_KEY]: provenance } : {}),
+		},
 		null,
 		2,
 	).trimEnd();
@@ -86,6 +187,8 @@ export interface WriteManagedSkillInput {
 	name: string;
 	description: string;
 	body: string;
+	/** Who is writing; stamped into the skill's provenance. */
+	origin: ManagedSkillOrigin;
 }
 
 /**
@@ -109,22 +212,33 @@ function serializeSkillMutation<T>(name: string, op: () => Promise<T>): Promise<
 }
 
 /**
- * Reject when the managed-skills root itself is a symlink. lstat on a child
- * follows intermediate components, so a symlinked root would let an otherwise
- * valid name write/delete outside the isolated directory (e.g. onto authored
- * skills). Checked before composing any child path.
+ * Validate the managed-skills root before composing any child path. A symlinked
+ * root is allowed when it resolves to an existing directory: the operator may
+ * point the store at the shared skills tree (`~/.omp/agent/managed-skills` ->
+ * `~/meta/notes/omp-skills`). Child paths stay inside that target because a
+ * skill name is one safe path segment and a child directory symlink is rejected
+ * at the mutation itself. A broken link or a link to a non-directory has no
+ * defined write target, so it is refused.
  */
 async function assertManagedRootSafe(): Promise<void> {
-	const rootStat = await fs.lstat(getManagedSkillsDir()).catch(err => {
+	const root = getManagedSkillsDir();
+	const rootStat = await fs.lstat(root).catch(err => {
 		if (isEnoent(err)) return null;
 		throw err;
 	});
-	if (rootStat?.isSymbolicLink()) {
-		throw new Error("The managed-skills root is a symlink; refusing to operate outside the managed directory.");
+	if (!rootStat?.isSymbolicLink()) return;
+	const targetStat = await fs.stat(root).catch(err => {
+		if (isEnoent(err)) {
+			throw new Error(`The managed-skills root ${root} is a broken symlink; refusing to write.`);
+		}
+		throw err;
+	});
+	if (!targetStat.isDirectory()) {
+		throw new Error(`The managed-skills root ${root} links to a non-directory; refusing to write.`);
 	}
 }
 
-const UPDATE_FILE_OPEN_FLAGS = fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW;
+const UPDATE_FILE_OPEN_FLAGS = fsConstants.O_RDWR | fsConstants.O_NOFOLLOW;
 
 function assertManagedSkillFileSafeForUpdate(name: string, fileStat: Stats): void {
 	if (!fileStat.isFile()) {
@@ -162,15 +276,21 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 	if (!body) {
 		throw new Error(`Managed skill "${name}" needs a non-empty body.`);
 	}
-	const content = `${toSkillFrontmatter(name, description)}\n${body}\n`;
-	// Cap the UTF-8 byte size of the FINAL file (body + description + frontmatter),
-	// not the UTF-16 code-unit length of the body alone.
-	const bytes = Buffer.byteLength(content, "utf8");
-	if (bytes > MAX_MANAGED_SKILL_BYTES) {
-		throw new Error(
-			`Managed skill is ${bytes} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
-		);
-	}
+	const render = (prior: ManagedSkillProvenance | undefined): Buffer => {
+		const provenance = nextProvenance(input.action, prior, input.origin, new Date().toISOString());
+		const content = Buffer.from(`${toSkillFrontmatter(name, description, provenance)}\n${body}\n`, "utf8");
+		// Cap the UTF-8 byte size of the FINAL file (body + description + frontmatter),
+		// not the UTF-16 code-unit length of the body alone.
+		if (content.byteLength > MAX_MANAGED_SKILL_BYTES) {
+			throw new Error(
+				`Managed skill is ${content.byteLength} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
+			);
+		}
+		return content;
+	};
+	// Fail an oversized create/update before touching the filesystem; an update
+	// re-renders below once the stored provenance is known.
+	render(undefined);
 	return serializeSkillMutation(name, async () => {
 		await assertManagedRootSafe();
 		const dir = path.join(getManagedSkillsDir(), name);
@@ -188,6 +308,7 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			);
 		}
 		if (input.action === "create") {
+			const content = render(undefined);
 			await fs.mkdir(dir, { recursive: true });
 			// O_CREAT|O_EXCL ("wx"): atomic create that fails if the file already
 			// exists (closing the check-then-write race) and refuses a symlinked SKILL.md.
@@ -220,13 +341,72 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		try {
 			const openStat = await handle.stat();
 			assertManagedSkillFileSafeForUpdate(name, openStat);
+			// Carry the stored provenance forward (created date, contributing sessions/projects).
+			const { frontmatter } = parseFrontmatter(await handle.readFile({ encoding: "utf8" }), {
+				source: file,
+				rawKeys: true,
+				level: "off",
+			});
+			const content = render(readManagedSkillProvenance(frontmatter));
 			await handle.truncate(0);
-			await handle.writeFile(content);
+			// Positional writes: the read above advanced the handle's file position.
+			let offset = 0;
+			while (offset < content.byteLength) {
+				const { bytesWritten } = await handle.write(content, offset, content.byteLength - offset, offset);
+				offset += bytesWritten;
+			}
 		} finally {
 			await handle.close();
 		}
 		return { path: file };
 	});
+}
+
+/** A managed skill as stored on disk, for review listings. */
+export interface ManagedSkillEntry {
+	name: string;
+	description: string;
+	path: string;
+	provenance?: ManagedSkillProvenance;
+}
+
+/**
+ * List every managed skill on disk (including ones an authored skill shadows),
+ * most recently updated first. Symlinked or invalidly named entries are skipped
+ * — the same entries the write/delete primitives refuse to touch.
+ */
+export async function listManagedSkills(): Promise<ManagedSkillEntry[]> {
+	const root = getManagedSkillsDir();
+	const dirents = await fs.readdir(root, { withFileTypes: true }).catch(err => {
+		if (isEnoent(err)) return [];
+		throw err;
+	});
+	const entries = await Promise.all(
+		dirents
+			.filter(dirent => dirent.isDirectory() && isValidManagedSkillName(dirent.name))
+			.map(async (dirent): Promise<ManagedSkillEntry | null> => {
+				const file = path.join(root, dirent.name, "SKILL.md");
+				const content = await fs.readFile(file, "utf8").catch(err => {
+					if (isEnoent(err)) return null;
+					throw err;
+				});
+				if (content === null) return null;
+				const { frontmatter } = parseFrontmatter(content, { source: file, rawKeys: true, level: "off" });
+				const provenance = readManagedSkillProvenance(frontmatter);
+				return {
+					name: dirent.name,
+					description: sanitizeManagedDescription(provenanceString(frontmatter.description)),
+					path: file,
+					...(provenance ? { provenance } : {}),
+				};
+			}),
+	);
+	return entries
+		.filter((entry): entry is ManagedSkillEntry => entry !== null)
+		.sort(
+			(a, b) =>
+				(b.provenance?.updated ?? "").localeCompare(a.provenance?.updated ?? "") || a.name.localeCompare(b.name),
+		);
 }
 
 /** Delete a managed skill directory. Throws when it does not exist. */

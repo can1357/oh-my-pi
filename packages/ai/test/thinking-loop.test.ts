@@ -1,21 +1,22 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { complete, completeSimple, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import {
 	GEMINI_HEADER_RUNAWAY_THRESHOLD,
 	GeminiHeaderRunDetector,
-	isLoopGuardedModel,
 	isReasoningSummaryHeader,
+	loopGuardLevel,
 	THINKING_LOOP_ERROR_MARKER,
 	ThinkingLoopDetector,
 	withThinkingLoopGuard,
 } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { isRetryableError } from "@oh-my-pi/pi-utils";
 
@@ -215,6 +216,59 @@ const ANCHOR_FREE_DELIBERATION = [
 	"Finally the threshold has to leave a wide margin so ordinary focused thinking never trips the detector ever.",
 ].join("\n\n\n");
 
+/** Issue #20096: Chinese reasoning that advances a dashboard plan step by step
+ *  while every paragraph reshuffles the same Latin tool/metric names. The Latin
+ *  vocabulary alone never shows novelty; the Chinese prose does — must NOT trip. */
+function cjkPlanWithRecurringLatin(): string {
+	const vocab = [
+		"tool_a",
+		"tool_b",
+		"campaign",
+		"spend",
+		"impressions",
+		"clicks",
+		"dashboard",
+		"ctr",
+		"roi",
+		"budget",
+	];
+	const steps = [
+		"首先确认用户要的是哪个广告账户，以及统计周期是最近七天还是自然月，这决定了查询参数怎么填。",
+		"接着检查返回的字段里有没有缺失值，如果某天没有投放，需要补零而不是直接跳过，否则折线图会断开。",
+		"然后按渠道分组汇总花费，计算每个渠道的点击率和千次展示成本，并把结果按花费从高到低排序。",
+		"第四步是设计面板布局：顶部放核心指标卡片，中间放趋势折线图，底部放渠道明细表格，方便老板快速浏览。",
+		"颜色方面，花费用橙色，点击用蓝色，转化用绿色，保持和公司品牌规范一致，避免红绿色盲用户看不清。",
+		"另外要考虑时区问题，接口返回的是协调世界时，而用户在北京，需要统一换算成东八区再按天切分。",
+		"如果某个活动在周期中途被暂停，表格里应该标注状态，并在备注列说明暂停原因，免得被误读为数据异常。",
+		"写入之前先做一次小规模试跑，只写一个面板验证格式正确，确认无误后再批量创建剩余的六个面板。",
+		"最后整理一段中文说明，告诉用户每个指标的口径、数据刷新频率，以及遇到空数据时应该联系谁处理。",
+		"还要设置每天早上八点自动刷新，并在刷新失败时给负责人发送提醒消息，保证看板数据始终是最新的。",
+	];
+	return steps
+		.map((step, i) => {
+			const rotated = [...vocab.slice(i), ...vocab.slice(0, i)];
+			return `${step}${rotated.map(word => `${word} 的`).join("")}`;
+		})
+		.join("\n\n");
+}
+
+/** A Chinese progress-lexicon stall: every paragraph reorders the same filler
+ *  clauses and names nothing concrete — must trip. */
+function cjkFillerLoop(paragraphs: number): string {
+	const clauses = [
+		"我现在继续推进这个任务",
+		"保持专注并且全力执行",
+		"确保一切都正确无误",
+		"不再犹豫而是马上行动",
+		"持续保持当前的节奏",
+		"坚定地朝着目标前进",
+	];
+	return Array.from({ length: paragraphs }, (_, i) => {
+		const shift = i % clauses.length;
+		return `${[...clauses.slice(shift), ...clauses.slice(0, shift)].join("，")}。`;
+	}).join("\n\n");
+}
+
 /** Realistic per-file refactor assignments: heavy boilerplate (low novelty) but
  *  each names a distinct file + symbol — a NEW anchor every segment — so neither
  *  the trigram cluster nor the lexical-stall run ever reaches its threshold. */
@@ -261,6 +315,44 @@ function vrmlDraft(parts: number): string {
 		].join("\n"),
 	);
 	return `\`\`\`wrl\n#VRML V2.0 utf8\nTransform {\n  children [\n${blocks.join("\n")}\n\n`;
+}
+
+/** A markdown table and a one-line JSON array, each with `n` same-shape rows whose
+ *  only variation is a numeric id: the final-answer shape from issue #11129. */
+function tableAndJsonAnswer(n: number): string {
+	const rows = ["| case_id | case_name | case_url |", "| --- | --- | --- |"];
+	const items: string[] = [];
+	for (let i = 0; i < n; i++) {
+		const id = 35350 + i;
+		rows.push(`| ${id} | case ${i + 1} | https://example.com/#/CaseEdit?fs_id=${id} |`);
+		items.push(
+			`{"case_id": ${id}, "case_name": "case ${i + 1}", "case_url": "https://example.com/#/CaseEdit?fs_id=${id}", "case_sheet": 0}`,
+		);
+	}
+	return `${rows.join("\n")}\n\n[TA_CASES]#{"cases": [${items.join(", ")}]}`;
+}
+
+/** `records` one-line JSON records with a `valueChars`-long description. Every record
+ *  carries the same text and only the digits differ: the shape of issue #11129 with long
+ *  values in place of the short ones tableAndJsonAnswer uses. */
+function jsonRecords(records: number, valueChars: number): string[] {
+	const base =
+		"Open the login page, enter the test account credentials, confirm the dashboard renders the case list, and verify every widget reports data. ";
+	return Array.from({ length: records }, (_, i) => {
+		let description = `Case ${i} `;
+		while (description.length < valueChars) description += base;
+		return `{"case_id": ${35350 + i}, "case_name": "case ${i + 1}", "description": "${description.slice(0, valueChars)}", "case_sheet": 0}`;
+	});
+}
+
+/** A degenerate reasoning loop dense with inline code: each paragraph re-reads the same
+ *  files with cosmetic wording drift, so most of its punctuation is backticks. */
+function inlineCodeReasoningLoop(paragraphs: number): string {
+	return Array.from(
+		{ length: paragraphs },
+		(_, i) =>
+			`Attempt ${i}: I will call \`read\` on \`src/a/b.ts\`, then \`grep\` for \`foo\` in \`src/\`, then \`edit\` \`src/c/d.ts\`: the \`foo\` helper ${i % 2 ? "again" : "once more"} needs checking, so \`bun test\` follows.`,
+	).join("\n\n");
 }
 
 describe("ThinkingLoopDetector", () => {
@@ -321,6 +413,15 @@ describe("ThinkingLoopDetector", () => {
 		expect(feed(ANCHOR_FREE_DELIBERATION, 23)).toBeNull();
 	});
 
+	test("does not trip on advancing CJK reasoning whose Latin identifiers recur", () => {
+		// Issue #20096: the Chinese prose must count toward novelty, not just the Latin terms.
+		expect(feed(cjkPlanWithRecurringLatin())).toBeNull();
+	});
+
+	test("trips on a reshuffled CJK filler loop", () => {
+		expect(feed(cjkFillerLoop(12))).toContain("segments");
+	});
+
 	test("flush() catches a final unterminated duplicate paragraph", () => {
 		const detector = new ThinkingLoopDetector();
 		// Seven blank-line-separated dupes leave the eighth (cluster-completing)
@@ -352,6 +453,16 @@ describe("ThinkingLoopDetector", () => {
 		const detail = feed(loop);
 		expect(detail).not.toBeNull();
 		expect(feed(`${vrmlDraft(8)}${loop}`)).toBe(detail);
+	});
+
+	test("does not trip on a summarizer repeating one status line", () => {
+		// Claude's summarized thinking restated this line seven times back to back
+		// while hidden reasoning ran; the short-stutter floor misread it as a loop.
+		const lead = "The helper goes in `tools/browser/tern/user-page.ts` beside the dock code.\n\n";
+		const status = "Still writing the Tern page helper...\n\n";
+		expect(feed(`${lead}${status.repeat(20)}`, 9)).toBeNull();
+		// Whole-line repetition still trips once it covers the long-cycle floor.
+		expect(feed(`${lead}${status.repeat(40)}`, 9)).toContain("back-to-back");
 	});
 
 	test("does not trip on short requested repetitive text", () => {
@@ -394,6 +505,166 @@ describe("ThinkingLoopDetector", () => {
 		// path cannot reach them.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"  ".repeat(2000)}`)).toBeNull();
+	});
+
+	test("does not trip on a markdown table followed by a JSON array of same-shape rows (issue #11129)", () => {
+		// Streamed in 20-char deltas as the provider sends them. Both blocks are answer
+		// content, not reasoning: their rows differ only in numeric ids.
+		expect(feed(tableAndJsonAnswer(33), 20)).toBeNull();
+	});
+
+	test("does not trip on a long markdown table whose cells are prose", () => {
+		// Same-shape rows with prose cells and no JSON fields: only the pipe-row shape keeps
+		// them out of the similarity check.
+		const rows = ["| case_id | status | note |", "| --- | --- | --- |"];
+		for (let i = 0; i < 150; i++) rows.push(`| ${35350 + i} | Verify the login page loads | Pass |`);
+		expect(feed(rows.join("\n"), 20)).toBeNull();
+	});
+
+	test("does not trip on a one-line JSON array of same-shape records (issue #11129)", () => {
+		const items = Array.from(
+			{ length: 100 },
+			(_, i) =>
+				`{"case_id": ${35350 + i}, "case_name": "case ${i + 1}", "case_url": "https://example.com/#/CaseEdit?fs_id=${35350 + i}", "case_sheet": 0}`,
+		);
+		expect(feed(`[TA_CASES]#{"cases": [${items.join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on a one-line JSON array whose records carry long text values (issue #11129)", () => {
+		// A 250-character value spans chunk boundaries. A chunk that starts inside a value must
+		// not leave the rest of that value unmasked, or it reads as prose.
+		expect(feed(`[TA_CASES]#{"cases": [${jsonRecords(60, 250).join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on 100 one-line JSON records with 550-character string values (issue #11129)", () => {
+		// At this length a 700-character chunk starts at a value's opening quote after its
+		// `:` landed in the previous chunk; the value must still be masked, not read as prose.
+		expect(feed(`[TA_CASES]#{"cases": [${jsonRecords(100, 550).join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on a one-line JSON array whose records carry array-valued fields (issue #11129)", () => {
+		// A field value may be a flat array of scalars, not only a scalar.
+		const items = Array.from(
+			{ length: 100 },
+			(_, i) =>
+				`{"case_id": ${35350 + i}, "case_name": "case ${i + 1}", "steps": [1, 2, 3], "tags": ["auth", "login"], "case_sheet": 0}`,
+		);
+		expect(feed(`[TA_CASES]#{"cases": [${items.join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on JSON records one per line (issue #11129)", () => {
+		// 150 records: enough to trip the near-duplicate path without the structured skip.
+		expect(feed(jsonRecords(150, 60).join("\n"), 20)).toBeNull();
+	});
+
+	test("still trips on a reasoning loop with one shell pipe per line", () => {
+		// One `|` is a shell pipe, not a table row: the table rule needs two pipes per line.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) =>
+				`Attempt ${i}: I will run cat report.log | grep ${i % 2 ? "again" : "once more"} and check the result before I decide.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a reasoning loop whose lines name a union type", () => {
+		// Two pipes make a union type, not a table row: a table row leads with a pipe.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) =>
+				`Attempt ${i}: the result is a ChartOptions | TableOptions | null union, so I will narrow it again before the next call.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a reasoning loop whose lines are shell pipelines", () => {
+		// Two pipes in a pipeline are still prose: a table row leads with a pipe.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) => `Attempt ${i}: I will run cat report.log | grep case | wc -l and compare the count before I decide.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a reasoning loop where half the lines are table rows", () => {
+		// Rows must reach 60% of a segment's non-blank lines. An even mix of rows and prose
+		// is reasoning, so it must still trip.
+		const paragraphs = Array.from(
+			{ length: 40 },
+			(_, i) =>
+				`| ${35350 + i} | case ${i + 1} | Verify the login page |\nI will check this row again, then move on.`,
+		);
+		expect(feed(paragraphs.join("\n\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("does not trip on a long markdown table with a caption line every tenth row", () => {
+		// About 90% of the lines are rows: above the 60% share, and a share raised past 90%
+		// would let this table trip.
+		const lines = ["| case_id | case_name | case_url |", "| --- | --- | --- |"];
+		for (let i = 0; i < 150; i++) {
+			lines.push(`| ${35350 + i} | case ${i + 1} | https://example.com/#/CaseEdit?fs_id=${35350 + i} |`);
+			if (i % 10 === 9) lines.push(`Batch ${i / 10 + 1} of 15 is done.`);
+		}
+		expect(feed(lines.join("\n"), 20)).toBeNull();
+	});
+
+	test("still trips on reasoning prose that quotes a JSON object", () => {
+		// The four fields are about a quarter of each segment, under the half-of-segment rule.
+		const paragraphs = Array.from(
+			{ length: 40 },
+			(_, i) =>
+				`Attempt ${i}: the reply was {"id": ${i}, "ok": true, "retries": 0, "cached": false}, so I will check the cache again before the next call.`,
+		);
+		expect(feed(paragraphs.join("\n\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a loop of single-field JSON objects", () => {
+		// A record needs two fields. One field with a long prose value is still reasoning;
+		// the trailing word keeps the line out of the code-line strip.
+		const paragraphs = Array.from(
+			{ length: 40 },
+			(_, i) => `{"note": "I will check the cache again before the next call, then verify result ${i}."} done`,
+		);
+		expect(feed(paragraphs.join("\n\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on bullet and numbered lists of same-shape items", () => {
+		// Lists are not table rows or JSON records, so the exemption does not cover them.
+		const bullets = Array.from(
+			{ length: 70 },
+			(_, i) => `- Case ${i + 1}: Verify the login page loads and shows the dashboard for user ${35350 + i}`,
+		).join("\n");
+		const numbered = Array.from(
+			{ length: 100 },
+			(_, i) => `${i + 1}. Verify the login page loads and shows the dashboard for user ${35350 + i}`,
+		).join("\n");
+		expect(feed(bullets, 20)).toContain("near-identical segments");
+		expect(feed(numbered, 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a drifting reasoning loop dense with inline code", () => {
+		// Backticks and commas lower its prose share, but it is reasoning, not record or
+		// table content, so it must still reach the near-duplicate check.
+		expect(feed(inlineCodeReasoningLoop(40), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on an exact cycle of identical table rows", () => {
+		// Byte-identical rows fed in small deltas: the exact suffix-cycle path does not
+		// bypass structured content.
+		const rows = Array.from({ length: 40 }, () => "| 35350 | case 1 | https://example.com/#/CaseEdit?fs_id=35350 |");
+		expect(feed(rows.join("\n"), 7)).toContain("back-to-back");
+	});
+
+	test("still trips on a wall-of-text prose loop with no blank lines", () => {
+		// Without paragraph breaks the loop reaches the detector as forced chunks; the
+		// structured-content exemption must leave that prose path armed. The index keeps
+		// the bytes from repeating exactly, so the near-duplicate path is the one tested.
+		const wall = Array.from(
+			{ length: 60 },
+			(_, i) =>
+				`Attempt ${i}: I am now verifying the test module ${i % 2 ? "again" : "once more"} to guarantee there are no compile errors.`,
+		).join(" ");
+		expect(feed(wall)).toContain("near-identical segments");
 	});
 });
 
@@ -441,6 +712,23 @@ describe("thinking-loop guard (stream wrapper)", () => {
 			expect(events.some(e => e.type === "thinking_end")).toBe(false);
 			expect(events.some(e => e.type === "done")).toBe(false);
 			if (terminal?.type === "error") expect(terminal.error.content).toEqual([]);
+		} finally {
+			clearCustomApis();
+		}
+	});
+
+	test("passes a Claude stream through untouched even with an exact cycle", async () => {
+		registerMockApi();
+		try {
+			const mock = createMockModel({ provider: "anthropic", id: "claude-opus-5-5" });
+			// Trips the exact-cycle check at the default level (see the verbatim
+			// back-to-back detector test).
+			mock.push({ content: [{ type: "thinking", thinking: "🌊 ".repeat(120) }] });
+
+			const result = await stream(mock.model, context()).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.some(b => b.type === "thinking")).toBe(true);
 		} finally {
 			clearCustomApis();
 		}
@@ -622,6 +910,19 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 
 describe("thinking-loop error accounting", () => {
 	const model = createMockModel({ provider: "google-vertex", id: "gemini-2.5-pro" }).model;
+	// The guard times attempts with `Date.now()`; a virtual clock keeps these assertions independent of host load.
+	let clock = 1_700_000_000_000;
+	beforeEach(() => {
+		spyOn(Date, "now").mockImplementation(() => clock);
+	});
+	afterEach(() => {
+		mock.restore();
+	});
+	/** Lets the guard drain already-pushed events at the current time, then advances the clock. */
+	const elapse = async (ms: number): Promise<void> => {
+		await scheduler.yield();
+		clock += ms;
+	};
 	const usage = (input: number, output: number, total: number): AssistantMessage["usage"] => ({
 		input,
 		output,
@@ -650,10 +951,10 @@ describe("thinking-loop error accounting", () => {
 			const inner = new AssistantMessageEventStream();
 			void (async () => {
 				inner.push({ type: "start", partial });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_start", contentIndex: 0, partial });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Checking the module.\n\n", partial });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial });
 			})();
 			return inner;
@@ -668,8 +969,8 @@ describe("thinking-loop error accounting", () => {
 		expect(result.usage).toEqual(usage(116_000, 2_400, 0.169));
 		expect(result.timestamp).toBe(partial.timestamp);
 		expect(result.responseId).toBe("resp-looping");
-		expect(result.ttft).toBeGreaterThanOrEqual(25);
-		expect(result.duration).toBeGreaterThanOrEqual((result.ttft ?? 0) + 20);
+		expect(result.ttft).toBe(30);
+		expect(result.duration).toBe(60);
 	});
 
 	test("reports the attempt that tripped, not the time spent on an earlier retried attempt", async () => {
@@ -681,7 +982,7 @@ describe("thinking-loop error accounting", () => {
 				inner.push({ type: "start", partial: first });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: first });
 				// A replay-safe provider retry: a fresh output after a backoff.
-				await scheduler.wait(80);
+				await elapse(80);
 				second = { ...attempt("attempt-2"), usage: usage(50_000, 100, 0.05) };
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: second });
 			})();
@@ -692,8 +993,8 @@ describe("thinking-loop error accounting", () => {
 		expect(result.responseId).toBe("attempt-2");
 		expect(result.timestamp).toBe(second?.timestamp ?? Number.NaN);
 		expect(result.usage.input).toBe(50_000);
-		expect(result.duration).toBeLessThan(60);
-		expect(result.ttft).toBeLessThan(60);
+		expect(result.duration).toBe(0);
+		expect(result.ttft).toBe(0);
 	});
 
 	test("restarts attempt timing when a provider resets its output in place for a retry", async () => {
@@ -704,11 +1005,11 @@ describe("thinking-loop error accounting", () => {
 			void (async () => {
 				inner.push({ type: "start", partial: output });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
-				await scheduler.wait(80);
+				await elapse(80);
 				output.timestamp = Date.now();
 				output.responseId = "attempt-2";
 				inner.push({ type: "start", partial: output });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
 			})();
 			return inner;
@@ -716,8 +1017,8 @@ describe("thinking-loop error accounting", () => {
 
 		const result = await guarded.result();
 		expect(result.responseId).toBe("attempt-2");
-		expect(result.ttft).toBeGreaterThanOrEqual(25);
-		expect(result.duration).toBeLessThan(80);
+		expect(result.ttft).toBe(30);
+		expect(result.duration).toBe(30);
 	});
 
 	test("takes the final message when the loop only shows at the end-of-stream flush", async () => {
@@ -756,7 +1057,7 @@ describe("thinking-loop error accounting", () => {
 			void (async () => {
 				inner.push({ type: "start", partial: output });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
-				await scheduler.wait(10);
+				await elapse(10);
 				output.usage = usage(116_000, 2_500, 0.17);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
 			})();
@@ -898,8 +1199,8 @@ describe("withThinkingLoopGuard (thinking after toolcall)", () => {
 	});
 });
 
-describe("isLoopGuardedModel", () => {
-	test("guards models with Gemini, DeepSeek, and xAI structured identity", () => {
+describe("loopGuardLevel", () => {
+	test("runs semantic heuristics for Gemini, DeepSeek, and xAI structured identity", () => {
 		const gemini = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
 		const deepseek = createMockModel({ provider: "deepseek", id: "deepseek-reasoner" }).model;
 		const grok46 = createMockModel({ provider: "venice", id: "grok-4-6" }).model;
@@ -912,27 +1213,43 @@ describe("isLoopGuardedModel", () => {
 		const openaiNamespacedDeepseek = createMockModel({ provider: "custom", id: "openai/deepseek-r1" }).model;
 		const openaiNamespacedGrok = createMockModel({ provider: "custom", id: "openai/grok-4.6" }).model;
 
-		expect(isLoopGuardedModel(gemini)).toBe(true);
-		expect(isLoopGuardedModel(deepseek)).toBe(true);
-		expect(isLoopGuardedModel(grok46)).toBe(true);
+		expect(loopGuardLevel(gemini)).toBe("semantic");
+		expect(loopGuardLevel(deepseek)).toBe("semantic");
+		expect(loopGuardLevel(grok46)).toBe("semantic");
 		// Cursor's wrapped per-tier Grok ids carry structured xai identity
 		// (`taxonomy/xai.kdl` cursor-grok- prefix), so the guard applies.
-		expect(isLoopGuardedModel(cursorGrok46)).toBe(true);
-		expect(isLoopGuardedModel(grok460)).toBe(true);
-		expect(isLoopGuardedModel(grok45)).toBe(true);
-		expect(isLoopGuardedModel(opaqueDeepseek)).toBe(false);
-		expect(isLoopGuardedModel(other)).toBe(false);
+		expect(loopGuardLevel(cursorGrok46)).toBe("semantic");
+		expect(loopGuardLevel(grok460)).toBe("semantic");
+		expect(loopGuardLevel(grok45)).toBe("semantic");
+		expect(loopGuardLevel(opaqueDeepseek)).toBe("exact");
+		expect(loopGuardLevel(other)).toBe("exact");
 
-		expect(isLoopGuardedModel(openaiNamespacedGemini)).toBe(true);
-		expect(isLoopGuardedModel(openaiNamespacedDeepseek)).toBe(true);
-		expect(isLoopGuardedModel(openaiNamespacedGrok)).toBe(true);
+		expect(loopGuardLevel(openaiNamespacedGemini)).toBe("semantic");
+		expect(loopGuardLevel(openaiNamespacedDeepseek)).toBe("semantic");
+		expect(loopGuardLevel(openaiNamespacedGrok)).toBe("semantic");
 		// enabled: false disables every guarded family.
-		expect(isLoopGuardedModel(gemini, { loopGuard: { enabled: false } })).toBe(false);
-		expect(isLoopGuardedModel(deepseek, { loopGuard: { enabled: false } })).toBe(false);
-		expect(isLoopGuardedModel(grok45, { loopGuard: { enabled: false } })).toBe(false);
+		expect(loopGuardLevel(gemini, { loopGuard: { enabled: false } })).toBe("off");
+		expect(loopGuardLevel(deepseek, { loopGuard: { enabled: false } })).toBe("off");
+		expect(loopGuardLevel(grok45, { loopGuard: { enabled: false } })).toBe("off");
 
-		// enabled: true does not opt unrelated models into the guard.
-		expect(isLoopGuardedModel(other, { loopGuard: { enabled: true } })).toBe(false);
+		// enabled: true does not opt unrelated models into the semantic heuristics.
+		expect(loopGuardLevel(other, { loopGuard: { enabled: true } })).toBe("exact");
+	});
+
+	test("turns the guard off for Claude on every host", () => {
+		// Claude's summarized thinking repeats one status line verbatim, which the
+		// exact-cycle check misread as a runaway and discarded whole turns.
+		for (const [provider, id] of [
+			["anthropic", "claude-opus-5-5"],
+			["anthropic", "claude-fable-5-1"],
+			["amazon-bedrock", "us.anthropic.claude-opus-5-5"],
+			["openrouter", "anthropic/claude-opus-5-5"],
+		]) {
+			expect(loopGuardLevel(createMockModel({ provider, id }).model)).toBe("off");
+		}
+		// enabled: true is the default, not an opt-in that overrides the lineage rule.
+		const claude = createMockModel({ provider: "anthropic", id: "claude-opus-5-5" }).model;
+		expect(loopGuardLevel(claude, { loopGuard: { enabled: true } })).toBe("off");
 	});
 });
 
@@ -1233,5 +1550,75 @@ describe("thinking-loop retry budget (result path)", () => {
 			waitSpy.mockRestore();
 			clearCustomApis();
 		}
+	});
+});
+
+describe("loopGuard on mapped provider options", () => {
+	// A built-in API, so the request goes through mapOptionsForApi before stream() guards it.
+	const model = buildModel({
+		api: "openai-responses",
+		provider: "loop-guard-test",
+		id: "loop-guard-test-model",
+		name: "Loop guard test model",
+		baseUrl: "https://unused.example.com/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 32_768,
+	} satisfies ModelSpec<"openai-responses">);
+	const text = `Healthy lead sentence. ${OBSERVED_KIRO_CYCLE.repeat(6)}`;
+	const fetch = async (): Promise<Response> => {
+		const events: unknown[] = [
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [] },
+			},
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		];
+		for (let i = 0; i < text.length; i += 23) {
+			events.push({ type: "response.output_text.delta", delta: text.slice(i, i + 23) });
+		}
+		events.push(
+			{
+				type: "response.output_item.done",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text }] },
+			},
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 1,
+						output_tokens: 1,
+						total_tokens: 2,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		);
+		return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+			headers: { "content-type": "text/event-stream" },
+		});
+	};
+
+	test("trips on an exact answer-text cycle when loopGuard is unset", async () => {
+		const result = await streamSimple(model, context(), { apiKey: "test", fetch }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+	});
+
+	test.each([
+		["enabled: false", { enabled: false }],
+		["checkAssistantContent: false", { checkAssistantContent: false }],
+	] as const)("returns the full answer when %s", async (_label, loopGuard) => {
+		const result = await streamSimple(model, context(), { apiKey: "test", fetch, loopGuard }).result();
+
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text })]);
 	});
 });

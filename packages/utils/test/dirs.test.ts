@@ -5,11 +5,15 @@ import * as path from "node:path";
 import * as nativePath from "@oh-my-pi/pi-natives/path";
 import {
 	__resetProjectDirCacheForTests,
+	directoryExists,
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
+	getTestTempDir,
 	localDay,
+	relativePathWithinNormalizedRoot,
 	relativePathWithinRoot,
+	resolveEquivalentPath,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils/dirs";
 
@@ -51,15 +55,29 @@ describe("project directory state", () => {
 		},
 	);
 
-	it("treats denied stat as probeable rather than missing", async () => {
+	it("keeps forgiving probe defaults and propagates denied stat in strict mode", async () => {
 		const stat = spyOn(fs.promises, "stat").mockRejectedValue(
 			Object.assign(new Error("operation not permitted"), { code: "EACCES" }),
 		);
 		try {
-			expect(await directoryIsMissing(path.join(os.tmpdir(), "blocked"))).toBe(false);
+			const blocked = path.join(os.tmpdir(), "blocked");
+			for (const probe of [directoryExists, directoryIsMissing]) {
+				expect(await probe(blocked)).toBe(false);
+				await expect(probe(blocked, { strict: true })).rejects.toMatchObject({ code: "EACCES" });
+			}
 		} finally {
 			stat.mockRestore();
 		}
+	});
+
+	it("treats a child whose name starts with two dots as inside, and a parent or sibling as outside", () => {
+		const root = path.resolve("containment-root");
+		expect(relativePathWithinNormalizedRoot(root, path.join(root, "..hidden", "file"))).toBe(
+			path.join("..hidden", "file"),
+		);
+		expect(relativePathWithinNormalizedRoot(root, root)).toBe("");
+		expect(relativePathWithinNormalizedRoot(root, path.dirname(root))).toBeNull();
+		expect(relativePathWithinNormalizedRoot(root, path.join(root, "..", "sibling"))).toBeNull();
 	});
 
 	it("normalizes each containment operand only once", () => {
@@ -109,5 +127,75 @@ describe("dated log path", () => {
 		if (proc.exitCode === 2) return; // TZ not honored on this platform
 		if (proc.exitCode !== 0) console.error(proc.stderr.toString());
 		expect(proc.exitCode).toBe(0);
+	});
+});
+
+describe("getTestTempDir", () => {
+	it("scopes temp directories by numeric uid when available and falls back to username on platforms without getuid", () => {
+		const originalGetuid = Object.getOwnPropertyDescriptor(process, "getuid");
+		spyOn(os, "tmpdir").mockReturnValue("/tmp/shared");
+		spyOn(os, "userInfo").mockReturnValue({
+			username: "alice",
+			uid: -1,
+			gid: -1,
+			shell: null,
+			homedir: "/Users/alice",
+		});
+		try {
+			Object.defineProperty(process, "getuid", {
+				value: () => 1001,
+				configurable: true,
+				writable: true,
+			});
+			expect(getTestTempDir("omp-test-logs")).toBe(path.join("/tmp/shared", "omp-test-logs-1001"));
+
+			Object.defineProperty(process, "getuid", {
+				value: undefined,
+				configurable: true,
+				writable: true,
+			});
+			expect(getTestTempDir("omp-test-logs")).toBe(path.join("/tmp/shared", "omp-test-logs-alice"));
+		} finally {
+			if (originalGetuid) {
+				Object.defineProperty(process, "getuid", originalGetuid);
+			} else {
+				Reflect.deleteProperty(process, "getuid");
+			}
+		}
+	});
+});
+
+describe("resolveEquivalentPath", () => {
+	it("falls back to the lexical project path when realpath fails", () => {
+		const inputPath = path.resolve("/sessions/link-project");
+		const realpathSpy = vi.spyOn(fs, "realpathSync").mockImplementation((() => {
+			const error = new Error("ENOENT: no such file or directory, realpath");
+			(error as NodeJS.ErrnoException).code = "ENOENT";
+			throw error;
+		}) as unknown as typeof fs.realpathSync);
+
+		expect(resolveEquivalentPath(inputPath)).toBe(inputPath);
+		expect(realpathSpy).toHaveBeenCalledWith(inputPath);
+	});
+
+	it("resolves a missing path through its deepest existing ancestor only when asked", () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-through-missing-"));
+		try {
+			const real = path.join(temp, "real");
+			const link = path.join(temp, "link");
+			fs.mkdirSync(real);
+			try {
+				fs.symlinkSync(real, link, "junction");
+			} catch {
+				return; // Symlinks unavailable on this host.
+			}
+			const missing = path.join(link, "sub", "new.ts");
+			expect(resolveEquivalentPath(missing)).toBe(missing);
+			expect(resolveEquivalentPath(missing, { throughMissing: true })).toBe(
+				path.join(fs.realpathSync(real), "sub", "new.ts"),
+			);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
 	});
 });

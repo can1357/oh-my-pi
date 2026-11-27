@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { type ImageContent, type TextContent, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { createSessionRuntime } from "@oh-my-pi/pi-coding-agent/autoresearch/state";
 import {
 	type AutoresearchStorage,
@@ -13,8 +13,14 @@ import { createInitExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch
 import { createLogExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/log-experiment";
 import { createRunExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/run-experiment";
 import { createUpdateNotesTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/update-notes";
-import type { ASIData, LogDetails, NumericMetricMap, RunDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type {
+	ASIData,
+	LogDetails,
+	NumericMetricMap,
+	RunDetails,
+} from "@oh-my-pi/pi-coding-agent/autoresearch/tool-details";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { type ReadonlySessionManager, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -43,7 +49,8 @@ function dashboardStub() {
 }
 
 function createCtx(cwd: string): ExtensionContext {
-	return { cwd, hasUI: false } as ExtensionContext;
+	const sessionManager: ReadonlySessionManager = SessionManager.inMemory(cwd);
+	return { cwd, hasUI: false, sessionManager } as ExtensionContext;
 }
 
 interface PiHarness {
@@ -373,7 +380,11 @@ describe("run_experiment", () => {
 
 	it("accepts arbitrary commands, parses METRIC/ASI, and stores a run", async () => {
 		const dir = freshRepo().dir;
-		await writeHarnessStub(dir, "echo METRIC runtime_ms=42; echo METRIC memory_mb=12; echo ASI hypothesis=baseline");
+		const ctx = createCtx(dir);
+		await writeHarnessStub(
+			dir,
+			'echo METRIC runtime_ms=42; echo METRIC memory_mb=12; echo "ASI session=$PI_SESSION_ID"',
+		);
 		const runtime = createSessionRuntime();
 		const init = createInitExperimentTool({
 			dashboard: dashboardStub(),
@@ -385,18 +396,18 @@ describe("run_experiment", () => {
 			{ name: "speed", primary_metric: "runtime_ms", metric_unit: "ms" },
 			undefined,
 			undefined,
-			createCtx(dir),
+			ctx,
 		);
 		const run = createRunExperimentTool({
 			dashboard: dashboardStub(),
 			getRuntime: () => runtime,
 			pi: createPiHarness().api,
 		});
-		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, createCtx(dir));
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
 		const details = result.details as RunDetails;
 		expect(details.parsedPrimary).toBe(42);
 		expect(details.parsedMetrics).toMatchObject({ runtime_ms: 42, memory_mb: 12 });
-		expect(details.parsedAsi).toMatchObject({ hypothesis: "baseline" });
+		expect(details.parsedAsi).toMatchObject({ session: ctx.sessionManager.getSessionId() });
 		expect(details.passed).toBe(true);
 		expect(details.command).toBe("bash autoresearch.sh");
 		expect(fs.existsSync(details.benchmarkLogPath)).toBe(true);
@@ -851,7 +862,7 @@ describe("update_notes", () => {
 		await dbOverride.remove().catch(() => {});
 	});
 
-	it("replaces session notes and refreshes runtime state", async () => {
+	async function setupNotes() {
 		const dir = freshRepo().dir;
 		await writeHarnessStub(dir);
 		const runtime = createSessionRuntime();
@@ -867,17 +878,65 @@ describe("update_notes", () => {
 			getRuntime: () => runtime,
 			pi: harness.api,
 		});
+		return { dir, runtime, notes };
+	}
+
+	it("replaces session notes and refreshes runtime state", async () => {
+		const { dir, runtime, notes } = await setupNotes();
 		await notes.execute("n", { body: "## Plan\n- step one\n" }, undefined, undefined, createCtx(dir));
 		expect(runtime.state.notes).toContain("step one");
 
-		const append = await notes.execute(
-			"n2",
-			{ body: "", append_idea: "try caching" },
+		const validated = validateToolArguments(notes, {
+			type: "toolCall",
+			id: "n2",
+			name: notes.name,
+			arguments: { append_idea: "try caching" },
+		}) as typeof notes.parameters.infer;
+		const append = await notes.execute("n2", validated, undefined, undefined, createCtx(dir));
+		expect(append.details?.notes).toBe("## Plan\n- step one\n\n## Ideas\n- try caching\n");
+		expect(runtime.state.notes).toBe("## Plan\n- step one\n\n## Ideas\n- try caching\n");
+
+		const empty = await notes.execute("n3", { append_idea: "   " }, undefined, undefined, createCtx(dir));
+		expect(firstTextBlockText(empty.content)).toContain("Error:");
+		expect(runtime.state.notes).toContain("- try caching");
+
+		const replaced = await notes.execute(
+			"n4",
+			{ body: "## Replacement\n", append_idea: "   " },
 			undefined,
 			undefined,
 			createCtx(dir),
 		);
-		expect(append.details?.notes).toContain("- try caching");
-		expect(runtime.state.notes).toContain("- try caching");
+		expect(firstTextBlockText(replaced.content)).toContain("Notes updated");
+		expect(replaced.details?.notes).toBe("## Replacement\n");
+		expect(runtime.state.notes).toBe("## Replacement\n");
+	});
+
+	it("append_idea creates an Ideas section when only a similarly named heading exists", async () => {
+		const { dir, runtime, notes } = await setupNotes();
+		const initialNotes = "## Plan\n- step one\n\n## Ideas backlog\n- old item\n\n### Ideas\n- nested item\n";
+		await notes.execute("n1", { body: initialNotes }, undefined, undefined, createCtx(dir));
+
+		const appended = await notes.execute("n2", { append_idea: "try caching" }, undefined, undefined, createCtx(dir));
+		const expectedNotes =
+			"## Plan\n- step one\n\n## Ideas backlog\n- old item\n\n### Ideas\n- nested item\n\n## Ideas\n- try caching\n";
+		expect(appended.details?.notes).toBe(expectedNotes);
+		expect(runtime.state.notes).toBe(expectedNotes);
+	});
+
+	it("append_idea stays inside an existing Ideas section before the next heading", async () => {
+		const { dir, runtime, notes } = await setupNotes();
+		await notes.execute(
+			"n1",
+			{ body: "## Plan\n- step one\n\n## Ideas\n- try pooling\n## Results\n- baseline\n" },
+			undefined,
+			undefined,
+			createCtx(dir),
+		);
+
+		const appended = await notes.execute("n2", { append_idea: "try caching" }, undefined, undefined, createCtx(dir));
+		const expectedNotes = "## Plan\n- step one\n\n## Ideas\n- try pooling\n- try caching\n## Results\n- baseline\n";
+		expect(appended.details?.notes).toBe(expectedNotes);
+		expect(runtime.state.notes).toBe(expectedNotes);
 	});
 });

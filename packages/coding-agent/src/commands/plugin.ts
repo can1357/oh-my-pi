@@ -5,7 +5,7 @@
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { pluginHelp as commandHelp } from "../cli/command-help";
 import { type PluginAction, type PluginCommandArgs, runPluginCommand } from "../cli/plugin-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 const ACTIONS: PluginAction[] = [
 	"install",
@@ -42,7 +42,10 @@ export default class Plugin extends Command {
 		json: Flags.boolean({ description: "Output JSON" }),
 		fix: Flags.boolean({ description: "Attempt to fix issues (doctor)" }),
 		force: Flags.boolean({ description: "Force install" }),
-		"dry-run": Flags.boolean({ description: "Show actions without applying changes" }),
+		"dry-run": Flags.boolean({
+			description:
+				"Show actions without applying changes (install, uninstall, link, upgrade of marketplace plugins)",
+		}),
 		local: Flags.boolean({ char: "l", description: "Operate on local plugin directory" }),
 		enable: Flags.string({ description: "Enable a feature" }),
 		disable: Flags.string({ description: "Disable a feature" }),
@@ -74,7 +77,7 @@ export default class Plugin extends Command {
 			},
 		};
 
-		await initTheme();
+		initTheme();
 		await runPluginCommand(cmd);
 	}
 }

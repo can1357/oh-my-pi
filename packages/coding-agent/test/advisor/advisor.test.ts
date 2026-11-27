@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
@@ -6,7 +6,10 @@ import {
 	createCompactionSummaryMessage,
 	defaultConvertToLlm,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AssistantMessage, completeSimple, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type {
 	ResponseFileSearchToolCall,
 	ResponseFunctionWebSearch,
@@ -36,13 +39,18 @@ import {
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
 } from "../../src/advisor";
-import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
-import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
+import { Settings } from "../../src/config/settings";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
+import { type ImageDescriptionDeps, ImageDescriptions } from "../../src/utils/image-vision-fallback";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 /** Poll until the drain loop reaches the asserted state — waitForCatchup
  *  releases IMMEDIATELY on advisor failure (the primary must never park on a
@@ -335,13 +343,7 @@ describe("advisor", () => {
 					id: "ask-1",
 					name: "ask",
 					arguments: {
-						questions: [
-							{
-								id: "deploy",
-								question: "Authorize deployment?",
-								options: [{ label: "Yes" }, { label: "No" }],
-							},
-						],
+						html: '<form><p>Authorize deployment?</p><label><input type="radio" name="deploy" value="yes"> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
 					},
 				},
 			],
@@ -351,8 +353,8 @@ describe("advisor", () => {
 			role: "toolResult",
 			toolCallId: "ask-1",
 			toolName: "ask",
-			content: [{ type: "text", text: "User selected: Yes" }],
-			details: { selectedOptions: ["Yes"] },
+			content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+			details: { answers: [{ name: "deploy", question: "Authorize deployment?", answer: "Yes" }] },
 			isError: false,
 			timestamp: 2,
 		} as unknown as AgentMessage;
@@ -364,28 +366,22 @@ describe("advisor", () => {
 				expandToolIO: true,
 			});
 
-			expect(compact).not.toContain("User selected: Yes");
-			expect(expanded).toContain('"question": "Authorize deployment?"');
-			expect(expanded).toContain('"label": "Yes"');
-			expect(expanded).toContain("User selected: Yes");
+			expect(compact).not.toContain('"deploy": "yes"');
+			expect(expanded).toContain("<p>Authorize deployment?</p>");
+			expect(expanded).toContain('value="no"> No</label>');
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
-		it("bounds long ask questions and custom answers with visible head and tail context", () => {
+		it("bounds long ask forms and answers with visible head and tail context", () => {
 			const questionEnd = "question-at-end";
 			const answerEnd = "answer-at-end";
 			const longQuestion = {
-				...(askCall as unknown as { content: { arguments: { questions: unknown[] } }[] }),
+				...(askCall as unknown as Record<string, unknown>),
 				content: [
 					{
 						...(askCall as unknown as { content: Record<string, unknown>[] }).content[0],
 						arguments: {
-							questions: [
-								{
-									id: "deploy",
-									question: `question-start ${"context ".repeat(1200)}${questionEnd}`,
-									options: [{ label: "Custom" }],
-								},
-							],
+							html: `<form><p>question-start ${"context\n".repeat(1200)}${questionEnd}</p><textarea name="answer"></textarea></form>`,
 						},
 					},
 				],
@@ -410,18 +406,8 @@ describe("advisor", () => {
 				role: "toolResult",
 				toolCallId: "ask-orphan",
 				toolName: "ask",
-				content: [{ type: "text", text: "deploy: Yes" }],
-				details: {
-					results: [
-						{
-							id: "deploy",
-							question: "Authorize production deployment?",
-							options: ["Yes", "No"],
-							multi: false,
-							selectedOptions: ["Yes"],
-						},
-					],
-				},
+				content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+				details: { answers: [{ name: "deploy", question: "Authorize production deployment?", answer: "Yes" }] },
 				isError: false,
 				timestamp: 2,
 			} as unknown as AgentMessage;
@@ -429,7 +415,7 @@ describe("advisor", () => {
 			const expanded = formatSessionHistoryMarkdown([orphan], { expandToolIO: true });
 
 			expect(expanded).toContain("Authorize production deployment?");
-			expect(expanded).toContain("deploy: Yes");
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
 		it("bounds expanded tool results with visible head and tail context", () => {
@@ -1127,6 +1113,19 @@ describe("advisor", () => {
 			expect(delivered).toEqual(["Queued but never flushed."]);
 		});
 
+		it("emits nothing from a cancelled review", async () => {
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note));
+			const cancelled = new AbortController();
+			cancelled.abort();
+			tool.beginUpdate(false);
+			await tool.execute("x-0", { note: "Stale finding.", severity: "blocker" }, cancelled.signal);
+			expect(delivered).toEqual([]);
+			// Nothing was admitted either: a later review may raise it.
+			await tool.execute("x-1", { note: "Stale finding.", severity: "blocker" });
+			expect(delivered).toEqual(["Stale finding."]);
+		});
+
 		it("validates parameters using ArkType", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -1479,6 +1478,78 @@ describe("advisor", () => {
 			};
 		}
 
+		it("hands an advisor that cannot see images their descriptions instead of `[image]`", async () => {
+			const vision = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const textOnly = { ...vision, input: ["text" as const] };
+			const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "advisor-image-"));
+			const reply = (text: string): AssistantMessage => ({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				api: vision.api,
+				provider: vision.provider,
+				model: vision.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			const completeImpl = (async () => reply("a single red pixel")) as unknown as typeof completeSimple;
+			const descriptions = new ImageDescriptions(() => ({
+				modelRegistry: {
+					getAvailable: () => [vision],
+					getAvailableForProviders: () => [vision],
+					getApiKey: async () => "test-key",
+					resolver: () => async () => "test-key",
+				} as unknown as ImageDescriptionDeps["modelRegistry"],
+				settings: Settings.isolated(),
+				localProtocolOptions: { getArtifactsDir: () => artifactsDir, getSessionId: () => "advisor-image" },
+				completeImpl,
+			}));
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					agent.state.messages.push(reply("no issues"));
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "what is wrong here?" },
+						{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUg==" },
+					],
+					timestamp: 1,
+				},
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				prepareImageDescriptions: (batch, signal) => descriptions.prepare(batch, textOnly, signal),
+				withImageDescriptions: message => descriptions.withDescriptions(message),
+			});
+			try {
+				runtime.onTurnEnd(messages);
+				await runtime.waitForCatchup(2_000, 1);
+
+				const sent = promptInputs.map(promptText).join("\n");
+				expect(sent).toContain("what is wrong here?");
+				expect(sent).toContain("a single red pixel");
+				expect(sent).not.toContain("[image]");
+			} finally {
+				runtime.dispose();
+				await removeWithRetries(artifactsDir);
+			}
+		});
+
 		it("coalesces multiple onTurnEnd calls while a prompt is in-flight", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: firstPromptPromise, resolve: finishFirstPrompt } = Promise.withResolvers<void>();
@@ -1699,6 +1770,52 @@ describe("advisor", () => {
 			expect(review).not.toContain("superseded by a newer read");
 			expect(review).toContain("inspect the retry config");
 			expect(review).toContain("now raise the limit");
+		});
+		it("omits primary thinking blocks when includeReasoning is false, including across model switches", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			let currentModelIdentity = "anthropic/claude-opus-5-5";
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "verify the patch", timestamp: 1 } as AgentMessage,
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "Internal hypothesis that might anchor the reviewer." },
+						{ type: "text", text: "Observable answer with file:line evidence." },
+					],
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				includeReasoning: false,
+				getModelIdentity: () => currentModelIdentity,
+			});
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(1);
+			const firstReview = promptText(promptInputs[0]);
+			expect(firstReview).toContain("Observable answer with file:line evidence.");
+			expect(firstReview).not.toContain("Internal hypothesis that might anchor the reviewer.");
+			expect(firstReview).not.toContain("_thinking:_");
+
+			// Switch advisor model identity and verify includeReasoning: false stays enforced
+			currentModelIdentity = "google/gemini-3-pro";
+			messages.push({
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "Second turn private reasoning." },
+					{ type: "text", text: "Second turn observable output." },
+				],
+				timestamp: 3,
+			} as unknown as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(2);
+			const secondReview = promptText(promptInputs[1]);
+			expect(secondReview).toContain("Second turn observable output.");
+			expect(secondReview).not.toContain("Second turn private reasoning.");
 		});
 
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
@@ -2067,6 +2184,43 @@ describe("advisor", () => {
 			expect(updateStates).toEqual([false]);
 		});
 
+		it("supersede cancels the review in flight and holds its update for the next dispatch", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const firstStarted = Promise.withResolvers<void>();
+			const firstRelease = Promise.withResolvers<void>();
+			const secondStarted = Promise.withResolvers<void>();
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					if (promptInputs.length === 1) {
+						firstStarted.resolve();
+						await firstRelease.promise;
+					} else {
+						secondStarted.resolve();
+					}
+				},
+				abort: () => firstRelease.resolve(),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "handoff", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages });
+
+			runtime.onTurnEnd(messages);
+			await firstStarted.promise;
+			expect(runtime.supersede()).toBe(true);
+			// The cancelled review no longer counts as backlog.
+			expect(await runtime.waitForCatchup(1_000, 1)).toBe(true);
+			expect(promptInputs).toHaveLength(1);
+
+			messages.push({ role: "user", content: "fix", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await secondStarted.promise;
+			const second = promptText(promptInputs[1]!);
+			expect(second).toContain("handoff");
+			expect(second).toContain("fix");
+		});
+
 		it("sends the batch when context maintenance fails", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
@@ -2201,6 +2355,62 @@ describe("advisor", () => {
 			expect(block?.type).toBe("toolCall");
 			expect(JSON.stringify(block?.type === "toolCall" ? block.arguments : {})).not.toContain(secret);
 			expect(block?.type === "toolCall" ? block.thoughtSignature : "kept").toBeUndefined();
+		});
+
+		it("drops a chat-completions reasoning_details envelope when it rewrites a later thinking block", async () => {
+			const secret = "ADVISOR_DETAILS_SECRET_123";
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			// The first thinking block holds the turn's received `reasoning_details`,
+			// which carry the second block's raw text.
+			const assistant = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "Plan.",
+						thinkingSignature: JSON.stringify({
+							reasoningDetails: [{ type: "reasoning.text", text: `Plan.Use ${secret} now.`, index: 0 }],
+							field: "reasoning",
+						}),
+					},
+					{ type: "text", text: "Working." },
+					{ type: "thinking", thinking: `Use ${secret} now.`, thinkingSignature: "reasoning" },
+				],
+				api: "openai-completions",
+				provider: "openrouter",
+				model: "google/gemini-3-pro-preview",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 1,
+			} as AssistantMessage;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [assistant] as AgentMessage[] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [{ role: "user", content: "go on", timestamp: 2 } as AgentMessage],
+				obfuscator,
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd();
+			await Promise.resolve();
+
+			expect(JSON.stringify(agent.state.messages)).not.toContain(secret);
+			const first = (agent.state.messages[0] as AssistantMessage).content[0];
+			expect(first).toMatchObject({ type: "thinking", thinking: "Plan.", thinkingSignature: "reasoning" });
 		});
 
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
@@ -5315,6 +5525,60 @@ describe("advisor", () => {
 			expect(failures).toEqual([]);
 		});
 
+		it("goes straight to the model fallback when the refused batch carried no reasoning", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const failures: unknown[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let modelRefuses = true;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					state.error = modelRefuses ? "Refusal (bio): blocked under Anthropic's Usage Policy" : undefined;
+					state.messages.push({
+						role: "assistant",
+						content: [],
+						stopReason: modelRefuses ? "error" : "stop",
+						stopDetails: modelRefuses ? { type: "refusal", category: "bio" } : undefined,
+						errorMessage: state.error,
+						timestamp: promptInputs.length + 1,
+					} as unknown as AgentMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				rollbackTo: count => {
+					state.messages.length = count;
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages = [
+				{ role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 1 } as AgentMessage,
+			];
+			let fallbackCalls = 0;
+			const runtime = new AdvisorRuntime(
+				agent,
+				{
+					snapshotMessages: () => messages,
+					notifyFailure: error => failures.push(error),
+					onTurnError: async () => {
+						fallbackCalls++;
+						modelRefuses = false;
+						return true;
+					},
+				},
+				0,
+			);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => runtime.backlog === 0);
+
+			// Stripping reasoning cannot change this batch, so the refused request is
+			// not resent byte-for-byte: refuse, switch models, the fallback answers.
+			expect(fallbackCalls).toBe(1);
+			expect(promptInputs).toHaveLength(2);
+			expect(failures).toEqual([]);
+		});
+
 		it("starts a fresh fallback cascade after the host declines to switch models", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const failures: unknown[] = [];
@@ -5616,6 +5880,38 @@ describe("advisor", () => {
 			expect(error.message).toBe("provider failed");
 			expect(events).toEqual(["prompt:1", "hook:provider failed", "prompt:2"]);
 			expect(runtime.backlog).toBe(0);
+		});
+
+		it("backs off between consecutive failures and honors a provider retry hint", async () => {
+			const promptTimes: number[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					promptTimes.push(performance.now());
+					// The 1st failure carries a 150 ms hint (above the 40 ms base); the 2nd has none.
+					state.error = promptTimes.length === 1 ? "429 rate limited retry-after-ms=150" : "provider failed";
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const failures: unknown[] = [];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				notifyFailure: error => failures.push(error),
+			};
+			const runtime = new AdvisorRuntime(agent, host, 40);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length >= 1 && runtime.backlog === 0);
+
+			expect(promptTimes).toHaveLength(3);
+			// Hint wins over the 40 ms jittered base; the second wait is 80 ms doubled, minus at most 25% jitter.
+			expect(promptTimes[1] - promptTimes[0]).toBeGreaterThanOrEqual(145);
+			expect(promptTimes[2] - promptTimes[1]).toBeGreaterThanOrEqual(58);
 		});
 
 		it("calls onTurnError for each consecutive failure including the dropped third turn", async () => {
@@ -6757,77 +7053,6 @@ describe("advisor", () => {
 			expect(runtime.quotaExhausted).toBe(false);
 			expect(quotaNotified).toBe(false);
 			expect(runtime.backlog).toBe(0);
-		});
-	});
-
-	describe("createAdvisorMessageCard", () => {
-		const strip = (lines: readonly string[]): string => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-
-		it("renders the advisor header, severity badge, and note text", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const card = createAdvisorMessageCard(
-				{ notes: [{ note: "deleting the wrong file", severity: "blocker" }, { note: "watch the empty case" }] },
-				() => true,
-				uiTheme,
-			);
-			const text = strip(card.render(80));
-			expect(text).toContain("Advisor");
-			expect(text).toContain("2 notes");
-			expect(text).toContain("blocker");
-			expect(text).toContain("deleting the wrong file");
-			expect(text).toContain("watch the empty case");
-		});
-
-		it("prefixes the note with a named-advisor label, but not for the default advisor", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const card = createAdvisorMessageCard(
-				{
-					notes: [
-						{ note: "module boundary leak", severity: "concern", advisor: "Architecture" },
-						{ note: "default-advisor note", advisor: "default" },
-					],
-				},
-				() => true,
-				uiTheme,
-			);
-			const text = strip(card.render(80));
-			expect(text).toContain("[Architecture]");
-			expect(text).toContain("module boundary leak");
-			// The implicit "default" advisor stays unlabeled.
-			expect(text).not.toContain("[default]");
-		});
-
-		it("collapses to the first notes with an overflow hint", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const notes = Array.from({ length: 5 }, (_, i) => ({ note: `note ${i}` }));
-			const card = createAdvisorMessageCard({ notes }, () => false, uiTheme);
-			const text = strip(card.render(80));
-			expect(text).toContain("note 0");
-			expect(text).toContain("+2 more");
-			expect(text).not.toContain("note 4");
-		});
-
-		it("wraps long notes across multiple lines based on render width instead of truncating them", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const card = createAdvisorMessageCard({ notes: [{ note, severity: "concern" }] }, () => true, uiTheme);
-			const text = strip(card.render(30));
-			expect(text).toContain("truncated.");
-		});
-
-		it("wraps long notes even when the message card is collapsed", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const card = createAdvisorMessageCard({ notes: [{ note, severity: "concern" }] }, () => false, uiTheme);
-			const text = strip(card.render(30));
-			expect(text).toContain("truncated.");
 		});
 	});
 

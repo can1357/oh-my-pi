@@ -100,6 +100,16 @@ describe("classifyModel", () => {
 		}
 	});
 
+	test("K3.1 Pro retains Kimi K3 identity with its own revision", () => {
+		for (const [provider, model] of [
+			["", "k3.1-pro"],
+			["kimi-code", "k3.1-pro"],
+			["kimi-code", "k3.1-pro-highspeed"],
+		] as const) {
+			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3", revision: "3.1.0" });
+		}
+	});
+
 	test("K3 identity does not absorb adjacent bare names", () => {
 		for (const model of [
 			"k30",

@@ -1,110 +1,122 @@
-import { paletteToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
-import { detectTerminalId, getTerminalInfo } from "../terminal-capabilities";
-import type { ColorMode, ColorValue } from "./schema";
-
-/** SGR reset for the foreground color only, leaving other attributes intact. */
-export const FG_RESET = "\x1b[39m";
-/** SGR reset for the background color only, leaving other attributes intact. */
-export const BG_RESET = "\x1b[49m";
-
-// ============================================================================
-// Color Utilities
-// ============================================================================
-
-/** Resolve theme color depth from the shared terminal capability model. */
-export function detectColorMode(env: NodeJS.ProcessEnv = Bun.env): ColorMode {
-	if (env.WT_SESSION) return "truecolor";
-	const terminal = getTerminalInfo(detectTerminalId(env), process.platform, env);
-	return terminal.trueColor ? "truecolor" : "256color";
-}
-
-const ANSI_COLOR_CACHE_LIMIT = 256;
-const ANSI_COLOR_CACHE_MAX_LENGTH = 128;
-const ansiColorCaches: Record<ColorMode, Map<string, string>> = {
-	truecolor: new Map(),
-	"256color": new Map(),
-};
-
-/** Convert a theme color to foreground SGR at the requested depth; throws for invalid colors. */
-export function colorToAnsi(color: string, mode: ColorMode): string {
-	const cache = color.length <= ANSI_COLOR_CACHE_MAX_LENGTH ? ansiColorCaches[mode] : undefined;
-	const cached = cache?.get(color);
-	if (cached !== undefined) return cached;
-	const format = mode === "truecolor" ? "ansi-16m" : "ansi-256";
-	const ansi = Bun.color(color, format);
-	if (ansi === null) {
-		throw new Error(`Invalid color value: ${color}`);
-	}
-	if (cache) {
-		if (cache.size >= ANSI_COLOR_CACHE_LIMIT) cache.clear();
-		cache.set(color, ansi);
-	}
-	return ansi;
-}
-
-export function fgAnsi(color: string | number, mode: ColorMode): string {
-	if (color === "") return "\x1b[39m";
-	if (typeof color === "number") return `\x1b[38;5;${color}m`;
-	if (typeof color === "string") {
-		return colorToAnsi(color, mode);
-	}
-	throw new Error(`Invalid color value: ${color}`);
-}
-
-export function bgAnsi(color: string | number, mode: ColorMode): string {
-	if (color === "") return "\x1b[49m";
-	if (typeof color === "number") return `\x1b[48;5;${color}m`;
-	const ansi = colorToAnsi(color, mode);
-	return ansi.replace("\x1b[38;", "\x1b[48;");
-}
-
-export function resolveVarRefs(
-	value: ColorValue,
-	vars: Record<string, ColorValue>,
-	visited = new Set<string>(),
-): string | number {
-	if (typeof value === "number" || value === "" || value.startsWith("#")) {
-		return value;
-	}
-	if (visited.has(value)) {
-		throw new Error(`Circular variable reference detected: ${value}`);
-	}
-	if (!(value in vars)) {
-		throw new Error(`Variable reference not found: ${value}`);
-	}
-	visited.add(value);
-	return resolveVarRefs(vars[value], vars, visited);
-}
-
-export function resolveThemeColors<T extends Record<string, ColorValue>>(
-	colors: T,
-	vars: Record<string, ColorValue> = {},
-): Record<keyof T, string | number> {
-	const resolved: Record<string, string | number> = {};
-	for (const [key, value] of Object.entries(colors)) {
-		resolved[key] = resolveVarRefs(value, vars);
-	}
-	return resolved as Record<keyof T, string | number>;
-}
-
 /**
- * Resolve a theme color value (hex string or 256-color index) to a CSS hex string.
- * Empty string represents the default terminal color.
+ * Theme colors → SGR at the terminal's color depth, plus the hex math theme
+ * resolution needs (defaults, luminance, palette slots).
  */
-export function resolveToHex(value: string | number, isLight: boolean): string {
-	if (typeof value === "number") return ansi256ToHex(value);
-	if (value === "") return isLight ? "#000000" : "#e5e5e7";
-	return value;
+import { colorLuma, hexToOklch, hueDistance, paletteToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
+import type { TerminalCapabilities } from "../driver/contract";
+import type { ColorValue } from "./schema";
+
+/** How many colors the terminal shows: 24-bit, the xterm 256 palette, or the 16 ANSI colors. */
+export type ColorDepth = "truecolor" | "256" | "16";
+
+export const FG_DEFAULT = "\x1b[39m";
+export const BG_DEFAULT = "\x1b[49m";
+
+/** Depth of a terminal the driver probed. */
+export function depthOf(capabilities: Pick<TerminalCapabilities, "truecolor" | "colors">): ColorDepth {
+	if (capabilities.truecolor || capabilities.colors > 256) return "truecolor";
+	return capabilities.colors >= 256 ? "256" : "16";
 }
 
-/**
- * Convert a 256-color index to hex string.
- * Indices 0-15: basic colors (approximate)
- * Indices 16-231: 6x6x6 color cube
- * Indices 232-255: grayscale ramp
- */
-export function ansi256ToHex(index: number): string {
+/** Hex of a palette index, or throws for an index outside 0–255. */
+export function paletteHex(index: number): string {
 	const rgb = paletteToRgb(index);
 	if (!rgb) throw new Error(`Invalid palette index: ${index}`);
 	return rgbToHex(rgb);
+}
+
+/** `#rrggbb` of a CSS color string; throws for anything Bun cannot parse. */
+export function normalizeHex(color: string): string {
+	const hex = Bun.color(color, "hex");
+	if (hex === null) throw new Error(`Invalid color value: ${color}`);
+	return hex;
+}
+
+/** Hex a resolved color stands for; `""` (terminal default) guesses black on light themes, near-white on dark. */
+export function colorHex(value: ColorValue, light: boolean): string {
+	if (typeof value === "number") return paletteHex(value);
+	if (value === "") return light ? "#000000" : "#e5e5e7";
+	return value;
+}
+
+/** True when `value` is a light surface (Rec. 709 luma above one half). */
+export function isLightColor(value: ColorValue | undefined): boolean {
+	if (value === undefined) return false;
+	const luma = colorLuma(value);
+	return luma !== undefined && luma > 0.5;
+}
+
+/** OKLCH hue of each chromatic ANSI color (index 1–6: red, green, yellow, blue, magenta, cyan). */
+const ANSI_HUES: readonly { readonly index: number; readonly hue: number }[] = [
+	{ index: 1, hue: 29 },
+	{ index: 3, hue: 110 },
+	{ index: 2, hue: 142 },
+	{ index: 6, hue: 195 },
+	{ index: 4, hue: 264 },
+	{ index: 5, hue: 328 },
+];
+/** Below this OKLCH chroma a color reads as gray. */
+const GRAY_CHROMA = 0.04;
+/** At or above this OKLCH lightness a chromatic color takes the bright variant. */
+const BRIGHT_LIGHTNESS = 0.6;
+
+/**
+ * The ANSI color (index 0–15) closest in meaning to `hex`: grays by
+ * lightness, other colors by hue family, bright when light. Terminals
+ * re-tint the 16 colors, so hue and brightness carry more than RGB distance.
+ */
+function nearestAnsi16(hex: string): number {
+	const { l, c, h } = hexToOklch(hex);
+	if (c < GRAY_CHROMA) {
+		if (l < 0.3) return 0;
+		if (l < 0.6) return 8;
+		return l < 0.85 ? 7 : 15;
+	}
+	let best = ANSI_HUES[0]!;
+	for (const candidate of ANSI_HUES) if (hueDistance(h, candidate.hue) < hueDistance(h, best.hue)) best = candidate;
+	return l >= BRIGHT_LIGHTNESS ? best.index + 8 : best.index;
+}
+
+function ansi16Code(index: number, background: boolean): number {
+	const base = index < 8 ? 30 + index : 90 + index - 8;
+	return background ? base + 10 : base;
+}
+
+const sgrCache: Record<ColorDepth, Map<string, string>> = { truecolor: new Map(), "256": new Map(), "16": new Map() };
+const SGR_CACHE_LIMIT = 512;
+
+/** Foreground SGR of a CSS color string at `depth`. */
+function stringFg(color: string, depth: ColorDepth): string {
+	const cache = sgrCache[depth];
+	const cached = cache.get(color);
+	if (cached !== undefined) return cached;
+	let sgr: string | null;
+	if (depth === "16") sgr = `\x1b[${ansi16Code(nearestAnsi16(normalizeHex(color)), false)}m`;
+	else sgr = Bun.color(color, depth === "truecolor" ? "ansi-16m" : "ansi-256");
+	if (sgr === null) throw new Error(`Invalid color value: ${color}`);
+	if (cache.size >= SGR_CACHE_LIMIT) cache.clear();
+	cache.set(color, sgr);
+	return sgr;
+}
+
+/** Foreground SGR of a resolved color: `""` is the terminal default, numbers are palette indices. */
+export function fgSgr(value: ColorValue, depth: ColorDepth): string {
+	if (value === "") return FG_DEFAULT;
+	if (typeof value === "number") {
+		if (depth !== "16") return `\x1b[38;5;${value}m`;
+		return `\x1b[${ansi16Code(value < 16 ? value : nearestAnsi16(paletteHex(value)), false)}m`;
+	}
+	return stringFg(value, depth);
+}
+
+/** Background SGR of a resolved color. */
+export function bgSgr(value: ColorValue, depth: ColorDepth): string {
+	if (value === "") return BG_DEFAULT;
+	if (typeof value === "number") {
+		if (depth !== "16") return `\x1b[48;5;${value}m`;
+		return `\x1b[${ansi16Code(value < 16 ? value : nearestAnsi16(paletteHex(value)), true)}m`;
+	}
+	const fg = stringFg(value, depth);
+	if (fg.startsWith("\x1b[38;")) return `\x1b[48;${fg.slice(5)}`;
+	return `\x1b[${Number(fg.slice(2, -1)) + 10}m`;
 }

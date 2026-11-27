@@ -13,7 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
-} from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/running-subagent-badge";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
@@ -44,7 +44,7 @@ function makeAgents(ids: string[]): AgentSnapshot[] {
 	}));
 }
 
-function makeGuestContext(): InteractiveModeContext {
+function makeGuestContext(): { ctx: InteractiveModeContext; subagentCount: () => number } {
 	let statusLineCount = 0;
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
@@ -65,28 +65,25 @@ function makeGuestContext(): InteractiveModeContext {
 				setDisableReasoning: () => {},
 			},
 		},
-		statusContainer: { clear: () => {} },
-		pendingMessagesContainer: { clear: () => {} },
+		clearTransientSessionUi: () => {},
+		clearWorking: () => false,
+		ensureWorkingRow: () => {},
+		updatePendingMessagesDisplay: () => {},
 		compactionQueuedMessages: [],
-		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
-		loadingAnimation: undefined,
 		statusLine: {
 			setRunningSubagents: (agentIds: readonly string[]) => {
 				statusLineCount = agentIds.length;
-			},
-			get subagentCount() {
-				return statusLineCount;
+				return true;
 			},
 			setCollabStatus: () => {},
-			invalidate: () => {},
 			resetActiveTime: () => {},
+			refresh: () => {},
 			markActivityStart: () => {},
 			markActivityEnd: () => {},
 		},
-		ui: { requestRender: () => {} },
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
@@ -105,8 +102,11 @@ function makeGuestContext(): InteractiveModeContext {
 			const agentIds = getRunningSubagentBadgeAgentIds(registry);
 			ctx.statusLine.setRunningSubagents(agentIds);
 		},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 	} as unknown as InteractiveModeContext;
-	return ctx;
+	return { ctx, subagentCount: () => statusLineCount };
 }
 
 beforeEach(() => {
@@ -147,28 +147,28 @@ describe("collab guest running-subagents badge", () => {
 		hostSocket.connect();
 		await hostOpen.promise;
 
-		const ctx = makeGuestContext();
+		const { ctx, subagentCount } = makeGuestContext();
 		const guest = new CollabGuestLink(ctx);
 
 		try {
 			await guest.join(link);
 			expect(ctx.collabGuest).toBe(guest);
-			expect(ctx.statusLine.subagentCount).toBe(1);
+			expect(subagentCount()).toBe(1);
 
 			nextWelcomeAgents = makeAgents(["remote-one", "remote-two"]);
 			const secondSnapshot = Promise.withResolvers<void>();
 			const originalSync = ctx.syncRunningSubagentBadge.bind(ctx);
 			ctx.syncRunningSubagentBadge = () => {
 				originalSync();
-				if (ctx.statusLine.subagentCount === 2) secondSnapshot.resolve();
+				if (subagentCount() === 2) secondSnapshot.resolve();
 			};
 			sendWelcome(nextWelcomeAgents);
 			await secondSnapshot.promise;
-			expect(ctx.statusLine.subagentCount).toBe(2);
+			expect(subagentCount()).toBe(2);
 
 			await guest.leave("test cleanup");
 			expect(ctx.collabGuest).toBeUndefined();
-			expect(ctx.statusLine.subagentCount).toBe(0);
+			expect(subagentCount()).toBe(0);
 		} finally {
 			hostSocket.close();
 			writeSpy.mockRestore();

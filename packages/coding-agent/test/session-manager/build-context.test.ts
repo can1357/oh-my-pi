@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { defaultConvertToLlm } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
@@ -176,6 +177,26 @@ describe("buildSessionContext", () => {
 			// downgrades both produce such mismatched messages.
 			expect(ctx.models.default).toBe("openai/gpt-4");
 		});
+
+		it("keeps an explicit default when a temporary model change and its assistant reply follow", () => {
+			// A retry fallback or context promotion appends a role="temporary"
+			// model_change; the reply produced under it must not clobber the default.
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "hello"),
+				modelChange("2", "1", "openai", "gpt-4"),
+				{
+					type: "model_change",
+					id: "3",
+					parentId: "2",
+					timestamp: "2025-01-01T00:00:00Z",
+					model: "anthropic/claude-test",
+					role: "temporary",
+				},
+				msg("4", "3", "assistant", "hi"),
+			];
+			const ctx = buildSessionContext(entries);
+			expect(ctx.models.default).toBe("openai/gpt-4");
+		});
 	});
 
 	describe("with compaction", () => {
@@ -303,6 +324,52 @@ describe("buildSessionContext", () => {
 				],
 			});
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
+		});
+
+		it("stands on the previous readable boundary for a model that cannot replay the remote payload", () => {
+			const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const openai = getBundledModel("openai", "gpt-5.4");
+			if (!claude || !openai) throw new Error("Expected bundled models");
+			const remotePayload = {
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [{ type: "compaction", encrypted_content: "enc_123" }],
+					compactionItem: { type: "compaction", encrypted_content: "enc_123" },
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "before local"),
+				msg("2", "1", "assistant", "kept by local"),
+				compaction("3", "2", "Local summary", "2"),
+				msg("4", "3", "user", "behind remote one"),
+				msg("5", "4", "assistant", "kept by remote one"),
+				{ ...compaction("6", "5", "Remote placeholder", "5"), preserveData: remotePayload },
+				msg("7", "6", "user", "behind remote two"),
+				{ ...compaction("8", "7", "Remote placeholder", "7"), preserveData: remotePayload },
+				msg("9", "8", "user", "after compact"),
+			];
+			const contents = (model?: Model) =>
+				buildSessionContext(entries, undefined, undefined, { model }).messages.map(message =>
+					message.role === "compactionSummary"
+						? `summary:${message.summary}`
+						: "content" in message
+							? message.content
+							: message.role,
+				);
+			expect(contents(claude)).toEqual([
+				"summary:Local summary",
+				[{ type: "text", text: "kept by local" }],
+				"behind remote one",
+				[{ type: "text", text: "kept by remote one" }],
+				"behind remote two",
+				"after compact",
+			]);
+			expect(contents(openai)).toEqual(["summary:Remote placeholder", "after compact"]);
+			expect(contents(undefined)).toEqual(contents(openai));
+			// The display transcript ignores the reader.
+			expect(
+				buildSessionContext(entries, undefined, undefined, { transcript: true, model: claude }).messages,
+			).toEqual(buildSessionContext(entries, undefined, undefined, { transcript: true }).messages);
 		});
 
 		it("attaches the signed Anthropic replay payload before the kept raw messages", () => {
@@ -786,6 +853,25 @@ describe("buildSessionContext", () => {
 			// cacheMissExplainedAt: the kept assistant (index 1) should NOT be a miss;
 			// the post-compaction assistant (index 4) SHOULD be a miss.
 			expect(transcript.cacheMissExplainedAt).toEqual([false, false, false, false, true]);
+			expect(transcript.nextCacheMissExplained).toBe(false);
+		});
+
+		it("collapsed transcript explains the next live turn when compaction ends the path", () => {
+			// The rebuild right after compaction reseeds the live cache baseline from
+			// the kept assistant; its warm read must not flag the next turn's miss.
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "kept question"),
+				msg("2", "1", "assistant", "kept response"),
+				compaction("3", "2", "Compacted", "1"),
+				msg("4", "3", "user", "after compact"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.nextCacheMissExplained).toBe(true);
 		});
 
 		it("collapsed display trims a mid-turn kept head instead of leading with stale fragments", () => {

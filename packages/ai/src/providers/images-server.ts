@@ -50,9 +50,9 @@ function decodeInputReference(value: unknown): { data: string; mimeType: string 
 	let raw: unknown = value;
 	if (value !== null && typeof value === "object") {
 		raw = "url" in value ? value.url : undefined;
-		const imageUrl = "image_url" in value ? value.image_url : undefined;
-		if (raw === undefined && imageUrl !== null && typeof imageUrl === "object" && "url" in imageUrl) {
-			raw = imageUrl.url;
+		if (raw === undefined && "image_url" in value) {
+			const imageUrl = value.image_url;
+			raw = imageUrl !== null && typeof imageUrl === "object" && "url" in imageUrl ? imageUrl.url : imageUrl;
 		}
 	}
 	if (typeof raw !== "string" || raw.length === 0) validation("input image must be base64 or a data URL");
@@ -153,12 +153,5 @@ export function encodeResponse(result: ImageGenerationResult, _requestedModelId:
 	};
 }
 
-export function formatError(status: number, errorType: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { code: status, type: errorType, message } }), {
-		status,
-		headers: {
-			"Content-Type": "application/json; charset=utf-8",
-			"Cache-Control": "no-store",
-		},
-	});
-}
+/** @deprecated Use `codedErrorResponse` from `auth-gateway/http`. */
+export { codedErrorResponse as formatError } from "../auth-gateway/http";

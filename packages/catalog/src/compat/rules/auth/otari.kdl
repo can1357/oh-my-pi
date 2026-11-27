@@ -1,0 +1,8 @@
+auth "otari" {
+	name "Otari"
+	// Hosted workspaces are region-local (US or EU) and their keys only
+	// authenticate in their region, so login selects the region, or a
+	// self-hosted API root, before pasting the key. A non-US endpoint is stored
+	// in the credential so discovery and inference both target it.
+	login "custom" hook="otari"
+}

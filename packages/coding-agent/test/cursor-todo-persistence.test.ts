@@ -3,11 +3,11 @@ import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import { type TodoPhase, todoToolRenderer } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildSessionContext } from "../src/session/session-context";
 import type { SessionEntry } from "../src/session/session-entries";
+import { toolText } from "./helpers/tool-text";
 
 const TIMESTAMP = "2026-07-25T00:00:00.000Z";
 
@@ -29,10 +29,8 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		cwd: "/tmp",
 		tools: new Map(),
 		getTodoPhases: () => phases,
-		setTodoPhases: next => {
+		commitTodoPhases: next => {
 			phases = next;
-		},
-		persistTodoPhases: next => {
 			entries.push({
 				type: "custom",
 				customType: USER_TODO_EDIT_CUSTOM_TYPE,
@@ -62,12 +60,38 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 	};
 }
 
+describe("todo snapshots saved with the retired blocked status", () => {
+	it("read back as pending, in both user-edit and tool-result entries", () => {
+		const saved = [
+			{
+				name: "Work",
+				tasks: [{ content: "wait", status: "blocked", blocker: "approval" }],
+			},
+		];
+		const userEdit = {
+			type: "custom",
+			customType: USER_TODO_EDIT_CUSTOM_TYPE,
+			data: { phases: saved },
+		};
+		const toolResult = {
+			type: "message",
+			message: {
+				role: "toolResult",
+				toolName: "todo",
+				details: { op: "append", phases: saved },
+			},
+		};
+		const expected: TodoPhase[] = [{ name: "Work", tasks: [{ content: "wait", status: "pending" }] }];
+		expect(getLatestTodoPhasesFromEntries([userEdit as SessionEntry])).toEqual(expected);
+		expect(getLatestTodoPhasesFromEntries([toolResult as SessionEntry])).toEqual(expected);
+	});
+});
+
 describe("cursor todo persistence", () => {
-	// The replay test drives the real todo renderer, which reads theme + settings.
+	// The replay test drives the real todo card, which reads settings.
 	beforeAll(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		await initTheme();
 	});
 
 	afterAll(() => {
@@ -104,7 +128,13 @@ describe("cursor todo persistence", () => {
 
 	it("replays the newest snapshot after repeated updates", () => {
 		const h = newHarness();
-		h.handlers.todoSync({ merged: false, todos: [{ content: "step one", status: "in_progress" }] }, "call-1");
+		h.handlers.todoSync(
+			{
+				merged: false,
+				todos: [{ content: "step one", status: "in_progress" }],
+			},
+			"call-1",
+		);
 		h.handlers.todoSync(
 			{
 				merged: false,
@@ -129,7 +159,10 @@ describe("cursor todo persistence", () => {
 
 	it("keeps existing phase grouping for tasks the session already knows", () => {
 		const h = newHarness([
-			{ name: "Foundation", tasks: [{ content: "scaffold", status: "pending" }] },
+			{
+				name: "Foundation",
+				tasks: [{ content: "scaffold", status: "pending" }],
+			},
 			{ name: "Auth", tasks: [{ content: "oauth", status: "pending" }] },
 		]);
 		h.handlers.todoSync(
@@ -145,7 +178,10 @@ describe("cursor todo persistence", () => {
 		);
 
 		expect(h.reload()).toEqual([
-			{ name: "Foundation", tasks: [{ content: "scaffold", status: "completed" }] },
+			{
+				name: "Foundation",
+				tasks: [{ content: "scaffold", status: "completed" }],
+			},
 			{ name: "Auth", tasks: [{ content: "oauth", status: "in_progress" }] },
 			{ name: "Tasks", tasks: [{ content: "unknown", status: "pending" }] },
 		]);
@@ -165,25 +201,6 @@ describe("cursor todo persistence", () => {
 		);
 
 		expect(h.reload()[0].tasks.every(task => task.status === "pending")).toBe(true);
-	});
-
-	it("writes nothing when the session exposes no todo state", () => {
-		const entries: SessionEntry[] = [];
-		const handlers = new CursorExecHandlers({
-			cwd: "/tmp",
-			tools: new Map(),
-			persistTodoPhases: next => {
-				entries.push({
-					type: "custom",
-					customType: USER_TODO_EDIT_CUSTOM_TYPE,
-					data: { phases: next },
-				} as SessionEntry);
-			},
-		});
-
-		handlers.todoSync({ merged: false, todos: [{ content: "a", status: "pending" }] }, "call-1");
-
-		expect(entries).toEqual([]);
 	});
 
 	it("refreshes the interactive todo panel, which only reacts to tool_execution_end", () => {
@@ -274,7 +291,11 @@ describe("cursor todo persistence", () => {
 		expect(events).toHaveLength(1);
 		const settled = events[0];
 		if (settled?.type !== "tool_execution_end") throw new Error("expected a completion event");
-		expect(settled).toMatchObject({ toolCallId: "call-1", toolName: "todo", isError: false });
+		expect(settled).toMatchObject({
+			toolCallId: "call-1",
+			toolName: "todo",
+			isError: false,
+		});
 		expect(settled.result.details).toBeUndefined();
 	});
 
@@ -290,9 +311,17 @@ describe("cursor todo persistence", () => {
 		expect(h.current()).toBe(before);
 		expect(h.entries).toEqual([]);
 		expect(h.uiTodos()).toBeNull();
-		expect(result).toMatchObject({ toolCallId: "call-1", isError: false, details: undefined });
+		expect(result).toMatchObject({
+			toolCallId: "call-1",
+			isError: false,
+			details: undefined,
+		});
 		expect(h.events).toHaveLength(1);
-		expect(h.events[0]).toMatchObject({ type: "tool_execution_end", toolCallId: "call-1", isError: false });
+		expect(h.events[0]).toMatchObject({
+			type: "tool_execution_end",
+			toolCallId: "call-1",
+			isError: false,
+		});
 	});
 
 	it("settles a server error as a failure without touching local state", () => {
@@ -309,14 +338,18 @@ describe("cursor todo persistence", () => {
 			content: [{ type: "text", text: "boom" }],
 			details: undefined,
 		});
-		expect(h.events[0]).toMatchObject({ type: "tool_execution_end", toolCallId: "call-1", isError: true });
+		expect(h.events[0]).toMatchObject({
+			type: "tool_execution_end",
+			toolCallId: "call-1",
+			isError: true,
+		});
 	});
 
 	it("returns a result that survives buildSessionContext and rebuilds the list", () => {
 		// The persisted result is what a rebuilt transcript renders from. Two
 		// independent failure modes: no result at all strips the block as
 		// dangling, and a summary-only result (no `details.phases`) survives the
-		// strip but replays as `Todo 0 tasks` — `todoToolRenderer.renderResult`
+		// strip but replays as `Todo 0 tasks` — the todo card
 		// reconstructs the list exclusively from `details.phases`.
 		const h = newHarness([{ name: "Auth", tasks: [{ content: "oauth", status: "pending" }] }]);
 		const result = h.handlers.todoSync(
@@ -349,31 +382,53 @@ describe("cursor todo persistence", () => {
 				id: "m1",
 				parentId: null,
 				timestamp: TIMESTAMP,
-				message: { role: "user", content: [{ type: "text", text: "track it" }], timestamp: 1 },
+				message: {
+					role: "user",
+					content: [{ type: "text", text: "track it" }],
+					timestamp: 1,
+				},
 			},
-			{ type: "message", id: "m2", parentId: "m1", timestamp: TIMESTAMP, message: assistant },
-			{ type: "message", id: "m3", parentId: "m2", timestamp: TIMESTAMP, message: result },
+			{
+				type: "message",
+				id: "m2",
+				parentId: "m1",
+				timestamp: TIMESTAMP,
+				message: assistant,
+			},
+			{
+				type: "message",
+				id: "m3",
+				parentId: "m2",
+				timestamp: TIMESTAMP,
+				message: result,
+			},
 		] as SessionEntry[];
 
-		const context = buildSessionContext(replayEntries, undefined, undefined, { transcript: true });
+		const context = buildSessionContext(replayEntries, undefined, undefined, {
+			transcript: true,
+		});
 
 		// The block is paired, so the rebuild keeps it.
 		const rebuilt = context.messages.find(message => message.role === "assistant");
 		expect(rebuilt?.content.some(block => block.type === "toolCall" && block.id === "cursor-call-1")).toBe(true);
 
-		// And the rebuilt result actually renders the list: `renderResult` derives
+		// And the rebuilt result actually renders the list: the card derives
 		// every row from `details.phases`, so a summary-only result would print
 		// the `0 tasks` fallback instead of the task.
 		const replayed = context.messages.find(
 			(message): message is typeof result => message.role === "toolResult" && message.toolCallId === "cursor-call-1",
 		);
 		if (!replayed) throw new Error("expected the paired result to survive the rebuild");
-		const component = todoToolRenderer.renderResult(
-			{ content: replayed.content, details: replayed.details as never, isError: replayed.isError },
-			{ expanded: true } as Parameters<typeof todoToolRenderer.renderResult>[1],
-			theme,
-		);
-		const rendered = (component.render(120) as readonly string[]).join("\n");
+		const rendered = toolText({
+			name: "todo",
+			args: {},
+			result: {
+				content: replayed.content,
+				details: replayed.details,
+				isError: replayed.isError,
+			},
+			expanded: true,
+		});
 
 		expect(rendered).toContain("oauth");
 		expect(rendered).not.toContain("0 tasks");

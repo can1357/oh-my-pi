@@ -1,18 +1,27 @@
-import { describe, expect, it, vi } from "bun:test";
-import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+	createMCPJsonRpcError,
+	MCPTransportError,
+	normalizeMCPTransportError,
+} from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import { disposeLocalMcpHost } from "@oh-my-pi/pi-coding-agent/mcp/host/local";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
 	createLegacyMCPToolName,
 	createMCPToolName,
-	DeferredMCPTool,
 	deduplicateMCPToolsByName,
 	isRetriableConnectionError,
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type { MCPImageContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPImageContent } from "@oh-my-pi/pi-coding-agent/tools/details/mcp";
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,9 +110,7 @@ describe("createMCPToolName", () => {
 		expect(createLegacyMCPToolName("plain", "tool")).toBeUndefined();
 	});
 
-	it("exposes the legacy alias on both live and deferred tools", () => {
-		// Slow-startup servers register DeferredMCPTool instead of MCPTool;
-		// approval fallback must not depend on connection timing (#10810 review).
+	it("exposes the legacy alias on a server's tool, where approval falls back to it", () => {
 		const digitTool = { name: "query-docs", inputSchema: { type: "object" as const } };
 		const live = new MCPTool(
 			makeConnection(
@@ -112,11 +119,7 @@ describe("createMCPToolName", () => {
 			),
 			digitTool,
 		);
-		const deferred = new DeferredMCPTool("context7", digitTool, async () => {
-			throw new Error("unneeded");
-		});
 		expect(live.legacyName).toBe("mcp__context_query_docs");
-		expect(deferred.legacyName).toBe("mcp__context_query_docs");
 	});
 
 	it("is deterministic and keeps distinct overlong names distinct", () => {
@@ -170,6 +173,19 @@ describe("isRetriableConnectionError", () => {
 			expect(isRetriableConnectionError(new Error(msg))).toBe(false);
 		});
 	}
+
+	it("retries pre-dispatch DNS and socket-open failures identified by code or message", () => {
+		const failures = [
+			Object.assign(new TypeError("Unable to connect"), { code: "EAI_AGAIN" }),
+			Object.assign(new TypeError("Unable to connect"), { code: "FailedToOpenSocket" }),
+			new TypeError("getaddrinfo ENOTFOUND example.invalid"),
+		];
+		for (const failure of failures) {
+			const error = normalizeMCPTransportError(failure, { transport: "http", stage: "send" });
+			expect(error).toMatchObject({ failure: "connect", retryable: true });
+			expect(isRetriableConnectionError(error)).toBe(true);
+		}
+	});
 
 	it("uses typed transport metadata without retrying ambiguous timeouts", () => {
 		expect(
@@ -255,6 +271,48 @@ describe("MCPTool.execute retry on connection error", () => {
 		expect(second.details?.isError).toBeFalsy();
 		expect(first.content[0]).toEqual({ type: "text", text: "ok" });
 		expect(second.content[0]).toEqual({ type: "text", text: "ok" });
+	});
+
+	it("asks for a fresh session only when the server still holds the expired one", async () => {
+		const failures = [
+			// The server itself refused its own session: the upstream still holds it.
+			new MCPTransportError({
+				transport: "http",
+				stage: "protocol",
+				failure: "json_rpc",
+				message: "MCP error -32001: Unknown or expired session",
+				retryable: false,
+				code: -32001,
+			}),
+			// The host saw the session expire and already replaced it.
+			new MCPTransportError({
+				transport: "http",
+				stage: "receive",
+				failure: "http_status",
+				message: "HTTP 404: Session not found",
+				retryable: true,
+				code: 404,
+			}),
+		];
+		const asked: unknown[] = [];
+		for (const failure of failures) {
+			let calls = 0;
+			const connection = makeConnection(
+				mockTransport(async () => {
+					if (calls++ === 0) throw failure;
+					return toolCallResult("ok");
+				}),
+			);
+			const reconnect: MCPReconnect = async options => {
+				asked.push(options);
+				return connection;
+			};
+
+			const result = await new MCPTool(connection, TOOL_DEF, reconnect).execute("call-1", {}, noop, noCtx);
+
+			expect(result.content[0]).toEqual({ type: "text", text: "ok" });
+		}
+		expect(asked).toEqual([{ staleSession: true }, { staleSession: false }]);
 	});
 
 	it("returns error result when reconnect returns null", async () => {
@@ -491,7 +549,6 @@ describe("MCPTool.execute retry on connection error", () => {
 describe("reconnect abort propagation", () => {
 	const noop = () => {};
 	const noCtx = {} as Parameters<MCPTool["execute"]>[3];
-	const noDeferredCtx = {} as Parameters<DeferredMCPTool["execute"]>[3];
 
 	it("throws ToolAbortError when MCPTool reconnect is aborted", async () => {
 		const failTransport = mockTransport(async () => {
@@ -507,19 +564,121 @@ describe("reconnect abort propagation", () => {
 
 		await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
 	});
+});
 
-	it("throws ToolAbortError when DeferredMCPTool reconnect is aborted", async () => {
-		const getConnection = async () => {
-			throw new Error("MCP server not connected");
-		};
-		const { promise } = Promise.withResolvers<MCPServerConnection | null>();
-		const reconnect: MCPReconnect = async () => promise;
+// ---------------------------------------------------------------------------
+// A remote server's tool call that never left the host
+// ---------------------------------------------------------------------------
 
-		const tool = new DeferredMCPTool("test-server", TOOL_DEF, getConnection, undefined, reconnect);
-		const controller = new AbortController();
-		const pending = tool.execute("call-1", {}, noop, noDeferredCtx, controller.signal);
-		controller.abort();
-
-		await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
+/**
+ * A handshake-era remote server, Streamable HTTP or HTTP+SSE, that counts the
+ * tool calls reaching it.
+ */
+function startRemoteServer(type: "http" | "sse") {
+	const encoder = new TextEncoder();
+	const streams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
+	const seen = { toolCalls: 0 };
+	const server = Bun.serve({
+		port: 0,
+		hostname: "127.0.0.1",
+		idleTimeout: 0,
+		async fetch(request) {
+			if (request.method === "GET") {
+				if (type === "http") return new Response(null, { status: 405 });
+				const session = String(streams.size + 1);
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							streams.set(session, controller);
+							controller.enqueue(encoder.encode(`event: endpoint\ndata: /messages?session=${session}\n\n`));
+						},
+					}),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			}
+			if (request.method !== "POST") return new Response(null, { status: 200 });
+			const message = (await request.json()) as { id?: string | number; method: string };
+			if (message.id === undefined) return new Response(null, { status: 202 });
+			let result: unknown = {};
+			switch (message.method) {
+				case "initialize":
+					result = {
+						protocolVersion: "2025-03-26",
+						capabilities: { tools: {} },
+						serverInfo: { name: "remote", version: "1.0.0" },
+					};
+					break;
+				case "tools/list":
+					result = { tools: [TOOL_DEF] };
+					break;
+				case "tools/call":
+					seen.toolCalls++;
+					result = toolCallResult("recovered");
+					break;
+			}
+			const response = { jsonrpc: "2.0", id: message.id, result };
+			if (type === "http") return Response.json(response);
+			const session = new URL(request.url).searchParams.get("session") ?? "";
+			streams.get(session)?.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(response)}\n\n`));
+			return new Response(null, { status: 202 });
+		},
 	});
+	return { url: `http://127.0.0.1:${server.port}/mcp`, seen, stop: () => server.stop(true) };
+}
+
+describe("a remote tool call that fails before it is sent", () => {
+	const noop = () => {};
+	const noCtx = {} as Parameters<MCPTool["execute"]>[3];
+	let cleanup: (() => Promise<void>) | undefined;
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await cleanup?.();
+		cleanup = undefined;
+		await disposeLocalMcpHost();
+	});
+
+	for (const type of ["http", "sse"] as const) {
+		it(`reconnects after a pre-dispatch ${type} DNS failure and sends the tool call only once`, async () => {
+			const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-predispatch-"));
+			const remote = startRemoteServer(type);
+			const manager = new MCPManager(workDir);
+			cleanup = async () => {
+				await manager.disconnectAll();
+				await remote.stop();
+				await removeWithRetries(workDir);
+			};
+			await manager.connectServers({ remote: { type, url: remote.url, timeout: 5_000 } }, {});
+			expect((await manager.waitForStartup(0)).connected).toEqual(["remote"]);
+			const tool = manager.getTools().find(candidate => candidate.mcpServerName === "remote");
+			if (!tool) throw new Error("remote tool not registered");
+			let reconnects = 0;
+			manager.addConnectionStatusListener(event => {
+				if (event.type === "connected") reconnects++;
+			});
+
+			const send = globalThis.fetch;
+			let refused = 0;
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async (input, init) => {
+					if (refused === 0 && typeof init?.body === "string" && init.body.includes('"tools/call"')) {
+						refused++;
+						// Captured from a real Bun fetch; avoid a live DNS lookup in the test suite.
+						throw Object.assign(new TypeError("getaddrinfo ENOTFOUND omp-mcp-test.invalid"), {
+							code: "ENOTFOUND",
+						});
+					}
+					return send(input, init);
+				}),
+			);
+
+			const result = await tool.execute("dns", {}, noop, noCtx);
+
+			expect(result.details?.isError).toBeFalsy();
+			expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+			expect(refused).toBe(1);
+			expect(reconnects).toBe(1);
+			expect(remote.seen.toolCalls).toBe(1);
+		}, 20_000);
+	}
 });

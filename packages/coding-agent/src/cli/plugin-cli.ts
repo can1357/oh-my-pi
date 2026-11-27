@@ -19,7 +19,7 @@ import {
 	parsePluginId,
 } from "../extensibility/plugins/marketplace/index.js";
 import type { InstalledPlugin } from "../extensibility/plugins/types";
-import { theme } from "@oh-my-pi/pi-tui/theme";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 // =============================================================================
 // Types
@@ -55,90 +55,6 @@ export interface PluginCommandArgs {
 	};
 }
 
-// =============================================================================
-// Argument Parser
-// =============================================================================
-
-const VALID_ACTIONS: PluginAction[] = [
-	"install",
-	"uninstall",
-	"list",
-	"link",
-	"doctor",
-	"features",
-	"config",
-	"enable",
-	"disable",
-	"marketplace",
-	"discover",
-	"upgrade",
-];
-
-/**
- * Parse plugin subcommand arguments.
- * Returns undefined if not a plugin command.
- */
-export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
-	if (args.length === 0 || args[0] !== "plugin") {
-		return undefined;
-	}
-
-	if (args.length < 2) {
-		return { action: "list", args: [], flags: {} };
-	}
-
-	const action = args[1];
-	if (!VALID_ACTIONS.includes(action as PluginAction)) {
-		console.error(chalk.red(`Unknown plugin command: ${action}`));
-		console.error(`Valid commands: ${VALID_ACTIONS.join(", ")}`);
-		process.exit(1);
-	}
-
-	const result: PluginCommandArgs = {
-		action: action as PluginAction,
-		args: [],
-		flags: {},
-	};
-
-	// Parse remaining arguments
-	for (let i = 2; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === "--json") {
-			result.flags.json = true;
-		} else if (arg === "--fix") {
-			result.flags.fix = true;
-		} else if (arg === "--force") {
-			result.flags.force = true;
-		} else if (arg === "--dry-run") {
-			result.flags.dryRun = true;
-		} else if (arg === "-l" || arg === "--local") {
-			result.flags.local = true;
-		} else if (arg === "--enable" && i + 1 < args.length) {
-			result.flags.enable = args[++i];
-		} else if (arg === "--disable" && i + 1 < args.length) {
-			result.flags.disable = args[++i];
-		} else if (arg === "--set" && i + 1 < args.length) {
-			result.flags.set = args[++i];
-		} else if (arg === "--scope" && i + 1 < args.length && !args[i + 1].startsWith("-")) {
-			const s = args[++i];
-			if (s === "user" || s === "project") {
-				result.flags.scope = s;
-			} else {
-				console.error(chalk.red(`Invalid --scope value: "${s}". Must be "user" or "project".`));
-				process.exit(1);
-			}
-		} else if (arg === "--scope") {
-			// --scope with no value following
-			console.error(chalk.red(`--scope requires a value: "user" or "project".`));
-			process.exit(1);
-		} else if (!arg.startsWith("-")) {
-			result.args.push(arg);
-		}
-	}
-
-	return result;
-}
-
 import { classifyInstallTarget, handleMarketplaceInstall } from "./classify-install-target";
 
 export { classifyInstallTarget } from "./classify-install-target";
@@ -146,6 +62,15 @@ export { classifyInstallTarget } from "./classify-install-target";
 // =============================================================================
 // Command Handlers
 // =============================================================================
+
+/**
+ * Stop a mutating command that has no preview mode before it applies its change under `--dry-run`.
+ */
+function refuseDryRun(flags: { dryRun?: boolean }, command: string): void {
+	if (!flags.dryRun) return;
+	console.error(chalk.red(`--dry-run is not supported by '${APP_NAME} plugin ${command}'. Nothing was changed.`));
+	process.exit(1);
+}
 
 /**
  * Run a plugin command.
@@ -207,7 +132,7 @@ async function makeMarketplaceManager(): Promise<MarketplaceManager> {
 	});
 }
 
-async function handleMarketplace(args: string[], _flags: PluginCommandArgs["flags"]): Promise<void> {
+async function handleMarketplace(args: string[], flags: PluginCommandArgs["flags"]): Promise<void> {
 	const subcommand = args[0] ?? "list";
 	const manager = await makeMarketplaceManager();
 
@@ -218,11 +143,14 @@ async function handleMarketplace(args: string[], _flags: PluginCommandArgs["flag
 				console.error(chalk.red(`Usage: ${APP_NAME} plugin marketplace add <source>`));
 				process.exit(1);
 			}
+			refuseDryRun(flags, "marketplace add");
 			try {
 				await manager.addMarketplace(source);
-				console.log(chalk.green(`${theme.status.success} Added marketplace: ${source}`));
+				console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} Added marketplace: ${source}`));
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to add marketplace: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to add marketplace: ${err}`),
+				);
 				process.exit(1);
 			}
 			break;
@@ -234,27 +162,39 @@ async function handleMarketplace(args: string[], _flags: PluginCommandArgs["flag
 				console.error(chalk.red(`Usage: ${APP_NAME} plugin marketplace remove <name>`));
 				process.exit(1);
 			}
+			refuseDryRun(flags, "marketplace remove");
 			try {
 				await manager.removeMarketplace(name);
-				console.log(chalk.green(`${theme.status.success} Removed marketplace: ${name}`));
+				console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} Removed marketplace: ${name}`));
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to remove marketplace: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to remove marketplace: ${err}`),
+				);
 				process.exit(1);
 			}
 			break;
 		}
 		case "update": {
+			refuseDryRun(flags, "marketplace update");
 			try {
 				const name = args[1];
 				if (name) {
 					await manager.updateMarketplace(name);
-					console.log(chalk.green(`${theme.status.success} Updated marketplace: ${name}`));
+					console.log(
+						chalk.green(`${currentTheme().symbols.symbol("status.success")} Updated marketplace: ${name}`),
+					);
 				} else {
 					const results = await manager.updateAllMarketplaces();
-					console.log(chalk.green(`${theme.status.success} Updated ${results.length} marketplace(s)`));
+					console.log(
+						chalk.green(
+							`${currentTheme().symbols.symbol("status.success")} Updated ${results.length} marketplace(s)`,
+						),
+					);
 				}
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to update marketplace: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to update marketplace: ${err}`),
+				);
 				process.exit(1);
 			}
 			break;
@@ -277,7 +217,9 @@ async function handleMarketplace(args: string[], _flags: PluginCommandArgs["flag
 					console.log(`  ${chalk.cyan(mp.name)}  ${chalk.dim(mp.sourceUri)}`);
 				}
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to list marketplaces: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to list marketplaces: ${err}`),
+				);
 				process.exit(1);
 			}
 			break;
@@ -304,7 +246,7 @@ async function handleDiscover(args: string[], _flags: PluginCommandArgs["flags"]
 			}
 		}
 	} catch (err) {
-		console.error(chalk.red(`${theme.status.error} Failed to discover plugins: ${err}`));
+		console.error(chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to discover plugins: ${err}`));
 		process.exit(1);
 	}
 }
@@ -314,50 +256,19 @@ async function handleUpgrade(
 	args: string[],
 	flags: PluginCommandArgs["flags"],
 ): Promise<void> {
-	let pluginId = args[0];
 	const manager = await makeMarketplaceManager();
-	// Marketplace IDs are `name@marketplace`; anything else is either a bare
-	// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
-	// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
-	if (pluginId && !parsePluginId(pluginId)) {
-		const bareName = pluginId;
-		const candidates = (await manager.listInstalledPlugins())
-			.map(p => p.id)
-			.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
-		const uniqueCandidates = [...new Set(candidates)];
-		if (uniqueCandidates.length > 1) {
-			console.error(
-				chalk.red(
-					`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
-				),
-			);
-			process.exit(1);
-		}
-		if (uniqueCandidates.length === 1) {
-			pluginId = uniqueCandidates[0] as string;
-		} else {
-			await upgradePackagePlugin(pluginManager, bareName, flags);
-			return;
-		}
-	}
 	try {
-		if (pluginId) {
-			if (flags.scope) {
-				const result = await manager.upgradePlugin(pluginId, flags.scope);
-				console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
-			} else {
-				const entries = await manager.upgradePluginAcrossScopes(pluginId);
-				for (const entry of entries) {
-					console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
-				}
-			}
-		} else {
+		if (args.length === 0) {
 			if (flags.scope) {
 				console.error(
 					chalk.yellow(
 						`Warning: --scope is ignored when upgrading all plugins. Use 'omp plugin upgrade <id> --scope ${flags.scope}' to target a specific plugin and scope.`,
 					),
 				);
+			}
+			if (flags.dryRun) {
+				await previewMarketplaceUpgradeAll(manager);
+				return;
 			}
 			const results = await manager.upgradeAllPlugins();
 			if (results.length === 0) {
@@ -367,10 +278,83 @@ async function handleUpgrade(
 					console.log(chalk.green(`  ${r.pluginId} (${r.scope}): ${r.from} -> ${r.to}`));
 				}
 			}
+			return;
+		}
+
+		for (let pluginId of args) {
+			// Marketplace IDs are `name@marketplace`; anything else is either a bare
+			// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
+			// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
+			if (!parsePluginId(pluginId)) {
+				const bareName = pluginId;
+				const candidates = (await manager.listInstalledPlugins())
+					.map(p => p.id)
+					.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
+				const uniqueCandidates = [...new Set(candidates)];
+				if (uniqueCandidates.length > 1) {
+					console.error(
+						chalk.red(
+							`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
+						),
+					);
+					process.exit(1);
+				}
+				if (uniqueCandidates.length === 1) {
+					pluginId = uniqueCandidates[0];
+				} else {
+					await upgradePackagePlugin(pluginManager, bareName, flags);
+					continue;
+				}
+			}
+			if (flags.dryRun) {
+				await previewMarketplaceReinstall(manager, pluginId, flags.scope);
+			} else if (flags.scope) {
+				const result = await manager.upgradePlugin(pluginId, flags.scope);
+				console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
+			} else {
+				const entries = await manager.upgradePluginAcrossScopes(pluginId);
+				for (const entry of entries) {
+					console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
+				}
+			}
 		}
 	} catch (err) {
 		console.error(chalk.red(`Failed to upgrade: ${err}`));
 		process.exit(1);
+	}
+}
+
+/**
+ * `upgrade --dry-run` with no id: the rows `upgradeAllPlugins` would reinstall, which are the
+ * outdated rows of `checkForUpdates` without the ones whose install the current state refuses.
+ */
+async function previewMarketplaceUpgradeAll(manager: MarketplaceManager): Promise<void> {
+	const updates = await manager.previewUpgradeAllPlugins();
+	if (updates.length === 0) {
+		console.log(chalk.dim("[dry-run] All marketplace plugins are up to date"));
+		return;
+	}
+	for (const u of updates) {
+		console.log(chalk.dim(`[dry-run] Would upgrade ${u.pluginId} (${u.scope}): ${u.from} -> ${u.to}`));
+	}
+}
+
+/**
+ * `upgrade <id> --dry-run`: one row per scope the real command reinstalls. `upgradePlugin` and
+ * `upgradePluginAcrossScopes` force a reinstall of the catalog's current version whatever it is,
+ * so a same or older catalog version is reported as a reinstall or downgrade, not skipped.
+ */
+async function previewMarketplaceReinstall(
+	manager: MarketplaceManager,
+	pluginId: string,
+	scope: "user" | "project" | undefined,
+): Promise<void> {
+	for (const row of await manager.previewUpgradePlugin(pluginId, scope)) {
+		const label = `${pluginId} (${row.scope})`;
+		const line = row.to
+			? `Would ${row.change} ${label}: ${row.from ?? "?"} -> ${row.to}`
+			: `Would reinstall ${label} from ${row.from ?? "?"}; the new version is known only after fetching its source`;
+		console.log(chalk.dim(`[dry-run] ${line}`));
 	}
 }
 
@@ -380,6 +364,15 @@ async function upgradePackagePlugin(
 	name: string,
 	flags: PluginCommandArgs["flags"],
 ): Promise<void> {
+	if (flags.dryRun) {
+		try {
+			await manager.validateUpgrade(name);
+		} catch (err) {
+			console.error(chalk.red(`Failed to upgrade ${name}: ${err instanceof Error ? err.message : err}`));
+			process.exit(1);
+		}
+		refuseDryRun(flags, `upgrade ${name}`);
+	}
 	if (flags.scope === "project") {
 		console.error(
 			chalk.yellow(
@@ -453,7 +446,9 @@ async function handleInstall(
 				);
 				if (handled) continue;
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to install ${spec}: ${err}`),
+				);
 				process.exit(1);
 			}
 			try {
@@ -463,11 +458,13 @@ async function handleInstall(
 				});
 				console.log(
 					chalk.green(
-						`${theme.status.success} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
+						`${currentTheme().symbols.symbol("status.success")} Installed ${target.name} from ${target.marketplace} (${entry.version})`,
 					),
 				);
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to install ${spec}: ${err}`),
+				);
 				process.exit(1);
 			}
 			continue;
@@ -500,13 +497,17 @@ async function handleInstall(
 				if (flags.json) {
 					console.log(JSON.stringify(result, null, 2));
 				} else {
-					console.log(chalk.green(`${theme.status.success} Linked ${result.name} from ${spec}`));
+					console.log(
+						chalk.green(`${currentTheme().symbols.symbol("status.success")} Linked ${result.name} from ${spec}`),
+					);
 					if (result.manifest.description) {
 						console.log(chalk.dim(`  ${result.manifest.description}`));
 					}
 				}
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to install ${spec}: ${err}`),
+				);
 				process.exit(1);
 			}
 			continue;
@@ -531,7 +532,11 @@ async function handleInstall(
 				if (flags.dryRun) {
 					console.log(chalk.dim(`[dry-run] Would install ${spec}`));
 				} else {
-					console.log(chalk.green(`${theme.status.success} Installed ${result.name}@${result.version}`));
+					console.log(
+						chalk.green(
+							`${currentTheme().symbols.symbol("status.success")} Installed ${result.name}@${result.version}`,
+						),
+					);
 					if (result.enabledFeatures && result.enabledFeatures.length > 0) {
 						console.log(chalk.dim(`  Features: ${result.enabledFeatures.join(", ")}`));
 					}
@@ -541,7 +546,7 @@ async function handleInstall(
 				}
 			}
 		} catch (err) {
-			console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
+			console.error(chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to install ${spec}: ${err}`));
 			process.exit(1);
 		}
 	}
@@ -579,7 +584,7 @@ async function handleUninstall(
 			} else if (candidates.length > 1) {
 				console.error(
 					chalk.red(
-						`${theme.status.error} ${rawName} is installed from ${candidates.length} marketplaces. Qualify it: ${candidates.join(", ")}`,
+						`${currentTheme().symbols.symbol("status.error")} ${rawName} is installed from ${candidates.length} marketplaces. Qualify it: ${candidates.join(", ")}`,
 					),
 				);
 				process.exit(1);
@@ -593,7 +598,9 @@ async function handleUninstall(
 				try {
 					await mktMgr.uninstallPlugin(name, flags.scope, { dryRun: true });
 				} catch (err) {
-					console.error(chalk.red(`${theme.status.error} Failed to uninstall ${name}: ${err}`));
+					console.error(
+						chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to uninstall ${name}: ${err}`),
+					);
 					process.exit(1);
 				}
 			}
@@ -618,9 +625,11 @@ async function handleUninstall(
 			// Exact match against installed marketplace plugin IDs (name@marketplace)
 			try {
 				await mktMgr.uninstallPlugin(name, flags.scope);
-				console.log(chalk.green(`${theme.status.success} Uninstalled ${name}`));
+				console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} Uninstalled ${name}`));
 			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to uninstall ${name}: ${err}`));
+				console.error(
+					chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to uninstall ${name}: ${err}`),
+				);
 				process.exit(1);
 			}
 			continue;
@@ -630,7 +639,7 @@ async function handleUninstall(
 		// unknown name would otherwise print a success line having removed nothing.
 		const npmPlugins = await manager.list();
 		if (!npmPlugins.some(p => p.name === name)) {
-			console.error(chalk.red(`${theme.status.error} ${rawName} is not installed`));
+			console.error(chalk.red(`${currentTheme().symbols.symbol("status.error")} ${rawName} is not installed`));
 			process.exit(1);
 		}
 
@@ -639,10 +648,12 @@ async function handleUninstall(
 			if (flags.json) {
 				console.log(JSON.stringify({ uninstalled: name }));
 			} else {
-				console.log(chalk.green(`${theme.status.success} Uninstalled ${name}`));
+				console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} Uninstalled ${name}`));
 			}
 		} catch (err) {
-			console.error(chalk.red(`${theme.status.error} Failed to uninstall ${name}: ${err}`));
+			console.error(
+				chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to uninstall ${name}: ${err}`),
+			);
 			process.exit(1);
 		}
 	}
@@ -667,7 +678,9 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 	if (npmPlugins.length > 0) {
 		console.log(chalk.bold("npm Plugins:\n"));
 		for (const plugin of npmPlugins) {
-			const status = plugin.enabled ? chalk.green(theme.status.enabled) : chalk.dim(theme.status.disabled);
+			const status = plugin.enabled
+				? chalk.green(currentTheme().symbols.symbol("status.enabled"))
+				: chalk.dim(currentTheme().symbols.symbol("status.disabled"));
 			const nameVersion = `${plugin.name}@${plugin.version}`;
 			console.log(`${status} ${nameVersion}`);
 			if (plugin.manifest.description) {
@@ -723,15 +736,21 @@ async function handleLink(
 		if (flags.json) {
 			console.log(JSON.stringify(result, null, 2));
 		} else {
-			console.log(chalk.green(`${theme.status.success} Linked ${result.name} from ${paths[0]}`));
+			console.log(
+				chalk.green(`${currentTheme().symbols.symbol("status.success")} Linked ${result.name} from ${paths[0]}`),
+			);
 		}
 	} catch (err) {
-		console.error(chalk.red(`${theme.status.error} Failed to link: ${err}`));
+		console.error(chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to link: ${err}`));
 		process.exit(1);
 	}
 }
 
-async function handleDoctor(manager: PluginManager, flags: { json?: boolean; fix?: boolean }): Promise<void> {
+async function handleDoctor(
+	manager: PluginManager,
+	flags: { json?: boolean; fix?: boolean; dryRun?: boolean },
+): Promise<void> {
+	if (flags.fix) refuseDryRun(flags, "doctor --fix");
 	const checks = await manager.doctor({ fix: flags.fix });
 
 	if (flags.json) {
@@ -744,13 +763,13 @@ async function handleDoctor(manager: PluginManager, flags: { json?: boolean; fix
 	for (const check of checks) {
 		const icon =
 			check.status === "ok"
-				? chalk.green(theme.status.success)
+				? chalk.green(currentTheme().symbols.symbol("status.success"))
 				: check.status === "warning"
-					? chalk.yellow(theme.status.warning)
-					: chalk.red(theme.status.error);
+					? chalk.yellow(currentTheme().symbols.symbol("status.warning"))
+					: chalk.red(currentTheme().symbols.symbol("status.error"));
 		console.log(`${icon} ${check.name}: ${check.message}`);
 		if (check.fixed) {
-			console.log(chalk.dim(`  ${theme.nav.cursor} Fixed`));
+			console.log(chalk.dim(`  ${currentTheme().symbols.symbol("nav.cursor")} Fixed`));
 		}
 	}
 
@@ -773,7 +792,7 @@ async function handleDoctor(manager: PluginManager, flags: { json?: boolean; fix
 async function handleFeatures(
 	manager: PluginManager,
 	args: string[],
-	flags: { json?: boolean; enable?: string; disable?: string; set?: string },
+	flags: { json?: boolean; enable?: string; disable?: string; set?: string; dryRun?: boolean },
 ): Promise<void> {
 	if (args.length === 0) {
 		console.error(
@@ -821,8 +840,9 @@ async function handleFeatures(
 			}
 		}
 
+		refuseDryRun(flags, "features");
 		await manager.setEnabledFeatures(pluginName, [...currentFeatures]);
-		console.log(chalk.green(`${theme.status.success} Updated features for ${pluginName}`));
+		console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} Updated features for ${pluginName}`));
 	}
 
 	// Display current state
@@ -853,7 +873,9 @@ async function handleFeatures(
 	const enabledSet = new Set(updatedFeatures ?? []);
 	for (const [name, feat] of Object.entries(plugin.manifest.features)) {
 		const enabled = enabledSet.has(name);
-		const icon = enabled ? chalk.green(theme.status.enabled) : chalk.dim(theme.status.disabled);
+		const icon = enabled
+			? chalk.green(currentTheme().symbols.symbol("status.enabled"))
+			: chalk.dim(currentTheme().symbols.symbol("status.disabled"));
 		const defaultLabel = feat.default ? chalk.dim(" (default)") : "";
 		console.log(`${icon} ${name}${defaultLabel}`);
 		if (feat.description) {
@@ -865,7 +887,7 @@ async function handleFeatures(
 async function handleConfig(
 	manager: PluginManager,
 	args: string[],
-	flags: { json?: boolean; local?: boolean },
+	flags: { json?: boolean; local?: boolean; dryRun?: boolean },
 ): Promise<void> {
 	if (args.length === 0) {
 		console.error(
@@ -966,8 +988,9 @@ async function handleConfig(
 				}
 			}
 
+			refuseDryRun(flags, "config set");
 			await manager.setPluginSetting(pluginName, key, value);
-			console.log(chalk.green(`${theme.status.success} Set ${key}`));
+			console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} Set ${key}`));
 			break;
 		}
 
@@ -977,8 +1000,9 @@ async function handleConfig(
 				process.exit(1);
 			}
 
+			refuseDryRun(flags, "config delete");
 			await manager.deletePluginSetting(pluginName, key);
-			console.log(chalk.green(`${theme.status.success} Deleted ${key}`));
+			console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} Deleted ${key}`));
 			break;
 		}
 
@@ -1038,10 +1062,10 @@ async function handleConfigValidate(manager: PluginManager, flags: { json?: bool
 	}
 
 	if (results.length === 0) {
-		console.log(chalk.green(`${theme.status.success} All settings valid`));
+		console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} All settings valid`));
 	} else {
 		for (const { plugin, key, error } of results) {
-			console.log(chalk.red(`${theme.status.error} ${plugin}.${key}: ${error}`));
+			console.log(chalk.red(`${currentTheme().symbols.symbol("status.error")} ${plugin}.${key}: ${error}`));
 		}
 		process.exit(1);
 	}
@@ -1050,7 +1074,7 @@ async function handleConfigValidate(manager: PluginManager, flags: { json?: bool
 async function handleEnable(
 	manager: PluginManager,
 	plugins: string[],
-	flags: { json?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; scope?: "user" | "project"; dryRun?: boolean },
 ): Promise<void> {
 	return handleSetEnabled(manager, plugins, flags, true);
 }
@@ -1058,7 +1082,7 @@ async function handleEnable(
 async function handleDisable(
 	manager: PluginManager,
 	plugins: string[],
-	flags: { json?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; scope?: "user" | "project"; dryRun?: boolean },
 ): Promise<void> {
 	return handleSetEnabled(manager, plugins, flags, false);
 }
@@ -1066,7 +1090,7 @@ async function handleDisable(
 async function handleSetEnabled(
 	manager: PluginManager,
 	plugins: string[],
-	flags: { json?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; scope?: "user" | "project"; dryRun?: boolean },
 	enabled: boolean,
 ): Promise<void> {
 	const action = enabled ? "enable" : "disable";
@@ -1077,6 +1101,8 @@ async function handleSetEnabled(
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin ${action} <plugin> ...`));
 		process.exit(1);
 	}
+
+	refuseDryRun(flags, action);
 
 	const mktMgr = await makeMarketplaceManager();
 	const installedPlugins = new Set((await mktMgr.listInstalledPlugins()).map(p => p.id));
@@ -1093,70 +1119,13 @@ async function handleSetEnabled(
 			if (flags.json) {
 				console.log(JSON.stringify({ [jsonKey]: name }));
 			} else {
-				console.log(chalk.green(`${theme.status.success} ${pastTense} ${name}`));
+				console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} ${pastTense} ${name}`));
 			}
 		} catch (err) {
-			console.error(chalk.red(`${theme.status.error} Failed to ${action} ${name}: ${err}`));
+			console.error(
+				chalk.red(`${currentTheme().symbols.symbol("status.error")} Failed to ${action} ${name}: ${err}`),
+			);
 			process.exit(1);
 		}
 	}
-}
-
-// =============================================================================
-// Help
-// =============================================================================
-
-export function printPluginHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} plugin`)} - Plugin lifecycle management
-
-${chalk.bold("Commands:")}
-  install <source>[features]     Install plugins from npm, GitHub, or git URL
-  uninstall <pkg>                Remove plugins
-  list                           Show installed plugins
-  link <path>                    Link local plugin for development
-  doctor                         Check plugin health
-  features <pkg>                 View/modify enabled features
-  config <cmd> <pkg> [key] [val] Manage plugin settings
-  enable <pkg>                   Enable a disabled plugin
-  disable <pkg>                  Disable plugin without uninstalling
-  marketplace <cmd>            Manage marketplace sources (add, remove, update, list)
-  discover [marketplace]        Browse available marketplace plugins
-
-${chalk.bold("Feature Syntax:")}
-  pkg                Install with default features
-  pkg[feat1,feat2]   Install with specific features
-  pkg[*]             Install with all features
-  pkg[]              Install with no optional features
-
-${chalk.bold("Sources:")}
-  pkg, pkg@1.2.3                  npm package (optionally pinned)
-  github:user/repo[#ref]          GitHub shorthand (also gitlab:, bitbucket:, codeberg:, sourcehut:)
-  https://github.com/user/repo    Full git URL (https, ssh, or git protocol)
-  name@marketplace                Marketplace plugin (see marketplace command)
-  ./path, ../path, /abs, ~/path   Local plugin directory (symlinked, same as plugin link)
-
-${chalk.bold("Config Subcommands:")}
-  config list <pkg>              List all settings
-  config get <pkg> <key>         Get a setting value
-  config set <pkg> <key> <val>   Set a setting value
-  config delete <pkg> <key>      Delete a setting
-  config validate                Validate all plugin settings
-
-${chalk.bold("Options:")}
-  --json           Output as JSON
-  --fix            Attempt automatic fixes (doctor)
-  --force          Overwrite without prompting (install)
-  --scope <scope>  Install scope: user (default) or project (install name@marketplace)
-  --dry-run        Preview changes without applying (install)
-  -l, --local      Use project-local overrides
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} plugin install @oh-my-pi/exa[search]
-  ${APP_NAME} plugin list --json
-  ${APP_NAME} plugin features my-plugin --enable search,web
-  ${APP_NAME} plugin config set my-plugin apiKey sk-xxx
-  ${APP_NAME} plugin doctor --fix
-  ${APP_NAME} plugin install --scope project name@marketplace
-  ${APP_NAME} plugin install github:user/repo#v1.0
-`);
 }

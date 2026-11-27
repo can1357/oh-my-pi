@@ -1,6 +1,6 @@
-# Porting Hot Paths to `pi-natives`
+# Porting Hot Paths to `omp-natives`
 
-This is the contributor path for moving a measured JS/TS hot path into `crates/pi-natives` and exposing it through `@oh-my-pi/pi-natives`.
+This is the contributor path for moving a measured JS/TS hot path into `crates/natives` and exposing it through `@oh-my-pi/pi-natives`.
 
 ## Decide whether to port
 
@@ -20,8 +20,7 @@ The package has no `packages/natives/src/<module>` wrapper layer. Its entrypoint
 
 The VCS subpath exposes discovery and Git/Jujutsu operations through `git`,
 `repo`, `repoForDisplay`, `require`, `requireGit`, and `jj`, plus metadata,
-clone/detach/patch helpers, error predicates, and a head-change watcher built
-on `VcsRepo.watchTarget()`. `repoForDisplay` prefers Jujutsu on equal-root
+clone/detach/patch helpers, and error predicates. `repoForDisplay` prefers Jujutsu on equal-root
 ties; Git-safe automation uses `repo` instead.
 
 Two commands serve different purposes:
@@ -33,7 +32,7 @@ Release builds use Bazel targets and publish `.node` files in platform leaf pack
 
 ## Design the N-API boundary
 
-1. Put implementation in the owning `crates/pi-natives/src/<module>.rs`; register new modules in `lib.rs`.
+1. Put implementation in the owning `crates/natives/src/<module>.rs`; register new modules in `lib.rs`.
 2. Keep the computation in a plain Rust function where practical, then expose a thin `#[napi]` boundary.
 3. Prefer owned N-API-compatible values: `String`, vectors, typed arrays, and `#[napi(object)]` option/result structs. Avoid borrowed public inputs whose lifetime cannot cross N-API work.
 4. Let napi-rs apply the default snake_case-to-camelCase name unless a deliberate public name requires `js_name`.
@@ -54,8 +53,8 @@ Match an existing export with the same scheduling/error shape rather than introd
 
 - Add the Rust logic and focused Rust tests for pure invariants when needed.
 - Add the `#[napi]` item and object/enum types.
-- Register a new module in `crates/pi-natives/src/lib.rs`.
-- If the port uses another first-party crate, add the dependency to `crates/pi-natives/Cargo.toml` and its build-system inputs as required by the native build.
+- Register a new module in `crates/natives/src/lib.rs`.
+- If the port uses another first-party crate, add the dependency to `crates/natives/Cargo.toml` and its build-system inputs as required by the native build.
 
 ### 2. Regenerate and inspect the binding
 
@@ -92,19 +91,17 @@ Do not add a wrapper merely to rename a generated root export.
 
 ### 5. Benchmark representative work
 
-Place a durable benchmark with the owning package (`packages/natives/bench`, `packages/tui/bench`, `packages/coding-agent/bench`, or another existing package bench directory). Run JS and native implementations in the same process on identical prepared input. Separate setup/conversion from the timed operation when callers can reuse that setup.
+Place a durable benchmark with the owning package (`packages/natives/bench`, `packages/coding-agent/bench`, or another existing package bench directory). Run JS and native implementations in the same process on identical prepared input. Separate setup/conversion from the timed operation when callers can reuse that setup.
 
 ```ts
 const ITERATIONS = 2_000;
 
 function bench(name: string, fn: () => void): number {
-  const start = Bun.nanoseconds();
-  for (let i = 0; i < ITERATIONS; i++) fn();
-  const elapsedMs = (Bun.nanoseconds() - start) / 1e6;
-  console.log(
-    `${name}: ${elapsedMs.toFixed(2)}ms (${(elapsedMs / ITERATIONS).toFixed(6)}ms/op)`,
-  );
-  return elapsedMs;
+	const start = Bun.nanoseconds();
+	for (let i = 0; i < ITERATIONS; i++) fn();
+	const elapsedMs = (Bun.nanoseconds() - start) / 1e6;
+	console.log(`${name}: ${elapsedMs.toFixed(2)}ms (${(elapsedMs / ITERATIONS).toFixed(6)}ms/op)`);
+	return elapsedMs;
 }
 
 bench("feature/js", () => jsImpl(sample));

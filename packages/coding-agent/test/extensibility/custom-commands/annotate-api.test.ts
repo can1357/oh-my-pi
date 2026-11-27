@@ -18,7 +18,7 @@ import * as review from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands
 import { createResolvedReviewTarget } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/target";
 import type { SendUserMessageOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../../src/ui/theme/service";
 
 const DIFF = `diff --git a/src/value.ts b/src/value.ts
 --- a/src/value.ts
@@ -65,7 +65,7 @@ function createContext(
 }
 
 beforeAll(async () => {
-	await initTheme();
+	initTheme();
 });
 
 afterEach(() => {
@@ -90,6 +90,15 @@ describe("annotations API: submit", () => {
 		expect(sendUserMessage).not.toHaveBeenCalled();
 		expect(result.text).toContain('"beta"');
 		expect(result.text).toContain("rename this");
+	});
+
+	it("names the source line, so notes on repeated blank lines stay distinguishable", async () => {
+		const { api } = createContext();
+		const result = await api.submit({
+			source: { kind: "text", text: "alpha\r\n\r\nbeta\r\n\r\n" },
+			notes: [{ line: 4, note: "TESTING 3" }],
+		});
+		expect(result.text).toContain('Feedback on line 4:\n""\nTESTING 3');
 	});
 
 	it("rejects a note whose line is outside the source instead of quoting nothing", async () => {

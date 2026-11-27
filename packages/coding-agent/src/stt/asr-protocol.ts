@@ -40,6 +40,16 @@ export type SttWorkerOutbound =
 	| { type: "downloaded"; id: string }
 	| { type: "error"; id: string; error: string }
 	| { type: "progress"; id: string; event: SttProgressEvent }
+	// The accelerated device failed to load the model (e.g. out of VRAM) and the
+	// worker fell back to `fallbackDevice`; sent once per model load.
+	| {
+			type: "device_fallback";
+			id: string;
+			modelKey: SttModelKey;
+			device: string;
+			fallbackDevice: string;
+			error: string;
+	  }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
 	// ── Live streaming session ──
 	// `partial` is the volatile transcript of the in-progress speech segment
@@ -51,13 +61,12 @@ export type SttWorkerOutbound =
 	| { type: "stream_done"; id: string; text: string };
 
 /**
- * Wire transport between the parent (`SttClient`) and the speech-recognition
- * subprocess. The parent owns the subprocess lifecycle (graceful work, hard
- * SIGKILL on shutdown); the protocol therefore carries no explicit close
- * handshake — once the parent decides to terminate, it signals the OS to reap
- * the child so `onnxruntime-node`'s NAPI finalizer never runs in any shared
- * address space (the destructor segfaults Bun on shutdown; issue #1606). See
- * `asr-client.ts` for the spawn/kill glue.
+ * Worker-side transport. Messages cross both hops (client tunnel <-> daemon
+ * `speech` module <-> worker stdio) as the binary frames of
+ * `daemon/modules/speech-frames.ts`; `audio` travels as a raw f32le payload.
+ * The daemon owns the worker process and SIGKILLs it on stop, so the protocol
+ * has no close handshake and `onnxruntime-node`'s NAPI finalizer never runs
+ * (its destructor segfaults Bun on shutdown; issue #1606).
  */
 export interface SttTransport {
 	send(message: SttWorkerOutbound): void;

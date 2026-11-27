@@ -15,6 +15,10 @@ export const frameDefs = {
 			"supportedProtocolVersions?": "number.integer[]",
 			"maxFrameBytes?": "number.integer",
 			"maxReassembledFrameBytes?": "number.integer",
+			"supportsBashExcludeFromContext?": doc(
+				"boolean",
+				"`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.",
+			),
 		},
 		"First frame after startup; transport fields are absent on servers without protocol v2.",
 	),
@@ -26,6 +30,10 @@ export const frameDefs = {
 			"model?": "string",
 			"httpStatus?": "number.integer",
 			retryable: doc("boolean", "Transient: resubmitting later may succeed (omp's own retries are exhausted)."),
+			"code?": doc(
+				"'cost_cap'",
+				"`cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request.",
+			),
 		},
 		'Failure detail of a `prompt_result` with `status: "error"`.',
 	),
@@ -103,6 +111,18 @@ export const frameDefs = {
 		{ type: "'live_end'", "error?": "string" },
 		"Sent exactly once when a live session ends; `error` carries the failure cause.",
 	),
+	DictationStateEvent: doc(
+		{ type: "'dictation_state'", captureId: "string", state: "'starting' | 'recording' | 'transcribing'" },
+		"State of one draft-only microphone capture.",
+	),
+	DictationTranscriptEvent: doc(
+		{ type: "'dictation_transcript'", captureId: "string", text: "string" },
+		"Full accumulated draft preview; replaces the previous preview for this capture.",
+	),
+	DictationEndEvent: doc(
+		{ type: "'dictation_end'", captureId: "string", text: "string", "error?": "string" },
+		"Exactly one terminal frame per capture; text is the accumulated result.",
+	),
 	BtwDeltaEvent: doc(
 		{ type: "'btw_delta'", recordId: "string", delta: "string" },
 		"Text appended to the running side question's latest answer.",
@@ -146,6 +166,16 @@ export const frameDefs = {
 		title: "string",
 		options: "string[]",
 		"optionDetails?": "SelectOptionDetail[]",
+		"initialIndex?": doc("number.integer", "Index into `options` to focus first."),
+		"selectionMarker?": doc("'radio' | 'checkbox'", "Marker style for the first `markableCount` options."),
+		"checkedIndices?": doc(
+			"number.integer[]",
+			"For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option.",
+		),
+		"markableCount?": doc(
+			"number.integer",
+			"Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set.",
+		),
 		"timeout?": "number.integer",
 	},
 	ConfirmUiRequest: {
@@ -163,6 +193,7 @@ export const frameDefs = {
 		title: "string",
 		"placeholder?": "string",
 		"timeout?": "number.integer",
+		"secret?": "boolean",
 	},
 	EditorUiRequest: {
 		type: UI,
@@ -174,7 +205,11 @@ export const frameDefs = {
 	},
 	AskUiRequest: doc(
 		{ type: UI, id: "string", method: "'ask'", questions: "AskQuestion[]", "timeout?": "number.integer" },
-		"Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it.",
+		"Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.",
+	),
+	FormUiRequest: doc(
+		{ type: UI, id: "string", method: "'form'", html: "string", "timeout?": "number.integer" },
+		"The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.",
 	),
 	CancelUiRequest: doc(
 		{ type: UI, id: "string", method: "'cancel'", targetId: "string" },
@@ -213,12 +248,12 @@ export const frameDefs = {
 		"instructions?": "string",
 	},
 	ExtensionUiRequest: doc(
-		"SelectUiRequest | ConfirmUiRequest | InputUiRequest | EditorUiRequest | AskUiRequest | CancelUiRequest | NotifyUiRequest | SetStatusUiRequest | SetWidgetUiRequest | SetTitleUiRequest | SetEditorTextUiRequest | OpenUrlUiRequest",
+		"SelectUiRequest | ConfirmUiRequest | InputUiRequest | EditorUiRequest | AskUiRequest | FormUiRequest | CancelUiRequest | NotifyUiRequest | SetStatusUiRequest | SetWidgetUiRequest | SetTitleUiRequest | SetEditorTextUiRequest | OpenUrlUiRequest",
 		"Extension UI request, discriminated by `method`.",
 	),
 	AskAnswer: doc(
 		{ id: "string", selectedOptions: "string[]", "customInput?": "string" },
-		"Answer to one `ask` question: exact option labels, plus optional free text.",
+		"Answer to one `ui.askDialog` question: exact option labels, plus optional free text.",
 	),
 	ValueUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", value: "string" },
@@ -230,14 +265,22 @@ export const frameDefs = {
 	),
 	CancelUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", cancelled: "true", "timedOut?": "boolean" },
-		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers).",
+		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults).",
 	),
 	AnswersUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", answers: "AskAnswer[]" },
 		"Answers an `ask` request: one `AskAnswer` per question, in question order.",
 	),
+	DataUiResponse: doc(
+		{
+			type: "'extension_ui_response'",
+			id: "string",
+			data: doc(JSON_OBJECT, "Submitted values by control `name`: a string, a number, or a string array."),
+		},
+		"Answers a `form` request with the submitted form data.",
+	),
 	ExtensionUiResponse: doc(
-		"ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse",
+		"ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse | DataUiResponse",
 		"Host reply to an extension UI request; variants share `type` and differ by their payload key.",
 	),
 

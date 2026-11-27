@@ -8,9 +8,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { rejectionOf } from "./helpers/rejection";
 
 /**
  * Regression for issue #5064.
@@ -28,6 +30,10 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
  *
  * A model whose wire strips images (`compat.stripImageInput`) declares image
  * input but is text-only on the wire, so it takes the same path.
+ *
+ * A configured order that omits `soft` still ends in soft compaction for a
+ * manual pass; it used to throw "No configured compaction method can run
+ * manually." on plan approval.
  */
 describe.each([
 	{
@@ -38,9 +44,9 @@ describe.each([
 	},
 	{
 		label: "wire-stripped",
-		provider: "venice",
-		id: "deepseek-v4-1-flash",
-		reason: "deepseek-v4-1-flash's provider strips image input",
+		provider: "fireworks",
+		id: "deepseek-v4-flash",
+		reason: "deepseek-v4-flash's provider strips image input",
 	},
 ] as const)("AgentSession manual snapcompact $label fallback", ({ provider, id, reason }) => {
 	let session: AgentSession | undefined;
@@ -60,7 +66,7 @@ describe.each([
 		}
 	});
 
-	async function createHarness(): Promise<{
+	async function createHarness(methodOrder: CompactionMethod[] = ["snapcompact", "soft"]): Promise<{
 		session: AgentSession;
 		sessionManager: SessionManager;
 		activeModel: Model;
@@ -103,7 +109,7 @@ describe.each([
 		if (!sessionManager.getBranch()[0]?.id) throw new Error("Expected seeded branch entry");
 
 		const settings = Settings.isolated({
-			"compaction.methodOrder": ["snapcompact", "soft"],
+			"compaction.methodOrder": methodOrder,
 			"compaction.keepRecentTokens": 1,
 		});
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
@@ -143,18 +149,38 @@ describe.each([
 		});
 	});
 
+	it("ends a configured order without soft in soft compaction for plan approval", async () => {
+		const harness = await createHarness(["remote", "snapcompact", "shake", "handoff"]);
+
+		const snapcompactSpy = vi.spyOn(snapcompact, "compact");
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "llm summary",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+			details: {},
+		}));
+
+		const result = await harness.session.compact(undefined, { internalGuidance: "distill the plan" });
+
+		expect(result.summary).toBe("llm summary");
+		expect(snapcompactSpy).not.toHaveBeenCalled();
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("still fails locally for explicit /compact snapcompact on a text-only model (no-LLM contract)", async () => {
 		const harness = await createHarness();
 
 		const compactSpy = vi.spyOn(compactionModule, "compact");
 
-		await expect(harness.session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
-			`snapcompact cannot run locally: ${reason}.`,
-		);
+		const error = String(await rejectionOf(harness.session.compact(undefined, { mode: "snapcompact" })));
 
+		// One message carries the reason and what to run instead; no separate notice repeats it.
+		expect(error).toContain(`snapcompact needs a vision-capable model (${reason})`);
+		expect(error).toContain("Run /compact soft instead");
 		// Explicit no-LLM request must never reach the provider-backed summarizer.
 		expect(compactSpy).not.toHaveBeenCalled();
-		expect(harness.notices).toContain(`snapcompact needs a vision-capable model (${reason})`);
+		expect(harness.notices.filter(notice => notice.includes("vision-capable"))).toEqual([]);
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
 	});
 });

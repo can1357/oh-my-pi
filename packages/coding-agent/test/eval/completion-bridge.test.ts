@@ -1,14 +1,17 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, RawSseEvent } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { RawSseDebugBuffer } from "../../src/debug/raw-sse-buffer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import type { ModelRegistry } from "../../src/config/model-registry";
+import { cfgOffline } from "../../src/config/auxiliary-model-policy";
 import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
+	type CompletionAttempt,
 	EVAL_HANDLE_CONCURRENCY,
 	getCompletionHandle,
 	releaseCompletionHandles,
@@ -16,13 +19,18 @@ import {
 	type EvalCompletionBridgeOptions,
 	type EvalCompletionResult,
 } from "../../src/eval/completion-bridge";
-import { runEvalWait } from "../../src/eval/handle-bridge";
+import { type EvalHandleSnapshot, runEvalCancel, runEvalStatus, runEvalWait } from "../../src/eval/handle-bridge";
 import { IdleTimeout } from "../../src/eval/idle-timeout";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { getBundledAgent } from "../../src/task/agents";
+import type { AgentDefinition } from "../../src/task/types";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { CostGate } from "../../src/session/cost-gate";
+import { SessionManager } from "../../src/session/session-manager";
+import { rejectionOf } from "../helpers/rejection";
 
 import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -41,6 +49,19 @@ async function runEvalCompletionAndWait(
 	if (entry.error) throw new ToolError(entry.error);
 	if (!entry.result) throw new Error(`Completion handle ${handle.id} returned no result`);
 	return entry.result;
+}
+
+/** Waits for a completion, then reads its attempt log through `__status__`. */
+async function waitWithAttempts(
+	args: unknown,
+	session: ToolSession,
+): Promise<{ snapshot?: EvalHandleSnapshot; attempts?: CompletionAttempt[] }> {
+	const { id } = await runEvalCompletion(args, { session });
+	const waited = await runEvalWait({ items: [{ kind: "completion", id }] }, { session });
+	return {
+		snapshot: waited.items[0],
+		attempts: runEvalStatus({ item: { kind: "completion", id } }, { session }).attempts,
+	};
 }
 
 function makeModel(provider: string, id: string, extra: Partial<Model<Api>> = {}): Model<Api> {
@@ -95,7 +116,12 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 	}
 	const available = opts.available ?? [SMOL, DEFAULT, SLOW];
 	const modelRegistry = {
-		getAvailable: () => available,
+		getAvailable: () => {
+			if (cfgOffline.get(settings)) throw new Error("Offline mode read every provider's catalog");
+			return available;
+		},
+		getAvailableForProviders: (providers: ReadonlySet<string>) =>
+			available.filter(model => providers.has(model.provider)),
 		find: (provider: string, id: string) => available.find(model => model.provider === provider && model.id === id),
 		getApiKey: async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 		resolver: () => async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
@@ -148,10 +174,11 @@ async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<Pytho
 	const settingsPath = path.resolve(import.meta.dir, "../../src/config/settings.ts");
 	const code = [
 		"import json",
-		'plain = completion("hi", model="smol").wait()',
+		'plain_handle = completion("hi", model="smol")',
+		"plain = plain_handle.wait()",
 		// `await` resolves on a worker thread; it must keep the cell's run context.
 		'structured = await completion("hi", schema={"type": "object"})',
-		'print(json.dumps({"plain": plain, "structured": structured}))',
+		'print(json.dumps({"plain": plain, "attempts": plain_handle.attempts, "structured": structured}))',
 	].join("\n");
 	await Bun.write(
 		scriptPath,
@@ -181,6 +208,7 @@ const session = {
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
+		find: (provider, id) => (provider === SMOL.provider && id === SMOL.id ? SMOL : undefined),
 		getApiKey: async () => "test-key",
 		resolver: () => async () => "test-key",
 	},
@@ -214,7 +242,7 @@ await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify(result));
 process.exit(0);
 `,
 	);
-	const child = await $`bun ${scriptPath}`.cwd(repoRoot).quiet().nothrow();
+	const child = await $`${process.execPath} ${scriptPath}`.cwd(repoRoot).quiet().nothrow();
 	const stdout = child.stdout.toString();
 	const stderr = child.stderr.toString();
 	if (child.exitCode !== 0)
@@ -243,6 +271,66 @@ describe("runEvalCompletion", () => {
 		expect(resolved).toEqual(["p/smol", "p/default", "p/slow"]);
 	});
 
+	it("runs the model a user-tagged agent (`m<N>`) names, at its tagged effort", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const tagged = makeReasoningModel("tagged");
+		const session = makeSession({ available: [SMOL, tagged] });
+		session.getSessionAgents = (): readonly AgentDefinition[] => [
+			{ name: "m1", model: ["p/tagged"], thinkingLevel: Effort.High } as AgentDefinition,
+		];
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "m1" }, { session });
+
+		const model = spy.mock.calls[0]?.[0] as Model<Api>;
+		expect(`${model.provider}/${model.id}`).toBe("p/tagged");
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown } | undefined;
+		expect(opts?.reasoning).toBe(Effort.High);
+		expect(result.details).toEqual({ model: "p/tagged", structured: false });
+	});
+
+	it("refuses a `model` that names neither a tier nor a tagged agent", async () => {
+		const session = makeSession();
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "m9" }, { session })).rejects.toThrow(
+			/could not resolve model "m9"/,
+		);
+	});
+
+	it("counts each completion against the session's cost cap and refuses at it", async () => {
+		const billed = assistant({ text: "ok" });
+		billed.usage.cost.total = 1.2;
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 0, () => {});
+		const session = { ...makeSession(), costGate } as ToolSession;
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		expect(costGate.spent).toBe(1.2);
+		const refused = await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }));
+		expect(String(refused)).toContain("Cost cap reached");
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("journals a completion once on the session, with its usage, prompt and reply", async () => {
+		const billed = assistant({ text: "ok" });
+		billed.usage.input = 7;
+		billed.usage.cost.total = 0.3;
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const sessionManager = SessionManager.inMemory();
+		const session = { ...makeSession(), sessionManager } as ToolSession;
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const journaled = sessionManager.getEntries().filter(entry => entry.type === "model_usage");
+		expect(journaled).toHaveLength(1);
+		expect(journaled[0]).toMatchObject({
+			purpose: "completion",
+			role: "smol",
+			usage: billed.usage,
+			completion: { prompt: "q", reply: "ok" },
+		});
+		expect(sessionManager.getUsageStatistics().cost).toBe(0.3);
+	});
+
 	it("prefers the session active model for the default tier, falling back to @default", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
 		const session = makeSession({ available: [SMOL, DEFAULT, SLOW], activeModel: "p/slow" });
@@ -268,6 +356,84 @@ describe("runEvalCompletion", () => {
 		expect(result).toEqual({
 			text: "fallback answer",
 			details: { model: "p/fallback", tier: "smol", structured: false },
+		});
+	});
+
+	describe("offline mode", () => {
+		const elsewhere = makeModel("q", "q-mini");
+
+		function offlineSession(opts: SessionOptions): ToolSession {
+			const session = makeSession(opts);
+			cfgOffline.set(session.settings, true);
+			session.getActiveModel = () => DEFAULT;
+			return session;
+		}
+
+		/** A user-tagged model agent, built the way `ModelMentionRegistry.sessionAgents()` builds one. */
+		function taggedAgent(name: string, selector: string): AgentDefinition {
+			const task = getBundledAgent("task");
+			if (!task) throw new Error("Bundled task agent is unavailable");
+			return { ...task, name, model: [selector], filePath: undefined };
+		}
+
+		it("refuses a tier or tagged agent that resolves only on another provider", async () => {
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere], roles: { smol: "q/q-mini" } });
+			session.getSessionAgents = () => [taggedAgent("m1", "q/q-mini")];
+
+			for (const model of ["smol", "m1"]) {
+				await expect(runEvalCompletionAndWait({ prompt: "q", model }, { session })).rejects.toThrow(ToolError);
+			}
+			expect(spy).not.toHaveBeenCalled();
+
+			await runEvalCompletionAndWait({ prompt: "q", model: "default" }, { session });
+			expect(spy.mock.calls.map(([model]) => model.id)).toEqual(["default"]);
+		});
+
+		it("sends nothing without an active model", async () => {
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+			const session = offlineSession({});
+			session.getActiveModel = () => undefined;
+
+			await expect(runEvalCompletionAndWait({ prompt: "q", model: "default" }, { session })).rejects.toThrow(
+				ToolError,
+			);
+			expect(spy).not.toHaveBeenCalled();
+		});
+
+		it("runs a tagged agent only on its exact pin, not an aggregator's copy of it", async () => {
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+			const aggregated = makeModel("openrouter", "anthropic/claude-sonnet-4");
+			const session = offlineSession({
+				available: [aggregated],
+				activeModel: "openrouter/anthropic/claude-sonnet-4",
+			});
+			session.getActiveModel = () => aggregated;
+			session.getSessionAgents = () => [
+				taggedAgent("m1", "anthropic/claude-sonnet-4"),
+				taggedAgent("m2", "openrouter/anthropic/claude-sonnet-4"),
+			];
+
+			await expect(runEvalCompletionAndWait({ prompt: "q", model: "m1" }, { session })).rejects.toThrow(ToolError);
+			expect(spy).not.toHaveBeenCalled();
+			await runEvalCompletionAndWait({ prompt: "q", model: "m2" }, { session });
+			expect(spy).toHaveBeenCalledTimes(1);
+		});
+
+		it("skips fallback chain entries on another provider, even one the active provider lists as an id", async () => {
+			const fallback = makeModel("p", "fallback");
+			// The active provider lists a model whose id spells the foreign entry.
+			const lookalike = makeModel("p", "q/q-mini");
+			const session = offlineSession({ available: [SMOL, DEFAULT, elsewhere, lookalike, fallback] });
+			cfgRetryFallbackChains.set(session.settings, { smol: ["q/q-mini", "p/fallback"] });
+			const spy = vi
+				.spyOn(ai, "completeSimple")
+				.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+				.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+			await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+			expect(spy.mock.calls.map(([model]) => model.id)).toEqual(["smol", "fallback"]);
 		});
 	});
 
@@ -390,11 +556,12 @@ describe("runEvalCompletion", () => {
 			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
 			.mockResolvedValueOnce(assistant({ text: "c answer" }));
 
-		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		const { attempts } = await waitWithAttempts({ prompt: "q", model: "slow" }, session);
 
 		const nested = spy.mock.calls[2]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
 		expect(nested.reasoning).toBeUndefined();
 		expect(nested.disableReasoning).toBe(true);
+		expect(attempts?.map(attempt => attempt.effort)).toEqual([Effort.High, "off", "off"]);
 	});
 
 	it("inherits disabled reasoning for a bare fallback after an explicit :off primary", async () => {
@@ -417,7 +584,7 @@ describe("runEvalCompletion", () => {
 		expect(fallbackOpts.disableReasoning).toBe(true);
 	});
 
-	it("skips keyless fallbacks without spending retry budget", async () => {
+	it("skips keyless fallbacks without spending retry budget and logs every attempt", async () => {
 		const b = makeModel("p", "b");
 		const c = makeModel("p", "c");
 		const session = makeSession({ available: [SMOL, b, c] });
@@ -431,11 +598,17 @@ describe("runEvalCompletion", () => {
 			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
 			.mockResolvedValueOnce(assistant({ text: "c answer" }));
 
-		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		const { snapshot, attempts } = await waitWithAttempts({ prompt: "q", model: "smol" }, session);
 
 		// b never reaches completeSimple: the keyless preflight skips it.
 		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "c"]);
-		expect(result.text).toBe("c answer");
+		expect(snapshot).toMatchObject({ status: "completed", text: "c answer" });
+		expect(snapshot).not.toHaveProperty("attempts");
+		expect(attempts).toEqual([
+			{ model: "p/smol", effort: null, outcome: "failed", error: "smol down" },
+			{ model: "p/b", effort: null, outcome: "no-credentials" },
+			{ model: "p/c", effort: null, outcome: "succeeded" },
+		]);
 	});
 
 	it("walks shared descendants once per inherited effort", async () => {
@@ -523,6 +696,54 @@ describe("runEvalCompletion", () => {
 		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session: makeSession() });
 		expect(result.text).toBe("the answer");
 		expect(result.details).toEqual({ model: "p/smol", tier: "smol", structured: false });
+	});
+
+	it("dumps captured provider frames to a .log when a completion fails", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-dump-");
+		const session = makeSession();
+		// ToolSession narrows `sessionManager`; the dump only needs `getArtifactsDir`.
+		const scoped = session as { sessionManager?: { getArtifactsDir: () => string | null } };
+		scoped.sessionManager = { getArtifactsDir: () => tempDir.path() };
+		const frame: RawSseEvent = {
+			event: "content_block_delta",
+			data: '{"delta":"thinking"}',
+			raw: ["event: content_block_delta", 'data: {"delta":"thinking"}'],
+		};
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _ctx, opts) => {
+			// A real transport feeds raw frames through the request's `onSseEvent`
+			// hook; the empty-content response then surfaces the no-text-output error.
+			opts?.onSseEvent?.(frame, model);
+			return assistant({});
+		});
+
+		const error = (await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }))) as Error;
+		expect(error.message).toContain("completion() returned no text output.");
+		const match = /Streamed provider frames written to (.+?)\.$/.exec(error.message);
+		expect(match).not.toBeNull();
+		const dumped = await Bun.file(match![1]!).text();
+		expect(dumped).toContain("content_block_delta");
+		expect(dumped).toContain('{"delta":"thinking"}');
+	});
+
+	it("mirrors completion frames into the session debug buffer for /debug", async () => {
+		const session = makeSession();
+		const debug = new RawSseDebugBuffer();
+		session.rawSseDebugBuffer = debug;
+		const frame: RawSseEvent = {
+			event: "content_block_delta",
+			data: '{"delta":"thinking"}',
+			raw: ["event: content_block_delta", 'data: {"delta":"thinking"}'],
+		};
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _ctx, opts) => {
+			opts?.onSseEvent?.(frame, model);
+			return assistant({ text: "ok" });
+		});
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const text = debug.toRawText();
+		expect(text).toContain("content_block_delta");
+		expect(text).toContain('{"delta":"thinking"}');
 	});
 
 	it("supplies a non-empty systemPrompt when system is omitted (codex 'Instructions are required' guard)", async () => {
@@ -918,6 +1139,45 @@ describe("runEvalCompletion", () => {
 		).rejects.toBeInstanceOf(ToolError);
 	});
 
+	it("marks the answering attempt failed when its output is unusable", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "not json" }));
+		const { attempts } = await waitWithAttempts(
+			{ prompt: "q", model: "smol", schema: { type: "object" } },
+			makeSession(),
+		);
+		expect(attempts).toEqual([
+			{
+				model: "p/smol",
+				effort: null,
+				outcome: "failed",
+				error: "completion() did not return a structured response matching the schema.",
+			},
+		]);
+	});
+
+	it("reports a running attempt live and marks it cancelled on cancel", async () => {
+		const started = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+			started.resolve();
+			const signal = options?.signal;
+			if (!signal) throw new Error("completion request did not receive an abort signal");
+			const aborted = Promise.withResolvers<never>();
+			signal.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+			return await aborted.promise;
+		});
+		const session = makeSession();
+		const item = {
+			kind: "completion" as const,
+			id: (await runEvalCompletion({ prompt: "q", model: "smol" }, { session })).id,
+		};
+		await started.promise;
+		expect(runEvalStatus({ item }, { session }).attempts?.map(attempt => attempt.outcome)).toEqual(["running"]);
+
+		runEvalCancel({ item }, { session });
+		await runEvalWait({ items: [item] }, { session });
+		expect(runEvalStatus({ item }, { session }).attempts?.map(attempt => attempt.outcome)).toEqual(["cancelled"]);
+	});
+
 	it("bounds in-flight handles and admits queued ones as earlier requests settle", async () => {
 		const total = EVAL_HANDLE_CONCURRENCY + 8;
 		const gate = Promise.withResolvers<void>();
@@ -1011,7 +1271,7 @@ describe("completion() through eval runtimes", () => {
 			[
 				'const handles = [completion("hi", { model: "smol" }), completion("hi", { schema: { type: "object" } })];',
 				"const [plain, structured] = await wait(handles);",
-				"return JSON.stringify({ plain, structured });",
+				"return JSON.stringify({ plain, structured, attempts: await handles[0].attempts() });",
 			].join("\n"),
 			{ cwd: tempDir.path(), sessionId, session: makeSession({ cwd: tempDir.path() }), sessionFile },
 		);
@@ -1020,6 +1280,7 @@ describe("completion() through eval runtimes", () => {
 		expect(JSON.parse(result.output.trim())).toEqual({
 			plain: "hello from smol",
 			structured: { ok: true, n: 3 },
+			attempts: [{ model: "p/smol", effort: null, outcome: "succeeded" }],
 		});
 	});
 
@@ -1043,6 +1304,23 @@ describe("completion() through eval runtimes", () => {
 		const result = await executeJs("print((await wait(handles))[0]);", options);
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("hello from the next cell");
+	});
+
+	it("refuses a number passed to wait() instead of returning at once as if it had slept", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-wait-number-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-wait-number:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		const result = await executeJs(
+			"try { await wait(1800); print('returned'); } catch (error) { print(error.message); }",
+			options,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).not.toContain("returned");
+		expect(result.output).toContain("not a sleep");
 	});
 
 	it("times out waiting on a running completion started in an earlier JavaScript cell", async () => {
@@ -1080,6 +1358,7 @@ describe("completion() through eval runtimes", () => {
 			expect(JSON.parse(result.output.trim())).toEqual({
 				plain: "hello from python",
 				structured: { ok: true },
+				attempts: [{ model: "p/smol", effort: null, outcome: "succeeded" }],
 			});
 		} finally {
 			tempDir.removeSync();

@@ -40,14 +40,11 @@ A hook module must default-export a factory:
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function hook(pi: HookAPI): void {
-  pi.on("tool_call", async (event, ctx) => {
-    if (
-      event.toolName === "bash" &&
-      String(event.input.command ?? "").includes("rm -rf")
-    ) {
-      return { block: true, reason: "blocked by policy" };
-    }
-  });
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName === "bash" && String(event.input.command ?? "").includes("rm -rf")) {
+			return { block: true, reason: "blocked by policy" };
+		}
+	});
 }
 ```
 
@@ -74,8 +71,7 @@ by `hookCapability` through the extension runner.
 
 Paths are deduplicated by absolute path. With `ambient: false`, native/installed
 discovery is skipped, but configured package roots can still contribute hook
-factories. Foreign user sources require opt-in via `enabledProviders`; project
-sources are unaffected by that user-level gate.
+factories.
 
 ### Native discovery location
 
@@ -88,7 +84,7 @@ A factory directly under `<cwd>/.omp/hooks/` is not found by ambient native
 discovery; put it in `pre/` or `post/`, or supply its path explicitly. Dot-prefixed
 entries and non-files are skipped. The directory and basename supply capability
 metadata/deduplication keys, not automatic event registration: the factory must
-still call `pi.on(...)`. This mirrors `.claude/hooks/pre|post/`. Only `.ts`/`.js`
+still call `pi.on(...)`. Only `.ts`/`.js`
 factories from the hook capability are appended to the extension pipeline.
 Explicit extension paths use the shared module resolver. See
 [Extension Loading](./extension-loading.md) for load order and disable controls.
@@ -118,6 +114,7 @@ Hook events are strongly typed in `types.ts`.
 - `session_start`
 - `session_before_switch` → can return `{ cancel?: boolean }`
 - `session_switch`
+- `session_clear`
 - `session_before_branch` → can return `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_branch`
 - `session_before_compact` → can return `{ cancel?: boolean; compaction?: CompactionResult }`
@@ -128,6 +125,12 @@ Hook events are strongly typed in `types.ts`.
 - `session_shutdown`
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+`session_clear` is a non-cancellable notification after `/clear` (or
+`AgentSession.resetSessionContext()`) successfully resets context in place.
+Use it to invalidate cached "already injected" instructions; handlers finish
+before the reset returns. It also fires for an empty successful clear, never
+for a busy/rejected reset, and does not change the session id, file, or history.
 
 ### Agent/context events
 
@@ -206,6 +209,7 @@ After the tool returns (including a returned error result), the wrapper emits
 `tool_result` with:
 
 - `toolName`, `toolCallId`, normalized `input` for the effective execution arguments
+- In the extension runner, both `tool_call` and `tool_result` include `parentToolCallId` for calls made by a JS or Python eval cell or kernel-defined tool. It identifies the immediately enclosing invocation and is absent on direct calls.
 - `content`
 - `details`
 - `isError: result.isError === true`
@@ -303,7 +307,7 @@ Hook status text set via `ctx.ui.setStatus(key, text)` is:
 
 - stored per key
 - sorted by key name
-- sanitized (ANSI/VT escape sequences stripped; control characters mapped to spaces; repeated spaces collapsed; trimmed)
+- sanitized (OSC/DCS/other ANSI/VT escape sequences stripped; control characters mapped to spaces; repeated spaces collapsed; trimmed). In the ANSI-rendered status bar, SGR foreground colours and text styles are kept (the `status` segment also drops background colours); the native Rex/Tern status line still shows accent text
 - joined and width-truncated for display
 
 ## Error propagation and fallback
@@ -330,15 +334,15 @@ The extension runner has separate handler-timeout and cancellation behavior.
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash") return;
-    const cmd = String(event.input.command ?? "");
-    if (!cmd.includes("rm -rf")) return;
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "bash") return;
+		const cmd = String(event.input.command ?? "");
+		if (!cmd.includes("rm -rf")) return;
 
-    if (!ctx.hasUI) return { block: true, reason: "rm -rf blocked (no UI)" };
-    const ok = await ctx.ui.confirm("Dangerous command", `Allow: ${cmd}`);
-    if (!ok) return { block: true, reason: "user denied command" };
-  });
+		if (!ctx.hasUI) return { block: true, reason: "rm -rf blocked (no UI)" };
+		const ok = await ctx.ui.confirm("Dangerous command", `Allow: ${cmd}`);
+		if (!ok) return { block: true, reason: "user denied command" };
+	});
 }
 ```
 
@@ -348,19 +352,19 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("tool_result", async (event) => {
-    if (event.toolName !== "read" || event.isError) return;
+	pi.on("tool_result", async event => {
+		if (event.toolName !== "read" || event.isError) return;
 
-    const redacted = event.content.map((chunk) => {
-      if (chunk.type !== "text") return chunk;
-      return {
-        ...chunk,
-        text: chunk.text.replaceAll(/API_KEY=\S+/g, "API_KEY=[REDACTED]"),
-      };
-    });
+		const redacted = event.content.map(chunk => {
+			if (chunk.type !== "text") return chunk;
+			return {
+				...chunk,
+				text: chunk.text.replaceAll(/API_KEY=\S+/g, "API_KEY=[REDACTED]"),
+			};
+		});
 
-    return { content: redacted };
-  });
+		return { content: redacted };
+	});
 }
 ```
 
@@ -370,12 +374,10 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.on("context", async (event) => {
-    const filtered = event.messages.filter(
-      (msg) => !(msg.role === "custom" && msg.customType === "debug-only"),
-    );
-    return { messages: filtered };
-  });
+	pi.on("context", async event => {
+		const filtered = event.messages.filter(msg => !(msg.role === "custom" && msg.customType === "debug-only"));
+		return { messages: filtered };
+	});
 }
 ```
 
@@ -385,24 +387,22 @@ export default function (pi: HookAPI): void {
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {
-  pi.registerCommand("handoff", {
-    description: "Create a new session with setup message",
-    handler: async (_args, ctx) => {
-      await ctx.waitForIdle();
-      await ctx.newSession({
-        parentSession: ctx.sessionManager.getSessionFile(),
-        setup: async (sm) => {
-          sm.appendMessage({
-            role: "user",
-            content: [
-              { type: "text", text: "Continue from prior session summary." },
-            ],
-            timestamp: Date.now(),
-          });
-        },
-      });
-    },
-  });
+	pi.registerCommand("handoff", {
+		description: "Create a new session with setup message",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+			await ctx.newSession({
+				parentSession: ctx.sessionManager.getSessionFile(),
+				setup: async sm => {
+					sm.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: "Continue from prior session summary." }],
+						timestamp: Date.now(),
+					});
+				},
+			});
+		},
+	});
 }
 ```
 

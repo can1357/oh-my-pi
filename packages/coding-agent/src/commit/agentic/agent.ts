@@ -1,13 +1,11 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { Markdown } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import typesDescriptionPrompt from "../../commit/prompts/types-description.md" with { type: "text" };
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
-import { getMarkdownTheme } from "@oh-my-pi/pi-tui/theme";
 import { createAgentSession } from "../../sdk";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
@@ -16,6 +14,8 @@ import agentUserPrompt from "./prompts/session-user.md" with { type: "text" };
 import agentSystemPrompt from "./prompts/system.md" with { type: "text" };
 import type { CommitAgentState } from "./state";
 import { createCommitTools } from "./tools";
+import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/render";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 export interface CommitAgentInput {
 	cwd: string;
@@ -62,7 +62,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		sessionManager: input.sessionManager,
 		authStorage: input.authStorage,
 		modelRegistry: input.modelRegistry,
-		cacheWarming: false,
+		cacheWarming: "off",
 		settings: input.settings,
 		model: input.model,
 		thinkingLevel: input.thinkingLevel,
@@ -226,8 +226,7 @@ function writeAssistantMessage(message: string): void {
 
 function renderMarkdownLines(message: string): readonly string[] {
 	const width = Math.max(40, process.stdout.columns ?? 100);
-	const markdown = new Markdown(message, 0, 0, getMarkdownTheme());
-	return markdown.render(width);
+	return renderMarkdown(message, width, { theme: currentTheme() });
 }
 
 function formatToolLabel(toolName: string): string {

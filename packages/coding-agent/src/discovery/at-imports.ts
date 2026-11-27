@@ -1,5 +1,5 @@
 /**
- * @-import expansion for context files (AGENTS.md / CLAUDE.md / GEMINI.md / …).
+ * @-import expansion for context files (AGENTS.md / CLAUDE.md / …).
  *
  * Other coding agents (Claude Code, Goose, Cline, …) treat `@path/to/file`
  * references inside their markdown memory files as inline includes. omp
@@ -18,7 +18,12 @@
  *   spans (`` `…` ``) are preserved verbatim so technical examples like
  *   `npm install @types/node` survive intact.
  * - Recursive imports are followed up to {@link MAX_AT_IMPORT_DEPTH} hops;
- *   cycles are broken silently.
+ *   cycles are broken silently. A file that is imported more than once is
+ *   expanded at every occurrence — only an import pointing back into the
+ *   current import chain counts as a cycle. Output therefore grows with
+ *   fan-out raised to the depth: a file that imports the next one N times
+ *   per level yields up to N^{@link MAX_AT_IMPORT_DEPTH} copies of the
+ *   deepest file. A shared expansion budget also caps total file reads.
  * - When the referenced file cannot be read, the original `@token` is
  *   left untouched and a debug log is emitted.
  *
@@ -31,6 +36,9 @@ import { readFile } from "../capability/fs";
 
 /** Maximum number of recursive `@`-import hops. Matches Claude Code's documented cap. */
 export const MAX_AT_IMPORT_DEPTH = 5;
+
+/** Maximum number of successfully expanded imports in one top-level document. */
+export const MAX_AT_IMPORT_EXPANSIONS = 256;
 
 /**
  * Matches a candidate `@import` token: a leading boundary (start-of-string
@@ -56,6 +64,15 @@ export interface ExpandAtImportsOptions {
 	maxDepth?: number;
 	/** Override the home directory used to resolve `~/...` (default: `os.homedir()`). */
 	home?: string;
+	/** Read imported files through a caller-owned discovery cache. */
+	readFile?: (filePath: string) => Promise<string | null>;
+}
+
+interface Expansion {
+	maxDepth: number;
+	home: string;
+	readFile: (filePath: string) => Promise<string | null>;
+	remaining: number;
 }
 
 /**
@@ -69,22 +86,23 @@ export async function expandAtImports(
 	filePath: string,
 	options: ExpandAtImportsOptions = {},
 ): Promise<string> {
-	const maxDepth = options.maxDepth ?? MAX_AT_IMPORT_DEPTH;
-	const home = options.home ?? os.homedir();
-	const absoluteSource = path.resolve(filePath);
-	const visited = new Set<string>([absoluteSource]);
-	return await expand(content, path.dirname(absoluteSource), 0, maxDepth, home, visited);
+	const source = path.resolve(filePath);
+	const expansion: Expansion = {
+		maxDepth: options.maxDepth ?? MAX_AT_IMPORT_DEPTH,
+		home: options.home ?? os.homedir(),
+		readFile: options.readFile ?? readFile,
+		remaining: MAX_AT_IMPORT_EXPANSIONS,
+	};
+	return await expand(content, path.dirname(source), [source], expansion);
 }
 
 async function expand(
 	content: string,
 	baseDir: string,
-	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	expansion: Expansion,
 ): Promise<string> {
-	if (depth >= maxDepth) return content;
+	if (chain.length - 1 >= expansion.maxDepth) return content;
 
 	const segments = splitMarkdownSegments(content);
 	const out: string[] = [];
@@ -93,7 +111,7 @@ async function expand(
 			out.push(segment.text);
 			continue;
 		}
-		out.push(await expandTextSegment(segment.text, baseDir, depth, maxDepth, home, visited));
+		out.push(await expandTextSegment(segment.text, baseDir, chain, expansion));
 	}
 	return out.join("");
 }
@@ -101,14 +119,12 @@ async function expand(
 async function expandTextSegment(
 	text: string,
 	baseDir: string,
-	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	expansion: Expansion,
 ): Promise<string> {
 	const lines = text.split("\n");
 	for (let i = 0; i < lines.length; i++) {
-		lines[i] = await expandLine(lines[i], baseDir, depth, maxDepth, home, visited);
+		lines[i] = await expandLine(lines[i], baseDir, chain, expansion);
 	}
 	return lines.join("\n");
 }
@@ -116,10 +132,8 @@ async function expandTextSegment(
 async function expandLine(
 	line: string,
 	baseDir: string,
-	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	expansion: Expansion,
 ): Promise<string> {
 	if (!line.includes("@")) return line;
 
@@ -147,7 +161,7 @@ async function expandLine(
 	let cursor = 0;
 	for (const m of matches) {
 		parts.push(line.slice(cursor, m.start));
-		const expanded = await resolveAndExpand(m.importPath, baseDir, depth, maxDepth, home, visited);
+		const expanded = await resolveAndExpand(m.importPath, baseDir, chain, expansion);
 		parts.push(expanded ?? line.slice(m.start, m.end));
 		cursor = m.end;
 	}
@@ -158,27 +172,29 @@ async function expandLine(
 async function resolveAndExpand(
 	importPath: string,
 	baseDir: string,
-	depth: number,
-	maxDepth: number,
-	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	expansion: Expansion,
 ): Promise<string | null> {
-	const resolved = resolveImportPath(importPath, baseDir, home);
-	if (visited.has(resolved)) {
+	if (expansion.remaining <= 0) {
+		logger.debug("@-import: expansion budget exhausted", { remaining: expansion.remaining });
+		return null;
+	}
+	const resolved = resolveImportPath(importPath, baseDir, expansion.home);
+	// Only an ancestor in the current import chain counts as a cycle. The
+	// same file imported twice from unrelated places is expanded twice.
+	if (chain.includes(resolved)) {
 		logger.debug("@-import: skipping cyclic include", { path: resolved });
 		return null;
 	}
 
-	const content = await readFile(resolved);
+	const content = await expansion.readFile(resolved);
 	if (content === null) {
 		logger.debug("@-import: file not found", { path: resolved });
 		return null;
 	}
 
-	// Visited is shared across the whole expansion tree to break cycles,
-	// even cycles that span multiple importing files.
-	visited.add(resolved);
-	return await expand(content, path.dirname(resolved), depth + 1, maxDepth, home, visited);
+	expansion.remaining--;
+	return await expand(content, path.dirname(resolved), [...chain, resolved], expansion);
 }
 
 function resolveImportPath(importPath: string, baseDir: string, home: string): string {

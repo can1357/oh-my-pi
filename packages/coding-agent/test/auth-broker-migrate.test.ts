@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -57,6 +57,7 @@ describe("auth-broker migrate", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await handle?.close();
 		brokerStorage?.close();
 		brokerStore?.close();
@@ -115,12 +116,6 @@ describe("auth-broker migrate", () => {
 
 	test.each([
 		{
-			provider: "google-antigravity",
-			shared: "project",
-			identity: { projectId: "aicode-consumers" },
-			local: ["alice@gmail.com", "bob@gmail.com"],
-		},
-		{
 			provider: "openai-codex",
 			shared: "workspace",
 			identity: { accountId: "ws-team-2222", orgId: "ws-team-2222" },
@@ -169,9 +164,9 @@ describe("auth-broker migrate", () => {
 			// Only the local row carries an account id, so the store keys the two apart:
 			// uploading would add a second row for the same account.
 			held: "a row keyed by email while the local one is keyed by account",
-			provider: "google-antigravity",
-			onBroker: { email: "alice@gmail.com", projectId: "aicode-consumers" },
-			local: { email: "alice@gmail.com", accountId: "acct-4444", projectId: "aicode-consumers" },
+			provider: "openai-codex",
+			onBroker: { email: "alice@example.com" },
+			local: { email: "alice@example.com", accountId: "acct-4444" },
 		},
 	])("keeps the broker's newer token for an account it holds as $held", async ({ provider, onBroker, local }) => {
 		await brokerStore!.upsertAuthCredential(provider, {

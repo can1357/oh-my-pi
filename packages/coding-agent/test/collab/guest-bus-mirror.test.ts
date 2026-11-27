@@ -45,26 +45,25 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 				setDisableReasoning: () => {},
 			},
 		},
-		statusContainer: { clear: () => {} },
-		pendingMessagesContainer: { clear: () => {} },
+		clearTransientSessionUi: () => {},
+		clearWorking: () => false,
+		ensureWorkingRow: () => {},
+		updatePendingMessagesDisplay: () => {},
 		compactionQueuedMessages: [],
-		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
-		loadingAnimation: undefined,
 		statusLine: {
 			setSubagentCount: () => {},
 			get subagentCount() {
 				return 0;
 			},
 			setCollabStatus: () => {},
-			invalidate: () => {},
 			resetActiveTime: () => {},
+			refresh: () => {},
 			markActivityStart: () => {},
 			markActivityEnd: () => {},
 		},
-		ui: { requestRender: () => {} },
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
@@ -79,6 +78,9 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 			resetTranscriptAnchors: () => {},
 		},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 		eventBus,
 		subagentEventBus: eventBus,
 	} as unknown as InteractiveModeContext;

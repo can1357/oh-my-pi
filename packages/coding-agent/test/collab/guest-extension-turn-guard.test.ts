@@ -15,7 +15,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionAPI, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { GuestLifecycleEmitter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/lifecycle-mirror";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -99,13 +99,15 @@ describe("collab guest extension turn guard", () => {
 			showStatus: (message: string) => statuses.push(message),
 			showError: (message: string) => errors.push(message),
 			syncComposerShape: () => {},
+			syncExtensionLinks: () => {},
+			setToolUIContext: () => {},
 		} as unknown as InteractiveModeContext;
-		new ExtensionUiController(ctx).initializeHookRunner({} as ExtensionUIContext, false);
+		await new ExtensionUiController(ctx).initHooksAndCustomTools();
 
 		const mirror = new GuestLifecycleEmitter();
 		const mirrorHostRun = async (): Promise<void> => {
 			mirror.emit(runner, { type: "agent_start" });
-			mirror.emit(runner, { type: "agent_end", messages: [], isTerminal: true });
+			mirror.emit(runner, { type: "agent_end", messages: [] });
 			await handled.promise;
 			// Every turn-starting action is admitted synchronously; wait for any
 			// admitted one to dispatch and its turn to finish.
@@ -132,7 +134,7 @@ describe("collab guest extension turn guard", () => {
 		for (const status of statuses) expect(status).toContain("host-only during a collab session");
 
 		// Left the session: the same reaction now owns a real local turn.
-		ctx.collabGuest = undefined;
+		Object.assign(ctx, { collabGuest: undefined });
 		handled = Promise.withResolvers<void>();
 		onAgentEnd = pi => {
 			pi.sendMessage({ customType: "plan-execute", content: "EXECUTE_PLAN", display: true }, { triggerTurn: true });

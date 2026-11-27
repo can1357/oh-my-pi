@@ -1,11 +1,7 @@
 // Gallery fixtures for agentic orchestration (task, wait, goal, yield).
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TaskToolDetails, YieldItem } from "@oh-my-pi/pi-tui/tools/task";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { TaskToolDetails, YieldItem } from "../../task/task-details";
 import type { GalleryFixture } from "./types";
-
-/** Message/activity timestamps are offsets from load time so gallery ages stay plausible. */
-const FIXTURE_NOW = Date.now();
 
 /** Plausible cumulative usage for a fixture subagent run. */
 const fixtureUsage = (tokens: { input: number; output: number }, costTotal: number): Usage => ({
@@ -30,7 +26,6 @@ const YIELD_DATA = {
 export const agenticFixtures: Record<string, GalleryFixture> = {
 	task: {
 		label: "Task",
-		customRendered: true,
 		// Streaming: agent chosen, assignment still landing. The args follow the
 		// tool schema `renderCall` reads (`agent`, `name`, `task`).
 		streamingArgs: {
@@ -147,33 +142,6 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 					},
 				],
 			} satisfies TaskToolDetails,
-		},
-	},
-
-	wait_message: {
-		label: "Wait for message",
-		customRendered: true,
-		renderer: "wait",
-		streamingArgs: {},
-		args: {},
-		result: {
-			content: [
-				{
-					type: "text",
-					text: "[7181122334455667790] AuthLoader: session-store rename is merged; auth.ts is yours.",
-				},
-			],
-			details: {
-				op: "wait",
-				from: "Main",
-				waited: {
-					id: "7181122334455667790",
-					from: "AuthLoader",
-					to: "Main",
-					body: "session-store rename is merged; auth.ts is yours.",
-					ts: FIXTURE_NOW - 30_000,
-				},
-			} satisfies CoordinationDetails,
 		},
 	},
 

@@ -8,17 +8,21 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	CompactionCancelledError,
+	generateHandoffFromContext,
+	renderHandoffPrompt,
+} from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage, Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { logger, ptree, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
+import { journalCompletion } from "./model-usage-journal";
 import type { SessionManager } from "./session-manager";
 
-import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
+import { cfgCompactionHandoffSaveToDisk, cfgCompactionHandoffTimeoutSeconds } from "./context-settings";
 
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
@@ -26,14 +30,24 @@ function createHandoffFileName(date = new Date()): string {
 }
 
 function throwIfHandoffAborted(signal: AbortSignal): void {
-	if (!signal.aborted) return;
-	const reason = signal.reason;
-	if (reason instanceof DOMException && reason.name === "AbortError") {
-		throw new Error("Handoff cancelled");
+	if (signal.aborted) throw new CompactionCancelledError(undefined, { cause: signal.reason });
+}
+
+/** A fired deadline is a failure, not a cancel, so automatic maintenance moves on to its next method. */
+function throwIfHandoffTimedOut(deadline: AbortSignal | undefined, timeoutSeconds: number): void {
+	if (deadline?.aborted) {
+		throw new Error(`Handoff timed out after ${timeoutSeconds}s (compaction.handoffTimeoutSeconds)`);
 	}
-	if (reason instanceof Error) throw reason;
-	if (typeof reason === "string" && reason.length > 0) throw new Error(reason);
-	throw new Error("Handoff aborted by session");
+}
+
+/** Request snapshot and cancellation owned by the compaction pass. */
+export interface HandoffGenerationOptions {
+	model: Model;
+	signal: AbortSignal;
+	messages?: readonly AgentMessage[];
+	autoTriggered?: boolean;
+	/** Sees every provider attempt's response, billed or failed, beside the spend journal. */
+	onAttempt?: (message: AssistantMessage) => void;
 }
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -44,12 +58,10 @@ export interface SessionHandoffHost {
 	modelRegistry: ModelRegistry;
 	sideStreamFn: StreamFn;
 	obfuscator(): SecretObfuscator | undefined;
-	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
 	getPromptCacheKeyForModel(model: Model): string | undefined;
 	baseSystemPrompt(): string[];
-	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;
 	convertMessagesToLlm(messages: AgentMessage[], signal: AbortSignal | undefined, model: Model): Promise<Message[]>;
@@ -59,26 +71,11 @@ export interface SessionHandoffHost {
 
 /** Generates handoff documents with a cache-friendly oneshot LLM call. */
 export class SessionHandoff {
-	#handoffAbortController: AbortController | undefined;
 	readonly #host: SessionHandoffHost;
 
 	constructor(host: SessionHandoffHost) {
 		this.#host = host;
 	}
-	/**
-	 * Cancel in-progress handoff generation, preserving a harness-provided reason.
-	 */
-	abortHandoff(reason?: Error): void {
-		this.#handoffAbortController?.abort(reason);
-	}
-
-	/**
-	 * Check if handoff generation is in progress.
-	 */
-	get isGeneratingHandoff(): boolean {
-		return this.#handoffAbortController !== undefined;
-	}
-
 	/**
 	 * Generate a handoff document with a oneshot LLM call.
 	 *
@@ -87,44 +84,19 @@ export class SessionHandoff {
 	 * caller (SessionMaintenance) commits the returned document as a compaction
 	 * entry; this method rewrites no history.
 	 *
-	 * @param customInstructions Optional focus for the handoff document
-	 * @param options Handoff execution options
-	 * @returns The handoff document text, or undefined when an auto-triggered
-	 *   generation produced no content (manual generation throws instead)
+	 * Auto generation returns undefined for unusable output so maintenance can try its next method.
 	 */
 	async generateDocument(
-		customInstructions?: string,
-		options?: SessionHandoffOptions,
-	): Promise<HandoffResult | undefined> {
-		this.#host.setSkipPostTurnMaintenance(undefined);
-
-		this.#handoffAbortController = new AbortController();
-		const handoffAbortController = this.#handoffAbortController;
-		const handoffSignal = handoffAbortController.signal;
-		const sourceSignal = options?.signal;
-		const onSourceAbort = () => {
-			if (!handoffSignal.aborted) {
-				handoffAbortController.abort(sourceSignal?.reason);
-			}
-		};
-		if (sourceSignal) {
-			sourceSignal.addEventListener("abort", onSourceAbort, { once: true });
-			if (sourceSignal.aborted) {
-				onSourceAbort();
-			}
-		}
-
+		customInstructions: string | undefined,
+		{ model, signal: cancelSignal, messages, autoTriggered, onAttempt }: HandoffGenerationOptions,
+	): Promise<string | undefined> {
+		const timeoutSeconds = cfgCompactionHandoffTimeoutSeconds.get(this.#host.settings);
+		const deadline = timeoutSeconds > 0 ? AbortSignal.timeout(timeoutSeconds * 1000) : undefined;
+		// Every request step observes the deadline; cancellation checks keep reading
+		// `cancelSignal` so only the caller's abort reports as a cancel.
+		const signal = ptree.combineSignals(cancelSignal, deadline) ?? cancelSignal;
 		try {
-			throwIfHandoffAborted(handoffSignal);
-
-			const model = this.#host.model();
-			if (!model) {
-				throw new Error("No model selected for handoff");
-			}
-			const apiKey = await this.#host.modelRegistry.getApiKey(model, this.#host.sessionId());
-			if (!apiKey) {
-				throw new Error(`No API key for ${model.provider}`);
-			}
+			throwIfHandoffAborted(cancelSignal);
 
 			// Build the handoff request through the SAME pipeline a live turn uses
 			// (`runEphemeralTurn` / `/btw` share it) so the oneshot reads the
@@ -142,7 +114,7 @@ export class SessionHandoff {
 			const handoffPromptCacheKey = this.#host.getPromptCacheKeyForModel(model) ?? this.#host.agent.sessionId;
 			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
 			const handoffSnapshot: AgentMessage[] = [
-				...this.#host.agent.state.messages,
+				...(messages ?? this.#host.agent.state.messages),
 				{
 					role: "user",
 					content: [{ type: "text", text: handoffPromptText }],
@@ -150,13 +122,21 @@ export class SessionHandoff {
 					timestamp: Date.now(),
 				},
 			];
-			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal, model);
+			// Every handoff document is committed as a compaction entry.
+			const journal = journalCompletion(this.#host.sessionManager, {
+				purpose: "compaction:handoff",
+				usageOnly: true,
+			});
+			const apiKey = await this.#host.modelRegistry.getApiKey(model, cacheSessionId);
+			if (!apiKey) throw new Error(`No API key for ${model.provider}`);
+			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, signal, model);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the document seeds the post-compaction context and must not carry
 			// prompt-specific hook state.
 			const handoffContext = await this.#host.agent.buildSideRequestContext(
 				handoffLlmMessages,
 				this.#host.baseSystemPrompt(),
+				signal,
 			);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
@@ -167,10 +147,11 @@ export class SessionHandoff {
 					serviceTier: this.#host.effectiveServiceTier(model),
 					hideThinkingSummary: this.#host.agent.hideThinkingSummary,
 					initiatorOverride: "agent",
-					signal: handoffSignal,
+					signal,
 				},
 				model.provider,
 			);
+			throwIfHandoffAborted(cancelSignal);
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
@@ -178,9 +159,13 @@ export class SessionHandoff {
 					streamOptions: handoffStreamOptions,
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
 						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-						return stream.result();
+						const message = await stream.result();
+						// One call per provider attempt, so a retried or failed one is billed too.
+						journal?.(message);
+						onAttempt?.(message);
+						return message;
 					},
-					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
+					telemetry: resolveTelemetry(this.#host.agent.telemetry, cacheSessionId),
 					// Honor the user's /model thinking selection on the handoff path.
 					// Clamped per-model inside generateHandoffFromContext via
 					// resolveCompactionEffort so unsupported-effort models don't trip
@@ -190,33 +175,33 @@ export class SessionHandoff {
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
 
-			throwIfHandoffAborted(handoffSignal);
-			if (!handoffText || handoffText.trim().length === 0) {
-				// Empty/whitespace-only generation is a real failure, not a user
-				// cancellation. #7904 stopped masking provider errors as "Handoff
-				// cancelled"; an empty document is the remaining path that produced the
-				// same misleading, undebuggable message (#7993).
-				logger.warn("Handoff generation produced no content", {
-					sessionId: this.#host.sessionId(),
-					autoTriggered: options?.autoTriggered ?? false,
+			throwIfHandoffAborted(cancelSignal);
+			// An aborted stream returns its partial text; never validate or commit it.
+			throwIfHandoffTimedOut(deadline, timeoutSeconds);
+			const failure = !handoffText?.trim()
+				? "no content"
+				: !/^## Goal[ \t]*\r?$/m.test(handoffText)
+					? "an invalid document"
+					: undefined;
+			if (failure) {
+				logger.warn(`Handoff generation produced ${failure}`, {
+					providerSessionId: cacheSessionId,
+					autoTriggered: autoTriggered ?? false,
 				});
-				// Auto-handoff is best-effort: returning undefined lets maintenance fall
-				// back to the next compaction method. A user-initiated handoff must
-				// surface the failure instead of a silent, misleading "cancelled".
-				if (options?.autoTriggered) {
+				// Auto-handoff is best-effort: maintenance can try the next method
+				// without committing a document that replaces the user's goal.
+				if (autoTriggered) {
 					return undefined;
 				}
-				throw new Error("Handoff generation produced no content");
+				throw new Error(`Handoff generation produced ${failure}`);
 			}
 
-			let savedPath: string | undefined;
-			if (options?.autoTriggered && cfgCompactionHandoffSaveToDisk.get(this.#host.settings)) {
+			if (autoTriggered && cfgCompactionHandoffSaveToDisk.get(this.#host.settings)) {
 				const artifactsDir = this.#host.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
 					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());
 					try {
 						await Bun.write(handoffFilePath, `${handoffText}\n`);
-						savedPath = handoffFilePath;
 					} catch (error) {
 						logger.warn("Failed to save handoff document to disk", {
 							path: handoffFilePath,
@@ -228,16 +213,12 @@ export class SessionHandoff {
 				}
 			}
 
-			return { document: handoffText, savedPath };
+			throwIfHandoffAborted(cancelSignal);
+			return handoffText;
 		} catch (error) {
-			// Only a genuine cancellation (user Esc or an unreasoned source-signal
-			// abort) maps to "Handoff cancelled". A harness-provided abort reason and
-			// provider failures surface verbatim.
-			throwIfHandoffAborted(handoffSignal);
+			throwIfHandoffAborted(cancelSignal);
+			throwIfHandoffTimedOut(deadline, timeoutSeconds);
 			throw error;
-		} finally {
-			sourceSignal?.removeEventListener("abort", onSourceAbort);
-			this.#handoffAbortController = undefined;
 		}
 	}
 }

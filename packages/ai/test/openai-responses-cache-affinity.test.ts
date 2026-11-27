@@ -9,7 +9,15 @@ import {
 	streamOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { stream as streamModel, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, FetchImpl, Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	Model,
+	ProviderSessionState,
+	SimpleStreamOptions,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -154,7 +162,7 @@ async function captureOpenAIResponseHeaders(
 		body: null as Record<string, unknown> | null,
 	};
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-		captured.sessionId = getHeader(init?.headers, "session_id");
+		captured.sessionId = getHeader(init?.headers, "session-id");
 		captured.clientRequestId = getHeader(init?.headers, "x-client-request-id");
 		captured.headers = new Headers(init?.headers);
 		captured.body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
@@ -219,7 +227,7 @@ async function captureDispatchedOpenAIResponseHeaders(
 		body: null as Record<string, unknown> | null,
 	};
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-		captured.sessionId = getHeader(init?.headers, "session_id");
+		captured.sessionId = getHeader(init?.headers, "session-id");
 		captured.clientRequestId = getHeader(init?.headers, "x-client-request-id");
 		captured.headers = new Headers(init?.headers);
 		captured.body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
@@ -385,6 +393,30 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
 	});
 
+	it("maps long retention to the 12h lifetime instead of the legacy 24h field", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long" },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "implicit", ttl: "12h" });
+		expect(params.prompt_cache_retention).toBeUndefined();
+		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("lets an explicit policy ttl override long retention", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long", promptCache: { mode: "explicit", ttl: "30m" } },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+	});
+
 	it("marks the latest eligible stable history block", () => {
 		const params = buildParams(
 			openAI56ResponsesModel,
@@ -440,6 +472,52 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 			},
 			{ role: "user", content: [{ type: "input_text", text: "only prompt" }] },
 		]);
+	});
+
+	it("marks the latest function output as the stable boundary for a tool loop", () => {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "README.md" } }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.6",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_read",
+			toolName: "read",
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: 2,
+		};
+		const params = buildParams(
+			openAI56ResponsesModel,
+			{
+				messages: [
+					{ role: "user", content: "read README.md", timestamp: 0 },
+					assistant,
+					toolResult,
+					{ role: "user", content: "summarize it", timestamp: 3 },
+				],
+			},
+			{ promptCache: { mode: "explicit" } },
+			undefined,
+		).params;
+
+		const output = params.input?.find(item => item.type === "function_call_output");
+		expect(output).toMatchObject({
+			output: [{ type: "input_text", text: "file contents", prompt_cache_breakpoint: { mode: "explicit" } }],
+		});
 	});
 
 	it("routes explicit policy through streamSimple", async () => {

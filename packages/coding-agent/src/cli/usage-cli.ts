@@ -22,20 +22,24 @@ import {
 	type UsageLimit,
 	type UsageReport,
 	type UsageUnit,
+	usageSubscriptionPlan,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
+import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
-import { peakBuckets, renderSparkline } from "@oh-my-pi/pi-tui/components/sparkline";
-import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatProviderName } from "../modes/view-model/chrome/format";
+import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { errorMessage, formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { isManagedMCPOAuthCredentialId } from "../mcp/oauth-flow";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
 import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { collapseSharedUsageReports, summarizeUsageResetCredits } from "../session/usage-display";
 import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
 	classifyResetExpiry,
@@ -44,7 +48,6 @@ import {
 	resetSpendVerdict,
 } from "../session/reset-expiry";
 import { formatCodexUsageReportLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
-import { errorMessage } from "../slash-commands/helpers/parse";
 import {
 	describeRedeemOutcome,
 	formatResetProviderName,
@@ -246,7 +249,8 @@ function aggregateStatus(limits: UsageLimit[]): LimitStatus {
 
 function formatUnitValue(value: number, unit: UsageUnit): string {
 	if (unit === "usd") return `$${value.toFixed(2)}`;
-	return formatNumber(value);
+	// Metered balances (e.g. Codex spend-cap credits) arrive as fractional floats.
+	return formatNumber(value, 2);
 }
 
 const UNIT_SUFFIX: Record<UsageUnit, string> = {
@@ -350,7 +354,7 @@ function formatReportIdentity(
 	const metaOrgId = report.metadata?.orgId;
 	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
 	if (typeof org === "string" && org && org !== label) identity += chalk.dim(` · ${redaction?.get(org) ?? org}`);
-	const plan = report.metadata?.planType;
+	const plan = usageSubscriptionPlan(report) ?? report.metadata?.planType;
 	if (typeof plan === "string" && plan.trim()) identity += chalk.dim(` · plan: ${plan.trim()}`);
 	return identity;
 }
@@ -426,7 +430,7 @@ interface ProviderLimitTemplate {
  * One row per meter (label and window), not per limit id: Codex ids name a slot, and an
  * account without a 5-hour window reports its 7-day one as `primary`. Most providers put the
  * subscription plan in the tier (see {@link meterForLimit}), so the tier joins the key only for
- * meters a single report repeats per tier (e.g. Antigravity's `Usage (<tier>)` rows).
+ * meters a single report repeats per tier (e.g. per-tier `Usage (<tier>)` rows).
  */
 function meterKey(limit: UsageLimit): string {
 	return `${limit.label}|${limit.window?.id ?? limit.scope.windowId ?? ""}`;
@@ -564,31 +568,64 @@ const RELOGIN_WARN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Re-login deadline line for providers whose OAuth grants expire a fixed
- * period after the interactive login (today: Anthropic, ~30 days regardless
- * of refresh rotation). Silent until the deadline is under a week out — a
- * nudge before the broker auto-disables the row, not a permanent countdown.
+ * period after the interactive login (today: Anthropic). The grant ends when
+ * the server said at login, else ~30 days after it regardless of refresh
+ * rotation. The current access token keeps working past the grant's end, so
+ * whichever lasts longer sets the deadline — for a long-lived login, the
+ * token's own expiry a year out. Silent until the deadline is under a week
+ * out — a nudge before the broker auto-disables the row, not a permanent
+ * countdown.
  */
 function formatReloginDeadline(
 	account: UsageAccountIdentity,
 	nowMs: number,
 	redaction?: Map<string, string>,
 ): string | undefined {
-	if (account.provider !== "anthropic" || account.type !== "oauth" || !account.authorizedAt) return undefined;
-	const remaining = account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS - nowMs;
+	if (account.provider !== "anthropic" || account.type !== "oauth") return undefined;
+	const stated = account.refreshExpires !== undefined;
+	const grantEnd =
+		account.refreshExpires ??
+		(account.authorizedAt ? account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS : undefined);
+	if (grantEnd === undefined) return undefined;
+	const deadline = Math.max(grantEnd, account.expires ?? 0);
+	const tokenBound = deadline > grantEnd;
+	const remaining = deadline - nowMs;
 	if (remaining > RELOGIN_WARN_WINDOW_MS) return undefined;
 	const label = accountIdentityLabel(account, redaction);
 	if (remaining <= 0) {
-		return `  ${chalk.red(`⚠ ${label} — grant is past Anthropic's ~30d lifetime; re-login now`)}`;
+		const reason = tokenBound
+			? "access token expired"
+			: stated
+				? "refresh token expired"
+				: "grant is past Anthropic's ~30d lifetime";
+		return `  ${chalk.red(`${currentTheme().symbols.symbol("status.warning")} ${label} — ${reason}; re-login now`)}`;
 	}
-	return `  ${chalk.yellow(`⚠ ${label} — re-login within ${formatDuration(remaining)} (Anthropic expires OAuth grants ~30d after login)`)}`;
+	const reason = tokenBound
+		? "access token expires"
+		: stated
+			? "refresh token expires"
+			: "Anthropic expires OAuth grants ~30d after login";
+	return `  ${chalk.yellow(`${currentTheme().symbols.symbol("status.warning")} ${label} — re-login within ${formatDuration(remaining)} (${reason})`)}`;
 }
 
 /**
  * Tombstones worth a row in `omp usage`: OAuth credentials torn down
- * automatically (refresh failure, upstream invalidation). Rows the user
- * replaced or deleted deliberately are lifecycle noise, not lost capacity.
+ * automatically (refresh failure, upstream invalidation) and not since
+ * restored. Rows the user replaced or deleted deliberately are lifecycle
+ * noise, not lost capacity.
+ *
+ * `activeAccounts` MUST be every active stored credential, not only the
+ * usage-reportable ones: a re-login restores a tombstone whether or not its
+ * provider has a usage endpoint (e.g. `mcp_oauth:*` servers).
  */
-function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
+export function actionableDisables(
+	disabled: DisabledCredentialSummary[],
+	activeAccounts: UsageAccountIdentity[],
+): DisabledCredentialSummary[] {
+	return disabled.filter(summary => isActionableDisable(summary, activeAccounts));
+}
+
+function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[]): boolean {
 	if (summary.type !== "oauth") return false;
 	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
 
@@ -597,13 +634,21 @@ function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts:
 	const summaryEmail = summary.email?.toLowerCase();
 	const summaryAccountId = summary.accountId?.toLowerCase();
 	const summaryOrgId = summary.orgId?.toLowerCase();
+	// A managed MCP OAuth provider id names one server login, so an identity-less
+	// tombstone there is restored by any identity-less login of that provider.
+	// Elsewhere identity-less logins can coexist (e.g. two Devin browser logins)
+	// and a sibling is not a re-login.
+	const anonymousRestorable =
+		!summaryEmail && !summaryAccountId && !summaryOrgId && isManagedMCPOAuthCredentialId(summary.provider);
 
 	const matchesActive = activeAccounts.some(account => {
-		if (account.provider !== summary.provider) return false;
+		if (account.provider !== summary.provider || account.type !== "oauth") return false;
 
 		const accountEmail = account.email?.toLowerCase();
 		const accountAccountId = account.accountId?.toLowerCase();
 		const accountOrgId = account.orgId?.toLowerCase();
+
+		if (anonymousRestorable && !accountEmail && !accountAccountId && !accountOrgId) return true;
 
 		// If email or accountId match, it's the same identity
 		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
@@ -664,37 +709,118 @@ function policyEnabledProviders(
 	return providers;
 }
 
-function formatPolicyLine(
+/** Optional per-account JSON field on reports and accountsWithoutUsage; the text view's policy line renders it. */
+export type UsagePolicyDiagnostics = {
+	priority: number;
+	reservePct: number;
+	reserveSource: "global" | "override";
+	reclaimAbovePct?: number;
+	/** Ids of exhausted limits outside the shared pool (a model-scoped weekly row); they gate only their own requests. */
+	scopedExhausted?: string[];
+} & (
+	| { state: "unknown"; remainingPct?: never }
+	| { state: "exhausted"; remainingPct?: number }
+	| { state: "eligible" | "inside-reserve"; remainingPct: number }
+);
+
+function computePolicyDiagnostics(
 	provider: string,
 	identity: OAuthAccountIdentity,
 	limits: UsageLimit[] | undefined,
 	options: UsagePolicyDiagnosticsOptions,
-): string {
+): UsagePolicyDiagnostics {
 	const policy = options.getAccountPolicy(provider, identity);
-	const priority = policy?.priority ?? 0;
 	const configuredReservePct = policy?.reservePct;
-	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
-	const reclaimLabel = policy?.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
-	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}${reclaimLabel}`;
 	// `omp usage` has no model/session context, so report the conservative
-	// account-wide state from the most-consumed visible window. Actual routing
-	// still scopes limits and selection in AuthStorage.
+	// account-wide state from the most-consumed account-wide window. Rows
+	// outside those windows (a Claude Fable or Opus weekly counter) gate only
+	// their own models in AuthStorage, so they are listed separately instead.
+	// A `sharedGroup` row is one subpool's quota and a shared row naming a
+	// `modelId` is one model's meter (Codex Spark), not account-wide windows;
+	// a provider that marks no account-wide window keeps every row.
+	const reported = limits ?? [];
+	const accountWide = reported.filter(
+		limit =>
+			limit.scope.shared === true && limit.scope.sharedGroup === undefined && limit.scope.modelId === undefined,
+	);
+	const pool = accountWide.length > 0 ? accountWide : reported;
+	const scopedExhausted = reported
+		.filter(limit => !pool.includes(limit) && resolveStatus(limit) === "exhausted")
+		.map(limit => limit.id);
 	// Exhaustion follows the same status-first rule as the limit rows and routing's
 	// `isUsageLimitReached`: a provider-reported "exhausted" wins over the fraction.
-	const exhausted = (limits ?? []).some(limit => resolveStatus(limit) === "exhausted");
-	const usedFractions = (limits ?? [])
+	const exhausted = pool.some(limit => resolveStatus(limit) === "exhausted");
+	const usedFractions = pool
 		.map(resolveUsedFraction)
 		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
-	if (usedFractions.length === 0) {
-		const unmeasured = exhausted ? "exhausted" : "reserve unknown";
-		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
-	}
+	const base = {
+		priority: policy?.priority ?? 0,
+		reservePct,
+		reserveSource: configuredReservePct === undefined ? "global" : "override",
+		...(policy?.reclaimAbovePct === undefined ? {} : { reclaimAbovePct: policy.reclaimAbovePct }),
+		...(scopedExhausted.length === 0 ? {} : { scopedExhausted }),
+	} as const;
+	if (usedFractions.length === 0) return { ...base, state: exhausted ? "exhausted" : "unknown" };
 	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
-	let state = "eligible";
-	if (exhausted || remainingFraction <= 0) state = "exhausted";
-	else if (isWithinUsageReserve(remainingFraction, reservePct / 100)) state = "inside reserve";
-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
+	const state =
+		exhausted || remainingFraction <= 0
+			? "exhausted"
+			: isWithinUsageReserve(remainingFraction, reservePct / 100)
+				? "inside-reserve"
+				: "eligible";
+	// Rounded exactly as the text view prints it (`toFixed(1)`), so JSON carries 9 rather than 8.999999999999996.
+	return { ...base, state, remainingPct: Number((remainingFraction * 100).toFixed(1)) };
+}
+
+function formatPolicyLine(policy: UsagePolicyDiagnostics, limits?: UsageLimit[]): string {
+	const reclaimLabel = policy.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
+	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${reclaimLabel}`;
+	const scopedLabel = (limits ?? [])
+		.filter(limit => policy.scopedExhausted?.includes(limit.id))
+		.map(limit => ` · ${limitTitle(limit)} exhausted`)
+		.join("");
+	if (policy.remainingPct === undefined) {
+		return `${prefix} · ${policy.state === "exhausted" ? "exhausted" : "reserve unknown"}${scopedLabel}`;
+	}
+	const state = policy.state === "inside-reserve" ? "inside reserve" : policy.state;
+	return `${prefix} · ${state} · ${policy.remainingPct.toFixed(1)}% left${scopedLabel}`;
+}
+
+/** Add policy only where the text view displays it (providers with a configured account policy). */
+export function annotateUsagePolicy(
+	reports: UsageReport[],
+	unreported: UsageAccountIdentity[],
+	accounts: UsageAccountIdentity[],
+	options: UsagePolicyDiagnosticsOptions,
+): {
+	reports: (UsageReport & { policy?: UsagePolicyDiagnostics })[];
+	accountsWithoutUsage: (UsageAccountIdentity & { policy?: UsagePolicyDiagnostics })[];
+} {
+	const enabled = policyEnabledProviders(reports, accounts, options);
+	return {
+		reports: reports.map(report =>
+			enabled.has(report.provider)
+				? {
+						...report,
+						policy: computePolicyDiagnostics(
+							report.provider,
+							usageReportIdentity(report),
+							report.limits,
+							options,
+						),
+					}
+				: report,
+		),
+		accountsWithoutUsage: unreported.map(account =>
+			enabled.has(account.provider) && account.type === "oauth"
+				? {
+						...account,
+						policy: computePolicyDiagnostics(account.provider, accountOAuthIdentity(account), undefined, options),
+					}
+				: account,
+		),
+	};
 }
 
 /** `1 expires in 6h`, or `2 expire, soonest in 6h`. */
@@ -715,8 +841,8 @@ function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
 
 /**
  * Saved resets expiring within 24 hours on accounts worth restoring: what the
- * provider's `autoRedeem` setting does with each one, whether it is eligible
- * now, and the `/usage reset` target that spends it now when the provider allows.
+ * governing window's auto-redeem setting does with each one, whether it is
+ * eligible now, and the `/usage reset` target that spends it now when the provider allows.
  */
 function formatResetExpiryBanner(
 	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],
@@ -760,7 +886,8 @@ function formatResetExpiryBanner(
 /**
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
- * each provider section as "no usage data" rows.
+ * each provider section as "no usage data" rows. `disabled` is rendered as
+ * given; filter it through {@link actionableDisables} first.
  */
 export function formatUsageBreakdown(
 	reports: UsageReport[],
@@ -788,7 +915,6 @@ export function formatUsageBreakdown(
 	}
 	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
 	for (const summary of disabled) {
-		if (!isActionableDisable(summary, accounts)) continue;
 		const list = disabledByProvider.get(summary.provider) ?? [];
 		list.push(summary);
 		disabledByProvider.set(summary.provider, list);
@@ -836,7 +962,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(provider, usageReportIdentity(report), report.limits, policyOptions))}`,
+					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, usageReportIdentity(report), report.limits, policyOptions), report.limits))}`,
 				);
 			}
 			if (report.limits.length === 0) {
@@ -859,7 +985,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
 			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(provider, accountOAuthIdentity(account), undefined, policyOptions))}`,
+					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, accountOAuthIdentity(account), undefined, policyOptions)))}`,
 				);
 			}
 		}
@@ -952,7 +1078,7 @@ function renderHistorySparkline(entries: UsageHistoryEntry[], sinceMs: number, n
 	const points = entries.flatMap(entry =>
 		entry.usedFraction === undefined ? [] : [{ at: entry.recordedAt, value: entry.usedFraction }],
 	);
-	return renderSparkline(peakBuckets(points, sinceMs, nowMs, HISTORY_SPARK_WIDTH), {
+	return sparkline(peakBuckets(points, sinceMs, nowMs, HISTORY_SPARK_WIDTH), {
 		min: 0,
 		max: 1,
 		gap: chalk.dim("·"),
@@ -1054,7 +1180,7 @@ async function loadUsageSources(
 	settings: Settings,
 	authStorage: AuthStorage,
 ): Promise<ModelRegistry> {
-	const modelRegistry = new ModelRegistry(authStorage);
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 	// Extensions contribute usage providers via `registerProvider(name, { usage })`;
 	// without loading them their accounts land in `accountsWithoutUsage`.
 	await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {
@@ -1074,6 +1200,65 @@ async function loadUsageSources(
 	return modelRegistry;
 }
 
+interface OrgPolicyRejectedAccount extends UsageAccountIdentity {
+	status: "rejected by org policy";
+	eligible: false;
+	blockedUntilMs: number;
+}
+
+/** Match persisted blocks by credential row, not email or usage report identity. */
+function collectOrgPolicyRejectedAccounts(
+	authStorage: AuthStorage,
+	provider: string | undefined,
+): OrgPolicyRejectedAccount[] {
+	const oauthRows = authStorage.credentials
+		.list()
+		.filter(
+			row => row.credential.type === "oauth" && (provider === undefined || row.provider.toLowerCase() === provider),
+		);
+	const blocks = new Map(
+		authStorage.blocks
+			.list(oauthRows.map(row => row.id))
+			.filter(block => block.blockScope === OAUTH_ORG_POLICY_BLOCK_SCOPE)
+			.map(block => [block.credentialId, block]),
+	);
+	const rejected: OrgPolicyRejectedAccount[] = [];
+	for (const { id, provider: rowProvider, credential } of oauthRows) {
+		const block = blocks.get(id);
+		if (credential.type !== "oauth" || block?.providerKey !== `${rowProvider}:oauth`) continue;
+		const { email, accountId, projectId, enterpriseUrl, orgId, orgName } = credential;
+		rejected.push({
+			provider: rowProvider,
+			type: "oauth",
+			email,
+			accountId,
+			projectId,
+			enterpriseUrl,
+			orgId,
+			orgName,
+			status: "rejected by org policy",
+			eligible: false,
+			blockedUntilMs: block.blockedUntilMs,
+		});
+	}
+	return rejected;
+}
+
+function formatOrgPolicyRejections(
+	rejected: OrgPolicyRejectedAccount[],
+	nowMs: number,
+	redaction?: Map<string, string>,
+): string {
+	return [
+		chalk.bold("OAuth eligibility"),
+		...rejected.map(account => {
+			const label = accountIdentityLabel(account, redaction);
+			const wait = formatDuration(account.blockedUntilMs - nowMs);
+			return `  ${formatProviderName(account.provider)} · ${label} — ${chalk.red(account.status)} ${chalk.dim(`(retry in ${wait})`)}`;
+		}),
+	].join("\n");
+}
+
 /** Name the providers that do hold credentials so a mistyped `--provider` id is easy to correct. */
 function formatNoProviderCredentials(provider: string, storedAccounts: UsageAccountIdentity[]): string {
 	const stored = [...new Set(storedAccounts.map(account => account.provider))].sort();
@@ -1087,6 +1272,18 @@ function formatNoProviderCredentials(provider: string, storedAccounts: UsageAcco
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
+}
+
+function redactUsageAccountForJson<T extends UsageAccountIdentity>(account: T, redaction: Map<string, string>): T {
+	return {
+		...account,
+		email: maskIdentity(redaction, account.email),
+		accountId: maskIdentity(redaction, account.accountId),
+		projectId: maskIdentity(redaction, account.projectId),
+		enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
+		orgId: maskIdentity(redaction, account.orgId),
+		orgName: maskIdentity(redaction, account.orgName),
+	};
 }
 
 const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName"] as const;
@@ -1595,7 +1792,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		// missing. Best-effort: a broker predating the endpoint yields [].
 		let disabled: DisabledCredentialSummary[] = [];
 		try {
-			disabled = await authStorage.credentials.listDisabled();
+			disabled = actionableDisables(await authStorage.credentials.listDisabled(), storedAccounts);
 		} catch {
 			// Usage output must not fail because tombstone listing did.
 		}
@@ -1606,27 +1803,29 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			accounts = accounts.filter(account => account.provider.toLowerCase() === wanted);
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
+		const nowMs = Date.now();
+		const orgPolicyRejectedAccounts = collectOrgPolicyRejectedAccounts(authStorage, cmd.provider?.toLowerCase());
 
 		const redaction = cmd.redact
-			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
+			? buildRedactionMap(
+					collectIdentityStrings(filteredReports, [...accounts, ...orgPolicyRejectedAccounts], disabled),
+				)
 			: undefined;
 
 		if (cmd.json) {
-			// Drop the heavy provider-specific `raw` payload — same shape as the
-			// broker/gateway `/v1/usage` endpoints.
-			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
-			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
+			// Compute policy against original identities before masking, then drop
+			// the heavy provider-specific `raw` payload.
+			const annotated = annotateUsagePolicy(
+				filteredReports,
+				collectUnreportedAccounts(filteredReports, accounts),
+				accounts,
+				policyOptions,
+			);
+			let trimmed = annotated.reports.map(({ raw: _raw, ...rest }) => rest);
+			let unreportedAccounts = annotated.accountsWithoutUsage;
 			if (redaction) {
 				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
-				unreportedAccounts = unreportedAccounts.map(account => ({
-					...account,
-					email: maskIdentity(redaction, account.email),
-					accountId: maskIdentity(redaction, account.accountId),
-					projectId: maskIdentity(redaction, account.projectId),
-					enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
-					orgId: maskIdentity(redaction, account.orgId),
-					orgName: maskIdentity(redaction, account.orgName),
-				}));
+				unreportedAccounts = unreportedAccounts.map(account => redactUsageAccountForJson(account, redaction));
 			}
 			const capacity: Record<string, ProviderWindowStat[]> = {};
 			for (const report of filteredReports) {
@@ -1634,7 +1833,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
-			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
+			let disabledForJson = disabled;
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
@@ -1645,17 +1844,23 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				}));
 			}
 			const payload = {
-				generatedAt: Date.now(),
+				generatedAt: nowMs,
 				reports: trimmed,
 				accountsWithoutUsage: unreportedAccounts,
 				disabledCredentials: disabledForJson,
 				capacity,
+				orgPolicyRejectedAccounts:
+					orgPolicyRejectedAccounts.length === 0
+						? undefined
+						: redaction
+							? orgPolicyRejectedAccounts.map(account => redactUsageAccountForJson(account, redaction))
+							: orgPolicyRejectedAccounts,
 			};
 			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 			return;
 		}
 
-		if (filteredReports.length === 0 && accounts.length === 0) {
+		if (filteredReports.length === 0 && accounts.length === 0 && orgPolicyRejectedAccounts.length === 0) {
 			// An explicit --provider keeps every stored account of that provider, so
 			// reaching here with one means none is stored for it. Without one,
 			// credentials may exist only for providers without a usage endpoint.
@@ -1676,9 +1881,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			settings,
 			accounts: provider => authStorage.oauth.accounts(provider),
 		};
-		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
-		);
+		const sections = [
+			formatUsageBreakdown(filteredReports, accounts, nowMs, redaction, disabled, policyOptions, resetOptions),
+		];
+		if (orgPolicyRejectedAccounts.length > 0) {
+			sections.push(formatOrgPolicyRejections(orgPolicyRejectedAccounts, nowMs, redaction));
+		}
+		process.stdout.write(`${sections.join("\n\n")}\n`);
 	} catch (error) {
 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or
 		// pre-endpoint broker; report one line instead of a stack dump.

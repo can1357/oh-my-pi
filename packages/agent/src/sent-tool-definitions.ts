@@ -1,4 +1,4 @@
-import type { Message, Tool } from "@oh-my-pi/pi-ai";
+import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
 
 /**
  * Last wire definition this Agent sent for each tool name, so a provider that keeps
@@ -14,11 +14,33 @@ export class SentToolDefinitions {
 	}
 
 	/**
-	 * Definitions for names the latest `requestControls.tools.declared` in `messages` holds
-	 * that are not in `active`; undefined when none. Names never sent by this Agent are
-	 * skipped: the provider drops them from the declaration.
+	 * A detached copy: an Agent that replays another's request history declares the same withdrawn tools. `keep`
+	 * leaves out a definition the copy must never declare.
 	 */
-	inactiveFor(messages: readonly Message[], active: readonly Tool[]): Tool[] | undefined {
+	copy(keep: (name: string) => boolean = () => true): SentToolDefinitions {
+		const copy = new SentToolDefinitions();
+		copy.record([...this.#byName.values()].filter(tool => keep(tool.name)));
+		return copy;
+	}
+
+	/**
+	 * `context` with {@link Context.inactiveTools} set to the definitions for names the latest
+	 * `requestControls.tools.declared` in its messages holds that are not in its `tools`; cleared when
+	 * there are none or the request declares no tools. A declared name this Agent never sent takes its
+	 * `standby` definition (a resumed transcript declares standby tools a fresh process has not sent);
+	 * names with neither are skipped, and the provider drops them from the declaration. Before any
+	 * request declared tools, `standby` (minus active names) stands in, so the first declaration
+	 * already holds tools that may activate later.
+	 */
+	withInactiveTools(context: Context, standby?: readonly Tool[]): Context {
+		const inactiveTools = context.tools?.length
+			? this.#inactiveFor(context.messages, context.tools, standby)
+			: undefined;
+		if (!inactiveTools && !context.inactiveTools) return context;
+		return { ...context, inactiveTools };
+	}
+
+	#inactiveFor(messages: readonly Message[], active: readonly Tool[], standby?: readonly Tool[]): Tool[] | undefined {
 		let declared: readonly string[] | undefined;
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index];
@@ -27,13 +49,18 @@ export class SentToolDefinitions {
 				break;
 			}
 		}
-		if (!declared) return undefined;
 		const activeNames = new Set(active.map(tool => tool.name));
 		const inactive: Tool[] = [];
-		for (const name of declared) {
-			if (activeNames.has(name)) continue;
-			const tool = this.#byName.get(name);
-			if (tool) inactive.push(tool);
+		if (declared) {
+			for (const name of declared) {
+				if (activeNames.has(name)) continue;
+				const tool = this.#byName.get(name) ?? standby?.find(candidate => candidate.name === name);
+				if (tool) inactive.push(tool);
+			}
+		} else if (standby) {
+			for (const tool of standby) {
+				if (!activeNames.has(tool.name)) inactive.push(tool);
+			}
 		}
 		return inactive.length > 0 ? inactive : undefined;
 	}

@@ -1,20 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import {
-	type OpenAIResponsesOptions,
-	openAIResponsesReplaysNativeHistory,
-	streamOpenAIResponses,
-} from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
+	buildTransformedCodexRequestBody,
+	convertCodexResponsesMessages,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import {
+	buildResponsesInput,
+	convertResponsesAssistantMessage,
+	SYNTHETIC_REASONING_REPLAY_PLACEHOLDER,
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
+import type {
+	AssistantMessage,
+	Context,
+	Model,
+	ModelSpec,
+	ProviderSessionState,
+	TextContent,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import {
 	createOpenAIResponsesHistoryPayload,
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
+	syncOpenAIResponsesHistoryTexts,
 } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { createCodexModel } from "./helpers";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -37,9 +53,9 @@ function getOpenAIReasoningModel(provider: GeneratedProvider, id: string): Model
 	return model;
 }
 
-const ISSUE_5002_PATCH = "*** Begin Patch\n*** End Patch\n";
-const ISSUE_5002_TOOL_OUTPUT = "patch applied";
-const issue5002XaiOAuthModel = buildModel({
+const EMPTY_PATCH = "*** Begin Patch\n*** End Patch\n";
+const APPLY_PATCH_OUTPUT = "patch applied";
+const xaiOAuthModel = buildModel({
 	id: "grok-build",
 	name: "Grok Build",
 	api: "openai-responses",
@@ -52,7 +68,7 @@ const issue5002XaiOAuthModel = buildModel({
 	maxTokens: 64000,
 } satisfies ModelSpec<"openai-responses">);
 
-const issue5002ZeroUsage = {
+const zeroUsage = {
 	input: 0,
 	output: 0,
 	cacheRead: 0,
@@ -60,7 +76,7 @@ const issue5002ZeroUsage = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-const issue5002EditTool: Tool = {
+const applyPatchTool: Tool = {
 	name: "edit",
 	customWireName: "apply_patch",
 	description: "Apply a hashline patch",
@@ -225,7 +241,7 @@ function selfHostedAssistantTurn(
 		api: plaintextReasoningModel.api,
 		provider: plaintextReasoningModel.provider,
 		model: plaintextReasoningModel.id,
-		usage: issue5002ZeroUsage,
+		usage: zeroUsage,
 		stopReason,
 		providerPayload: createOpenAIResponsesHistoryPayload(plaintextReasoningModel.provider, nativeItems),
 		timestamp: Date.now(),
@@ -262,7 +278,7 @@ function resumedEncryptedReasoningContext(model: Model<"openai-responses">): Con
 				api: model.api,
 				provider: model.provider,
 				model: model.id,
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				stopReason: "stop",
 				providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
 					{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "enc_turn_1" },
@@ -379,7 +395,7 @@ function findResponsesInputItem(input: unknown[] | undefined, type: string): Rec
 	}) as Record<string, unknown> | undefined;
 }
 
-function isIssue5002Record(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
 	return true;
 }
@@ -390,7 +406,7 @@ function findResponsesInputItemByCallId(
 	callId: string,
 ): Record<string, unknown> | undefined {
 	for (const item of input) {
-		if (!isIssue5002Record(item)) continue;
+		if (!isRecord(item)) continue;
 		if (item.type === type && item.call_id === callId) return item;
 	}
 	return undefined;
@@ -399,7 +415,7 @@ function findResponsesInputItemByCallId(
 function listResponsesToolItems(input: unknown[] | undefined): Array<[unknown, unknown, unknown]> {
 	const tools: Array<[unknown, unknown, unknown]> = [];
 	for (const item of input ?? []) {
-		if (!isIssue5002Record(item)) continue;
+		if (!isRecord(item)) continue;
 		if (item.type === "function_call" || item.type === "function_call_output") {
 			tools.push([item.type, item.call_id, item.name]);
 		}
@@ -414,7 +430,7 @@ function collectResponsesInputImageDetails(input: unknown): string[] {
 			for (const child of node) visit(child);
 			return;
 		}
-		if (!isIssue5002Record(node)) return;
+		if (!isRecord(node)) return;
 		if (node.type === "input_image" && typeof node.detail === "string") details.push(node.detail);
 		for (const key in node) visit(node[key]);
 	};
@@ -436,6 +452,86 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("replays frozen native computer calls without writing to stored history", async () => {
+		const model = { ...createCodexModel("gpt-5.5"), supportsComputerUse: true };
+		const computer = Object.freeze({
+			type: "computer_call",
+			id: "cu_stored",
+			call_id: "call_stored",
+			action: { type: "screenshot" },
+			pending_safety_checks: [],
+		});
+		const context: Context = {
+			messages: [
+				makeAssistantMessage(
+					[
+						computer,
+						{
+							type: "computer_call_output",
+							call_id: "call_stored",
+							output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+						},
+					],
+					true,
+					"openai-codex",
+				),
+				{ role: "user", content: "Continue", timestamp: Date.now() },
+			],
+		};
+		const payload = await buildTransformedCodexRequestBody(model, context, undefined);
+		expect(findResponsesInputItem(payload.input, "computer_call")).toMatchObject({
+			id: "cu_stored",
+			call_id: "call_stored",
+		});
+		expect(computer.call_id).toBe("call_stored");
+	});
+
+	it.each([
+		{ provider: "openai", snapshot: false },
+		{ provider: "openai", snapshot: true },
+		{ provider: "openai-codex", snapshot: false },
+		{ provider: "openai-codex", snapshot: true },
+	] as const)(
+		"strips internal response metadata from $provider replay (snapshot=$snapshot) without changing stored history",
+		async ({ provider, snapshot }) => {
+			const message = Object.freeze({
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Previous answer", annotations: [] }],
+				metadata: { turn_id: "turn_1" },
+				internal_chat_message_metadata_passthrough: {
+					content_token_count: 52,
+					create_time: 1793472704,
+					turn_id: "turn_1",
+				},
+			});
+			const context: Context = {
+				messages: [
+					snapshot
+						? {
+								role: "user",
+								content: "Compacted history",
+								providerPayload: createOpenAIResponsesHistoryPayload(provider, [message], false),
+								timestamp: Date.now(),
+							}
+						: makeAssistantMessage([message], true, provider),
+					{ role: "user", content: "Continue", timestamp: Date.now() },
+				],
+			};
+			const payload =
+				provider === "openai-codex"
+					? await buildTransformedCodexRequestBody(createCodexModel("gpt-5.5"), context, undefined)
+					: ((await captureResponsesPayload(getOpenAIReasoningModel("openai", "gpt-5-mini"), context)) as {
+							input?: unknown[];
+						});
+			const replayed = findResponsesInputItem(payload.input, "message");
+			const { internal_chat_message_metadata_passthrough: _internal, ...expected } = message;
+			expect(replayed).toEqual(expected);
+			expect(message.internal_chat_message_metadata_passthrough.content_token_count).toBe(52);
+		},
+	);
+
 	it("clamps stored original image hints when replay support is unknown", () => {
 		const items = [
 			{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
@@ -474,14 +570,14 @@ describe("OpenAI responses history payload", () => {
 							type: "toolCall",
 							id: "call_apply",
 							name: "apply_patch",
-							arguments: { input: ISSUE_5002_PATCH },
+							arguments: { input: EMPTY_PATCH },
 							customWireName: "apply_patch",
 						},
 					],
 					api: "openai-responses",
 					provider: "openai",
 					model: "gpt-5-mini",
-					usage: issue5002ZeroUsage,
+					usage: zeroUsage,
 					stopReason: "toolUse",
 					timestamp: Date.now(),
 				},
@@ -489,31 +585,31 @@ describe("OpenAI responses history payload", () => {
 					role: "toolResult",
 					toolCallId: "call_apply",
 					toolName: "edit",
-					content: [{ type: "text", text: ISSUE_5002_TOOL_OUTPUT }],
+					content: [{ type: "text", text: APPLY_PATCH_OUTPUT }],
 					isError: false,
 					timestamp: Date.now(),
 				},
 			],
-			tools: [issue5002EditTool],
+			tools: [applyPatchTool],
 		};
 
 		const xaiInput = buildResponsesInput({
-			model: issue5002XaiOAuthModel,
+			model: xaiOAuthModel,
 			context,
 			strictResponsesPairing: false,
-			supportsImageDetailOriginal: issue5002XaiOAuthModel.compat.supportsImageDetailOriginal,
-			nativeHistory: { replay: true, filterReasoning: issue5002XaiOAuthModel.compat.filterReasoningHistory },
+			supportsImageDetailOriginal: xaiOAuthModel.compat.supportsImageDetailOriginal,
+			nativeHistory: { replay: true, filterReasoning: xaiOAuthModel.compat.filterReasoningHistory },
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call", "call_apply")).toEqual({
 			type: "function_call",
 			call_id: "call_apply",
 			name: "edit",
-			arguments: JSON.stringify({ input: ISSUE_5002_PATCH }),
+			arguments: JSON.stringify({ input: EMPTY_PATCH }),
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call_output", "call_apply")).toEqual({
 			type: "function_call_output",
 			call_id: "call_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(JSON.stringify(xaiInput)).not.toContain("custom_tool_call");
 		expect(collectResponsesInputImageDetails(xaiInput)).toEqual(["auto"]);
@@ -530,12 +626,12 @@ describe("OpenAI responses history payload", () => {
 			type: "custom_tool_call",
 			call_id: "call_apply",
 			name: "apply_patch",
-			input: ISSUE_5002_PATCH,
+			input: EMPTY_PATCH,
 		});
 		expect(findResponsesInputItemByCallId(openaiInput, "custom_tool_call_output", "call_apply")).toEqual({
 			type: "custom_tool_call_output",
 			call_id: "call_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(collectResponsesInputImageDetails(openaiInput)).toEqual(["original"]);
 	});
@@ -550,11 +646,11 @@ describe("OpenAI responses history payload", () => {
 					{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
 				],
 			},
-			{ type: "custom_tool_call", call_id: "call_native_apply", name: "apply_patch", input: ISSUE_5002_PATCH },
+			{ type: "custom_tool_call", call_id: "call_native_apply", name: "apply_patch", input: EMPTY_PATCH },
 			{
 				type: "custom_tool_call_output",
 				call_id: "call_native_apply",
-				output: ISSUE_5002_TOOL_OUTPUT,
+				output: APPLY_PATCH_OUTPUT,
 			},
 		];
 		const xaiContext: Context = {
@@ -564,8 +660,8 @@ describe("OpenAI responses history payload", () => {
 					content: [{ type: "text", text: "fallback should not be replayed" }],
 					api: "openai-responses",
 					provider: "xai-oauth",
-					model: issue5002XaiOAuthModel.id,
-					usage: issue5002ZeroUsage,
+					model: xaiOAuthModel.id,
+					usage: zeroUsage,
 					stopReason: "stop",
 					providerPayload: createOpenAIResponsesHistoryPayload("xai-oauth", nativeHistoryItems),
 					timestamp: Date.now(),
@@ -575,22 +671,22 @@ describe("OpenAI responses history payload", () => {
 		};
 
 		const xaiInput = buildResponsesInput({
-			model: issue5002XaiOAuthModel,
+			model: xaiOAuthModel,
 			context: xaiContext,
 			strictResponsesPairing: false,
-			supportsImageDetailOriginal: issue5002XaiOAuthModel.compat.supportsImageDetailOriginal,
-			nativeHistory: { replay: true, filterReasoning: issue5002XaiOAuthModel.compat.filterReasoningHistory },
+			supportsImageDetailOriginal: xaiOAuthModel.compat.supportsImageDetailOriginal,
+			nativeHistory: { replay: true, filterReasoning: xaiOAuthModel.compat.filterReasoningHistory },
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call", "call_native_apply")).toEqual({
 			type: "function_call",
 			call_id: "call_native_apply",
 			name: "edit",
-			arguments: JSON.stringify({ input: ISSUE_5002_PATCH }),
+			arguments: JSON.stringify({ input: EMPTY_PATCH }),
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call_output", "call_native_apply")).toEqual({
 			type: "function_call_output",
 			call_id: "call_native_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(JSON.stringify(xaiInput)).not.toContain("custom_tool_call");
 		expect(collectResponsesInputImageDetails(xaiInput)).toEqual(["auto"]);
@@ -604,7 +700,7 @@ describe("OpenAI responses history payload", () => {
 					api: "openai-responses",
 					provider: "openai",
 					model: openaiModel.id,
-					usage: issue5002ZeroUsage,
+					usage: zeroUsage,
 					stopReason: "stop",
 					providerPayload: createOpenAIResponsesHistoryPayload("openai", nativeHistoryItems),
 					timestamp: Date.now(),
@@ -623,12 +719,12 @@ describe("OpenAI responses history payload", () => {
 			type: "custom_tool_call",
 			call_id: "call_native_apply",
 			name: "apply_patch",
-			input: ISSUE_5002_PATCH,
+			input: EMPTY_PATCH,
 		});
 		expect(findResponsesInputItemByCallId(openaiInput, "custom_tool_call_output", "call_native_apply")).toEqual({
 			type: "custom_tool_call_output",
 			call_id: "call_native_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(collectResponsesInputImageDetails(openaiInput)).toEqual(["original"]);
 	});
@@ -770,6 +866,7 @@ describe("OpenAI responses history payload", () => {
 		for (const model of [
 			getOpenAIReasoningModel("github-copilot", "gpt-5.4"),
 			getOpenAIReasoningModel("xai-oauth", "grok-4.7"),
+			getOpenAIReasoningModel("openrouter", "z-ai/glm-5.3-flash"),
 		]) {
 			const context = resumedEncryptedReasoningContext(model);
 			const providerSessionState = new Map<string, ProviderSessionState>();
@@ -797,6 +894,7 @@ describe("OpenAI responses history payload", () => {
 			"github-copilot first request",
 			"github-copilot closed",
 			"xai-oauth closed",
+			"openrouter closed",
 		]);
 	});
 
@@ -1052,7 +1150,7 @@ describe("OpenAI responses history payload", () => {
 				api: model.api,
 				provider: model.provider,
 				model: model.id,
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 			} as const;
 			return {
 				messages: [
@@ -1142,7 +1240,7 @@ describe("OpenAI responses history payload", () => {
 						api: model.api,
 						provider: model.provider,
 						model: model.id,
-						usage: issue5002ZeroUsage,
+						usage: zeroUsage,
 						role: "assistant",
 						content: [
 							{ type: "thinking", thinking: "Open a.txt." },
@@ -1170,6 +1268,317 @@ describe("OpenAI responses history payload", () => {
 			};
 
 			expect(warm.input?.filter(item => item.type === "reasoning")).toEqual([reasoningItem]);
+		});
+	});
+
+	describe("DeepSeek Responses reasoning_text synthesis", () => {
+		// DeepSeek-family Responses targets reject a thinking-mode continuation
+		// whose assistant turns lack a reasoning item carrying `reasoning_text`
+		// (empty text is rejected exactly like a missing one):
+		//   400 The reasoning_text in the thinking mode must be passed back to the API.
+		// Replayed turns that lost their native reasoning — minted by another
+		// model before a switch, or stripped by compaction — get a synthesized
+		// item with non-empty `reasoning_text`.
+		interface ReasoningTextPart {
+			type: string;
+			text: string;
+		}
+		interface ResponsesInputItem {
+			type?: string;
+			id?: string;
+			role?: string;
+			content?: unknown;
+		}
+		interface ResponsesPayload {
+			reasoning?: { effort?: string };
+			input?: ResponsesInputItem[];
+		}
+
+		const deepseek = getOpenAIReasoningModel("opencode-go", "deepseek-v4-flash");
+
+		async function capture(
+			model: Model<"openai-responses">,
+			context: Context,
+			options: Omit<OpenAIResponsesOptions, "apiKey" | "signal" | "providerSessionState" | "onPayload"> = {
+				reasoning: Effort.XHigh,
+			},
+		): Promise<ResponsesPayload> {
+			return (await captureResponsesPayload(model, context, undefined, options)) as ResponsesPayload;
+		}
+
+		function reasoningItems(items: ResponsesInputItem[] | undefined): ResponsesInputItem[] {
+			return (items ?? []).filter(item => item.type === "reasoning");
+		}
+
+		function reasoningTextOf(item: ResponsesInputItem): string {
+			const content = Array.isArray(item.content) ? (item.content as ReasoningTextPart[]) : [];
+			return content
+				.filter(part => part.type === "reasoning_text")
+				.map(part => part.text)
+				.join("");
+		}
+
+		function priorTurnContext(prior: AssistantMessage, followUp: string): Context {
+			return {
+				messages: [
+					{ role: "user", content: "Edit bar", timestamp: Date.now() },
+					prior,
+					{ role: "user", content: followUp, timestamp: Date.now() },
+				],
+			};
+		}
+
+		const foreignResponsesTurn: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "github-copilot",
+			model: "gpt-5.6-sol",
+			stopReason: "stop",
+			usage: zeroUsage,
+			content: [
+				{
+					type: "thinking",
+					thinking: "Refactor plan for foo.",
+					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_prev" }),
+				},
+				{ type: "text", text: "Refactored bar.ts." },
+			],
+			timestamp: Date.now(),
+		};
+
+		it("synthesizes a reasoning item for a foreign assistant turn replayed after a model switch", async () => {
+			// Same api, different provider+model -> block re-encode.
+			const payload = await capture(deepseek, priorTurnContext(foreignResponsesTurn, "Now update the tests"));
+			expect(payload.reasoning?.effort).toBeDefined();
+
+			const input = payload.input ?? [];
+			const reasoning = reasoningItems(input);
+			expect(reasoning).toHaveLength(1);
+			// The reasoning item must precede the assistant message it belongs to.
+			const reasoningIdx = input.findIndex(item => item.type === "reasoning");
+			const assistantIdx = input.findIndex(item => item.type === "message" && item.role === "assistant");
+			expect(reasoningIdx).toBeGreaterThanOrEqual(0);
+			expect(reasoningIdx).toBeLessThan(assistantIdx);
+			// It carries a reasoning_text content part (the field DeepSeek requires).
+			const content = Array.isArray(reasoning[0]!.content) ? (reasoning[0]!.content as ReasoningTextPart[]) : [];
+			expect(content.some(part => part.type === "reasoning_text")).toBe(true);
+		});
+
+		it("carries the actual reasoning text when a same-model thinking block survives replay", async () => {
+			// Same provider/model but no native providerPayload (dropped by
+			// compaction). The thinking block survives transform with no native
+			// Responses signature, so its text must ride in the synthesized item
+			// verbatim rather than the placeholder.
+			const prior: AssistantMessage = {
+				role: "assistant",
+				api: "openai-responses",
+				provider: "opencode-go",
+				model: "deepseek-v4-flash",
+				stopReason: "stop",
+				usage: zeroUsage,
+				content: [
+					{ type: "thinking", thinking: "Inspect bar.ts before editing." },
+					{ type: "text", text: "Edited bar.ts." },
+				],
+				timestamp: Date.now(),
+			};
+
+			const payload = await capture(deepseek, priorTurnContext(prior, "Run the tests"));
+			const reasoning = reasoningItems(payload.input);
+			expect(reasoning).toHaveLength(1);
+			expect(reasoningTextOf(reasoning[0]!)).toBe("Inspect bar.ts before editing.");
+		});
+
+		it("does not synthesize a reasoning item when reasoning is disabled for the turn", async () => {
+			const payload = await capture(deepseek, priorTurnContext(foreignResponsesTurn, "Now update the tests"), {
+				disableReasoning: true,
+			});
+			expect(reasoningItems(payload.input)).toHaveLength(0);
+		});
+
+		it("does not synthesize reasoning items for non-DeepSeek Responses targets", async () => {
+			const openai = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			expect(openai.compat.requiresReasoningContentForAllAssistantTurns).toBe(false);
+
+			const prior: AssistantMessage = {
+				role: "assistant",
+				api: "openai-responses",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: zeroUsage,
+				content: [
+					{ type: "thinking", thinking: "Cross-provider reasoning." },
+					{ type: "text", text: "Answer." },
+				],
+				timestamp: Date.now(),
+			};
+
+			const payload = await capture(openai, priorTurnContext(prior, "Follow up"));
+			expect(reasoningItems(payload.input)).toHaveLength(0);
+		});
+
+		it("substitutes a non-empty placeholder when the turn has no surviving thinking block", async () => {
+			// Compaction dropped the reasoning entirely; only the message survives.
+			const prior: AssistantMessage = {
+				role: "assistant",
+				api: "openai-responses",
+				provider: "opencode-go",
+				model: "deepseek-v4-flash",
+				stopReason: "stop",
+				usage: zeroUsage,
+				content: [{ type: "text", text: "Edited bar.ts." }],
+				timestamp: Date.now(),
+			};
+
+			const payload = await capture(deepseek, priorTurnContext(prior, "Run the tests"));
+			const reasoning = reasoningItems(payload.input);
+			expect(reasoning).toHaveLength(1);
+			const text = reasoningTextOf(reasoning[0]!);
+			expect(text.length).toBeGreaterThan(0);
+			expect(text).toBe(SYNTHETIC_REASONING_REPLAY_PLACEHOLDER);
+		});
+
+		it("substitutes a non-empty placeholder for an empty-text thinking block, preserving its upstream id", () => {
+			// A reasoning item survived with a real upstream id but an empty
+			// payload. The synthesis branch keeps the id and replaces the empty
+			// text with the placeholder. Driven through the encoder directly
+			// because an empty-text thinking block is dropped by
+			// transform-messages before the full stream path re-encodes it.
+			const prior: AssistantMessage = {
+				role: "assistant",
+				api: "openai-responses",
+				provider: "opencode-go",
+				model: "deepseek-v4-flash",
+				stopReason: "stop",
+				usage: zeroUsage,
+				content: [
+					{ type: "thinking", thinking: "", itemId: "rs_upstream" },
+					{ type: "text", text: "Edited bar.ts." },
+				],
+				timestamp: Date.now(),
+			};
+
+			const items = convertResponsesAssistantMessage(
+				prior,
+				deepseek,
+				0,
+				new Set<string>(),
+				true,
+				undefined,
+				false,
+				true,
+				undefined,
+				undefined,
+				true,
+			) as ResponsesInputItem[];
+			const reasoning = reasoningItems(items);
+			expect(reasoning).toHaveLength(1);
+			expect(reasoning[0]!.id).toBe("rs_upstream");
+			expect(reasoningTextOf(reasoning[0]!)).toBe(SYNTHETIC_REASONING_REPLAY_PLACEHOLDER);
+		});
+
+		it("fills the required item with another model's demoted thinking instead of the placeholder", async () => {
+			// After a model switch, every prior turn's foreign thinking is demoted to
+			// text. A placeholder in each required item became a few-shot pattern:
+			// DeepSeek and Kimi echoed "reasoning unavailable" as their own reasoning.
+			const prior: AssistantMessage = {
+				role: "assistant",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-opus-4-5",
+				stopReason: "toolUse",
+				usage: zeroUsage,
+				content: [
+					{ type: "thinking", thinking: "Inspect bar.ts before editing.", thinkingSignature: "sig_anthropic" },
+					{ type: "toolCall", id: "toolu_read", name: "read", arguments: { path: "bar.ts" } },
+				],
+				timestamp: Date.now(),
+			};
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "Edit bar", timestamp: Date.now() },
+					prior,
+					{
+						role: "toolResult",
+						toolCallId: "toolu_read",
+						toolName: "read",
+						content: [{ type: "text", text: "contents" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			};
+
+			const payload = await capture(deepseek, context);
+			const reasoning = reasoningItems(payload.input);
+			expect(reasoning).toHaveLength(1);
+			expect(reasoningTextOf(reasoning[0]!)).toBe("Inspect bar.ts before editing.");
+		});
+
+		it("adds required reasoning before native history from a custom DeepSeek Responses model", async () => {
+			const customDeepseek = buildModel({
+				id: "deepseek-flash",
+				name: "DeepSeek Flash",
+				api: "openai-responses",
+				provider: "custom-deepseek",
+				baseUrl: "https://api.deepseek.com",
+				reasoning: true,
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.High },
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 16_000,
+			});
+			const prior: AssistantMessage = {
+				role: "assistant",
+				api: customDeepseek.api,
+				provider: customDeepseek.provider,
+				model: customDeepseek.id,
+				stopReason: "stop",
+				usage: zeroUsage,
+				content: [{ type: "text", text: "Done." }],
+				providerPayload: createOpenAIResponsesHistoryPayload(
+					customDeepseek.provider,
+					[
+						{ role: "user", content: [{ type: "input_text", text: "Inspect and edit." }] },
+						{
+							type: "message",
+							role: "assistant",
+							content: [{ type: "output_text", text: "Inspecting." }],
+							status: "completed",
+						},
+						{ type: "function_call", call_id: "call_read", name: "read", arguments: "{}" },
+						{ type: "function_call_output", call_id: "call_read", output: "contents" },
+						{
+							type: "message",
+							role: "assistant",
+							content: [{ type: "output_text", text: "Edited." }],
+							status: "completed",
+						},
+					],
+					false,
+				),
+				timestamp: Date.now(),
+			};
+
+			const payload = await capture(customDeepseek, priorTurnContext(prior, "Run the tests"));
+			const input = payload.input ?? [];
+			const reasoning = reasoningItems(input);
+			expect(reasoning).toHaveLength(2);
+			for (const item of reasoning) {
+				expect(reasoningTextOf(item)).toBe(SYNTHETIC_REASONING_REPLAY_PLACEHOLDER);
+			}
+			expect(input.map(item => item.type ?? item.role)).toEqual([
+				"user",
+				"reasoning",
+				"message",
+				"function_call",
+				"function_call_output",
+				"reasoning",
+				"message",
+				"user",
+			]);
 		});
 	});
 
@@ -1896,6 +2305,198 @@ describe("OpenAI responses history payload", () => {
 		expect(containsAssistantOutputText(payload.input, "Running the script.")).toBe(true);
 	});
 
+	describe("length-cut native tool calls (#17847)", () => {
+		function cutContext(provider: "openai" | "openai-codex", modelId: string): Context {
+			const assistant = {
+				...makeAssistantMessage(
+					[
+						{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+						{ type: "function_call", call_id: "call_A", id: "fc_A", name: "write", arguments: '{"path":"a"}' },
+					],
+					true,
+					provider,
+					modelId,
+				),
+				content: [
+					{ type: "text" as const, text: "Writing files" },
+					{ type: "toolCall" as const, id: "call_A|fc_A", name: "write", arguments: { path: "a" } },
+					{ type: "toolCall" as const, id: "call_B|fc_B", name: "write", arguments: { path: "b" } },
+				],
+				stopReason: "length" as const,
+			};
+			return {
+				messages: [
+					{ role: "user", content: "Write two files", timestamp: 1 },
+					assistant,
+					{
+						role: "toolResult",
+						toolCallId: "call_A|fc_A",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_B|fc_B",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 3,
+					},
+				],
+			};
+		}
+
+		const pairedCalls: Array<[unknown, unknown, unknown]> = [
+			["function_call", "call_A", "write"],
+			["function_call", "call_B", "write"],
+			["function_call_output", "call_A", undefined],
+			["function_call_output", "call_B", undefined],
+		];
+
+		it("pairs both synthetic results on Responses replay instead of ending on an assistant prefill", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const input = buildResponsesInput({
+				model,
+				context: cutContext("openai", model.id),
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+			});
+			expect(listResponsesToolItems(input)).toEqual(pairedCalls);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+
+		it("pairs both synthetic results on Codex native replay", () => {
+			const model = createCodexModel("gpt-5.1-codex");
+			const input = convertCodexResponsesMessages(model, cutContext("openai-codex", model.id));
+			expect(listResponsesToolItems(input)).toEqual(pairedCalls);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+
+		it("rebuilds a cut call whose id an earlier snapshot round already used", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context = cutContext("openai", model.id);
+			const assistant = context.messages[1];
+			if (assistant?.role !== "assistant") throw new Error("expected assistant turn");
+			assistant.providerPayload = createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "Earlier round" }] },
+					{ type: "function_call", call_id: "call_B", name: "write", arguments: '{"path":"old"}' },
+					{ type: "function_call_output", call_id: "call_B", output: "old result" },
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "Write two files" }] },
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+					{ type: "function_call", call_id: "call_A", name: "write", arguments: '{"path":"a"}' },
+				],
+				false,
+			);
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+			});
+			expect(listResponsesToolItems(input)).toEqual([
+				["function_call", "call_B", "write"],
+				["function_call_output", "call_B", undefined],
+				...pairedCalls,
+			]);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+
+		// Failure mode: a model that requires reasoning before tool calls receives the cut call's turn
+		// without it and rejects the continuation.
+		it("replays the required reasoning item ahead of a turn whose only call was cut", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "Write a file", timestamp: 1 },
+					{
+						...makeAssistantMessage(
+							[
+								{
+									type: "message",
+									role: "assistant",
+									content: [{ type: "output_text", text: "Writing the file" }],
+								},
+							],
+							true,
+							"openai",
+							model.id,
+						),
+						content: [
+							{ type: "text" as const, text: "Writing the file" },
+							{ type: "toolCall" as const, id: "call_B|fc_B", name: "write", arguments: { path: "b" } },
+						],
+						stopReason: "length" as const,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_B|fc_B",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 2,
+					},
+				],
+			};
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+				requiresReasoningReplayForToolCalls: true,
+			});
+			expect(input.map(item => (isRecord(item) ? (item.type ?? item.role) : item))).toEqual([
+				"user",
+				"reasoning",
+				"message",
+				"function_call",
+				"function_call_output",
+			]);
+		});
+
+		// Failure mode: on a host that prefixes tool names (Muse Code), the rebuilt call goes out under the
+		// bare name the request never declares, next to the native call under the prefixed one.
+		it("rebuilds a cut call under the host's prefixed tool name", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context = cutContext("openai", model.id);
+			const assistant = context.messages[1];
+			if (assistant?.role !== "assistant") throw new Error("expected assistant turn");
+			// The host answered under the prefixed names the request declared.
+			assistant.providerPayload = createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+					{ type: "function_call", call_id: "call_A", id: "fc_A", name: "_write", arguments: '{"path":"a"}' },
+				],
+				true,
+			);
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+				toolNaming: { prefix: "_", maxLength: undefined },
+			});
+			expect(listResponsesToolItems(input)).toEqual([
+				["function_call", "call_A", "_write"],
+				["function_call", "call_B", "_write"],
+				["function_call_output", "call_A", undefined],
+				["function_call_output", "call_B", undefined],
+			]);
+		});
+	});
+
 	it("drops malformed tool names from same-model native history replay", async () => {
 		const malformedName = 'bash\0arg_key="command"\0arg_value="ls -la"';
 		const assistantMessage = {
@@ -2082,11 +2683,14 @@ describe("OpenAI responses history payload", () => {
 					api: "openai-responses",
 					provider: "openai",
 					model: "gpt-5-mini",
-					usage: issue5002ZeroUsage,
+					usage: zeroUsage,
 					stopReason: "toolUse",
 					providerPayload: createOpenAIResponsesHistoryPayload(
 						"openai",
-						[{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] }],
+						[
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] },
+							{ type: "function_call", call_id: orphanCallId, name: "bad invocation text", arguments: "{}" },
+						],
 						false,
 					),
 					timestamp: Date.now(),
@@ -2128,5 +2732,200 @@ describe("OpenAI responses history payload", () => {
 
 		expect(orphanNote(strictOverridePayload.input)?.content).toContain("[Orphan read result;");
 		expect(orphanNote(nonStrictOverridePayload.input)?.content).toContain("[Orphan tool result;");
+	});
+
+	it("pairs a call missing from a native snapshot before sending its result on a non-strict host", () => {
+		// DeepSeek via openai-responses pairs tool calls by turn, so an assistant
+		// `message` wedged between a `function_call` and its `function_call_output`
+		// closes the round early → `400 No tool output found`.
+		const model = buildModel({
+			id: "deepseek-v4-flash",
+			name: "DeepSeek V4 Flash",
+			api: "openai-responses",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_000,
+		});
+		const toolResult = (callId: string, toolName: string, text: string, isError = false): ToolResultMessage => ({
+			role: "toolResult",
+			toolCallId: callId,
+			toolName,
+			content: [{ type: "text", text }],
+			isError,
+			timestamp: 2,
+		});
+		// A tool call omitted from a native snapshot still has a block and a result.
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "call_00", name: "todo", arguments: {} },
+				{ type: "toolCall", id: "call_01", name: "bash", arguments: { command: "ls" } },
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: zeroUsage,
+			stopReason: "toolUse",
+			providerPayload: createOpenAIResponsesHistoryPayload(
+				model.provider,
+				[
+					{ type: "reasoning", id: "rs_1", summary: [], content: [] },
+					{ type: "function_call", call_id: "call_01", name: "bash", arguments: "{}" },
+				],
+				false,
+			),
+			timestamp: 1,
+		};
+		const context: Context = {
+			messages: [
+				assistant,
+				toolResult("call_00", "todo", "Invalid todo arguments: op must be operation to apply", true),
+				toolResult("call_01", "bash", "file listing"),
+				{ role: "user", content: "continue", timestamp: 5 },
+			],
+		};
+
+		const items = buildResponsesInput({
+			model,
+			context,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: false,
+			repairOrphanOutputs: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		expect(
+			items.map(item => {
+				if ("type" in item && typeof item.type === "string") return item.type;
+				if ("role" in item && typeof item.role === "string") return `message:${item.role}`;
+				return "unknown";
+			}),
+		).toEqual([
+			"reasoning",
+			"function_call",
+			"function_call",
+			"function_call_output",
+			"function_call_output",
+			"message:user",
+		]);
+		expect(JSON.stringify(items)).not.toContain("[Orphan tool result; call_id=call_00]");
+		expect(items.find(item => item.type === "function_call" && item.call_id === "call_00")).toMatchObject({
+			name: "todo",
+			arguments: "{}",
+		});
+		expect(items.find(item => item.type === "function_call_output" && item.call_id === "call_00")).toMatchObject({
+			output: "Invalid todo arguments: op must be operation to apply",
+		});
+	});
+});
+
+describe("assistant text rewrites reaching Codex native replay", () => {
+	const codexModel = createCodexModel("gpt-5.6-codex");
+
+	function fixtureMessage(): AssistantMessage {
+		return {
+			role: "assistant",
+			api: codexModel.api,
+			provider: codexModel.provider,
+			model: codexModel.id,
+			stopReason: "stop",
+			timestamp: 2,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			content: [
+				{
+					type: "text",
+					text: "original",
+					textSignature: JSON.stringify({ v: 1, id: "msg_fixture", phase: "commentary" }),
+				},
+			],
+			providerPayload: createOpenAIResponsesHistoryPayload(codexModel.provider, [
+				{ type: "reasoning", id: "rs_fixture", summary: [], encrypted_content: "ENC" },
+				{
+					type: "message",
+					id: "msg_fixture",
+					role: "assistant",
+					phase: "commentary",
+					content: [
+						{
+							type: "output_text",
+							text: "original",
+							annotations: [{ type: "url_citation", url: "https://example.test/a" }],
+						},
+					],
+				},
+			]),
+		};
+	}
+
+	function userContext(messages: AssistantMessage[]): Context {
+		return {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "hello", timestamp: 1 }, ...messages],
+		};
+	}
+
+	function replayedOutputTexts(context: Context): string[] {
+		const texts: string[] = [];
+		for (const message of convertCodexResponsesMessages(codexModel, context)) {
+			const content = (message as { content?: unknown }).content;
+			if (!Array.isArray(content)) continue;
+			for (const part of content) {
+				if ((part as { type?: unknown }).type === "output_text") {
+					texts.push((part as { text: string }).text);
+				}
+			}
+		}
+		return texts;
+	}
+
+	it("delivers the rewrite through same-model native replay once the payload is synced", () => {
+		const message = fixtureMessage();
+		const rewritten: AssistantMessage["content"] = [{ ...(message.content[0] as TextContent), text: "rewritten" }];
+		const synced = syncOpenAIResponsesHistoryTexts(message.providerPayload, ["rewritten"]);
+		const texts = replayedOutputTexts(userContext([{ ...message, content: rewritten, providerPayload: synced }]));
+		expect(texts).toContain("rewritten");
+		expect(texts).not.toContain("original");
+	});
+
+	it("keeps item ids and citations while syncing", () => {
+		const synced = syncOpenAIResponsesHistoryTexts(fixtureMessage().providerPayload, ["rewritten"]);
+		const messageItem = synced?.items.find(item => item.type === "message") as {
+			id: unknown;
+			content: Array<{ annotations: unknown[] }>;
+		};
+		expect(messageItem.id).toBe("msg_fixture");
+		expect(messageItem.content[0].annotations).toHaveLength(1);
+	});
+
+	it("pairs multiple text blocks across message items positionally", () => {
+		const payload = createOpenAIResponsesHistoryPayload(codexModel.provider, [
+			{ type: "message", id: "msg_a", role: "assistant", content: [{ type: "output_text", text: "one" }] },
+			{ type: "reasoning", id: "rs_b", summary: [] },
+			{ type: "message", id: "msg_b", role: "assistant", content: [{ type: "output_text", text: "two" }] },
+		]);
+		const synced = syncOpenAIResponsesHistoryTexts(payload, ["ONE", "TWO"]);
+		expect(synced).toBeDefined();
+		const texts = synced?.items
+			.filter(item => item.type === "message")
+			.flatMap(item => (item.content as Array<{ text: string }>).map(part => part.text));
+		expect(texts).toEqual(["ONE", "TWO"]);
+	});
+
+	it("leaves the payload untouched on shape mismatch instead of half-updating", () => {
+		expect(syncOpenAIResponsesHistoryTexts(fixtureMessage().providerPayload, ["a", "b"])).toBeUndefined();
+		const nonList = createOpenAIResponsesHistoryPayload(codexModel.provider, [
+			{ type: "message", id: "msg_x", role: "assistant", content: "suddenly a string" },
+		]);
+		expect(syncOpenAIResponsesHistoryTexts(nonList, ["a"])).toBeUndefined();
 	});
 });

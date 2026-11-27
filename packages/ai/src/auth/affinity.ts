@@ -27,6 +27,7 @@ type PersistedSticky = {
 	type: AuthCredential["type"];
 	credentialId: number;
 	explicit: boolean;
+	pinGeneration?: string;
 	lastUsedAtMs: number;
 };
 
@@ -38,6 +39,8 @@ export type SessionCredential = {
 	lastUsedAtMs?: number;
 	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
 	explicit?: true;
+	/** Identifies one explicit pin: a new pin mints it, re-recording the pinned credential keeps it. */
+	readonly pinGeneration?: string;
 };
 
 /** One installed restriction: the allowed OAuth identity keys and the lease that lifts it. */
@@ -174,12 +177,14 @@ export class SessionAffinity implements SessionsApi {
 			previous?.type === type &&
 			(credentialId !== undefined ? previous.credentialId === credentialId : previous.index === index);
 		const isExplicit = explicit || (sameCredential && previous?.explicit === true);
+		const pinGeneration = explicit ? crypto.randomUUID() : isExplicit ? previous?.pinGeneration : undefined;
 		const sessionCredential: SessionCredential = {
 			type,
 			index,
 			credentialId,
 			lastUsedAtMs: nowMs,
 			...(isExplicit ? { explicit: true as const } : {}),
+			...(pinGeneration === undefined ? {} : { pinGeneration }),
 		};
 		sessionMap.set(sessionId, sessionCredential);
 
@@ -193,6 +198,7 @@ export class SessionAffinity implements SessionsApi {
 			persisted.type === type &&
 			persisted.credentialId === credentialId &&
 			persisted.explicit === isExplicit &&
+			persisted.pinGeneration === pinGeneration &&
 			Math.abs(nowMs - persisted.lastUsedAtMs) < SESSION_STICKY_PERSIST_INTERVAL_MS
 		) {
 			return;
@@ -203,12 +209,33 @@ export class SessionAffinity implements SessionsApi {
 				type,
 				credentialId,
 				explicit: isExplicit,
+				pinGeneration,
 				lastUsedAtMs: nowMs,
 			});
 		} catch (err) {
 			persistedSessions.delete(sessionId);
 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
 		}
+	}
+
+	/**
+	 * Records the credential an automatic selection chose, unless an explicit
+	 * pin was installed after the selection read `basis` (the session's
+	 * {@link get} result when it began). Selection awaits usage reports and
+	 * refreshes, so a `/session pin` can land mid-flight; that pin wins.
+	 */
+	recordSelection(
+		provider: string,
+		sessionId: string | undefined,
+		type: AuthCredential["type"],
+		index: number,
+		basis: SessionCredential | undefined,
+	): void {
+		if (!sessionId) return;
+		const current = this.get(provider, sessionId);
+		const pinnedSince =
+			current?.explicit === true && (basis?.explicit !== true || current.pinGeneration !== basis.pinGeneration);
+		if (!pinnedSince) this.record(provider, sessionId, type, index);
 	}
 
 	/**
@@ -220,6 +247,26 @@ export class SessionAffinity implements SessionsApi {
 		if (!sessionId) return undefined;
 		const credential = this.#lookup(provider, sessionId);
 		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
+	}
+
+	/**
+	 * `SessionsApi.sticky`: read-only display/attribution view of {@link get} —
+	 * the stored credential row that most recently served the session,
+	 * including API-key rows (which have no OAuth identity to attribute by).
+	 *
+	 * Returns `undefined` when an override would be served instead of stored
+	 * rows: `KeyCascade` resolves runtime (`--api-key`) and config keys ahead
+	 * of the pool, and an env key can take over once stored rows go unusable —
+	 * its branch only forgets the in-memory pin, so a persisted row survives
+	 * and must not be reported as the session's auth source.
+	 */
+	sticky(provider: string, sessionId: string | undefined): SessionCredential | undefined {
+		const pin = this.get(provider, sessionId);
+		if (!pin) return undefined;
+		const restricted = this.isRestricted(provider, sessionId);
+		if (this.#overrides.suppressesOAuth(provider, restricted)) return undefined;
+		if (!restricted && getEnvApiKey(provider)) return undefined;
+		return pin;
 	}
 
 	#lookup(provider: string, sessionId: string): SessionCredential | undefined {
@@ -267,12 +314,14 @@ export class SessionAffinity implements SessionsApi {
 					credentialId: val.credentialId,
 					lastUsedAtMs: val.lastUsedAtMs,
 					...(val.explicit === true ? { explicit: true } : {}),
+					...(val.pinGeneration === undefined ? {} : { pinGeneration: val.pinGeneration }),
 				};
 				if (typeof val.lastUsedAtMs === "number") {
 					SessionAffinity.#sessionsFor(this.#persistedSticky, provider).set(sessionId, {
 						type: val.type,
 						credentialId: val.credentialId,
 						explicit: val.explicit === true,
+						pinGeneration: val.pinGeneration,
 						lastUsedAtMs: val.lastUsedAtMs,
 					});
 				}

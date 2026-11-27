@@ -3,20 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
-import { type Settings, settingsCapability } from "@oh-my-pi/pi-coding-agent/capability/settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function loadOpenCodeMcpConfig(cwd: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
-		cwd,
-		providers: ["opencode"],
-	});
-	return result.items;
-}
-
-async function loadOpenCodeSettings(cwd: string): Promise<Settings[]> {
-	const result = await loadCapability<Settings>(settingsCapability.id, {
 		cwd,
 		providers: ["opencode"],
 	});
@@ -36,7 +27,7 @@ describe("OpenCode MCP discovery", () => {
 		await removeWithRetries(tempDir);
 	});
 
-	test("discovers commented JSONC config at user and project scopes", async () => {
+	test("ignores user-level OpenCode config", async () => {
 		const projectDir = path.join(tempDir, "project");
 		const userConfigDir = path.join(tempDir, ".config", "opencode");
 		await fs.mkdir(projectDir);
@@ -44,48 +35,78 @@ describe("OpenCode MCP discovery", () => {
 
 		await fs.writeFile(
 			path.join(userConfigDir, "opencode.jsonc"),
-			`{
-				// User-level OpenCode config
-				"model": "user-model",
-				"mcp": {
-					"user-jsonc": {
-						"type": "local",
-						"command": ["user-server"]
-					}
-				}
-			}`,
+			JSON.stringify({ mcp: { "user-jsonc": { type: "local", command: ["user-server"] } } }),
 		);
 		await fs.writeFile(
 			path.join(projectDir, "opencode.jsonc"),
-			`{
-				// Project-level OpenCode config
-				"model": "project-model",
-				"mcp": {
-					"project-jsonc": {
-						"type": "local",
-						"command": ["project-server"]
-					}
-				}
-			}`,
+			JSON.stringify({ mcp: { "project-jsonc": { type: "local", command: ["project-server"] } } }),
 		);
 
-		const [servers, discoveredSettings] = await Promise.all([
-			loadOpenCodeMcpConfig(projectDir),
-			loadOpenCodeSettings(projectDir),
+		const servers = await loadOpenCodeMcpConfig(projectDir);
+
+		expect(servers).toEqual([expect.objectContaining({ name: "project-jsonc", command: "project-server" })]);
+	});
+
+	test("discovers OpenCode v2 servers rather than the mcp.servers container", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "opencode.jsonc"),
+			JSON.stringify({
+				mcp: {
+					timeout: 10_000,
+					servers: {
+						demo: { type: "local", command: ["node", "demo.js"] },
+					},
+				},
+			}),
+		);
+
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+
+		expect(servers).toEqual([
+			expect.objectContaining({ name: "demo", command: "node", args: ["demo.js"], transport: "stdio" }),
 		]);
+	});
 
-		expect(servers).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ name: "user-jsonc", command: "user-server" }),
-				expect.objectContaining({ name: "project-jsonc", command: "project-server" }),
-			]),
+	test("merges v2 overrides with legacy flat servers across config layers", async () => {
+		const projectDir = path.join(tempDir, "project");
+		await fs.mkdir(path.join(projectDir, ".opencode"), { recursive: true });
+
+		await fs.writeFile(
+			path.join(projectDir, "opencode.json"),
+			JSON.stringify({
+				mcp: {
+					demo: { type: "local", command: ["node", "demo.js"], environment: { TOKEN: "root" } },
+				},
+			}),
 		);
-		expect(discoveredSettings).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ level: "user", data: expect.objectContaining({ model: "user-model" }) }),
-				expect.objectContaining({ level: "project", data: expect.objectContaining({ model: "project-model" }) }),
-			]),
+		await fs.writeFile(
+			path.join(projectDir, ".opencode", "opencode.jsonc"),
+			JSON.stringify({
+				mcp: { timeout: 10_000, servers: { demo: { environment: { REGION: "project" } } } },
+			}),
 		);
+
+		const servers = await loadOpenCodeMcpConfig(projectDir);
+
+		expect(servers).toEqual([
+			expect.objectContaining({
+				name: "demo",
+				command: "node",
+				args: ["demo.js"],
+				env: { TOKEN: "root", REGION: "project" },
+			}),
+		]);
+	});
+
+	test("keeps a legacy flat server named servers", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "opencode.json"),
+			JSON.stringify({ mcp: { servers: { type: "local", command: ["node", "legacy.js"] } } }),
+		);
+
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+
+		expect(servers).toEqual([expect.objectContaining({ name: "servers", command: "node", args: ["legacy.js"] })]);
 	});
 
 	test("loads project .opencode config after project-root config", async () => {
@@ -109,52 +130,43 @@ describe("OpenCode MCP discovery", () => {
 			}`,
 		);
 
-		const [servers, discoveredSettings] = await Promise.all([
-			loadOpenCodeMcpConfig(projectDir),
-			loadOpenCodeSettings(projectDir),
-		]);
+		const servers = await loadOpenCodeMcpConfig(projectDir);
 
 		expect(servers.filter(server => server.name === "shared")).toEqual([
 			expect.objectContaining({ command: "dotdir-server", transport: "stdio" }),
 		]);
-		expect(discoveredSettings.at(-1)).toMatchObject({
-			path: path.join(projectConfigDir, "opencode.jsonc"),
-			level: "project",
-			data: expect.objectContaining({ model: "dotdir-model" }),
-		});
 	});
 
 	test("resolves same-named MCP servers by OpenCode precedence", async () => {
 		const projectDir = path.join(tempDir, "project");
-		const userConfigDir = path.join(tempDir, ".config", "opencode");
-		await fs.mkdir(projectDir);
-		await fs.mkdir(userConfigDir, { recursive: true });
+		const projectConfigDir = path.join(projectDir, ".opencode");
+		await fs.mkdir(projectConfigDir, { recursive: true });
 
-		// Lower precedence: user scope enables "shared" with the user command.
-		await fs.writeFile(
-			path.join(userConfigDir, "opencode.json"),
-			JSON.stringify({
-				mcp: { shared: { type: "local", command: ["user-server"], enabled: true } },
-			}),
-		);
-		// Higher precedence: project opencode.json disables it with a different command.
+		// Lowest precedence: project-root opencode.json enables "shared" with the root command.
 		await fs.writeFile(
 			path.join(projectDir, "opencode.json"),
 			JSON.stringify({
-				mcp: { shared: { type: "local", command: ["project-json-server"], enabled: false } },
+				mcp: { shared: { type: "local", command: ["root-json-server"], enabled: true } },
 			}),
 		);
-		// Highest precedence within the project scope: opencode.jsonc wins outright.
+		// Higher precedence: project-root opencode.jsonc disables it with a different command.
 		await fs.writeFile(
 			path.join(projectDir, "opencode.jsonc"),
-			`{ "mcp": { "shared": { "type": "local", "command": ["project-jsonc-server"], "enabled": false } } }`,
+			JSON.stringify({
+				mcp: { shared: { type: "local", command: ["root-jsonc-server"], enabled: false } },
+			}),
+		);
+		// Highest precedence: .opencode/opencode.jsonc wins outright.
+		await fs.writeFile(
+			path.join(projectConfigDir, "opencode.jsonc"),
+			`{ "mcp": { "shared": { "type": "local", "command": ["dotdir-server"], "enabled": false } } }`,
 		);
 
 		const servers = await loadOpenCodeMcpConfig(projectDir);
 		const shared = servers.filter(server => server.name === "shared");
 
 		expect(shared).toHaveLength(1);
-		expect(shared[0]).toMatchObject({ command: "project-jsonc-server", enabled: false });
+		expect(shared[0]).toMatchObject({ command: "dotdir-server", enabled: false });
 	});
 
 	test("preserves OAuth settings from remote OpenCode MCP servers", async () => {
@@ -193,26 +205,24 @@ describe("OpenCode MCP discovery", () => {
 
 	test("inherits lower-precedence fields on partial overrides", async () => {
 		const projectDir = path.join(tempDir, "project");
-		const userConfigDir = path.join(tempDir, ".config", "opencode");
-		await fs.mkdir(projectDir);
-		await fs.mkdir(userConfigDir, { recursive: true });
+		await fs.mkdir(path.join(projectDir, ".opencode"), { recursive: true });
 
-		// User scope carries the full definition.
+		// Project-root config carries the full definition.
 		await fs.writeFile(
-			path.join(userConfigDir, "opencode.json"),
+			path.join(projectDir, "opencode.json"),
 			JSON.stringify({
 				mcp: {
 					github: {
 						type: "local",
 						command: ["gh-server"],
-						environment: { TOKEN: "user-token" },
+						environment: { TOKEN: "root-token" },
 					},
 				},
 			}),
 		);
-		// Project scope overrides only a single field; command/env must survive.
+		// .opencode config overrides only a single field; command/env must survive.
 		await fs.writeFile(
-			path.join(projectDir, "opencode.jsonc"),
+			path.join(projectDir, ".opencode", "opencode.jsonc"),
 			`{ "mcp": { "github": { "timeout": 5000, "environment": { "REGION": "eu" } } } }`,
 		);
 
@@ -224,7 +234,7 @@ describe("OpenCode MCP discovery", () => {
 			command: "gh-server",
 			transport: "stdio",
 			timeout: 5000,
-			env: { TOKEN: "user-token", REGION: "eu" },
+			env: { TOKEN: "root-token", REGION: "eu" },
 		});
 	});
 

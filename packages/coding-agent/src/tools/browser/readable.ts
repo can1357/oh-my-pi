@@ -1,6 +1,6 @@
+import { renderHtml } from "@oh-my-pi/pi-natives";
 import type * as DomNs from "@oh-my-pi/pi-utils/dom";
 import type * as ReadabilityNs from "@oh-my-pi/pi-utils/readability";
-import { htmlToBasicMarkdown } from "../../web/scrapers/types";
 
 export type ReadableFormat = "text" | "markdown";
 
@@ -268,13 +268,16 @@ export function filterMarkdownSections(markdown: string, filter: string): string
 		.trim();
 }
 
+/** An escaped character (kept as literal text), a `_` run outside a word, or an emphasis or code marker. */
+const PLAIN_TEXT_MARKUP = /\\([\\`*_[\]~])|(?<![\p{L}\p{N}_])_+|_+(?![\p{L}\p{N}_])|[*`~]/gu;
+
 function markdownToPlainText(markdown: string): string {
 	return markdown
 		.replace(/^#{1,6}\s+/gm, "")
 		.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
 		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
 		.replace(/^\s*[-*+]\s+/gm, "")
-		.replace(/[*_`~]/g, "")
+		.replace(PLAIN_TEXT_MARKUP, (_match, escaped?: string) => escaped ?? "")
 		.trim();
 }
 
@@ -285,7 +288,7 @@ async function markdownContent(
 	htmlContent: string | null | undefined,
 	options: ReadableExtractOptions,
 ): Promise<string | undefined> {
-	let processedMarkdown = normalize(await htmlToBasicMarkdown(htmlContent ?? "")) ?? text;
+	let processedMarkdown = normalize((await renderHtml(htmlContent ?? "", { mode: "full" })).trim()) ?? text;
 	if (!processedMarkdown) return undefined;
 	if (options.filter) processedMarkdown = normalize(filterMarkdownSections(processedMarkdown, options.filter));
 	if (!processedMarkdown) return undefined;

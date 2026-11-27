@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import { MemoizedRuntime } from "../src/subprocess/worker-runtime";
 import type { SttTransport, SttWorkerInbound, SttWorkerOutbound } from "../src/stt/asr-protocol";
 import { startSttWorker } from "../src/stt/asr-worker";
+import type { DetectedSpeech, SpeechDetector } from "../src/stt/endpointer";
 import * as registry from "../src/stt/models";
+import * as device from "../src/tiny/device";
 import * as runtime from "../src/stt/sherpa-runtime";
 
 // A stateful native-API double: each positive sample introduces a token, -1
@@ -82,12 +84,55 @@ const offlineRecognizer = {
 		text: Array.from(stream.samples, sample => vocabulary[sample] ?? "").join(" "),
 	}),
 };
+// Speech is any chunk with a nonzero sample; an all-zero chunk ends the utterance.
+class Vad implements SpeechDetector {
+	#position = 0;
+	#start = -1;
+	#ready: DetectedSpeech[] = [];
+
+	acceptWaveform(samples: Float32Array): void {
+		if (samples.some(sample => sample !== 0)) {
+			if (this.#start < 0) this.#start = this.#position;
+		} else {
+			this.#finish(this.#position);
+		}
+		this.#position += samples.length;
+	}
+
+	isEmpty(): boolean {
+		return this.#ready.length === 0;
+	}
+
+	isDetected(): boolean {
+		return this.#start >= 0;
+	}
+
+	front(): DetectedSpeech {
+		return this.#ready[0]!;
+	}
+
+	pop(): void {
+		this.#ready.shift();
+	}
+
+	flush(): void {
+		this.#finish(this.#position);
+	}
+
+	#finish(end: number): void {
+		if (this.#start < 0) return;
+		this.#ready.push({ start: this.#start, samples: new Float32Array(end - this.#start) });
+		this.#start = -1;
+	}
+}
+
 const nativeRuntime: runtime.SherpaRuntime = {
 	OnlineRecognizer,
 	OfflineRecognizer: { createAsync: async () => offlineRecognizer },
+	Vad,
 };
 const onlineSpec = registry.getSttModelSpec("nemotron-streaming-en-0.6b")!;
-const offlineSpec = registry.getSttModelSpec("parakeet-tdt-0.6b-v3")!;
+const offlineSpec = registry.getSttModelSpec("fluid-speech-pro")!;
 let nextKey = 0;
 let key: registry.SttModelKey;
 let offlineKey: registry.SttModelKey;
@@ -148,7 +193,7 @@ beforeEach(() => {
 	spyOn(registry, "getSttModelSpec").mockImplementation(requested =>
 		requested === key ? onlineSpec : requested === offlineKey ? offlineSpec : undefined,
 	);
-	spyOn(runtime, "loadSourceSherpaRuntime").mockReturnValue(nativeRuntime);
+	spyOn(runtime, "loadSherpaRuntime").mockResolvedValue(nativeRuntime);
 	spyOn(fs, "mkdir").mockResolvedValue(undefined);
 	spyOn(fs, "stat").mockResolvedValue(presentFile);
 	OnlineRecognizer.instances.length = 0;
@@ -313,6 +358,26 @@ describe("native online STT worker", () => {
 		});
 		expect(offlineDecode).toHaveBeenCalledTimes(1);
 	});
+
+	it("stops scheduling previews after consecutive decodes slower than the preview cadence", async () => {
+		let now = 0;
+		spyOn(performance, "now").mockImplementation(() => now);
+		// Every decode takes 500 ms, past the 450 ms preview cadence.
+		spyOn(offlineRecognizer, "decodeAsync").mockImplementation(async stream => {
+			now += 500;
+			return { text: stream.samples.length > 0 ? "hello" : "" };
+		});
+		const h = harness();
+		h.send({ type: "stream_start", id: "slow", modelKey: offlineKey });
+		const speech = new Float32Array(16_000 * 0.6).fill(0.1);
+		for (let i = 0; i < 3; i++) {
+			h.send({ type: "stream_audio", id: "slow", audio: speech });
+			await nextTurn();
+		}
+		expect(h.events.filter(event => event.type === "partial")).toHaveLength(2);
+		h.send({ type: "stream_stop", id: "slow" });
+		expect(await h.waitFor("stream_done", "slow")).toEqual({ type: "stream_done", id: "slow", text: "hello" });
+	});
 });
 
 describe("online stream terminal boundaries", () => {
@@ -345,5 +410,35 @@ describe("online stream terminal boundaries", () => {
 		await nextTurn();
 		expect(h.events).toEqual([]);
 		expect(OnlineRecognizer.instances[0]!.streams).toHaveLength(0);
+	});
+});
+
+describe("accelerated device fallback", () => {
+	it("tells the client which device the model fell back to and why", async () => {
+		// The worker keeps loaded models warm; only this test loads whisper-base.
+		const whisperKey: registry.SttModelKey = "whisper-base";
+		mock.restore();
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "stat").mockResolvedValue(presentFile);
+		spyOn(runtime, "loadSherpaRuntime").mockResolvedValue(nativeRuntime);
+		spyOn(device, "tinyModelDeviceLoadOrder").mockReturnValue(["cuda", "cpu"]);
+		const transformers = {
+			pipeline: async (_task: string, _repo: string, options: { device: string }) => {
+				if (options.device === "cuda") throw new Error("CUDA out of memory\nstack");
+				return async () => ({ text: "" });
+			},
+		};
+		spyOn(MemoizedRuntime.prototype, "load").mockResolvedValue(transformers);
+		const h = harness();
+		h.send({ type: "stream_start", id: "gpu", modelKey: whisperKey });
+		expect(await h.waitFor("device_fallback", "gpu")).toEqual({
+			type: "device_fallback",
+			id: "gpu",
+			modelKey: whisperKey,
+			device: "cuda",
+			fallbackDevice: "cpu",
+			error: "CUDA out of memory\nstack",
+		});
+		h.send({ type: "stream_cancel", id: "gpu" });
 	});
 });

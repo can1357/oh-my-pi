@@ -171,13 +171,41 @@ const instances = new Map<string, AgentStorage>();
 let cancelExitCleanup: (() => void) | undefined;
 
 /**
+ * The agent.db surface sessions and tools reach through `Settings.getStorage()`.
+ * {@link AgentStorage} implements it over SQLite; a subagent worker's settings
+ * mirrors return a remote implementation that runs every call on the main
+ * thread's open storage (`thread/services/runtime-remote.ts`), so workers never
+ * open a second connection.
+ */
+export interface AgentStorageApi {
+	/** Cached value by key; null when missing or expired. */
+	getCache(key: string): string | null;
+	/** Set a cached value with expiry time (unix seconds). */
+	setCache(key: string, value: string, expiresAtSec: number): void;
+	/** Stored auth credentials, optionally filtered by provider. */
+	listAuthCredentials(provider?: string, includeDisabled?: boolean): StoredAuthCredential[];
+	/** Record a model use ("provider/modelId"), bumping it in the MRU order. */
+	recordModelUsage(modelKey: string): void;
+	/** Model keys, most recently used first. */
+	getModelUsageOrder(): string[];
+	/** Fold one completed request's timing into the model's perf aggregates. */
+	recordModelPerf(modelKey: string, sample: ModelPerfSample, serviceTier?: ServiceTier | null): Promise<void>;
+	/** Recency-weighted perf averages keyed by "provider/modelId". */
+	getModelPerf(): Map<string, ModelPerfStats>;
+	/** Claim a one-time notice across every process sharing the database. */
+	claimNotice(key: string, expiresAtMs: number): boolean;
+}
+
+/**
  * Unified SQLite storage for agent settings, model usage, and auth credentials.
  * Delegates auth credential operations to AuthCredentialStore from @oh-my-pi/pi-ai.
  * Uses singleton pattern per database path; access via AgentStorage.open().
  */
-export class AgentStorage {
+export class AgentStorage implements AgentStorageApi {
 	#db: Database;
-	#authStore: AuthCredentialStore;
+	#authStore: SqliteAuthCredentialStore;
+	/** Loads the OS-vault key when the store holds sealed credentials; `open()` waits for it. */
+	#unlocked: Promise<void>;
 
 	#listSettingsStmt: Statement;
 	#upsertModelUsageStmt: Statement;
@@ -203,6 +231,7 @@ export class AgentStorage {
 
 		// Create AuthCredentialStore with our open database
 		this.#authStore = new SqliteAuthCredentialStore(this.#db);
+		this.#unlocked = this.#authStore.unlock();
 
 		this.#listSettingsStmt = this.#db.prepare("SELECT key, value FROM settings");
 		this.#upsertModelUsageStmt = this.#db.prepare(
@@ -283,6 +312,11 @@ CREATE TABLE IF NOT EXISTS hint_usage (
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notice_claims (
+	key TEXT PRIMARY KEY,
+	expires_at_ms INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
@@ -428,10 +462,14 @@ FROM model_usage_legacy
 	 */
 	static async open(dbPath: string = getAgentDbPath()): Promise<AgentStorage> {
 		const existing = instances.get(dbPath);
-		if (existing) return existing;
+		if (existing) {
+			await existing.#unlocked;
+			return existing;
+		}
 
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
-		return openSqliteDatabase(
+		let preservedPath: string | undefined;
+		const opened = await openSqliteDatabase(
 			dbPath,
 			db => {
 				const storage = new AgentStorage(db, dbPath);
@@ -441,8 +479,20 @@ FROM model_usage_legacy
 				instances.set(dbPath, storage);
 				return storage;
 			},
-			{ recoverCorruption: true },
+			{
+				recoverCorruption: true,
+				onCorruptionPreserved: backupPath => {
+					preservedPath = backupPath;
+				},
+			},
 		);
+		// The quarantined store held the user's provider credentials; carry over what is readable.
+		if (preservedPath) {
+			opened.#authStore.salvageQuarantinedCredentials(preservedPath);
+			opened.#unlocked = opened.#authStore.unlock();
+		}
+		await opened.#unlocked;
+		return opened;
 	}
 
 	/** Flushes deferred writes, closes every process-wide database, and permits reopening them. */
@@ -553,6 +603,25 @@ FROM model_usage_legacy
 			this.#usageStmts[kind].upsert.run(name);
 		} catch (error) {
 			logger.warn("AgentStorage failed to record usage", { kind, name, error: String(error) });
+		}
+	}
+
+	/**
+	 * Claims a one-time notice: true only for the first claim of `key` among every
+	 * process sharing this database, so concurrent omp windows show it once. The
+	 * claim lasts until `expiresAtMs`, when the notice no longer applies.
+	 * Failures are logged and return false: a notice that cannot be recorded
+	 * stays unshown rather than repeating on every check.
+	 */
+	claimNotice(key: string, expiresAtMs: number): boolean {
+		try {
+			using prune = this.#db.prepare("DELETE FROM notice_claims WHERE expires_at_ms <= ?");
+			prune.run(Date.now());
+			using claim = this.#db.prepare("INSERT OR IGNORE INTO notice_claims (key, expires_at_ms) VALUES (?, ?)");
+			return claim.run(key, expiresAtMs).changes > 0;
+		} catch (error) {
+			logger.warn("AgentStorage failed to claim notice", { key, error: String(error) });
+			return false;
 		}
 	}
 
@@ -802,41 +871,9 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @returns Array of stored credentials with their database IDs
 	 */
 	listAuthCredentials(provider?: string, includeDisabled = false): StoredAuthCredential[] {
-		const credentials = this.#authStore.listAuthCredentials(provider);
-		if (!includeDisabled) return credentials;
-
-		using stmt = this.#db.prepare(
-			provider
-				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
-				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
-		);
-		const rows = (provider ? stmt.all(provider) : stmt.all()) as Array<{
-			id: number;
-			provider: string;
-			credential_type: string;
-			data: string;
-			disabled_cause: string | null;
-		}>;
-
-		const results: StoredAuthCredential[] = [];
-		for (const row of rows) {
-			try {
-				const parsed = JSON.parse(row.data);
-				if (!parsed || typeof parsed !== "object") continue;
-
-				let credential: AuthCredential;
-				if (row.credential_type === "api_key" && typeof (parsed as { key?: unknown }).key === "string") {
-					credential = { type: "api_key", key: (parsed as { key: string }).key };
-				} else if (row.credential_type === "oauth") {
-					credential = { type: "oauth", ...(parsed as Record<string, unknown>) } as AuthCredential;
-				} else {
-					continue;
-				}
-
-				results.push({ id: row.id, provider: row.provider, credential, disabledCause: row.disabled_cause });
-			} catch {}
-		}
-		return results;
+		return includeDisabled
+			? this.#authStore.listAllAuthCredentials(provider)
+			: this.#authStore.listAuthCredentials(provider);
 	}
 
 	/**

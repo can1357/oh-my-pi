@@ -33,7 +33,7 @@ export function hasBillableCost(cost: ModelSpec["cost"]): boolean {
 /**
  * Price zero-cost rows at their `pricing-peer` equivalents: the rule's alias
  * `peer-id` first, then the row's own id, across the peer providers in their
- * declared order (e.g. Antigravity Claude ids at Vertex before Anthropic).
+ * declared order.
  * Rows that are already billable, and ids without a billable peer, keep
  * their cost.
  */
@@ -82,7 +82,9 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (
 		model.compat &&
 		"thinkingFormat" in model.compat &&
-		model.compat.thinkingFormat === "chat-template" &&
+		// These wire formats carry provider-authored controls that cannot be
+		// recovered from model identity (including Kimi's live effort ladder).
+		(model.compat.thinkingFormat === "chat-template" || model.compat.thinkingFormat === "kimi") &&
 		model.thinking
 	)
 		return;

@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
+import { readBoundedRequestBody } from "../utils/request-body";
 import type { EmbeddingRequest, EmbeddingResult } from "../embeddings/types";
 
 export const MAX_EMBEDDINGS_BODY_BYTES = 8 * 1024 * 1024;
@@ -52,45 +53,17 @@ function parseInput(value: unknown): EmbeddingRequest["input"] {
 	invalid("input arrays must contain non-empty strings, finite numbers, or non-empty arrays of finite numbers");
 }
 
-async function readBody(req: Request): Promise<Uint8Array> {
-	const contentLength = req.headers.get("content-length");
-	if (contentLength !== null) {
-		const declared = Number(contentLength);
-		if (Number.isFinite(declared) && declared > MAX_EMBEDDINGS_BODY_BYTES) {
-			throw new EmbeddingsWireError(413, "Request payload exceeds the 8 MiB limit");
-		}
-	}
-	const reader = req.body?.getReader();
-	if (!reader) return new Uint8Array();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		total += value.byteLength;
-		if (total > MAX_EMBEDDINGS_BODY_BYTES) {
-			await reader.cancel();
-			throw new EmbeddingsWireError(413, "Request payload exceeds the 8 MiB limit");
-		}
-		chunks.push(value);
-	}
-	if (chunks.length === 1) return chunks[0]!;
-	const bytes = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return bytes;
-}
-
 /** Parse an OpenAI-compatible embeddings request with a bounded JSON body. */
 export async function parseRequest(req: Request): Promise<EmbeddingsParsedRequest> {
 	const contentType = req.headers.get("content-type")?.toLowerCase() ?? "";
 	if (!contentType.startsWith("application/json")) {
 		throw new EmbeddingsWireError(400, "Content-Type must be application/json");
 	}
-	const bytes = await readBody(req);
+	const bytes = await readBoundedRequestBody(
+		req,
+		MAX_EMBEDDINGS_BODY_BYTES,
+		() => new EmbeddingsWireError(413, "Request payload exceeds the 8 MiB limit"),
+	);
 	let body: unknown;
 	try {
 		body = JSON.parse(new TextDecoder().decode(bytes));
@@ -143,9 +116,5 @@ export function encodeResponse(result: EmbeddingResult, requestedModelId: string
 	};
 }
 
-export function formatError(status: number, errorType: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { code: status, type: errorType, message } }), {
-		status,
-		headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
-	});
-}
+/** @deprecated Use `codedErrorResponse` from `auth-gateway/http`. */
+export { codedErrorResponse as formatError } from "../auth-gateway/http";

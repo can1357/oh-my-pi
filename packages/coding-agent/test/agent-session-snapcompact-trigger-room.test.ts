@@ -16,7 +16,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { rejectionOf } from "./helpers/rejection";
 
@@ -241,7 +241,7 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 			snapcompact.maxFramesForDataBudget(shape, snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET),
 		);
 		expect(officialFrames).toBeGreaterThan(proxiedFrames);
-		// The trigger, not the 12 MB frame share, decides the official count.
+		// The trigger, not the 60 MB frame share, decides the official count.
 		expect(officialFrames).toBeLessThan(
 			snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(official)),
 		);

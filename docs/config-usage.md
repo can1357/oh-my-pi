@@ -29,8 +29,8 @@ Key integration points:
 ```text
          Generic helper order (`config.ts`)
 ┌───────────────────────────────────────┐
-│ 1) ~/.omp/agent, ~/.claude, ...       │
-│ 2) <cwd>/.omp, <cwd>/.claude, ...     │
+│ 1) ~/.omp/agent                       │
+│ 2) <cwd>/.omp                         │
 └───────────────────────────────────────┘
                     │
                     ▼
@@ -52,26 +52,17 @@ Key integration points:
 
 `src/config.ts` defines a fixed source priority list:
 
-1. `.omp` (native)
-2. `.claude`
-3. `.codex`
-4. `.gemini`
+1. `.omp` (native) — the only source; other tools' directories are handled by their discovery providers, not these helpers
 
-User-level bases:
+User-level base (only one; omp never reads another tool's home-directory config):
 
-- OMP native: `~/<PI_CONFIG_DIR>/agent` (normally `~/.omp/agent`; a named profile changes this as described below)
-- Claude's active config directory (`~/.claude` by default; `CLAUDE_CONFIG_DIR` overrides it)
-- `~/.codex`
-- `~/.gemini`
+- OMP native: the active agent directory, `getAgentDir()` (normally `~/.omp/agent`; `PI_CONFIG_DIR`, a named profile, or the default-profile `PI_CODING_AGENT_DIR` changes it as described below)
 
 Project-level bases:
 
 - `<cwd>/.omp`
-- `<cwd>/.claude`
-- `<cwd>/.codex`
-- `<cwd>/.gemini`
 
-`CONFIG_DIR_NAME` is `.omp` (`packages/utils/src/dirs.ts`). `PI_CONFIG_DIR` changes the OMP user root used by the generic helpers. `PI_CODING_AGENT_DIR` is different: for the default profile it changes `getAgentDir()` consumers such as native discovery, settings, and runtime state, but it does **not** change the generic `getConfigDirs()` / `findConfigFile()` OMP base. Named profiles ignore `PI_CODING_AGENT_DIR`.
+`CONFIG_DIR_NAME` is `.omp` (`packages/utils/src/dirs.ts`). `PI_CONFIG_DIR` changes the OMP user root used by the generic helpers. In the default profile, `PI_CODING_AGENT_DIR` replaces the whole agent directory, so it relocates the generic `getConfigDirs()` / `findConfigFile()` OMP user base along with native discovery, settings, and runtime state. Project bases stay `<cwd>/.omp`. Named profiles ignore `PI_CODING_AGENT_DIR`.
 
 ## Profiles
 
@@ -85,7 +76,7 @@ Keybindings are the one exception: a named profile merges the default profile's 
 
 On macOS and Linux, an existing `$XDG_DATA_HOME/omp`, `$XDG_STATE_HOME/omp`, or `$XDG_CACHE_HOME/omp` can relocate the corresponding data, state, or cache paths. For a named profile, OMP uses an XDG category only when that category already contains `omp/profiles/<name>`; otherwise that category remains under `~/.omp/profiles/<name>`. Run `omp config init-xdg` before relying on XDG paths.
 
-The other source bases are not profile-scoped and load identically under every profile: the external-tool bases (`~/.claude`, `~/.codex`, `~/.gemini`) belong to those tools, and the project-level bases (`<cwd>/.omp`, `<cwd>/.claude`, ...) are keyed to the working directory. Throughout this document, read `~/.omp/agent` as shorthand for the active profile's agent directory unless an environment override or XDG path is being discussed.
+The other source bases are not profile-scoped and load identically under every profile: the project-level base (`<cwd>/.omp`) is keyed to the working directory. Throughout this document, read `~/.omp/agent` as shorthand for the active profile's agent directory unless an environment override or XDG path is being discussed.
 
 ## Important constraint
 
@@ -99,8 +90,8 @@ The generic helpers in `src/config.ts` do **not** include `.pi` in source discov
 
 Returns ordered entries:
 
-- User-level entries first (by source priority)
-- Then project-level entries (by same source priority)
+- The user-level entry first (`~/.omp/agent`)
+- Then the project-level entry (`<cwd>/.omp`)
 
 Options:
 
@@ -111,15 +102,13 @@ Options:
 
 This API is used for directory-based config lookups (commands, hooks, tools, agents, etc.).
 
-Disabled foreign user sources (`isUserSourceEnabled`) are omitted from the user entries; project entries are not filtered by this helper. Claude user paths honor `CLAUDE_CONFIG_DIR` (trimmed and resolved relative to the process working directory).
-
 ## `findConfigFile(subpath, options)` / `findConfigFileWithMeta(...)`
 
 Searches for the first existing file across ordered bases, returns first match (path-only or path+metadata).
 
 ## `findAllNearestProjectConfigDirs(subpath, cwd)`
 
-Walks parent directories upward and returns the **nearest existing directory per source base** (`.omp`, `.claude`, `.codex`, `.gemini`), then sorts results by source priority.
+Walks parent directories upward and returns the **nearest existing `.omp` directory**.
 
 Use this when project config should be inherited from ancestor directories (monorepo/nested workspace behavior).
 
@@ -141,9 +130,9 @@ Behavior:
 - Both `.json` and `.jsonc` are parsed as JSONC.
 - Caches load result until `invalidate()`.
 - Returns tri-state result via `tryLoad()`:
-  - `ok`
-  - `not-found`
-  - `error` (`ConfigError` with schema/parse context)
+   - `ok`
+   - `not-found`
+   - `error` (`ConfigError` with schema/parse context)
 
 Legacy migration still supported:
 
@@ -223,14 +212,10 @@ Providers are sorted by numeric priority (higher first). Full set:
 - Claude: `80`
 - Agent Plugins standard (`agent-plugins`): `75`
 - Codex / agents / Claude plugins marketplace: `70`
-- Gemini: `60`
 - OpenCode: `55`
-- Cursor / Windsurf: `50`
-- Cline: `40`
-- GitHub Copilot: `30`
-- VS Code: `20`
 - agents-md (`AGENTS.md` files) / claude-md (standalone `CLAUDE.md` files): `10`
 - mcp-json / ssh-json / managed-skills (auto-learn): `5`
+- ssh-config (`~/.ssh/config` host aliases): `3`
 - Built-in default rules (`builtin-defaults`): `1`
 
 ```text
@@ -242,15 +227,11 @@ claude                  priority  80
 agent-plugins           priority  75
 codex / agents /
   claude-plugins        priority  70
-gemini                  priority  60
 opencode                priority  55
-cursor / windsurf       priority  50
-cline                   priority  40
-github                  priority  30
-vscode                  priority  20
 agents-md / claude-md   priority  10
 mcp-json / ssh-json /
   managed-skills        priority   5
+ssh-config              priority   3
 builtin-defaults        priority   1
 ```
 
@@ -267,7 +248,6 @@ Relevant keys:
 - tools: `name`
 - hooks: `${type}:${tool}:${name}`
 - extension modules: `name`
-- extensions: `name`
 - settings: no dedup (all items preserved)
 
 ---
@@ -281,7 +261,7 @@ Native provider (`id: native`) reads native config from:
 
 ### Directory admission rules
 
-- Slash commands, directory rules, prompts, instructions, hooks, tools, extensions, extension modules, and settings use a project/user root only when the root directory exists and is non-empty.
+- Slash commands, directory rules, prompts, instructions, hooks, tools, extension modules, and settings use a project/user root only when the root directory exists and is non-empty.
 - Skills scan `<ancestor>/.omp/skills` for each ancestor from the current working directory up to the repo root/home boundary, plus `~/.omp/agent/skills`, without requiring the root `.omp` directory itself to be non-empty.
 - `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, `RULES.md`, and `.omp/AGENTS.md` read user-level files directly and use the nearest non-empty ancestor `.omp` directory for project files. Project system-prompt entries load before user entries. `RULES.md` becomes an always-apply sticky rule. See [`docs/system-prompt-customization.md`](./system-prompt-customization.md) for the full `SYSTEM.md` / `APPEND_SYSTEM.md` contract.
 - MCP does not use the non-empty-root admission helper. It reads project `.omp/mcp.json` then `.omp/.mcp.json`, followed by user `mcp.json` then `.mcp.json`, directly.
@@ -297,7 +277,6 @@ Native provider (`id: native`) reads native config from:
 - Hooks: `hooks/pre/*`, `hooks/post/*`
 - Tools: `tools/*.{json,md,ts,js,sh,bash,py}` and `tools/<name>/index.ts`
 - Extension modules: discovered under `extensions/` (+ legacy `settings.json.extensions` string array)
-- Extensions: `extensions/<name>/gemini-extension.json`
 - Settings capability: `settings.json`, then `config.yml`
 - Context files: `.omp/AGENTS.md`; standalone ancestor `AGENTS.md` files are loaded separately by the low-priority `agents-md` provider
 
@@ -323,7 +302,7 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 
 - Missing `TITLE_SYSTEM.md` keeps the bundled title prompts. A new session's first title then comes from a fork of its first reply: when the reply's first text or tool-call block starts, the session's own model answers `src/prompts/system/title-fork.md` as a side turn on the cached prefix, naming the title plus a card index (Nerd Fonts icon, emoji, 1-6 character code) that the window title shows as `<icon> <CODE>: <title>`. The tiny title model takes over when the fork fails, times out, declines, or the reply never starts.
 - With `TITLE_SYSTEM.md` present, the first title skips the fork and comes from the tiny title model with the override, as do replan refreshes.
-- Discovery checks the current project directory bases first (`<cwd>/.omp`, `.claude`, `.codex`, `.gemini`), then the user bases in the generic helper order. Unlike native `SYSTEM.md`, project title discovery does **not** walk ancestor directories.
+- Discovery checks the current project directory first (`<cwd>/.omp`), then the user base (`~/.omp/agent`). Unlike native `SYSTEM.md`, project title discovery does **not** walk ancestor directories.
 - The override replaces only the automatic session-title generation system prompt; normal `SYSTEM.md` / `APPEND_SYSTEM.md` prompt customization is unaffected.
 - The online path asks the title model to wrap the title in `<title>...</title>` and parses it leniently from text (a plain sentence, a truncated/unclosed tag, or a stray `{"title": "..."}` JSON echo all still work). A `TITLE_SYSTEM.md` override gets the wrap-in-`<title>` instruction appended after it. The local tiny-title path keeps the `<title>...</title>` prefill/stop wrapper and uses this file as its system turn.
 

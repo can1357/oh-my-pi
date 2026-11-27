@@ -1,4 +1,9 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageTokenization } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
+import { ToolError } from "../tool-errors";
+import type { Viewport } from "puppeteer-core";
+import type { FrontTabSource } from "./native-windows";
+import type { HiddenFrame } from "./relay/protocol";
 
 export type Transferable = Bun.Transferable;
 
@@ -35,23 +40,62 @@ export interface ScreenshotResult {
 	height: number;
 }
 
+/**
+ * What rescales an image between the tool and the session's model: the vendor's own resize and the edge the
+ * host passes. A screenshot is sized to pass both untouched, so positions on it stay positions on the page.
+ */
+export interface ScreenshotLimits {
+	/** The model's resize rule; unset when the catalog names none. */
+	tokenization?: ImageTokenization;
+	/** Longest edge the host passes to the model; unset when it keeps the image's size. */
+	maxEdge?: number;
+	/**
+	 * Set where the model's wire sends a screenshot's `detail: "original"` tag as it is. Elsewhere the wire
+	 * drops it and the provider's default level sizes the image.
+	 */
+	detail?: "original";
+}
+
 export interface SessionSnapshot {
 	cwd: string;
 	browserScreenshotDir?: string;
 	/** Force non-WebP screenshot encoding (e.g. for Ollama). Unset honors `OMP_NO_WEBP`. */
 	excludeWebP?: boolean;
+	/** Image limits of the session's active model; unset without one. */
+	screenshotLimits?: ScreenshotLimits;
 }
 
 /**
- * The page an attach worker drives. `create`: open a background tab and own it, in the browser of
- * `nearTargetId` (another tab omp drives on the relay) when given. `owned`: a tab omp created, adopted
- * again after a recycle. `borrowed`: a page the user has open; never closed, never focus-emulated.
+ * The page an attach worker drives. `create`: open and own a background tab in a
+ * spawned browser, relay or CDP endpoint; `nearTargetId` selects the relay browser when given,
+ * and `reload` loads a URL once the page is set up (a recycle re-creating a page that closed with
+ * its old worker's connection). `owned`: an omp tab adopted after recycle. `borrowed`: a user's
+ * page, never closed, and focus-emulated only in a browser the user drives (see `userDriven`).
  */
-export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
+export type AttachPage =
+	| { kind: "create"; nearTargetId?: string; reload?: { url: string; timeoutMs: number } }
+	| { kind: "owned" | "borrowed"; targetId: string };
 
-/** omp created the payload's page (headless, or a relay tab of its own): closing the tab closes the page. */
+/** omp created the payload's page: closing the tab closes the page. */
 export function ownsPage(payload: WorkerInitPayload): boolean {
 	return payload.mode === "headless" || payload.page.kind !== "borrowed";
+}
+
+/** Globals every page has and omp's Bun runtime lacks: run code that cannot find one was written for the page. */
+export const PAGE_ONLY_GLOBAL_RE =
+	/^(document|window|location|history|localStorage|sessionStorage|customElements|getComputedStyle|CSS|HTML\w*Element|Element|Node) is not defined$/;
+
+/**
+ * Whether run code itself, in omp's runtime, reached for a page-only global. An exception thrown in the page arrives
+ * as a plain `Error` that Puppeteer names after it, so it never counts. A floating rejection arrives wrapped: one
+ * reason as the wrapper's `cause`, or, once an in-process run returned, all of them in its `rejections`.
+ */
+export function isMissingPageGlobal(error: unknown): boolean {
+	if (error instanceof ReferenceError) return PAGE_ONLY_GLOBAL_RE.test(error.message);
+	if (!(error instanceof Error)) return false;
+	if (error.cause instanceof ReferenceError) return isMissingPageGlobal(error.cause);
+	const rejections = error instanceof ToolError ? error.context?.rejections : undefined;
+	return Array.isArray(rejections) && rejections.some(isMissingPageGlobal);
 }
 
 export type WorkerInitPayload =
@@ -63,7 +107,7 @@ export type WorkerInitPayload =
 			uploadDir: string;
 			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
 			emulateViewport?: boolean;
-			viewport?: { width: number; height: number; deviceScaleFactor?: number };
+			viewport?: Viewport;
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];
@@ -74,7 +118,14 @@ export type WorkerInitPayload =
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
-			ignoreHttpsErrors?: boolean;
+			insecure?: boolean;
+			/**
+			 * The browser draws its windows on the user's screen (a visible launch), so a call can raise native ones, and
+			 * this tab list says whether the call's tab is the one in front of its window.
+			 */
+			frontTab?: FrontTabSource;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  }
 	| {
 			mode: "attach";
@@ -83,6 +134,7 @@ export type WorkerInitPayload =
 			/** The tab's upload staging folder, which outlives a recycled worker; see `UploadStaging`. */
 			uploadDir: string;
 			page: AttachPage;
+			viewport?: Viewport;
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];
@@ -93,7 +145,7 @@ export type WorkerInitPayload =
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
-			ignoreHttpsErrors?: boolean;
+			insecure?: boolean;
 			/**
 			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
 			 * stop a pending navigation so a blocked target cannot stall worker init (which
@@ -102,9 +154,27 @@ export type WorkerInitPayload =
 			recover?: boolean;
 			/**
 			 * The user drives this browser (connected, relay): downloads keep its one browser-wide folder and real file
-			 * names, since the user's own downloads land there too. Unset means an OMP-launched browser.
+			 * names, since the user's own downloads land there too. The page, borrowed user tabs included, is also
+			 * focus-emulated so a background tab takes trusted input without being selected; the emulation ends with
+			 * the CDP session (on the relay, with the bridge's last session of the tab). Unset means an OMP-launched
+			 * browser.
 			 */
 			userDriven?: boolean;
+			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
+			relay?: boolean;
+			/**
+			 * The browser draws its windows on the user's screen, so a call can raise native ones, and this tab list says
+			 * whether the call's tab is the one in front of its window. Unset for a headless browser, whose recycled tabs
+			 * attach too, and for a browser whose tab list cannot say.
+			 */
+			frontTab?: FrontTabSource;
+			/**
+			 * The adopted tab was opened in front of its window, so it has been shown: a recycled managed browser tab,
+			 * which a headless-mode worker opened that way.
+			 */
+			openedInFront?: boolean;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
@@ -115,13 +185,16 @@ export type WorkerInbound =
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
 	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
-	| { type: "close" };
+	/** `keepPage` leaves a page omp created open in its browser; only the worker's hold on it goes. */
+	| { type: "close"; keepPage?: boolean };
 
 export interface ReadyInfo {
 	url: string;
 	title?: string;
 	viewport: { width: number; height: number; deviceScaleFactor?: number };
 	targetId: string;
+	/** Other extensions' frames the omp relay hid in the tab before this worker adopted it. */
+	hiddenFrames?: HiddenFrame[];
 }
 
 export interface RunResultOk {
@@ -132,6 +205,14 @@ export interface RunResultOk {
 	recoverTab?: boolean;
 }
 
+/**
+ * How a run ended, with the other extensions' frames the omp relay hid in the tab while it or an earlier run went on,
+ * which the supervisor holds for the tab whether the run succeeded or not.
+ */
+export type RunOutcome = ({ ok: true; payload: RunResultOk } | { ok: false; error: RunErrorPayload }) & {
+	hiddenFrames?: HiddenFrame[];
+};
+
 export interface RunErrorPayload {
 	name: string;
 	message: string;
@@ -140,6 +221,8 @@ export interface RunErrorPayload {
 	isAbort: boolean;
 	/** The worker could not restore tab-scoped browser state and must be recycled. */
 	recoverTab?: boolean;
+	/** The run's own code reached for a page-only global ({@link isMissingPageGlobal}). */
+	missingPageGlobal?: boolean;
 	/** `tab.goto` outlasted its budget; the page stays on what loaded. */
 	navigationTimeout?: boolean;
 	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */
@@ -150,6 +233,12 @@ export interface RunErrorPayload {
 	 * (`target_closed`, `canceled_by_user`): after a user cancel the relay hides the tab, otherwise it is re-adopted.
 	 */
 	debuggerDetached?: { when: "during" | "before"; reason: string };
+	/**
+	 * The page's Puppeteer session went stale (main frame detached, CDP session closed) `during` this run, after its
+	 * code started, or `before` it, so nothing ran; the supervisor reattaches the target on a new worker. `closed`:
+	 * the page itself closed, which a reattach cannot undo.
+	 */
+	pageLost?: { when: "during" | "before"; closed: boolean };
 }
 
 export type WorkerOutbound =
@@ -169,10 +258,16 @@ export type WorkerOutbound =
 			type: "page-created";
 			targetId: string;
 	  }
+	| {
+			/**
+			 * The page closed while omp was not closing it. Not sent once the worker stops; a supervisor that cannot
+			 * see the page in the browser's target list (a connection-scoped page) releases the tab on it.
+			 */
+			type: "page-closed";
+	  }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
-	| { type: "result"; id: string; ok: true; payload: RunResultOk }
-	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| ({ type: "result"; id: string } & RunOutcome)
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
 	| { type: "closed" };

@@ -17,9 +17,10 @@ import type {
 	SimpleStreamOptions,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import { isBuiltinApi } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { resolveAnthropicCompactionEffort } from "@oh-my-pi/pi-ai/providers/anthropic";
 import {
+	declaresAnthropicCompactionEndpoint,
 	supportsAnthropicCompaction,
 	supportsBedrockConverseCompaction,
 } from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
@@ -61,22 +62,36 @@ function isBedrockConverseModel(model: Model): model is Model<"bedrock-converse-
 }
 
 /**
+ * Whether a custom api (an extension's `registerProvider` stream, never a
+ * built-in adapter) declares that it dispatches its model to Anthropic
+ * Messages with an endpoint that serves on-demand compaction
+ * (`declaresAnthropicCompactionEndpoint`). The request goes through the
+ * model's own api like any turn, so the custom stream shapes and
+ * authenticates it, and the Anthropic provider it delegates to still applies
+ * its own model and endpoint policy. The stream receives the caller's
+ * `reasoning` as is: it resolves the effort earlier controls left in force
+ * (`resolveAnthropicCompactionEffort`) on the Anthropic model it delegates to,
+ * which the agent never sees.
+ */
+function declaresAnthropicCompaction(model: Model): boolean {
+	return !isBuiltinApi(model.api) && declaresAnthropicCompactionEndpoint(model);
+}
+
+/**
  * Whether a model compacts through the Anthropic compaction beta. Model
  * eligibility is catalog policy (`compat.supportsServerCompaction`, the
  * lineage the beta documents); endpoint eligibility is resolved the way the
  * provider routes requests, so a Foundry or `ANTHROPIC_BASE_URL` reroute of a
  * first-party model is excluded unless the route opted in with
  * `remoteCompaction.enabled`. Bedrock Converse models compact through a
- * Bedrock Runtime side request; their ordinary turns stay on Converse.
+ * Bedrock Runtime side request; their ordinary turns stay on Converse. A
+ * custom api qualifies through {@link declaresAnthropicCompaction}.
  */
-export function shouldUseAnthropicNativeCompaction(
-	model: Model,
-): model is Model<"anthropic-messages" | "bedrock-converse-stream"> {
+export function shouldUseAnthropicNativeCompaction(model: Model): boolean {
 	if (isAnthropicMessagesModel(model)) return supportsAnthropicCompaction(model);
-	return isBedrockConverseModel(model) && supportsBedrockConverseCompaction(model);
+	if (isBedrockConverseModel(model)) return supportsBedrockConverseCompaction(model);
+	return declaresAnthropicCompaction(model);
 }
-
-type AnthropicNativeCompactionModel = Model<"anthropic-messages" | "bedrock-converse-stream">;
 
 export function getPreservedAnthropicCompactionData(
 	preserveData: Record<string, unknown> | undefined,
@@ -245,12 +260,20 @@ export interface AnthropicNativeCompactionOptions
  * output limits; the configured method order can then choose a fallback.
  */
 export async function requestAnthropicNativeCompaction(
-	model: AnthropicNativeCompactionModel,
+	model: Model,
 	apiKey: ApiKey,
 	request: AnthropicNativeCompactionRequest,
 	signal: AbortSignal | undefined,
 	options: AnthropicNativeCompactionOptions,
 ): Promise<AnthropicNativeCompactionResponse> {
+	// Pure compaction policy checks must not load the provider; only an actual request needs it.
+	const reasoning = isAnthropicMessagesModel(model)
+		? (await import("@oh-my-pi/pi-ai/providers/anthropic")).resolveAnthropicCompactionEffort(
+				model,
+				request.context.messages,
+				request.reasoning,
+			)
+		: request.reasoning;
 	const response = await instrumentedCompleteSimple(
 		model,
 		request.context,
@@ -258,9 +281,7 @@ export async function requestAnthropicNativeCompaction(
 			apiKey,
 			signal,
 			maxTokens: request.maxTokens,
-			reasoning: isAnthropicMessagesModel(model)
-				? resolveAnthropicCompactionEffort(model, request.context.messages, request.reasoning)
-				: request.reasoning,
+			reasoning,
 			initiatorOverride: options.initiatorOverride,
 			metadata: options.metadata,
 			fetch: options.fetch,

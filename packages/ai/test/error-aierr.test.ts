@@ -119,9 +119,9 @@ describe("AIError.classify — structural provider errors", () => {
 
 	it("classifies thought-only output as transient + empty-response + retryable", () => {
 		const err = new AIError.ProviderResponseError(
-			"Cloud Code Assist API returned a thought-only response without final output",
+			"Google API returned a thought-only response without final output",
 			{
-				provider: "google-antigravity",
+				provider: "google",
 				kind: "empty-output",
 			},
 		);
@@ -187,6 +187,25 @@ describe("AIError.finalize", () => {
 		// The transient flag survives a re-classify from the persisted message fields.
 		const reId = AIError.classifyMessage({ errorId: result.id, errorMessage: result.message });
 		expect(AIError.retriable(reId)).toBe(true);
+	});
+
+	it("treats Aliyun multimodal-gateway 400s as transient (flaky, replay succeeds)", () => {
+		const phrasings = [
+			"400 <400> InternalError.Algo.InvalidParameter: The provided URL does not appear to be valid. Ensure it is correctly formatted.\n<400> InternalError.Algo.InvalidParameter: The provided URL does not appear to be valid. Ensure it is correctly formatted. (type=invalid_request_error param=invalid_parameter_error)",
+			"400 <400> InternalError.Algo.InvalidParameter: Download multimodal file timed out\n<400> InternalError.Algo.InvalidParameter: Download multimodal file timed out (type=invalid_request_error param=invalid_parameter_error)",
+		];
+		for (const errorMessage of phrasings) {
+			const id = AIError.classifyMessage({ errorStatus: 400, errorMessage });
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		}
+	});
+
+	it("keeps genuine 400 validation errors terminal", () => {
+		const id = AIError.classifyMessage({
+			errorStatus: 400,
+			errorMessage: "400 invalid_request_error: unknown field 'temperaturee' in request body",
+		});
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
 	});
 });
 

@@ -5,22 +5,18 @@
  *
  * Presentation now follows a second detector, `vcs.repoForDisplay()`, whose
  * only policy difference is preferring jj on equal-root ties; automation
- * keeps `vcs.repo()`. The component (and footer) split accordingly:
- * branch label and the head watcher come from the display
- * repository (status counts stay on the operational repository), while PR
- * lookup keeps resolving the operational git branch — a jj bookmark/change
- * id must never become a GitHub head.
+ * keeps `vcs.repo()`. The branch label comes from the display repository,
+ * while PR lookup keeps resolving the operational git
+ * branch — a jj bookmark/change id must never become a GitHub head.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
-import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
-import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/types";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { disposeStatusLines, flushStatus, lineText, statusLine, statusSession } from "./helpers/session-status-line";
 
 type GitStatus = { staged: number; unstaged: number; untracked: number };
 
@@ -29,7 +25,6 @@ const originalProjectDir = getProjectDir();
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
 });
 
 afterAll(() => {
@@ -38,41 +33,26 @@ afterAll(() => {
 });
 
 afterEach(() => {
+	disposeStatusLines();
 	vi.restoreAllMocks();
 });
 
-function makeSession() {
-	return {
-		state: { messages: [], model: undefined },
-		messages: [],
-		model: undefined,
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isFastModeEnabled: () => false,
-		getGoalModeState: () => null,
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "display-detector test",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+function makeLine(settings: StatusLineSettings) {
+	return statusLine(
+		statusSession({
+			sessionManager: { getSessionName: () => "display-detector test" },
+		}),
+		settings,
+	);
 }
 
 function headFor(branch: string): VcsHeadState {
-	return { kind: "ref", branch, refName: `refs/heads/${branch}`, commit: undefined };
+	return {
+		kind: "ref",
+		branch,
+		refName: `refs/heads/${branch}`,
+		commit: undefined,
+	};
 }
 const detachedHead: VcsHeadState = { kind: "detached" };
 
@@ -91,12 +71,19 @@ function gitHandle(head: VcsHeadState | null): VcsGitRepo {
 	return {
 		headSync: () => head,
 		linkedWorktree: () => null,
-		statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		statusSummary: async (): Promise<GitStatus | null> => ({
+			staged: 0,
+			unstaged: 0,
+			untracked: 0,
+		}),
 	} as unknown as VcsGitRepo;
 }
 
 function gitWithDefaultBranch(branch: string): VcsGitRepo {
-	return { defaultBranch: async () => branch, linkedWorktree: () => null } as unknown as VcsGitRepo;
+	return {
+		defaultBranch: async () => branch,
+		linkedWorktree: () => null,
+	} as unknown as VcsGitRepo;
 }
 
 function operationalGit(root: string, head: VcsHeadState | null): VcsRepo {
@@ -106,7 +93,6 @@ function operationalGit(root: string, head: VcsHeadState | null): VcsRepo {
 		asGit: () => handle,
 		asJj: () => null,
 		root: () => root,
-		watchTarget: () => `${root}/.git/HEAD`,
 		statusSummary: (signal?: AbortSignal) => handle.statusSummary(signal),
 	} as unknown as VcsRepo;
 }
@@ -117,7 +103,6 @@ function displayJj(root: string, label: () => Promise<string | null>, status: Gi
 		asGit: () => null,
 		asJj: () => ({}) as never,
 		root: () => root,
-		watchTarget: () => `${root}/.jj/repo/op_heads/heads`,
 		label,
 		statusSummary: async () => status,
 	} as unknown as VcsRepo;
@@ -136,11 +121,11 @@ const gitPrSegments: StatusLineSettings = {
 	leftSegments: ["git", "pr"],
 };
 
-async function flush(): Promise<void> {
-	await Promise.resolve();
-	await Promise.resolve();
-	await Promise.resolve();
-	await Promise.resolve();
+/** Paint once (the first paint starts the VCS read), then let it land. */
+async function paint(line: ReturnType<typeof makeLine>): Promise<string> {
+	lineText(line, 80);
+	await flushStatus();
+	return lineText(line, 80);
 }
 
 function mockRepos(operational: VcsRepo, display: VcsRepo, root: string): void {
@@ -150,32 +135,23 @@ function mockRepos(operational: VcsRepo, display: VcsRepo, root: string): void {
 	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(display);
 }
 
-describe("StatusLineComponent display detector", () => {
-	it("shows the jj bookmark with the jj watch target when colocated", async () => {
+describe("status line display detector", () => {
+	it("shows the jj bookmark when colocated", async () => {
 		const root = "/repo/colocated";
 		const operational = operationalGit(root, headFor("main"));
-		const display = displayJj(root, async () => "my-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
+		const display = displayJj(root, async () => "my-bookmark", {
+			staged: 0,
+			unstaged: 0,
+			untracked: 0,
+		});
 		mockRepos(operational, display, root);
-		let watched: VcsRepo | null = null;
-		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
-			watched = repo;
-			return () => {};
-		}) as unknown as typeof vcs.watch);
 
-		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession(), statusLineHost);
-		component.updateSettings(gitSegment);
-		component.watchBranch(onBranchChange);
-
-		component.getTopBorder(80);
-		await flush();
+		const component = makeLine(gitSegment);
+		const painted = await paint(component);
 
 		expect(vcs.repoForDisplay).toHaveBeenCalled();
-		expect(onBranchChange).toHaveBeenCalled();
-		const content = component.getTopBorder(80).content;
+		const content = painted;
 		expect(content).toContain("my-bookmark");
-		expect((watched as VcsRepo | null)?.watchTarget()).toBe(`${root}/.jj/repo/op_heads/heads`);
-		component.dispose();
 	});
 
 	it("keeps the git branch for a nested git checkout under an outer jj workspace", async () => {
@@ -183,14 +159,9 @@ describe("StatusLineComponent display detector", () => {
 		const operational = operationalGit(root, headFor("git-branch-name"));
 		mockRepos(operational, operationalGit(root, headFor("git-branch-name")), root);
 
-		const component = new StatusLineComponent(makeSession(), statusLineHost);
-		component.updateSettings(gitSegment);
-		component.watchBranch(() => {});
-
-		component.getTopBorder(80);
-		await flush();
-		expect(component.getTopBorder(80).content).toContain("git-branch-name");
-		component.dispose();
+		const component = makeLine(gitSegment);
+		const painted = await paint(component);
+		expect(painted).toContain("git-branch-name");
 	});
 
 	it("keeps detached for ordinary git with no jj workspace", async () => {
@@ -198,58 +169,53 @@ describe("StatusLineComponent display detector", () => {
 		const operational = operationalGit(root, detachedHead);
 		mockRepos(operational, operationalGit(root, detachedHead), root);
 
-		const component = new StatusLineComponent(makeSession(), statusLineHost);
-		component.updateSettings(gitSegment);
-		component.watchBranch(() => {});
-
-		component.getTopBorder(80);
-		await flush();
-		expect(component.getTopBorder(80).content).toContain("detached");
-		component.dispose();
+		const component = makeLine(gitSegment);
+		const painted = await paint(component);
+		expect(painted).toContain("detached");
 	});
 
 	it("does not send the jj bookmark to PR lookup when the git branch is default", async () => {
 		const root = "/repo/colocated-pr";
 		const operational = operationalGit(root, headFor("main"));
-		const display = displayJj(root, async () => "feature-x", { staged: 0, unstaged: 0, untracked: 0 });
+		const display = displayJj(root, async () => "feature-x", {
+			staged: 0,
+			unstaged: 0,
+			untracked: 0,
+		});
 		mockRepos(operational, display, root);
 		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
 		const run = vi.spyOn(github, "run").mockResolvedValue({ exitCode: 0, stdout: "{}", stderr: "" });
 
-		const component = new StatusLineComponent(makeSession(), statusLineHost);
-		component.updateSettings(gitPrSegments);
-		component.watchBranch(() => {});
+		const component = makeLine(gitPrSegments);
+		const painted = await paint(component);
 
-		component.getTopBorder(80);
-		await flush();
-
-		expect(component.getTopBorder(80).content).toContain("feature-x");
+		expect(painted).toContain("feature-x");
 		expect(run).not.toHaveBeenCalled();
-		component.dispose();
 	});
 
 	it("still looks up PRs by the operational git branch when it is not default", async () => {
 		const root = "/repo/colocated-pr-live";
 		const operational = operationalGit(root, headFor("git-branch-name"));
-		const display = displayJj(root, async () => "feature-x", { staged: 0, unstaged: 0, untracked: 0 });
+		const display = displayJj(root, async () => "feature-x", {
+			staged: 0,
+			unstaged: 0,
+			untracked: 0,
+		});
 		mockRepos(operational, display, root);
 		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
-		const run = vi
-			.spyOn(github, "run")
-			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
+		const run = vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 0,
+			stdout: '{"number":7,"url":"https://example.test/x/7"}',
+			stderr: "",
+		});
 
-		const component = new StatusLineComponent(makeSession(), statusLineHost);
-		component.updateSettings(gitPrSegments);
-		component.watchBranch(() => {});
-
-		component.getTopBorder(80);
-		await flush();
+		const component = makeLine(gitPrSegments);
+		const painted = await paint(component);
 
 		expect(run).toHaveBeenCalledTimes(1);
 		expect(run.mock.calls[0]?.[1]).toEqual(["pr", "view", "--json", "number,url"]);
-		expect(component.getTopBorder(80).content).toContain("feature-x");
-		expect(component.getTopBorder(80).content).toContain("#7");
-		component.dispose();
+		expect(painted).toContain("feature-x");
+		expect(painted).toContain("#7");
 	});
 	it("sanitizes control characters from the jj label", async () => {
 		const root = "/repo/sanitize";
@@ -261,18 +227,13 @@ describe("StatusLineComponent display detector", () => {
 		});
 		mockRepos(operational, display, root);
 
-		const component = new StatusLineComponent(makeSession(), statusLineHost);
-		component.updateSettings(gitSegment);
-		component.watchBranch(() => {});
-
-		component.getTopBorder(80);
-		await flush();
-		const content = component.getTopBorder(80).content;
+		const component = makeLine(gitSegment);
+		const painted = await paint(component);
+		const content = painted;
 		expect(content).toContain("evil-");
 		expect(content).toContain("bookmark");
 		// The raw erase-display payload is gone (theme ANSI aside, which is
 		// emitted by the renderer itself, not the label).
 		expect(content).not.toContain("[2J");
-		component.dispose();
 	});
 });

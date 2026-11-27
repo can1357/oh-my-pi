@@ -6,25 +6,25 @@ The critical distinction: **notebook support is file conversion/editing, not not
 
 ## Implementation files
 
-- [`crates/pi-edit/src/notebook.rs`](../crates/pi-edit/src/notebook.rs)
-- [`crates/pi-edit/src/files.rs`](../crates/pi-edit/src/files.rs)
+- [`crates/edit/src/notebook.rs`](../crates/edit/src/notebook.rs)
+- [`crates/edit/src/files.rs`](../crates/edit/src/files.rs)
 - [`src/tools/read.ts`](../packages/coding-agent/src/tools/read.ts)
 - [`src/tools/eval.ts`](../packages/coding-agent/src/tools/eval.ts)
 - [`src/eval/py/executor.ts`](../packages/coding-agent/src/eval/py/executor.ts)
 - [`src/eval/py/kernel.ts`](../packages/coding-agent/src/eval/py/kernel.ts)
 - [`src/eval/kernel-session-registry.ts`](../packages/coding-agent/src/eval/kernel-session-registry.ts)
 - [`src/eval/executor-base.ts`](../packages/coding-agent/src/eval/executor-base.ts)
-- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts)
+- [`packages/coding-agent/src/tools/streaming-output.ts`](../packages/coding-agent/src/tools/streaming-output.ts)
 
 ## 1) Runtime boundary: editing vs executing
 
-## `.ipynb` file conversion (`crates/pi-edit/src/notebook.rs`)
+## `.ipynb` file conversion (`crates/edit/src/notebook.rs`)
 
 - `read` treats `.ipynb` files as notebooks unless the selector is `:raw`.
 - The default notebook view is editable text with markers:
-  - `# %% [code] cell:N`
-  - `# %% [markdown] cell:N`
-  - `# %% [raw] cell:N`
+   - `# %% [code] cell:N`
+   - `# %% [markdown] cell:N`
+   - `# %% [raw] cell:N`
 - Line selectors and multi-range selectors operate on that virtual text.
 - The edit pipeline round-trips virtual text back to notebook JSON through `serialize_edited_notebook_text(...)`.
 - Existing notebook metadata is preserved when a marker references an existing unused `cell:N`; new cells get fresh empty metadata.
@@ -92,14 +92,14 @@ Kernel semantics are implemented in `executePython` / `PythonKernel` and apply t
 `PythonKernelMode`:
 
 - `session` (default)
-  - kernels are cached by `(session id, cwd, interpreter)`
-  - multiple owners can share a retained kernel for the same key
-  - foreground eval tool calls use exclusive concurrency; this is not a blanket lock on background cells or kernel-defined tool requests
-  - dead kernels are replaced before execution
+   - kernels are cached by `(session id, cwd, interpreter)`
+   - multiple owners can share a retained kernel for the same key
+   - foreground eval tool calls use exclusive concurrency; this is not a blanket lock on background cells or kernel-defined tool requests
+   - dead kernels are replaced before execution
 - `per-call`
-  - creates a subprocess for the request
-  - executes
-  - always shuts down the subprocess in `finally`
+   - creates a subprocess for the request
+   - executes
+   - always shuts down the subprocess in `finally`
 
 ## Reset behavior
 
@@ -146,7 +146,7 @@ Cancellation/timeout:
 
 ## 6) Truncation and artifact behavior
 
-`OutputSink` in `packages/tui/src/tools/streaming-output.ts` is used by kernel execution paths:
+`OutputSink` in `packages/coding-agent/src/tools/streaming-output.ts` is used by kernel execution paths:
 
 - sanitizes every chunk
 - tracks total/output lines and bytes
@@ -173,7 +173,7 @@ Kernel-backed execution rendering expects:
 - optional structured status events
 - optional JSON output trees
 - image outputs
-- truncation warnings + optional `artifact://<id>` pointer
+- truncation warnings + optional `local://<id>.log` pointer
 
 This renderer behavior is unrelated to notebook JSON editing except that both reuse shared TUI primitives.
 

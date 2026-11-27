@@ -42,8 +42,10 @@ describe("CoreWeave Serverless Inference project header", () => {
 	const coreWeaveModel = {
 		provider: "coreweave",
 		id: "zai-org/GLM-5.2",
+		api: "openai-completions",
+		reasoning: true,
 		baseUrl: "https://api.inference.wandb.ai/v1",
-	};
+	} as const;
 
 	test("adds OpenAI-Project from COREWEAVE_PROJECT", () => {
 		Bun.env.COREWEAVE_PROJECT = "team/project";

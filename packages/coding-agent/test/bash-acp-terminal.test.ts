@@ -138,7 +138,7 @@ describe("BashTool ACP terminal routing", () => {
 		const sessionEnvOf = (call: number) =>
 			Object.fromEntries(
 				(createSpy.mock.calls[call]![0].env ?? [])
-					.filter(({ name }) => name === "PI_SESSION_ID" || name === "PI_SESSION_FILE")
+					.filter(({ name }) => name.startsWith("PI_SESSION_") || name === "PI_TOOL_CALL_ID")
 					.map(({ name, value }) => [name, value]),
 			);
 
@@ -147,9 +147,17 @@ describe("BashTool ACP terminal routing", () => {
 		sessionFile = null;
 		await tool.execute("call-env-b", { command: "true" });
 
-		expect(sessionEnvOf(0)).toEqual({ PI_SESSION_ID: "session-a", PI_SESSION_FILE: fileA });
+		expect(sessionEnvOf(0)).toEqual({
+			PI_SESSION_ID: "session-a",
+			PI_SESSION_FILE: fileA,
+			PI_TOOL_CALL_ID: "call-env-a",
+		});
 		// Empty, not absent: an env overlay cannot unset a stale value inherited from a parent omp.
-		expect(sessionEnvOf(1)).toEqual({ PI_SESSION_ID: "session-b", PI_SESSION_FILE: "" });
+		expect(sessionEnvOf(1)).toEqual({
+			PI_SESSION_ID: "session-b",
+			PI_SESSION_FILE: "",
+			PI_TOOL_CALL_ID: "call-env-b",
+		});
 	});
 
 	it("extracts graphics from cumulative terminal snapshots without leaking escapes", async () => {
@@ -199,7 +207,7 @@ describe("BashTool ACP terminal routing", () => {
 		const tool = new BashTool(makeSession(bridge));
 
 		await expect(tool.execute("call-pre-abort", { command: "echo hi" }, controller.signal)).rejects.toThrow(
-			/Command aborted/,
+			/\[aborted\]/,
 		);
 
 		expect(createSpy).toHaveBeenCalledTimes(0);
@@ -291,7 +299,7 @@ describe("BashTool ACP terminal routing", () => {
 
 		const executePromise = tool.execute("call-abort", { command: "sleep 60" }, controller.signal);
 
-		await expect(executePromise).rejects.toThrow(/Command aborted/);
+		await expect(executePromise).rejects.toThrow(/\[aborted\]/);
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	});
@@ -328,7 +336,7 @@ describe("BashTool ACP terminal routing", () => {
 
 		expect(result.isError).toBe(true);
 		expect(result.details?.timedOut).toBe(true);
-		expect(result.content.find(block => block.type === "text")?.text).toContain("Command timed out after 1 seconds");
+		expect(result.content.find(block => block.type === "text")?.text).toContain("[timed out after 1s]");
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 		expect(currentOutputAfterKill).toBeGreaterThan(0);
@@ -360,7 +368,7 @@ describe("BashTool ACP terminal routing", () => {
 
 		expect(result.isError).toBe(true);
 		expect(result.details?.timedOut).toBe(true);
-		expect(result.content.find(block => block.type === "text")?.text).toContain("Command timed out after 1 seconds");
+		expect(result.content.find(block => block.type === "text")?.text).toContain("[timed out after 1s]");
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	}, 8000);

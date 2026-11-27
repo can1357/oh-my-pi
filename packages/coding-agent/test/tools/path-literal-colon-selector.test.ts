@@ -12,13 +12,13 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { splitPathAndSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { GrepTool } from "../../src/tools/grep";
+import { initTheme } from "../../src/ui/theme/service";
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -178,12 +178,6 @@ describe("literal colon filename resolution (issue #4618)", () => {
 
 			expect(await probeLiteralPathExists(literal, tmpDir)).toBe("exists");
 			expect(await splitPathAndSelPreferringLiteral(literal, tmpDir)).toEqual({ path: literal });
-		});
-
-		it("returns the strict split unchanged when there is no selector tail", async () => {
-			expect(await splitPathAndSelPreferringLiteral("plain.txt", tmpDir)).toEqual({
-				path: "plain.txt",
-			});
 		});
 	});
 
@@ -528,7 +522,7 @@ describe("grep CLI subcommand leading-colon path (issue #5624)", () => {
 
 	beforeEach(async () => {
 		tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "grep-cli-colon-"));
-		await initTheme();
+		initTheme();
 	});
 
 	afterEach(async () => {

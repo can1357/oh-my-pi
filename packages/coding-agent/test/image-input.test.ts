@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readImageMetadata, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { loadImageAttachmentInput, loadImageInput } from "../src/utils/image-loading";
-import { InvalidImageDataError } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { InvalidImageDataError } from "@oh-my-pi/pi-coding-agent/utils/image-input";
 
 describe("readImageMetadata", () => {
 	let testDir: string;
@@ -66,6 +66,26 @@ describe("readImageMetadata", () => {
 		);
 		const imagePath = path.join(testDir, "middle-elided.png");
 		fs.writeFileSync(imagePath, Buffer.concat([whole.subarray(0, 20), whole.subarray(40)]));
+
+		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
+		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
+	});
+
+	it("rejects a JPEG truncated before its EOI marker", async () => {
+		// Bun.Image pads a truncated JPEG's missing scan rows and decodes it
+		// anyway, so the read path has to notice the missing EOI marker itself.
+		const intact = Buffer.from(
+			await new Bun.Image(
+				Buffer.from(
+					"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+					"base64",
+				),
+			)
+				.jpeg()
+				.bytes(),
+		);
+		const imagePath = path.join(testDir, "truncated.jpg");
+		fs.writeFileSync(imagePath, intact.subarray(0, intact.length - 8));
 
 		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
 		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);

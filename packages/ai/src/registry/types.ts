@@ -13,6 +13,8 @@
  */
 
 import type { Api, FetchImpl, Model, SimpleStreamOptions, StreamOptions } from "../types";
+import type { OAuthRefreshReason } from "../auth/types";
+import type { SignOutHook } from "./hooks/types";
 import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
 /**
@@ -82,9 +84,18 @@ export interface ProviderDefinition {
 	// --- interactive login (OAuthProviderInterface-compatible) ---
 	/** Interactive login; flows that need `onPrompt`/`onAuth` reject a bare controller at runtime. */
 	readonly login?: (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
-	/** Refresh a stored grant; the signal bounds provider network work to refresh ownership. */
-	readonly refreshToken?: (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
+	/**
+	 * Refresh a stored grant; the signal bounds provider network work to refresh ownership.
+	 * `reason` is why the refresh was requested; undefined means the grant is near expiry.
+	 */
+	readonly refreshToken?: (
+		credentials: OAuthCredentials,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
+	/** Forget a removed login's secrets kept outside `agent.db` and revoke it upstream (`sign-out hook=`). */
+	readonly signOut?: SignOutHook;
 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
 	readonly storeCredentialsAs?: string;
 	// --- coding-agent login UX ---

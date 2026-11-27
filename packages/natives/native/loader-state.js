@@ -71,12 +71,36 @@ function getNativesDir() {
 	return path.join(os.homedir(), ".omp", "natives");
 }
 
-function resolveLeafPackageDir(platformTag) {
+/**
+ * Bun's install cache has no `node_modules` around a release copy, so
+ * `require.resolve` cannot reach the platform leaf beside it: a version-pinned
+ * sibling (`pi-natives-<tag>@<version>@@@N`) of the core package. Scan the core
+ * package's scope directory for the leaf that holds the addon, matching the
+ * running version (issue #8901).
+ */
+function findScopedLeafPackageDir(platformTag, addonFilenames) {
+	const scopeDir = path.join(import.meta.dir, "..", "..");
+	let names;
+	try {
+		names = fs.readdirSync(scopeDir);
+	} catch {
+		return null;
+	}
+	const leafName = `pi-natives-${platformTag}`;
+	const leaves = names.filter(name => name === leafName || name.startsWith(`${leafName}@${packageJson.version}@`));
+	for (const name of leaves) {
+		const dir = path.join(scopeDir, name);
+		if (addonFilenames.some(filename => fs.existsSync(path.join(dir, filename)))) return dir;
+	}
+	return null;
+}
+
+function resolveLeafPackageDir(platformTag, addonFilenames) {
 	try {
 		const require_ = createRequire(import.meta.url);
 		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
 	} catch {
-		return null;
+		return findScopedLeafPackageDir(platformTag, addonFilenames);
 	}
 }
 
@@ -453,11 +477,26 @@ function isSafeEmbeddedAddonFilename(filename) {
 	return filename.length > 0 && path.basename(filename) === filename && !filename.includes("/") && !filename.includes("\\");
 }
 
+/**
+ * Embedded addons extract to `<targetDir>/embedded-<hash>/<filename>`, where
+ * `hash` is the manifest's build-time content hash. A path only ever receives
+ * the bytes of its own build, and a file appears there only through an atomic
+ * rename, so its presence at the expected size identifies it. Two builds of
+ * one version never share a path, so a rebuild with a same-size addon, an
+ * interrupted extraction, or two builds extracting at once cannot leave one
+ * build loading the other's addon. Hashing the 100+ MB file at startup is
+ * never needed.
+ */
+const EMBEDDED_ADDON_DIR_PREFIX = "embedded-";
+
+export function embeddedAddonPath(targetDir, file) {
+	return path.join(targetDir, `${EMBEDDED_ADDON_DIR_PREFIX}${file.hash}`, file.filename);
+}
+
 function isEmbeddedAddonFileCurrent(targetPath, file) {
 	try {
 		const stat = fs.statSync(targetPath);
-		if (!stat.isFile()) return false;
-		return stat.size === file.size;
+		return stat.isFile() && stat.size === file.size;
 	} catch (err) {
 		if (err && err.code === "ENOENT") return false;
 		throw err;
@@ -479,49 +518,122 @@ function writeEmbeddedAddonFile(targetPath, content) {
 	}
 }
 
+/**
+ * Refreshes `targetDir`'s activity time before probing, so a concurrently
+ * starting newer build's `cleanupStaleNativeVersions` spares it until this
+ * process loads the addon. A directory this process cannot create or touch
+ * (read-only mount, another owner) is fatal only when a file must be written:
+ * an addon already at its build's hash path is used as-is.
+ */
 export function extractEmbeddedAddons({ files, targetDir }) {
 	for (const file of files) {
 		if (!isSafeEmbeddedAddonFilename(file.filename)) {
 			throw new Error(`Unsafe embedded addon filename: ${file.filename}`);
 		}
+		if (!/^[0-9a-f]+$/.test(file.hash)) {
+			throw new Error(`Unsafe embedded addon hash for ${file.filename}: ${file.hash}`);
+		}
+	}
+	let prepareError = null;
+	try {
+		prepareNativeVersionDir(targetDir);
+	} catch (err) {
+		prepareError = err;
 	}
 	const writtenPaths = [];
 	for (const file of files) {
-		const targetPath = path.join(targetDir, file.filename);
+		const targetPath = embeddedAddonPath(targetDir, file);
 		if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
+		if (prepareError) throw prepareError;
 		const content = Bun.zstdDecompressSync(fs.readFileSync(file.zstdPath));
 		if (content.length !== file.size) {
 			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
 		}
-		writeEmbeddedAddonFile(targetPath, content);
+		fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+		try {
+			writeEmbeddedAddonFile(targetPath, content);
+		} catch (err) {
+			// Another process published the same build first; on Windows the
+			// rename then fails because that process has the file loaded.
+			if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
+			throw err;
+		}
 		writtenPaths.push(targetPath);
 	}
 	return writtenPaths;
 }
 
+/**
+ * Best-effort removal of `embedded-<hash>` directories left by other builds of
+ * this version. A directory still loaded by a running process (Windows locks
+ * it) is skipped and retried on a later start.
+ */
+export function pruneStaleEmbeddedAddons({ targetDir, keepHashes }) {
+	const keep = new Set(keepHashes.map(hash => `${EMBEDDED_ADDON_DIR_PREFIX}${hash}`));
+	const removed = [];
+	let entries;
+	try {
+		entries = fs.readdirSync(targetDir, { withFileTypes: true });
+	} catch {
+		return removed;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !entry.name.startsWith(EMBEDDED_ADDON_DIR_PREFIX) || keep.has(entry.name)) continue;
+		const dir = path.join(targetDir, entry.name);
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+			removed.push(dir);
+		} catch {
+			// In use by another process; retried on a later start.
+		}
+	}
+	return removed;
+}
+
+function hasMatchingEmbeddedAddon(ctx) {
+	return (
+		ctx.isCompiledBinary &&
+		!!embeddedAddon &&
+		embeddedAddon.platformTag === ctx.platformTag &&
+		embeddedAddon.version === ctx.packageVersion
+	);
+}
+
+/** This build's embedded addon for the selected variant, plus the lazily extracted baseline fallback on modern x64. */
+function embeddedProbeFiles(ctx) {
+	if (!hasMatchingEmbeddedAddon(ctx)) return { primary: null, fallback: null };
+	const fallback =
+		ctx.selectedVariant === "modern" ? embeddedAddon.files.find(file => file.variant === "baseline") || null : null;
+	return { primary: selectEmbeddedAddonFile(ctx.selectedVariant), fallback };
+}
+
 function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
-	if (!ctx.isCompiledBinary || !embeddedAddon) return null;
-	if (embeddedAddon.platformTag !== ctx.platformTag || embeddedAddon.version !== ctx.packageVersion) return null;
-	if (!file) return null;
-	const targetPath = path.join(ctx.versionedDir, file.filename);
+	if (!hasMatchingEmbeddedAddon(ctx) || !file) return null;
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
-		prepareNativeVersionDir(ctx.versionedDir);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		errors.push(`embedded addon dir: ${message}`);
-		return null;
-	}
-
-	try {
 		extractEmbeddedAddons({ files: [file], targetDir: ctx.versionedDir });
-		return targetPath;
+		return embeddedAddonPath(ctx.versionedDir, file);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		errors.push(`embedded addon extraction (${file.filename}): ${message}`);
 		return null;
 	}
+}
+
+/**
+ * Final probe order for `loadNative`. When the binary carries an addon for
+ * this platform and version, the unhashed `versionedDir/<filename>` paths are
+ * dropped: older builds of this version extracted there, so a file at that
+ * path may belong to any of them and would pass the release-version check.
+ * The embedded addon is reachable only through its own hash path, which the
+ * caller probes after (re-)extracting it.
+ *
+ * @param {{ candidates: string[]; versionedDir: string; hasEmbedded: boolean; embedded: string[]; staged: string | null }} input
+ */
+export function resolveRuntimeCandidates({ candidates, versionedDir, hasEmbedded, embedded, staged }) {
+	const shared = hasEmbedded ? candidates.filter(candidate => path.dirname(candidate) !== versionedDir) : candidates;
+	return [...new Set([...embedded, ...(staged ? [staged] : []), ...shared])];
 }
 
 /**
@@ -694,6 +806,48 @@ export function missingNativeExport(symbolName, addon = loadedAddon) {
 }
 
 /**
+ * Static reads a {@link missingNativeClass} stand-in answers normally rather
+ * than throwing: the function-object intrinsics every caller and inspector
+ * touches, and `then`, so an accidental `await` on the export resolves to the
+ * class instead of exploding somewhere unrelated.
+ */
+const CLASS_STUB_PLAIN_STATICS = new Set(["prototype", "name", "length", "constructor", "then"]);
+
+/**
+ * Class counterpart of {@link missingNativeExport}: a stand-in that fails with
+ * the addon's identity attached instead of as a bare `undefined` export, which
+ * surfaces as `undefined is not a constructor` at the callsite and names
+ * nothing.
+ *
+ * Same staleness rule as the function stub: only a stale addon gets a
+ * stand-in, so `typeof native.Thing === "function"` capability probes against
+ * a current addon keep their meaning.
+ *
+ * Several of these classes are entered through a static rather than a
+ * constructor — `FileLock.tryAcquire`, `IpcServer.listen`, `Process.fromPid`,
+ * `PowerAssertion.start` — so the stand-in answers any other static read with
+ * the same diagnostic. Only a stale addon reaches it, and only for a class
+ * that addon does not carry, so nothing on a healthy tree meets a proxy.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {(new (...args: unknown[]) => never) | undefined}
+ */
+export function missingNativeClass(symbolName, addon = loadedAddon) {
+	if (!addon?.stale) return undefined;
+	const stub = class MissingNativeClass {
+		constructor() {
+			throw new Error(missingNativeExportMessage(symbolName, addon));
+		}
+	};
+	return new Proxy(stub, {
+		get(target, key, receiver) {
+			if (typeof key === "symbol" || CLASS_STUB_PLAIN_STATICS.has(key)) return Reflect.get(target, key, receiver);
+			throw new Error(missingNativeExportMessage(`${symbolName}.${key}`, addon));
+		},
+	});
+}
+
+/**
  * Actionable text for {@link missingNativeExport}. `addon` is injectable so the
  * wording can be pinned without a stale `.node` on disk.
  * @param {string} symbolName
@@ -747,13 +901,27 @@ function configureGrammarDir(bindings, nativesDir) {
 }
 
 
+/**
+ * Paths a compiled binary loads its addon from: this build's
+ * `embedded-<hash>/` paths when it embeds an addon (the shared
+ * `versionedDir/<filename>` paths are never probed then), else the shared ones.
+ */
+function compiledAddonTargets(ctx) {
+	const { primary, fallback } = embeddedProbeFiles(ctx);
+	const files = [...new Set([primary, fallback].filter(Boolean))];
+	if (files.length > 0) {
+		return files.map(file => ({ filename: file.filename, targetPath: embeddedAddonPath(ctx.versionedDir, file) }));
+	}
+	return ctx.addonFilenames.map(filename => ({ filename, targetPath: path.join(ctx.versionedDir, filename) }));
+}
+
 function buildHelpMessage(ctx) {
 	if (ctx.isCompiledBinary) {
-		const expectedPaths = ctx.addonFilenames.map(filename => `  ${path.join(ctx.versionedDir, filename)}`).join("\n");
-		const downloadHints = ctx.addonFilenames
-			.map(filename => {
+		const targets = compiledAddonTargets(ctx);
+		const expectedPaths = targets.map(({ targetPath }) => `  ${targetPath}`).join("\n");
+		const downloadHints = targets
+			.map(({ filename, targetPath }) => {
 				const downloadUrl = `https://github.com/can1357/oh-my-pi/releases/latest/download/${filename}`;
-				const targetPath = path.join(ctx.versionedDir, filename);
 				return `  curl -fsSL "${downloadUrl}" -o "${targetPath}"`;
 			})
 			.join("\n");
@@ -799,25 +967,28 @@ export function initLoaderContext(overrides = {}) {
 			importMetaUrl: import.meta.url,
 		});
 	const normalizedNativeDir = platform === "win32" ? nativeDir.toLowerCase() : nativeDir;
+	// A published core manifest declares its platform leaf in `optionalDependencies`; a
+	// checkout does not. A release copied into bun's install cache has no `node_modules`
+	// segment, so the path alone cannot tell it from a checkout (issue #8901).
 	const isWorkspaceLoad =
 		!isCompiledBinary &&
+		!packageJson.optionalDependencies?.[`@oh-my-pi/pi-natives-${platformTag}`] &&
 		!normalizedNativeDir.includes("\\node_modules\\") &&
 		!normalizedNativeDir.includes("/node_modules/");
+	const selectedVariant = resolveCpuVariant(getVariantOverride());
+	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
+	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 	const leafPackageDir =
 		isCompiledBinary || isWorkspaceLoad
 			? null
 			: overrides.leafPackageDir === undefined
-				? resolveLeafPackageDir(platformTag)
+				? resolveLeafPackageDir(platformTag, addonFilenames)
 				: overrides.leafPackageDir;
 	const stageFromNodeModules = shouldStageNodeModulesAddon({
 		platform,
 		isCompiledBinary,
 		nativeDir: normalizedNativeDir,
 	});
-
-	const selectedVariant = resolveCpuVariant(getVariantOverride());
-	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
-	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 
 	const candidates = resolveLoaderCandidates({
 		addonFilenames,
@@ -854,34 +1025,72 @@ export function initLoaderContext(overrides = {}) {
 	};
 }
 
+/**
+ * Exports of each `.node` file this copy of the loader opened, by the path it
+ * was opened at.
+ * @type {Map<string, Record<string, unknown>>}
+ */
+const openedAddons = new Map();
+
+/**
+ * Open one `.node` addon and return its exports, as `require` does for a
+ * `.node` file. `process.dlopen` rather than `require`: Bun's `require` cannot
+ * load any module from a path that contains `?` (it reads the path cut at the
+ * `?`), and the addon's directory follows `HOME`, `PI_NATIVES_DIR` or the
+ * install location, so it can hold one. `dlopen` takes the path as it is.
+ *
+ * Like `require`, it opens a file once and then returns the same exports:
+ * `loadNative()` runs again on every call of the lazy entrypoints
+ * (`clipboard.js`, `desktop.js`, …), and a second `dlopen` of the file runs the
+ * addon's init again, which makes new classes that `instanceof` against the
+ * first ones fails.
+ * @param {string} candidate
+ * @returns {Record<string, unknown>}
+ */
+export function openNativeAddon(candidate) {
+	const opened = openedAddons.get(candidate);
+	if (opened) return opened;
+	const addonModule = { exports: {} };
+	process.dlopen(addonModule, candidate);
+	openedAddons.set(candidate, addonModule.exports);
+	return addonModule.exports;
+}
+
 export function loadNative() {
 	startupMarker("native:loadNative:start");
 	const ctx = initLoaderContext();
-	const require_ = createRequire(import.meta.url);
 
 	const errors = [];
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
 	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
-	const prepended = [embeddedCandidate, stagedCandidate].filter(c => typeof c === "string");
-	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
-	const fallbackEmbeddedFile =
-		ctx.selectedVariant === "modern" && embeddedAddon
-			? embeddedAddon.files.find(file => file.variant === "baseline")
-			: null;
-	const fallbackEmbeddedPath = fallbackEmbeddedFile && path.join(ctx.versionedDir, fallbackEmbeddedFile.filename);
+	const hasEmbedded = hasMatchingEmbeddedAddon(ctx);
+	const { primary: primaryEmbeddedFile, fallback: fallbackEmbeddedFile } = embeddedProbeFiles(ctx);
+	const fallbackEmbeddedPath = fallbackEmbeddedFile && embeddedAddonPath(ctx.versionedDir, fallbackEmbeddedFile);
+	const runtimeCandidates = resolveRuntimeCandidates({
+		candidates: ctx.candidates,
+		versionedDir: ctx.versionedDir,
+		hasEmbedded,
+		embedded: [embeddedCandidate, fallbackEmbeddedPath].filter(c => typeof c === "string"),
+		staged: stagedCandidate,
+	});
 
 	for (const candidate of runtimeCandidates) {
-		if (fallbackEmbeddedFile && candidate === fallbackEmbeddedPath) {
-			maybeExtractEmbeddedAddon(ctx, errors, fallbackEmbeddedFile);
-		}
+		// Extracted lazily, and never probed unless this build's copy is in place.
+		if (candidate === fallbackEmbeddedPath && !maybeExtractEmbeddedAddon(ctx, errors, fallbackEmbeddedFile)) continue;
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
-			const bindings = require_(candidate);
+			const bindings = openNativeAddon(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
-	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+			cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+			if (hasEmbedded) {
+				pruneStaleEmbeddedAddons({
+					targetDir: ctx.versionedDir,
+					keepHashes: [primaryEmbeddedFile, fallbackEmbeddedFile].filter(Boolean).map(file => file.hash),
+				});
+			}
 			startupMarker("native:loadNative:done");
 			return bindings;
 		} catch (err) {

@@ -1,15 +1,13 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
 
 const SSE_RESPONSE =
-	'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Gemini answer"}]}}],"modelVersion":"gemini-2.5-flash"}}\n\n';
+	'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Gemini answer"}]}}],"modelVersion":"gemini-2.5-flash"}\n\n';
 const DEVELOPER_SSE_RESPONSE =
 	'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Developer answer"}]},"groundingMetadata":{"webSearchQueries":["latest Bun version"],"groundingChunks":[{"web":{"uri":"https://bun.sh","title":"Bun"}}],"groundingSupports":[{"segment":{"text":"Developer answer"},"groundingChunkIndices":[0]}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7},"modelVersion":"gemini-2.5-flash"}\n\n';
 const DEVELOPER_SSE_RESPONSE_WITHOUT_MODEL =
@@ -33,23 +31,7 @@ function geminiDeveloperModel(
 	});
 }
 
-function geminiOAuthModel(id: string): Model<"google-gemini-cli"> {
-	return buildModel({
-		id,
-		name: id,
-		api: "google-gemini-cli",
-		provider: "google-gemini-cli",
-		baseUrl: "https://cloudcode-pa.googleapis.com",
-		reasoning: false,
-		input: ["text", "image"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 1_000_000,
-		maxTokens: 65_536,
-	});
-}
-
 const developerModel = geminiDeveloperModel("gemini-2.5-flash");
-const oauthModel = geminiOAuthModel("gemini-2.5-flash");
 
 type CapturedRequest = {
 	url: string;
@@ -60,21 +42,12 @@ type CapturedRequest = {
 describe("searchGemini tools serialization", () => {
 	let capturedRequest: CapturedRequest | null = null;
 
-	let oauthAuthStorage: AuthStorage;
 	let apiKeyAuthStorage: AuthStorage;
-	let oauthRegistry: ModelRegistry;
 	let apiKeyRegistry: ModelRegistry;
 
 	beforeEach(() => {
-		oauthAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		vi.spyOn(oauthAuthStorage.oauth, "access").mockResolvedValue({
-			accessToken: "test-access-token",
-			projectId: "test-project",
-		});
-		vi.spyOn(oauthAuthStorage.credentials, "hasOAuth").mockReturnValue(true);
 		apiKeyAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 		apiKeyAuthStorage.keys.setRuntime("google", "test-gemini-api-key");
-		oauthRegistry = new ModelRegistry(oauthAuthStorage);
 		apiKeyRegistry = new ModelRegistry(apiKeyAuthStorage);
 	});
 
@@ -99,11 +72,10 @@ describe("searchGemini tools serialization", () => {
 	afterEach(() => {
 		capturedRequest = null;
 		vi.restoreAllMocks();
-		oauthAuthStorage.close();
 		apiKeyAuthStorage.close();
 	});
 
-	function makeParams(query: string, model: Model = oauthModel, modelRegistry = oauthRegistry) {
+	function makeParams(query: string, model: Model = developerModel, modelRegistry = apiKeyRegistry) {
 		return {
 			query,
 			authStorage: modelRegistry.authStorage,
@@ -236,8 +208,7 @@ describe("searchGemini tools serialization", () => {
 		});
 
 		expect(capturedRequest).not.toBeNull();
-		const request = capturedRequest?.body?.request as Record<string, unknown>;
-		expect(request).toMatchObject({
+		expect(capturedRequest?.body).toMatchObject({
 			contents: [{ role: "user", parts: [{ text: "k8s site:kubernetes.io after:2024-01-01" }] }],
 		});
 	});
@@ -269,72 +240,17 @@ describe("searchGemini tools serialization", () => {
 		expect(response.model).toBe("gemini-3.5-flash");
 	});
 
-	it("uses the selected OAuth model in the Cloud Code request body", async () => {
-		const fetchMock = mockGeminiFetch();
-		const selectedModel = geminiOAuthModel("gemini-3.5-flash");
-		await searchGemini({
-			...makeParams("oauth configured", selectedModel),
-			fetch: fetchMock,
-		});
-
-		expect(capturedRequest?.url).toBe("https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
-		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-3.5-flash",
-		});
-	});
-
-	it("uses the collapsed OAuth model's default wire id", async () => {
-		const fetchMock = mockGeminiFetch();
-		const selectedModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
-		await searchGemini({
-			...makeParams("collapsed OAuth model", selectedModel),
-			fetch: fetchMock,
-		});
-
-		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-3.8-flash-low",
-		});
-	});
-
-	it("routes an explicit thinking level to the matching OAuth wire id", async () => {
-		const fetchMock = mockGeminiFetch();
-		const selectedModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
-		await searchGemini({
-			...makeParams("collapsed OAuth model", selectedModel),
-			thinkingLevel: ThinkingLevel.High,
-			fetch: fetchMock,
-		});
-
-		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-3.8-flash-high",
-		});
-	});
-
-	it("clamps an unsupported thinking level onto the nearest routed wire id", async () => {
-		const fetchMock = mockGeminiFetch();
-		const selectedModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
-		await searchGemini({
-			...makeParams("collapsed OAuth model", selectedModel),
-			thinkingLevel: ThinkingLevel.XHigh,
-			fetch: fetchMock,
-		});
-
-		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-3.8-flash-high",
-		});
-	});
-
 	it("sends default googleSearch tool when no passthrough payloads are provided", async () => {
 		const fetchMock = mockGeminiFetch();
 		await searchGemini({ ...makeParams("default tools"), fetch: fetchMock });
 
 		expect(capturedRequest).not.toBeNull();
-		expect(capturedRequest?.body?.request).toMatchObject({
+		expect(capturedRequest?.body).toMatchObject({
 			tools: [{ googleSearch: {} }],
 		});
-		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-2.5-flash",
-		});
+		expect(capturedRequest?.url).toBe(
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+		);
 	});
 
 	it("passes through googleSearch payload into googleSearch tool", async () => {
@@ -346,7 +262,7 @@ describe("searchGemini tools serialization", () => {
 		});
 
 		expect(capturedRequest).not.toBeNull();
-		expect(capturedRequest?.body?.request).toMatchObject({
+		expect(capturedRequest?.body).toMatchObject({
 			tools: [{ googleSearch: { dynamicRetrievalConfig: { mode: "MODE_DYNAMIC" } } }],
 		});
 	});
@@ -361,7 +277,7 @@ describe("searchGemini tools serialization", () => {
 		});
 
 		expect(capturedRequest).not.toBeNull();
-		expect(capturedRequest?.body?.request).toMatchObject({
+		expect(capturedRequest?.body).toMatchObject({
 			tools: [{ googleSearch: {} }, { codeExecution: {} }, { urlContext: { allowedDomains: ["example.com"] } }],
 		});
 	});
@@ -412,16 +328,5 @@ describe("searchGemini tools serialization", () => {
 				fetch: mockGeminiFetch("data: {}\n\n"),
 			}),
 		).rejects.toThrow("Gemini API returned an empty grounded response");
-	});
-
-	it("does not tag Antigravity search requests with the requestType that draws false 429 quota errors", async () => {
-		const fetchMock = mockGeminiFetch();
-		await searchGemini({
-			...makeParams("antigravity search", getBundledModel("google-antigravity", "gemini-3.8-flash")),
-			fetch: fetchMock,
-		});
-
-		expect(capturedRequest?.body?.userAgent).toBe("antigravity");
-		expect(capturedRequest?.body?.requestType).toBeUndefined();
 	});
 });

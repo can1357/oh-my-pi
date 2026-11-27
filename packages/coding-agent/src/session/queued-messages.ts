@@ -74,8 +74,17 @@ export function isUserAuthoredQueuedMessage(message: AgentMessage): boolean {
 /** Hidden magic-keyword notice types (`<id>-notice`) queued alongside a user prompt. */
 const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set(MAGIC_KEYWORDS.map(keyword => `${keyword.id}-notice`));
 
-/** Hidden companion carrying vision descriptions for a text-only model. */
+/**
+ * Hidden companion that carried vision descriptions for a text-only model in older transcripts. Descriptions
+ * are now made per request (`ImageDescriptions.transform`); recorded ones still group with their prompt and
+ * stay in text transcripts, but no longer reach the model.
+ */
 export const IMAGE_ATTACHMENT_DESCRIPTION_TYPE = "image-attachment-description";
+
+/** Whether `message` is a vision-description companion recorded by an older version. */
+export function isLegacyImageDescription(message: AgentMessage): boolean {
+	return message.role === "custom" && message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE;
+}
 
 /** Hidden companion carrying the source path of a video contact sheet. */
 export const VIDEO_ATTACHMENT_TYPE = "video-attachment";
@@ -83,12 +92,19 @@ export const VIDEO_ATTACHMENT_TYPE = "video-attachment";
 /** Hidden companion carrying the source path of a pasted or dropped image. */
 export const IMAGE_ATTACHMENT_TYPE = "image-attachment";
 
+/**
+ * Hidden notice announcing model agents the user tagged with a `^` mention.
+ * Agent-attributed so providers keep its system authority, yet queued only
+ * ahead of the prompt that tagged the model, so it is a companion by type.
+ */
+export const SESSION_AGENT_NOTICE_TYPE = "session-agent-notice";
+
 /** Whether a hidden queued message is a companion of an adjacent user prompt. */
 export function isHiddenUserCompanion(message: AgentMessage): boolean {
+	if (message.role !== "custom" || message.display !== false) return false;
+	if (message.customType === SESSION_AGENT_NOTICE_TYPE) return true;
 	return (
-		message.role === "custom" &&
 		message.attribution === "user" &&
-		message.display === false &&
 		(MAGIC_KEYWORD_NOTICE_TYPES.has(message.customType) ||
 			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
 			message.customType === VIDEO_ATTACHMENT_TYPE ||

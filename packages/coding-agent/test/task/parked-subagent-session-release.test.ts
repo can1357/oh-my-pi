@@ -23,6 +23,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "ParkedRelease";
 const MOCK_API_SOURCE = "test/parked-subagent-session-release";
@@ -78,7 +79,7 @@ afterEach(async () => {
 function weakRefToLiveSession(id: string): WeakRef<AgentSession> {
 	const session = AgentRegistry.global().get(id)?.session;
 	if (!session) throw new Error(`subagent ${id} has no live session to observe`);
-	return new WeakRef(session);
+	return new WeakRef(localSession(session));
 }
 
 async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<boolean> {
@@ -93,8 +94,7 @@ async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<bool
 
 /** Makes a settings write in the live session's own overlay, then observes the overlay weakly (outside the test body). */
 function writeAndObserveLiveSettings(id: string): WeakRef<Settings> {
-	const session = AgentRegistry.global().get(id)?.session;
-	if (!session) throw new Error(`subagent ${id} has no live session to observe`);
+	const session = localSession(AgentRegistry.global().get(id)?.session);
 	cfgContextPromotionEnabled.set(session, true);
 	return new WeakRef(session.settings);
 }
@@ -192,7 +192,7 @@ it("parks without retaining the run's settings overlay and revives with the sett
 		// for as long as the parked agent stayed adopted.
 		expect(await collected(settingsRef, COLLECT_DEADLINE_MS)).toBe(true);
 
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
 	} finally {
 		run.close();

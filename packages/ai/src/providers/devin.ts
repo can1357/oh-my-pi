@@ -1,4 +1,5 @@
-import { gunzipSync, gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzipSync, gzip } from "node:zlib";
 
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
@@ -27,7 +28,7 @@ import {
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -41,6 +42,8 @@ import type {
 	DeveloperMessage,
 	Message,
 	Model,
+	ModelCost,
+	ServiceTier,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -53,6 +56,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { MIN_COMPRESSED_BODY_BYTES } from "../utils/request-compression";
 import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import {
 	CONNECT_COMPRESSED_FLAG,
@@ -77,11 +81,16 @@ export interface DevinOptions extends StreamOptions {
 	sessionId?: string;
 	/** Wire model uid selected after thinking-effort routing. */
 	chatModelUid?: string;
+	/** `priority` (`/fast`) sends the model's fast-lane twin of `chatModelUid`; other tiers are ignored. */
+	serviceTier?: ServiceTier;
 }
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
+
+/** Off the event loop: a synchronous gzip stalls the TUI on a multi-MB transcript. */
+const gzipAsync = promisify(gzip);
 
 /**
  * Cascade forwards replayed tool-call ids to the backend serving the chat model;
@@ -187,6 +196,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let cost: ModelCost = model.cost;
 
 		let currentTextBlock: TextContent | null = null;
 		let currentThinkingBlock: ThinkingContent | null = null;
@@ -263,25 +273,42 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
-			let request = buildDevinChatRequest(model, context, options, turn, assignment);
+			// `/fast`: the effort's wire uid swaps for its fast-lane twin, billed at the lane's card.
+			const lane = assignment === undefined && options?.serviceTier === "priority" ? model.priorityLane : undefined;
+			const fastUid = lane?.routes[options?.chatModelUid ?? model.requestModelId ?? model.id];
+			if (lane && fastUid !== undefined) {
+				output.serviceTier = "priority";
+				cost = lane.cost;
+			}
+			let request = buildDevinChatRequest(
+				model,
+				context,
+				fastUid === undefined ? options : { ...options, chatModelUid: fastUid },
+				turn,
+				assignment,
+			);
 			const replacementRequest = await options?.onPayload?.(request, model);
 			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
-			const gz = gzipSync(reqBytes);
+			// A small request goes out plain and without `connect-content-encoding`,
+			// so no server sees an encoding it never has to decode.
+			const compress = reqBytes.byteLength >= MIN_COMPRESSED_BODY_BYTES;
+			const chatBody = compress ? await gzipAsync(reqBytes) : reqBytes;
+			const compressedBytes = compress ? chatBody.byteLength : undefined;
 			logger.debug("devin: sending chat request", {
 				model: model.id,
 				tools: context.tools?.length ?? 0,
 				requestBytes: reqBytes.byteLength,
-				compressedBytes: gz.byteLength,
+				compressedBytes,
 			});
-			const frame = frameConnectMessage(gz, CONNECT_COMPRESSED_FLAG);
+			const frame = frameConnectMessage(chatBody, compress ? CONNECT_COMPRESSED_FLAG : 0);
 
 			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
 				headers: {
 					"content-type": "application/connect+proto",
 					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
+					...(compress ? { "connect-content-encoding": "gzip" } : {}),
 					"accept-encoding": "identity",
 					"user-agent": "connect-go/1.18.1 (go1.26.3)",
 					"connect-accept-encoding": "gzip",
@@ -335,7 +362,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 								...(trailerError.detail ? { detail: trailerError.detail } : {}),
 								rawTrailer: trailerError.raw,
 								requestBytes: reqBytes.byteLength,
-								compressedBytes: gz.byteLength,
+								compressedBytes,
 								tools: context.tools?.length ?? 0,
 								messages: context.messages.length,
 								hadOutput: firstTokenTime !== undefined,
@@ -380,7 +407,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 										model: model.id,
 										historyBytes,
 										requestBytes: reqBytes.byteLength,
-										compressedBytes: gz.byteLength,
+										compressedBytes,
 									});
 								}
 							}
@@ -522,7 +549,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				toolBlocks.size > 0 ? "toolUse" : latestStopReason === StopReason.MAX_TOKENS ? "length" : "stop";
 			output.stopReason = doneReason;
 
-			calculateCost(model, output.usage, output.timestamp);
+			calculateUsageCost(cost, output.usage, output.timestamp);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 
@@ -644,6 +671,18 @@ function buildRouterPrompt(messages: Message[]): ChatMessagePrompt | undefined {
 }
 
 /**
+ * Raise an explicit `temperature` to the wire's floor. Cascade answers
+ * `temperature: 0` with an opaque `invalid_argument` while any positive value
+ * works, so the catalog's `temperature-floor` axis keeps deterministic callers
+ * (session titles, memory extraction) on this provider instead of failing.
+ * An unset floor or an unset temperature (wire default 1) passes through.
+ */
+function clampDevinTemperature(temperature: number | undefined, floor: number | undefined): number {
+	const value = temperature ?? 1;
+	return floor !== undefined && value < floor ? floor : value;
+}
+
+/**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
  * `Metadata.apiKey`; the system prompt is the flattened `prompt` string and the
  * conversation history maps to `chatMessagePrompts`. `assignment` is present only
@@ -693,7 +732,7 @@ function buildDevinChatRequest(
 			numCompletions: 1n,
 			maxTokens: BigInt(options?.maxTokens ?? model.maxTokens ?? 64000),
 			maxNewlines: 400n,
-			temperature: options?.temperature ?? 1,
+			temperature: clampDevinTemperature(options?.temperature, model.compat.temperatureFloor),
 			topK: 40n,
 			// Devin's CLI sends topP as a float32 widened to double; round the same way.
 			topP: Math.fround(options?.topP ?? 0.95),

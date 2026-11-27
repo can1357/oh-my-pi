@@ -378,7 +378,7 @@ export interface EasyInputMessage {
 	 * sending follow-up requests, preserve and resend phase on all assistant messages
 	 * — dropping it can degrade performance. Not used for user messages.
 	 */
-	phase?: "commentary" | "final_answer" | null;
+	phase?: "commentary" | "final_answer" | "partial_answer" | null;
 	/**
 	 * The type of the message input. Always `message`.
 	 */
@@ -2871,6 +2871,8 @@ export interface ResponseInputFileContent {
 	 * The name of the file to be sent to the model.
 	 */
 	filename?: string | null;
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * An image input to the model. Learn about
@@ -2921,6 +2923,8 @@ export interface ResponseInputImageContent {
 	 * encoded image in a data URL.
 	 */
 	image_url?: string | null;
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * A message input to the model with a role indicating instruction following
@@ -3630,6 +3634,8 @@ export interface ResponseInputTextContent {
 	 * The type of the input item. Always `input_text`.
 	 */
 	type: "input_text";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * Represents the use of a local environment to perform shell actions.
@@ -4201,7 +4207,7 @@ export interface ResponseOutputMessage {
 	 * sending follow-up requests, preserve and resend phase on all assistant messages
 	 * — dropping it can degrade performance. Not used for user messages.
 	 */
-	phase?: "commentary" | "final_answer" | null;
+	phase?: "commentary" | "final_answer" | "partial_answer" | null;
 }
 /**
  * A refusal from the model.
@@ -5897,8 +5903,8 @@ export interface ResponseCreateParamsBase {
 	 *   `prompt_cache_retention` is not specified.
 	 */
 	prompt_cache_retention?: "in_memory" | "24h" | null;
-	/** Explicit prompt-cache mode and minimum lifetime for GPT-5.6+ models. */
-	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" } | null;
+	/** Explicit prompt-cache mode and minimum lifetime (`12h` is Responses-only) for GPT-5.6+ models. */
+	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" | "12h" } | null;
 	/**
 	 * **gpt-5 and o-series models only**
 	 *

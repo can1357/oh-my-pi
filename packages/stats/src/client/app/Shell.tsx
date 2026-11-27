@@ -4,6 +4,8 @@ import { rangeMeta, TIME_RANGES } from "../data/range";
 import { useLiveStatus } from "../data/live";
 import type { TimeRange } from "../types";
 import { Segmented } from "../ui";
+import { CloseButton } from "./CloseButton";
+import { isDialogOpen, isTypingTarget } from "./keys";
 import { LiveChip } from "./LiveChip";
 import { type DashboardSection, NAV } from "./nav";
 import { ThemeToggle } from "./ThemeToggle";
@@ -24,7 +26,7 @@ const RANGE_OPTIONS = TIME_RANGES.map((range, i) => ({
 
 /**
  * Fixed glass topbar + naked sidebar framing one inset content panel. Owns
- * the global keyboard shortcuts: `1`–`6` pick a range, `g` then a letter jumps
+ * the global keyboard shortcuts: `1`–`8` pick a range, `g` then a letter jumps
  * to a page.
  */
 export function Shell({ section, onSectionChange, range, onRangeChange, children }: ShellProps) {
@@ -77,6 +79,7 @@ export function Shell({ section, onSectionChange, range, onRangeChange, children
 					</span>
 					<Segmented options={RANGE_OPTIONS} value={range} onChange={onRangeChange} aria-label="Time range" />
 					<ThemeToggle />
+					<CloseButton />
 				</div>
 				{progress !== undefined && (
 					<div className="topbar-progress">
@@ -112,7 +115,7 @@ export function Shell({ section, onSectionChange, range, onRangeChange, children
 				))}
 				<div className="sidebar-foot micro">
 					<span>
-						<span className="kbd">1</span>–<span className="kbd">6</span> range
+						<span className="kbd">1</span>–<span className="kbd">8</span> range
 					</span>
 					<span>
 						<span className="kbd">G</span> then letter to jump
@@ -143,17 +146,7 @@ function useShortcuts(onSection: (section: DashboardSection) => void, onRange: (
 		let pendingG = 0;
 		const onKey = (e: KeyboardEvent) => {
 			if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
-			const target = e.target;
-			if (
-				target instanceof HTMLElement &&
-				(target.isContentEditable ||
-					target.tagName === "INPUT" ||
-					target.tagName === "TEXTAREA" ||
-					target.tagName === "SELECT")
-			) {
-				return;
-			}
-			if (document.querySelector('[aria-modal="true"]')) return;
+			if (isTypingTarget(e.target) || isDialogOpen()) return;
 			const key = e.key.toLowerCase();
 			if (pendingG && Date.now() - pendingG < 1200) {
 				pendingG = 0;

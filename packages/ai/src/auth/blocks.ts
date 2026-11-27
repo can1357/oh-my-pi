@@ -1,9 +1,10 @@
-import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
-import type { Provider } from "../types";
+import { getAgentDbPath, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { Provider, ServiceTier } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
+import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
-import { isSqliteCorruptionError, USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
+import { isSqliteCorruptionError, resolveCredentialIdentityKey, USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
 import { isUsageLimitReached, usageReportMetadataValue, usageReportScopeAccountId } from "./usage-report";
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
@@ -11,6 +12,12 @@ import type { AuthCredential, BlocksApi, StoredCredentialBlock } from "./types";
 
 /** Default block when no provider reset time is known; used by selectors and rate limits. */
 export const DEFAULT_BLOCK_MS = 60_000;
+/**
+ * Tolerance when matching a stored block deadline to a partial usage report's reset.
+ * The block comes from the 429's reset header (epoch seconds) while `/usage`
+ * reports `resets_at` as ISO, so seconds of skew between the two are expected.
+ */
+const BLOCK_RESET_MATCH_TOLERANCE_MS = 60_000;
 
 /** Composite key for round-robin tracking: "<provider>:oauth" or "<provider>:api_key". */
 export function providerTypeKey(provider: string, type: AuthCredential["type"]): string {
@@ -24,34 +31,55 @@ export function scopedBackoffKey(providerKey: string, blockScope: string | undef
 
 /** Authentication backoffs apply to every model and cannot be healed by quota evidence. */
 export const AUTH_BLOCK_SCOPE = "auth";
+/** Refresh failures block every model until the credential refreshes or the backoff expires. */
+export const OAUTH_REFRESH_FAILURE_BLOCK_SCOPE = "oauth-refresh-failure";
 /** Account-policy backoffs apply to every model and survive quota resets. */
 export const ACCOUNT_POLICY_BLOCK_SCOPE = "account-policy";
-const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE] as const;
+/** An organization refused OAuth for this login; even last-resort routing must skip it. */
+export const OAUTH_ORG_POLICY_BLOCK_SCOPE = "oauth-org-policy";
+const PROTECTED_BLOCK_SCOPES = [
+	AUTH_BLOCK_SCOPE,
+	OAUTH_REFRESH_FAILURE_BLOCK_SCOPE,
+	ACCOUNT_POLICY_BLOCK_SCOPE,
+	OAUTH_ORG_POLICY_BLOCK_SCOPE,
+] as const;
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
-const MODEL_ACCOUNT_POLICY_PROVIDERS: Readonly<Record<string, true>> = {
-	"openai-codex": true,
-	cursor: true,
-};
 
-/** Scope key for one model-specific account-policy block, shared by selectors and rate limits. */
-export function modelAccountPolicyBlockScope(provider: string, modelId: string | undefined): string | undefined {
-	if (!Object.hasOwn(MODEL_ACCOUNT_POLICY_PROVIDERS, provider) || typeof modelId !== "string") return undefined;
-	const separator = modelId.lastIndexOf("/");
-	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).trim().toLowerCase();
-	if (!bareModelId || bareModelId.includes("\0")) return undefined;
-	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${bareModelId}`;
+/**
+ * Scope key for one model-specific account-policy block, shared by selectors
+ * and rate limits. Keyed by the exact requested id: distinct ids are distinct models.
+ */
+export function modelAccountPolicyBlockScope(modelId: string | undefined): string | undefined {
+	if (!modelId || modelId.includes("\0")) return undefined;
+	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${modelId}`;
+}
+
+const SERVICE_TIER_BLOCK_SCOPE_PREFIX = "service-tier:";
+
+/**
+ * Scope key for "this credential was refused `serviceTier` on `modelId`".
+ * Read only by tier-preferring selection, never by ordinary block checks: the
+ * credential still serves the model at standard speed. Keyed by model because
+ * both the entitlement (Codex Ultrafast per model) and the refusal (a Claude
+ * model without fast mode) are model-specific.
+ */
+export function serviceTierBlockScope(
+	serviceTier: ServiceTier | undefined,
+	modelId: string | undefined,
+): string | undefined {
+	if (!serviceTier || !modelId || modelId.includes("\0")) return undefined;
+	return `${SERVICE_TIER_BLOCK_SCOPE_PREFIX}${serviceTier}:${modelId}`;
 }
 
 /** Scope keys that a request must check, including model-policy constraints. */
 export function credentialBlockScopesForRequest(
-	provider: string,
 	strategy: CredentialRankingStrategy | undefined,
 	rankingContext: CredentialRankingContext,
 	blockScope: string | undefined,
 ): readonly string[] {
 	const scopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
-	const modelPolicyScope = modelAccountPolicyBlockScope(provider, rankingContext.modelId);
+	const modelPolicyScope = modelAccountPolicyBlockScope(rankingContext.modelId);
 	if (!modelPolicyScope || scopes.includes(modelPolicyScope)) return scopes;
 	return [...scopes, modelPolicyScope];
 }
@@ -130,6 +158,8 @@ export class CredentialBlocks implements BlocksApi {
 	readonly #deps: CredentialBlocksDeps;
 	/** Backoff key (provider:type, optionally scoped) -> credential row id -> live in-memory block. */
 	#credentialBackoff: Map<string, Map<number, CredentialBackoff>> = new Map();
+	/** `provider\0serviceTierBlockScope` -> deadline of a tier refusal against a key with no stored row. */
+	#unstoredKeyRefusals: Map<string, number> = new Map();
 
 	constructor(deps: CredentialBlocksDeps) {
 		this.#deps = deps;
@@ -353,6 +383,55 @@ export class CredentialBlocks implements BlocksApi {
 	}
 
 	/**
+	 * Whether exactly `blockScope` holds a live block for a credential, without
+	 * the protected and unscoped blocks {@link CredentialBlocks.blockedUntil} merges in.
+	 */
+	isScopeBlocked(provider: string, providerKey: string, credentialIndex: number, blockScope: string): boolean {
+		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
+		return credentialId !== undefined && this.#exactBlockedUntil(credentialId, providerKey, blockScope) !== undefined;
+	}
+
+	/** Explain a restricted pool with an org rejection and no unblocked account. */
+	describeOrgPolicyPoolExhaustion(
+		provider: string,
+		sessionId: string | undefined,
+		affinity: SessionAffinity,
+		requestScopes: readonly string[],
+	): string | undefined {
+		if (!affinity.isRestricted(provider, sessionId)) return undefined;
+		const providerKey = providerTypeKey(provider, "oauth");
+		const reasons: string[] = [];
+		let hasOrgRejection = false;
+		for (const { id, credential } of this.#deps.pool.entries(provider)) {
+			if (!affinity.allows(provider, sessionId, credential)) continue;
+			const scopes = this.#readPersistedCredentialBlockScopes(id, providerKey);
+			const orgRejection = this.#exactBlockedUntil(id, providerKey, OAUTH_ORG_POLICY_BLOCK_SCOPE, scopes);
+			const until = orgRejection ?? this.#blockedUntilById(id, providerKey, requestScopes, scopes);
+			if (until === undefined) return undefined;
+			const label = sanitizeText(resolveCredentialIdentityKey(provider, credential) ?? `credential ${id}`);
+			if (orgRejection !== undefined) {
+				hasOrgRejection = true;
+				reasons.push(`${label} rejected by org policy`);
+			} else {
+				const authOrPolicyBlock =
+					this.#exactBlockedUntil(id, providerKey, AUTH_BLOCK_SCOPE, scopes) !== undefined ||
+					this.#exactBlockedUntil(id, providerKey, OAUTH_REFRESH_FAILURE_BLOCK_SCOPE, scopes) !== undefined ||
+					this.#exactBlockedUntil(id, providerKey, ACCOUNT_POLICY_BLOCK_SCOPE, scopes) !== undefined ||
+					requestScopes.some(
+						scope =>
+							scope.startsWith(MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX) &&
+							this.#exactBlockedUntil(id, providerKey, scope, scopes) !== undefined,
+					);
+				const reason = authOrPolicyBlock ? "blocked" : "usage-limited";
+				reasons.push(`${label} ${reason} until ${new Date(until).toISOString()}`);
+			}
+		}
+		return hasOrgRejection
+			? `All accounts allowed by the session OAuth account pool for ${provider} are unusable: ${reasons.join("; ")}`
+			: undefined;
+	}
+
+	/**
 	 * Whether the in-memory block currently sitting at exactly `deadline` for
 	 * this credential was written with provider-stated timing. Mirrors the
 	 * scope enumeration of {@link CredentialBlocks.blockedUntil}.
@@ -468,7 +547,7 @@ export class CredentialBlocks implements BlocksApi {
 		}
 	}
 
-	/** Clear exactly one quota scope, preserving unrelated account and model blocks. */
+	/** Clear exactly one block scope, preserving unrelated account and model blocks. */
 	clearScope(provider: string, credentialId: number, providerKey: string, blockScope: string | undefined): boolean {
 		// A damaged store neither holds nor reads persisted rows; memory is the whole block.
 		if (this.#deps.health.damaged) {
@@ -487,6 +566,49 @@ export class CredentialBlocks implements BlocksApi {
 				blockScope,
 			});
 			return false;
+		}
+	}
+
+	/**
+	 * Whether the provider's unstored key (environment variable, `--api-key`,
+	 * `models.yml`) was refused the tier under `blockScope` and is still cooling
+	 * down. Such a key has no row to hold a block, so the refusal is
+	 * process-local and names the provider rather than the key.
+	 */
+	isUnstoredKeyRefused(provider: string, blockScope: string): boolean {
+		const key = `${provider}\0${blockScope}`;
+		const until = this.#unstoredKeyRefusals.get(key);
+		if (until === undefined) return false;
+		if (until > Date.now()) return true;
+		this.#unstoredKeyRefusals.delete(key);
+		return false;
+	}
+
+	/** Record a tier refusal against the provider's unstored key; see {@link isUnstoredKeyRefused}. */
+	markUnstoredKeyRefused(provider: string, blockScope: string, untilMs: number): void {
+		this.#unstoredKeyRefusals.set(`${provider}\0${blockScope}`, untilMs);
+	}
+
+	/**
+	 * Forget every refusal recorded under one {@link serviceTierBlockScope} for
+	 * a provider's credentials, and drop its cached usage reports so the next
+	 * selection re-reads each account's entitlement.
+	 */
+	clearServiceTierRefusals(provider: string, blockScope: string): void {
+		this.#unstoredKeyRefusals.delete(`${provider}\0${blockScope}`);
+		for (const entry of this.#deps.pool.entries(provider)) {
+			const providerKey = providerTypeKey(provider, entry.credential.type);
+			if (this.#exactBlockedUntil(entry.id, providerKey, blockScope) === undefined) continue;
+			this.clearScope(provider, entry.id, providerKey, blockScope);
+		}
+		this.#deps.usageCache.invalidate(provider);
+	}
+
+	/** A successful exchange lifts refresh backoff, not provider rejection or quota blocks. */
+	clearOAuthRefreshFailure(provider: string, credentialId: number): void {
+		const providerKey = providerTypeKey(provider, "oauth");
+		if (this.#exactBlockedUntil(credentialId, providerKey, OAUTH_REFRESH_FAILURE_BLOCK_SCOPE) !== undefined) {
+			this.clearScope(provider, credentialId, providerKey, OAUTH_REFRESH_FAILURE_BLOCK_SCOPE);
 		}
 	}
 
@@ -542,9 +664,23 @@ export class CredentialBlocks implements BlocksApi {
 		// last-good report for hours after `/usage` starts failing, and those
 		// healthy limits describe the account before the 429 that blocked it.
 		if (!Number.isFinite(report.fetchedAt) || Date.now() - report.fetchedAt > USAGE_REPORT_TTL_MS) return;
-		for (const { blockScope, limits, healthy } of strategy?.healableBlockScopes?.(report) ?? []) {
+		for (const { blockScope, limits, healthy, resetMatchRequired } of strategy?.healableBlockScopes?.(report) ?? []) {
 			if (healthy === false || isUsageLimitReached(limits) || (healthy === undefined && limits.length === 0))
 				continue;
+			if (resetMatchRequired) {
+				const blockedUntilMs = this.#exactBlockedUntil(credentialId, providerKey, blockScope);
+				if (blockedUntilMs === undefined) continue;
+				const resetMatchesBlock = limits.some(resetLimit => {
+					if (resetLimit.scope.shared !== true) return false;
+					const resetsAt = resetLimit.window?.resetsAt;
+					return (
+						typeof resetsAt === "number" &&
+						Number.isFinite(resetsAt) &&
+						Math.abs(resetsAt - blockedUntilMs) <= BLOCK_RESET_MATCH_TOLERANCE_MS
+					);
+				});
+				if (!resetMatchesBlock) continue;
+			}
 			this.#clearHealedBlockScope(provider, providerKey, credentialId, blockScope, report.fetchedAt);
 		}
 	}

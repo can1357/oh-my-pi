@@ -6,18 +6,23 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import {
+	getKeybindings,
+	KeybindingsManager,
+	setKeybindings,
+} from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal } from "./helpers/mode-terminal";
 
 function answer(text: string) {
 	const assistantMessage: AssistantMessage = {
@@ -58,10 +63,15 @@ describe("BTW session boundaries", () => {
 	let originalRecord: string;
 	let turns: SideTurn[];
 	let extensionRunner: ExtensionRunner;
+	let previousKeybindings: KeybindingsManager;
+	let term: ModeTerminal;
 
 	beforeAll(() => initTheme());
 	beforeEach(async () => {
 		resetSettingsForTest();
+		// The app installs its keymap before any picker opens; picker delete runs through `app.session.delete`.
+		previousKeybindings = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory());
 		directory = TempDir.createSync("@omp-btw-session-lifecycle-");
 		await Settings.init({ inMemory: true, cwd: directory.path() });
 		auth = await AuthStorage.create(path.join(directory.path(), "auth.db"));
@@ -80,15 +90,10 @@ describe("BTW session boundaries", () => {
 			extensionRunner,
 			rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
-		mode.ui.requestComponentRender = vi.fn();
-		mode.ui.setFocus = vi.fn();
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(() => ({
-			hide: vi.fn(),
-			setHidden: vi.fn(),
-			isHidden: () => false,
-		}));
+		// The picker runs on the shell: keys reach it through the terminal.
+		term = createModeTerminal();
+		await term.start();
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 		vi.spyOn(mode, "renderInitialMessages").mockResolvedValue(undefined);
 		vi.spyOn(mode, "reloadTodos").mockResolvedValue(undefined);
 		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
@@ -122,10 +127,13 @@ describe("BTW session boundaries", () => {
 		await btw.flush();
 		await btw.dispose();
 		mode.stop();
+		await mode.shell.stop();
+		term.dispose();
 		await session.dispose();
 		auth.close();
 		directory.removeSync();
 		resetSettingsForTest();
+		setKeybindings(previousKeybindings);
 	});
 
 	async function targetSession(): Promise<string> {
@@ -137,15 +145,19 @@ describe("BTW session boundaries", () => {
 		return file;
 	}
 
-	async function picker(file: string): Promise<SessionSelectorComponent> {
+	/** Open `/resume` listing only `file`; keys then go to the picker. */
+	async function picker(file: string): Promise<void> {
 		const list = await SessionManager.list(directory.path(), directory.path());
 		const selected = list.find(item => item.path === file);
 		if (!selected) throw new Error("Expected saved picker target");
-		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([selected]);
+		const listed = [selected];
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+			sessions: listed,
+			complete: Promise.resolve(listed),
+		});
 		await new SelectorController(mode).showSessionSelector();
-		const component = vi.spyOn(mode.ui, "showOverlay").mock.calls.at(-1)?.[0];
-		if (!(component instanceof SessionSelectorComponent)) throw new Error("Expected session selector");
-		return component;
+		if (!mode.shell.overlays.open()) throw new Error("Expected the session picker");
+		await term.settle();
 	}
 
 	async function startTransition(action: "delete command" | "picker delete" | "picker resume") {
@@ -153,7 +165,7 @@ describe("BTW session boundaries", () => {
 			vi.spyOn(SelectorController.prototype, "showSessionSelector").mockResolvedValue(undefined);
 			return { finished: mode.handleSessionDeleteCommand() };
 		}
-		const panel = await picker(action === "picker delete" ? sourceFile : await targetSession());
+		await picker(action === "picker delete" ? sourceFile : await targetSession());
 		const done = Promise.withResolvers<void>();
 		if (action === "picker delete") {
 			const remove = FileSessionStorage.prototype.deleteSessionWithArtifacts;
@@ -168,7 +180,7 @@ describe("BTW session boundaries", () => {
 					}
 				},
 			);
-			panel.handleInput("\x1b[3~");
+			term.press("delete");
 		} else {
 			const resume = SelectorController.prototype.handleResumeSession;
 			vi.spyOn(SelectorController.prototype, "handleResumeSession").mockImplementation(async function (
@@ -185,7 +197,7 @@ describe("BTW session boundaries", () => {
 				}
 			});
 		}
-		panel.handleInput("\n");
+		term.press("enter");
 		return { finished: done.promise };
 	}
 
@@ -260,7 +272,7 @@ describe("BTW session boundaries", () => {
 
 	it("deletes an inactive picker entry without interrupting the current BTW", async () => {
 		const target = await targetSession();
-		const panel = await picker(target);
+		await picker(target);
 		const removed = Promise.withResolvers<void>();
 		const remove = FileSessionStorage.prototype.deleteSessionWithArtifacts;
 		vi.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts").mockImplementation(
@@ -269,8 +281,8 @@ describe("BTW session boundaries", () => {
 				removed.resolve();
 			},
 		);
-		panel.handleInput("\x1b[3~");
-		panel.handleInput("\n");
+		term.press("delete");
+		term.press("enter");
 		await removed.promise;
 		expect(await Bun.file(target).exists()).toBe(false);
 		expect(manager.getSessionId()).toBe(sourceId);
@@ -278,11 +290,10 @@ describe("BTW session boundaries", () => {
 		expect(await Bun.file(recordPath).text()).toBe(originalRecord);
 	});
 
-	describe.each(["initial", "reinitialized"] as const)("%s extension command context", binding => {
+	describe("extension command context", () => {
 		async function transition(action: "newSession" | "switchSession" | "branch") {
 			const controller = new ExtensionUiController(mode);
 			await controller.initHooksAndCustomTools();
-			if (binding === "reinitialized") controller.initializeHookRunner(extensionRunner.getUIContext(), true);
 			const context = extensionRunner.createCommandContext();
 			const target = action === "switchSession" ? await targetSession() : manager.getLeafId()!;
 			return () => {

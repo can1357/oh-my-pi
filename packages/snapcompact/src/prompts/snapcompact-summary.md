@@ -10,8 +10,8 @@ Archived transcript scopes:
 Reading HISTORY:
 - Plain text: verbatim transcript; rely on it exactly.
 {{#if frameCount}}- Some middle sections: images, not text. Each image: one page of that transcript, in reading order between marked delimiters. Solid black cell: newline; runs of spaces collapse to one.
-{{#if docColumns}}  - Frame: two side-by-side columns, each {{cols}} characters wide, up to {{rows}} rows tall; read left top→bottom, then right.
-{{else}}  - Frame: one grid {{cols}} characters wide, up to {{rows}} rows tall; read left→right, top→bottom. No word wrap; words may break across rows.
+{{#if docColumns}}  - Frame: two side-by-side columns, each {{#each grids}}{{cols}} characters wide, up to {{rows}} rows tall{{#unless @last}}, or {{/unless}}{{/each}}; read left top→bottom, then right.
+{{else}}  - Frame: one grid {{#each grids}}{{cols}} characters wide, up to {{rows}} rows tall{{#unless @last}}, or {{/unless}}{{/each}}; read left→right, top→bottom. No word wrap; words may break across rows.
 {{/if}}{{#if sentenceInk}}  - Ink: six colors, one per sentence.
 {{/if}}{{#if stopwordDimmed}}  - Function words: dim gray; content words: full ink.
 {{/if}}{{#if lineRepeated}}  - Each line printed twice (white, then pale-yellow band); copies identical.
@@ -19,9 +19,9 @@ Reading HISTORY:
 {{/if}}{{#if truncatedChars}}- About {{truncatedChars}} characters of older middle history dropped to fit archive budget.
 {{/if}}- If an exact earlier detail matters and a section is unclear, re-derive from workspace (re-read files, re-run commands), rather than guess.
 
+{{!-- viewWithoutFrames (snapcompact.ts) reads this FILES section back out of a rendered summary, and viewSummary tells this template's summaries from others by their closing HISTORY heading: keep FILES_SECTION_HEAD and HISTORY_SECTION_HEAD in step with these headings. --}}
 {{#if files}}FILES
 ===================
 {{files}}
-
 {{/if}}HISTORY
 ===================

@@ -332,6 +332,8 @@ export interface CompiledPricingPeer {
 /** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
 export interface CompiledRetryResetTimezone {
 	provider: string;
+	/** Exact upstream endpoint whose custom provider IDs inherit this offset. */
+	baseUrl?: string;
 	offset: string;
 }
 
@@ -351,6 +353,8 @@ export interface CompiledBehavior {
 	pricingPeers: CompiledPricingPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	/** Hosts whose prefix caches benefit from a stable append-only conversation. */
+	appendOnlyContextProviders: string[];
 	referenceIsolatedProviders: string[];
 	/** Built-in model selector chains per agent role, keyed by role in declaration order. */
 	roleDefaults: Record<string, string[]>;
@@ -396,8 +400,12 @@ export type CompiledAuthValidation =
 			kind: "models-endpoint";
 			label?: string;
 			url: string;
-			/** Env var holding an alternate base URL; `/models` is appended to it. */
+			/** Env var holding an alternate base URL; `baseUrlPath` is appended to it. */
 			baseUrlEnv?: string;
+			/** Path segment ensured on the `baseUrlEnv` value (appended when absent) before `baseUrlPath` is applied — e.g. `/v1` for bases that may be bare origins. */
+			baseUrlAppend?: string;
+			/** Path appended to the `baseUrlEnv` value (default `/models`), for bases that exclude the API version. */
+			baseUrlPath?: string;
 			/** Hook returning extra request headers (may throw a configuration error). */
 			headersHook?: string;
 			optional?: boolean;
@@ -444,6 +452,10 @@ export interface CompiledCredentialMap {
 	projectId?: CompiledCredentialField;
 	apiEndpoint?: CompiledCredentialField;
 	enterpriseUrl?: CompiledCredentialField;
+	/** Dot path to the refresh token's remaining lifetime in seconds (`OAuthCredentials.refreshExpires`). */
+	refreshExpiresIn?: string;
+	/** Granted scopes (`OAuthCredentials.scope`), usually the response's `scope`. */
+	scope?: CompiledCredentialField;
 }
 
 /** Bearer GET that enriches credentials with identity fields. */
@@ -454,16 +466,17 @@ export interface CompiledUserinfo {
 }
 
 /**
- * One token-endpoint style request. `params` values may use `{placeholders}`
- * (`code`, `state`, `redirect_uri`, `code_verifier`, `client_id`,
- * `client_secret`, `refresh_token`, `device_code`, `scope`, `base`).
+ * One token-endpoint style request. String `params` values may use
+ * `{placeholders}` (`code`, `state`, `redirect_uri`, `code_verifier`,
+ * `client_id`, `client_secret`, `refresh_token`, `device_code`, `scope`,
+ * `base`); numeric values go out as JSON numbers.
  */
 export interface CompiledOAuthRequest {
 	url: CompiledAuthValue;
 	body: "form" | "json";
 	/** Include the grant's standard parameter set before `params`. */
 	standard: boolean;
-	params: Record<string, string>;
+	params: Record<string, string | number>;
 	headers: Record<string, string>;
 	timeoutMs?: number;
 }
@@ -547,15 +560,36 @@ export type CompiledLogin =
 	| CompiledDeviceCodeLogin
 	| CompiledCustomLogin;
 
+/**
+ * Token-endpoint refusals that prove a refresh grant dead: a 400/401 whose
+ * RFC 6749 `error` code is in `codes`, unless its `error_description` equals
+ * `exceptDescription`.
+ */
+export interface CompiledDeadGrant {
+	codes: string[];
+	exceptDescription?: string;
+}
+
 /** Refresh-token grant declared for a provider. */
 export type CompiledRefresh =
 	| { kind: "none" }
-	| { kind: "hook"; hook: string }
+	| {
+			kind: "hook";
+			hook: string;
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+	  }
 	| {
 			kind: "request";
 			token: CompiledOAuthRequest;
 			/** Stored credential fields that must be present before refreshing. */
 			require: string[];
+			/** Sent space-joined as `scope`; a 400 `invalid_scope` retries once without it. */
+			scopes?: string[];
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+			/** When set, only these refusals disable the login; every other refresh failure keeps it. */
+			deadGrant?: CompiledDeadGrant;
 			credential: CompiledCredentialMap;
 			userinfo?: CompiledUserinfo;
 			afterRefresh?: string;
@@ -568,6 +602,8 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** Login-sourced API keys use the provider's subscription quota rather than metered billing. */
+	loginSubscription?: boolean;
 	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
 	orgScopedIdentity?: boolean;
 	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
@@ -576,9 +612,31 @@ export interface CompiledAuthProvider {
 	nativeAuthApis?: string[];
 	available?: boolean;
 	showInLoginList?: boolean;
+	/** Why the provider is turned off: no login, and no credential of any source reaches it. */
+	disabled?: string;
+	/** Account risk a user must accept (by typing "yes") before a new login starts. */
+	loginWarning?: string;
+	/**
+	 * What every surface calls the provider once an account is linked (such as
+	 * "Acme Pro plan"); `name` stays the pre-sign-in `/login` label.
+	 */
+	connectedName?: string;
+	/**
+	 * One transcript line shown when a session starts using one of the provider's
+	 * models (such as "Using your Acme Pro plan").
+	 */
+	activeNotice?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;
+	/**
+	 * Logins are bound to a key that must stay on this machine (such as a DPoP
+	 * key), so they stay in the local `agent.db`: the auth broker neither stores
+	 * nor refreshes them.
+	 */
+	deviceBound?: boolean;
+	/** Runs when a login is removed: `hook` revokes the grant at the provider. */
+	signOut?: { hook: string };
 	apiKeyFormat: "bearer" | "structured";
 	expiry?: "jwt-or-never";
 	/** `api-key`: an OAuth login persists only `credentials.access` as a plain API key. */
@@ -664,6 +722,10 @@ export interface CompiledProvider {
 	automaticDefault?: boolean;
 	/** Env vars consulted, in order, for the runtime API-key fallback. */
 	envVars?: string[];
+	/** The provider's own managed API base URL when its deployment has one (chat, discovery, usages, search). */
+	baseUrl?: string;
+	/** Env var naming an alternate base URL for that deployment; consumers keep override resolution in code. */
+	baseUrlEnv?: string;
 	/** The runtime creates a model manager even without a valid API key. */
 	allowUnauthenticated?: boolean;
 	/** Successful runtime discovery replaces bundled provider models instead of merging. */
@@ -749,6 +811,8 @@ export interface ResolvedAxes {
 export interface RequestPolicy {
 	completionsReasoningMode?: "none" | "effort" | "opt-in" | "forced-on";
 	completionsReasoningHistory?: "omit" | "preserved" | "interleaved";
+	/** Send `allow_missing_thinking` with the effort so tool-call turns may arrive without reasoning. */
+	completionsAllowMissingThinking?: boolean;
 	anthropicThinking?: "adaptive" | "adaptive-summarized" | "budget-interleaved" | "budget-effort";
 	/** Advertise `fine-grained-tool-streaming-2025-05-14` on requests that carry tools. */
 	anthropicToolStreamingBeta?: boolean;
@@ -756,12 +820,18 @@ export interface RequestPolicy {
 	openaiPlatformHeader?: string;
 	responsesCacheRetention?: boolean;
 	responsesVerbosity?: "low";
-	responsesServiceTier?: "priority";
+	responsesServiceTier?: "priority" | "ultrafast";
 	responsesParallelToolCalls?: boolean;
 	responsesSafetyIdentifier?: boolean;
 	/** Default `tool_choice` to `auto` when the request carries tools and the caller picks none. */
 	responsesToolChoiceAuto?: boolean;
 	googleThinking?: "level" | "level-medium";
+	/** Send no `temperature`, `topP` or `topK` in `generationConfig`. */
+	googleOmitSampling?: boolean;
+	/** Send `generationConfig.maxOutputTokens` as the model's output maximum. */
+	googlePinMaxOutputTokens?: boolean;
+	/** Replay the model's own turns as the native Gemini content it streamed. */
+	googleNativeReplay?: boolean;
 	/** The route locks its upstream for the session (`x-provider-routing-source: session_lock`). */
 	routingSessionLock?: boolean;
 }

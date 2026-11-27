@@ -1,15 +1,44 @@
 /** Shared SQLite opening, error attribution, and result-code classification for persistent stores. */
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { getDbBusyTimeoutMs } from "./env";
 import { withFileLockSync } from "./file-lock";
 import { isEnoent } from "./fs-error";
+import { toError } from "./type-guards";
 import * as logger from "./logger";
 
 const BUSY_MAX_ATTEMPTS = 4;
 const BUSY_BASE_DELAY_MS = 100;
 const SQLITE_STORE_SUFFIXES = ["-wal", "-shm", "-journal", ""];
+
+let sqliteLockShimInstalled: boolean | undefined;
+
+/**
+ * Moves this process's SQLite locks onto open-file-description locks (Linux), once.
+ *
+ * SQLite's POSIX record locks belong to the process, so any close of another
+ * descriptor of a database or its `-shm` released them, including Bun's own file
+ * APIs and the bash tool's builtins; a peer omp then unlinked the WAL under the live
+ * connection (issue #15586). Call before the process opens its first database: a
+ * connection opened earlier keeps POSIX locks. Returns whether the shim is active; a
+ * Linux build where it cannot be installed (Bun's SQLite layout changed) logs a warning
+ * once, and callers with a UI surface it.
+ */
+export function ensureSqliteLockShim(): boolean {
+	if (sqliteLockShimInstalled === undefined) {
+		sqliteLockShimInstalled = installSqliteLockShim();
+		if (!sqliteLockShimInstalled && process.platform === "linux") {
+			logger.warn("SQLite OFD lock shim unavailable; in-process reads of a live store can release its locks", {
+				bun: Bun.version,
+				issue: "https://github.com/can1357/oh-my-pi/issues/15586",
+			});
+		}
+	}
+	return sqliteLockShimInstalled;
+}
 
 /**
  * A store's identity as `dev:ino:birthtimeMs`, `null` when the path holds no
@@ -100,7 +129,7 @@ function closeFailedDatabase(db: Database | undefined, error: unknown, identity:
 	try {
 		db?.close();
 	} catch (closeError) {
-		const original = error instanceof Error ? error : new Error(String(error));
+		const original = toError(error);
 		const detail = closeError instanceof Error ? closeError.message : String(closeError);
 		original.message += `; failed to close the SQLite handle: ${detail}`;
 		throw new SqliteAttemptFailure(original, identity, { canRecover: false });
@@ -152,6 +181,7 @@ async function openWithBusyRetries<T>(
 		let db: Database | undefined;
 		const identity = sqliteFileIdentity(dbPath);
 		try {
+			ensureSqliteLockShim();
 			db = new Database(dbPath);
 			// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
 			db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
@@ -175,6 +205,7 @@ function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: S
 	let db: Database | undefined;
 	const identity = sqliteFileIdentity(dbPath);
 	try {
+		ensureSqliteLockShim();
 		db = new Database(dbPath);
 		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		return initialize(db);
@@ -333,7 +364,7 @@ export function openSqliteDatabaseSync<T>(
 
 /** Adds the failing store's path to an error without losing SQLite result codes or its original stack. */
 export function annotateSqliteError(error: unknown, dbPath: string): Error {
-	const annotated = error instanceof Error ? error : new Error(String(error));
+	const annotated = toError(error);
 	annotated.message = `Database "${dbPath}": ${annotated.message}`;
 	return annotated;
 }
@@ -341,6 +372,89 @@ export function annotateSqliteError(error: unknown, dbPath: string): Error {
 /** Checkpoints committed WAL frames without waiting for concurrent readers. */
 export function checkpointWal(db: Database): void {
 	db.run("PRAGMA wal_checkpoint(PASSIVE)");
+}
+
+/** A scratch copy of a quarantined store, opened for salvage reads. */
+export interface SalvageSource extends Disposable {
+	db: Database;
+	/** True when the copy's header page count had to be lowered to open it. */
+	headerRepaired: boolean;
+}
+
+/**
+ * Lowers a copy's header page count to the pages the file really holds, when the
+ * header claims more. Returns whether the header was changed. A torn checkpoint can leave
+ * page 1 describing a longer file than the tail that survived; SQLite then rejects
+ * every statement, though the table pages are intact.
+ */
+function repairHeaderPageCount(copyPath: string): boolean {
+	const fd = fs.openSync(copyPath, "r+");
+	try {
+		const header = Buffer.alloc(100);
+		if (fs.readSync(fd, header, 0, 100, 0) < 100 || header.toString("latin1", 0, 16) !== "SQLite format 3\0")
+			return false;
+		const rawPageSize = header.readUInt16BE(16);
+		const pageSize = rawPageSize === 1 ? 65536 : rawPageSize;
+		if (pageSize < 512) return false;
+		const actualPages = Math.floor(fs.fstatSync(fd).size / pageSize);
+		if (actualPages < 1 || header.readUInt32BE(28) <= actualPages) return false;
+		const count = Buffer.alloc(4);
+		count.writeUInt32BE(actualPages);
+		fs.writeSync(fd, count, 0, 4, 28);
+		return true;
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Opens a private copy of a quarantined store (main file and WAL; the original is never
+ * written) so its rows can be read with {@link readSalvageableRows}. When the copy is
+ * rejected as corrupt, retries once after repairing the header page count on the copy.
+ * Dispose the result to close the handle and delete the copy.
+ */
+export function openQuarantinedStoreForSalvage(backupPath: string): SalvageSource {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-salvage-"));
+	let db: Database | undefined;
+	const cleanup = (): void => {
+		try {
+			db?.close();
+		} catch {}
+		fs.rmSync(dir, { recursive: true, force: true });
+	};
+	try {
+		const copyPath = path.join(dir, "store.db");
+		fs.copyFileSync(backupPath, copyPath);
+		fs.chmodSync(copyPath, 0o600);
+		try {
+			fs.copyFileSync(`${backupPath}-wal`, `${copyPath}-wal`);
+			fs.chmodSync(`${copyPath}-wal`, 0o600);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		const probe = (): Database => {
+			const opened = new Database(copyPath);
+			try {
+				opened.query("SELECT count(*) FROM sqlite_master").get();
+				return opened;
+			} catch (error) {
+				opened.close();
+				throw error;
+			}
+		};
+		let headerRepaired = false;
+		try {
+			db = probe();
+		} catch (error) {
+			if (!isSqliteCorruptionError(error) || !repairHeaderPageCount(copyPath)) throw error;
+			headerRepaired = true;
+			db = probe();
+		}
+		return { db, headerRepaired, [Symbol.dispose]: cleanup };
+	} catch (error) {
+		cleanup();
+		throw error;
+	}
 }
 
 /** Damaged regions one {@link readSalvageableRows} scan skips before abandoning the rest of the table. */

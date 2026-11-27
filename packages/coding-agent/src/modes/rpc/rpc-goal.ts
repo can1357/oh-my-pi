@@ -8,12 +8,11 @@
  * opt-in continuation driver keyed to agent lifecycle events instead of an
  * editor idle window.
  */
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { Goal } from "../../tools/details/goal";
 import { logger } from "@oh-my-pi/pi-utils";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../../goals/settings";
 import { type GoalModeState, goalContinuationActivity, goalFromModeData } from "../../goals/state";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
-import { nextActionableTask } from "../../tools/todo";
 
 /** `goal.continuationModes` value that enables automatic continuation for RPC hosts. */
 export const RPC_GOAL_CONTINUATION_MODE = "rpc";
@@ -39,6 +38,7 @@ export type RpcGoalSession = Pick<
 	| "getGoalModeState"
 	| "setGoalModeState"
 	| "getPlanModeState"
+	| "restrictToolNames"
 	| "getEnabledToolNames"
 	| "setActiveToolsByName"
 	| "sendGoalModeContext"
@@ -54,9 +54,9 @@ export type RpcGoalSession = Pick<
 
 export class RpcGoalController {
 	readonly #session: RpcGoalSession;
-	/** Active tool set before goal mode added `goal`; restored when the goal ends. */
-	#previousTools: string[] | undefined;
-	/** Continuation turns submitted whose terminal `agent_end` has not arrived. */
+	/** Whether goal mode added `goal` to the live roster; exit strips only that tool. */
+	#goalToolAddedByMode = false;
+	/** Continuation turns submitted whose run has not reached its `agent_end`. */
 	#pendingContinuationTurns = 0;
 	#previousContinuationActivity: string | undefined;
 	/** A continuation turn made no new progress; wait for the host before continuing. */
@@ -167,7 +167,7 @@ export class RpcGoalController {
 	 * running goal untouched and resumes continuation.
 	 *
 	 * `detachedRun`: the change stopped the running agent (new, switch, reload). A
-	 * detached continuation turn never reaches its terminal `agent_end`, so it no
+	 * detached continuation turn never reaches its `agent_end`, so it no
 	 * longer counts as pending. Never throws; settlement is re-checked afterwards.
 	 */
 	async endSessionChange(options?: { detachedRun?: boolean }): Promise<void> {
@@ -236,6 +236,9 @@ export class RpcGoalController {
 		if (this.#session.getPlanModeState()?.enabled) {
 			throw new Error("Exit plan mode before starting a goal.");
 		}
+		if (this.#session.restrictToolNames) {
+			throw new Error("Goal mode is unavailable in a --no-tools session.");
+		}
 	}
 
 	async #create(command: RpcGoalCommand): Promise<RpcGoalResult> {
@@ -265,13 +268,12 @@ export class RpcGoalController {
 	}
 
 	async #enter(start: () => Promise<GoalModeState>): Promise<void> {
-		// The pre-goal tool set is captured once, when this controller first adds `goal`
-		// (a reattached paused goal already holds it). A `goal` tool the host enabled
-		// before the goal stays enabled afterwards.
-		const previousTools = this.#previousTools ?? this.#session.getEnabledToolNames();
+		// Only a `goal` the controller added belongs to goal mode. A `goal` the host
+		// enabled beforehand stays enabled when the goal ends.
+		const enabledTools = this.#session.getEnabledToolNames();
 		const state = await start();
-		this.#previousTools = previousTools;
-		await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+		this.#goalToolAddedByMode = !enabledTools.includes("goal");
+		await this.#session.setActiveToolsByName([...new Set([...enabledTools, "goal"])]);
 		this.#session.setGoalModeState(state);
 		this.#resetContinuation();
 		if (this.#session.isStreaming) {
@@ -281,12 +283,17 @@ export class RpcGoalController {
 		this.#scheduleContinuation();
 	}
 
-	/** Restore the pre-goal tool set. Idempotent. */
+	/** Undo only goal mode's own tool change, preserving the live roster. Idempotent. */
 	async #exit(): Promise<void> {
-		const previousTools = this.#previousTools;
-		this.#previousTools = undefined;
+		const ownedGoalTool = this.#goalToolAddedByMode;
+		this.#goalToolAddedByMode = false;
 		this.#resetContinuation();
-		if (previousTools) await this.#session.setActiveToolsByName(previousTools);
+		if (ownedGoalTool) {
+			const liveTools = this.#session.getEnabledToolNames();
+			if (liveTools.includes("goal")) {
+				await this.#session.setActiveToolsByName(liveTools.filter(name => name !== "goal"));
+			}
+		}
 	}
 
 	/** Write the completion records into the current transcript and clear goal state. Synchronous. */
@@ -347,12 +354,17 @@ export class RpcGoalController {
 			this.#session.sessionManager.appendModeChange("none");
 			return;
 		}
+		// A --no-tools session cannot run the goal; leave it journaled for a session that can.
+		if (this.#session.restrictToolNames) {
+			runtime.clearAccounting();
+			return;
+		}
 		this.#session.setGoalModeState({ enabled: context.mode === "goal", mode: "active", goal });
 		const restored = await runtime.onThreadResumed({ preserveActiveGoal: options?.preserveActiveGoal });
 		if (!restored?.goal) return;
-		const previousTools = this.#session.getEnabledToolNames();
-		this.#previousTools = previousTools;
-		await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+		const enabledTools = this.#session.getEnabledToolNames();
+		this.#goalToolAddedByMode = !enabledTools.includes("goal");
+		await this.#session.setActiveToolsByName([...new Set([...enabledTools, "goal"])]);
 	}
 
 	/**
@@ -366,16 +378,12 @@ export class RpcGoalController {
 			return;
 		}
 		if (event.type === "goal_updated") {
-			const status = event.state?.goal.status;
-			if (status === "dropped") {
+			if (event.state?.goal.status === "dropped") {
 				this.#queueExit(() => this.#exit());
-			} else if (event.state?.enabled && this.#previousTools === undefined) {
-				// Created by the agent's `goal` tool rather than this controller.
-				this.#previousTools = this.#session.getEnabledToolNames();
 			}
 			return;
 		}
-		if (event.type !== "agent_end" || event.isTerminal === false) return;
+		if (event.type !== "agent_end") return;
 		if (this.#pendingContinuationTurns > 0) {
 			this.#pendingContinuationTurns--;
 			const activity = goalContinuationActivity(event.messages);
@@ -409,10 +417,7 @@ export class RpcGoalController {
 		if (session.getPlanModeState()?.enabled) return false;
 		const state = session.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") return false;
-		const phases = session.getTodoPhases();
-		return !(
-			!nextActionableTask(phases) && phases.some(phase => phase.tasks.some(task => task.status === "blocked"))
-		);
+		return true;
 	}
 
 	/**

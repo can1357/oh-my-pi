@@ -103,12 +103,18 @@ interface LogEntry {
 	readonly message: string;
 }
 
+function parseLogLines(text: string): LogEntry[] {
+	return text
+		.split(os.EOL)
+		.filter(line => line.length > 0)
+		.map(line => {
+			const entry: LogEntry = JSON.parse(line);
+			return entry;
+		});
+}
+
 async function readLogEntries(directory: string): Promise<LogEntry[]> {
-	const lines = (await readSingleLog(directory)).text.split(os.EOL).filter(line => line.length > 0);
-	return lines.map(line => {
-		const entry: LogEntry = JSON.parse(line);
-		return entry;
-	});
+	return parseLogLines((await readSingleLog(directory)).text);
 }
 
 function expectedLine(
@@ -185,6 +191,26 @@ describe("central logger byte contract", () => {
 			expectedLine(result.pid, "info", "bigint-%d"),
 		].join("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
+	});
+
+	test("stamps each record with its own async context, read live, which call fields override", async () => {
+		const result = await runScenario("context");
+		expect(result.stderr).toBe("");
+		const expected = [
+			expectedLine(result.pid, "info", "parent-start", { sessionId: "parent" }),
+			expectedLine(result.pid, "info", "outside"),
+			expectedLine(result.pid, "info", "parent-after-timer", { sessionId: "parent-rekeyed" }),
+			expectedLine(result.pid, "info", "explicit-wins", { sessionId: "explicit" }),
+			expectedLine(result.pid, "info", "shared-service"),
+			expectedLine(result.pid, "info", "child-nested", { sessionId: "grandchild", ordinal: 1 }),
+			expectedLine(result.pid, "info", "reserved-kept", { sessionId: "reserved" }),
+			expectedLine(result.pid, "info", "to-sink", { sessionId: "sink", turn: 2 }),
+			expectedLine(result.pid, "info", "to-sink-outside"),
+		].join("");
+		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
+		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as { sinkContexts: unknown[] };
+		// The throwing getter drops that record from the file; its sink still gets the call's own fields.
+		expect(payload.sinkContexts).toEqual([{ sessionId: "sink", turn: 2 }, null, { kept: true }]);
 	});
 
 	test("drops native JSON failures locally but sends original contexts to sinks", async () => {
@@ -286,6 +312,14 @@ describe("central logger transport lifecycle", () => {
 		expect(both.stdout).toBe(bothLine);
 		expect(both.stderr).toBe("");
 		expect((await readSingleLog(both.primaryDir)).text).toBe(bothLine);
+	});
+
+	test.each([
+		{ logLevel: "info", messages: ["console-warn", "console-info"] },
+		{ logLevel: "", messages: ["console-warn", "console-info", "console-debug"] },
+	])("OMP_LOG_LEVEL=$logLevel gates the console transport", async ({ logLevel, messages }) => {
+		const result = await runScenario("console-levels", { logLevel });
+		expect(parseLogLines(result.stdout).map(entry => entry.message)).toEqual([...messages]);
 	});
 
 	test("keeps disabled mode silent, sends sinks, preserves void returns, and re-enables", async () => {

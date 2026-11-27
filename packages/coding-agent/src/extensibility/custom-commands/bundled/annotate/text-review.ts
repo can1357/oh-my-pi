@@ -1,7 +1,7 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import { markdownFenceFor } from "../../../../utils/markdown-fence";
 import textReviewTemplate from "./prompts/text-review.md" with { type: "text" };
-import type { TextReviewAnnotation, TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { TextReviewAnnotation, TextReviewSource } from "./annotation-types";
 
 const SHORT_SOURCE_CHARACTER_LIMIT = 1000;
 
@@ -35,6 +35,7 @@ function sanitizePreviewLabel(value: string, maxLength = 96): string {
 interface RenderedTextAnnotation {
 	number: number;
 	isLine: boolean;
+	line?: number;
 	quote?: string;
 	note: string;
 	quoteIsInline?: boolean;
@@ -100,6 +101,7 @@ export function buildTextReviewPrompt(
 		return {
 			number: index + 1,
 			isLine: true,
+			line: annotation.line,
 			quote: exact("QUOTE", annotation.quote),
 			note,
 			quoteIsInline,

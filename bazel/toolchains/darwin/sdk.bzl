@@ -1,13 +1,13 @@
 """Repository rule materializing the macOS SDK from Apple's Command Line Tools.
 
-Downloads the newest-SDK package of the Command Line Tools for Xcode 27.0
+Downloads the newest-SDK package of the Command Line Tools for Xcode 27.2
 (`CLTools_macOSNMOS_SDK.pkg`) from Apple's software update CDN — the
 unauthenticated catalog `softwareupdate` installs the Command Line Tools from —
-and unpacks its MacOSX27.0.sdk with extract_pkg.py, so linux exec hosts get
+and unpacks its MacOSX27.2.sdk with extract_pkg.py, so linux exec hosts get
 the SDK straight from Apple, the way @xwin_sysroot gets the MSVC CRT from
 Microsoft. Requires python3 on the exec host (standard library only).
 
-    MacOSX27.0.sdk/   the SDK, minus its man pages, Mac Catalyst support
+    MacOSX27.2.sdk/   the SDK, minus its man pages, Mac Catalyst support
                       (System/iOSSupport) and Perl modules
 
 The package download (~70 MiB) is sha256-pinned, so it lands in Bazel's
@@ -16,6 +16,8 @@ opts into the repo contents cache.
 
 Bumping: the catalog lists every Command Line Tools release; the product whose
 `.dist` names "Command Line Tools for Xcode <version>" carries the package.
+Apple drops superseded packages from the CDN (GET returns 403), so a fetch
+failing with 403 means the pin needs bumping.
 
     curl -fsSL https://swscan.apple.com/content/catalogs/others/index-27-26-15-14-13-12-10.16-10.15-10.14-10.13-10.12-10.11-10.10-10.9-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog \\
       | grep -o 'https://swcdn[^<]*CLTools_macOSNMOS_SDK.pkg'
@@ -24,9 +26,9 @@ Update _URL, _SHA256 and _SDK together (the SDK directory name is printed by
 extract_pkg.py's "no <member>" error when it changes).
 """
 
-_URL = "https://swcdn.apple.com/content/downloads/58/48/082-83364-A_KCEBOO2NJS/0d2rj4y5ucjlkgcvqt6f6a4pergug5tu2b/CLTools_macOSNMOS_SDK.pkg"
-_SHA256 = "d55351824fd17742fd6e1e7a252fa1028698f32147ee48be9a6b75442bf30575"
-_SDK = "MacOSX27.0.sdk"
+_URL = "https://swcdn.apple.com/content/downloads/53/49/142-50405-A_WOBLDDXP4W/wk3d2yw94ir1jieuddcu9b9tffxrb09bq8/CLTools_macOSNMOS_SDK.pkg"
+_SHA256 = "1eb5196e069ad6e0abde1d750d967b7ea58f5b97f179dbf07aee2d00ca6c813e"
+_SDK = "MacOSX27.2.sdk"
 _EXCLUDES = [
     "System/iOSSupport",
     "System/Library/Perl",
@@ -95,3 +97,41 @@ macos_sdk_repository = repository_rule(
 )
 
 MACOS_SDK_DIR = _SDK
+
+def _rustc_sdk_env_file_impl(ctx):
+    settings = ctx.file.sdk_settings
+    out = ctx.actions.declare_file(ctx.label.name + ".env")
+    # rules_rust's process_wrapper expands ${pwd} immediately before spawning
+    # rustc, yielding an absolute path in the current action's execroot (not a
+    # repository-cache or sandbox path captured while generating this file).
+    # rustc queries the SDK before invoking clang, so clang's -isysroot cannot
+    # prevent its fallback to xcrun on Linux.
+    content = "SDKROOT=${{pwd}}/{}\n".format(settings.dirname) if settings else ""
+    ctx.actions.write(out, content)
+    return [DefaultInfo(files = depset([out]))]
+
+rustc_sdk_env_file = rule(
+    implementation = _rustc_sdk_env_file_impl,
+    doc = "Generates the SDK environment in the execution configuration.",
+    attrs = {
+        "sdk_settings": attr.label(
+            allow_single_file = True,
+            cfg = "exec",
+            doc = "SDKSettings.json on Linux; unset to retain native Xcode discovery.",
+        ),
+    },
+)
+
+def _rustc_sdk_env_impl(ctx):
+    return [ctx.attr._env[DefaultInfo]]
+
+rustc_sdk_env = rule(
+    implementation = _rustc_sdk_env_impl,
+    doc = "Supplies Rust link actions with the Linux cross SDK root while retaining native Xcode discovery.",
+    attrs = {
+        "_env": attr.label(
+            default = Label("//bazel/toolchains/darwin:rustc_sdk_env_file"),
+            cfg = "exec",
+        ),
+    },
+)

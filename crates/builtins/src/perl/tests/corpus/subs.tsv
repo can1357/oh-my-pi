@@ -1,0 +1,29 @@
+# Perl corpus: subs. Format and regeneration: crates/builtins/src/perl/tests.rs.
+args-count	sub f { scalar @_ } print f(1,2,3),"\n";	3␊
+args-empty	sub g { scalar @_ } sub f { &g() } print f(4,5),"\n";	0␊
+args-forward	sub g { join('|',@_) } sub f { &g } print f(4,5),"\n";	4|5␊
+array-alias	sub f { $_[0]=7 } my @x=(2,3); f(@x); print "@x\n";	7 3␊
+call-ampersand	sub f($) {scalar @_} my @a=(2,3); print &f(@a),"\n";	2␊
+closure-share	my $n=0; my $a=sub {++$n}; my $b=sub {$n}; $a->(); print $b->(),"\n";	1␊
+closure	sub make { my $n=shift; sub {++$n} } my $a=make(10); my $b=make(20); print $a->(),'|',$a->(),'|',$b->(),"\n";	11|12|21␊
+explicit-return	sub f { return 6; 9 } print f(),"\n";	6␊
+forward-declaration	sub f; print f(3),"\n"; sub f { $_[0]*2 }	6␊
+implicit-return	sub f { 1+2 } print f(),"\n";	3␊
+lvalue	sub f :lvalue { our $x } f()=98; print "$x\n";	98␊
+pop-default	sub f { return pop } print f(4,5),"\n";	5␊
+prototype-array-ref	sub f(\@) { join('|',@{$_[0]}) } my @a=(2,3); print f(@a),"\n";	2|3␊
+prototype-attribute	sub f :prototype($$) { $_[0].$_[1] } print f(2,3),"\n";	23␊
+prototype-block	sub f(&@) { my $c=shift; join('|', map {$c->($_)} @_) } print f {$_[0]*2} 3,4;	6|8
+prototype-default	sub f(_) {$_[0]} local $_='fallback'; print f(),"\n";	fallback␊
+prototype-query	sub f($;@) { 1 } print prototype(\&f),"\n";	$;@␊
+prototype-scalar	sub f($) { scalar @_ . ':' . $_[0] } my @a=(2,3); print f(@a),"\n";	1:2␊
+recursion	sub f { my ($n)=@_; $n<2 ? 1 : $n*f($n-1) } print f(6),"\n";	720␊
+recursive-anon	use feature 'current_sub'; my $f=sub {$_[0]<2 ? 1 : $_[0]*__SUB__->($_[0]-1)}; print $f->(6),"\n";	720␊
+scalar-alias	sub f { $_[0]*=3 } my $x=5; f($x); print "$x\n";	15␊
+shift-default	sub f { my $a=shift; my $b=shift; return "$a|$b" } print f(4,5),"\n";	4|5␊
+signature-array	use feature 'signatures'; no warnings 'experimental::signatures'; sub f($x,@rest) { "$x|@rest" } print f(1,2,3),"\n";	1|2 3␊
+signature-hash	use feature 'signatures'; no warnings 'experimental::signatures'; sub f($x,%rest) { "$x|$rest{a}|$rest{b}" } print f(1,a=>2,b=>3),"\n";	1|2|3␊
+signature-no-alias	use feature 'signatures'; no warnings 'experimental::signatures'; sub f($x) {$x=7} my $v=4; f($v); print "$v\n";	4␊
+signatures	use feature 'signatures'; no warnings 'experimental::signatures'; sub f($x,$y=5) {$x+$y} print f(3),'|',f(3,4),"\n";	8|7␊
+state-in-closure	use feature 'state'; sub make { sub { state $n=shift; ++$n } } my $a=make(); my $b=make(); print $a->(10),'|',$b->(20),'|',$a->(0),"\n";	11|21|12␊
+state	use feature 'state'; sub f { state $n=10; ++$n } print f(),'|',f(),"\n";	11|12␊

@@ -50,7 +50,7 @@ export const KNOWN_HOSTS = {
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
 	xai: { providers: ["xai", "xai-oauth"], urlMarkers: ["api.x.ai"] },
-	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai"] },
+	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai", "/publishers/mistralai/"] },
 	together: { providers: ["together"], urlMarkers: ["api.together.xyz"] },
 	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
 	/** URL-only on purpose: the `fireworks`/`firepass` providers route per-model and not every model is Fireworks-shaped. */
@@ -65,13 +65,18 @@ export const KNOWN_HOSTS = {
 	nvidia: { providers: ["nvidia"], urlMarkers: ["integrate.api.nvidia.com"] },
 	/** Venice AI (`api.venice.ai`). OpenAI-compatible; drives reasoning via top-level `reasoning_effort` (and `venice_parameters.disable_thinking`), and rejects DashScope's top-level `enable_thinking` with a 400 (`additionalProperties: false` request schema). */
 	venice: { providers: ["venice"], urlMarkers: ["api.venice.ai"] },
-	moonshotNative: { providers: ["moonshot", "kimi-code"], urlMarkers: ["api.moonshot.ai", "api.kimi.com"] },
+	moonshotNative: {
+		providers: ["moonshot", "kimi-code", "kimi-code-global"],
+		urlMarkers: ["api.moonshot.ai", "api.kimi.com", "api.kimi.ai"],
+	},
 	/** Google AI Studio's OpenAI-compatible shim (`/v1beta/openai`) — a subset of chat-completions; rejects `store` with a 400. Native Gemini uses `google-generative-ai` api instead. */
 	googleAistudio: { providers: [], urlMarkers: ["generativelanguage.googleapis.com"] },
 	opencode: { providers: ["opencode-go", "opencode-zen"], urlMarkers: ["opencode.ai"] },
 	/** ZenMux's Anthropic-compatible proxy (`zenmux.ai/api/anthropic`) forwards to signature-enforcing Anthropic. */
 	zenmux: { providers: ["zenmux"], urlMarkers: ["zenmux.ai"] },
 	chutes: { urlMarkers: ["chutes.ai"] },
+	/** Morph (`api.morphllm.com`). Reached only through custom providers, so the URL is its sole identity. */
+	morph: { urlMarkers: ["api.morphllm.com"] },
 } as const satisfies Record<string, HostClassSpec>;
 
 export type KnownHost = keyof typeof KNOWN_HOSTS;
@@ -161,14 +166,17 @@ export function isVertexExpressOpenAIUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/endpoints/openapi");
 }
 
-/** Vertex AI Anthropic raw-predict endpoints (`:streamRawPredict` / `:rawPredict`). */
+/** Vertex AI partner-model raw-predict endpoints (`:streamRawPredict` / `:rawPredict`), e.g. Anthropic or Mistral. */
 export function isVertexRawPredictUrl(baseUrl: string): boolean {
 	return baseUrl.includes(":streamRawPredict") || baseUrl.includes(":rawPredict");
 }
 
-/** Azure OpenAI deployment-scoped path (`…/deployments/<name>/…`). */
-export function isAzureDeploymentsUrl(baseUrl: string): boolean {
-	return baseUrl.includes("/deployments/");
+/**
+ * Vertex AI Anthropic raw-predict endpoints: the only publisher whose body is the
+ * Messages shape, carrying `anthropic_version` instead of `model`.
+ */
+export function isVertexAnthropicRawPredictUrl(baseUrl: string): boolean {
+	return baseUrl.includes("/publishers/anthropic/") && isVertexRawPredictUrl(baseUrl);
 }
 
 // Bedrock inference endpoints, per AWS's endpoint and PrivateLink docs:

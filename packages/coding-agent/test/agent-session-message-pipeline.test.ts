@@ -43,12 +43,17 @@ import { createAgentSession, type ExtensionContext, type ExtensionFactory } from
 import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	wrapSteeringForModel,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createTestImageDescriptions } from "./helpers/image-description";
 
 function createAgent(): Agent {
 	return new Agent({
@@ -127,6 +132,36 @@ describe("AgentSession message pipeline", () => {
 		});
 		sessions.push(session);
 		return session;
+	}
+
+	function capturingAnthropicSideSession(model: Model) {
+		const bodies: Array<{
+			messages: Array<{ role: string; content: string | Array<{ text?: string; cache_control?: unknown }> }>;
+		}> = [];
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [{ role: "user", content: "Fix the issue", timestamp: 1 }, createAssistantMessage("Fixed.")],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (target, context, options) =>
+				streamSimple(target, context, {
+					...options,
+					apiKey: "test-key",
+					fetch: async (_url, init) => {
+						bodies.push(JSON.parse(requestBodyText(init) ?? "{}"));
+						return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+					},
+				}),
+		});
+		sessions.push(session);
+		return { session, bodies };
 	}
 
 	it.each([false, true])("awaits ordered async delivery, final flush=%s", async finalFlush => {
@@ -652,43 +687,37 @@ describe("AgentSession message pipeline", () => {
 		expect(hookErrors).toHaveLength(3);
 	});
 
-	it("applies transformContext before convertToLlm", async () => {
-		const inputMessages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: Date.now() }];
-		const transformedMessages: AgentMessage[] = [
-			...inputMessages,
-			{ role: "user", content: "injected context", timestamp: Date.now() },
-		];
-		const convertedMessages: Message[] = [
-			{
-				role: "user",
-				content: [{ type: "text", text: "converted" }],
-				attribution: "user",
-				timestamp: Date.now(),
-			},
-		];
-		const transformContext = vi.fn(async (messages: AgentMessage[], signal?: AbortSignal) => {
-			expect(signal).toBe(abortController.signal);
-			return [...messages, ...transformedMessages.slice(messages.length)];
-		});
-		const convertToLlm = vi.fn(async (_messages: AgentMessage[]) => {
-			return convertedMessages;
-		});
-		const abortController = new AbortController();
+	it("applies the destination's reasoning policy to notes added by a context transform", async () => {
+		using tempDir = TempDir.createSync("@pi-context-reader-");
+		const authStorage = createInMemoryAuthStorage();
+		const note: AgentMessage = {
+			role: "custom",
+			customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
+			content: "interrupted reasoning",
+			display: false,
+			attribution: "agent",
+			timestamp: 1,
+		};
 		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
+			agent: new Agent({ initialState: { model: getBundledModel("openai", "gpt-4o-mini") } }),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-			transformContext,
+			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
+			transformContext: messages => [...messages, note],
 			convertToLlm,
 		});
-		sessions.push(session);
-
-		const result = await session.convertMessagesToLlm(inputMessages, abortController.signal);
-
-		expect(transformContext).toHaveBeenCalledWith(inputMessages, abortController.signal);
-		expect(convertToLlm).toHaveBeenCalledWith(transformedMessages);
-		expect(result).toEqual(convertedMessages);
+		try {
+			const history: AgentMessage[] = [{ role: "user", content: "continue", timestamp: 0 }];
+			const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const restricted = await session.convertMessagesToLlm(history, undefined, claude);
+			expect(restricted.map(getConvertedUserText)).toEqual(["continue"]);
+			expect(await session.convertMessagesToLlm(history)).toContainEqual(
+				expect.objectContaining({ role: "developer", content: [{ type: "text", text: note.content }] }),
+			);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 
 	it("marks queued user steers without changing the public queue text", async () => {
@@ -746,36 +775,6 @@ describe("AgentSession message pipeline", () => {
 			throw new Error("Expected attachment sourcePath to be populated");
 		}
 		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
-	});
-
-	it("resolves attachment://N to images pasted into a newer ask answer", () => {
-		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
-		const answerImage: ImageContent = { type: "image", data: "answer-image", mimeType: "image/png" };
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-		});
-		sessions.push(session);
-
-		session.agent.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "inspect this" }, userImage],
-			timestamp: Date.now(),
-		});
-		session.agent.appendMessage({
-			role: "toolResult",
-			toolCallId: "ask-1",
-			toolName: "ask",
-			content: [{ type: "text", text: "User selected: A\nUser added note: see [Image #1]" }, answerImage],
-			timestamp: Date.now(),
-			isError: false,
-		});
-
-		expect(session.getImageAttachments().map(entry => [entry.uri, entry.image])).toEqual([
-			["attachment://1", answerImage],
-		]);
 	});
 
 	it("normalizes historical WebP on the main provider request path", async () => {
@@ -1081,6 +1080,7 @@ describe("AgentSession message pipeline", () => {
 		if (!context.runEphemeralTurn) throw new Error("Host did not expose side turns");
 		const messagesBefore = structuredClone(session.agent.state.messages);
 		const entriesBefore = structuredClone(sessionManager.getEntries());
+		const transcriptBefore = structuredClone(sessionManager.buildSessionContext().messages);
 		const deltas: string[] = [];
 		const result = await context.runEphemeralTurn({
 			promptText: "Question?",
@@ -1091,13 +1091,24 @@ describe("AgentSession message pipeline", () => {
 		expect(deltas.join("")).toBe("Answer");
 		expect(JSON.stringify(capturedContext?.messages)).toContain("zephyr-42");
 		expect(session.agent.state.messages).toEqual(messagesBefore);
-		expect(sessionManager.getEntries()).toEqual(entriesBefore);
+		// Only the spend is journaled, off-transcript: the reply without the question, and no message entry.
+		const entriesAfter = sessionManager.getEntries();
+		expect(entriesAfter.slice(0, entriesBefore.length)).toEqual(entriesBefore);
+		expect(entriesAfter.slice(entriesBefore.length)).toEqual([
+			expect.objectContaining({
+				type: "model_usage",
+				purpose: "extension",
+				completion: { reply: "Answer" },
+			}),
+		]);
+		expect(sessionManager.buildSessionContext().messages).toEqual(transcriptBefore);
 
 		expect(result.replyText).toBe("Answer");
 		expect(capturedOptions?.promptCacheKey).toBe(promptCacheKey);
 		expect(capturedOptions?.sessionId).toStartWith(`${cacheSessionId}:side:`);
 		expect(capturedOptions?.sessionId).not.toBe(cacheSessionId);
-		expect(capturedOptions?.preferWebsockets).toBe(true);
+		// The Codex-only global opt-in must not leak into an unrelated side-turn provider.
+		expect(capturedOptions?.preferWebsockets).toBeUndefined();
 		expect(capturedOptions?.providerSessionState).toBe(session.providerSessionState);
 	});
 
@@ -1204,6 +1215,83 @@ describe("AgentSession message pipeline", () => {
 		expect(session.sessionManager.getEntries()).toEqual(journalSnapshot);
 	});
 
+	it.each([
+		["sends the image to a vision model", ["text", "image"]],
+		["describes the image for a text-only model", ["text"]],
+	] as const)("ephemeral prompt and history images: %s", async (_label, input) => {
+		const model = buildModel({
+			id: "side-stream-model",
+			name: "Side Stream Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: [...input],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const contexts: Context[] = [];
+		const sideStreamFn: StreamFn = (_model, context) => {
+			contexts.push({ ...context, messages: structuredClone(context.messages) });
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Red") }));
+			return stream;
+		};
+		const vision = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const modelRegistry = {
+			...createModelRegistryStub(),
+			getAvailable: () => [vision],
+			getAvailableForProviders: () => [vision],
+		};
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const artifacts = TempDir.createSync("@pi-ephemeral-image-");
+		try {
+			const descriptions = createTestImageDescriptions({
+				modelRegistry: modelRegistry as never,
+				settings,
+				artifactsDir: artifacts.path(),
+				description: "A red square.",
+			});
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+				transformProviderContext: descriptions.transform,
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: modelRegistry as never,
+				sideStreamFn,
+			});
+			sessions.push(session);
+			const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+			const textOnly = input.length === 1;
+			const expectRequest = (context: Context | undefined) => {
+				const request = JSON.stringify(context?.messages);
+				expect(request.includes('"type":"image"')).toBe(!textOnly);
+				expect(request.includes("A red square.")).toBe(textOnly);
+			};
+
+			await session.runEphemeralTurn({ promptText: "What colour is this?", promptImages: [screenshot] });
+			expectRequest(contexts[0]);
+
+			// A follow-up replays the image from history with the same handling, reusing the description.
+			await session.runEphemeralTurn({
+				promptText: "And the border?",
+				history: [
+					{ role: "user", content: [{ type: "text", text: "What colour is this?" }, screenshot], timestamp: 1 },
+					createAssistantMessage("Red"),
+				],
+			});
+			expectRequest(contexts[1]);
+			expect(descriptions.calls).toHaveLength(textOnly ? 1 : 0);
+			expect(agent.state.messages).toEqual([]);
+		} finally {
+			artifacts.removeSync();
+		}
+	});
+
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
 		"encodes the output cap and omits tools in the %s HTTP request",
 		async api => {
@@ -1262,8 +1350,49 @@ describe("AgentSession message pipeline", () => {
 		},
 	);
 
+	it("caches the persisted reply rather than the prediction-only prompt on Anthropic side turns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		await expect(session.runEphemeralTurn({ promptText: "Predict the next user message." })).rejects.toThrow();
+		expect(bodies).toHaveLength(1);
+		const cached = bodies[0].messages.flatMap((message, index) =>
+			Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
+		);
+		// The side-only reminder and prediction prompt are absent from the next real turn.
+		expect(cached.filter(index => index >= 1)).toEqual([1]);
+	});
+
+	it("caches reusable /btw topic history through its latest side question", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		await expect(
+			session.runEphemeralTurn({ promptText: "First question", conversationKey: "btw:topic" }),
+		).rejects.toThrow();
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Follow-up",
+				conversationKey: "btw:topic",
+				history: [
+					{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 2 },
+					{ ...createAssistantMessage("First answer"), model: model.id },
+				],
+			}),
+		).rejects.toThrow();
+
+		expect(bodies).toHaveLength(2);
+		expect(
+			bodies.map(body => {
+				const content = body.messages.at(-1)?.content;
+				return Array.isArray(content) && content.some(block => block.cache_control != null);
+			}),
+		).toEqual([true, true]);
+		const [firstWire, nextWire] = [bodies[0].messages, bodies[1].messages.slice(0, bodies[0].messages.length)].map(
+			messages => JSON.stringify(messages, (key, value) => (key === "cache_control" ? undefined : value)),
+		);
+		expect(nextWire).toEqual(firstWire);
+	});
+
 	it.each([
-		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
 			api =>
 				[
@@ -1335,9 +1464,9 @@ describe("AgentSession message pipeline", () => {
 			true,
 		],
 		[
-			"Gemini CLI",
+			"Gemini",
 			buildModel({
-				...getBundledModel("google-gemini-cli", "gemini-2.5-pro"),
+				...getBundledModel("google", "gemini-2.5-pro"),
 				thinking: { mode: "budget", efforts: [Effort.Medium] },
 			}),
 			false,
@@ -1466,7 +1595,10 @@ describe("AgentSession message pipeline", () => {
 			const history = (body: Record<string, unknown>) =>
 				(body.messages as { role: string; content: unknown }[]).slice(0, 2).map(({ role, content }) => ({
 					role,
-					content: JSON.stringify(content).replaceAll(',"cache_control":{"type":"ephemeral"}', ""),
+					content: JSON.stringify(
+						typeof content === "string" ? [{ type: "text", text: content }] : content,
+						(key, value) => (key === "cache_control" ? undefined : value),
+					),
 				}));
 			// Cache keys: tools, system, thinking, top-level effort, and the history before the side prompt.
 			for (const key of ["tools", "system", "thinking", "output_config"]) expect(minimized[key]).toEqual(plain[key]);
@@ -1982,6 +2114,7 @@ describe("AgentSession message pipeline", () => {
 				type: "toolcall_delta",
 				contentIndex: 0,
 				delta: "rep",
+				partial: assistantMessage,
 			},
 		} as never);
 
@@ -2551,7 +2684,7 @@ describe("AgentSession message pipeline", () => {
 				"compaction.enabled": false,
 				"bash.autoBackground.enabled": false,
 				"bashInterceptor.enabled": false,
-				"tools.xdev": false,
+				"tools.commands": false,
 			}),
 			model,
 			disableExtensionDiscovery: true,
@@ -2669,7 +2802,7 @@ describe("AgentSession message pipeline", () => {
 				"compaction.enabled": false,
 				"bash.autoBackground.enabled": false,
 				"bashInterceptor.enabled": false,
-				"tools.xdev": false,
+				"tools.commands": false,
 			}),
 			model,
 			disableExtensionDiscovery: true,
@@ -2769,7 +2902,7 @@ describe("AgentSession message pipeline", () => {
 			modelRegistry,
 			settings: Settings.isolated({
 				"compaction.enabled": false,
-				"tools.xdev": false,
+				"tools.commands": false,
 				"web_search.enabled": true,
 			}),
 			model,

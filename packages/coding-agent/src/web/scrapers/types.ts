@@ -1,16 +1,5 @@
-/**
- * Shared types and utilities for web-fetch handlers
- */
-import { scheduler } from "node:timers/promises";
-import { ptree } from "@oh-my-pi/pi-utils";
-import type TurndownService from "@oh-my-pi/pi-utils/turndown";
-
-import type { ModelRegistry } from "../../config/model-registry";
-import type { AgentStorage } from "../../session/agent-storage";
-import { ToolAbortError } from "../../tools/tool-errors";
-import { decodeBody, readBodyCapped } from "../response-body";
-
-export { formatNumber } from "@oh-my-pi/pi-utils";
+import { readUrl } from "../read";
+import { decodeBody } from "../response-body";
 
 export interface RenderResult {
 	url: string;
@@ -24,41 +13,8 @@ export interface RenderResult {
 	notes: string[];
 }
 
-/**
- * Site-specific URL renderer: returns `null` for URLs it does not own.
- * `modelRegistry` is the session's, for handlers that read through a model (X via Grok).
- */
-export type SpecialHandler = (
-	url: string,
-	timeout: number,
-	signal?: AbortSignal,
-	storage?: AgentStorage | null,
-	modelRegistry?: ModelRegistry,
-) => Promise<RenderResult | null>;
-
 /** Network read bound for a fetched body; the only size limit on rendered URL content. */
 export const MAX_BYTES = 50 * 1024 * 1024;
-
-const USER_AGENTS = [
-	"curl/8.0",
-	"Mozilla/5.0 (compatible; TextBot/1.0)",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-];
-
-function isBotBlocked(status: number, content: string): boolean {
-	if (status === 403 || status === 503) {
-		const lower = content.toLowerCase();
-		return (
-			lower.includes("cloudflare") ||
-			lower.includes("captcha") ||
-			lower.includes("challenge") ||
-			lower.includes("blocked") ||
-			lower.includes("access denied") ||
-			lower.includes("bot detection")
-		);
-	}
-	return false;
-}
 
 /**
  * Collapse blank-line runs and trim. Never shortens content: URL reads page the preview
@@ -75,12 +31,6 @@ export interface LoadPageOptions {
 	body?: string;
 	maxBytes?: number;
 	signal?: AbortSignal;
-	/**
-	 * Return true to skip reading the response body for this content type
-	 * (lowercased mime, no params). The caller is expected to re-fetch the
-	 * payload as binary; this avoids streaming + decoding huge binaries twice.
-	 */
-	skipBodyForContentType?: (contentType: string) => boolean;
 }
 
 export interface LoadPageResult {
@@ -93,248 +43,39 @@ export interface LoadPageResult {
 	truncated?: boolean;
 	/** Last transport-level error message when ok is false. */
 	error?: string;
-	/** True when the body read was skipped via skipBodyForContentType. */
-	bodySkipped?: boolean;
+	/**
+	 * Bot protection that answered with its challenge or block page instead of the page. Such a
+	 * response is never `ok`, whatever its status, so a caller checking `ok` does not take it as content.
+	 */
+	blockedBy?: string;
 }
 
-const RETRY_AFTER_MAX_MS = 10_000;
-
-/** Parse a Retry-After header (seconds or HTTP-date) into a bounded delay. */
-function parseRetryAfterMs(value: string | null): number {
-	if (!value) return 1_000;
-	const seconds = Number(value);
-	if (Number.isFinite(seconds)) return Math.min(Math.max(seconds, 0) * 1000, RETRY_AFTER_MAX_MS);
-	const date = Date.parse(value);
-	if (!Number.isNaN(date)) return Math.min(Math.max(date - Date.now(), 0), RETRY_AFTER_MAX_MS);
-	return 1_000;
-}
-
-/**
- * Fetch a page with timeout and size limit
- */
+/** Fetch a page without formatting its body. */
 export async function loadPage(url: string, options: LoadPageOptions = {}): Promise<LoadPageResult> {
-	const { timeout = 20, headers = {}, maxBytes = MAX_BYTES, signal, method = "GET", body } = options;
-
-	let lastError: string | undefined;
-	let retried429 = false;
-	for (let attempt = 0; attempt < USER_AGENTS.length; attempt++) {
-		if (signal?.aborted) {
-			throw new ToolAbortError();
-		}
-
-		const userAgent = USER_AGENTS[attempt];
-		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
-
-		try {
-			const requestInit: RequestInit = {
-				signal: requestSignal,
-				method,
-				headers: {
-					"User-Agent": userAgent,
-					Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-					"Accept-Language": "en-US,en;q=0.5",
-					"Accept-Encoding": "identity", // Cloudflare Markdown-for-Agents returns corrupted bytes when compression is negotiated
-					...headers,
-				},
-				redirect: "follow",
-			};
-
-			if (body !== undefined) {
-				requestInit.body = body;
-			}
-
-			const response = await fetch(url, requestInit);
-
-			const rawContentType = response.headers.get("content-type") ?? "";
-			const contentType = rawContentType.split(";")[0]?.trim().toLowerCase() ?? "";
-			const finalUrl = response.url;
-
-			if (response.status === 429 && !retried429) {
-				// Rate limited: retry once, honoring a bounded Retry-After. The
-				// wait observes the caller's signal so an Esc during the backoff
-				// does not stall for up to the full delay.
-				retried429 = true;
-				const delayMs = parseRetryAfterMs(response.headers.get("retry-after"));
-				void response.body?.cancel().catch(() => {});
-				try {
-					await scheduler.wait(delayMs, { signal });
-				} catch {
-					throw new ToolAbortError();
-				}
-				attempt--; // Reuse the same user agent for the retry.
-				continue;
-			}
-
-			if (response.ok && options.skipBodyForContentType?.(contentType)) {
-				void response.body?.cancel().catch(() => {});
-				return { content: "", contentType, finalUrl, ok: true, status: response.status, bodySkipped: true };
-			}
-
-			const responseBody = await readBodyCapped(response, maxBytes);
-			if (!responseBody) {
-				// A successful response can still be bodyless (HTTP 204, or a null
-				// body stream): keep the transport's own success verdict instead of
-				// rewriting it, so the caller's status handling (a 204 is a valid
-				// empty read, not a failed fetch) runs on the real outcome.
-				return { content: "", contentType, finalUrl, ok: response.ok, status: response.status };
-			}
-
-			const content = decodeBody(responseBody.bytes, rawContentType);
-			if (isBotBlocked(response.status, content) && attempt < USER_AGENTS.length - 1) {
-				continue;
-			}
-
-			if (!response.ok) {
-				return {
-					content,
-					contentType,
-					finalUrl,
-					ok: false,
-					status: response.status,
-					truncated: responseBody.truncated,
-				};
-			}
-
-			return {
-				content,
-				contentType,
-				finalUrl,
-				ok: true,
-				status: response.status,
-				truncated: responseBody.truncated,
-			};
-		} catch (error) {
-			if (signal?.aborted) {
-				throw new ToolAbortError();
-			}
-			lastError = error instanceof Error ? error.message : String(error);
-			if (attempt === USER_AGENTS.length - 1) {
-				return { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
-			}
-		}
-	}
-
-	return { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
-}
-
-/** Module-level Turndown instance — built lazily on first use. */
-let turndownPromise: Promise<TurndownService> | undefined;
-
-function getTurndown(): Promise<TurndownService> {
-	turndownPromise ||= initTurndown();
-	return turndownPromise;
-}
-
-async function initTurndown(): Promise<TurndownService> {
-	// Lazy import keeps turndown/turndown-plugin-gfm off the startup graph.
-	const { createTurndown } = await import("../../utils/turndown");
-	return createTurndown();
-}
-
-/**
- * Convert HTML to markdown using Turndown with GFM support.
- * Strips script/style tags before conversion.
- */
-export async function htmlToBasicMarkdown(html: string): Promise<string> {
-	const cleaned = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");
-	const turndown = await getTurndown();
-	return turndown.turndown(cleaned).trim();
-}
-
-/**
- * Build a RenderResult from markdown content. Calls finalizeOutput internally.
- */
-export function buildResult(
-	md: string,
-	opts: {
-		url: string;
-		finalUrl?: string;
-		method: string;
-		fetchedAt: string;
-		notes?: string[];
-		contentType?: string;
-		/** Pass the source `LoadPageResult.truncated` when `md` embeds a fetched body verbatim. */
-		truncated?: boolean;
-	},
-): RenderResult {
+	const { timeout = 20, headers, maxBytes = MAX_BYTES, signal, method, body } = options;
+	const output = await readUrl(url, {
+		raw: true,
+		browser: false,
+		timeoutMs: timeout * 1000,
+		headers: headers && Object.entries(headers).map(([name, value]) => ({ name, value })),
+		maxBytes,
+		signal,
+		method,
+		body,
+	});
+	const contentTypeHeader = output.responseHeaders.find(({ name }) => name.toLowerCase() === "content-type")?.value;
+	const contentType = output.contentType ?? output.mime ?? contentTypeHeader ?? "";
+	const blockedBy = output.verdict === "wall" ? (output.wall ?? "bot protection") : undefined;
 	return {
-		url: opts.url,
-		finalUrl: opts.finalUrl ?? opts.url,
-		contentType: opts.contentType ?? "text/markdown",
-		method: opts.method,
-		content: finalizeOutput(md),
-		fetchedAt: opts.fetchedAt,
-		truncated: opts.truncated ?? false,
-		notes: opts.notes ?? [],
+		content:
+			output.content ??
+			(output.errorBody && !blockedBy ? decodeBody(output.errorBody, contentTypeHeader ?? "") : ""),
+		contentType: contentType.split(";", 1)[0].trim().toLowerCase(),
+		finalUrl: output.url || url,
+		ok: output.kind !== "failed" && !blockedBy,
+		status: output.status || undefined,
+		truncated: output.truncated,
+		error: output.error,
+		blockedBy,
 	};
-}
-
-/**
- * Format a date value as YYYY-MM-DD. Returns empty string on invalid input.
- */
-export function formatIsoDate(value?: string | number | Date): string {
-	if (value == null) return "";
-	if (typeof value === "string") {
-		const datePrefix = value.match(/^\d{4}-\d{2}-\d{2}/);
-		if (datePrefix) return datePrefix[0];
-	}
-	try {
-		return new Date(value).toISOString().split("T")[0];
-	} catch {
-		return "";
-	}
-}
-
-/**
- * Decode common HTML entities.
- */
-export function decodeHtmlEntities(text: string): string {
-	return text
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&amp;/g, "&")
-		.replace(/&quot;/g, '"')
-		.replace(/&#0?39;/g, "'")
-		.replace(/&#x27;/g, "'")
-		.replace(/&#x2F;/g, "/")
-		.replace(/&nbsp;/g, " ");
-}
-
-/**
- * Format seconds into HH:MM:SS or MM:SS.
- */
-export function formatMediaDuration(totalSeconds: number): string {
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const secs = Math.floor(totalSeconds % 60);
-	if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-	return `${minutes}:${String(secs).padStart(2, "0")}`;
-}
-
-/**
- * Extract localized text, preferring en-US/en.
- */
-export type LocalizedText = string | Record<string, string | null> | null | undefined;
-
-export function getLocalizedText(value: LocalizedText, defaultLocale?: string): string | undefined {
-	if (value == null) return undefined;
-	if (typeof value === "string") return value;
-	if (defaultLocale && value[defaultLocale]) return value[defaultLocale];
-	return (
-		value["en-US"] ?? value.en_US ?? value.en ?? Object.values(value).find(v => typeof v === "string") ?? undefined
-	);
-}
-
-/**
- * Check if content looks like HTML by inspecting the leading tag.
- */
-export function looksLikeHtml(content: string): boolean {
-	// Only the leading tag matters; lowercase a short prefix instead of the whole body.
-	const trimmed = content.trimStart().slice(0, 16).toLowerCase();
-	return (
-		trimmed.startsWith("<!doctype") ||
-		trimmed.startsWith("<html") ||
-		trimmed.startsWith("<head") ||
-		trimmed.startsWith("<body")
-	);
 }

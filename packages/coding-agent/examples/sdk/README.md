@@ -4,74 +4,75 @@ Programmatic usage of omp-coding-agent via `createAgentSession()`.
 
 ## Examples
 
-| File                       | Description                                    |
-| -------------------------- | ---------------------------------------------- |
-| `01-minimal.ts`            | Simplest usage with all defaults               |
-| `02-custom-model.ts`       | Select model and thinking level                |
-| `03-custom-prompt.ts`      | Replace or modify system prompt                |
-| `04-skills.ts`             | Discover, filter, or replace skills            |
-| `05-tools.ts`              | Built-in tools, custom tools                   |
-| `06-hooks.ts`              | Logging, blocking, result modification         |
-| `07-context-files.ts`      | AGENTS.md context files                        |
-| `08-slash-commands.ts`     | File-based slash commands                      |
-| `09-api-keys-and-oauth.ts` | API key resolution, OAuth config               |
-| `10-settings.ts`           | Override compaction, retry, terminal settings  |
-| `11-sessions.ts`           | In-memory, persistent, continue, list sessions |
-| `12-full-control.ts`       | Replace everything, no discovery               |
+| File                       | Description                                             |
+| -------------------------- | ------------------------------------------------------- |
+| `01-minimal.ts`            | Simplest usage with all defaults                        |
+| `02-custom-model.ts`       | Select model and thinking level                         |
+| `03-custom-prompt.ts`      | Replace or modify system prompt                         |
+| `04-skills.ts`             | Discover, filter, or replace skills                     |
+| `06-extensions.ts`         | Load extensions and register tools                      |
+| `06-hooks.ts`              | Log and block events with extension factories           |
+| `07-context-files.ts`      | AGENTS.md context files                                 |
+| `08-prompt-templates.ts`   | File-based prompt templates                             |
+| `08-slash-commands.ts`     | Migrate file-based slash commands to prompt templates   |
+| `09-api-keys-and-oauth.ts` | API key resolution, OAuth config                        |
+| `11-sessions.ts`           | In-memory, persistent, continue, and list sessions      |
+| `12-redis-sessions.ts`     | Store sessions in Redis or Valkey                       |
+| `13-sql-sessions.ts`       | Store sessions in PostgreSQL, MySQL, SQLite, or MariaDB |
 
 ## Running
 
 ```bash
 cd packages/coding-agent
-npx tsx examples/sdk/01-minimal.ts
+bun examples/sdk/01-minimal.ts
 ```
 
 ## Quick Reference
 
 ```typescript
-import { getModel } from "@oh-my-pi/pi-ai";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	AuthStorage,
 	createAgentSession,
+	createTools,
 	discoverAuthStorage,
-	discoverModels,
-	discoverSkills,
-	discoverHooks,
-	discoverCustomTools,
-	discoverContextFiles,
-	discoverSlashCommands,
-	loadSettings,
-	buildSystemPrompt,
 	ModelRegistry,
 	SessionManager,
-	BUILTIN_TOOLS,
-	HIDDEN_TOOLS,
-	createTools,
 } from "@oh-my-pi/pi-coding-agent";
 
 // Auth and models setup
-const authStorage = discoverAuthStorage();
-const modelRegistry = discoverModels(authStorage);
+const authStorage = await discoverAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
 
 // Minimal
-const { session } = await createAgentSession({ authStorage, modelRegistry });
+const { session: minimalSession } = await createAgentSession({ authStorage, modelRegistry });
 
 // Custom model
-const model = getModel("anthropic", "claude-opus-4-5");
-const { session } = await createAgentSession({ model, thinkingLevel: "high", authStorage, modelRegistry });
+const model = getBundledModel("anthropic", "claude-opus-4-5");
+const { session: customModelSession } = await createAgentSession({
+	model,
+	thinkingLevel: ThinkingLevel.High,
+	authStorage,
+	modelRegistry,
+});
 
 // Modify prompt
-const { session } = await createAgentSession({
-	systemPrompt: (defaultPrompt) => defaultPrompt + "\n\nBe concise.",
+const { session: promptSession } = await createAgentSession({
+	systemPrompt: defaultPrompt => [...defaultPrompt, "Be concise."],
 	authStorage,
 	modelRegistry,
 });
 
 // Read-only tools
-const { session } = await createAgentSession({ toolNames: ["read", "search", "find"], authStorage, modelRegistry });
+const { session: readOnlySession } = await createAgentSession({
+	toolNames: ["read", "grep", "glob"],
+	authStorage,
+	modelRegistry,
+});
 
 // In-memory
-const { session } = await createAgentSession({
+const { session: inMemorySession } = await createAgentSession({
 	sessionManager: SessionManager.inMemory(),
 	authStorage,
 	modelRegistry,
@@ -80,16 +81,16 @@ const { session } = await createAgentSession({
 // Full control
 const customAuth = await AuthStorage.create("/my/app/agent.db");
 customAuth.keys.setRuntime("anthropic", Bun.env.MY_KEY!);
-const customRegistry = new ModelRegistry(customAuth);
+const customRegistry = new ModelRegistry(customAuth, "/my/app/models.yml");
 
-const { session } = await createAgentSession({
+const { session: controlledSession } = await createAgentSession({
 	model,
 	authStorage: customAuth,
 	modelRegistry: customRegistry,
 	systemPrompt: ["You are helpful."],
 	toolNames: ["read", "bash"],
-	customTools: [{ tool: myTool }],
-	hooks: [{ factory: myHook }],
+	customTools: [myTool],
+	extensions: [myExtension],
 	skills: [],
 	contextFiles: [],
 	slashCommands: [],
@@ -97,58 +98,58 @@ const { session } = await createAgentSession({
 });
 
 // Run prompts
-session.subscribe((event) => {
+minimalSession.subscribe(event => {
 	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 		process.stdout.write(event.assistantMessageEvent.delta);
 	}
 });
-await session.prompt("Hello");
+await minimalSession.prompt("Hello");
 ```
 
 ## Resolve preview workflow (AST edit apply/discard)
 
-`ast_edit` now always returns a preview. To finalize, write plain text to the appropriate virtual device with the `write` tool.
+`ast_edit` now always returns a preview. To finalize, run the `resolve` or `reject` command with the reason as its argument.
 
-- `xd://resolve` → apply the pending preview; body = reason text
-- `xd://reject` → discard the pending preview; body = reason text
+- `resolve "<reason>"` → apply the pending preview
+- `reject "<reason>"` → discard the pending preview
 
-`createAgentSession()` / `createTools()` auto-include `write` whenever a deferrable tool (e.g. `ast_edit`) is present, so the devices are always reachable.
+While the `bash` tool is active these run as bash tool commands; otherwise `createAgentSession()` / `createTools()` present them as top-level tools whenever a deferrable tool (e.g. `ast_edit`) is present.
 
 ```typescript
-const tools = await createTools(toolSession, ["ast_edit"]); // write is auto-included
-const writeTool = tools.find(t => t.name === "write")!;
+const tools = await createTools(toolSession, ["ast_edit"]); // resolve is included
 
-await writeTool.execute("call-1", {
-  path: "xd://resolve",
-  content: "Preview matches expected replacements",
+const resolveTool = tools.find(t => t.name === "resolve")!;
+
+await resolveTool.execute("call-1", {
+	reason: "Preview matches expected replacements",
 });
 ```
+
 ## Options
 
-| Option                      | Default                       | Description                       |
-| --------------------------- | ----------------------------- | --------------------------------- |
-| `authStorage`               | `discoverAuthStorage()`       | Credential storage                |
-| `modelRegistry`             | `discoverModels(authStorage)` | Model registry                    |
-| `cwd`                       | `process.cwd()`               | Working directory                 |
-| `agentDir`                  | `~/.omp/agent`                | Config directory                  |
-| `model`                     | From settings/first available | Model to use                      |
-| `thinkingLevel`             | From settings/"off"           | off, low, medium, high            |
-| `systemPrompt`              | Discovered                    | String or `(default) => modified` |
-| `toolNames`                 | All built-in tools            | Filter which tools to include     |
-| `customTools`               | Discovered                    | Replaces discovery                |
-| `additionalCustomToolPaths` | `[]`                          | Merge with discovery              |
-| `hooks`                     | Discovered                    | Replaces discovery                |
-| `additionalHookPaths`       | `[]`                          | Merge with discovery              |
-| `skills`                    | Discovered                    | Skills for prompt                 |
-| `contextFiles`              | Discovered                    | AGENTS.md files                   |
-| `slashCommands`             | Discovered                    | File commands                     |
-| `sessionManager`            | `SessionManager.create(cwd)`  | Persistence                       |
-| `settingsManager`           | From agentDir                 | Settings overrides                |
+| Option                     | Default                       | Description                                |
+| -------------------------- | ----------------------------- | ------------------------------------------ |
+| `authStorage`              | `discoverAuthStorage()`       | Credential storage                         |
+| `modelRegistry`            | From `<agentDir>/models.yml`  | Model registry                             |
+| `cwd`                      | `process.cwd()`               | Working directory                          |
+| `agentDir`                 | `~/.omp/agent`                | Config directory                           |
+| `model`                    | From settings/first available | Model to use                               |
+| `thinkingLevel`            | From settings/"off"           | off, low, medium, high                     |
+| `systemPrompt`             | Discovered                    | Strings or `(default) => modified strings` |
+| `toolNames`                | All built-in tools            | Filter which tools to include              |
+| `customTools`              | `[]`                          | Additional inline custom tools             |
+| `extensions`               | `[]`                          | Inline extensions merged with discovery    |
+| `additionalExtensionPaths` | `[]`                          | Merge with extension discovery             |
+| `skills`                   | Discovered                    | Skills for prompt                          |
+| `contextFiles`             | Discovered                    | AGENTS.md files                            |
+| `slashCommands`            | Discovered                    | File commands                              |
+| `sessionManager`           | `SessionManager.create(cwd)`  | Persistence                                |
+| `settingsManager`          | From agentDir                 | Settings overrides                         |
 
 ## Events
 
 ```typescript
-session.subscribe((event) => {
+session.subscribe(event => {
 	switch (event.type) {
 		case "message_update":
 			if (event.assistantMessageEvent.type === "text_delta") {

@@ -16,11 +16,11 @@ import { type AgentMessage, isNonBlankContext, joinAdditionalContext } from "@oh
 import type { CompactionPreparation, CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantRetryRecovery, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { Goal } from "../tools/details/goal";
 import type { GoalModeState } from "../goals/state";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry } from "../session/session-entries";
-import type { CacheWarmingAction } from "../session/cache-warmer";
-import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
+import type { CacheWarmingAction, CacheWarmingRentMethod } from "../session/cache-warmer";
+import type { TodoItem } from "../tools/details/todo";
 
 // ============================================================================
 // Session Events
@@ -47,6 +47,11 @@ export interface SessionSwitchEvent {
 	reason: "new" | "resume" | "fork";
 	/** Session file we came from */
 	previousSessionFile: string | undefined;
+}
+
+/** Fired after successfully clearing the live/model context without changing session identity. */
+export interface SessionClearEvent {
+	type: "session_clear";
 }
 
 /**
@@ -99,6 +104,13 @@ export interface SessionCompactEvent {
 	compactionEntry: CompactionEntry;
 	/** Whether the compaction entry was provided by an extension/hook */
 	fromExtension: boolean;
+}
+
+/** Fired before the operator ends the session through a close the host can still refuse (can be cancelled). */
+export interface SessionBeforeShutdownEvent {
+	type: "session_before_shutdown";
+	/** Aborted when the close stops waiting: another close request, a signal, or the UI stopping. */
+	signal: AbortSignal;
 }
 
 /** Fired on process exit (SIGINT/SIGTERM) */
@@ -166,12 +178,14 @@ export type SessionEvent =
 	| SessionStartEvent
 	| SessionBeforeSwitchEvent
 	| SessionSwitchEvent
+	| SessionClearEvent
 	| SessionBeforeBranchEvent
 	| SessionBranchEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactingEvent
 	| SessionCompactEvent
 	| SessionStopEvent
+	| SessionBeforeShutdownEvent
 	| SessionShutdownEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent
@@ -345,9 +359,9 @@ export interface ToolCallEventResult {
 	 * concurrency scheduling, `tool_execution_start`, and the approval gate: the revision is
 	 * revalidated against the tool schema and becomes what the loop schedules, displays, persists,
 	 * and executes — the user always approves what actually runs. For dispatches the loop never
-	 * sees (nested `write xd://` device calls, Cursor direct execution) the tool wrapper applies
-	 * the revision before its own approval gate; a revised nested xd:// input forfeits the outer
-	 * write gate's approval and faces the full prompt again.
+	 * sees (a tool command run inside a `bash` call, Cursor direct execution) the tool wrapper applies
+	 * the revision before its own approval gate; a revised nested tool command input forfeits the outer
+	 * bash gate's approval and faces the full prompt again.
 	 */
 	input?: Record<string, unknown>;
 	/**
@@ -427,15 +441,29 @@ export interface SessionBeforeSwitchResult {
 }
 
 /**
- * Fired before each prompt-cache warming refresh with the warmer's economics
- * filled in. Return `{ action }` to override whether the refresh is sent.
+ * Fired before each prompt-cache warming decision with the warmer's economics
+ * filled in. Return `{ action }` to override whether a refresh is sent, the
+ * wait is bridged with compaction, or warming stops.
  */
 export interface CacheWarmingDecisionEvent {
 	type: "cache_warming_decision";
-	/** Price of this refresh: a cache read of the prompt plus one output token. */
+	/**
+	 * How the refresh would be sent: "prewarm" (`max_tokens: 0`, no output billed) or "replay" (one-token
+	 * replay cut off at its first output). Absent when the request cannot be refreshed without changing its
+	 * cache key.
+	 */
+	method?: CacheWarmingRentMethod;
+	/** Price of this refresh: a cache read of the prompt, plus the expected billed output for a replay. */
 	warmCost: number;
-	/** Extra price of the next real request if the cache entry is lost. */
+	/** Extra price of the next real request if the cache entry is lost: re-writing the prompt instead of reading it. */
 	missCost: number;
+	/**
+	 * Price of bridging the wait with compaction instead (reading the prompt, generating the summary,
+	 * re-writing the compacted context). Absent when compaction is not an option for this wait.
+	 */
+	compactCost?: number;
+	/** Refresh spend since the last real request. */
+	spentCost: number;
 	/** Estimated chance that a real request arrives before the entry expires. */
 	continuationProbability: number;
 	/** The warmer's own decision. */
@@ -444,7 +472,11 @@ export interface CacheWarmingDecisionEvent {
 
 /** Return type for `cache_warming_decision` handlers. */
 export interface CacheWarmingDecisionEventResult {
-	/** Override whether this refresh is sent. "stop" ends warming until the next real request. */
+	/**
+	 * Override the decision. "warm" needs a `method`; "compact" needs `compactCost` and a decision at least a
+	 * minute before the entry expires; an override the warmer cannot carry out leaves its own decision standing.
+	 * "stop" ends warming until the next real request.
+	 */
 	action?: CacheWarmingAction;
 }
 
@@ -486,6 +518,12 @@ export interface SessionCompactingResult {
 	prompt?: string;
 	/** Custom data to store in compaction entry */
 	preserveData?: Record<string, unknown>;
+}
+
+/** Return type for `session_before_shutdown` handlers */
+export interface SessionBeforeShutdownResult {
+	/** If true, cancel this shutdown attempt. */
+	cancel?: boolean;
 }
 
 /** Return type for `session_stop` handlers */

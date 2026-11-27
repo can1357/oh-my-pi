@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
+import { readBoundedRequestBody } from "../utils/request-body";
 import type {
 	TranscriptionRequest,
 	TranscriptionResponseFormat,
@@ -93,38 +94,6 @@ function parseTemperature(value: string | undefined): number | undefined {
 	return parsed;
 }
 
-async function readBody(req: Request): Promise<Uint8Array> {
-	const contentLength = req.headers.get("content-length");
-	if (contentLength !== null) {
-		const declared = Number(contentLength);
-		if (Number.isFinite(declared) && declared > MAX_TRANSCRIPTION_BODY_BYTES) {
-			throw new TranscriptionWireError(413, "Request payload exceeds the 25 MB limit");
-		}
-	}
-	const reader = req.body?.getReader();
-	if (!reader) return new Uint8Array();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		total += value.byteLength;
-		if (total > MAX_TRANSCRIPTION_BODY_BYTES) {
-			await reader.cancel();
-			throw new TranscriptionWireError(413, "Request payload exceeds the 25 MB limit");
-		}
-		chunks.push(value);
-	}
-	if (chunks.length === 1) return chunks[0]!;
-	const bytes = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return bytes;
-}
-
 async function parseMultipart(bytes: Uint8Array, contentType: string): Promise<TranscriptionParsedRequest> {
 	const form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData().catch(error => {
 		throw new TranscriptionWireError(400, "Invalid multipart/form-data body", { cause: error });
@@ -202,7 +171,11 @@ function parseJson(bytes: Uint8Array): TranscriptionParsedRequest {
 /** Parse either OpenAI multipart uploads or OpenRouter base64 JSON requests. */
 export async function parseRequest(req: Request): Promise<TranscriptionParsedRequest> {
 	const contentType = req.headers.get("content-type")?.trim() ?? "";
-	const bytes = await readBody(req);
+	const bytes = await readBoundedRequestBody(
+		req,
+		MAX_TRANSCRIPTION_BODY_BYTES,
+		() => new TranscriptionWireError(413, "Request payload exceeds the 25 MB limit"),
+	);
 	if (contentType.toLowerCase().startsWith("multipart/form-data")) return parseMultipart(bytes, contentType);
 	if (contentType.toLowerCase().startsWith("application/json")) return parseJson(bytes);
 	throw new TranscriptionWireError(400, "Content-Type must be multipart/form-data or application/json");
@@ -235,9 +208,5 @@ export function encodeResponse(result: TranscriptionResult): TranscriptionRespon
 	};
 }
 
-export function formatError(status: number, errorType: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { code: status, type: errorType, message } }), {
-		status,
-		headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
-	});
-}
+/** @deprecated Use `codedErrorResponse` from `auth-gateway/http`. */
+export { codedErrorResponse as formatError } from "../auth-gateway/http";

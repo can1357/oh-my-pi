@@ -3,6 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { embeddedRelayExtensionFiles } from "./embed-relay-extension";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
@@ -10,11 +11,26 @@ import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 const packageDir = path.join(import.meta.dir, "..");
 const defaultOutDir = path.join(packageDir, "dist");
 const shebang = "#!/usr/bin/env bun\n";
-const htmlExportAssetPattern =
+// Remove old inline-viewer sidecars left in an existing output directory.
+const obsoleteHtmlExportAssetPattern =
 	/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/;
 
-// Native / optional / platform-specific deps are loaded from installed files.
+// Native/platform dependencies and on-demand model runtimes stay outside the bundle.
 const ALWAYS_EXTERNAL = ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+
+/**
+ * Embeds `@oh-my-pi/pi-natives/THIRD-PARTY-NOTICES.txt` even though the natives package is external. An external
+ * text import would be hoisted to a top-level import of `dist/cli.js`, reading the installed addon's notices on every
+ * launch instead of only for `omp --license`.
+ */
+const inlineNativeNoticesPlugin: Bun.BunPlugin = {
+	name: "inline-native-notices",
+	setup(build) {
+		build.onResolve({ filter: /^@oh-my-pi\/pi-natives\/THIRD-PARTY-NOTICES\.txt$/ }, () => ({
+			path: path.join(packageDir, "../natives/THIRD-PARTY-NOTICES.txt"),
+		}));
+	},
+};
 
 // Heavy, lazily-used third-party leaf deps. Each is a declared `dependency`, so the
 // published package resolves it from node_modules at runtime; bundling only embeds a
@@ -66,8 +82,9 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 					entry.endsWith(".node") ||
 					entry.endsWith(".js.map") ||
 					/\.json-[^/]+\.zst$/.test(entry) ||
+					/^perturbation-pool\.json-[^/]+\.txt$/.test(entry) ||
 					(entry.startsWith("CHANGELOG-") && entry.endsWith(".md")) ||
-					htmlExportAssetPattern.test(entry),
+					obsoleteHtmlExportAssetPattern.test(entry),
 			)
 			.map(entry => fs.rm(path.join(outDir, entry), { force: true })),
 	);
@@ -95,7 +112,9 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 			entrypoints: [path.join(packageDir, "src/cli.ts")],
 			outdir: outDir,
 			target: "bun",
-			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
+			// Also refreshes `src/.../extension.generated.json`, which SDK consumers of `src` read.
+			files: await embeddedRelayExtensionFiles(),
+			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin(), inlineNativeNoticesPlugin],
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),

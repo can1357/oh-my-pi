@@ -2,11 +2,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { Effort } from "@oh-my-pi/pi-ai";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
+	applyModelPresetOverrides,
 	deleteModelPreset,
 	getModelPreset,
 	getModelPresetNames,
@@ -16,9 +17,15 @@ import {
 	saveModelPreset,
 } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import {
+	formatModelString,
+	formatModelStringWithRouting,
+	resolveModelScope,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -46,6 +53,7 @@ describe("model presets", () => {
 		fixtureDir = TempDir.createSync("@pi-model-presets-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "auth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openrouter", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
 	});
 
@@ -60,11 +68,22 @@ describe("model presets", () => {
 		fixtureDir.removeSync();
 	});
 
-	function createSession(settings: Settings, initialModel = SONNET, thinkingLevel: Effort = Effort.High) {
+	function createSession(
+		settings: Settings,
+		initialModel = SONNET,
+		thinkingLevel: Effort = Effort.High,
+		scope?: Pick<AgentSessionConfig, "scopedModels" | "scopedModelsFromSettings">,
+	) {
 		const agent = new Agent({
 			initialState: { model: bundled(initialModel), systemPrompt: ["Test"], tools: [], messages: [], thinkingLevel },
 		});
-		const session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			...scope,
+		});
 		sessions.push(session);
 		return session;
 	}
@@ -144,6 +163,56 @@ describe("model presets", () => {
 		expect(session.model?.id).toBe("claude-opus-4-5");
 	});
 
+	it("--preset style overrides replace the runtime roles without persisting", async () => {
+		const settings = await projectSettings({ project: `modelRoles:\n  slow: ${SONNET_46}\n` });
+		cfgModelPresets.setEntry(settings, "lean", {
+			modelRoles: { default: OPUS, smol: SONNET },
+			defaultThinkingLevel: Effort.Low,
+		});
+		settings.overrideModelRoles({ plan: SONNET_46 });
+
+		const result = applyModelPresetOverrides(settings, "lean");
+
+		expect(result).toEqual({ kind: "applied", defaultThinkingLevel: Effort.Low });
+		expect({ ...settings.getModelRoles() }).toEqual({ default: OPUS, smol: SONNET });
+		expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.Low);
+		expect(settings.getGlobalModelRole("default")).toBeUndefined();
+		expect(settings.getProjectModelRole("slow")).toBe(SONNET_46);
+
+		// A later per-role flag (`--smol`) layers on top without resurrecting the hidden roles.
+		settings.overrideModelRoles({ smol: SONNET_46 });
+		expect({ ...settings.getModelRoles() }).toEqual({ default: OPUS, smol: SONNET_46 });
+	});
+
+	it("--preset reports a missing or malformed preset", async () => {
+		const settings = await projectSettings({ project: "modelPresets:\n  broken:\n    modelRoles: 5\n" });
+
+		expect(applyModelPresetOverrides(settings, "nope")).toEqual({ kind: "missing" });
+		expect(applyModelPresetOverrides(settings, "broken").kind).toBe("invalid");
+	});
+
+	it("--preset from a project config routes the run but never grants", async () => {
+		const settings = await projectSettings({
+			project: `modelPresets:\n  sneaky:\n    modelRoles:\n      default: ${OPUS}\n      review: ${SONNET_46}\n`,
+		});
+
+		expect(applyModelPresetOverrides(settings, "sneaky").kind).toBe("applied");
+		expect(settings.getModelRole("review")).toBe(SONNET_46);
+		expect(settings.grantAuthority().getModelRole("review")).toBeUndefined();
+
+		// An operator write to the role re-owns it, so it grants again.
+		settings.overrideModelRoles({ review: SONNET });
+		expect(settings.grantAuthority().getModelRole("review")).toBe(SONNET);
+	});
+
+	it("--preset from the global config grants like any operator override", async () => {
+		const settings = await projectSettings({});
+		cfgModelPresets.setEntry(settings, "deep", { modelRoles: { default: OPUS, review: SONNET_46 } });
+
+		expect(applyModelPresetOverrides(settings, "deep").kind).toBe("applied");
+		expect(settings.grantAuthority().getModelRole("review")).toBe(SONNET_46);
+	});
+
 	it("replaces --model style runtime role overrides like a model hub edit", async () => {
 		const settings = Settings.isolated();
 		settings.overrideModelRoles({ default: SONNET, smol: SONNET_46 });
@@ -212,6 +281,116 @@ describe("model presets", () => {
 		expect(result.kind).toBe("unavailable");
 		expect(settings.getModelRole("default")).toBe(SONNET);
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
+	});
+
+	it("refreshes a settings-derived scope after a preset changes a role its allowlist references", async () => {
+		const settings = Settings.isolated({ enabledModels: ["@slow"] });
+		settings.setModelRole("default", SONNET);
+		settings.setModelRole("slow", SONNET);
+		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: "@slow", slow: OPUS } });
+		const session = createSession(settings, SONNET, Effort.High, {
+			scopedModels: [{ model: bundled(SONNET) }],
+			scopedModelsFromSettings: true,
+		});
+		session.setScopedModelsRefresher(async () => {
+			session.setScopedModels(await resolveModelScope(["@slow"], modelRegistry, undefined, settings));
+		});
+
+		const result = await applyModelPreset(settings, session, "reroute");
+
+		expect(result.kind).toBe("switched");
+		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["claude-opus-4-5"]);
+		expect(session.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("keeps an explicit scope authoritative for the preset default", async () => {
+		const settings = Settings.isolated({ enabledModels: ["@slow"] });
+		settings.setModelRole("default", SONNET);
+		settings.setModelRole("slow", SONNET);
+		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: "@slow", slow: OPUS } });
+		const session = createSession(settings, SONNET, Effort.High, {
+			scopedModels: [{ model: bundled(SONNET) }],
+			scopedModelsFromSettings: false,
+		});
+
+		const result = await applyModelPreset(settings, session, "reroute");
+
+		expect(result.kind).toBe("unavailable");
+		expect(settings.getModelRoles()).toEqual({ default: SONNET, slow: SONNET });
+	});
+
+	it("resolves allowlist aliases through the layer that will still own the role", async () => {
+		const settings = await projectSettings({
+			overlay: `enabledModels: ['@slow']\nmodelRoles:\n  slow: ${SONNET}\n`,
+		});
+		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: "@slow", slow: OPUS } });
+		const session = createSession(settings);
+
+		const result = await applyModelPreset(settings, session, "reroute");
+
+		expect(result).toMatchObject({
+			kind: "switched",
+			shadowed: [{ role: "slow", expected: OPUS, actual: SONNET, source: "overlay" }],
+		});
+		expect(session.model && formatModelString(session.model)).toBe(SONNET);
+	});
+
+	it("resolves allowlist aliases through the global role revealed by a project removal", async () => {
+		const settings = await projectSettings({
+			project: `enabledModels: ['@slow']\nmodelRoles:\n  slow: ${SONNET}\n`,
+			storage: "project",
+		});
+		settings.setModelRole("slow", OPUS);
+		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: "@slow" } });
+		const session = createSession(settings);
+		expect(session.getAvailableModels().map(formatModelString)).toEqual([SONNET]);
+
+		const result = await applyModelPreset(settings, session, "reroute");
+
+		expect(result).toMatchObject({
+			kind: "switched",
+			shadowed: [{ role: "slow", expected: undefined, actual: OPUS, source: "global" }],
+		});
+		expect(settings.getProjectModelRole("slow")).toBeUndefined();
+		expect(session.model && formatModelString(session.model)).toBe(OPUS);
+	});
+
+	it("does not write roles when a shadowing default will be outside the prospective allowlist", async () => {
+		const settings = await projectSettings({
+			project: `enabledModels: ['@slow']\nmodelRoles:\n  default: ${SONNET}\n`,
+		});
+		settings.setModelRole("slow", SONNET);
+		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: OPUS, slow: OPUS } });
+		const session = createSession(settings);
+
+		const result = await applyModelPreset(settings, session, "reroute");
+
+		expect(result).toEqual({
+			kind: "unavailable",
+			reason: `default model \`${SONNET}\` is not available (default set by project config)`,
+		});
+		expect(settings.getGlobalModelRole("default")).toBeUndefined();
+		expect(settings.getModelRole("slow")).toBe(SONNET);
+	});
+
+	const cerebras = "openrouter/z-ai/glm-4.7@cerebras";
+	const sambanova = "openrouter/z-ai/glm-4.7@sambanova";
+
+	it("rejects a preset pinned to an upstream outside enabledModels", async () => {
+		const settings = Settings.isolated({ enabledModels: [cerebras] });
+		settings.setModelRole("default", cerebras);
+		cfgModelPresets.setEntry(settings, "sambanova", { modelRoles: { default: sambanova } });
+		const session = createSession(settings);
+		const available = session.getAvailableModels();
+		expect(available.map(formatModelStringWithRouting)).toEqual([cerebras]);
+		await session.setModel(available[0]!);
+
+		const result = await applyModelPreset(settings, session, "sambanova");
+
+		expect(result.kind).toBe("unavailable");
+		expect(settings.getModelRole("default")).toBe(cerebras);
+		expect(session.model && formatModelStringWithRouting(session.model)).toBe(cerebras);
+		expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([cerebras]);
 	});
 
 	it("reports a failed live switch instead of success", async () => {
@@ -417,5 +596,40 @@ describe("model presets", () => {
 		release();
 		expect((await applying).kind).toBe("switched");
 		expect(settings.getModelRole("default")).toBe(OPUS);
+	});
+	describe("setModel against a per-model defaultLevel", () => {
+		function withDefaultLevel(model: Model, defaultLevel: Effort): Model {
+			return {
+				...model,
+				thinking: {
+					mode: "anthropic-adaptive",
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+					defaultLevel,
+				},
+			};
+		}
+
+		it("carries the current level over the target's defaultLevel, clamped to its ladder", async () => {
+			const session = createSession(
+				Settings.isolated({ defaultThinkingLevel: Effort.Medium }),
+				"anthropic/claude-opus-4-7",
+				Effort.Low,
+			);
+			session.setThinkingLevel(Effort.Max);
+
+			await session.setModel(withDefaultLevel(bundled(OPUS), Effort.Medium));
+
+			// The target has no max: the nearest level is xhigh, not its medium default.
+			expect(session.thinkingLevel).toBe(Effort.XHigh);
+		});
+
+		it("adopts the target's defaultLevel when the session has no level to carry", async () => {
+			const session = createSession(Settings.isolated({ defaultThinkingLevel: Effort.Medium }), SONNET, Effort.Low);
+			session.setThinkingLevel(undefined);
+
+			await session.setModel(withDefaultLevel(bundled(OPUS), Effort.XHigh));
+
+			expect(session.thinkingLevel).toBe(Effort.XHigh);
+		});
 	});
 });

@@ -1,7 +1,14 @@
-import type { AgentStorage } from "../../../session/agent-storage";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { mapOpenAIReasoningEffort } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
+import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
+import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
-import { decodeBody, readBodyCapped } from "../../response-body";
+import { decodeBody } from "../../response-body";
+import { formatQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
 
 /**
@@ -18,7 +25,7 @@ import { dateToAgeSeconds } from "../utils";
  * @param storageProviders - Provider names to look up in AgentStorage
  */
 export function findCredential(
-	storage: AgentStorage | null | undefined,
+	storage: AgentStorageApi | null | undefined,
 	envKey: string | null | undefined,
 	...storageProviders: string[]
 ): string | null {
@@ -70,6 +77,23 @@ export const SEARCH_HARD_TIMEOUT_MS = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000
 export function withHardTimeout(signal: AbortSignal | undefined, ms: number = SEARCH_HARD_TIMEOUT_MS): AbortSignal {
 	const timeout = AbortSignal.timeout(ms);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/**
+ * Wire `reasoning.effort` for an OpenAI-style hosted-search request (Codex,
+ * OpenAI Responses) from the web role's thinking level. Clamps to the model's
+ * ladder and applies its effort map, as chat requests do. `undefined` — omit
+ * the field and keep the server default — when the level is unset, `auto`,
+ * `off`, or `inherit`, or the model does not reason.
+ */
+export function searchReasoningEffort(
+	model: Model<Api>,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+): string | undefined {
+	const effort = clampThinkingLevelForModel(model, toReasoningEffort(concreteThinkingLevel(thinkingLevel)));
+	if (effort === undefined) return undefined;
+	const compat = model.compat && "reasoningEffortMap" in model.compat ? model.compat : undefined;
+	return mapOpenAIReasoningEffort(model, compat, effort);
 }
 
 /**
@@ -151,6 +175,24 @@ export function siteHosts(sites: readonly string[]): string[] {
 }
 
 /**
+ * Query text for search APIs that take only plain terms in `syntax`. A query without
+ * directives passes through verbatim; otherwise its terms are rendered, and a
+ * directives-only query falls back to its constraint values (site hosts, `intitle:`
+ * words, …) as keywords, never the operators themselves.
+ *
+ * @throws {SearchProviderError} 400 when nothing searchable remains (a date-only query).
+ */
+export function keywordQuery(provider: SearchProviderId, parsed: StructuredQuery, syntax: QuerySyntax): string {
+	const query = parsed.hasDirectives ? formatQuery({ ...parsed, raw: "" }, syntax) : parsed.raw.trim();
+	if (query) return query;
+	throw new SearchProviderError(
+		provider,
+		`${SEARCH_PROVIDER_LABELS[provider]} needs search terms; date-only queries are not supported`,
+		400,
+	);
+}
+
+/**
  * Read a provider response body up to a byte cap, truncating or throwing when
  * the limit is exceeded. Shared so streaming-cap fixes land in one place.
  */
@@ -160,10 +202,24 @@ export async function readLimitedText(
 	maxBytes: number,
 	truncate = false,
 ): Promise<string> {
-	const body = await readBodyCapped(response, maxBytes);
+	const body = await readBoundedBody(response, maxBytes);
 	if (!body) return "";
 	if (body.truncated && !truncate) {
 		throw new SearchProviderError(provider, `${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`, 500);
 	}
 	return decodeBody(body.bytes, response.headers.get("content-type") ?? "");
+}
+
+/**
+ * Parse a provider-supplied result URL, keeping only absolute http(s) URLs.
+ * Returns the normalized string, or `undefined` for anything else.
+ */
+export function normalizeHttpUrl(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	try {
+		const url = new URL(value);
+		return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
+	} catch {
+		return undefined;
+	}
 }

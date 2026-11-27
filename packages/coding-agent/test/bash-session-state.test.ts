@@ -3,7 +3,7 @@
  * functions, options) is visible to the next call through the default
  * auto-background path, including after a call moved to the background and
  * after a call that exited non-zero. That `exit` and errexit keep the native
- * session is pinned in `crates/pi-shell` (`exit_and_errexit_keep_session_state`):
+ * session is pinned in `crates/shell` (`exit_and_errexit_keep_session_state`):
  * pull-request CI runs these tests against main's native addon.
  */
 import { afterEach, beforeEach, expect, it } from "bun:test";
@@ -50,6 +50,23 @@ async function run(tool: BashTool, command: string) {
 	return { text, async: result.details?.async };
 }
 
+it.each([
+	{ managed: false, settings: { "bash.autoBackground.enabled": false } },
+	{ managed: true, settings: { "bash.autoBackground.enabled": true } },
+])("does not stream or return a run trace when visualization is disabled (managed: $managed)", async ({ settings }) => {
+	const tool = bashTool({ ...settings, "display.shellVisualization": false });
+	let frames = 0;
+	let tracedFrames = 0;
+	const result = await tool.execute("trace-disabled", { command: "printf 'plain output\\n'" }, undefined, update => {
+		frames++;
+		if (update.details?.trace) tracedFrames++;
+	});
+	expect(frames).toBeGreaterThan(0);
+	expect(tracedFrames).toBe(0);
+	expect(result.details?.trace).toBeUndefined();
+	expect(result.content.find(block => block.type === "text")?.text).toContain("plain output");
+});
+
 it.skipIf(process.platform === "win32")("keeps a variable set by one call for the next call", async () => {
 	const tool = bashTool();
 	await run(tool, "PI_STATE_VAR=kept");
@@ -77,27 +94,50 @@ it.skipIf(process.platform === "win32")(
 it.skipIf(process.platform === "win32")("keeps state and options after a call that exits non-zero", async () => {
 	const tool = bashTool();
 	await run(tool, "set -uo pipefail; PI_STATE_VAR=kept");
-	expect((await run(tool, "false")).text).toContain("Command exited with code 1");
+	expect((await run(tool, "false")).text).toContain("[exit code 1]");
 	expect((await run(tool, 'printf "%s %s" "$PI_STATE_VAR" "$-"')).text).toMatch(/^kept \S*u\S*$/);
 });
 
 it.skipIf(process.platform === "win32")(
-	"reports calls that overlap a backgrounded one and leaves the session shell intact",
+	"carries what calls overlapping a backgrounded one set back into the session shell",
 	async () => {
 		const tool = bashTool({ "bash.autoBackground.thresholdMs": 100 });
-		await run(tool, "PI_STATE_VAR=kept");
-		expect((await run(tool, "sleep 2")).async?.state).toBe("running");
+		await run(tool, "PI_STATE_VAR=kept; PI_BOTH_VAR=before");
+		expect((await run(tool, "PI_BOTH_VAR=owner; sleep 2")).async?.state).toBe("running");
 
-		const overlapping = await run(tool, 'printf "[%s]" "$PI_STATE_VAR"; PI_STATE_VAR=lost');
-		expect(overlapping.text).toStartWith("[]");
-		expect(overlapping.text).toContain("Ran in a temporary shell");
-		// An overlapping call that itself moves to the background says so in its start result.
-		const promoted = await run(tool, "sleep 0.5");
-		expect(promoted.async?.state).toBe("running");
-		expect(promoted.text).toContain("Ran in a temporary shell");
+		const overlapping = await run(
+			tool,
+			'printf "[%s]" "$PI_STATE_VAR"; PI_STATE_VAR=carried; PI_BOTH_VAR=fork; pi_fork_fn() { printf fn; }',
+		);
+		expect(overlapping.text).toBe("[kept]");
+		// The next overlapping call sees it before the backgrounded one ends.
+		expect((await run(tool, 'printf "%s:" "$PI_STATE_VAR"; pi_fork_fn')).text).toBe("carried:fn");
 
 		await manager.waitForAll();
-		expect((await run(tool, 'printf "%s" "$PI_STATE_VAR"')).text).toBe("kept");
+		// The backgrounded call ended last, so it keeps the name both set.
+		expect((await run(tool, 'printf "%s %s:" "$PI_STATE_VAR" "$PI_BOTH_VAR"; pi_fork_fn')).text).toBe(
+			"carried owner:fn",
+		);
+	},
+	10_000,
+);
+
+it.skipIf(process.platform === "win32")(
+	"keeps background jobs an overlapping call starts alive and says they stay in its copy",
+	async () => {
+		const tool = bashTool({ "bash.autoBackground.thresholdMs": 100 });
+		expect((await run(tool, "sleep 2")).async?.state).toBe("running");
+
+		const overlapping = await run(tool, "/bin/sleep 30 & printf %s $!");
+		expect(overlapping.text).toContain("[jobs invisible to later calls]");
+		const pid = Number.parseInt(overlapping.text, 10);
+		try {
+			Bun.gc(true);
+			expect(() => process.kill(pid, 0)).not.toThrow();
+		} finally {
+			process.kill(pid, "SIGKILL");
+		}
+		await manager.waitForAll();
 	},
 	10_000,
 );
@@ -107,21 +147,12 @@ it.skipIf(process.platform === "win32")(
 	async () => {
 		const [first, second] = [`${cwd}:first`, `${cwd}:second`];
 		let sessionId = first;
-		const heldAllocation = Promise.withResolvers<{ id?: string; path?: string }>();
-		let allocations = 0;
-		const tool = bashTool(
-			{ "bash.autoBackground.thresholdMs": 100 },
-			{
-				getSessionId: () => sessionId,
-				// Holds the first call before its shell starts, so the session changes underneath it.
-				allocateOutputArtifact: async () => (allocations++ === 0 ? heldAllocation.promise : {}),
-			},
-		);
+		const tool = bashTool({}, { getSessionId: () => sessionId });
 		try {
-			expect((await run(tool, "PI_STATE_VAR=from-first")).async?.state).toBe("running");
+			const pending = run(tool, "PI_STATE_VAR=from-first");
+			// The session changes after the call started but before its shell runs.
 			sessionId = second;
-			heldAllocation.resolve({});
-			await manager.waitForAll();
+			await pending;
 
 			expect((await run(tool, 'printf "[%s]" "$PI_STATE_VAR"')).text).toBe("[]");
 			// The left session's shell was dropped when that call finished.

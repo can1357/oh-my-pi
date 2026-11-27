@@ -73,8 +73,10 @@ export async function generateOpenAIImage(
 		// them; OpenAI's multipart edit sends raw bytes and needs them only for
 		// the 404 fallback.
 		const buildEditBody = (): Record<string, unknown> => {
+			if (!isXAI) {
+				return { ...generationBody, images: inputImages.map(image => ({ image_url: toDataUrl(image) })) };
+			}
 			const references = inputImages.map(image => ({ type: "image_url", url: toDataUrl(image) }));
-			if (!isXAI) return { ...generationBody, input_references: references };
 			return references.length === 1
 				? { ...generationBody, image: references[0] }
 				: { ...generationBody, images: references };
@@ -88,9 +90,15 @@ export async function generateOpenAIImage(
 				form.set("n", String(count));
 				if (!isGptImage) form.set("response_format", "b64_json");
 				if (size) form.set("size", size);
+				// 重复的标量 `image` 字段会被判为 `duplicate_parameter`；多图须使用官方 SDK
+				// 同款的 `image[]` 数组语法。单图保留标量字段，兼容只接受 `image` 的端点。
+				const imageField = inputImages.length === 1 ? "image" : "image[]";
 				for (const image of inputImages) {
 					validateImageInput(image);
-					form.append("image", new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }));
+					form.append(
+						imageField,
+						new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }),
+					);
 				}
 				response = await postMultipart({
 					model,

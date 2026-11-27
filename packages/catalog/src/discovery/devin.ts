@@ -296,7 +296,7 @@ export interface DevinModelDiscoveryOptions {
 	apiKey?: string;
 	/** Optional Codeium API base URL override. */
 	baseUrl?: string;
-	/** Optional request timeout in milliseconds (default 5000). */
+	/** Optional request timeout in milliseconds (default 15000). */
 	timeoutMs?: number;
 	/** Optional caller abort signal, combined with the internal timeout. */
 	signal?: AbortSignal;
@@ -314,7 +314,10 @@ export interface DevinModelDiscoveryOptions {
 export async function fetchDevinModels(
 	options: DevinModelDiscoveryOptions,
 ): Promise<ModelSpec<"devin-agent">[] | null> {
-	const timeoutMs = options.timeoutMs ?? 5_000;
+	// `GetCliModelConfigs` returns the full per-account catalog (600+ configs)
+	// and often takes 7-15s to send headers; 5s silently fell back to the seed.
+	// 15s matches coding-agent's runtime discovery bound.
+	const timeoutMs = options.timeoutMs ?? 15_000;
 	const resolvedBaseUrl = options.baseUrl ?? DEVIN_DEFAULT_BASE_URL;
 	const requestUrl = `${resolvedBaseUrl.replace(/\/+$/, "")}${DEVIN_GET_CLI_MODEL_CONFIGS_PATH}`;
 
@@ -370,7 +373,8 @@ export async function fetchDevinModels(
  * frontier model (Claude/Gemini/GPT/Kimi) read the same field correctly.
  * Declaring text-only lets clients use their image fallback path instead of
  * silently losing attachments ([#6072](https://github.com/can1357/oh-my-pi/issues/6072)).
- * Remove entries if Devin ever wires SWE-1.6 vision up.
+ * Remove entries if Devin ever wires SWE-1.6 vision up. SWE-1.6 Fast is gone
+ * from Devin's own catalog but stays here for a Cascade host that still lists it.
  */
 const DEVIN_IMAGE_BLIND_UIDS = new Set(["swe-1-6", "swe-1-6-fast"]);
 
@@ -389,6 +393,9 @@ function devinModelSpec(
 	if (isAssignModelRouter) compat.modelRouter = true;
 	if (features?.supportsParallelToolCalls === true) compat.supportsParallelToolCalls = true;
 	const maxOutputTokens = config.modelInfo?.maxOutputTokens ?? 0;
+	// Current catalogs leave `ClientModelConfig.maxTokens` unset and carry each
+	// lane's context window on `ModelInfo.maxTokens` (200K vs 1M lanes differ there).
+	const contextWindow = config.maxTokens > 0 ? config.maxTokens : (config.modelInfo?.maxTokens ?? 0);
 	const spec: ModelSpec<"devin-agent"> = {
 		id: uid,
 		name: config.label.trim() || uid,
@@ -402,7 +409,7 @@ function devinModelSpec(
 		// mean tools are available.
 		supportsTools: features !== undefined ? features.supportsToolCalls : true,
 		cost: devinModelCost(config),
-		contextWindow: config.maxTokens > 0 ? config.maxTokens : DEFAULT_CONTEXT_WINDOW,
+		contextWindow: contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW,
 		maxTokens: maxOutputTokens > 0 ? maxOutputTokens : DEFAULT_MAX_TOKENS,
 		...(Object.keys(compat).length > 0 ? { compat } : {}),
 	};
@@ -417,50 +424,15 @@ function devinModelSpec(
 }
 
 /**
- * Lead chat uid of a Fusion pairing `fusion-<lead>[-fast]-sidekick-<sidekick>`.
- * An exact live lead uid wins, so leads whose own uid ends in `-fast`
- * (`swe-1-6-fast`) route as written. Otherwise `-fast` selects the lead's
- * priority lane when the server lists one, then the standard lane.
- *
- * Returns `undefined` for uids that are not pairings and `null` for pairings
- * whose lead is not live: the composite uid itself is never servable.
+ * Whether `uid` is a Fusion pairing `fusion-<lead>-sidekick-<sidekick>`. The
+ * native client runs the lead as an ordinary chat uid and pairs the sidekick
+ * locally; omp runs no sidekick, so a pairing only re-lists its lead pinned to
+ * one effort. Accounts receive every lead × sidekick combination (1000+ rows),
+ * all duplicates of the lead families. The bare `fusion` composite and
+ * `fusion-sidekick-*` uids name no lead and are not pairings.
  */
-function devinFusionLeadUid(uid: string, liveUids: ReadonlyMap<string, unknown>): string | null | undefined {
-	if (!uid.startsWith("fusion-")) return undefined;
-	const cut = uid.indexOf("-sidekick-");
-	if (cut <= "fusion-".length) return undefined;
-	const lead = uid.slice("fusion-".length, cut);
-	if (liveUids.has(lead)) return lead;
-	if (lead.endsWith("-fast")) {
-		const base = lead.slice(0, -"-fast".length);
-		if (liveUids.has(`${base}-priority`)) return `${base}-priority`;
-		if (liveUids.has(base)) return base;
-	}
-	return null;
-}
-
-/**
- * Point a Fusion pairing at its lead. omp runs only the lead (the sidekick is
- * paired by the native client), so the limits and pricing a caller budgets
- * against are the lead's, not the composite card's. The composite uid names no
- * model, so `buildModel` resolves the row under its `requestModelId` and the
- * lead's catalog rules (cache-write rate, long-context tier) apply there.
- */
-function routeDevinFusionLead(spec: ModelSpec<"devin-agent">, lead: ModelSpec<"devin-agent">): void {
-	spec.requestModelId = lead.id;
-	spec.reasoning = lead.reasoning;
-	spec.input = lead.input;
-	spec.supportsTools = lead.supportsTools;
-	spec.cost = lead.cost;
-	spec.contextWindow = lead.contextWindow;
-	spec.maxTokens = lead.maxTokens;
-	if (lead.compat?.supportsParallelToolCalls) {
-		spec.compat = { ...spec.compat, supportsParallelToolCalls: true };
-	} else if (spec.compat?.supportsParallelToolCalls) {
-		const { supportsParallelToolCalls: _, ...rest } = spec.compat;
-		if (Object.keys(rest).length > 0) spec.compat = rest;
-		else delete spec.compat;
-	}
+function isDevinFusionPairing(uid: string): boolean {
+	return uid.startsWith("fusion-") && uid.indexOf("-sidekick-") > "fusion-".length;
 }
 
 function normalizeDevinModels(
@@ -474,11 +446,6 @@ function normalizeDevinModels(
 	const specs: ModelSpec<"devin-agent">[] = [];
 	const seen = new Set<string>();
 	const lanes = new Map<string, DevinFamilyLane>();
-	const liveConfigs = new Map<string, ClientModelConfig>();
-	for (const config of configs) {
-		const uid = config.modelUid.trim();
-		if (!config.disabled && uid && !liveConfigs.has(uid)) liveConfigs.set(uid, config);
-	}
 
 	for (const config of configs) {
 		if (config.disabled) {
@@ -489,7 +456,7 @@ function normalizeDevinModels(
 			continue;
 		}
 		const uid = config.modelUid.trim();
-		if (!uid || seen.has(uid)) {
+		if (!uid || seen.has(uid) || isDevinFusionPairing(uid)) {
 			continue;
 		}
 		seen.add(uid);
@@ -500,15 +467,7 @@ function normalizeDevinModels(
 		// `fusion-sidekick-*`) that are themselves valid chat uids. Only the
 		// former take the `AssignModel` path — sending a composite uid there 404s.
 		const isAssignModelRouter = isRouter && (config.modelInfo?.harnessUids.length ?? 0) === 0;
-		// Fusion pairings are orchestrated by the native client: it runs the lead
-		// model as an ordinary chat uid and pairs a sidekick locally. The server
-		// has no provider for the composite uid itself (`permission_denied: no API
-		// providers are available`), so the chat request carries the lead uid and
-		// a pairing without a live lead is not listed.
-		const lead = devinFusionLeadUid(uid, liveConfigs);
-		if (lead === null) continue;
 		const spec = devinModelSpec(config, uid, baseUrl, isAssignModelRouter);
-		if (lead !== undefined) routeDevinFusionLead(spec, devinModelSpec(liveConfigs.get(lead)!, lead, baseUrl, false));
 		if (uid === accountDefaultUid) spec.isProviderDefault = true;
 		specs.push(spec);
 		// A router is a server-side dispatcher, not an effort tier: it stays a
@@ -538,5 +497,39 @@ function normalizeDevinModels(
 		if (accountFamily.id === accountDefaultUid) delete accountFamily.requestModelId;
 		else accountFamily.requestModelId = accountDefaultUid;
 	}
-	return collapsed.sort((a, b) => a.id.localeCompare(b.id));
+	return foldDevinFastLanes(collapsed).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Logical-id suffix of a fast lane, from family metadata (`Fast Mode`) and the static families alike. */
+const DEVIN_FAST_LANE_SUFFIX = "-fast";
+const DEVIN_ROUTE_LEVELS: readonly (Effort | "off")[] = ["off", ...THINKING_EFFORTS];
+
+/**
+ * Fold each `<id>-fast` lane into `<id>` as its {@link ModelSpec.priorityLane},
+ * so `/fast` selects the lane instead of a duplicate row. Each standard wire id
+ * routes to the fast uid serving the same effort; the default wire ids pair for
+ * efforts outside the routing table. A lane without its standard row stays
+ * listed on its own.
+ */
+function foldDevinFastLanes(specs: ModelSpec<"devin-agent">[]): ModelSpec<"devin-agent">[] {
+	const byId = new Map(specs.map(spec => [spec.id, spec]));
+	const folded = new Set<ModelSpec<"devin-agent">>();
+	for (const fast of specs) {
+		if (!fast.id.endsWith(DEVIN_FAST_LANE_SUFFIX)) continue;
+		const standard = byId.get(fast.id.slice(0, -DEVIN_FAST_LANE_SUFFIX.length));
+		if (standard === undefined) continue;
+		const routes: Record<string, string> = {};
+		const standardRouting = standard.thinking?.effortRouting;
+		const fastRouting = fast.thinking?.effortRouting;
+		for (const level of DEVIN_ROUTE_LEVELS) {
+			const wireId = standardRouting?.[level];
+			const fastWireId = fastRouting?.[level];
+			if (wireId !== undefined && fastWireId !== undefined) routes[wireId] ??= fastWireId;
+		}
+		routes[standard.requestModelId ?? standard.id] ??= fast.requestModelId ?? fast.id;
+		standard.priorityLane = { id: fast.id, routes, cost: fast.cost };
+		if (fast.isProviderDefault) standard.isProviderDefault = true;
+		folded.add(fast);
+	}
+	return specs.filter(spec => !folded.has(spec));
 }

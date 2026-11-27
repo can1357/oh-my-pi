@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 /** Minified JSON — the pretty-printed rendering of it does not contain `"needle":"x"`. */
@@ -26,7 +27,12 @@ describe("GrepTool external URL selectors", () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "grep-url-"));
 		server = Bun.serve({
 			port: 0,
-			fetch: () => new Response(MINIFIED_JSON, { headers: { "content-type": "application/json" } }),
+			fetch: request => {
+				const pathname = new URL(request.url).pathname;
+				return pathname === "/page" || pathname === "/page/bundle.zip"
+					? new Response(MINIFIED_JSON, { headers: { "content-type": "application/json" } })
+					: new Response(null, { status: 404 });
+			},
 		});
 		url = `http://127.0.0.1:${server.port}/page`;
 	});
@@ -60,6 +66,45 @@ describe("GrepTool external URL selectors", () => {
 		expect(getResultText(rendered)).toContain("No matches found");
 	});
 
+	it("uses grep body line numbers for URL read ranges", async () => {
+		server?.stop(true);
+		const body = `${Array.from({ length: 20 }, (_, i) =>
+			i === 11 ? "REMAINING_TARGET_LINE" : `BODY_LINE_${i + 1}`,
+		).join("\n")}\n`;
+		server = Bun.serve({
+			port: 0,
+			fetch: () => new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } }),
+		});
+		url = `http://127.0.0.1:${server.port}/source.txt`;
+		const session = createSession();
+		const match = getResultText(
+			await new GrepTool(session).execute("grep", { pattern: "REMAINING_TARGET_LINE", path: url }),
+		);
+		const read = new ReadTool(session);
+		const selected = getResultText(await read.execute("read", { path: `${url}:12:raw` }));
+		const ranged = getResultText(await read.execute("range", { path: `${url}:11-13:raw` }));
+
+		expect(match).toContain("*12|REMAINING_TARGET_LINE");
+		expect(selected).toBe("REMAINING_TARGET_LINE\n");
+		expect(ranged).toBe("BODY_LINE_11\nREMAINING_TARGET_LINE\nBODY_LINE_13\n");
+	});
+
+	it("searches a URL in a session without an artifacts dir", async () => {
+		const { getArtifactsDir: _, ...session } = createSession();
+		const result = await new GrepTool(session).execute("no-session", { pattern: '"needle":"x"', path: `${url}:raw` });
+		expect(getResultText(result)).toContain(MINIFIED_JSON);
+	});
+
+	it("reports a failed fetch instead of searching the error page", async () => {
+		server?.stop(true);
+		server = Bun.serve({ port: 0, fetch: () => new Response("needle: page not found", { status: 404 }) });
+		url = `http://127.0.0.1:${server.port}/missing`;
+
+		await expect(new GrepTool(createSession()).execute("404", { pattern: "needle", path: url })).rejects.toThrow(
+			`Cannot search ${url}: Failed to fetch URL (HTTP 404)`,
+		);
+	});
+
 	it("searches the whole fetched resource when the URL carries the :conflicts selector", async () => {
 		const tool = new GrepTool(createSession());
 
@@ -89,10 +134,11 @@ describe("GrepTool external URL selectors", () => {
 	it("fetches an archive-named URL with :raw instead of opening it as a local archive member", async () => {
 		const tool = new GrepTool(createSession());
 
-		// The `:raw` request is fetched like the bare URL, not parsed as archive `bundle.zip` + member `raw`.
+		// Both fetch bundle.zip itself, but only the bare read formats its JSON response.
 		const raw = await tool.execute("archive-url-raw", { pattern: "needle", path: `${url}/bundle.zip:raw` });
 		const bare = await tool.execute("archive-url", { pattern: "needle", path: `${url}/bundle.zip` });
-		expect(getResultText(raw)).toBe(getResultText(bare));
+		expect(getResultText(raw)).toContain(`*1|${MINIFIED_JSON}`);
+		expect(getResultText(bare)).toContain('*2|  "needle": "x"');
 	});
 
 	// `:` is not allowed in Windows file names.

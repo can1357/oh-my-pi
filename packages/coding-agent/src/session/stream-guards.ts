@@ -21,6 +21,7 @@ import {
 } from "./tool-call-loop-redirect";
 
 import { cfgEditStreamingAbort } from "../edit/settings";
+import { toolCommandCallName } from "../tools/tool-commands";
 import {
 	cfgModelLoopGuardEnabled,
 	cfgModelLoopGuardToolCallReminder,
@@ -44,7 +45,7 @@ const STREAMING_EDIT_RECOVERY_LIMIT = 2;
 const STREAMING_EDIT_NOTICE_SOURCE = "streaming-edit";
 // Prefix of the native no-op diagnostic emitted by the Rust edit engine when a
 // preview produces byte-identical content. Kept in sync with
-// crates/pi-edit/src/modes/replace.rs and crates/pi-edit/src/hashline/preview.rs
+// crates/edit/src/modes/replace.rs and crates/edit/src/hashline/preview.rs
 // ("No changes would be made to <path>..."). Prefix match (not equality)
 // because the Rust messages append the path and mode-specific suffixes.
 const NO_CHANGES_PREVIEW_PREFIX = "No changes would be made";
@@ -200,6 +201,13 @@ export class StreamingEditGuard {
 export class LoopGuards {
 	readonly #host: StreamGuardsHost;
 	#geminiHeaderDetector: GeminiHeaderRunDetector | undefined;
+	/**
+	 * Prompt sequence whose header reminder is spent. Each interrupt discards the
+	 * whole reasoning turn, so re-tripping before the model acts would restart a
+	 * legitimately long reasoning pass forever; the guard stays disarmed until the
+	 * model starts a tool call or a new prompt begins.
+	 */
+	#headerReminderSequence: number | undefined;
 	#toolCallLoopGuard: ToolCallLoopGuard | undefined;
 	#toolCallLoopGuardSettingsKey: string | undefined;
 
@@ -214,14 +222,16 @@ export class LoopGuards {
 			message: context.message,
 			toolResults: context.toolResults,
 			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
+			unresolvedToolCallIds: context.unresolvedToolCallIds,
 		});
 		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
 	}
 
 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
 	onAssistantEvent(message: AssistantMessage, event: AssistantMessageEvent): void {
+		if (event.type === "toolcall_start") this.#headerReminderSequence = undefined;
 		if (event.type === "thinking_start") {
-			this.#geminiHeaderDetector = this.#geminiHeaderGuardActive() ? new GeminiHeaderRunDetector() : undefined;
+			this.#geminiHeaderDetector = this.#geminiHeaderGuardArmed() ? new GeminiHeaderRunDetector() : undefined;
 			return;
 		}
 		const detector = this.#geminiHeaderDetector;
@@ -245,14 +255,22 @@ export class LoopGuards {
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
-			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
+			this.#toolCallLoopGuard = new ToolCallLoopGuard({
+				threshold,
+				exemptTools,
+				exemptionAlias: toolCommandCallName,
+			});
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
 		}
 		return this.#toolCallLoopGuard;
 	}
 
 	#injectToolCallLoopRedirect(messages: AgentMessage[], detection: RepeatedToolCallDetection): void {
-		logger.warn("cross-turn tool-call loop detected", { toolName: detection.toolName, count: detection.count });
+		logger.warn("cross-turn tool-call loop detected", {
+			kind: detection.kind,
+			toolName: detection.toolName,
+			count: detection.count,
+		});
 		const content = renderToolCallLoopRedirect(detection);
 		const details = toolCallLoopRedirectDetails(detection);
 		const redirectMessage: CustomMessage = {
@@ -275,9 +293,10 @@ export class LoopGuards {
 		);
 	}
 
-	#geminiHeaderGuardActive(): boolean {
+	#geminiHeaderGuardArmed(): boolean {
 		const model = this.#host.model();
 		return (
+			this.#headerReminderSequence !== this.#host.promptSequence() &&
 			cfgModelLoopGuardEnabled.get(this.#host.settings) === true &&
 			cfgModelLoopGuardToolCallReminder.get(this.#host.settings) === true &&
 			model !== undefined &&
@@ -297,6 +316,7 @@ export class LoopGuards {
 			`Interrupted ${headerCount} planning headers with no tool call; reminded the model to issue one.`,
 			"loop-guard",
 		);
+		this.#headerReminderSequence = this.#host.promptSequence();
 		this.#host.agent.abort(GEMINI_HEADER_INTERRUPT_REASON);
 		const generation = this.#host.promptGeneration();
 		this.#host.schedulePostPromptTask(async signal => {

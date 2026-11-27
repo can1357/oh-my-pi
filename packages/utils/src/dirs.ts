@@ -191,9 +191,13 @@ export function resolveEquivalentPath(inputPath: string, options?: EquivalentPat
 	}
 }
 
-export function normalizePathForComparison(inputPath: string): string {
-	const resolvedPath = resolveEquivalentPath(inputPath);
+function comparablePath(inputPath: string, options?: EquivalentPathOptions): string {
+	const resolvedPath = resolveEquivalentPath(inputPath, options);
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
+}
+
+export function normalizePathForComparison(inputPath: string): string {
+	return comparablePath(inputPath);
 }
 
 /**
@@ -204,16 +208,32 @@ export function normalizePathForComparison(inputPath: string): string {
  * candidate against several static roots can normalize each side once and
  * reuse the public helpers' containment semantics without repeating realpath
  * work.
+ *
+ * The comparison itself is lexical: it never resolves symlinks. Callers that
+ * want a purely lexical check may pass `path.resolve()`d paths instead, as long
+ * as both sides are prepared the same way.
  */
 export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	// `..name` is a child; only a `..` segment leaves the root.
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
 	return relative;
 }
 
-export function pathIsWithin(root: string, candidate: string): boolean {
+/**
+ * Lexical containment: `candidate` is `root` itself or below it. Symlinks are not resolved; the
+ * comparison is `path.relative`'s, so it follows the platform (case-insensitive on Windows).
+ * Callers resolve or normalize both sides first. Use {@link pathIsWithin} to compare through
+ * symlinks.
+ */
+export function pathIsWithinLexical(root: string, candidate: string): boolean {
+	return relativePathWithinNormalizedRoot(root, candidate) !== null;
+}
+
+/** `options` apply to `candidate` only. */
+export function pathIsWithin(root: string, candidate: string, options?: EquivalentPathOptions): boolean {
 	const normalizedRoot = normalizePathForComparison(root);
-	const normalizedCandidate = normalizePathForComparison(candidate);
+	const normalizedCandidate = comparablePath(candidate, options);
 	return relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate) !== null;
 }
 
@@ -264,25 +284,23 @@ export function __resetProjectDirCacheForTests(): void {
 	projectDir = undefined;
 }
 
-/** Whether a path is absent or not a directory. Other stat failures return false. */
-export async function directoryIsMissing(dir: string): Promise<boolean> {
+/** Whether a path is absent or not a directory; `strict` propagates non-missing stat failures. */
+export async function directoryIsMissing(dir: string, options?: { strict?: boolean }): Promise<boolean> {
 	try {
 		return !(await fs.promises.stat(dir)).isDirectory();
 	} catch (error) {
-		return isEnoent(error) || isEnotdir(error);
+		if (isEnoent(error) || isEnotdir(error)) return true;
+		if (options?.strict) throw error;
+		return false;
 	}
 }
 
-/**
- * Whether `dir` resolves to an existing directory. Any stat failure — a deleted
- * path (ENOENT), permission error, or a non-directory — returns `false`, so
- * callers can decide whether a directory is safe to `chdir` into or adopt as a
- * working directory before {@link setProjectDir} throws on it.
- */
-export async function directoryExists(dir: string): Promise<boolean> {
+/** Whether a path is an existing directory; `strict` propagates non-missing stat failures. */
+export async function directoryExists(dir: string, options?: { strict?: boolean }): Promise<boolean> {
 	try {
 		return (await fs.promises.stat(dir)).isDirectory();
-	} catch {
+	} catch (error) {
+		if (options?.strict && !isEnoent(error) && !isEnotdir(error)) throw error;
 		return false;
 	}
 }
@@ -328,12 +346,6 @@ export function getSafeProjectCwd(): string {
 /** Get the config directory name relative to home (e.g. ".omp" or PI_CONFIG_DIR override). */
 export function getConfigDirName(): string {
 	return process.env.PI_CONFIG_DIR || CONFIG_DIR_NAME;
-}
-
-/** Get the config agent directory name relative to home (e.g. ".omp/agent" or PI_CONFIG_DIR + "/agent"). */
-export function getConfigAgentDirName(): string {
-	const profile = getActiveProfile();
-	return profile ? path.join(getConfigDirName(), "profiles", profile, "agent") : `${getConfigDirName()}/agent`;
 }
 
 // =============================================================================
@@ -657,6 +669,24 @@ export function getReportsDir(): string {
 }
 
 /**
+ * Get the self-update state directory (~/.omp/update): the background
+ * auto-update's status file and worker log, and the lock that keeps two
+ * installs (`omp update`, auto-update) from running at once.
+ */
+export function getUpdateStateDir(): string {
+	return dirs.rootSubdir("update", "state");
+}
+
+/**
+ * Return a per-user directory (`<tmpdir>/<prefix>-<uid>`) under the OS temp dir
+ * so `bun test` state never collides across accounts sharing `/tmp`.
+ */
+export function getTestTempDir(prefix: string): string {
+	const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+	return path.join(os.tmpdir(), `${prefix}-${uid}`);
+}
+
+/**
  * Get the logs directory (~/.omp/logs). `bun test` processes get
  * `<tmpdir>/omp-test-logs-<uid>` instead, so suites never write into the
  * developer's real logs; the uid suffix (as for the test session-owners dir)
@@ -664,8 +694,7 @@ export function getReportsDir(): string {
  */
 export function getLogsDir(): string {
 	if (isBunTestRuntime()) {
-		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
-		return path.join(os.tmpdir(), `omp-test-logs-${uid}`);
+		return getTestTempDir("omp-test-logs");
 	}
 	return dirs.rootSubdir("logs", "state");
 }
@@ -788,9 +817,19 @@ export function getPythonEnvDir(): string {
 	return dirs.rootSubdir("python-env", "data");
 }
 
+/** Get managed Ghidra installs, JDK, PyGhidra venv and Gradle cache (~/.omp/ghidra). */
+export function getGhidraDir(): string {
+	return dirs.rootSubdir("ghidra", "data");
+}
+
 /** Get the shared Python gateway state directory (~/.omp/agent/python-gateway; XDG default: $XDG_STATE_HOME/omp/python-gateway). */
 export function getPythonGatewayDir(): string {
 	return dirs.agentSubdir(undefined, "python-gateway", "state");
+}
+
+/** Get the managed Antigravity CLI directory (~/.omp/antigravity-cli): the `agy` binary and its isolated state. */
+export function getAntigravityCliDir(): string {
+	return dirs.rootSubdir("antigravity-cli", "data");
 }
 
 /** Get the puppeteer sandbox directory (~/.omp/puppeteer). */
@@ -798,9 +837,23 @@ export function getPuppeteerDir(): string {
 	return dirs.rootSubdir("puppeteer", "cache");
 }
 
+/**
+ * Get where the WebKit browser engine's host executable is installed: `ABHost` (`ABHost.exe` on Windows)
+ * in the ABKit engine directory `~/.o2/lib/abkit`. The location is shared with Tern, so it is outside omp's
+ * own directories.
+ */
+export function getWebKitHostPath(platform: NodeJS.Platform = process.platform): string {
+	return path.join(os.homedir(), ".o2", "lib", "abkit", platform === "win32" ? "ABHost.exe" : "ABHost");
+}
+
 /** Get the browser relay extension install directory (~/.omp/browser-relay). */
 export function getBrowserRelayDir(): string {
 	return dirs.rootSubdir("browser-relay", "data");
+}
+
+/** Get the install registry shared by every omp profile and browser. */
+export function getBrowserRelayInstallRegistryFile(): string {
+	return dirs.baseRootSubdir(path.join("browser-relay", "installs.json"));
 }
 
 /** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
@@ -881,9 +934,23 @@ export function getAuthBrokerSnapshotCachePath(): string {
 	return dirs.rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
 }
 
+/**
+ * Get the cached OpenAI Codex client version record
+ * (~/.omp/agent/codex-client-version.json; XDG default: $XDG_CACHE_HOME/omp/codex-client-version.json).
+ * It is a refetchable cache, not config, so it belongs under the cache dir.
+ */
+export function getCodexClientVersionPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "codex-client-version.json", "cache");
+}
+
 /** Get the commit-author avatar cache directory (~/.omp/cache/avatars). */
 export function getAvatarCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
+}
+
+/** Get the directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH (~/.omp/cache/bun-stub). */
+export function getBunStubDir(): string {
+	return dirs.rootSubdir(path.join("cache", "bun-stub"), "cache");
 }
 
 /** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
@@ -964,6 +1031,11 @@ export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");
 }
 
+/** Get the path to transcripts.db (full-text index of session transcripts). */
+export function getTranscriptIndexDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "transcripts.db", "data");
+}
+
 /** Get the path to models.db (model cache database). */
 export function getModelDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "models.db", "data");
@@ -1007,11 +1079,6 @@ export function getBlobsDir(agentDir?: string): string {
 /** Get the custom themes directory (~/.omp/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "themes");
-}
-
-/** Get the tools directory (~/.omp/agent/tools). */
-export function getToolsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "tools");
 }
 
 /** Get the slash commands directory (~/.omp/agent/commands). */
@@ -1108,38 +1175,15 @@ export function getSecretPlaceholderKeyPath(): string {
 	return keyPath;
 }
 
-/** Directory holding the per-model tiny-worker sockets and logs (~/.omp/run/tiny; XDG default: $XDG_STATE_HOME/omp/run/tiny). */
-export function getTinyWorkerRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "tiny"), "state");
+/** Runtime directory of the single per-user omp daemon (~/.omp/run/daemon; XDG default: $XDG_STATE_HOME/omp/run/daemon). Shared across profiles; holds its socket, token, sqlite store and unit logs. */
+export function getDaemonDir(): string {
+	return dirs.baseRootSubdir(path.join("run", "daemon"), "state");
 }
 
-/** Directory holding the per-model mnemopi embedding server endpoints and logs (~/.omp/run/mnemopi; XDG default: $XDG_STATE_HOME/omp/run/mnemopi). */
-export function getMnemopiEmbedRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "mnemopi"), "state");
-}
-
-/** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
-export function getDaemonRuntimeRoot(): string {
-	return dirs.rootSubdir(path.join("run", "daemons"), "state");
-}
-
-/** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
+/** Get the per-project runtime directory (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
 export function getDaemonRuntimeDir(projectDir: string): string {
 	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-	return path.join(getDaemonRuntimeRoot(), key);
-}
-
-/** Root directory containing every machine-global daemon service scope (~/.omp/run/daemons/global; XDG default: $XDG_STATE_HOME/omp/run/daemons/global). Shared across profiles. */
-export function getGlobalDaemonRuntimeRoot(): string {
-	return dirs.baseRootSubdir(path.join("run", "daemons", "global"), "state");
-}
-
-/** Get a profile-independent runtime directory for a machine-global daemon service. */
-export function getGlobalDaemonRuntimeDir(service: string): string {
-	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(service)) {
-		throw new Error(`Invalid global daemon service name: ${JSON.stringify(service)}`);
-	}
-	return path.join(getGlobalDaemonRuntimeRoot(), service);
+	return path.join(dirs.rootSubdir(path.join("run", "daemons"), "state"), key);
 }
 
 /**
@@ -1149,11 +1193,6 @@ export function getGlobalDaemonRuntimeDir(service: string): string {
  */
 export function getSessionOwnersDir(): string {
 	return dirs.baseRootSubdir(path.join("run", "session-owners"), "state");
-}
-
-/** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
-export function getProviderInFlightRoot(): string {
-	return dirs.rootSubdir(path.join("run", "provider-inflight"), "state");
 }
 
 /** Get the marketplaces registry path (~/.omp/marketplaces.json; XDG default: $XDG_DATA_HOME/omp/marketplaces.json). Adopts a legacy registry on first XDG resolution. */

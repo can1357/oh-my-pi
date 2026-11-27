@@ -2,9 +2,24 @@
 
 provider "kimi-code" {
 	default-model "kimi-for-coding"
-	discovery label="Kimi Code" {
-		env "KIMI_API_KEY"
+	dynamic-models-authoritative #true
+	// KIMI_API_KEY sits on the provider (not inside `discovery`) so runtime
+	// credential resolution and usage probing see it; discovery still inherits
+	// it via the provider-envVars fallback. Kimi Code and Moonshot keys are not
+	// interchangeable, so Moonshot's MOONSHOT_API_KEY is not accepted here.
+	env "KIMI_API_KEY"
+	// Managed `/coding/v1` base URL (chat, models, usages, search); mirrors the
+	// official client's region profile. `env` names the official client's base
+	// URL override for this deployment.
+	base-url "https://api.kimi.com/coding/v1" {
+		env "KIMI_CODE_BASE_URL"
 	}
+	// Kimi Code managed endpoint: the dedicated Kimi stream dispatcher handles
+	// its streams, requests carry the shared Kimi CLI client headers, and both
+	// transports (OpenAI completions, Anthropic messages) share one prompt-cache
+	// affinity identity.
+	kimi-code-endpoint #true
+	discovery label="Kimi Code (China)"
 
 	class "kimi" {
 		// Replaces the native Kimi provider thinking-format branch.
@@ -13,6 +28,10 @@ provider "kimi-code" {
 			thinking-format "openai"
 		}
 	}
+	// Kimi Code serves the K2 chat template on every model; heal leaked
+	// section/tool-call markup regardless of family (replaces the explicit
+	// `kimi-code` branch in compat/resolve.ts).
+	stream-markup-healing-pattern "kimi"
 	// Replaces streamKimi's TS fallback for models whose discovery metadata omits the protocol.
 	kimi-api-format "anthropic"
 	// Kimi Code derives cache routing from top-level `prompt_cache_key` on
@@ -39,16 +58,41 @@ provider "kimi-code" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-format "zai"
 	}
+	// K2.7 Code Highspeed always thinks (`supports_thinking_type: "only"`) but
+	// exposes no adjustable effort ladder (`think_efforts` is omitted).
+	models "kimi-for-coding-highspeed" {
+		thinking-efforts
+	}
 
 	// /coding/v1/models carries no pricing. `cost-fallback` seeds the public
 	// Moonshot list price only when discovery reports $0, so a future priced
 	// envelope keeps its real rates. `kimi-for-coding` is K2.8 Preview — no
 	// public API SKU exists yet, so it uses the K2.7 Code line rate.
+	// K3 bills cache writes at the default 5m TTL rate (omp never requests
+	// 1h); K2.x SKUs have no cache-write charge.
+	// https://platform.kimi.ai/docs/guide/context-caching
 	models "k3" "k3-256k" {
 		cost-fallback {
 			input 3.0
 			output 15.0
 			cache-read 0.3
+			cache-write 3.0
+		}
+	}
+	models "k3.1-pro" {
+		cost-fallback {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 2.0
+		}
+	}
+	models "k3.1-pro-highspeed" {
+		cost-fallback {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 4.0
 		}
 	}
 	models "kimi-for-coding" {

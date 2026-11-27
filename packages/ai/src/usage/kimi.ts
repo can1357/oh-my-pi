@@ -1,3 +1,4 @@
+import { providerBaseUrl, providerBaseUrlEnv } from "@oh-my-pi/pi-catalog/compat/providers";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { $env } from "@oh-my-pi/pi-utils";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
@@ -17,7 +18,6 @@ import { parseIsoTimestamp, usageStatus } from "./shared";
 
 // (Refresh is the sole responsibility of AuthStorage; no provider-direct refresh here.)
 
-const DEFAULT_BASE_URL = "https://api.kimi.com/coding/v1";
 const USAGE_PATH = "usages";
 
 interface KimiUsagePayload {
@@ -36,12 +36,6 @@ type KimiUsageRow = {
 	resetsAt?: number;
 	window?: UsageWindow;
 };
-
-function normalizeBaseUrl(baseUrl?: string): string {
-	const envBase = $env.KIMI_CODE_BASE_URL?.trim();
-	const candidate = baseUrl?.trim() || envBase || DEFAULT_BASE_URL;
-	return candidate.replace(/\/+$/, "");
-}
 
 function buildUsageUrl(baseUrl: string): string {
 	const normalized = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
@@ -270,72 +264,100 @@ function parseUsagePayload(payload: unknown, nowMs: number): { rows: KimiUsageRo
 	return { rows, raw: data };
 }
 
-export const kimiUsageProvider: UsageProvider = {
-	id: "kimi-code",
-	supports(params: UsageFetchParams): boolean {
-		return params.provider === "kimi-code" && params.credential.type === "oauth";
-	},
-	async fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
-		if (params.provider !== "kimi-code") return null;
-		const { credential } = params;
-		if (credential.type !== "oauth") return null;
+function createKimiUsageProvider(id: string): UsageProvider {
+	return {
+		id,
+		supports(params: UsageFetchParams): boolean {
+			if (params.provider !== id) return false;
+			// `/coding/v1/usages` also accepts a subscription API key
+			// (KIMI_API_KEY / KIMI_CODE_GLOBAL_API_KEY) as the bearer, so key-only
+			// setups (no /login OAuth) can report quota.
+			return params.credential.type === "oauth"
+				? Boolean(params.credential.accessToken)
+				: Boolean(params.credential.apiKey);
+		},
+		async fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
+			if (params.provider !== id) return null;
+			const { credential } = params;
+			// OAuth sessions carry the bearer in accessToken; pasted/env keys in apiKey.
+			const accessToken = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
+			if (!accessToken) return null;
 
-		const accessToken = credential.accessToken;
-		if (!accessToken) return null;
-
-		const nowMs = Date.now();
-		// AuthStorage refreshes OAuth credentials pre-emptively (60s skew). If the
-		// usage probe lands with an expired token, short-circuit rather than POST
-		// the broker sentinel back to Kimi — the next cycle will carry a freshly
-		// refreshed credential.
-		if (credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
-			ctx.logger?.debug("Kimi usage token expired; skipping probe", { provider: params.provider });
-			return null;
-		}
-
-		const baseUrl = normalizeBaseUrl(params.baseUrl);
-		const url = buildUsageUrl(baseUrl);
-		let payload: unknown;
-		try {
-			const response = await ctx.fetch(url, {
-				headers: {
-					...getKimiCommonHeaders(),
-					Authorization: `Bearer ${accessToken}`,
-				},
-				signal: params.signal,
-			});
-			if (!response.ok) {
-				ctx.logger?.warn("Kimi usage request failed", { status: response.status, provider: params.provider });
+			const nowMs = Date.now();
+			// AuthStorage refreshes OAuth credentials pre-emptively (60s skew). If the
+			// usage probe lands with an expired token, short-circuit rather than POST
+			// the broker sentinel back to Kimi — the next cycle will carry a freshly
+			// refreshed credential. API keys have no expiry, so only OAuth is gated.
+			if (credential.type === "oauth" && credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
+				ctx.logger?.debug("Kimi usage token expired; skipping probe", { provider: params.provider });
 				return null;
 			}
-			payload = await response.json();
-		} catch (error) {
-			ctx.logger?.warn("Kimi usage request error", { provider: params.provider, error: String(error) });
-			return null;
-		}
 
-		const parsed = parseUsagePayload(payload, nowMs);
-		if (!parsed || parsed.rows.length === 0) {
-			ctx.logger?.warn("Kimi usage response invalid", { provider: params.provider });
-			return null;
-		}
+			// Base URL and its override env come from the compiled provider entry
+			// (`base-url` node in `providers/kimi-code*.kdl`; the env child is
+			// declared on the mainland entry only — the official client's override
+			// does not fork the global deployment).
+			const overrideEnv = providerBaseUrlEnv(id);
+			const envBase = overrideEnv ? $env[overrideEnv]?.trim() : undefined;
+			const managedBase = providerBaseUrl(id);
+			if (!managedBase) {
+				ctx.logger?.warn("Kimi usage provider has no managed base URL", { provider: params.provider });
+				return null;
+			}
+			const baseUrl = (params.baseUrl?.trim() || envBase || managedBase).replace(/\/+$/, "");
+			const url = buildUsageUrl(baseUrl);
+			let payload: unknown;
+			try {
+				const response = await ctx.fetch(url, {
+					headers: {
+						...getKimiCommonHeaders(),
+						Authorization: `Bearer ${accessToken}`,
+					},
+					signal: params.signal,
+				});
+				if (!response.ok) {
+					ctx.logger?.warn("Kimi usage request failed", { status: response.status, provider: params.provider });
+					return null;
+				}
+				payload = await response.json();
+			} catch (error) {
+				ctx.logger?.warn("Kimi usage request error", { provider: params.provider, error: String(error) });
+				return null;
+			}
 
-		const limits = parsed.rows.map((row, index) => toUsageLimit(row, params.provider, index, credential.accountId));
+			const parsed = parseUsagePayload(payload, nowMs);
+			if (!parsed || parsed.rows.length === 0) {
+				// `{}` is Kimi's answer for an account without a Kimi Code plan: nothing to meter.
+				if (isRecord(payload) && Object.keys(payload).length === 0) {
+					ctx.logger?.debug("Kimi account has no Kimi Code plan to meter", { provider: params.provider });
+					return null;
+				}
+				ctx.logger?.warn("Kimi usage response invalid", { provider: params.provider });
+				return null;
+			}
 
-		const report: UsageReport = {
-			provider: params.provider,
-			fetchedAt: nowMs,
-			limits,
-			metadata: {
-				accountId: credential.accountId,
-				endpoint: url,
-			},
-			raw: parsed.raw,
-		};
+			const limits = parsed.rows.map((row, index) =>
+				toUsageLimit(row, params.provider, index, credential.accountId),
+			);
 
-		return report;
-	},
-};
+			const report: UsageReport = {
+				provider: params.provider,
+				fetchedAt: nowMs,
+				limits,
+				metadata: {
+					accountId: credential.accountId,
+					endpoint: url,
+				},
+				raw: parsed.raw,
+			};
+
+			return report;
+		},
+	};
+}
+
+export const kimiUsageProvider = createKimiUsageProvider("kimi-code");
+export const kimiGlobalUsageProvider = createKimiUsageProvider("kimi-code-global");
 
 /** Ranks Kimi OAuth accounts by the canonical 5-hour and 7-day quota windows. */
 export const kimiRankingStrategy: CredentialRankingStrategy = {

@@ -6,8 +6,10 @@
  */
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import * as os from "node:os";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getInstallId } from "@oh-my-pi/pi-utils";
-import type { Api, Model } from "../types";
+import { extractClaudeMetadataSessionId } from "../providers/anthropic-identity";
+import type { Api, Model, ServiceTier } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 
 const JSON_HEADERS = {
@@ -19,6 +21,32 @@ export function json(status: number, body: unknown, headers?: Record<string, str
 	return new Response(JSON.stringify(body) ?? "null", {
 		status,
 		headers: headers ? { ...JSON_HEADERS, ...headers } : JSON_HEADERS,
+	});
+}
+
+const NO_STORE_JSON_HEADERS = {
+	"Content-Type": "application/json; charset=utf-8",
+	"Cache-Control": "no-store",
+} as const;
+
+/** Error body of the media routes (embeddings, images, rerank, speech, transcriptions, video): `{ error: { code, type, message } }`. */
+export function codedErrorResponse(status: number, type: string, message: string): Response {
+	return new Response(JSON.stringify({ error: { code: status, type, message } }), {
+		status,
+		headers: NO_STORE_JSON_HEADERS,
+	});
+}
+
+/** Error body of the pi-native and SystemOne routes: `{ error: { type, message } }`. */
+export function noStoreErrorResponse(status: number, type: string, message: string): Response {
+	return new Response(JSON.stringify({ error: { type, message } }), { status, headers: NO_STORE_JSON_HEADERS });
+}
+
+/** OpenAI wire error body: `{ error: { message, type } }`. */
+export function openAIErrorResponse(status: number, type: string, message: string): Response {
+	return new Response(JSON.stringify({ error: { message, type } }), {
+		status,
+		headers: { "Content-Type": "application/json" },
 	});
 }
 
@@ -137,9 +165,9 @@ export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean
 }
 
 /**
- * Allow-list of inbound request headers that the gateway captures and forwards
- * to the underlying parsers (which decide whether to surface them to the
- * provider). Case-insensitive; `x-stainless-` is a prefix match.
+ * Allow-list of inbound request headers that the gateway forwards to the
+ * provider for gateway-token requests (`applyCallerTrust`; scoped clients'
+ * are dropped). Case-insensitive; `x-stainless-` is a prefix match.
  */
 const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"anthropic-beta": true,
@@ -149,11 +177,15 @@ const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"openai-project": true,
 	"openai-beta": true,
 	// Codex / ChatGPT-OAuth backend headers (see @oh-my-pi/pi-catalog/wire/codex).
-	// `session_id` and `conversation_id` thread the upstream session so prompt
-	// caching and per-conversation rate limiting work; `chatgpt-account-id` and
-	// `originator` identify the calling account and client surface.
+	// `session-id` / `thread-id` (codex-rs since 2026-05) and the underscored
+	// `session_id` / `conversation_id` (older Codex clients) thread the upstream
+	// session so prompt caching and per-conversation rate limiting work;
+	// `chatgpt-account-id` and `originator` identify the calling account and
+	// client surface.
 	"chatgpt-account-id": true,
 	originator: true,
+	"session-id": true,
+	"thread-id": true,
 	session_id: true,
 	conversation_id: true,
 	// Vendor-neutral cache-identity headers. The gateway also reads these to
@@ -166,8 +198,8 @@ const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 
 /**
  * Extract allow-listed passthrough headers from an inbound request. Keys are
- * lowercased; empty values are dropped. Called once per request in
- * `handleFormatEndpoint`; parsers then read `options.headers`.
+ * lowercased; empty values are dropped. Used by `applyCallerTrust` and by the
+ * Anthropic parser, whose stream encoder reads the caller's `anthropic-beta`.
  */
 export function captureRequestHeaders(headers: Headers): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -213,7 +245,11 @@ export function resolveClientIdentity(headers: Headers): ClientUsageIdentity {
  */
 const CACHE_KEY_HEADERS: readonly string[] = [
 	"x-prompt-cache-key",
+	"x-claude-code-session-id",
+	"x-session-affinity",
+	"session-id",
 	"session_id",
+	"thread-id",
 	"conversation_id",
 	"x-session-id",
 	"x-conversation-id",
@@ -234,17 +270,23 @@ function readBodyCacheKey(body: unknown): string | undefined {
 		const v = meta[field];
 		if (typeof v === "string" && v.length > 0) return v;
 	}
-	return undefined;
+	// Claude Code nests its session id inside the `user_id` JSON string.
+	return extractClaudeMetadataSessionId(meta.user_id);
 }
 
 /**
  * Resolve a prompt-cache identity from inbound request body + headers.
  * Order of precedence (first wins):
  *   1. Body `prompt_cache_key`
- *   2. Body `metadata.{prompt_cache_key,session_id,conversation_id}`
+ *   2. Body `metadata.{prompt_cache_key,session_id,conversation_id}`, then the
+ *      `session_id` inside Claude Code's `metadata.user_id`
  *   3. Header `x-prompt-cache-key`
- *   4. Header `session_id` / `conversation_id` (Codex / ChatGPT-OAuth surface)
- *   5. Header `x-session-id` / `x-conversation-id` (common informal)
+ *   4. Header `x-claude-code-session-id` (Claude Code), `x-session-affinity` (OpenCode)
+ *   5. Header `session-id` / `session_id`, then `thread-id` / `conversation_id`
+ *      (Codex CLI; codex-rs sends both, and its session id is the cache key)
+ *   6. Header `x-session-id` / `x-conversation-id` (common informal)
+ * OpenCode's `x-parent-session-id` is deliberately ignored: it would key every
+ * subagent on its parent's conversation.
  * Returns undefined when none present; the gateway then derives a stable
  * UUID from the request's stable parts.
  */
@@ -257,6 +299,23 @@ export function resolvePromptCacheKey(body: unknown, headers?: Headers): string 
 		if (v && v.length > 0) return v;
 	}
 	return undefined;
+}
+
+/** OpenAI-wire `reasoning_effort` / `reasoning.effort` values the gateway forwards. */
+export function isOpenAIReasoningEffort(value: unknown): value is Effort {
+	return (
+		value === "minimal" ||
+		value === "low" ||
+		value === "medium" ||
+		value === "high" ||
+		value === "xhigh" ||
+		value === "max"
+	);
+}
+
+/** OpenAI-wire `service_tier` values the gateway forwards. */
+export function isOpenAIServiceTier(value: unknown): value is ServiceTier {
+	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
 }
 
 const CORS_HEADERS: Record<string, string> = {

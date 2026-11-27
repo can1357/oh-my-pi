@@ -135,7 +135,7 @@ describe("Python runner shell output streaming", () => {
 			.map(frame => frame.data)
 			.join("");
 
-		expect(stdout).toContain("[output truncated: shell helper exceeded");
+		expect(stdout).toContain("[shell output truncated:");
 		expect(stdout).toContain("captured=3000 return=0");
 		expect(stdout).not.toContain("captured=3100");
 	});
@@ -153,7 +153,7 @@ describe("Python runner shell output streaming", () => {
 			.map(frame => frame.data)
 			.join("");
 
-		expect(stdout).toContain("[output truncated: shell helper exceeded");
+		expect(stdout).toContain("[shell output truncated:");
 		expect(stdout).toContain("capturedChars=1048576 return=0");
 		expect(stdout).not.toContain("capturedChars=1048593");
 	});
@@ -214,7 +214,16 @@ describe("Python runner shell output streaming", () => {
 		const stdout = frames.filter(frame => frame.type === "stdout").map(frame => frame.data);
 
 		expect(stdout[0]).toBe("first");
-		// The cell's trailing value (the magic's exit status) is echoed to stdout after the stream.
-		expect(stdout.join("")).toStartWith("firstsecond");
+		// The cell has no value of its own: nothing follows the command's output.
+		expect(stdout.join("")).toBe("firstsecond");
+	});
+
+	it("reports a failing %%bash cell's exit status", async () => {
+		const frames = await runCell("%%bash\nexit 3");
+
+		expect(frames.filter(frame => frame.type === "stdout")).toEqual([]);
+		expect(frames.filter(frame => frame.type === "stderr").map(frame => frame.data)).toEqual([
+			"%%bash: exit status 3\n",
+		]);
 	});
 });

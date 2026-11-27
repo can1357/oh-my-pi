@@ -10,6 +10,9 @@
  * eliminates the much-worse "issue shows OPEN for up to softTtlSec after
  * `gh issue close`" failure mode reported by users.
  *
+ * Plain `git push` calls are handled after the command exits 0 instead, once
+ * their destination repository can be resolved (`invalidateGithubCacheForBashResult`).
+ *
  * Detector scope: ops that change visible issue/PR state — `close`,
  * `reopen`, `merge`, `delete`, `ready`, `lock`, `unlock`, `pin`, `unpin`,
  * `transfer`, plus the comment/review/edit ops that change the rendered
@@ -17,13 +20,19 @@
  * number, all auth_keys) because the upside of staleness elimination
  * dwarfs the cost of one cache miss.
  */
+import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { logger } from "@oh-my-pi/pi-utils";
+import { parseGitUrl } from "../extensibility/plugins/git-url";
 import { formatRepoRef } from "./gh-common";
-import { invalidateAllForNumber, invalidateAllForRepo } from "./github-cache";
+import { invalidateAllForNumber, invalidateAllForRepo, invalidatePullRequestsForRepo } from "./github-cache";
+import { isGitlabHostSegment } from "./glab-mr";
 import { tokenizeShellSegments } from "./shell-tokenize";
 
 const PR_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
 const ISSUE_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)(?:[/?#].*)?$/i;
-
+const GLAB_MR_URL_PATTERN = /^https?:\/\/([^/\s]+)\/(.+?)\/-\/merge_requests\/(\d+)(?:[/?#].*)?$/i;
+const GLAB_ISSUE_URL_PATTERN = /^https?:\/\/([^/\s]+)\/(.+?)\/-\/issues\/(\d+)(?:[/?#].*)?$/i;
 /** Subcommands that mutate the rendered issue/PR view in any meaningful way. */
 const MUTATING_ISSUE_SUBCMDS: Record<string, true> = {
 	close: true,
@@ -49,6 +58,27 @@ const MUTATING_PR_SUBCMDS: Record<string, true> = {
 	review: true,
 	lock: true,
 	unlock: true,
+};
+
+const MUTATING_GLAB_MR_SUBCMDS: Record<string, true> = {
+	update: true,
+	note: true,
+	comment: true,
+	close: true,
+	reopen: true,
+	delete: true,
+	merge: true,
+	approve: true,
+	revoke: true,
+	rebase: true,
+};
+
+const MUTATING_GLAB_ISSUE_SUBCMDS: Record<string, true> = {
+	close: true,
+	reopen: true,
+	delete: true,
+	update: true,
+	note: true,
 };
 
 /**
@@ -94,6 +124,97 @@ const VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
 	"--match-head-commit",
 	"--author-email",
 ]);
+
+const GLAB_VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
+	...[...VALUE_TAKING_FLAGS].filter(flag => flag !== "-r"),
+	"-d",
+	"--description",
+	"--message",
+	"--unlabel",
+	"--reviewer",
+	"--target-branch",
+	"-s",
+	"--source-branch",
+	"--sha",
+	"--squash-commit-message",
+	"--merge-commit-message",
+	"--weight",
+	"--issue-type",
+]);
+
+function normalizeGlabRepoFlag(raw: string): string | undefined {
+	const trimmed = raw
+		.trim()
+		.replace(/\/+$/, "")
+		.replace(/\.git$/, "");
+	if (!trimmed) return undefined;
+	if (/^https?:\/\//i.test(trimmed)) {
+		try {
+			const parsed = new URL(trimmed);
+			const projectPath = parsed.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+			return projectPath ? `${parsed.host.toLowerCase()}/${projectPath}` : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	const firstSlash = trimmed.indexOf("/");
+	if (firstSlash < 0) return undefined;
+	const hostPart = trimmed.slice(0, firstSlash);
+	const rest = trimmed.slice(firstSlash + 1);
+	if (!rest.includes("/")) return undefined;
+	if (isGitlabHostSegment(hostPart)) {
+		return `${hostPart.toLowerCase()}/${rest}`;
+	}
+	return undefined;
+}
+
+function detectGlabMutation(tokens: readonly string[]): { number?: number; repo?: string } | null {
+	const glabIdx = tokens.indexOf("glab");
+	if (glabIdx === -1) return null;
+	const subject = tokens[glabIdx + 1];
+	if (subject !== "mr" && subject !== "issue") return null;
+	const subcmd = tokens[glabIdx + 2];
+	if (!subcmd) return null;
+	const expected = subject === "mr" ? MUTATING_GLAB_MR_SUBCMDS : MUTATING_GLAB_ISSUE_SUBCMDS;
+	if (!expected[subcmd]) return null;
+
+	let repo: string | undefined;
+	for (let i = glabIdx + 3; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "-R" || token === "--repo") {
+			const next = tokens[i + 1];
+			if (next) repo = normalizeGlabRepoFlag(next);
+			i++;
+			continue;
+		}
+		if (token.startsWith("--repo=")) {
+			repo = normalizeGlabRepoFlag(token.slice("--repo=".length));
+		}
+	}
+	for (let i = glabIdx + 3; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "-R" || token === "--repo" || GLAB_VALUE_TAKING_FLAGS.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		const numMatch = /^[!#]?(\d+)$/.exec(token);
+		if (numMatch) {
+			const direct = Number(numMatch[1]);
+			if (Number.isSafeInteger(direct) && direct > 0) {
+				return repo !== undefined ? { number: direct, repo } : { number: direct };
+			}
+		}
+		const urlMatch = (subject === "mr" ? GLAB_MR_URL_PATTERN : GLAB_ISSUE_URL_PATTERN).exec(token);
+		if (urlMatch) {
+			const num = Number(urlMatch[3]);
+			if (Number.isSafeInteger(num) && num > 0) {
+				return { number: num, repo: `${urlMatch[1].toLowerCase()}/${urlMatch[2]}` };
+			}
+		}
+	}
+	return repo !== undefined ? { repo } : {};
+}
 /**
  * Walk a single shell command's token stream looking for a top-level
  * `gh (issue|pr) <subcmd> [<id-or-url>]` invocation and return the
@@ -162,15 +283,95 @@ function detectGhMutation(tokens: readonly string[]): { number?: number; repo?: 
  * command does not touch GitHub state.
  */
 export function invalidateGithubCacheForBashCommand(command: string): void {
-	if (!command?.includes("gh")) return;
+	if (!command || (!command.includes("gh") && !command.includes("glab"))) return;
 	const segments = tokenizeShellSegments(command);
 	for (const segment of segments) {
-		const hit = detectGhMutation(segment);
-		if (!hit) continue;
-		if (hit.number !== undefined) {
-			invalidateAllForNumber(hit.number, hit.repo);
-		} else {
-			invalidateAllForRepo(hit.repo);
+		for (const hit of [detectGhMutation(segment), detectGlabMutation(segment)]) {
+			if (!hit) continue;
+			if (hit.number !== undefined) {
+				invalidateAllForNumber(hit.number, hit.repo);
+			} else {
+				invalidateAllForRepo(hit.repo);
+			}
+		}
+	}
+}
+
+/** Options of `git push` that consume the next argv token. */
+const PUSH_VALUE_FLAGS: Record<string, true> = {
+	"--receive-pack": true,
+	"--exec": true,
+	"-o": true,
+	"--push-option": true,
+};
+
+/** A redirection word (`2>&1` lexes as `2>`, `>/dev/null`) ends the argv. */
+const REDIRECT = /^\d*[<>]/;
+
+/** Repository a `git push` argv sends to, or undefined for dry runs and non-push commands. */
+async function pushedRepo(tokens: readonly string[], cwd: string): Promise<string | undefined> {
+	if (path.basename(tokens[0]) !== "git") return undefined;
+	let i = 1;
+	for (; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "-C") cwd = path.resolve(cwd, tokens[++i] ?? "");
+		else if (token.startsWith("-C")) cwd = path.resolve(cwd, token.slice(2));
+		else if (token !== "--no-pager" && token !== "--paginate") break;
+	}
+	if (tokens[i] !== "push") return undefined;
+	let positional: string | undefined;
+	let repoFlag: string | undefined;
+	for (i++; i < tokens.length && !REDIRECT.test(tokens[i]); i++) {
+		const token = tokens[i];
+		if (token === "--dry-run" || /^-[^-]*n/.test(token)) return undefined;
+		if (token === "--repo") repoFlag = tokens[++i];
+		else if (token.startsWith("--repo=")) repoFlag = token.slice("--repo=".length);
+		else if (PUSH_VALUE_FLAGS[token]) i++;
+		else if (token === "--") {
+			positional ??= tokens[i + 1];
+			break;
+		} else if (!token.startsWith("-")) positional ??= token;
+	}
+	// Git's precedence: the positional repository wins over `--repo`.
+	let remote = positional ?? repoFlag;
+	const repository = vcs.git(cwd);
+	if (!remote) {
+		if (!repository) return undefined;
+		const branch = await repository.currentBranch();
+		remote =
+			(branch && (await repository.configGet(`branch.${branch}.pushRemote`))) ||
+			(await repository.configGet("remote.pushDefault")) ||
+			(branch && (await repository.configGet(`branch.${branch}.remote`))) ||
+			undefined;
+		if (!remote) {
+			const remotes = await repository.remoteList();
+			remote = remotes.length === 1 ? remotes[0] : "origin";
+		}
+	}
+	const url =
+		(await repository?.configGet(`remote.${remote}.pushurl`)) ?? (await repository?.remoteUrl(remote)) ?? remote;
+	const source = parseGitUrl(url);
+	return source ? formatRepoRef(source.host, source.path) : undefined;
+}
+
+/**
+ * After a bash command exits 0, drop live PR metadata/diff rows for every
+ * repository a `git push` in it sent to. Like the `gh` detector this
+ * over-invalidates (a push hidden behind `|| true` still clears): a spurious
+ * clear costs one refetch, a missed one serves the old head until the TTL.
+ */
+export async function invalidateGithubCacheForBashResult(
+	command: string,
+	cwd: string,
+	result: { exitCode?: number },
+): Promise<void> {
+	if (result.exitCode !== 0 || !command.includes("push")) return;
+	for (const tokens of tokenizeShellSegments(command)) {
+		try {
+			const repo = await pushedRepo(tokens, cwd);
+			if (repo) invalidatePullRequestsForRepo(repo);
+		} catch (err) {
+			logger.debug("github cache: push destination lookup failed", { err: String(err) });
 		}
 	}
 }

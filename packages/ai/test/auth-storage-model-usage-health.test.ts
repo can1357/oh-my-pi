@@ -4,11 +4,14 @@ import {
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
+	type AuthStorageOptions,
+	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import { logger } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
 
 interface CacheEntry {
 	value: string;
@@ -120,6 +123,124 @@ describe("AuthStorage model usage health", () => {
 		storages.push(storage);
 		return storage;
 	}
+
+	it("prefetches selection usage without pinning, and an aborted warmup does not cancel foreground resolution", async () => {
+		const release = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		let calls = 0;
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			async fetchUsage(params) {
+				calls += 1;
+				if (calls === 2) started.resolve();
+				await release.promise;
+				return report(params.credential.accountId!, [limit("short", 0.2)]);
+			},
+		};
+		const storage = new AuthStorage(makeStore([oauthRow(1), oauthRow(2)]), {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+			rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		const controller = new AbortController();
+		const warm = storage.keys.prefetchUsage("anthropic", "prefetch-session", { signal: controller.signal });
+		await started.promise;
+		expect(storage.oauth.accounts("anthropic", "prefetch-session").some(account => account.active)).toBe(false);
+		const foreground = storage.keys.get("anthropic", "prefetch-session");
+		controller.abort();
+		await expect(warm).rejects.toThrow();
+		release.resolve();
+		expect(await foreground).toMatch(/^access-[12]$/);
+		expect(calls).toBe(2);
+		// Prefetching never advances the non-session round-robin cursor.
+		expect(await storage.keys.get("anthropic")).toBe("access-1");
+	});
+
+	it.each(["runtime", "config", "pinned", "single", "restricted", "unranked"] as const)(
+		"does not prefetch usage for a %s selection",
+		async mode => {
+			const fetchUsage = vi.fn(async () => null);
+			const storage = new AuthStorage(makeStore(mode === "single" ? [oauthRow(1)] : [oauthRow(1), oauthRow(2)]), {
+				usageProviderResolver: provider => (provider === "anthropic" ? { id: "anthropic", fetchUsage } : undefined),
+				rankingStrategyResolver: () => (mode === "unranked" ? undefined : strategy),
+			});
+			await storage.credentials.reload();
+			storages.push(storage);
+			if (mode === "runtime") storage.keys.setRuntime("anthropic", "override");
+			if (mode === "config") storage.keys.setConfig("anthropic", "override");
+			if (mode === "pinned") storage.sessions.pin("anthropic", "session", 1);
+			if (mode === "restricted") storage.sessions.restrict("anthropic", "session", ["account:account-1"]);
+
+			await storage.keys.prefetchUsage("anthropic", "session");
+			expect(fetchUsage).not.toHaveBeenCalled();
+		},
+	);
+
+	it("prefetches a model-gated single account when selection needs plan evidence", async () => {
+		const fetchUsage = vi.fn(async () => report("account-1", [limit("short", 0.2)]));
+		const storage = new AuthStorage(makeStore([oauthRow(1)]), {
+			usageProviderResolver: provider => (provider === "anthropic" ? { id: "anthropic", fetchUsage } : undefined),
+			rankingStrategyResolver: () => ({ ...strategy, planGate: () => () => true }),
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		await storage.keys.prefetchUsage("anthropic", "session", { modelId: "plan-gated" });
+		expect(fetchUsage).toHaveBeenCalledTimes(1);
+		expect(storage.oauth.accounts("anthropic", "session").some(account => account.active)).toBe(false);
+	});
+
+	it.each([
+		{ rejected: false, state: "healthy" },
+		{ rejected: true, state: "depleted" },
+	])("restores model health across processes after OAuth refresh ($state)", async ({ rejected, state }) => {
+		await using dir = await TempDir.create();
+		const dbPath = dir.join("agent.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		let offline = true;
+		const reports = { "account-1": report("account-1", [limit("short", 0.2)]) };
+		const options: AuthStorageOptions = {
+			async refreshOAuthCredential() {
+				if (offline) throw new Error("getaddrinfo ENOTFOUND api.anthropic.com");
+				return { access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 3_600_000 };
+			},
+			usageProviderResolver: () => makeUsageProvider(reports),
+			rankingStrategyResolver: () => strategy,
+		};
+		const auth = new AuthStorage(store, options);
+		const model = { modelId: "claude", reserveFraction: 0.1 };
+		try {
+			const { credential } = oauthRow(1);
+			if (credential.type !== "oauth") throw new Error("expected OAuth credential");
+			await auth.credentials.set("anthropic", [{ ...credential, expires: Date.now() - 60_000 }]);
+			expect(await auth.keys.get("anthropic", "offline", model)).toBeUndefined();
+			expect((await auth.health.model("anthropic", model)).state).toBe("depleted");
+
+			if (rejected) {
+				const [row] = store.listAuthCredentials("anthropic");
+				if (!row) throw new Error("expected stored OAuth credential");
+				auth.blocks.upsert({
+					credentialId: row.id,
+					providerKey: "anthropic:oauth",
+					blockScope: "auth",
+					blockedUntilMs: Date.now() + 60_000,
+				});
+			}
+			offline = false;
+			expect(await auth.keys.get("anthropic", "online", model)).toBe("fresh-access");
+
+			const peer = new AuthStorage(await SqliteAuthCredentialStore.open(dbPath), options);
+			try {
+				await peer.credentials.reload();
+				expect((await peer.health.model("anthropic", model)).state).toBe(state);
+				expect((await auth.health.model("anthropic", model)).state).toBe(state);
+			} finally {
+				peer.close();
+			}
+		} finally {
+			auth.close();
+		}
+	});
 
 	it("honours every request scope when checking persisted health blocks", async () => {
 		const rows = [oauthRow(1)];

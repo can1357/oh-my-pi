@@ -1,6 +1,7 @@
 /**
  * Owner-routed async job delivery: formatting and batch-message assembly for
- * `async-result` follow-ups.
+ * `async-result` follow-ups, and the rows a finished `/tan` leaves instead
+ * ({@link buildTanResultMessages}).
  *
  * Each {@link AgentSession} registers a delivery sink for its own agent id
  * (`AsyncJobManager.registerDeliverySink`) and enqueues formatted entries on
@@ -11,11 +12,17 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import tanResultTemplate from "../prompts/system/tan-result.md" with { type: "text" };
+import type { StructuredSubagentOutput } from "../task/task-details";
 import { escapeHarnessTags } from "./harness-tags";
-import type { CustomMessage } from "./messages";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	type CustomMessage,
+	type NormalizedCustomMessagePayload,
+	TAN_RESULT_MESSAGE_TYPE,
+	type TanResultDetails,
+} from "./messages";
+import type { OutputMeta } from "../tools/output-meta-format";
+import { truncateMiddle } from "../tools/streaming-output";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -93,30 +100,114 @@ export function structuredStatusLabel(status: StructuredSubagentOutput["status"]
 	return status === "unavailable" ? "unavailable" : `schema ${status}`;
 }
 
+/**
+ * Which agent handles a result for task job `jobId` names. A task job's id can
+ * differ from its agent id (a messaged agent's next turn, vibe turns, workpool
+ * batches, /tan) while its output and transcript stay under the agent id.
+ * `agent://` answers for this job only when it completed without reporting that
+ * it wrote no output; otherwise only `history://` resolves to its turn.
+ * `undefined`: the job id already is the agent id, or this is not a task job.
+ */
+export function taskAgentHandles(
+	jobId: string,
+	job: Pick<AsyncJob, "type" | "status" | "agentOutputPublished"> | undefined,
+	agentUrlId: string | undefined,
+): "agent" | "history" | undefined {
+	if (job?.type !== "task" || !agentUrlId || agentUrlId === jobId) return undefined;
+	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
+}
+
+/** Longest command a completion header quotes before eliding its middle. */
+const COMMAND_IDENTITY_MAX_CHARS = 400;
+
+/**
+ * A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct.
+ * Names the job in the notices that report on it: its completion and its `notify` matches.
+ */
+export function commandIdentity(command: string): string {
+	const oneLine = command.trim().replace(/\r\n|\r|\n/g, "\\n");
+	if (oneLine.length <= COMMAND_IDENTITY_MAX_CHARS) return oneLine;
+	const keep = COMMAND_IDENTITY_MAX_CHARS / 2;
+	return `${oneLine.slice(0, keep)}…${oneLine.slice(-keep)}`;
+}
+
+/**
+ * The rows a finished `/tan` job (`request`: the user's work it ran) leaves in
+ * its owner's session, which never ran that work: a breadcrumb the user sees,
+ * kept out of the model's context, and a hidden record linking the clone's
+ * output. Neither asks the owner to act, and the record carries no report
+ * body, so the owner neither resumes the tangent nor follows its next steps.
+ */
+export function buildTanResultMessages(
+	jobId: string,
+	job: AsyncJob,
+	request: string,
+): {
+	breadcrumb: NormalizedCustomMessagePayload<TanResultDetails>;
+	record: NormalizedCustomMessagePayload<TanResultDetails>;
+} {
+	const agentId = job.agentId ?? jobId;
+	const failed = job.status === "failed";
+	const details: TanResultDetails = {
+		jobId,
+		agentId,
+		work: request,
+		failed,
+		durationMs: Math.max(0, (job.endTime ?? Date.now()) - job.startTime),
+	};
+	const record = prompt.render(tanResultTemplate, {
+		agentId,
+		request: escapeHarnessTags(request),
+		failed,
+		showAgentUrl: taskAgentHandles(jobId, job, agentId) !== "history",
+	});
+	return {
+		breadcrumb: {
+			customType: TAN_RESULT_MESSAGE_TYPE,
+			content: request,
+			display: true,
+			excludeFromContext: true,
+			attribution: "agent",
+			details,
+		},
+		record: { customType: TAN_RESULT_MESSAGE_TYPE, content: record, display: false, attribution: "agent", details },
+	};
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
 		const structured = entry.job?.structured;
 		const hasStructuredData = structured ? Object.hasOwn(structured, "data") : false;
 		const structuredJson = structured && structured.status !== "valid" ? renderStructuredJson(structured) : undefined;
+		// The job manager disambiguates a requested job id when it collides
+		// with another live job (e.g. a task job reusing a vibe turn's job
+		// id), suffixing `jobId` — but the task's artifacts are still
+		// written under its own agent id (`AsyncJob.agentId`). Build the
+		// advertised `agent://` URL from that, or the delivery would point
+		// at an id with no backing `<id>.md`/`.json` on disk.
+		const agentUrlId = entry.job?.agentId ?? entry.jobId;
+		const handles = taskAgentHandles(entry.jobId, entry.job, agentUrlId);
 		// Job output (a command's output, or a task's `<task-result>` around a
 		// subagent's output), a subagent's payload and its validation error are
 		// text the job controls: it must not close the `<system-notice>` it renders
-		// into or open a forged harness block.
+		// into or open a forged harness block. Neither may the label naming it.
+		// A bash job is named by its whole command: its label truncates the tail, so parallel jobs
+		// that share a prefix would otherwise read the same in the notice that delivers them.
+		const command = entry.job?.type === "bash" ? entry.job.process?.command : undefined;
+		const headerLabel = command === undefined ? entry.job?.label : commandIdentity(command);
 		return {
 			jobId: entry.jobId,
-			// The job manager disambiguates a requested job id when it collides
-			// with another live job (e.g. a task job reusing a vibe turn's job
-			// id), suffixing `jobId` — but the task's artifacts are still
-			// written under its own agent id (`AsyncJob.agentId`). Build the
-			// advertised `agent://` URL from that, or the delivery would point
-			// at an id with no backing `<id>.md`/`.json` on disk.
-			agentUrlId: entry.job?.agentId ?? entry.jobId,
+			agentUrlId,
+			showAgentUrl: handles === "agent",
+			showHistoryUrl: handles === "history",
 			result: escapeHarnessTags(entry.result),
 			type: entry.job?.type,
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
 			label: entry.job?.label,
+			headerLabel: headerLabel ? escapeHarnessTags(headerLabel) : undefined,
+			namedByCommand: command !== undefined,
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,

@@ -24,7 +24,7 @@ import type {
 } from "./types";
 
 import { cfgDisabledExtensions } from "../extensibility/settings";
-import { cfgDisabledProviders, cfgEnabledProviders } from "../config/model-settings";
+import { cfgDisabledProviders } from "../config/model-settings";
 
 // =============================================================================
 // Registry State
@@ -41,26 +41,61 @@ const providerMeta = new Map<string, { displayName: string; description: string 
 
 /** Provider switches in effect while no settings instance is bound ({@link initializeWithSettings}). */
 let unboundDisabledProviders = new Set<string>();
-let unboundEnabledProviders = new Set<string>();
 
-/** `disabledProviders` / `enabledProviders` as sets, memoized per settings instance. */
+/** `disabledProviders` as a set, memoized per settings instance. */
 const cfgDisabledProviderSet = cfgDisabledProviders.map(ids => new Set(ids));
-const cfgEnabledProviderSet = cfgEnabledProviders.map(ids => new Set(ids));
-
-/** Foreign tools whose user-level (~/...) configs are opt-in */
-const FOREIGN_USER_PROVIDERS: Record<string, true> = {
-	cursor: true,
-	codex: true,
-	claude: true,
-	"claude-plugins": true,
-	gemini: true,
-	opencode: true,
-	windsurf: true,
-	github: true,
-};
 
 /** Outstanding {@link initializeWithSettings} holds, oldest first; the newest one is bound. */
 const settingsHolds: { settings: Settings }[] = [];
+
+/** Worker thread: the main thread's bound settings (mirrored), in effect below this thread's own holds. */
+let inheritedBoundSettings: Settings | undefined;
+
+/** Observers of binding and unbound-switch changes ({@link onProviderSwitchesChange}). */
+const switchListeners = new Set<() => void>();
+
+/** Provider switches a worker thread inherits from the main thread ({@link providerSwitches}). */
+export interface ProviderSwitches {
+	/** Settings the newest hold bound; the live switches come from its `disabledProviders`. */
+	readonly bound: Settings | null;
+	/** Switches in effect while nothing is bound. */
+	readonly unboundDisabled: readonly string[];
+}
+
+/** Current binding and unbound switches, for handing to a worker thread. */
+export function providerSwitches(): ProviderSwitches {
+	return {
+		bound: boundSettings() ?? null,
+		unboundDisabled: [...unboundDisabledProviders],
+	};
+}
+
+/** Calls `listener` after the binding or the unbound switches change; returns the unsubscribe. */
+export function onProviderSwitchesChange(listener: () => void): () => void {
+	switchListeners.add(listener);
+	return () => {
+		switchListeners.delete(listener);
+	};
+}
+
+/**
+ * Worker bootstrap only: adopt the main thread's switches. `bound` (a settings mirror) applies
+ * whenever this thread holds no binding of its own; the unbound switches replace this thread's.
+ */
+export function installProviderSwitches(switches: ProviderSwitches): void {
+	inheritedBoundSettings = switches.bound ?? undefined;
+	unboundDisabledProviders = new Set(switches.unboundDisabled);
+}
+
+function notifySwitchListeners(): void {
+	for (const listener of Array.from(switchListeners)) {
+		try {
+			listener();
+		} catch (error) {
+			logger.warn("Capability: provider-switch listener failed", { error: String(error) });
+		}
+	}
+}
 
 /**
  * Settings instance the newest {@link initializeWithSettings} hold bound.
@@ -68,19 +103,13 @@ const settingsHolds: { settings: Settings }[] = [];
  * singleton or tests pick up the developer's config.
  */
 export function boundSettings(): Settings | undefined {
-	return settingsHolds.at(-1)?.settings;
+	return settingsHolds.at(-1)?.settings ?? inheritedBoundSettings;
 }
 
 /** Disabled provider IDs in effect: the bound settings' live value, else the unbound set. */
 function disabledProviders(): ReadonlySet<string> {
 	const settings = boundSettings();
 	return settings ? cfgDisabledProviderSet.get(settings) : unboundDisabledProviders;
-}
-
-/** Explicitly enabled provider IDs in effect: the bound settings' live value, else the unbound set. */
-function enabledProviders(): ReadonlySet<string> {
-	const settings = boundSettings();
-	return settings ? cfgEnabledProviderSet.get(settings) : unboundEnabledProviders;
 }
 
 // =============================================================================
@@ -194,7 +223,9 @@ async function loadImpl<T>(
 			}
 
 			const extensionId = capability.toExtensionId?.(itemWithSource);
-			const isDisabled = extensionId !== undefined && disabledExtensionIds.has(extensionId);
+			const isDisabled =
+				(extensionId !== undefined && disabledExtensionIds.has(extensionId)) ||
+				(options.includeDisabled === true && options.isSourceDisabled?.(itemWithSource._source) === true);
 			if (isDisabled && !options.includeDisabled) {
 				continue;
 			}
@@ -304,8 +335,10 @@ async function loadImpl<T>(
  * Filter providers based on options and disabled state.
  */
 function filterProviders<T>(capability: Capability<T>, options: LoadOptions<T>): Provider<T>[] {
-	const disabled = disabledProviders();
-	let providers = (capability.providers as Provider<T>[]).filter(p => !disabled.has(p.id));
+	const disabled = options.includeDisabledProviders ? null : disabledProviders();
+	let providers = disabled
+		? (capability.providers as Provider<T>[]).filter(p => !disabled.has(p.id))
+		: (capability.providers as Provider<T>[]);
 
 	if (options.providers) {
 		const allowed = new Set(options.providers);
@@ -336,8 +369,6 @@ export async function loadCapability<T>(
 	const repoRoot = await findRepoRoot(cwd);
 	const ctx: LoadContext = { cwd, home, repoRoot };
 	if (options.agentDir !== undefined) ctx.agentDir = options.agentDir;
-	if (options.providers) ctx.explicitProviders = new Set(options.providers);
-	if (options.includeDisabled) ctx.includeOptOutUserSources = true;
 	if (options.extensionRoots !== undefined) ctx.extensionRoots = options.extensionRoots;
 	const providers = filterProviders(capability, options);
 
@@ -348,43 +379,9 @@ export async function loadCapability<T>(
 // Provider Enable/Disable API
 // =============================================================================
 
-/** Whether `providerId` is a foreign tool whose `~/` config is opt-in. */
-export function isForeignUserProvider(providerId: string): boolean {
-	return FOREIGN_USER_PROVIDERS[providerId] === true;
-}
-
-/**
- * Check whether a user-level (~/...) config source is enabled.
- * Native (.omp) and .agents directories are enabled by default.
- * Foreign tool directories (~/.cursor, ~/.codex, ~/.claude, etc.) are opt-in
- * via `enabledProviders`. Project-level (cwd) config is unaffected; see
- * {@link isProviderEnabled} for the whole-provider switch.
- */
-export function isUserSourceEnabled(source: string, ctx?: LoadContext): boolean {
-	const id = source.replace(/^\./, "");
-	if (disabledProviders().has(id)) return false;
-	if (FOREIGN_USER_PROVIDERS[id] !== true) return true;
-	if (ctx?.explicitProviders?.has(id) || ctx?.includeOptOutUserSources) return true;
-	const enabled = enabledProviders();
-	if (enabled.has(id) || enabled.has("*") || enabled.has("all")) return true;
-	if (id === "claude-plugins" && enabled.has("claude")) return true;
-	if (id === "claude" && process.env.CLAUDE_CONFIG_DIR?.trim()) return true;
-	return false;
-}
-
-/** Opt a foreign provider's `~/` config in. */
-export function enableUserSource(providerId: string): void {
-	setEnabledProviders([...enabledProviders(), providerId]);
-}
-
-/** Opt a foreign provider's `~/` config out (project config keeps loading). */
-export function disableUserSource(providerId: string): void {
-	setEnabledProviders([...enabledProviders()].filter(id => id !== providerId));
-}
-
 /**
  * Bind the capability system to `activeSettings`: provider switches are read live
- * from its `enabledProviders`/`disabledProviders` (settings UI, `set()` from any
+ * from its `disabledProviders` (settings UI, `set()` from any
  * caller, on-disk reloads — the next discovery pass sees them) and persisted to it.
  * Holds stack: the newest outstanding hold is bound, and releasing it (the returned
  * function) hands the binding back to the previous hold. The release is idempotent
@@ -393,9 +390,12 @@ export function disableUserSource(providerId: string): void {
 export function initializeWithSettings(activeSettings: Settings): () => void {
 	const hold = { settings: activeSettings };
 	settingsHolds.push(hold);
+	notifySwitchListeners();
 	return () => {
 		const index = settingsHolds.indexOf(hold);
-		if (index !== -1) settingsHolds.splice(index, 1);
+		if (index === -1) return;
+		settingsHolds.splice(index, 1);
+		notifySwitchListeners();
 	};
 }
 
@@ -415,8 +415,7 @@ export function enableProvider(providerId: string): void {
 
 /**
  * Check if a provider is enabled (the whole-provider switch backed by
- * `disabledProviders`). Foreign `~/` config additionally needs
- * {@link isUserSourceEnabled}.
+ * `disabledProviders`).
  */
 export function isProviderEnabled(providerId: string): boolean {
 	return !disabledProviders().has(providerId);
@@ -434,24 +433,12 @@ export function getDisabledProviders(): string[] {
  */
 export function setDisabledProviders(providerIds: string[]): void {
 	const settings = boundSettings();
-	if (settings) cfgDisabledProviders.set(settings, [...new Set(providerIds)]);
-	else unboundDisabledProviders = new Set(providerIds);
-}
-
-/**
- * Get list of all explicitly enabled provider IDs.
- */
-export function getEnabledProviders(): string[] {
-	return Array.from(enabledProviders());
-}
-
-/**
- * Set enabled providers from a list (replaces current set), persisting to the bound settings.
- */
-export function setEnabledProviders(providerIds: string[]): void {
-	const settings = boundSettings();
-	if (settings) cfgEnabledProviders.set(settings, [...new Set(providerIds)]);
-	else unboundEnabledProviders = new Set(providerIds);
+	if (settings) {
+		cfgDisabledProviders.set(settings, [...new Set(providerIds)]);
+		return;
+	}
+	unboundDisabledProviders = new Set(providerIds);
+	notifySwitchListeners();
 }
 
 // =============================================================================
@@ -565,8 +552,9 @@ export function reset(): void {
  */
 export function resetCapabilityForTests(): void {
 	settingsHolds.length = 0;
+	inheritedBoundSettings = undefined;
 	unboundDisabledProviders = new Set();
-	unboundEnabledProviders = new Set();
+	notifySwitchListeners();
 	clearFsCache();
 }
 

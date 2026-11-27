@@ -6,7 +6,6 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleModelManagerOptions,
 	googleVertexModelManagerOptions,
@@ -45,6 +44,14 @@ const googleVertexModelsDevPayload = {
 				limit: { context: 200_000, output: 64_000 },
 				provider: { npm: "@ai-sdk/google-vertex/anthropic" },
 			},
+			"mistral-small-2503": {
+				name: "Mistral Small 2503",
+				tool_call: true,
+				reasoning: false,
+				modalities: { input: ["text"] },
+				limit: { context: 131_072, output: 8_192 },
+				provider: { npm: "@ai-sdk/mistral" },
+			},
 			"gemini-embedding-001": {
 				name: "Gemini Embedding 001",
 				tool_call: false,
@@ -82,6 +89,7 @@ describe("google-vertex model catalog", () => {
 			"gemini-3.5-flash",
 			"deepseek-ai/deepseek-v3.2-maas",
 			"claude-sonnet-4@20250514",
+			"mistral-small-2503",
 		]);
 
 		const gemini = models.find(model => model.id === "gemini-3.5-flash");
@@ -102,6 +110,14 @@ describe("google-vertex model catalog", () => {
 			"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
 		);
 		expect(claude?.reasoning).toBe(true);
+
+		// Partner Mistral models ride the mistralai publisher raw-predict
+		// endpoint with the OpenAI wire shape, not publishers/google (#19010).
+		const mistral = models.find(model => model.id === "mistral-small-2503");
+		expect(mistral?.api).toBe("openai-completions");
+		expect(mistral?.baseUrl).toBe(
+			"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
+		);
 	});
 
 	it("uses the bundled Vertex catalog without ADC project discovery", async () => {
@@ -124,15 +140,14 @@ describe("google-vertex model catalog", () => {
 	it("invalidates cached Gemini 3.7/3.8 Flash effort metadata on upgrade (#10543)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-google-flash37-cache-"));
 		try {
-			for (const [providerId, options] of [
-				["google", googleModelManagerOptions()],
-				["google-vertex", googleVertexModelManagerOptions()],
+			for (const [providerId, api, options] of [
+				["google", "google-generative-ai", googleModelManagerOptions()],
+				["google-vertex", "google-vertex", googleVertexModelManagerOptions()],
 			] as const) {
-				const bundledModels = getBundledModels(providerId);
 				const currentIds = ["gemini-3.7-flash", "gemini-3.8-flash"];
-				const stale = currentIds.map(id => {
-					const current = bundledModels.find(model => model.id === id);
-					if (!current?.thinking) throw new Error(`${providerId} ${id} is missing thinking metadata`);
+				const currentModels = currentIds.map(id => buildModel(geminiSpec(providerId, api, id)));
+				const stale = currentModels.map(current => {
+					if (!current.thinking) throw new Error(`${providerId} ${current.id} is missing thinking metadata`);
 					return {
 						...current,
 						thinking: {
@@ -145,7 +160,7 @@ describe("google-vertex model catalog", () => {
 				writeModelCache(providerId, Date.now(), stale, true, "merge-v3:pre-10543", cacheDbPath);
 
 				const result = await resolveProviderModels(
-					{ ...options, staticModels: bundledModels, cacheDbPath },
+					{ ...options, staticModels: currentModels, cacheDbPath },
 					"offline",
 				);
 				for (const id of currentIds) {

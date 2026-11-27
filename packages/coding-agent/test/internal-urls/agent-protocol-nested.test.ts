@@ -23,8 +23,8 @@ it("agent:// resolves a depth-2 subagent's .md output while its session is live 
 	const rootSessionFile = path.join(root, "session.jsonl");
 	const rootArtifactsDir = rootSessionFile.slice(0, -6);
 	await fs.mkdir(rootArtifactsDir, { recursive: true });
-	// Every subagent adopts the root ArtifactManager and reports its dir.
-	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	// Every subagent adopts the root ArtifactManager and reports its session dir.
+	const sharedArtifactManager = new ArtifactManager(path.join(rootArtifactsDir, "local"), rootArtifactsDir);
 
 	// A depth-1 subagent's OWN children are written under its own
 	// sessionFile.slice(0, -6) (task/index.ts), i.e. one level deeper.
@@ -37,7 +37,7 @@ it("agent:// resolves a depth-2 subagent's .md output while its session is live 
 	await fs.writeFile(path.join(midOwnArtifactsDir, `${grandchildId}.md`), "full report content");
 
 	const fakeSession = {
-		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.sessionDir },
 	} as unknown as AgentSession;
 	const registry = AgentRegistry.global();
 	registry.register({
@@ -73,7 +73,7 @@ it("agent:// nested child is the dotted host; a slash on the parent is a JSON pa
 	const rootSessionFile = path.join(root, "slash-session.jsonl");
 	const rootArtifactsDir = rootSessionFile.slice(0, -6);
 	await fs.mkdir(rootArtifactsDir, { recursive: true });
-	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	const sharedArtifactManager = new ArtifactManager(path.join(rootArtifactsDir, "local"), rootArtifactsDir);
 
 	// Parent subagent adopts the root ArtifactManager; its own children are
 	// written one level deeper under its sessionFile-derived dir, dot-qualified.
@@ -85,7 +85,7 @@ it("agent:// nested child is the dotted host; a slash on the parent is a JSON pa
 	await fs.writeFile(path.join(rootArtifactsDir, "Parent.md"), JSON.stringify({ Child: "parent json field" }));
 
 	const fakeSession = {
-		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.sessionDir },
 	} as unknown as AgentSession;
 	const registry = AgentRegistry.global();
 	registry.register({
@@ -118,14 +118,14 @@ it("agent:// path form extracts JSON by key and array index", async () => {
 	const rootSessionFile = path.join(root, "json-session.jsonl");
 	const rootArtifactsDir = rootSessionFile.slice(0, -6);
 	await fs.mkdir(rootArtifactsDir, { recursive: true });
-	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	const sharedArtifactManager = new ArtifactManager(path.join(rootArtifactsDir, "local"), rootArtifactsDir);
 	await fs.writeFile(
 		path.join(rootArtifactsDir, "Worker.md"),
 		JSON.stringify({ result: { ok: true }, reports: [{ data: "first report" }] }),
 	);
 
 	const fakeSession = {
-		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.sessionDir },
 	} as unknown as AgentSession;
 	const registry = AgentRegistry.global();
 	registry.register({
@@ -154,13 +154,13 @@ it("agent:// path extraction prefers the <id>.json sidecar over the markdown bod
 	const rootSessionFile = path.join(root, "sidecar-session.jsonl");
 	const rootArtifactsDir = rootSessionFile.slice(0, -6);
 	await fs.mkdir(rootArtifactsDir, { recursive: true });
-	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	const sharedArtifactManager = new ArtifactManager(path.join(rootArtifactsDir, "local"), rootArtifactsDir);
 	// Non-JSON body proves the fallback path could not have produced the answer.
 	await fs.writeFile(path.join(rootArtifactsDir, "Worker.md"), "schema_violation summary text");
 	await fs.writeFile(path.join(rootArtifactsDir, "Worker.json"), JSON.stringify({ summary: "ok", count: 7 }));
 
 	const fakeSession = {
-		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.sessionDir },
 	} as unknown as AgentSession;
 	const registry = AgentRegistry.global();
 	registry.register({
@@ -192,16 +192,17 @@ it("agent:// marks a published output as the previous run while the agent stream
 	const rootSessionFile = path.join(root, "superseded-session.jsonl");
 	const rootArtifactsDir = rootSessionFile.slice(0, -6);
 	await fs.mkdir(rootArtifactsDir, { recursive: true });
-	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	const sharedArtifactManager = new ArtifactManager(path.join(rootArtifactsDir, "local"), rootArtifactsDir);
 	const published = JSON.stringify({ status: "partial", summary: "run budget ran out" });
 	await fs.writeFile(path.join(rootArtifactsDir, "Visuals.md"), published);
 
 	const mainSession = {
-		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.sessionDir },
 	} as unknown as AgentSession;
 	const wokenSession = {
-		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.sessionDir },
 		isStreaming: true,
+		runStartedAt: Date.now(),
 	} as unknown as AgentSession;
 	const registry = AgentRegistry.global();
 	registry.register({

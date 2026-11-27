@@ -2,19 +2,42 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	type BuiltinSlashCommandRuntime,
 	executeBuiltinSlashCommand,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { CollabQrCodeComponent } from "@oh-my-pi/pi-tui/chrome/collab-qrcode";
-import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import type { JSXNode } from "@oh-my-pi/pi-tui";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import "../../src/ui/styles/figures";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
+
+/** QR modules: black on white. */
+const QR_MODULES = /\x1b\[47m/;
+
+/** The terminal rows (with escapes) of the block `/collab` presented, at `columns`. */
+function presentedRows(present: ReturnType<typeof vi.fn>, columns: number): string[] {
+	const factory = present.mock.calls[0]?.[0] as (() => JSXNode) | undefined;
+	if (!factory) throw new Error("/collab presented nothing");
+	const term = createTestTerminal(() => ({ main: factory() }), {
+		columns,
+		rows: 80,
+		capabilities: { hyperlinks: true },
+	});
+	try {
+		return [...term.rows()];
+	} finally {
+		term.dispose();
+	}
+}
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme(false);
 });
 
 afterEach(() => {
@@ -46,15 +69,14 @@ async function createRuntimeHarness(options?: { collabHost?: NonNullable<Interac
 	const showError = vi.fn();
 	const present = vi.fn();
 	const ctx = {
-		editor: { setText },
+		composer: { setText },
 		showStatus,
 		showError,
 		present,
 		settings: Settings.isolated({ "collab.relayUrl": "wss://relay.example.com" }),
 		session: { registerSessionChangeCallback: () => () => {} },
-		sessionManager: { getSessionId: () => "sess-qrcode" },
+		sessionManager: { getSessionId: () => "sess-qrcode", onPersistenceNotice: () => () => {} },
 		statusLine: { setCollabStatus: () => {}, invalidate: () => {} },
-		ui: { requestRender: () => {} },
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
 	// `/collab` starts rooms through the controller, which builds a real CollabHost.
@@ -107,11 +129,7 @@ describe("/collab slash command QR code rendering", () => {
 
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain("my.omp.sh/#started-full");
-		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
-
-		const component = presented[1] as CollabQrCodeComponent;
-
-		expect(component.render(120).join("\n")).toMatch(/\x1b\[(?:47|40)m/);
+		expect(presentedRows(harness.present, 120).join("\n")).toMatch(QR_MODULES);
 	});
 
 	it("starts hosting and prints a one-shot read-only QR", async () => {
@@ -125,10 +143,7 @@ describe("/collab slash command QR code rendering", () => {
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain("my.omp.sh/#started-view");
 		expect(statusText).not.toContain("my.omp.sh/#started-full");
-		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
-
-		const component = presented[1] as CollabQrCodeComponent;
-		const fallback = component.render(10).join("\n");
+		const fallback = presentedRows(harness.present, 10).join("\n");
 		expect(fallback).toContain("https://my.omp.sh/#started-view");
 		expect(fallback).not.toContain("https://my.omp.sh/#started-full");
 	});
@@ -141,10 +156,7 @@ describe("/collab slash command QR code rendering", () => {
 		expect(handled).toBe(true);
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain("my.omp.sh/#full-control");
-		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
-
-		const component = presented[1] as CollabQrCodeComponent;
-		expect(component.render(120).join("\n")).toMatch(/\x1b\[(?:47|40)m/);
+		expect(presentedRows(harness.present, 120).join("\n")).toMatch(QR_MODULES);
 	});
 
 	it("replaces a view-only room with a control room when /collab asks for control", async () => {
@@ -186,13 +198,11 @@ describe("/collab slash command QR code rendering", () => {
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain(webViewLink);
 		expect(statusText).not.toContain(webLink);
-		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
-
-		const component = presented[1] as CollabQrCodeComponent;
-
-		const clipped = component.render(10).join("\n");
-		expect(visibleWidth(clipped)).toBeLessThanOrEqual(10);
-		expect(clipped).toContain(webViewLink);
+		const clipped = presentedRows(harness.present, 10);
+		expect(clipped).toHaveLength(1);
+		expect(visibleWidth(clipped[0]!)).toBeLessThanOrEqual(10);
+		expect(clipped[0]).toContain(webViewLink);
+		expect(clipped[0]).not.toContain(webLink);
 	});
 
 	it("keeps the browser URL on the first status row so transcript clipping cannot hide it", async () => {
@@ -203,43 +213,6 @@ describe("/collab slash command QR code rendering", () => {
 
 		expect(handled).toBe(true);
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
-		const firstRow = new Text(statusText, 1, 0).render(80)[0] ?? "";
-
-		expect(firstRow).toContain(webLink);
-	});
-});
-
-describe("CollabQrCodeComponent transcript height clipping", () => {
-	it("renders the full half-block symbol when the viewport allocates enough rows", () => {
-		const component = new CollabQrCodeComponent("https://my.omp.sh/#clip-test");
-		const full = component.render(120);
-
-		expect(full.join("\n")).toMatch(/\x1b\[(?:47|40)m/);
-
-		component.setTranscriptAllocation(full.length);
-		expect(component.render(120)).toEqual(full);
-	});
-
-	it("does not render a quiet-zone white line when the transcript clips to one row", () => {
-		const component = new CollabQrCodeComponent("https://my.omp.sh/#clip-test");
-		const full = component.render(120);
-		const first = full[0] ?? "";
-		expect(first).toMatch(/\x1b\[(?:47|40)m/);
-
-		component.setTranscriptAllocation(1);
-		const clipped = component.render(120);
-		expect(clipped).toHaveLength(1);
-
-		expect(clipped[0]).toContain("my.omp.sh/#clip-test");
-
-		expect(clipped[0]).not.toMatch(/\x1b\[(?:47|40)m/);
-	});
-
-	it("keeps the browser URL as the emergency one-row transcript representation", () => {
-		const component = new CollabQrCodeComponent("https://my.omp.sh/#clip-test");
-		component.setTranscriptAllocation(1);
-		const row = component.renderTranscriptBlockEmergencyRow(10);
-		expect(visibleWidth(row)).toBeLessThanOrEqual(10);
-		expect(row).toContain("https://my.omp.sh/#clip-test");
+		expect(statusText.split("\n")[0]).toContain(webLink);
 	});
 });

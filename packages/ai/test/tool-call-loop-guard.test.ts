@@ -12,6 +12,30 @@ const zeroUsage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } satisfies AssistantMessage["usage"];
 
+function textTurn(
+	id: string,
+	name: string,
+	args: Record<string, unknown>,
+	text: string,
+): { message: AssistantMessage; toolResults: ToolResultMessage[] } {
+	return {
+		message: {
+			role: "assistant",
+			content: [
+				{ type: "text", text },
+				{ type: "toolCall", id, name, arguments: args },
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "test-model",
+			usage: zeroUsage,
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		} satisfies AssistantMessage,
+		toolResults: [],
+	};
+}
+
 describe("ToolCallLoopGuard", () => {
 	test("detects the fifth consecutive identical tool call", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: ["job", "irc"] });
@@ -51,6 +75,98 @@ describe("ToolCallLoopGuard", () => {
 			resultSummary: "1263 passed, 4 skipped",
 			argumentsSummary: '{"command":"pytest -q","timeout":120}',
 		});
+	});
+
+	test("detects incrementing echo suffixes when assistant text repeats", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		const text = "Merging the next live revision.";
+		for (let iteration = 1; iteration <= 152; iteration++) {
+			const detection = guard.recordTurn(
+				textTurn(`call-${iteration}`, "bash", { command: `echo merge-live-${iteration}` }, text),
+			);
+			if (iteration < 5) expect(detection).toBeNull();
+			if (iteration === 5) expect(detection).toMatchObject({ toolName: "bash", count: 5 });
+		}
+	});
+
+	test("does not flag reads of distinct file paths", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		for (let iteration = 1; iteration <= 152; iteration++) {
+			expect(
+				guard.recordTurn(
+					textTurn(
+						`call-${iteration}`,
+						"read",
+						{ path: `src/file-${iteration}.ts` },
+						"Reading the next source file.",
+					),
+				),
+			).toBeNull();
+		}
+	});
+
+	test("does not flag grep pagination through skip", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		const text = "Checking the next page of matches.";
+		for (let page = 0; page < 6; page++) {
+			expect(
+				guard.recordTurn(
+					textTurn(`call-${page}`, "grep", { pattern: "todo", path: "src", skip: page * 100 }, text),
+				),
+			).toBeNull();
+		}
+	});
+
+	test("does not flag a shell sweep over distinct test files", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		const text = "Testing the next file.";
+		for (let file = 1; file <= 6; file++) {
+			expect(
+				guard.recordTurn(textTurn(`call-${file}`, "bash", { command: `bun test test/case-${file}.test.ts` }, text)),
+			).toBeNull();
+		}
+	});
+
+	test("does not count normalized calls when assistant text changes", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		for (let iteration = 1; iteration <= 152; iteration++) {
+			expect(
+				guard.recordTurn(
+					textTurn(
+						`call-${iteration}`,
+						"bash",
+						{ command: `echo merge-live-${iteration}` },
+						`Running merge iteration ${iteration}.`,
+					),
+				),
+			).toBeNull();
+		}
+	});
+
+	test("resets value-drift counts after a turn without tool calls", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
+		const text = "Continue checking the merge status.";
+		const driftTurn = (iteration: number) =>
+			textTurn(`call-${iteration}`, "bash", { command: `echo merge-live-${iteration}` }, text);
+		expect(guard.recordTurn(driftTurn(1))).toBeNull();
+		expect(
+			guard.recordTurn({
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test-model",
+					usage: zeroUsage,
+					stopReason: "stop",
+					timestamp: Date.now(),
+				} satisfies AssistantMessage,
+				toolResults: [],
+			}),
+		).toBeNull();
+		expect(guard.recordTurn(driftTurn(2))).toBeNull();
+		expect(guard.recordTurn(driftTurn(3))).toBeNull();
+		expect(guard.recordTurn(driftTurn(4))).toMatchObject({ toolName: "bash", count: 3 });
 	});
 
 	test("canonicalizes argument key order and ignores harness intent fields", () => {
@@ -408,6 +524,53 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		});
 	});
 
+	test("reports the non-exempt call in a batch containing an exempt alias", () => {
+		const guard = new ToolCallLoopGuard({
+			threshold: 2,
+			exemptTools: ["poll"],
+			exemptionAlias: call => call.arguments.target as string,
+		});
+		const calls = [toolCall("dispatch", { target: "poll" }), toolCall("dispatch", { target: "edit" })];
+		expect(guard.recordTurn(turn(calls))).toBeNull();
+		expect(guard.recordTurn(turn(calls))).toMatchObject({
+			toolName: "dispatch",
+			count: 2,
+			argumentsSummary: '{"target":"edit"}',
+		});
+	});
+
+	test.each([true, false])("preserves idle-poll counting for an alias with useless=%s", useless => {
+		const guard = new ToolCallLoopGuard({
+			threshold: 2,
+			exemptTools: ["poll"],
+			exemptionAlias: call => (call.name === "dispatch" ? "poll" : undefined),
+		});
+		const repeated = turn([toolCall("bash", { command: "pytest" })]);
+		const poll = toolCall("dispatch", {});
+		expect(guard.recordTurn(repeated)).toBeNull();
+		expect(
+			guard.recordTurn(
+				turn(
+					[poll],
+					[
+						{
+							role: "toolResult",
+							toolCallId: poll.id,
+							toolName: poll.name,
+							content: [{ type: "text", text: "Poll completed" }],
+							isError: false,
+							useless,
+							timestamp: Date.now(),
+						},
+					],
+				),
+			),
+		).toBeNull();
+		const detection = guard.recordTurn(repeated);
+		if (useless) expect(detection).toMatchObject({ toolName: "bash", count: 2 });
+		else expect(detection).toBeNull();
+	});
+
 	test("treats reordered parallel calls as the same batch", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
 		expect(
@@ -426,5 +589,96 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(turn(b()))).toBeNull();
 		expect(guard.recordTurn(turn(a()))).toBeNull();
 		expect(guard.recordTurn(turn(b()))).toBeNull();
+	});
+});
+
+describe("ToolCallLoopGuard unresolved tool calls (issue #10876)", () => {
+	let nextId = 0;
+
+	/** A turn of calls; `resolved: false` marks every call as naming no tool, answered `Tool <name> not found`. */
+	function turn(calls: Array<{ name: string; args: Record<string, unknown> }>, resolved: boolean) {
+		const toolCalls: ToolCall[] = calls.map(({ name, args }) => ({
+			type: "toolCall",
+			id: `tc_${nextId++}`,
+			name,
+			arguments: args,
+		}));
+		const message = {
+			role: "assistant",
+			content: toolCalls,
+			api: "openai-responses",
+			provider: "openai",
+			model: "test-model",
+			usage: zeroUsage,
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		} satisfies AssistantMessage;
+		const toolResults: ToolResultMessage[] = toolCalls.map(call => ({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: call.name,
+			content: [{ type: "text", text: resolved ? "ok" : `Tool ${call.name} not found` }],
+			isError: !resolved,
+			timestamp: Date.now(),
+		}));
+		return { message, toolResults, unresolvedToolCallIds: resolved ? [] : toolCalls.map(call => call.id) };
+	}
+
+	test("trips on a streak of unresolved calls that vary in name and arguments", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: { path: "a.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "wri", args: { path: "b.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "ed", args: { path: "c.txt" } }], false))).toEqual({
+			kind: "unresolved_tool_call",
+			toolName: "ed",
+			count: 3,
+			resultSummary: "Tool ed not found",
+			argumentsSummary: '{"path":"c.txt"}',
+		});
+		// Still stuck: keeps reporting past the threshold, like the identical-call bound.
+		expect(guard.recordTurn(turn([{ name: "ba", args: {} }], false))).toMatchObject({
+			kind: "unresolved_tool_call",
+			count: 4,
+		});
+	});
+
+	test("reports identical unresolved calls as unresolved, not as an argument repeat", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: {} }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "wri", args: {} }], false))).toMatchObject({
+			kind: "unresolved_tool_call",
+			toolName: "wri",
+			count: 2,
+		});
+	});
+
+	test("a resolved call breaks the streak, so a typo then a recovery never trips", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: { path: "a.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "write", args: { path: "a.txt" } }], true))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "ed", args: { path: "a.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "edit", args: { path: "a.txt" } }], true))).toBeNull();
+	});
+
+	test("a turn mixing an unresolved call with a resolved one breaks the streak", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: {} }], false))).toBeNull();
+		const mixed = turn([{ name: "read", args: { path: "a.ts" } }], true);
+		const miss = turn([{ name: "ed", args: {} }], false);
+		expect(
+			guard.recordTurn({
+				message: { ...mixed.message, content: [...mixed.message.content, ...miss.message.content] },
+				toolResults: [...mixed.toolResults, ...miss.toolResults],
+				unresolvedToolCallIds: miss.unresolvedToolCallIds,
+			}),
+		).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "ba", args: {} }], false))).toBeNull();
+	});
+
+	test("varied resolved calls never trip", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		for (let index = 0; index < 6; index++) {
+			expect(guard.recordTurn(turn([{ name: index % 2 ? "read" : "bash", args: { n: index } }], true))).toBeNull();
+		}
 	});
 });

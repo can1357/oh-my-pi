@@ -15,10 +15,12 @@ import {
 	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
 	ModelAssignmentSchema,
+	type ModelUsageStats,
+	ModelUsageStatsSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import type { DevinCompat } from "@oh-my-pi/pi-catalog/types";
+import type { DevinCompat, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const AUTH_PAYLOAD = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "user-jwt" }));
 
@@ -31,7 +33,11 @@ function frameConnectMessage(payload: Uint8Array): Uint8Array {
 	return out;
 }
 
-function devinModel(compat: DevinCompat, requestModelId = "adaptive"): Model<"devin-agent"> {
+function devinModel(
+	compat: DevinCompat,
+	requestModelId = "adaptive",
+	spec: Partial<ModelSpec<"devin-agent">> = {},
+): Model<"devin-agent"> {
 	return buildModel({
 		id: "devin-router-test",
 		name: "Devin Router Test",
@@ -45,11 +51,13 @@ function devinModel(compat: DevinCompat, requestModelId = "adaptive"): Model<"de
 		contextWindow: 200_000,
 		maxTokens: 64_000,
 		compat,
+		...spec,
 	});
 }
 
 interface ChatResponseFields {
 	actualModelUid?: string;
+	usage?: ModelUsageStats;
 	creditCost?: number;
 	committedCreditCost?: number;
 	committedAcuCost?: number;
@@ -70,7 +78,8 @@ function decodeAssignRequest(body: RequestInit["body"]): AssignModelRequest {
 function decodeChatRequest(body: RequestInit["body"]): GetChatMessageRequest {
 	const framed = new Uint8Array(body as ArrayBuffer);
 	const length = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(1, false);
-	return fromBinary(GetChatMessageRequestSchema, gunzipSync(framed.subarray(5, 5 + length)));
+	const message = framed.subarray(5, 5 + length);
+	return fromBinary(GetChatMessageRequestSchema, framed[0] & 0x01 ? gunzipSync(message) : message);
 }
 
 function decodeAuthRequest(body: RequestInit["body"]): GetUserJwtRequest {
@@ -165,7 +174,7 @@ describe("streamDevin router assignment", () => {
 			ideName: "devin-cli",
 			ideType: "chisel",
 			extensionName: "chisel",
-			extensionVersion: "3000.11.3",
+			extensionVersion: "3000.12.57",
 			apiKey: "devin-session-token$header.payload.signature",
 			userJwt: "",
 		});
@@ -237,6 +246,34 @@ describe("streamDevin router assignment", () => {
 		expect(recorded.chat?.modelAssignmentJwt).toBeUndefined();
 		expect(recorded.chat?.cascadeId).toBe("session-7");
 		expect(result.upstreamModel).toBeUndefined();
+	});
+
+	it("sends the fast-lane uid under /fast and bills the lane's card", async () => {
+		const model = devinModel({}, "claude-sonnet-4-5", {
+			cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
+			priorityLane: {
+				id: "devin-router-test-fast",
+				routes: { "claude-sonnet-4-5": "claude-sonnet-4-5-fast" },
+				cost: { input: 6, output: 30, cacheRead: 0, cacheWrite: 0 },
+			},
+		});
+		const usage = create(ModelUsageStatsSchema, { inputTokens: 1_000_000n });
+
+		const fast = fakeDevin({ chat: { usage } });
+		const fastResult = await streamDevin(model, context, {
+			apiKey: "token",
+			fetch: fast.fetch,
+			serviceTier: "priority",
+		}).result();
+		expect(fast.recorded.chat?.chatModelUid).toBe("claude-sonnet-4-5-fast");
+		expect(fastResult.serviceTier).toBe("priority");
+		expect(fastResult.usage.cost.input).toBe(6);
+
+		const standard = fakeDevin({ chat: { usage } });
+		const standardResult = await streamDevin(model, context, { apiKey: "token", fetch: standard.fetch }).result();
+		expect(standard.recorded.chat?.chatModelUid).toBe("claude-sonnet-4-5");
+		expect(standardResult.serviceTier).toBeUndefined();
+		expect(standardResult.usage.cost.input).toBe(3);
 	});
 
 	it("surfaces credit metering onto usage", async () => {
@@ -474,5 +511,20 @@ describe("streamDevin router assignment", () => {
 			topP: Math.fround(0.8),
 			stopPatterns: ["END"],
 		});
+	});
+
+	it("raises temperature 0 to the wire floor Cascade accepts", async () => {
+		const edge = fakeDevin({});
+
+		// Session titles and memory extraction pin 0 for deterministic decoding;
+		// Cascade answers 0 with an opaque `invalid_argument` (issue #18423), so
+		// the frame must carry the catalog floor instead of 0.
+		await streamDevin(devinModel({}, "gpt-5-6-sol-medium"), context, {
+			apiKey: "token",
+			fetch: edge.fetch,
+			temperature: 0,
+		}).result();
+
+		expect(edge.recorded.chat?.configuration?.temperature).toBe(0.0001);
 	});
 });

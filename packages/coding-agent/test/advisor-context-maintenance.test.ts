@@ -10,7 +10,7 @@ import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { estimateToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -91,7 +91,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -204,7 +203,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -437,7 +435,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -1027,7 +1024,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);

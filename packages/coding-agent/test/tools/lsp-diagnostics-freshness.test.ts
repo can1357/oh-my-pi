@@ -2,12 +2,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
-import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
-import { formatContent, INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
-import type { Diagnostic, LinterClient, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import {
+	formatContent,
+	getDiagnosticsForFile,
+	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+} from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
+import {
+	type Diagnostic,
+	FileChangeType,
+	type LinterClient,
+	type LspClient,
+	type ServerConfig,
+} from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -51,6 +61,8 @@ function createClient(cwd: string, config: ServerConfig): LspClient {
 		proc: {} as ptree.ChildProcess<"pipe">,
 		requestId: 0,
 		diagnostics: new EquivalentUriMap(),
+		publishedDiagnostics: new Map(),
+		pulledDiagnostics: new Map(),
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
 		pendingRequests: new Map(),
@@ -145,11 +157,7 @@ describe("LSP diagnostics freshness", () => {
 
 		expect(result.finalContent).toBe(".section {}\n");
 		expect(await Bun.file(filePath).text()).toBe(".section {}\n");
-		expect(notify).toHaveBeenCalledWith(
-			tempDir.path(),
-			[{ filePath, type: lspClient.FileChangeType.Created }],
-			undefined,
-		);
+		expect(notify).toHaveBeenCalledWith(tempDir.path(), [{ filePath, type: FileChangeType.Created }], undefined);
 	});
 
 	it("does not start an LSP server just to notify existing clients when write-time features are disabled", async () => {
@@ -169,11 +177,7 @@ describe("LSP diagnostics freshness", () => {
 
 		expect(result.finalContent).toBe("export const value = 1;\n");
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
-		expect(notify).toHaveBeenCalledWith(
-			tempDir.path(),
-			[{ filePath, type: lspClient.FileChangeType.Created }],
-			undefined,
-		);
+		expect(notify).toHaveBeenCalledWith(tempDir.path(), [{ filePath, type: FileChangeType.Created }], undefined);
 		expect(loadConfig).not.toHaveBeenCalled();
 		expect(getServers).not.toHaveBeenCalled();
 		expect(getOrCreate).not.toHaveBeenCalled();
@@ -375,7 +379,7 @@ describe("LSP diagnostics freshness", () => {
 			return init.promise;
 		});
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
-			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			publishDiagnostics(mockClient, uri, [], 1);
@@ -391,6 +395,38 @@ describe("LSP diagnostics freshness", () => {
 		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
 		expect(result?.diagnostics?.messages).toEqual([]);
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
+	});
+
+	it("does not report a formatted write as clean when its diagnostics server never answered", async () => {
+		const filePath = path.join(tempDir.path(), "formatted.ts");
+		const uri = fileToUri(filePath);
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		client.serverCapabilities = { documentFormattingProvider: true };
+		installVirtualTime(new VirtualClock(Date.now()));
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "sendRequest").mockResolvedValue([
+			{
+				range: { start: { line: 0, character: 0 }, end: { line: 1, character: 0 } },
+				newText: "export const value = 1;\n",
+			},
+		]);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
+		});
+		// The server formats the file but never publishes diagnostics for it.
+		vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: true,
+		});
+		const result = await writethrough(filePath, "export const value=1\n");
+
+		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
+		expect(result?.diagnostics?.summary).not.toBe("OK");
 	});
 
 	it("announces batched sibling writes before syncing the diagnostic target", async () => {
@@ -415,7 +451,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 			events.push(`sync:${path.basename(syncedFilePath)}`);
 			const syncedUri = fileToUri(syncedFilePath);
-			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			publishDiagnostics(mockClient, tsUri, [], mockClient.openFiles.get(tsUri)?.version ?? null);
@@ -432,7 +468,7 @@ describe("LSP diagnostics freshness", () => {
 		});
 
 		expect(result.diagnostics?.summary).toBe("no issues");
-		expect(events[0]).toBe(`watched:probe.module.scss:${lspClient.FileChangeType.Created}`);
+		expect(events[0]).toBe(`watched:probe.module.scss:${FileChangeType.Created}`);
 		expect(notifySignals.some(signal => signal instanceof AbortSignal)).toBe(true);
 		expect(events).toContain("sync:probe.tsx");
 	});
@@ -441,7 +477,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "example.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		const clock = new VirtualClock(Date.now());
 		installVirtualTime(clock);
 
@@ -455,7 +491,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async (mockClient, savedFilePath) => {
@@ -485,7 +521,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "example.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		const clock = new VirtualClock(Date.now());
 		installVirtualTime(clock);
 
@@ -499,7 +535,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async (mockClient, savedFilePath) => {
@@ -546,7 +582,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
-			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(10, () => {
@@ -592,7 +628,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 			const syncedUri = fileToUri(syncedFilePath);
-			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(10, () => {
@@ -628,7 +664,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "pull-only.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		client.serverCapabilities = { diagnosticProvider: true };
 
 		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
@@ -641,7 +677,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
@@ -677,7 +713,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "example.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		const clock = new VirtualClock(Date.now());
 		installVirtualTime(clock);
 
@@ -691,7 +727,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		// Publish far past the 500ms inline budget (INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS)
@@ -744,7 +780,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 			const syncedUri = fileToUri(syncedFilePath);
-			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(2000, () => {
@@ -799,7 +835,11 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
-			mockClient.openFiles.set(fileToUri(syncedFilePath), { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(fileToUri(syncedFilePath), {
+				version: 1,
+				languageId: "typescript",
+				lastUsedAt: Date.now(),
+			});
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(2000, () => {
@@ -854,7 +894,7 @@ describe("LSP diagnostics freshness", () => {
 			const filePath = path.join(orphanDir.path(), "scratch.ts");
 			const uri = fileToUri(filePath);
 			const client = createClient(tempDir.path(), server);
-			client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+			client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
 				servers: { "typescript-language-server": server },
@@ -864,7 +904,7 @@ describe("LSP diagnostics freshness", () => {
 			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 			vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 				const syncedUri = fileToUri(syncedFilePath);
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			});
 			vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 				const moduleDiagnostic = createDiagnostic(
@@ -896,5 +936,95 @@ describe("LSP diagnostics freshness", () => {
 		} finally {
 			orphanDir.removeSync();
 		}
+	});
+});
+
+/**
+ * The batched writethrough flush reaches `getDiagnosticsForFile` on its blocking branch with a
+ * user-abort-only signal, and the edit tool runs `exclusive`, so one wedged server would queue every
+ * later edit behind it. Each server's whole pipeline therefore runs under a wall-clock budget
+ * (`pipelineBudgetMs`, defaulting to the diagnostics wait budget plus
+ * `DIAGNOSTICS_PIPELINE_GRACE_MS`); an overrunning server is rejected and skipped by the
+ * `Promise.allSettled` collection. These cases use the custom-linter branch (no real LSP process)
+ * with the budget shrunk so the bound is observable in milliseconds.
+ */
+describe("diagnostics pipeline wall-clock budget", () => {
+	const FILE = "/tmp/omp-lsp-pipeline-budget/target.py";
+	const CWD = "/tmp/omp-lsp-pipeline-budget";
+
+	it("a linter that never settles cannot hang getDiagnosticsForFile", async () => {
+		const client: LinterClient = {
+			format: async (_filePath, content) => content,
+			lint: () => Promise.withResolvers<Diagnostic[]>().promise,
+		};
+		const config: ServerConfig = {
+			command: "hung-linter",
+			fileTypes: [".py"],
+			rootMarkers: [],
+			createClient: () => client,
+		};
+		const started = Date.now();
+		// Unique server name: getLinterClient caches by `serverName:cwd`.
+		const result = await getDiagnosticsForFile(FILE, CWD, [["hung-linter", config]], { pipelineBudgetMs: 50 });
+		const elapsed = Date.now() - started;
+
+		// The hung server is skipped, so no server produced results.
+		expect(result).toBeUndefined();
+		// Bounded promptly by the budget, not by any multi-second default.
+		// Generous ceiling to stay robust on slow CI machines.
+		expect(elapsed).toBeLessThan(5_000);
+	});
+
+	it("passes the pipeline deadline to cancellable linter work", async () => {
+		let aborted = false;
+		const pending = Promise.withResolvers<Diagnostic[]>();
+		const client: LinterClient = {
+			format: async (_filePath, content) => content,
+			lint: (_filePath, signal) => {
+				signal?.addEventListener(
+					"abort",
+					() => {
+						aborted = true;
+						pending.reject(signal.reason);
+					},
+					{ once: true },
+				);
+				return pending.promise;
+			},
+		};
+		const config: ServerConfig = {
+			command: "cancellable-linter",
+			fileTypes: [".py"],
+			rootMarkers: [],
+			createClient: () => client,
+		};
+
+		const result = await getDiagnosticsForFile(FILE, CWD, [["cancellable-linter", config]], {
+			pipelineBudgetMs: 50,
+		});
+
+		expect(result).toBeUndefined();
+		expect(aborted).toBe(true);
+	});
+
+	it("a healthy linter still reports normally under the same budget", async () => {
+		const client: LinterClient = {
+			format: async (_filePath, content) => content,
+			lint: async () => [],
+		};
+		const config: ServerConfig = {
+			command: "healthy-linter",
+			fileTypes: [".py"],
+			rootMarkers: [],
+			createClient: () => client,
+		};
+		const result = await getDiagnosticsForFile(FILE, CWD, [["healthy-linter", config]], {
+			pipelineBudgetMs: 5_000,
+		});
+
+		expect(result).toBeDefined();
+		expect(result?.server).toBe("healthy-linter");
+		expect(result?.summary).toBe("OK");
+		expect(result?.errored).toBe(false);
 	});
 });

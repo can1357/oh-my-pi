@@ -11,14 +11,6 @@ function fixture(provider: GeneratedProvider, predicate?: (candidate: Model) => 
 	return found;
 }
 
-test("google-antigravity vetoes caller output caps while the gemini-cli lane preserves them", () => {
-	// Both providers ride the google-gemini-cli api; only the provider-scoped
-	// preserves-max-output-tokens rule may separate them.
-	expect(fixture("google-antigravity").api).toBe(fixture("google-gemini-cli").api);
-	expect(supportsOutputTokenLimit(fixture("google-antigravity"))).toBe(false);
-	expect(supportsOutputTokenLimit(fixture("google-gemini-cli"))).toBe(true);
-});
-
 test("transports that cannot encode output limits are omitted", () => {
 	expect(supportsOutputTokenLimit(fixture("openai-codex", m => m.api === "openai-codex-responses"))).toBe(false);
 	expect(supportsOutputTokenLimit(fixture("cursor", m => m.api === "cursor-agent"))).toBe(false);

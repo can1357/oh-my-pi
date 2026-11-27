@@ -1,7 +1,7 @@
 /**
  * Client-side {@link AuthCredentialStore} that mirrors a remote broker's
- * snapshot. Refresh tokens never leave the broker; mutating methods (`replace*`,
- * `upsert*`, `delete*ForProvider`) throw because login flows are server-side.
+ * snapshot. Refresh tokens never leave the broker; credential writes (`replace*`,
+ * `upsert*`, `delete*`) are forwarded to the broker, which owns persistence.
  *
  * Cache (`getCache`/`setCache`/`cleanExpiredCache`) is in-memory and ephemeral.
  * The bounded hot set preserves recently used session pins without keeping
@@ -26,7 +26,13 @@ import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
 import { raceSignal } from "../auth/abort";
-import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
+import {
+	type AuthBrokerClient,
+	AuthBrokerError,
+	AuthBrokerStreamUnsupportedError,
+	type FetchSnapshotResult,
+	isBrokerNoRouteBody,
+} from "./client";
 import { compareCredentialBlockSnapshots } from "./protocol";
 import type {
 	CredentialBlockSnapshot,
@@ -40,6 +46,21 @@ import type {
 // keys/values; an evicted session falls back to normal credential selection.
 const REMOTE_CACHE_MAX_ENTRIES = 4096;
 const REMOTE_CACHE_MAX_CHARACTERS = 4 * 1024 * 1024;
+
+/**
+ * A broker accepted a credential upload but serves none of the provider's rows
+ * back, as a broker whose version pauses the provider does: the login would be
+ * gone on the next snapshot. {@link HybridAuthCredentialStore} catches it and
+ * keeps the login in the local `agent.db` instead.
+ */
+export class AuthBrokerUnservedProviderError extends Error {
+	readonly provider: string;
+	constructor(provider: string) {
+		super(`The auth broker stored the ${provider} credential but does not serve it back`);
+		this.name = "AuthBrokerUnservedProviderError";
+		this.provider = provider;
+	}
+}
 
 /** Visibility rule for one provider's broker credentials. */
 export interface AuthBrokerProviderPool {
@@ -336,8 +357,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#activityWakeup: PromiseWithResolvers<void> | null = null;
 	#cache: Map<string, CacheEntry> = new Map();
 	#cacheCharacters = 0;
-	#usageCache?: UsageCacheEntry;
-	#usageInflight?: Promise<UsageReport[] | null>;
+	/** `undefined` is the aggregate scope; provider scopes never stand in for it. */
+	#usageCache = new Map<Provider | undefined, UsageCacheEntry>();
+	#usageInflight = new Map<Provider | undefined, Promise<UsageReport[] | null>>();
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	/** Exact deleted rows suppressed until their old deadline, including snapshots racing the DELETE acknowledgement. */
 	#deletedCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
@@ -503,6 +525,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async #runBackground(): Promise<void> {
 		let backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
+		// One long-poll before the next stream attempt; set when the stream
+		// path answers a 404 that is not the broker's own.
+		let pollBeforeStream = false;
 		while (!this.#closed && !this.#backgroundAbort.signal.aborted) {
 			if (this.#idleRemainingMs() <= 0) {
 				this.#activityWakeup ??= Promise.withResolvers<void>();
@@ -511,7 +536,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			}
 			const watchdog = this.#startIdleWatchdog();
 			try {
-				if (this.#streamSnapshots && !this.#streamingUnsupported) {
+				if (this.#streamSnapshots && !this.#streamingUnsupported && !pollBeforeStream) {
 					try {
 						await this.#consumeSnapshotStream(watchdog.signal);
 						backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
@@ -523,12 +548,23 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 							logger.debug("auth-broker snapshot stream unsupported; falling back to long-poll");
 							continue;
 						}
+						if (error instanceof AuthBrokerError && error.status === 404) {
+							// A proxy 404: transient while the broker restarts, or permanent
+							// when the proxy never routes the stream. Keep credentials
+							// syncing with a long-poll, then try the stream again.
+							pollBeforeStream = true;
+							logger.debug("auth-broker snapshot stream not routed; long-polling once", {
+								error: String(error),
+							});
+							continue;
+						}
 						logger.debug("auth-broker snapshot stream failed; backing off", { error: String(error) });
 						await this.#backoffWait(backoffMs);
 						backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, backoffMs * 2);
 					}
 					continue;
 				}
+				pollBeforeStream = false;
 				try {
 					const result = await this.#client.fetchSnapshot({
 						ifGenerationGt: this.#generation,
@@ -966,14 +1002,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * Upsert a single credential through the broker. The broker server is the
 	 * canonical writer — see `POST /v1/credential`. The redacted snapshot
 	 * entries returned by the server replace the provider's rows in our local
-	 * snapshot, and the global snapshot is then refreshed in the background so
-	 * any concurrent peer (refresh, generation bump) stays in sync.
+	 * snapshot, then {@link #confirmServed} re-reads the snapshot so a broker
+	 * that stores the row without serving it fails the login.
 	 */
 	async upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
 		this.#noteActivity();
 		const { entries } = await this.#client.uploadCredential(provider, credential);
 		this.#applyProviderEntries(provider, entries);
-		this.#maybeRefreshSnapshot("upload");
+		await this.#confirmServed(provider, entries);
 		return this.listAuthCredentials(provider);
 	}
 
@@ -998,11 +1034,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		// Snapshot reflects the disables before we add the new rows so a concurrent
 		// reader cannot momentarily see old + new together for the same provider.
 		this.#removeProviderEntries(provider);
+		let uploaded: AuthCredentialSnapshotEntry[] = [];
 		for (const credential of credentials) {
 			const { entries } = await this.#client.uploadCredential(provider, credential);
 			this.#applyProviderEntries(provider, entries);
+			uploaded = entries;
 		}
-		this.#maybeRefreshSnapshot("replace");
+		await this.#confirmServed(provider, uploaded);
 		return this.listAuthCredentials(provider);
 	}
 
@@ -1026,6 +1064,29 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 		this.#removeProviderEntries(provider);
 		this.#maybeRefreshSnapshot("delete");
+	}
+
+	/**
+	 * Adopt a fresh snapshot after an upload and throw when it serves none of
+	 * `uploaded`, the provider rows the broker just reported storing. A broker
+	 * whose version pauses `provider` accepts the write but never serves the row
+	 * ({@link AuthBrokerUnservedProviderError}). A failed fetch only logs: the
+	 * upload itself succeeded.
+	 */
+	async #confirmServed(provider: string, uploaded: readonly AuthCredentialSnapshotEntry[]): Promise<void> {
+		let result: FetchSnapshotResult;
+		try {
+			result = await this.#client.fetchSnapshot();
+		} catch (error) {
+			logger.debug("auth-broker snapshot refresh after upload failed", { provider, error: String(error) });
+			return;
+		}
+		if (result.status !== 200) return;
+		this.#applySnapshot(result.snapshot, result.generation);
+		if (uploaded.length === 0) return;
+		const served = new Set(result.snapshot.credentials.map(entry => entry.id));
+		if (uploaded.some(entry => served.has(entry.id))) return;
+		throw new AuthBrokerUnservedProviderError(provider);
 	}
 
 	#applyProviderEntries(provider: string, entries: AuthCredentialSnapshotEntry[]): void {
@@ -1283,7 +1344,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		// Snapshot/block updates invalidate quota evidence, not a failed broker
 		// connection's cooldown. Keep the flight too: its completion will queue
 		// one current-generation successor instead of overlapping broker calls.
-		if (this.#usageCache?.reports !== null) this.#usageCache = undefined;
+		for (const [provider, cached] of this.#usageCache) {
+			if (cached.reports !== null) this.#usageCache.delete(provider);
+		}
 		this.#usageCacheEpoch += 1;
 	}
 
@@ -1355,17 +1418,18 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
 	 * cooldowns keep separate clients from multiplying provider probes.
 	 */
-	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
+	async fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
 		if (!reports) return null;
-		return this.#filterUsageReports(this.#applyUsageOverlays(reports));
+		const visible = this.#filterUsageReports(this.#applyUsageOverlays(reports));
+		return provider === undefined ? visible : visible.filter(report => report.provider === provider);
 	}
 
 	/**
 	 * Per-credential usage hook consumed by `UsageService.report`. Pulls
-	 * the aggregate broker `/v1/usage` once and serves all callers from the
-	 * same response (coalesced + cached), then overlays any client-observed
+	 * provider-scoped broker `/v1/usage` once and serves that provider's callers
+	 * from the same response (coalesced + cached), then overlays any client-observed
 	 * header hints for the matching credential.
 	 *
 	 * The broker caches each credential independently; the short client TTL
@@ -1377,7 +1441,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		signal?: AbortSignal,
 	): Promise<UsageReport | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
 		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
 		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
 		const overlay = this.#getActiveUsageOverlay(provider, credential);
@@ -1489,41 +1553,58 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		else this.#brokerUsageAccountCounts.set(provider, count - 1);
 	}
 
-	#maxBrokerUsageAccounts(): number {
+	#maxBrokerUsageAccounts(provider?: Provider): number {
+		if (provider !== undefined) return this.#brokerUsageAccountCounts.get(provider) ?? 1;
 		let maximum = 1;
 		for (const count of this.#brokerUsageAccountCounts.values()) maximum = Math.max(maximum, count);
 		return maximum;
 	}
 
-	#loadUsageReports(): Promise<UsageReport[] | null> {
-		const cached = this.#usageCache;
-		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS) {
-			return Promise.resolve(cached.reports);
+	#loadUsageReports(provider?: Provider): Promise<UsageReport[] | null> {
+		// An existing aggregate result covers a provider lookup too. The reverse
+		// is not true: a partial cache must never hide other providers from /usage.
+		const now = Date.now();
+		let cached = this.#usageCache.get(provider);
+		if (cached && now - cached.fetchedAt >= USAGE_CACHE_TTL_MS) cached = undefined;
+		const aggregate = provider === undefined ? undefined : this.#usageCache.get(undefined);
+		// Prefer the newest successful coverage over a failed fetch in another scope.
+		if (
+			aggregate &&
+			now - aggregate.fetchedAt < USAGE_CACHE_TTL_MS &&
+			(!cached ||
+				(aggregate.reports !== null && (cached.reports === null || aggregate.fetchedAt >= cached.fetchedAt)))
+		) {
+			cached = aggregate;
 		}
-		if (this.#usageInflight) return this.#usageInflight;
+		if (cached) return Promise.resolve(cached.reports);
+		const existing = this.#usageInflight.get(provider) ?? this.#usageInflight.get(undefined);
+		if (existing) return existing;
 		const epoch = this.#usageCacheEpoch;
 		const inflight = this.#client
-			.fetchUsage({ maxAccountsPerProvider: this.#maxBrokerUsageAccounts() })
+			.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
 			.then(body => {
 				if (epoch !== this.#usageCacheEpoch) {
-					if (this.#usageInflight === inflight) this.#usageInflight = undefined;
-					return this.#loadUsageReports();
+					if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
+					return this.#loadUsageReports(provider);
 				}
-				this.#usageCache = { reports: body.reports, fetchedAt: Date.now() };
-				return body.reports;
+				// Older brokers ignore the query and still return an aggregate.
+				// Keep it scoped locally; a scoped response is never an aggregate cache.
+				const reports =
+					provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
+				this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
+				return reports;
 			})
 			.catch(error => {
 				logger.warn("auth-broker usage fetch failed", { error: String(error) });
-				// Documented 15s TTL fallback: cache the null so sequential callers
-				// don't re-hit the broker while it's still down. See
-				// docs/auth-broker-gateway.md § "Client-side single-flight".
-				this.#usageCache = { reports: null, fetchedAt: Date.now() };
+				// Documented 15s TTL fallback, isolated to the requested scope.
+				// Invalidation preserves this cooldown, as it does for aggregate polls.
+				this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
 				return null;
 			})
 			.finally(() => {
-				if (this.#usageInflight === inflight) this.#usageInflight = undefined;
+				if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
 			});
-		this.#usageInflight = inflight;
+		this.#usageInflight.set(provider, inflight);
 		return inflight;
 	}
 
@@ -1531,8 +1612,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * Fold locally observed request usage into the pending report and schedule
 	 * a flush. One `POST /v1/usage/observed` at most per flush interval, plus a
 	 * final one when the process exits; on failure the batch is retained and
-	 * retried with the next flush. A 404 (pre-endpoint broker) disables
-	 * reporting for the life of this store.
+	 * retried with the next flush. The broker's own 404 (pre-endpoint broker)
+	 * disables reporting for the life of this store.
 	 *
 	 * `client` overrides the reporting identity — the auth-gateway attributes
 	 * each request to the originating install/app instead of the gateway host.
@@ -1609,7 +1690,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				});
 			} catch (error) {
 				const status = error instanceof AuthBrokerError ? error.status : undefined;
-				if (status === 400 || status === 404 || status === 501) {
+				// Only the broker's own 404 means the endpoint is missing; a proxy
+				// 404 (no route yet while the broker restarts) retries next flush.
+				const missingEndpoint =
+					error instanceof AuthBrokerError && error.status === 404 && isBrokerNoRouteBody(error.body);
+				if (status === 400 || missingEndpoint || status === 501) {
 					// Broker predates the endpoint or its request schema (or the store
 					// can't persist) — stop trying for the life of this process.
 					this.#observedUsageUnsupported = true;

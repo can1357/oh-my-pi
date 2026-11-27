@@ -1,7 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
-import { getOAuthProvider } from "../registry/oauth";
+import { assertProviderEnabled, getOAuthProvider, loginRiskWarning } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import type { SessionAffinity } from "./affinity";
@@ -23,6 +23,8 @@ import type {
 	OAuthLoginController,
 	OAuthLoginIdentity,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	StoredOAuthRefreshOptions,
 	StoredOAuthRefreshResult,
 } from "./types";
@@ -78,6 +80,19 @@ export class OAuthAccounts implements OAuthApi {
 		if (!def?.login) {
 			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 		}
+		assertProviderEnabled(provider);
+		const warning = loginRiskWarning(provider);
+		if (warning !== undefined) {
+			// No answer but an explicit "yes" starts a login the provider's own terms put at risk.
+			const answer = await untilAborted(ctrl.signal, () =>
+				ctrl.onPrompt({
+					message: `⚠ ${def.name}: use at your own risk\n\n${warning}\n\nType "yes" to accept the risk and continue`,
+					placeholder: "yes",
+					riskAcknowledgement: true,
+				}),
+			);
+			if (answer.trim().toLowerCase() !== "yes") throw new AIError.LoginCancelledError();
+		}
 		const result = await def.login({
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,
@@ -92,7 +107,8 @@ export class OAuthAccounts implements OAuthApi {
 			if (!result) {
 				return undefined;
 			}
-			await this.#deps.pool.storeLoginApiKey(provider, result);
+			// `store-as` routes API-key logins too, not only OAuth credentials.
+			await this.#deps.pool.storeLoginApiKey(def.storeCredentialsAs ?? provider, result);
 			return { type: "api_key" };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant
@@ -133,6 +149,26 @@ export class OAuthAccounts implements OAuthApi {
 	 * Rejects with {@link AIError.OAuthRefreshUnavailableError} (transient,
 	 * retryable) when a retryable refresh failure left no usable credential.
 	 */
+	async signOut(
+		provider: string,
+		credentialId: number,
+		options: OAuthSignOutOptions = {},
+	): Promise<OAuthSignOutResult> {
+		const credential = this.#deps.pool.entries(provider).find(entry => entry.id === credentialId)?.credential;
+		if (!credential) return { removed: false };
+		const signOut = getProviderDefinition(provider)?.signOut;
+		let signOutError: string | undefined;
+		if (signOut && credential.type === "oauth") {
+			try {
+				await signOut(credential, { signal: options.signal });
+			} catch (error) {
+				signOutError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const removed = await this.#deps.pool.removeById(provider, credentialId);
+		return signOutError === undefined ? { removed } : { removed, signOutError };
+	}
+
 	async access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined> {
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be
@@ -185,6 +221,7 @@ export class OAuthAccounts implements OAuthApi {
 				await this.refresh(selection.credentialId, options.signal, {
 					reuseRecentMint: options.refreshReason === "auth-recovery",
 					reason: options.refreshReason,
+					rejectedAccess: options.rejectedAccessToken,
 				});
 				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
 				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);
@@ -211,11 +248,12 @@ export class OAuthAccounts implements OAuthApi {
 					error: "OAuth access unavailable",
 				};
 			}
-			const { credential } = resolved;
+			const { credential, apiKey } = resolved;
 			return {
 				ok: true,
 				credentialId: selection.credentialId,
 				accessToken: credential.access,
+				apiKey,
 				accountId: credential.accountId,
 				email: credential.email,
 				projectId: credential.projectId,

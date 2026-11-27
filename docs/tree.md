@@ -17,7 +17,7 @@ Primary implementation:
 - `packages/coding-agent/src/slash-commands/builtin-session.ts` (`/tree`, `/branch` command routing)
 - `packages/coding-agent/src/modes/controllers/input-controller.ts` (keybinding wiring, double-escape behavior)
 - `packages/coding-agent/src/modes/controllers/selector-controller.ts` (tree UI launch + summary prompt flow)
-- `packages/tui/src/overlays/tree-selector.ts` (navigation, filters, search, labels, rendering)
+- `packages/coding-agent/src/ui/overlays/pickers/tree-selector.tsx` (navigation, filters, search, labels, rendering)
 - `packages/coding-agent/src/session/agent-session.ts` (`navigateTree` leaf switching + optional summary)
 - `packages/coding-agent/src/session/session-manager.ts` (`getTree`, `branch`, `branchWithSummary`, `resetLeaf`, label persistence)
 
@@ -156,10 +156,10 @@ Assistant messages that contain only tool calls (no canonical text) are hidden i
 
 ### Selecting a past `ask` tool result
 
-- Interactive `/tree` reopens the original question UI instead of reusing the stale answer
+- Interactive `/tree` reopens the original form instead of reusing the stale answer
 - Cancel leaves the tree unchanged
 - A new answer is appended as a sibling tool result, preserving the old answer branch, then the agent resumes from it
-- If legacy/corrupt data cannot recover the original questions, selection falls back to a plain leaf move
+- If legacy/corrupt data cannot recover the original form `html`, selection falls back to a plain leaf move
 
 ### Selecting other nodes
 
@@ -179,7 +179,7 @@ selected node
    │
    ├─ current leaf (not ask result)? ──> close selector (no-op)
    │
-   ├─ ask tool result? ──> re-answer as a sibling branch when questions are recoverable
+   ├─ ask tool result? ──> re-answer as a sibling branch when the form is recoverable
    │
    ├─ user or ordinary custom message? ──> leaf := parentId (or root)
    │                                         + prefill only into an empty editor
@@ -228,14 +228,14 @@ Label edits in tree UI call `appendLabelChange(targetId, label)`.
 
 ## `/tree` vs adjacent operations
 
-| Operation | Scope                                            | Result                                                                                                                                                   |
-| --------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/tree`   | Current session file                             | Moves leaf to selected point (same file)                                                                                                                 |
-| `/branch` (alias `/rewind`) | Current session file | Opens transcript rewind; moves the leaf in place and restores user-request drafts |
-| `/fork`   | Whole current session                            | Duplicates session into a new persisted session file                                                                                                     |
-| `/resume` | Session list                                     | Switches to another session file                                                                                                                         |
+| Operation                   | Scope                 | Result                                                                            |
+| --------------------------- | --------------------- | --------------------------------------------------------------------------------- |
+| `/tree`                     | Current session file  | Moves leaf to selected point (same file)                                          |
+| `/branch` (alias `/rewind`) | New session file      | Opens transcript rewind (also Esc Esc); branches the conversation up to the pick into a new session, restoring user-request drafts |
+| `/fork`                     | Whole current session | Duplicates session into a new persisted session file                              |
+| `/resume`                   | Session list          | Switches to another session file                                                  |
 
-Key distinction: `/tree` and `/branch` navigate inside one session file. `/fork` duplicates the file; `/resume` switches files. The programmatic `AgentSession.branch()` API still creates a separate branched session.
+Key distinction: `/tree` navigates inside one session file. `/branch` moves onto a new file holding the path up to the pick and leaves the current file unchanged; `/fork` duplicates the file; `/resume` switches files.
 
 ## Operator workflows
 

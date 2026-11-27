@@ -26,6 +26,7 @@ There are two active integration styles:
    - Unrestricted session bootstrap discovers and loads config/provider/plugin tool modules, then registers them through a generated extension.
    - These functions and the combined `discoverAndLoadCustomTools` helper are also library APIs in `packages/coding-agent/src/extensibility/custom-tools/loader.ts`.
    - Subagents can reuse `preloadedCustomToolPaths` to skip discovery, but factories are rebound to each session's own API.
+   - Discovered tools load per working directory. After `/move` (or resuming a session from another project) the top-level session discovers the destination's tools, binds them to the destination cwd, and suspends the previous directory's; moving back resumes them. Subagents spawned afterwards inherit the destination's paths.
 
 ```text
 Model tool call flow
@@ -48,15 +49,14 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 
 1. Capability providers (`toolCapability`), including:
    - Native OMP config (`<agentDir>/tools`, default `~/.omp/agent/tools`; `.omp/tools`)
-   - Claude config (`<Claude config dir>/tools`, default `~/.claude/tools`; `.claude/tools`)
-   - Codex config (`~/.codex/tools`, `.codex/tools`)
-   - OMP package roots and Claude marketplace plugins
+   - OMP package roots and marketplace plugins
 2. Enabled installed plugin manifests (user `~/.omp/plugins` and the active project `.omp/plugins` registry via the plugin loader; project packages shadow same-named user packages)
 3. Explicit configured paths passed to the loader
 
+`discoverCustomToolPaths(..., { ambient: false })` skips sources 1–2 except OMP package roots, which then list only explicit extension roots. Sessions with `disableExtensionDiscovery` (CLI `--no-extensions`) discover this way.
+
 ### Important behavior
 
-- Foreign user directories are opt-in via `enabledProviders` (for example `"claude"` or `"codex"`); project directories remain discoverable unless the whole provider is disabled. `CLAUDE_CONFIG_DIR` also opts in the Claude user source.
 - Native user discovery follows the active profile and the supplied `agentDir`.
 - Duplicate resolved paths are deduplicated by discovery; `loadCustomTools` itself loads the supplied path list.
 - Filesystem tool name conflicts are rejected against the supplied built-in names and already-loaded custom tools. Configured paths are appended, not name overrides.
@@ -72,44 +72,40 @@ A custom tool module must export a function (default export preferred):
 ```ts
 import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
-const factory: CustomToolFactory = (pi) => ({
-  name: "repo_stats",
-  label: "Repo Stats",
-  description: "Counts tracked TypeScript files",
-  parameters: pi.zod.object({
-    glob: pi.zod.string().optional(),
-  }),
+const factory: CustomToolFactory = pi => ({
+	name: "repo_stats",
+	label: "Repo Stats",
+	description: "Counts tracked TypeScript files",
+	parameters: pi.zod.object({
+		glob: pi.zod.string().optional(),
+	}),
 
-  async execute(toolCallId, params, onUpdate, ctx, signal) {
-    onUpdate?.({
-      content: [{ type: "text", text: "Scanning files..." }],
-      details: { phase: "scan" },
-    });
+	async execute(toolCallId, params, onUpdate, ctx, signal) {
+		onUpdate?.({
+			content: [{ type: "text", text: "Scanning files..." }],
+			details: { phase: "scan" },
+		});
 
-    const result = await pi.exec(
-      "git",
-      ["ls-files", params.glob ?? "**/*.ts"],
-      { signal, cwd: pi.cwd },
-    );
-    if (result.killed) {
-      throw new Error("Scan was cancelled");
-    }
-    if (result.code !== 0) {
-      throw new Error(result.stderr || "git ls-files failed");
-    }
+		const result = await pi.exec("git", ["ls-files", params.glob ?? "**/*.ts"], { signal, cwd: pi.cwd });
+		if (result.killed) {
+			throw new Error("Scan was cancelled");
+		}
+		if (result.code !== 0) {
+			throw new Error(result.stderr || "git ls-files failed");
+		}
 
-    const files = result.stdout.split("\n").filter(Boolean);
-    return {
-      content: [{ type: "text", text: `Found ${files.length} files` }],
-      details: { count: files.length, sample: files.slice(0, 10) },
-    };
-  },
+		const files = result.stdout.split("\n").filter(Boolean);
+		return {
+			content: [{ type: "text", text: `Found ${files.length} files` }],
+			details: { count: files.length, sample: files.slice(0, 10) },
+		};
+	},
 
-  onSession(event) {
-    if (event.reason === "shutdown") {
-      // cleanup resources if needed
-    }
-  },
+	onSession(event) {
+		if (event.reason === "shutdown") {
+			// cleanup resources if needed
+		}
+	},
 });
 
 export default factory;
@@ -138,7 +134,7 @@ From `types.ts` and `loader.ts`:
 - `zod`: injected Zod-compatible omptype builder
 - `typebox`: compatibility shim for legacy TypeBox-style schemas
 - `pi`: injected `@oh-my-pi/pi-coding-agent` exports
-- `pushPendingAction(action)`: stage a preview action that is finalized by writing a plain-text reason to `xd://resolve` or `xd://reject`
+- `pushPendingAction(action)`: stage a preview action that is finalized by running the `resolve` or `reject` command with a plain-text reason
 
 The loader starts with a no-op UI context and `hasUI: false`. Library hosts can
 call the returned `setUIContext(...)` when real UI is ready. Normal SDK
@@ -165,14 +161,15 @@ The session bootstrap bridge converts custom tools to extension `ToolDefinition`
 
 Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `readsSkillUris`, `mcpServerName`, `mcpToolName`, `legacyName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `glob`, `find`, `eval`, `task`, `wait`, `learn`, `manage_skill`, `context_notes`, and `new_context`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level.
 
-Although the public `CustomTool` type also declares `formatApprovalDetails`, `describeCall`, and `describeResult`, the SDK/discovery conversion does not propagate those callbacks into the registered definition. Direct `CustomToolAdapter` consumers retain them.
+Although the public `CustomTool` type also declares `formatApprovalDetails`, the SDK/discovery conversion does not propagate that callback into the registered definition. Direct `CustomToolAdapter` consumers retain it.
 
 ## How tools are exposed to the model
 
 - Session bootstrap wraps included SDK-provided and discovered custom tools as extension tool definitions; library consumers may instead use `CustomToolAdapter` directly.
 - They are inserted into the session tool registry by name.
 - Unrestricted SDK bootstrap auto-enables custom and extension-registered tools unless the effective registry winner is hidden/default-inactive. Explicit `toolNames` can enable hidden tools. Restricted sessions exclude SDK-provided custom tools unless `allowRestrictedCustomTools: true`, and expose an opted-in custom tool only when its name appears in `toolNames`; ambient filesystem tool discovery is skipped.
-- With `tools.xdev` enabled and the `read`/`write` transport available, enabled discoverable tools are mounted under `xd://` rather than advertised as top-level functions. Explicitly requested tools and essential tools stay top-level.
+- With `tools.commands` enabled and the `bash` tool active, enabled discoverable tools are mounted as bash tool commands rather than advertised as top-level functions; without an active `bash` tool they stay ordinary top-level tools. Explicitly requested tools and essential tools stay top-level.
+- A mounted tool is presented by its bare name: the system-prompt catalog lists it with a one-line summary (the tool's `summary`, else the first non-empty line of its description), and `<name> --help` prints usage derived from its JSON schema — required top-level scalars as positionals, every field also as a flag (`--flag value`; booleans `--flag` / `--no-flag`), and `-j '<json>'` for a raw arguments object.
 - CLI `--tools` validates against the fully discovered session registry, including registered custom tools. Unknown names and unavailable built-ins produce distinct errors.
 
 ## Rendering hooks
@@ -182,15 +179,18 @@ Optional rendering hooks:
 - `renderCall(args, options, theme)`
 - `renderResult(result, options, theme)`
 
+Each returns pi-tui nodes (JSX from `@oh-my-pi/pi-tui`), a rows object `{ render(width): string[] }`, or `undefined`; see [extension rendering](./extensions.md#migrating-from-pi-tui). The `theme` is pi-tui's theme plus `bold`, `italic`, `underline`, `strikethrough` and `inverse`.
+
 The normal SDK and filesystem-discovery paths wrap custom tools as extensions. On those paths, `renderResult` receives only the three arguments above; the bridge does not forward the original tool arguments. The public `CustomTool` type retains an optional fourth `args` parameter for direct `CustomToolAdapter` consumers.
 
 On extension-adapter paths, `renderCall`'s `options` argument additionally answers the `Theme` API, allowing upstream pi renderers to use their second argument for styling. The third argument remains the theme, not upstream pi's context object.
 
-Runtime behavior in TUI:
+Runtime behavior in the interactive UI:
 
-- If hooks exist, tool output is rendered inside a `Box` container.
+- If hooks exist, their output is drawn inside the padded custom-tool box, call first, then result.
+- Nodes are drawn by the terminal and by Tern. Rows objects are drawn by the terminal only; Tern shows the generic tool card for them.
 - `renderResult` receives `{ expanded, isPartial, spinnerFrame? }` as its `options` argument.
-- Renderer errors are caught and logged; UI falls back to default text rendering.
+- A hook that throws, or returns something that is neither nodes nor rows, is reported; when nothing else drew, the generic tool card shows. Rows that throw while painting draw one error row.
 
 ## Session/state handling
 

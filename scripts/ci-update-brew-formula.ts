@@ -81,7 +81,7 @@ async function resolveFile(version: string, target: string): Promise<FormulaFile
 
 // `${...}` is JS interpolation; the literal `#{bin}` below is a Ruby
 // interpolation Homebrew resolves when it evaluates the formula.
-export function renderFormula(version: string, files: Record<FormulaTarget, FormulaFile>): string {
+function renderFormula(version: string, files: Record<FormulaTarget, FormulaFile>): string {
 	// Each `url` carries `using: :nounzip` because the build files are bare
 	// Mach-O/ELF executables, not archives. Without it Homebrew's default
 	// CurlDownloadStrategy routes through UnpackStrategy::Uncompressed#extract_nestedly,

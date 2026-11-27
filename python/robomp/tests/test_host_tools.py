@@ -1046,6 +1046,120 @@ def test_search_commits_message_and_patch_modes(db: Database, tmp_path: Path) ->
     assert none.startswith("No commits")
 
 
+def _close_duplicate_github(**live: Any) -> tuple[httpx.MockTransport, list[tuple[str, str, Any]]]:
+    """GitHub double for gh_close_duplicate: #42 is the inbound issue in state `live`, #7 exists."""
+    calls: list[tuple[str, str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        path = request.url.path
+        calls.append((request.method, path, body))
+        if request.method == "GET" and path.endswith("/issues/42"):
+            issue = {"number": 42, "title": "boom", "body": "b", "user": {"login": "alice"}, "labels": []}
+            return httpx.Response(200, json={**issue, **live})
+        if request.method == "GET" and path.endswith("/issues/7"):
+            issue = {"number": 7, "title": "orig", "body": "", "state": "open", "user": {"login": "bob"}, "labels": []}
+            return httpx.Response(200, json=issue)
+        if request.method == "GET":
+            return httpx.Response(404, json={"message": "Not Found"})
+        if path.endswith("/comments"):
+            return httpx.Response(
+                201, json={"id": 99, "user": {"login": "bot"}, "body": body["body"], "created_at": "t"}
+            )
+        if path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": n} for n in body["labels"]])
+        return httpx.Response(200, json={})
+
+    return httpx.MockTransport(handler), calls
+
+
+def test_gh_close_duplicate_links_original_then_closes_as_duplicate(db: Database, tmp_path: Path) -> None:
+    transport, calls = _close_duplicate_github(state="open", labels=[{"name": "duplicate"}])
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "duplicate")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_close_duplicate")
+        tool.execute({"duplicate_of": 7, "fixed_in": "", "body": "Same Ctrl+C crash; #7 tracks it."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    mutations = [(m, p, b) for m, p, b in calls if m != "GET"]
+    assert [m for m, _, _ in mutations] == ["POST", "PATCH"]  # label already present: no re-label
+    comment = mutations[0][2]["body"]
+    assert comment.splitlines()[0] == "Duplicate of #7"  # GitHub's duplicate-marking syntax leads
+    assert "Same Ctrl+C crash; #7 tracks it." in comment
+    assert mutations[1] == ("PATCH", "/repos/octo/widget/issues/42", {"state": "closed", "state_reason": "duplicate"})
+
+
+def test_gh_close_duplicate_fixed_in_commit_closes_completed(db: Database, tmp_path: Path) -> None:
+    transport, calls = _close_duplicate_github(state="open")
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    _git_repo_with_commits(bindings)
+    sha = subprocess.run(
+        ["git", "-C", str(bindings.workspace.repo_dir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    db.set_issue_classification(bindings.issue_key, "bug")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_close_duplicate")
+        tool.execute({"fixed_in": sha[:8], "body": "Fixed on main; ships in the next release."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    mutations = [(m, p, b) for m, p, b in calls if m != "GET"]
+    assert mutations[0][2]["body"].splitlines()[0] == f"Fixed in {sha[:12]}"
+    assert mutations[1] == ("POST", "/repos/octo/widget/issues/42/labels", {"labels": ["duplicate"]})
+    assert mutations[2][2] == {"state": "closed", "state_reason": "completed"}
+    row = db.get_issue(bindings.issue_key)
+    assert row is not None and row.classification == "duplicate"
+
+
+@pytest.mark.parametrize(
+    ("classification", "live", "args"),
+    [
+        pytest.param(None, {"state": "open"}, {"duplicate_of": 7}, id="before-classify"),
+        pytest.param(
+            "duplicate", {"state": "open", "state_reason": "reopened"}, {"duplicate_of": 7}, id="human-reopened"
+        ),
+        pytest.param("duplicate", {"state": "open"}, {"duplicate_of": 8}, id="unknown-original"),
+        pytest.param("duplicate", {"state": "open"}, {"duplicate_of": 42}, id="self-reference"),
+        pytest.param("duplicate", {"state": "open"}, {"fixed_in": "deadbeef"}, id="commit-not-on-default"),
+    ],
+)
+def test_gh_close_duplicate_refusals_leave_issue_untouched(
+    db: Database, tmp_path: Path, classification: str | None, live: dict[str, Any], args: dict[str, Any]
+) -> None:
+    transport, calls = _close_duplicate_github(**live)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    if classification is not None:
+        db.set_issue_classification(bindings.issue_key, classification)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_close_duplicate")
+        with pytest.raises(RpcCommandError):
+            tool.execute({**args, "body": "same problem"}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+    assert [c for c in calls if c[0] != "GET"] == []
+
+
+def test_fetch_issue_thread_reads_other_issue_by_number(db: Database, tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/issues/7/comments"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/issues/7"):
+            issue = {"number": 7, "title": "orig", "body": "ctrl c kills subagents", "user": {"login": "bob"}}
+            return httpx.Response(200, json={**issue, "state": "closed", "state_reason": "completed", "labels": []})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "fetch_issue_thread")
+        result = tool.execute({"number": 7}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+    assert result.splitlines()[0] == "# octo/widget#7 (issue, closed, completed)"
+    assert "ctrl c kills subagents" in result
+
+
 def test_classify_issue_rejects_bug_without_priority(db: Database, tmp_path: Path) -> None:
     bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
     try:
@@ -2584,6 +2698,137 @@ def test_gh_open_pr_rejects_wrong_identity_before_push_or_pr(db: Database, tmp_p
             check=True,
         )
         assert not any(r.startswith("refs/heads/farm/") for r in refs.stdout.splitlines()), refs.stdout
+    finally:
+        _stop_loop(loop, thread)
+
+
+def test_gh_open_pr_scopes_identity_gate_to_requested_base(db: Database, tmp_path: Path) -> None:
+    """`base` override: only commits beyond `origin/<base>` must be bot-authored.
+
+    Gitflow repo: default `main`, integration branch `develop` carries a
+    maintainer commit. A bot fix on top of `develop` opened with
+    `base="develop"` must push and open the PR against `develop`.
+    """
+    import os
+    import subprocess
+
+    bare = tmp_path / "upstream.git"
+    bare.mkdir()
+    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], check=True, capture_output=True)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "maintainer",
+        "GIT_AUTHOR_EMAIL": "maintainer@x",
+        "GIT_COMMITTER_NAME": "maintainer",
+        "GIT_COMMITTER_EMAIL": "maintainer@x",
+    }
+    subprocess.run(["git", "init", "--initial-branch=main", str(seed)], check=True, capture_output=True)
+    (seed / "README.md").write_text("init\n")
+    for cmd in (
+        ["git", "-C", str(seed), "add", "."],
+        ["git", "-C", str(seed), "commit", "-m", "init"],
+        ["git", "-C", str(seed), "checkout", "-b", "develop"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True, env=env)
+    (seed / "feature.txt").write_text("integration work\n")
+    for cmd in (
+        ["git", "-C", str(seed), "add", "."],
+        # Literal `\n` escape: the message repair must not rewrite this
+        # already-published integration-branch commit.
+        ["git", "-C", str(seed), "commit", "-m", "feat: develop work\\n\\nbody"],
+        ["git", "-C", str(seed), "remote", "add", "origin", str(bare)],
+        ["git", "-C", str(seed), "push", "origin", "main", "develop"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True, env=env)
+    develop_sha = subprocess.run(
+        ["git", "-C", str(seed), "rev-parse", "develop"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    from robomp.sandbox import SandboxManager
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=42,
+        title="gitflow base",
+        clone_url=str(bare),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    bot_env = os.environ | {
+        "GIT_AUTHOR_NAME": "robomp-bot",
+        "GIT_AUTHOR_EMAIL": "robomp-bot@example.invalid",
+        "GIT_COMMITTER_NAME": "robomp-bot",
+        "GIT_COMMITTER_EMAIL": "robomp-bot@example.invalid",
+    }
+    subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "reset", "--hard", "origin/develop"], check=True, capture_output=True
+    )
+    (ws.repo_dir / "fix.txt").write_text("fix\n")
+    subprocess.run(["git", "-C", str(ws.repo_dir), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "commit", "-m", "fix: x"], check=True, capture_output=True, env=bot_env
+    )
+
+    pr_bases: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pr_bases.append(json.loads(request.content)["base"])
+        return httpx.Response(
+            201,
+            json={
+                "number": 7,
+                "html_url": "https://github.com/octo/widget/pull/7",
+                "head": {"ref": ws.branch},
+                "base": {"ref": "develop"},
+            },
+        )
+
+    github = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    loop, thread = _make_loop_in_background()
+    try:
+        bindings = ToolBindings(
+            db=db,
+            github=github,
+            git_transport=LocalGitTransport(token=None),
+            repo=_stub_repo(),
+            issue=IssueInfo(
+                repo="octo/widget",
+                number=42,
+                title="t",
+                body="",
+                state="open",
+                author="alice",
+                labels=(),
+                is_pull_request=False,
+            ),
+            workspace=ws,
+            loop=loop,
+            author_name="robomp-bot",
+            author_email="robomp-bot@example.invalid",
+        )
+        db.upsert_issue(
+            key=bindings.issue_key,
+            repo="octo/widget",
+            number=42,
+            state="reproducing",
+            branch=ws.branch,
+            session_dir=str(ws.session_dir),
+        )
+        db.set_issue_classification(bindings.issue_key, "bug")
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        tool.execute({"title": "fix: x", "body": body, "base": "develop"}, _ctx())
+        assert pr_bases == ["develop"]
+        pushed_parent = subprocess.run(
+            ["git", "-C", str(bare), "rev-parse", f"refs/heads/{ws.branch}^"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert pushed_parent == develop_sha
     finally:
         _stop_loop(loop, thread)
 

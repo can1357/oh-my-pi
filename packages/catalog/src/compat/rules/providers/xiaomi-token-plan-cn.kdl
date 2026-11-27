@@ -1,7 +1,7 @@
 // Provider-wire compat for "xiaomi-token-plan-cn"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xiaomi-token-plan-cn" {
-	default-model "mimo-v2.5"
+	default-model "mimo-v2.6-flash"
 	env "XIAOMI_TOKEN_PLAN_CN_API_KEY"
 
 	// Xiaomi's credential-scoped roster returns bare ids, so these documented

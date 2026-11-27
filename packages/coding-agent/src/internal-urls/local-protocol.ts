@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -24,26 +23,9 @@ import type {
 	UrlCompletion,
 } from "./types";
 import { formatByteSize } from "../utils/video";
+import { type LocalProtocolOptions, resolveLocalRoot } from "./local-root";
 
-export interface LocalProtocolOptions {
-	getArtifactsDir?: () => string | null;
-	getSessionId?: () => string | null;
-}
-
-const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
-
-function safeSessionId(options: LocalProtocolOptions): string {
-	const raw = options.getSessionId?.() ?? "session";
-	const safe = raw.replace(/[^a-zA-Z0-9_.-]/g, "_");
-	return safe && safe !== "." && safe !== ".." ? safe : "session";
-}
-
-function shortLocalRoot(options: LocalProtocolOptions): string {
-	// Derive the short root from the stable session id, never the artifact path,
-	// so `SessionManager.moveTo()` and the resume-after-move flow keep finding
-	// the same `local://` directory the session wrote pre-move.
-	return path.join(os.tmpdir(), "omp-local", safeSessionId(options));
-}
+export * from "./local-root";
 
 const LOCAL_TEXT_SNIFF_BYTES = 8 * 1024;
 const LOCAL_TEXT_RESOURCE_MAX_BYTES = 1024 * 1024;
@@ -236,18 +218,46 @@ function extractRelativePath(url: InternalUrl): string {
 	return decoded;
 }
 
-/** Resolve the session-scoped local:// root, shortening long Windows artifact paths before writes hit MAX_PATH. */
-export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
-	const artifactsDir = options.getArtifactsDir?.();
-	if (artifactsDir) {
-		const candidate = path.resolve(artifactsDir, "local");
-		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
-			return shortLocalRoot(options);
-		}
-		return candidate;
-	}
+export interface LocalFileEntry {
+	/** Root-relative, `/`-separated name, e.g. `plans/x-plan.md`. */
+	name: string;
+	/** `local://${name}` */
+	url: string;
+	/** Absolute path under the resolved local root. */
+	path: string;
+	size: number;
+	mtimeMs: number;
+}
 
-	return path.join(os.tmpdir(), "omp-local", safeSessionId(options));
+/**
+ * Every regular file under the session's local:// root, newest first (ties by name); missing root → [].
+ * Uncached, unlike completion listings, so pickers see files written moments ago. The walker skips
+ * symlinks, so each entry is a real file inside the root.
+ */
+export async function listLocalFiles(options: LocalProtocolOptions): Promise<LocalFileEntry[]> {
+	const root = path.resolve(resolveLocalRoot(options));
+	let names: string[];
+	try {
+		names = await listFilesRecursively(root);
+	} catch (err) {
+		if (isEnoent(err)) return [];
+		throw err;
+	}
+	const entries = await Promise.all(
+		names.map(async (name): Promise<LocalFileEntry | null> => {
+			const filePath = path.join(root, name);
+			try {
+				const stat = await fs.stat(filePath);
+				return { name, url: `local://${name}`, path: filePath, size: stat.size, mtimeMs: stat.mtimeMs };
+			} catch (err) {
+				if (isEnoent(err)) return null;
+				throw err;
+			}
+		}),
+	);
+	return entries
+		.filter((entry): entry is LocalFileEntry => entry !== null)
+		.sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name));
 }
 
 /**
@@ -424,6 +434,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		backing: "file",
 		selectors: "lines",
 		immutable: false,
+		unspilledPages: true,
 		pathAuthority: true,
 		linkable: true,
 		imageQuestion: true,

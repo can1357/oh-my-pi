@@ -1,5 +1,7 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
+
 /** Frameless Bidi model used by Codex Desktop live calls. */
-export const LIVE_MODEL = "gpt-live-1-codex" as const;
+export const LIVE_MODEL = "gpt-live-1.1-codex" as const;
 
 /** Maximum UTF-8 payload size accepted by each context append. */
 export const CONTEXT_CHUNK_BYTES = 500;
@@ -18,8 +20,20 @@ export type LiveSessionPayload = {
 	delegation: { type: "client" };
 };
 
+/**
+ * Session configuration a custom live endpoint receives in `session.update` once its sideband
+ * opens (signaling sent it only the SDP); the endpoint picks the model.
+ */
+export type LiveSessionUpdate = {
+	type: "realtime";
+	instructions: string;
+	audio: { output: { voice: string } };
+	delegation: { type: "client" };
+};
+
 /** Messages sent by the client over the Frameless Bidi data channel. */
 export type LiveClientMessage =
+	| { type: "session.update"; session: LiveSessionUpdate }
 	| {
 			type: "delegation.context.append";
 			delegation_item_id: string;
@@ -55,10 +69,6 @@ export type LiveServerEvent =
 	| { type: "unknown"; wireType: string };
 
 type UnknownRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is UnknownRecord {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function parsePayload(payload: unknown): UnknownRecord | null {
 	let parsed = payload;
@@ -169,6 +179,14 @@ export function buildLiveSessionPayload(instructions: string, voice: string): Li
 		instructions,
 		audio: { output: { voice } },
 		delegation: { type: "client" },
+	};
+}
+
+/** Build the `session.update` that configures a custom endpoint's call. */
+export function buildLiveSessionUpdate(instructions: string, voice: string): LiveClientMessage {
+	return {
+		type: "session.update",
+		session: { type: "realtime", instructions, audio: { output: { voice } }, delegation: { type: "client" } },
 	};
 }
 

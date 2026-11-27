@@ -7,16 +7,28 @@
 #   & ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Source -Ref v18.8.9
 #   & ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Source -Ref main
 #   & ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Binary -Ref v18.8.9
+#   & ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Uninstall
+#   & ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Purge
 #
+# The prebuilt binary is the default, since it updates itself with delta
+# patches; -Source installs the package via bun and is implied by a bare -Ref.
 # -Ref takes any tag/commit/branch with -Source; binary installs take a release
 # tag (v<version>). Prebuilt binaries come from the build service
 # ($env:PI_BUILD_URL, default https://build.stencil.so) and are checked against
 # its sha256 before install.
+#
+# -Uninstall removes omp: the binary this script installs (and the user PATH
+# entry it added), or the bun/npm global package. It keeps omp's state
+# directory (%USERPROFILE%\.omp, or $env:PI_CONFIG_DIR under the profile)
+# unless you confirm at the prompt; -Purge uninstalls and deletes that state
+# without asking.
 
 param(
     [switch]$Source,
     [switch]$Binary,
-    [string]$Ref
+    [string]$Ref,
+    [switch]$Uninstall,
+    [switch]$Purge
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +64,7 @@ $BuildTarget = switch ($RawArchitecture.ToUpperInvariant()) {
     "ARM64" { "windows-arm64" }
     default { throw "Unsupported Windows architecture: $RawArchitecture" }
 }
-$MinimumBunVersion = "1.3.14"
+$MinimumBunVersion = "1.4.4"
 
 # PowerShell 5.1 raises a terminating NativeCommandError for any line a native
 # executable writes to stderr while $ErrorActionPreference is "Stop", regardless
@@ -344,6 +356,13 @@ function Install-Binary {
 
     Configure-BashShell
 
+    # An omp earlier on PATH (a previous `bun install -g`, Scoop, ...) keeps
+    # winning over this install: $InstallDir is appended to PATH, not prepended.
+    $Active = Get-Command omp -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($Active -and $Active.Source -ne [System.IO.Path]::GetFullPath($OutPath)) {
+        Write-Host "[WARN] 'omp' still resolves to $($Active.Source); remove that install or move $InstallDir ahead of it on PATH." -ForegroundColor Yellow
+    }
+
     if ($needsRestart) {
         Write-Host "Restart your terminal, then run 'omp' to get started!"
     } else {
@@ -351,8 +370,200 @@ function Install-Binary {
     }
 }
 
-# Main logic
-if ($Ref -and -not $Source -and -not $Binary) {
+function Remove-OmpPath {
+    param([string]$Path)
+    Write-Host "Removing $Path"
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    } catch {
+        throw "Could not remove ${Path}: $_`nClose any running omp sessions, then re-run the uninstall."
+    }
+}
+
+# Remove what an update can leave beside launcher $Path: omp's self-update
+# temporaries and backups (<name>.<timestamp>.<pid>[.<seq>].bak|.new|.patch,
+# legacy <name>.bak and <name>.new, shims renamed aside by a takeover) and this
+# script's .omp.download.exe.
+function Remove-UpdateLeftovers {
+    param([string]$Path)
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+        return
+    }
+    $pattern = '^' + [regex]::Escape((Split-Path -Leaf $Path)) + '\.(?:\d+(?:\.\d+)*\.(?:bak|new|patch)|bak|new)$'
+    Get-ChildItem -LiteralPath $dir -Force |
+        Where-Object { $_.Name -match $pattern -or $_.Name -eq ".omp.download.exe" } |
+        ForEach-Object { Remove-OmpPath $_.FullName }
+}
+
+# After a package manager removed omp, an omp.exe still in its launcher
+# directory is the standalone binary omp's self-update installed there.
+function Remove-TakenOverLauncher {
+    param([string]$Dir)
+    $exe = Join-Path $Dir "omp.exe"
+    if (Test-Path -LiteralPath $exe -PathType Leaf) {
+        Remove-OmpPath $exe
+    }
+    foreach ($name in @("omp.exe", "omp", "omp.cmd", "omp.ps1", "omp.bat")) {
+        Remove-UpdateLeftovers (Join-Path $Dir $name)
+    }
+}
+
+function Remove-UserPathEntry {
+    param([string]$Dir)
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath) {
+        return
+    }
+    $target = $Dir.TrimEnd("\")
+    $entries = $userPath -split ";"
+    $kept = @($entries | Where-Object { $_.TrimEnd("\") -ne $target })
+    if ($kept.Count -eq $entries.Count) {
+        return
+    }
+    Write-Host "Removing $Dir from your user PATH"
+    [Environment]::SetEnvironmentVariable("Path", ($kept -join ";"), "User")
+}
+
+# Remove the binary this script installs. The installer also creates
+# $InstallDir and adds it to the user PATH; once nothing else lives there,
+# undo both. Returns whether omp.exe was there.
+function Uninstall-Binary {
+    $exe = Join-Path $InstallDir "omp.exe"
+    $found = Test-Path -LiteralPath $exe
+    if ($found) {
+        Remove-OmpPath $exe
+    }
+    Remove-UpdateLeftovers $exe
+    if ((Test-Path -LiteralPath $InstallDir -PathType Container) -and
+        -not (Get-ChildItem -LiteralPath $InstallDir -Force | Select-Object -First 1)) {
+        Remove-OmpPath $InstallDir
+    }
+    if (-not (Test-Path -LiteralPath $InstallDir)) {
+        Remove-UserPathEntry $InstallDir
+    }
+    return $found
+}
+
+# Remove the bun global package (what -Source installs). Returns whether it
+# was installed.
+function Uninstall-BunPackage {
+    $bunRoot = if ($env:BUN_INSTALL) { $env:BUN_INSTALL } else { Join-Path $env:USERPROFILE ".bun" }
+    $globalDir = if ($env:BUN_INSTALL_GLOBAL_DIR) { $env:BUN_INSTALL_GLOBAL_DIR } else { Join-Path $bunRoot "install\global" }
+    if (-not (Test-Path -LiteralPath (Join-Path $globalDir "node_modules\$Package"))) {
+        return $false
+    }
+    $bun = Get-Command bun -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $bunPath = if ($bun) { $bun.Source } else { Join-Path $bunRoot "bin\bun.exe" }
+    if (-not (Test-Path -LiteralPath $bunPath)) {
+        throw "Found $Package in bun's global packages ($globalDir), but bun is not available to remove it"
+    }
+    Write-Host "Removing the bun global package $Package..."
+    Invoke-Native { & $bunPath remove -g $Package | Out-Host }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to remove $Package with bun"
+    }
+    $binDir = if ($env:BUN_INSTALL_BIN) { $env:BUN_INSTALL_BIN } else { Join-Path $bunRoot "bin" }
+    Remove-TakenOverLauncher $binDir
+    return $true
+}
+
+# Remove an npm global install of the package. Returns whether there was one.
+function Uninstall-NpmPackage {
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+    $npmRoot = Invoke-Native { npm root -g 2>$null } | Select-Object -First 1
+    if (-not $npmRoot -or -not (Test-Path -LiteralPath (Join-Path "$npmRoot".Trim() $Package))) {
+        return $false
+    }
+    $npmPrefix = Invoke-Native { npm prefix -g 2>$null } | Select-Object -First 1
+    Write-Host "Removing the npm global package $Package..."
+    Invoke-Native { npm uninstall -g $Package | Out-Host }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to remove $Package with npm"
+    }
+    # npm puts Windows launchers directly in the global prefix.
+    if ($npmPrefix) {
+        Remove-TakenOverLauncher "$npmPrefix".Trim()
+    }
+    return $true
+}
+
+# Delete omp's state directory with -Purge, or when an interactive user
+# confirms; otherwise keep it and say how to delete it.
+function Remove-OmpState {
+    $dirName = if ($env:PI_CONFIG_DIR) { $env:PI_CONFIG_DIR } else { ".omp" }
+    $stateRoot = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE $dirName))
+    if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) {
+        return
+    }
+    # A PI_CONFIG_DIR of "." or ".." would otherwise name the profile directory
+    # or one of its ancestors.
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    $homeFull = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd($sep) + $sep
+    if ($homeFull.StartsWith($stateRoot.TrimEnd($sep) + $sep, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete omp's state at ${stateRoot}: it contains your profile directory (check PI_CONFIG_DIR)"
+    }
+
+    if (-not $Purge) {
+        $confirmed = $false
+        $nonInteractive = [Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-noni' }
+        if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not $nonInteractive) {
+            Write-Host ""
+            Write-Host "omp's state is stored in $stateRoot"
+            Write-Host "It holds your sessions, settings, credentials, caches and the git"
+            Write-Host "worktrees omp created, which may contain uncommitted work."
+            $answer = Read-Host "Delete it too? [y/N]"
+            $confirmed = $answer -match '^(y|yes)$'
+        }
+        if (-not $confirmed) {
+            Write-Host ""
+            Write-Host "Kept omp's state (sessions, settings, credentials, caches, worktrees) in $stateRoot"
+            Write-Host "To delete it as well, re-run with -Purge."
+            return
+        }
+    }
+
+    Remove-OmpPath $stateRoot
+    Write-Host "[OK] Deleted omp's state" -ForegroundColor Green
+}
+
+function Uninstall-Omp {
+    $removed = Uninstall-Binary
+    if (Uninstall-BunPackage) {
+        $removed = $true
+    }
+    if (Uninstall-NpmPackage) {
+        $removed = $true
+    }
+
+    if ($removed) {
+        Write-Host ""
+        Write-Host "[OK] Uninstalled omp" -ForegroundColor Green
+    } else {
+        Write-Host "No omp install found in $InstallDir or in bun's or npm's global packages."
+    }
+
+    $Active = Get-Command omp -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($Active) {
+        Write-Host "[WARN] 'omp' still resolves to $($Active.Source), which this script did not install; remove it with the tool that installed it." -ForegroundColor Yellow
+    }
+
+    Remove-OmpState
+}
+
+if ($Uninstall -or $Purge) {
+    if ($Source -or $Binary -or $Ref) {
+        throw "-Uninstall and -Purge do not combine with -Source, -Binary or -Ref"
+    }
+    Uninstall-Omp
+    return
+}
+
+# Main logic. A ref can name a branch or commit, which only a source install
+# can build, so a bare -Ref selects source.
+if ($Ref -and -not $Binary) {
     $Source = $true
 }
 
@@ -362,14 +573,6 @@ if ($Source) {
     }
     Assert-BunVersion $MinimumBunVersion
     Install-ViaBun
-} elseif ($Binary) {
-    Install-Binary
 } else {
-    # Default: use bun if available, otherwise binary
-    if (Test-BunInstalled) {
-        Assert-BunVersion $MinimumBunVersion
-        Install-ViaBun
-    } else {
-        Install-Binary
-    }
+    Install-Binary
 }

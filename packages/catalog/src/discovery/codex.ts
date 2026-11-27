@@ -3,8 +3,9 @@ import { compareRevision, parseRevision } from "../compat/revision";
 import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import type { FetchImpl, ModelSpec } from "../types";
-import { discoveryFetch } from "../utils";
-import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { discoveryFetch, parseServiceTierIds } from "../utils";
+import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { getCodexClientVersion } from "../wire/codex-version";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
@@ -113,12 +114,11 @@ export interface CodexModelDiscoveryResult {
 	models: ModelSpec<"openai-codex-responses">[];
 	etag?: string;
 	/**
-	 * Set when the backend rejected the credential itself (401/403, e.g.
-	 * `token_revoked`); `models` is empty. A definitive per-account denial,
-	 * unlike the `null` result for transport/parse failures, so multi-account
-	 * discovery can skip the account instead of aborting.
+	 * A definitive per-account denial (401/403 auth, 402 payment). `models` is
+	 * empty; unlike transport/parse failures, sibling accounts can still supply
+	 * an authoritative catalog.
 	 */
-	rejectedStatus?: 401 | 403;
+	rejectedStatus?: 401 | 402 | 403;
 }
 
 /**
@@ -131,7 +131,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 	const fetchFn = discoveryFetch(options.fetchFn);
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
 	const paths = normalizePaths(options.paths);
-	const clientVersion = normalizeClientVersion(options.clientVersion) ?? CODEX_CLIENT_VERSION;
+	const clientVersion = normalizeClientVersion(options.clientVersion) ?? getCodexClientVersion();
 	const headers = buildCodexHeaders(options, clientVersion);
 
 	let sawSuccessfulResponse = false;
@@ -148,7 +148,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
-		if (response.status === 401 || response.status === 403) {
+		if (response.status === 401 || response.status === 402 || response.status === 403) {
 			return { models: [], rejectedStatus: response.status };
 		}
 		if (!response.ok) {
@@ -206,7 +206,6 @@ function buildCodexHeaders(options: CodexModelDiscoveryOptions, clientVersion: s
 	if (options.accountId && options.accountId.trim().length > 0) {
 		headers.set(OPENAI_HEADERS.ACCOUNT_ID, options.accountId);
 	}
-	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, clientVersion);
 	headers.set("accept", "application/json");
@@ -252,13 +251,22 @@ function normalizeCodexModels(
 	// model.
 	const advertisedSlugs = new Set(parsedEntries.map(parsed => parsed.slug));
 	const bundledCodexModelIds = getBundledCodexModelIds();
+	// Codex's `display_name` is a title-cased slug (`GPT-6.2-Sol`); the same
+	// model's first-party OpenAI row carries the spelling every other surface
+	// uses (`GPT-6.2 Sol`). `keep-bundled-names` only covers ids already in the
+	// bundled Codex catalog, so models Codex lists ahead of it need this.
+	const referenceNames = new Map(getBundledModels("openai").map(model => [model.id, model.name]));
 	const normalized: NormalizedCodexModel[] = [];
 	for (const parsed of parsedEntries) {
 		const canonicalSlug = plainCounterpartForWorkerSlug(parsed.slug, bundledCodexModelIds) ?? parsed.slug;
-		normalized.push(buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl, accountId));
+		normalized.push(
+			buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl, accountId, referenceNames),
+		);
 		const plainSlug = canonicalSlug !== parsed.slug ? canonicalSlug : null;
 		if (plainSlug && !advertisedSlugs.has(plainSlug)) {
-			normalized.push(buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl, accountId));
+			normalized.push(
+				buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl, accountId, referenceNames),
+			);
 		}
 	}
 
@@ -335,14 +343,7 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 
 	// codex-rs `ModelServiceTier { id, name, description }`; only the id reaches the wire.
 	// An explicit empty array is kept: it means the model offers no optional tier.
-	let serviceTiers: string[] | undefined;
-	if (Array.isArray(payload.service_tiers)) {
-		serviceTiers = [];
-		for (const tier of payload.service_tiers) {
-			const id = tier !== null && typeof tier === "object" && "id" in tier ? toNonEmptyString(tier.id) : null;
-			if (id && !serviceTiers.includes(id)) serviceTiers.push(id);
-		}
-	}
+	const serviceTiers = parseServiceTierIds(payload.service_tiers);
 
 	return {
 		slug,
@@ -365,6 +366,8 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
  * the model's bundled SKU (`slug` itself for plain/unknown rows, the plain
  * counterpart for a safe `-wm` row) and owns the base-model metadata derivation
  * so both listings of a model report the same context window and pricing.
+ * The display name comes from `referenceNames[slug]` when OpenAI ships that
+ * id, else from Codex's `display_name`.
  */
 function buildNormalizedCodexModel(
 	parsed: ParsedCodexModelEntry,
@@ -372,6 +375,7 @@ function buildNormalizedCodexModel(
 	canonicalSlug: string,
 	baseUrl: string,
 	accountId: string | undefined,
+	referenceNames: ReadonlyMap<string, string>,
 ): NormalizedCodexModel {
 	// Codex discovery historically omitted `context_window` for GPT-5.6-family
 	// SKUs (#5705); luna/sol/terra additionally floor the reported value because
@@ -397,14 +401,17 @@ function buildNormalizedCodexModel(
 		priority: parsed.priority,
 		model: {
 			id: slug,
-			name: parsed.name,
+			name: referenceNames.get(slug) ?? parsed.name,
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl,
 			...(accountId && accountId.trim().length > 0
 				? {
 						accountAccess: {
-							[accountId]: parsed.cyberPrograms === undefined ? {} : { cyberPrograms: parsed.cyberPrograms },
+							[accountId]: {
+								...(parsed.cyberPrograms !== undefined ? { cyberPrograms: parsed.cyberPrograms } : {}),
+								...(parsed.serviceTiers !== undefined ? { serviceTiers: parsed.serviceTiers } : {}),
+							},
 						},
 					}
 				: {}),

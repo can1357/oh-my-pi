@@ -1,4 +1,6 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { type } from "@oh-my-pi/omptype";
+import { untilAborted } from "@oh-my-pi/pi-utils";
+import { ToolError } from "../tool-errors";
 import type { Device, Frame, NetworkConditions, Page, Permission } from "puppeteer-core";
 import { pressKey } from "./interactions";
 import { applyViewport } from "./launch";
@@ -11,6 +13,10 @@ export interface EmulationViewport {
 	height: number;
 	/** Device scale factor. */
 	scale?: number;
+	/** Mobile metrics (`meta viewport`, overlay scrollbars), as a phone's browser has. */
+	isMobile?: boolean;
+	/** Touch events and `(pointer: coarse)`. */
+	hasTouch?: boolean;
 }
 
 /** Coordinates accepted by runtime geolocation emulation. */
@@ -53,8 +59,10 @@ export interface BrowserEmulateOptions {
 	offline?: boolean;
 	/** Override the preferred color scheme. */
 	colorScheme?: "dark" | "light" | "no-preference";
-	/** Toggle reduced-motion preference. */
+	/** Toggle reduced-motion preference (`tab.emulate()` also takes `"reduce"`/`"no-preference"`). */
 	reducedMotion?: boolean;
+	/** Emulate the CSS media type, or clear it with `null`. */
+	media?: "screen" | "print" | null;
 	/** Set extra HTTP headers, or clear them with `null`. */
 	headers?: Record<string, string> | null;
 	/** Set HTTP basic-auth credentials, or clear them with `null`. */
@@ -81,6 +89,68 @@ export interface ClipboardActionResult {
 export interface ClipboardReadResult extends ClipboardActionResult {
 	/** Clipboard plain text. */
 	text: string;
+}
+
+/** Viewport keys a browser `open` and `tab.emulate()` take; anything else (Puppeteer's names included) is refused. */
+const viewportInputSchema = type({
+	width: "number",
+	height: "number",
+	"scale?": "number",
+	"deviceScaleFactor?": "number",
+	"isMobile?": "boolean",
+	"hasTouch?": "boolean",
+	"+": "reject",
+});
+
+/**
+ * The viewport a browser `open` and `tab.emulate()` take: `{width, height, scale?, isMobile?, hasTouch?}`, with
+ * Puppeteer's `deviceScaleFactor` read as `scale`. Other keys are refused.
+ */
+export const viewportSchema = viewportInputSchema.pipe(({ deviceScaleFactor, scale, ...rest }): EmulationViewport => {
+	const viewport: EmulationViewport = rest;
+	const resolved = scale ?? deviceScaleFactor;
+	if (resolved !== undefined) viewport.scale = resolved;
+	return viewport;
+});
+
+const emulateOptionsSchema = type({
+	"viewport?": viewportSchema,
+	"device?": "string",
+	"geolocation?": type({ latitude: "number", longitude: "number", "accuracy?": "number", "+": "reject" }).or("null"),
+	"offline?": "boolean",
+	"colorScheme?": "'dark' | 'light' | 'no-preference'",
+	"reducedMotion?": "boolean | 'reduce' | 'no-preference'",
+	"media?": "'screen' | 'print' | null",
+	"headers?": type("Record<string, string>").or("null"),
+	"credentials?": type({ username: "string", password: "string", "+": "reject" }).or("null"),
+	"userAgent?": "string | null",
+	"timezone?": "string | null",
+	"locale?": "string | null",
+	"cpuThrottling?": "number | null",
+	"network?": type("'slow3g' | 'fast3g' | null").or({
+		download: "number",
+		upload: "number",
+		latency: "number",
+		"+": "reject",
+	}),
+	"+": "reject",
+});
+
+/**
+ * Check `tab.emulate()` options: unknown keys (`deviceScaleFactor`, `isMobile`, `media`) and wrong types fail, naming
+ * the keys it takes. `reducedMotion` also takes the CSS values `"reduce"`/`"no-preference"`.
+ */
+export function validateEmulateOptions(options: unknown): BrowserEmulateOptions {
+	const parsed = emulateOptionsSchema(options ?? {});
+	if (parsed instanceof type.errors) {
+		throw new ToolError(
+			`tab.emulate() received invalid options: ${parsed.summary}. It takes viewport ({width, height, scale?, isMobile?, hasTouch?}), device, geolocation, offline, colorScheme, reducedMotion, media, headers, credentials, userAgent, timezone, locale, cpuThrottling, network.`,
+		);
+	}
+	const { reducedMotion, ...rest } = parsed;
+	const result: BrowserEmulateOptions = rest;
+	if (reducedMotion !== undefined) result.reducedMotion = reducedMotion === true || reducedMotion === "reduce";
+	return result;
 }
 
 type KnownDeviceMap = Readonly<Record<string, Device>>;
@@ -119,6 +189,8 @@ export class BrowserEmulationController {
 	readonly #state: BrowserEmulateOptions = {};
 	readonly #permissionsByOrigin = new Map<string, Set<Permission>>();
 	#clipboardShim: string | undefined;
+	/** The shim holds text the page clipboard never received (its write was refused). */
+	#shimOnly = false;
 	readonly #navigationHandler: (frame: Frame) => void;
 
 	constructor(page: Page, devices: KnownDeviceMap, networkConditions: KnownNetworkMap, baseUserAgent: string) {
@@ -139,8 +211,8 @@ export class BrowserEmulationController {
 	}
 
 	/** Merge supplied overrides, apply the effective state, and return a detached state snapshot. */
-	async emulate(options: BrowserEmulateOptions = {}): Promise<BrowserEmulateOptions> {
-		Object.assign(this.#state, copyOptions(options));
+	async emulate(options: unknown = {}): Promise<BrowserEmulateOptions> {
+		Object.assign(this.#state, validateEmulateOptions(options));
 		await this.reapply();
 		return copyOptions(this.#state);
 	}
@@ -159,6 +231,8 @@ export class BrowserEmulationController {
 				width: state.viewport.width,
 				height: state.viewport.height,
 				deviceScaleFactor: state.viewport.scale,
+				isMobile: state.viewport.isMobile,
+				hasTouch: state.viewport.hasTouch,
 			});
 		}
 		if (hasOwn(state, "userAgent")) {
@@ -193,6 +267,7 @@ export class BrowserEmulationController {
 			}
 			await this.#page.emulateMediaFeatures(features);
 		}
+		if (hasOwn(state, "media")) await this.#page.emulateMediaType(state.media ?? undefined);
 		if (hasOwn(state, "headers")) await this.#page.setExtraHTTPHeaders(state.headers ?? {});
 		if (hasOwn(state, "credentials")) await this.#page.authenticate(state.credentials);
 		if (hasOwn(state, "timezone")) await this.#page.emulateTimezone(state.timezone ?? undefined);
@@ -230,27 +305,37 @@ export class BrowserEmulationController {
 				return clipboard.writeText(value);
 			}, text);
 			this.#clipboardShim = text;
+			this.#shimOnly = false;
 			return { source: "page" };
 		} catch {
 			this.#clipboardShim = text;
+			this.#shimOnly = true;
 			return { source: "shim" };
 		}
 	}
 
 	/** Copy the page's current selection using the platform keyboard shortcut. */
-	async clipboardCopy(): Promise<ClipboardActionResult> {
+	async clipboardCopy(signal?: AbortSignal): Promise<ClipboardActionResult> {
 		this.#clipboardShim = undefined;
-		await this.#grantPermissions(["clipboard-read", "clipboard-write"]);
+		this.#shimOnly = false;
+		// The copy shortcut is trusted input and needs no permission; the grant only helps page script read it back.
+		await untilAborted(signal, () => this.#grantPermissionsBestEffort(["clipboard-read", "clipboard-write"]));
 		const modifier = process.platform === "darwin" ? "Meta" : "Control";
-		await pressKey(this.#page, `${modifier}+c`);
+		await pressKey(this.#page, `${modifier}+c`, undefined, signal);
 		return { source: "page" };
 	}
 
 	/** Paste the page clipboard into the focused control using the platform keyboard shortcut. */
-	async clipboardPaste(): Promise<ClipboardActionResult> {
-		await this.#grantPermissions(["clipboard-read", "clipboard-write"]);
+	async clipboardPaste(signal?: AbortSignal): Promise<ClipboardActionResult> {
+		if (this.#shimOnly && this.#clipboardShim !== undefined) {
+			// The page clipboard never got the shim's text: type it in as one insertion, as a paste would land.
+			const text = this.#clipboardShim;
+			await untilAborted(signal, () => this.#page.keyboard.sendCharacter(text));
+			return { source: "shim" };
+		}
+		await untilAborted(signal, () => this.#grantPermissionsBestEffort(["clipboard-read", "clipboard-write"]));
 		const modifier = process.platform === "darwin" ? "Meta" : "Control";
-		await pressKey(this.#page, `${modifier}+v`);
+		await pressKey(this.#page, `${modifier}+v`, undefined, signal);
 		return { source: "page" };
 	}
 
@@ -269,6 +354,18 @@ export class BrowserEmulationController {
 		const conditions = this.#networkConditions[key];
 		if (!conditions) throw new ToolError(`Puppeteer network preset ${JSON.stringify(key)} is unavailable`);
 		return conditions;
+	}
+
+	/**
+	 * Grant where the browser allows it. The omp relay's extension debugger has no `Browser.grantPermissions`, and
+	 * trusted copy/paste shortcuts work without the grant.
+	 */
+	async #grantPermissionsBestEffort(permissions: Permission[]): Promise<void> {
+		try {
+			await this.#grantPermissions(permissions);
+		} catch {
+			// Ungranted: the shortcut still reaches the page as trusted input.
+		}
 	}
 
 	async #grantPermissions(permissions: Permission[]): Promise<void> {

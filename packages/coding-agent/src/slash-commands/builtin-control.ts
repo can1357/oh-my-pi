@@ -1,9 +1,88 @@
-import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { errorMessage } from "@oh-my-pi/pi-utils";
+import { AgentRegistry } from "../registry/agent-registry";
+import type { AgentSession } from "../session/agent-session";
+import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { clearApprovalGrants } from "../tools/approval-cache";
 import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
+import { signal } from "@oh-my-pi/pi-tui";
+import type { InteractiveModeContext } from "../modes/types";
+import { formatCoarseDuration } from "../modes/view-model/chrome/format";
+import type { PauseWorkStatus } from "../modes/view-model/overlays/pause-screen";
+import { presentFullscreen } from "../ui/apps/fullscreen";
+import { PAUSE_SHEET, PauseScreen } from "../ui/overlays/panels/pause-screen";
+
+/** Advisors with review work they can still run (not parked, yielded, or quota-paused). */
+function advisorUnsettledCount(session: AgentSessionHandle): number {
+	return session
+		.getAdvisorStatusOverview()
+		.advisors.filter(advisor => advisor.backlog > 0 && !advisor.isPaused && !advisor.yielded).length;
+}
+
+/**
+ * Outstanding work for the `/pause` screen. A subagent counts as a turn only
+ * while its session streams and is not parked; its task job is deduplicated
+ * against that same live set, so a pre-live or stale `running` ref still
+ * counts through its job. Advisors of the root and every live subagent count.
+ */
+function pauseWorkStatus(root: AgentSession): PauseWorkStatus {
+	const registry = AgentRegistry.global();
+	const liveSubagents = registry.list().filter(ref => ref.kind === "sub" && registry.isRunning(ref));
+	const liveSubagentIds = new Set(liveSubagents.map(ref => ref.id));
+	let unsettledTurns = Number(root.isStreaming && !root.agent.isPaused) + advisorUnsettledCount(root);
+	for (const ref of liveSubagents) {
+		if (!ref.session) continue;
+		if (!ref.session.agent.isPaused) unsettledTurns++;
+		unsettledTurns += advisorUnsettledCount(ref.session);
+	}
+	const unfinishedJobs =
+		root
+			.getAsyncJobTree({ recentLimit: 0 })
+			?.running.filter(job => job.type !== "task" || job.agentId === undefined || !liveSubagentIds.has(job.agentId))
+			.length ?? 0;
+	return { unsettledTurns, unfinishedJobs };
+}
+
+/** How often the pause screen re-reads outstanding work. */
+const PAUSE_WORK_POLL_MS = 1_000;
+
+/**
+ * Engage the global pause gate and hold the fullscreen pause screen until the
+ * user resumes. No-op when the gate is already engaged. Always releases the
+ * gate on the way out (including teardown throws) — a leaked pause would
+ * freeze every agent in the process with no UI left to release it.
+ */
+async function runPauseScreen(ctx: InteractiveModeContext): Promise<void> {
+	if (!agentPauseGate.pause()) return;
+	try {
+		const startedAt = Date.now();
+		const work = signal(pauseWorkStatus(ctx.session), {
+			equals: (a, b) => a.unsettledTurns === b.unsettledTurns && a.unfinishedJobs === b.unfinishedJobs,
+		});
+		const timer = setInterval(() => work.set(pauseWorkStatus(ctx.session)), PAUSE_WORK_POLL_MS);
+		const resumed = Promise.withResolvers<void>();
+		await presentFullscreen(ctx.shell, () => ({
+			view: () =>
+				PauseScreen({
+					sessionName: ctx.sessionName,
+					since: () => startedAt,
+					work,
+					onResume: () => resumed.resolve(),
+				}),
+			sheet: PAUSE_SHEET,
+			done: resumed.promise,
+			dispose: () => clearInterval(timer),
+		}));
+	} finally {
+		const heldMs = agentPauseGate.resume();
+		if (heldMs !== undefined) {
+			ctx.showStatus(`Resumed after ${formatCoarseDuration(heldMs)} — agents are running again.`);
+		}
+	}
+}
 
 export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{

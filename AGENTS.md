@@ -8,18 +8,18 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 ### Package Structure
 
-| Package                 | Description                                                                             |
-| ----------------------- | --------------------------------------------------------------------------------------- |
-| `packages/ai`           | Multi-provider LLM client with streaming support                                        |
-| `packages/catalog`      | Model catalog: bundled models.json, provider descriptors, model identity/classification |
-| `packages/agent`        | Agent runtime with tool calling and state management                                    |
-| `packages/coding-agent` | Main CLI application (primary focus)                                                    |
-| `packages/tui`          | Terminal UI library with differential rendering                                         |
-| `packages/natives`      | Bindings for native text/image/grep operations                                          |
-| `packages/stats`        | Local observability dashboard (`omp stats`)                                             |
-| `packages/omptype`      | ArkType-compatible schema validation with a lazy JIT runtime                            |
-| `packages/utils`        | Shared utilities (logger, streams, temp files)                                          |
-| `crates/pi-natives`     | Rust crate for performance-critical text/grep ops                                       |
+|Package|Description|
+|---|---|
+|`packages/ai`|Multi-provider LLM client with streaming support|
+|`packages/catalog`|Model catalog: bundled models.json, provider descriptors, model identity/classification|
+|`packages/agent`|Agent runtime with tool calling and state management|
+|`packages/coding-agent`|Main CLI application (primary focus)|
+|`packages/tui`|UI library: reactive JSX nodes, terminal and native (TSP) renderers, terminal driver, text, theme|
+|`packages/natives`|Bindings for native text/image/grep operations|
+|`packages/stats`|Local observability dashboard (`omp stats`)|
+|`packages/omptype`|ArkType-compatible schema validation with a lazy JIT runtime|
+|`packages/utils`|Shared utilities (logger, streams, temp files)|
+|`crates/natives`|Rust crate for performance-critical text/grep ops|
 
 **Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
 
@@ -76,20 +76,20 @@ Use Bun APIs where they provide a cleaner alternative; fall back to `node:*` onl
 
 ### Quick reference
 
-| Operation       | Use                                       | Not                                |
-| --------------- | ----------------------------------------- | ---------------------------------- |
-| File read/write | `Bun.file()`, `Bun.write()`               | `readFileSync`, `writeFileSync`    |
-| Spawn process   | `` $`cmd` ``, `Bun.spawn()`               | `child_process`                    |
-| Sleep           | `Bun.sleep(ms)`                           | `setTimeout` promise               |
-| Binary lookup   | `$which("git")` from `@oh-my-pi/pi-utils` | `spawnSync(["which", "git"])`      |
-| HTTP server     | `Bun.serve()`                             | `http.createServer()`              |
-| SQLite          | `bun:sqlite`                              | `better-sqlite3`                   |
-| Hashing         | `Bun.hash()`, `Bun.password.*`, WebCrypto | `node:crypto`                      |
-| Path resolution | `import.meta.dir`, `import.meta.path`     | `fileURLToPath` dance              |
-| JSON5           | `Bun.JSON5.parse()` / `.stringify()`      | `json5` package                    |
-| JSONL           | `Bun.JSONL.parse()` / `.parseChunk()`     | `text.split("\n").map(JSON.parse)` |
-| String width    | `Bun.stringWidth()`                       | `get-east-asian-width`, custom     |
-| Text wrapping   | `Bun.wrapAnsi()`                          | custom ANSI-aware wrappers         |
+|Operation|Use|Not|
+|---|---|---|
+|File read/write|`Bun.file()`, `Bun.write()`|`readFileSync`, `writeFileSync`|
+|Spawn process|`` $`cmd` ``, `Bun.spawn()`|`child_process`|
+|Sleep|`Bun.sleep(ms)`|`setTimeout` promise|
+|Binary lookup|`$which("git")` from `@oh-my-pi/pi-utils`|`spawnSync(["which", "git"])`|
+|HTTP server|`Bun.serve()`|`http.createServer()`|
+|SQLite|`bun:sqlite`|`better-sqlite3`|
+|Hashing|`Bun.hash()`, `Bun.password.*`, WebCrypto|`node:crypto`|
+|Path resolution|`import.meta.dir`, `import.meta.path`|`fileURLToPath` dance|
+|JSON5|`Bun.JSON5.parse()` / `.stringify()`|`json5` package|
+|JSONL|`Bun.JSONL.parse()` / `.parseChunk()`|`text.split("\n").map(JSON.parse)`|
+|String width|`Bun.stringWidth()`|`get-east-asian-width`, custom|
+|Text wrapping|`Bun.wrapAnsi()`|custom ANSI-aware wrappers|
 
 ### Process execution
 
@@ -233,10 +233,10 @@ All text displayed in tool renderers must be sanitized. Raw content (file conten
 
 **Rules:**
 
-- **Tabs → spaces** via `replaceTabs()` (from `@oh-my-pi/pi-tui` or `../tools/render-utils`).
-- **Truncate** lines with `truncateToWidth()` / `ui.truncate()`. Use `TRUNCATE_LENGTHS` constants.
-- **Shorten paths** with `shortenPath()` (replaces home with `~`).
-- **Preview limits** from `PREVIEW_LIMITS`. No ad-hoc numbers.
+- **Tabs → spaces** via `replaceTabs()` (from `@oh-my-pi/pi-tui/text/width` or `src/utils/text-width.ts`).
+- **Truncate** lines with `truncate()` (`@oh-my-pi/pi-tui/text/width`) / `truncateToWidth()` (`src/utils/text-width.ts`). Use `TRUNCATE_LENGTHS` constants (`src/utils/render-utils.ts`).
+- **Shorten paths** with `shortenPath()` (`src/utils/render-utils.ts`; replaces home with `~`).
+- **Preview limits** from `PREVIEW_LIMITS` (`src/utils/render-utils.ts`). No ad-hoc numbers.
 
 **Apply to every render path**, not just the happy one:
 
@@ -252,27 +252,28 @@ Tool-call previews can have **multiple render paths**. If you add preview-only f
 For the bash tool specifically:
 
 - The pending preview may need raw `partialJson`, not just parsed `arguments`. Parsed args lag until a JSON object closes, which makes inline env assignments appear only at the end.
-- Preserve preview-only fields (e.g. `__partialJson`) through `event-controller.ts`, transcript rebuilds in `ui-helpers.ts`, and merged call/result rendering in `tool-execution.ts`. Missing one path causes inconsistent previews.
-- `ToolExecutionComponent.#buildRenderContext()` for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
+- Preserve preview-only fields (e.g. `__partialJson`) through `modes/controllers/event-controller.ts`, transcript rebuilds in `modes/utils/ui-helpers.ts`, and merged call/result rendering in `ui/transcript/tool-block.tsx`. Missing one path causes inconsistent previews.
+- `ToolCall.#buildRenderContext()` (`ui/transcript/tool-block.tsx`) for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
 - Verify both live streaming and rebuilt transcript paths after any bash preview change. A fix in one path does not fix the other.
 
 ## Commands
 
 - NEVER commit unless asked.
 - Never use `tsc`/`npx tsc` — always `bun check`.
-- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass runs every runnable doctest in the workspace's lib crates; today that is tree-sitter-go's one example (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs).
+- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass runs every runnable doctest in the workspace's lib crates; today that is tree-sitter-go's one example (omp-natives is a `cdylib`, which rustdoc skips; omp-builtins' examples are `ignore`d vendored uutils docs).
+- `bun check`'s Rust half runs only when the branch changed a Rust-affecting file (`*.rs`, `crates/`, Cargo/toolchain files) since its merge base with `upstream/main` or `origin/main`, committed or not; it always runs in GitHub Actions, when that cannot be determined (e.g. shallow clone), or with `OMP_FORCE_RUST_TASKS=1`.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
 ## Rust Build Profiles
 
 Profiles live in the root `Cargo.toml`; `.cargo/config.toml` carries the settings Cargo.toml cannot express. Both are committed, so no local `~/.cargo/config.toml` is required.
 
-| Profile | Use |
-| --- | --- |
-| `dev` | Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`. |
-| `release` | Shipping build: fat LTO, 1 codegen unit, stripped. |
-| `local` | Fast local release iteration: thin LTO, 16 codegen units, incremental. |
-| `profiling` | `release` codegen with symbols kept, for `perf`/`samply`/Instruments. |
-| `ci` | Thin LTO, no debuginfo, stripped. |
+|Profile|Use|
+|---|---|
+|`dev`|Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`.|
+|`release`|Shipping build: fat LTO, 1 codegen unit, stripped.|
+|`local`|Fast local release iteration: thin LTO, 16 codegen units, incremental.|
+|`profiling`|`release` codegen with symbols kept, for `perf`/`samply`/Instruments.|
+|`ci`|Thin LTO, no debuginfo, stripped.|
 
 **Never set `split-debuginfo = "off"` on a profile that has debuginfo.** On Mach-O the linker never merges DWARF into the executable — it writes a debug map (`N_OSO`) pointing at the `.o` files, and `"unpacked"` is what keeps those files. With `"off"` every backtrace frame in our own crates silently loses `file:line`; the `panicked at foo.rs:3` header still prints (that is `#[track_caller]`, not debuginfo), which makes the loss easy to miss. `ci` may use `"off"` only because it sets `debug = false`.
 

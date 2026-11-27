@@ -10,7 +10,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const taskAgent: AgentDefinition = {
@@ -166,6 +166,29 @@ describe("task async preflight", () => {
 		expect(runSubprocess).not.toHaveBeenCalled();
 		expect(jobs.getJob("Invalid")).toBeUndefined();
 		expect(jobs.getJob("Valid")).toBeUndefined();
+	});
+
+	it.each([false, true])("treats a blank per-call model as omitted (batch=%s)", async batch => {
+		mockDiscovery();
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("BlankModel"));
+		const tool = await TaskTool.create(
+			createSession({ manager: manager(), settings: { "async.enabled": false, "task.batch": batch } }),
+		);
+
+		const result = await tool.execute(
+			"blank-model",
+			(batch
+				? {
+						context: "Shared context.",
+						tasks: [{ name: "BlankModel", agent: "task", task: "Do work.", model: "" }],
+					}
+				: { name: "BlankModel", agent: "task", task: "Do work.", model: "" }) as TaskParams,
+		);
+
+		expect(result.isError).toBeFalsy();
+		expect(runSubprocess).toHaveBeenCalledTimes(1);
+		// A blank selector is absence: the task uses its configured model, not a per-call route.
+		expect(runSubprocess.mock.calls[0]?.[0]?.perCallModelGrants).toBeUndefined();
 	});
 
 	it("names the searched agent directories, home-shortened, when the agent is unknown", async () => {

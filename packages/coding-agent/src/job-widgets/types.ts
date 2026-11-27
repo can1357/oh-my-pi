@@ -4,7 +4,7 @@
  * into a `JobWidgetView` for the `wait` card, the HUD and the jobs sheet
  * ({@link JobWidgetRegistry}).
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../tools/details/job-widget";
 import type { AsyncJob } from "../async/job-manager";
 
 /** Id of a task job's source carrying its subagent's finished tool calls. */
@@ -33,7 +33,7 @@ export interface JobTextChunk {
  * a pipe, UTF-16 units for a tap); a reader only hands back an `end` it got.
  */
 export interface JobTextSource {
-	/** Stable id a widget rule names in `from`: `out`, `pipe:1`, `tools`, `bg_7:pipe:1`. */
+	/** Stable id a widget rule names in `from`: `out`, `pipe:1`, `file:2`, `tools`, `bg_7:pipe:1`. */
 	readonly id: string;
 	/** What the text is, for the widget author (`cargo nextest run … → tail -n 5`). */
 	readonly label: string;
@@ -45,6 +45,8 @@ export interface JobWidgetBrief {
 	kind: "bash" | "task";
 	/** bash: the full command line. */
 	command?: string;
+	/** bash: seconds until the command is killed; absent when it has no timeout. */
+	timeoutSec?: number;
 	/** task: the assignment the subagent was given. */
 	task?: string;
 	/** The model's intent line on the call that started the job. */
@@ -74,9 +76,21 @@ export interface JobWidgetRegistry {
 	 * model start writing its spec.
 	 */
 	view(job: AsyncJob): JobWidgetView | undefined;
-	/** Called after a background refresh changed a shown widget, so a surface that is not polling repaints. */
+	/**
+	 * One line on what a command's job does and when it ends, written by the
+	 * cheap model once the job has run a while; `undefined` until then, for a
+	 * command that reads at a glance, or with widgets turned off.
+	 */
+	caption(job: AsyncJob): string | undefined;
+	/**
+	 * Asks for a running command's caption without showing its widget (so no
+	 * spec is written), for a listing that prints the command; the caption
+	 * shows on a later listing. Same once-per-job rules as a shown widget.
+	 */
+	requestCaption(job: AsyncJob): void;
+	/** Called after a background refresh changed a shown widget or a caption landed, so a surface that is not polling repaints. */
 	subscribe(listener: () => void): () => void;
-	/** Drops a job's widget, once its row is evicted. */
+	/** Drops a job's widget and caption, once its row is evicted. */
 	forget(jobId: string): void;
 	dispose(): void;
 }

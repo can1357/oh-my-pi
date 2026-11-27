@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,14 +9,16 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { RACY_STAMP_WINDOW_MS } from "@oh-my-pi/pi-coding-agent/tools/racy-stamp";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { $which, removeSyncWithRetries, Snowflake, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
@@ -39,6 +41,15 @@ function writeFileWithMtime(filePath: string, content: string, mtimeMs: number):
 	fs.writeFileSync(filePath, content);
 	const mtime = new Date(mtimeMs);
 	fs.utimesSync(filePath, mtime, mtime);
+}
+
+/** Makes `Bun.file(filePath).stat()` answer `stat()`, as a filesystem whose timestamps the test picks. */
+function reportStat(filePath: string, stat: () => fs.Stats): void {
+	const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(filePath));
+	const realStat = prototype.stat;
+	vi.spyOn(prototype, "stat").mockImplementation(function (this: Bun.BunFile) {
+		return this.name === filePath ? Promise.resolve(stat()) : realStat.call(this);
+	});
 }
 
 function shellEscape(value: string): string {
@@ -512,10 +523,10 @@ function createTestToolSession(
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => sessionDir,
-		allocateOutputArtifact: async (toolType: string) => {
-			fs.mkdirSync(sessionDir, { recursive: true });
+		allocateOutputArtifact: async () => {
+			fs.mkdirSync(path.join(sessionDir, "local"), { recursive: true });
 			const id = String(++artifactCounter);
-			return { id, path: path.join(sessionDir, `${id}.${toolType}.log`) };
+			return { id, path: path.join(sessionDir, "local", spillFileName(id)) };
 		},
 		settings,
 		...overrides,
@@ -751,7 +762,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 1");
 			expect(output).toContain(`Line ${defaultLimit}`);
 			expect(output).not.toContain(`Line ${defaultLimit + 1}`);
-			expect(output).toContain(`[Showing lines 1-${defaultLimit} of 3500. Use :${defaultLimit + 1} to continue]`);
+			expect(output).toContain(`[Showing lines 1-${defaultLimit} of 3500. Use :${defaultLimit + 1}- to continue]`);
 		});
 
 		it("applies a read.defaultLimit change made after the tool was built", async () => {
@@ -780,7 +791,7 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain("Line 1:");
 			// Should show byte limit message
-			expect(output).toMatch(/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use :\d+ to continue\]/);
+			expect(output).toMatch(/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use :\d+- to continue\]/);
 		});
 
 		it("should handle offset parameter (with leading context expansion)", async () => {
@@ -788,7 +799,7 @@ describe("Coding Agent Tools", () => {
 			const lines = Array.from({ length: 100 }, (_, i) => `Line ${i + 1}`);
 			fs.writeFileSync(testFile, lines.join("\n"));
 
-			const result = await readTool.execute("test-call-5", { path: `${testFile}:L51` });
+			const result = await readTool.execute("test-call-5", { path: `${testFile}:L51-` });
 			const output = getTextOutput(result);
 
 			// Read tool widens by 1 leading + 3 trailing unanchored context lines
@@ -816,7 +827,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 10");
 			expect(output).toContain("Line 13");
 			expect(output).not.toContain("Line 14");
-			expect(output).toContain("[Showing lines 1-13 of 100. Use :14 to continue]");
+			expect(output).toContain("[Showing lines 1-13 of 100. Use :14- to continue]");
 		});
 
 		it("does not expand on the leading side when offset is 1 or unspecified", async () => {
@@ -835,7 +846,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 5");
 			expect(output).toContain("Line 8");
 			expect(output).not.toContain("Line 9");
-			expect(output).toContain("[Showing lines 1-8 of 50. Use :9 to continue]");
+			expect(output).toContain("[Showing lines 1-8 of 50. Use :9- to continue]");
 		});
 
 		it("clamps leading context at file start without errors", async () => {
@@ -873,7 +884,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 60");
 			expect(output).toContain("Line 63");
 			expect(output).not.toContain("Line 64");
-			expect(output).toContain("[Showing lines 40-63 of 100. Use :64 to continue]");
+			expect(output).toContain("[Showing lines 40-63 of 100. Use :64- to continue]");
 		});
 
 		it("should show error when offset is beyond file length", async () => {
@@ -884,7 +895,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Line 100 is beyond end of file (3 lines total)");
-			expect(output).toContain("Use :1 to read from the start, or :3 to read the last line.");
+			expect(output).toContain("Use :1- to read from the start, or :3 to read the last line.");
 		});
 
 		it("should refuse binary files (NUL or invalid UTF-8) instead of emitting mojibake", async () => {
@@ -925,7 +936,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should reject malformed internal-URL selectors instead of dumping the whole resource", async () => {
-			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100-5" })).rejects.toThrow(
+			await expect(readTool.execute("test-call-bad-internal-sel", { path: "local://3.log:-100-5" })).rejects.toThrow(
 				/Invalid selector ':-100-5'/,
 			);
 		});
@@ -968,7 +979,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("not scanned to EOF");
-			expect(output).toContain("Use :7 to continue");
+			expect(output).toContain("Use :7- to continue");
 			expect(output).not.toMatch(/\[Showing lines 1-6 of \d+/);
 			expect(result.details?.meta?.truncation).toBeUndefined();
 			expect(result.details?.truncation).toBeUndefined();
@@ -982,7 +993,11 @@ describe("Coding Agent Tools", () => {
 			fs.writeFileSync(testFile, `${firstLine}\n${tail}`);
 			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
 
-			const result = await readTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
+			// With the column cap on, the line's cut display fits the page; only an uncapped read hits this branch.
+			const uncappedReadTool = wrapToolWithMetaNotice(
+				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }))),
+			);
+			const result = await uncappedReadTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Hashline output requires full lines");
@@ -990,12 +1005,12 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("Showing line 1");
 		});
 
-		it("raw tail selects the last two addressable lines, not the terminal newline", async () => {
+		it("raw tail selects the last two addressable lines verbatim, with no empty line after them", async () => {
 			const testFile = path.join(testDir, "tail-raw.txt");
 			fs.writeFileSync(testFile, "alpha\nbeta\ngamma\n");
 
 			const raw = getTextOutput(await readTool.execute("test-tail-raw", { path: `${testFile}:raw:-2` }));
-			expect(raw).toBe("beta\ngamma");
+			expect(raw).toBe("beta\ngamma\n");
 
 			const clamped = getTextOutput(await readTool.execute("test-tail-clamp", { path: `${testFile}:-50` }));
 			expect(clamped).toContain("alpha");
@@ -1019,9 +1034,13 @@ describe("Coding Agent Tools", () => {
 
 		it("reports the artifact byte budget that truncated a ranged read", async () => {
 			const artifactsDir = path.join(testDir, "artifact-limit-session");
-			fs.mkdirSync(artifactsDir, { recursive: true });
-			fs.writeFileSync(path.join(artifactsDir, "7.mcp.log"), `skip\n{\n${"x".repeat(60 * 1024)}\ntail`);
-			const artifactSession = createTestToolSession(testDir, Settings.isolated(), {
+			fs.mkdirSync(path.join(artifactsDir, "local"), { recursive: true });
+			fs.writeFileSync(
+				path.join(artifactsDir, "local", spillFileName(7)),
+				`skip\n{\n${"x".repeat(60 * 1024)}\ntail`,
+			);
+			// Uncapped, so the 60KB line is charged its full size rather than its cut display.
+			const artifactSession = createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }), {
 				localProtocolOptions: {
 					getArtifactsDir: () => artifactsDir,
 					getSessionId: () => "artifact-limit-session",
@@ -1030,13 +1049,13 @@ describe("Coding Agent Tools", () => {
 			const artifactReadTool = wrapToolWithMetaNotice(new ReadTool(artifactSession));
 
 			const result = await artifactReadTool.execute("test-call-artifact-byte-limit", {
-				path: "artifact://7:3-4",
+				path: "local://7.log:3-4",
 			});
 			const output = getTextOutput(result);
 			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
 			expect(output).toContain("Line 3 is 60.0KB");
-			expect(output).toContain("artifact://7:raw:3-3");
-			expect(output).not.toContain("Use :3 to continue");
+			expect(output).toContain("local://7.log:raw:3-3");
+			expect(output).not.toContain("Use :3- to continue");
 		});
 
 		it("pages oversized file reads at the spill threshold instead of eliding their middle (#16277)", async () => {
@@ -1088,7 +1107,7 @@ describe("Coding Agent Tools", () => {
 					expect(truncation.outputBytes).toBeLessThanOrEqual(20 * 1024);
 					for (let n = firstRow; n <= lastRow; n++) expect(output).toContain(row(n));
 					expect(output).not.toContain(row(lastRow + 1));
-					expect(output).toContain(`Use :${truncation.nextOffset} to continue`);
+					expect(output).toContain(`Use :${truncation.nextOffset}- to continue`);
 
 					// The named continuation picks up exactly where the page stopped.
 					const next = getTextOutput(
@@ -1145,7 +1164,7 @@ describe("Coding Agent Tools", () => {
 				const nextOffset = page.details?.meta?.truncation?.nextOffset;
 				expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
 				expect(getTextOutput(page)).not.toContain("elided");
-				expect(getTextOutput(page)).toContain(`Use :${nextOffset} to continue`);
+				expect(getTextOutput(page)).toContain(`Use :${nextOffset}- to continue`);
 
 				// Block context is unbounded by the line budget, so that page still spills.
 				const closers = await read(`${nested}:${depth + 1}-${depth * 2}`);
@@ -1156,7 +1175,7 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
-		it("bounds oversized URL reads like plain files, except pages of artifact storage", async () => {
+		it("bounds oversized URL reads like plain files, except pages of local:// files", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
 			fs.mkdirSync(skillDir, { recursive: true });
@@ -1212,25 +1231,23 @@ describe("Coding Agent Tools", () => {
 					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
 				}
 				// Line pages of a URL-located file stop at the threshold and name their continuation.
-				for (const url of ["local://big.md:1-3000", "agent://Lines:1-3000"]) {
+				for (const url of ["agent://Lines:1-3000"]) {
 					const result = await spillReadTool.execute(`page-${url}`, { path: url }, undefined, undefined, context);
 					const truncation = result.details?.meta?.truncation;
 					expect(truncation?.artifactId).toBeUndefined();
 					expect(truncation?.outputBytes).toBeLessThanOrEqual(20 * 1024);
-					expect(getTextOutput(result)).toContain(`Use :${truncation?.nextOffset} to continue`);
+					expect(getTextOutput(result)).toContain(`Use :${truncation?.nextOffset}- to continue`);
 				}
 
-				const artifactId = await spillManager.saveArtifact(payload, "read");
+				// local:// files (spills included) are re-readable with selectors: a page keeps
+				// the full budget and is never copied into another spill.
+				const artifactId = await spillManager.saveArtifact(payload);
 				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
-				const artifactPage = await spillReadTool.execute(
-					"spill-artifact-page",
-					{ path: `artifact://${artifactId}:1-3000` },
-					undefined,
-					undefined,
-					context,
-				);
-				expect(artifactPage.details?.meta?.truncation?.artifactId).toBeUndefined();
-				expect(getTextOutput(artifactPage)).toContain("payload line 2999");
+				for (const url of [`${spillUrl(artifactId!)}:1-3000`, "local://big.md:1-3000"]) {
+					const page = await spillReadTool.execute(`page-${url}`, { path: url }, undefined, undefined, context);
+					expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
+					expect(getTextOutput(page)).toContain("payload line 2999");
+				}
 				expect(saveArtifact).not.toHaveBeenCalled();
 			} finally {
 				await spillManager.close();
@@ -1304,11 +1321,8 @@ describe("Coding Agent Tools", () => {
 					mimeType: image.mimeType,
 				});
 
-				const artifactPath = path.join(
-					spillManager.getArtifactsDir()!,
-					`${truncation.artifactId}.mcp__server__tool.log`,
-				);
-				expect(await Bun.file(artifactPath).text()).toBe(payload);
+				const artifactPath = await spillManager.getArtifactPath(truncation.artifactId!);
+				expect(await Bun.file(artifactPath!).text()).toBe(payload);
 			} finally {
 				await spillManager.close();
 			}
@@ -1369,7 +1383,7 @@ describe("Coding Agent Tools", () => {
 			fs.mkdirSync(childDir, { recursive: true });
 			writeFileWithMtime(path.join(testDir, ".hidden-root"), "hidden", base + 20_000);
 			writeFileWithMtime(path.join(testDir, ".DS_Store"), "mac metadata", base + 25_000);
-			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "ignored", base + 24_000);
+			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "dependency", base + 24_000);
 			for (let i = 0; i < 13; i += 1) {
 				const fileName = `root-${String(i).padStart(2, "0")}.txt`;
 				writeFileWithMtime(path.join(testDir, fileName), fileName, base + i);
@@ -1387,7 +1401,9 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(".");
 			expect(output).toContain(".hidden-root");
 			expect(output).not.toContain(".DS_Store");
-			expect(output).not.toContain("node_modules");
+			expect(output).toContain("node_modules/");
+			expect(output).toContain("pkg/");
+			expect(output).not.toContain("index.js");
 			expect(output).toContain("root-00.txt");
 			expect(output).toContain("root-01.txt");
 			expect(output).toContain("root-12.txt");
@@ -1841,16 +1857,53 @@ describe("Coding Agent Tools", () => {
 			const pinnedMtime = new Date("2024-01-01T00:00:00Z");
 			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
 			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
-			expect(getTextOutput(await readTool.execute("test-call-zip-before", { path: archivePath }))).toContain(
-				"alpha.txt",
-			);
+			const settled = await Bun.file(archivePath).stat();
+			let reported = settled;
+			reportStat(archivePath, () => reported);
+			// The archive is older than the racy window when first read, so its index is cached
+			// (the clock ticks in whole milliseconds; ctime carries a fraction).
+			setSystemTime(new Date(Math.ceil(settled.ctimeMs) + RACY_STAMP_WINDOW_MS));
+			try {
+				expect(getTextOutput(await readTool.execute("test-call-zip-before", { path: archivePath }))).toContain(
+					"alpha.txt",
+				);
 
-			// Same-length name and content: the rewrite keeps the size; the mtime is put back.
-			fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
-			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
-			const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
-			expect(output).toContain("bravo.txt");
-			expect(output).not.toContain("alpha.txt");
+				// Same-length name and content: the rewrite keeps the size; the mtime is put back.
+				fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
+				// Only the change time tells it apart, moved on by the next timestamp granule.
+				reported = Object.assign(Object.create(Object.getPrototypeOf(settled)), settled, {
+					ctimeMs: settled.ctimeMs + 1,
+				});
+				const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				setSystemTime();
+			}
+		});
+
+		it("re-reads an archive rewritten in place within one timestamp granule", async () => {
+			const archivePath = path.join(testDir, "granule.zip");
+			await Bun.write(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			// A coarse-timestamp filesystem: the same-size rewrite below lands in this
+			// write's granule, so it leaves the archive's whole stat unchanged.
+			const granuleStat = await Bun.file(archivePath).stat();
+			reportStat(archivePath, () => granuleStat);
+			// Both reads run inside the granule.
+			setSystemTime(granuleStat.ctime);
+			try {
+				expect(
+					getTextOutput(await readTool.execute("test-call-zip-granule-before", { path: archivePath })),
+				).toContain("alpha.txt");
+
+				await Bun.write(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				const output = getTextOutput(await readTool.execute("test-call-zip-granule-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				setSystemTime();
+			}
 		});
 
 		it("should list zip archives without inflating member payloads", async () => {
@@ -2411,7 +2464,7 @@ function b() {
 		it("retains wall time and exit status for slow failed commands", async () => {
 			const result = await bashTool.execute("test-call-walltime-slow", { command: "sleep 1.1; echo wt; exit 7" });
 			expect(getTextOutput(result)).toContain("wt");
-			expect(getTextOutput(result)).toMatch(/Wall time: \d+\.\d{2} seconds/);
+			expect(getTextOutput(result)).toMatch(/\[took \d+\.\d{2}s\]/);
 			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(1000);
 			expect(result.details?.exitCode).toBe(7);
 			expect(result.isError).toBe(true);
@@ -2541,7 +2594,7 @@ function b() {
 			const artifactId = result.details?.meta?.truncation?.artifactId;
 			expect(artifactId).toBeDefined();
 			if (artifactId) {
-				const artifactPath = path.join(testDir, "session", `${artifactId}.bash.log`);
+				const artifactPath = path.join(testDir, "session", "local", spillFileName(artifactId));
 				expect(fs.existsSync(artifactPath)).toBe(true);
 			}
 		});
@@ -2552,7 +2605,7 @@ function b() {
 			const result = await bashTool.execute("test-call-9", { command: "exit 1" });
 			expect(result.isError).toBe(true);
 			expect(result.details?.exitCode).toBe(1);
-			expect(getTextOutput(result)).toContain("Command exited with code 1");
+			expect(getTextOutput(result)).toContain("[exit code 1]");
 		});
 
 		it("should keep short commands inline when auto-background is enabled", async () => {
@@ -2634,10 +2687,8 @@ function b() {
 			expect(result.details?.async?.state).toBe("running");
 			expect(result.details?.async?.type).toBe("bash");
 			// Auto-backgrounded after its foreground wait: the deadline counts the job's whole run, not time left.
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
-			expect(getTextOutput(result)).toContain(
-				"(killed once it has run 3600s in total; `timeout: 0` disables the deadline)",
-			);
+			expect(getTextOutput(result)).toContain("[backgrounded as ");
+			expect(getTextOutput(result)).toContain("killed at 3600s total");
 
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
@@ -2701,7 +2752,7 @@ function b() {
 			// The steer backgrounds the command instead of killing it: the call
 			// returns a running job and the command finishes on its own.
 			expect(result.details?.async?.state).toBe("running");
-			expect(getTextOutput(result)).toContain("Backgrounded early to handle an incoming message");
+			expect(getTextOutput(result)).toContain("(incoming message)");
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected a steer-backgrounded job id");
@@ -2739,8 +2790,7 @@ function b() {
 			// backgrounded job hits its timeout in ~0.1s instead of a real
 			// wall-clock second. The auto-background-on-timeout decision path is
 			// unchanged; we assert the timeout-notice prefix rather than the
-			// rounded seconds (it reads "0" here only because the seam
-			// deliberately undercuts the 1s production floor).
+			// seconds (the seam deliberately undercuts the 1s production floor).
 			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
 
 			const result = await autoBackgroundBashTool.execute("test-call-9-auto-timeout-background", {
@@ -2750,7 +2800,7 @@ function b() {
 
 			expect(result.details?.timeoutSeconds).toBe(0.05);
 			expect(result.details?.async?.state).toBe("running");
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
+			expect(getTextOutput(result)).toContain("[backgrounded as ");
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected an auto-backgrounded job id");
@@ -2761,7 +2811,7 @@ function b() {
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
 			expect(deliveries).toHaveLength(1);
 			expect(deliveries[0]?.jobId).toBe(jobId);
-			expect(deliveries[0]?.text).toContain("Command timed out after");
+			expect(deliveries[0]?.text).toContain("[timed out after");
 			await asyncJobManager.dispose();
 		});
 
@@ -2770,7 +2820,7 @@ function b() {
 
 			const output = getTextOutput(result);
 			expect(output).toContain("ok");
-			expect(output).toContain("Timeout clamped to 3600s (requested 7200s; allowed range 1-3600s).");
+			expect(output).toContain("[timeout clamped: 7200s → 3600s]");
 			expect(result.details?.timeoutSeconds).toBe(3600);
 			expect(result.details?.requestedTimeoutSeconds).toBe(7200);
 		});
@@ -2850,6 +2900,26 @@ function b() {
 			expect(output).toContain("first-line");
 			expect(output).toContain("second");
 			expect(output).toContain("third");
+		});
+
+		it("hoists a leading `cd <dir>;` into cwd only when the directory exists", async () => {
+			fs.mkdirSync(path.join(testDir, "sub-dir"));
+			const executeBash = vi.spyOn(bashExecutor, "executeBash");
+
+			const hoistedResult = await bashTool.execute("cd-semicolon-hoist", { command: "cd sub-dir; pwd" });
+			const [hoisted, options] = executeBash.mock.calls[0]!;
+			expect(hoisted).toBe("pwd");
+			expect(options?.cwd).toBe(path.join(testDir, "sub-dir"));
+			// Renderers draw the executed `pwd` under the directory it ran in.
+			expect(hoistedResult.details?.cwd).toBe(path.join(testDir, "sub-dir"));
+			expect(hoistedResult.details?.cdSeparator).toBe(";");
+
+			// A missing directory stays with the shell, which runs the rest anyway.
+			const missing = "cd does-not-exist; echo still-executed";
+			const result = await bashTool.execute("cd-semicolon-missing", { command: missing });
+			expect(executeBash.mock.calls[1]![0]).toBe(missing);
+			expect(getTextOutput(result)).toContain("still-executed");
+			expect(result.details?.cwd).toBeUndefined();
 		});
 	});
 

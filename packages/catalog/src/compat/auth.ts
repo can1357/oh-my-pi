@@ -19,6 +19,31 @@ export function authPolicyFor(provider: string): CompiledAuthProvider | undefine
 	return byId[provider];
 }
 
+/** Why `provider` is turned off (`disabled "<reason>"`): it offers no login and no credential reaches it. */
+export function providerDisabledReason(provider: string): string | undefined {
+	return byId[provider]?.disabled;
+}
+
+/** Whether `provider`'s logins hinge on a key only this machine holds (`device-bound #true`), so no auth broker stores them. */
+export function providerDeviceBound(provider: string): boolean {
+	return byId[provider]?.deviceBound === true;
+}
+
+/** The account risk a new login must accept first (`login-warning "<text>"`), if declared. */
+export function providerLoginWarning(provider: string): string | undefined {
+	return byId[provider]?.loginWarning;
+}
+
+/** What surfaces call `provider` once an account is linked (`connected-name "<text>"`), if declared. */
+export function providerConnectedName(provider: string): string | undefined {
+	return byId[provider]?.connectedName;
+}
+
+/** The transcript line shown when a session starts using a `provider` model (`active-notice "<text>"`), if declared. */
+export function providerActiveNotice(provider: string): string | undefined {
+	return byId[provider]?.activeNotice;
+}
+
 /** Every hook name referenced anywhere in the auth stratum, for registry completeness checks. */
 export function authHookNames(): Record<string, string[]> {
 	const names: Record<string, string[]> = {};
@@ -47,6 +72,7 @@ export function authHookNames(): Record<string, string[]> {
 			add("value", login.device.url.hook);
 			add("value", login.token.url.hook);
 		}
+		add("sign-out", p.signOut?.hook);
 		const refresh = p.refresh;
 		if (refresh?.kind === "hook") add("refresh", refresh.hook);
 		if (refresh?.kind === "request") {

@@ -1,10 +1,13 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import { assertSelectorString, PLAYWRIGHT_ONLY_SELECTOR_RE, parseAriaRefSelector } from "../aria/aria-snapshot";
 
 /** Semantic selector engines resolved in-page by the exported Chromium query handlers. */
 export type TernSemanticEngine = "label" | "placeholder" | "testid" | "alt" | "title" | "role";
 
-/** Parsed selector, JSON-safe, resolved in-page by the Tern page kit. */
+/**
+ * Parsed selector, JSON-safe: resolved in-page by the Tern page kit, or by the
+ * engine's native reads (`dom.ts`) on a Tern that answers them.
+ */
 export type TernSelector =
 	| { engine: "css"; query: string }
 	/** Puppeteer text engine: deepest elements whose text content includes the query. */
@@ -20,7 +23,9 @@ export type TernSelector =
 	/** Numeric id from the last `observe()` in this document. */
 	| { engine: "id"; id: number }
 	/** Element marked by the kit's `mark()`. */
-	| { engine: "handle"; token: string };
+	| { engine: "handle"; token: string }
+	/** Engine node ref of the native reads; the kit cannot resolve it. */
+	| { engine: "ref"; ref: string };
 
 const SEMANTIC_ENGINES: readonly TernSemanticEngine[] = ["label", "placeholder", "testid", "alt", "title", "role"];
 
@@ -68,7 +73,8 @@ export function parseTernSelector(selector: string): TernSelector {
 				`Use a puppeteer text selector ("text/Allow all"), an aria selector ("aria/Name"), CSS, or "xpath/...".`,
 		);
 	}
-	if (selector.startsWith("p-")) {
+	// `p-<engine>/` is the legacy prefixed form; any other `p-…` is CSS (PrimeNG's `p-button`, `p-confirmdialog`).
+	if (/^p-[a-z]+\//.test(selector)) {
 		if (!LEGACY_PREFIXES.some(prefix => selector.startsWith(prefix))) {
 			throw new ToolError(
 				`Unsupported selector prefix. Use CSS or puppeteer query handlers (aria/, text/, xpath/, pierce/). Got: ${selector}`,

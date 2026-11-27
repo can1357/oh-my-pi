@@ -196,6 +196,15 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
+	test("GET /v1/usage forwards an encoded provider filter and keeps aggregate requests unfiltered", async () => {
+		const reports = vi.spyOn(storage!.usage, "reports").mockResolvedValue([]);
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		await client.fetchUsage({ provider: "custom/provider + alias" });
+		expect(reports.mock.calls[0]?.[0]?.provider).toBe("custom/provider + alias");
+		await client.fetchUsage();
+		expect(reports.mock.calls[1]?.[0]?.provider).toBeUndefined();
+	});
+
 	test("GET /v1/usage outlives the base timeout for a serialized account batch", async () => {
 		vi.useFakeTimers();
 		const response = Promise.withResolvers<Response>();
@@ -660,6 +669,16 @@ describe("auth-broker wire surface", () => {
 			body: JSON.stringify({ installId: "x", entries: [{ at: "not-a-number" }] }),
 		});
 		expect(bad.status).toBe(400);
+
+		// Fields a newer client adds are ignored, not a reason to drop its usage.
+		const newer = await fetch(`${handle!.url}/v1/usage/observed`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ installId: "install-3", sessionId: "newer-client", entries: [entry] }),
+		});
+		expect(newer.status).toBe(200);
+		const afterNewer = await client.fetchClientUsageSummary();
+		expect(afterNewer.clients.find(c => c.installId === "install-3")?.providers[0]).toMatchObject({ requests: 2 });
 	});
 
 	test("Unknown route returns 404", async () => {
@@ -967,16 +986,40 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
-	test("openSnapshotStream throws AuthBrokerStreamUnsupportedError on 404", async () => {
+	test("openSnapshotStream throws AuthBrokerStreamUnsupportedError on the broker's own 404", async () => {
+		// An older broker answers an unknown route with its JSON `No route` body.
 		const dummy = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
-			fetch: () => new Response("Not Found", { status: 404 }),
+			fetch: () => Response.json({ error: "No route: GET /v1/snapshot/stream" }, { status: 404 }),
 		});
 		try {
 			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
 			const iter = client.openSnapshotStream();
 			await expect(iter.next()).rejects.toBeInstanceOf(AuthBrokerStreamUnsupportedError);
+		} finally {
+			dummy.stop(true);
+		}
+	});
+
+	test("openSnapshotStream treats a proxy's 404 as an ordinary failure, not a missing endpoint", async () => {
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => new Response("404 page not found\n", { status: 404, headers: { "Content-Type": "text/plain" } }),
+		});
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+			const error = await client
+				.openSnapshotStream()
+				.next()
+				.then(
+					() => undefined,
+					(caught: unknown) => caught,
+				);
+			expect(error).toBeInstanceOf(AuthBrokerError);
+			expect(error).not.toBeInstanceOf(AuthBrokerStreamUnsupportedError);
+			expect((error as AuthBrokerError).status).toBe(404);
 		} finally {
 			dummy.stop(true);
 		}

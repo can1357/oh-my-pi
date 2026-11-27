@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type CfgAppliedChange,
@@ -11,6 +14,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgAdvisorEnabled, cfgAdvisorSyncBacklog } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgBashPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import type { InternalWriteResult } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
@@ -193,20 +197,35 @@ describe("CfgProtocolHandler", () => {
 		}
 	});
 
-	it("reports a partial record write as applied, since layers deep-merge", async () => {
+	it("writes a record as a patch naming only the entries it changes", async () => {
 		const settings = Settings.isolated();
-		cfgModelRoles.set(settings, { default: "anthropic/a" });
-		setCfgApprovalHost({ approve: async () => "once", applied: () => {}, persistentSettings: settings });
+		cfgModelRoles.set(settings, { default: "anthropic/a", smol: "anthropic/s" });
+		const asked: CfgChangeRequest[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(request), "once"),
+			applied: () => {},
+			persistentSettings: settings,
+		});
 
-		const session = await write("cfg://modelRoles", '{"smol":"anthropic/b"}', settings);
-		expect(session.details?.cfg?.outcome).toBe("applied");
+		const session = await write("cfg://modelRoles", '{"plan":"anthropic/p"}', settings);
+		expect(asked[0]).toMatchObject({ previous: '{"plan":null}', value: '{"plan":"anthropic/p"}' });
 		expect(session.details?.cfg?.effective).toBeUndefined();
-		expect(textOf(session)).toContain("cfg://modelRoles/save");
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", smol: "anthropic/s", plan: "anthropic/p" });
 
-		const saved = await write("cfg://modelRoles/save", '{"smol":"anthropic/c"}', settings);
-		expect(saved.details?.cfg?.effective).toBeUndefined();
-		expect(textOf(saved)).not.toContain("Effective value is still");
-		expect(cfgModelRoles.get(settings)).toMatchObject({ smol: "anthropic/c" });
+		// The restore patch the result offers drops the session-only entry again.
+		await write("cfg://modelRoles", '{"plan":null}', settings);
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", smol: "anthropic/s" });
+
+		// A session override cannot remove an entry the config supplies, so the user is not asked.
+		await expect(write("cfg://modelRoles", '{"smol":null}', settings)).rejects.toThrow("cfg://modelRoles/save");
+		expect(asked).toHaveLength(2);
+
+		const saved = await write("cfg://modelRoles/save", '{"smol":null,"plan":"anthropic/c"}', settings);
+		expect(saved.details?.cfg?.previous).toBe('{"smol":"anthropic/s","plan":null}');
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", plan: "anthropic/c" });
+		// The global config kept the entry the patch did not name.
+		cfgModelRoles.clearOverride(settings);
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", plan: "anthropic/c" });
 	});
 
 	it("reports a saved value a project layer still overrides", async () => {
@@ -233,6 +252,48 @@ describe("CfgProtocolHandler", () => {
 		await write("cfg://modelRoles/save", '{"smol":"anthropic/next"}', settings);
 		expect(asked[2]?.shadowedBy).toBeUndefined();
 		expect(cfgModelRoles.get(settings)).toMatchObject({ default: "anthropic/project", smol: "anthropic/next" });
+	});
+
+	it("reports a saved bash.patterns list as applied under project rules that prepend to it", async () => {
+		const dir = TempDir.createSync("@omp-cfg-merged-list-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const projectDir = path.join(dir.path(), "project");
+			const resetDir = path.join(dir.path(), "reset");
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({ bash: { patterns: [{ match: "make *", approval: "allow" }] } }),
+			);
+			await Bun.write(path.join(resetDir, ".omp", "config.yml"), YAML.stringify({ bash: { patterns: [] } }));
+			const asked: CfgChangeRequest[] = [];
+			const approveAll = (settings: Settings) =>
+				setCfgApprovalHost({
+					approve: async request => (asked.push(request), "once"),
+					applied: () => {},
+					persistentSettings: settings,
+				});
+
+			const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+			approveAll(settings);
+			const saved = await write("cfg://bash/patterns/save", '[{"match":"git *","approval":"allow"}]', settings);
+			expect(asked[0]?.shadowedBy).toBeUndefined();
+			expect(saved.details?.cfg?.effective).toBeUndefined();
+			expect(textOf(saved)).not.toContain("Effective value is still");
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "make *", approval: "allow" },
+				{ match: "git *", approval: "allow" },
+			]);
+
+			// A project `[]` resets the list, so the saved global rules do not take effect there.
+			const reset = await Settings.loadIsolated({ cwd: resetDir, agentDir });
+			approveAll(reset);
+			const shadowed = await write("cfg://bash/patterns/save", '[{"match":"ls *","approval":"allow"}]', reset);
+			expect(asked[1]?.shadowedBy).toContain("project config");
+			expect(textOf(shadowed)).toContain("project config takes precedence");
+			expect(cfgBashPatterns.get(reset)).toEqual([]);
+		} finally {
+			await dir.remove();
+		}
 	});
 
 	it("persists /save writes to the host settings and mirrors them into a separate session instance", async () => {

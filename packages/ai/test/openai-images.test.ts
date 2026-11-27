@@ -48,13 +48,17 @@ describe("OpenAI-compatible image response_format", () => {
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 
-	test("ChatGPT Image JSON edits omit the unsupported parameter", async () => {
+	test("ChatGPT Image JSON edits satisfy a strict OpenAI-compatible gateway", async () => {
 		const model = imageModel("gateway", "chatgpt-image-latest");
-		let body: Record<string, unknown> | undefined;
-		const fetch: FetchImpl = async (_input, init) => {
-			const requestBody: Record<string, unknown> = JSON.parse(String(init?.body));
-			body = requestBody;
-			return imageResponse("response_format" in requestBody ? 400 : 200);
+		const fetch: FetchImpl = async (input, init) => {
+			expect(String(input)).toBe("https://gateway.example/v1/images/edits");
+			const body: Record<string, unknown> = JSON.parse(String(init?.body));
+			if (!Array.isArray(body.images)) {
+				return Response.json({ error: { message: "Missing required parameter: 'images'" } }, { status: 400 });
+			}
+			expect(body.images).toEqual([{ image_url: `data:image/png;base64,${IMAGE_DATA}` }]);
+			expect(body).not.toHaveProperty("input_references");
+			return imageResponse("response_format" in body ? 400 : 200);
 		};
 
 		const result = await generateOpenAIImage(
@@ -63,8 +67,6 @@ describe("OpenAI-compatible image response_format", () => {
 			{ apiKey: "test", fetch },
 		);
 
-		expect(body?.input_references).toEqual([{ type: "image_url", url: `data:image/png;base64,${IMAGE_DATA}` }]);
-		expect(body).not.toHaveProperty("response_format");
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 
@@ -86,6 +88,32 @@ describe("OpenAI-compatible image response_format", () => {
 		expect(form?.get("model")).toBe("gpt-image-1");
 		expect(form?.get("image")).toBeInstanceOf(File);
 		expect(form?.has("response_format")).toBe(false);
+		expect(result.images[0]?.data).toBe(IMAGE_DATA);
+	});
+
+	test("OpenAI multipart edits send multiple input images as an image[] array", async () => {
+		const model = imageModel("openai", "gpt-image-1");
+		let form: FormData | undefined;
+		const fetch: FetchImpl = async (_input, init) => {
+			if (!(init?.body instanceof FormData)) throw new Error("Expected multipart image edit");
+			form = init.body;
+			if (form.getAll("image").length > 1) {
+				return new Response(
+					JSON.stringify({ error: { message: "Duplicate parameter: 'image'.", code: "duplicate_parameter" } }),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			}
+			return imageResponse();
+		};
+
+		const result = await generateOpenAIImage(
+			model,
+			{ prompt: "combine these", inputImages: [INPUT_IMAGE, INPUT_IMAGE] },
+			{ apiKey: "test", fetch },
+		);
+
+		expect(form?.has("image")).toBe(false);
+		expect(form?.getAll("image[]")).toHaveLength(2);
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 

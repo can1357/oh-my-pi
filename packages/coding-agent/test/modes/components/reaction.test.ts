@@ -1,11 +1,16 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { splitReaction } from "@oh-my-pi/pi-tui/chat/reaction";
-import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { Container, Text } from "@oh-my-pi/pi-tui";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AssistantView, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { splitReaction } from "@oh-my-pi/pi-coding-agent/session/transcript/reaction";
+import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
+import { createInteractiveModeContext, renderTranscript } from "../../helpers/interactive-mode-context";
+import { blockText } from "../../helpers/transcript-text";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const W = 60;
 
@@ -29,31 +34,27 @@ function msg(text: string): AssistantMessage {
 	};
 }
 
-function plain(component: { render(width: number): readonly string[] }): string {
-	return Bun.stripANSI(component.render(W).join("\n"))
-		.split("\n")
-		.map(row => row.trim())
-		.join("\n")
-		.trim();
+function user(text: string, extra: Record<string, unknown> = {}): AgentMessage {
+	return { role: "user", content: text, timestamp: 0, ...extra } as AgentMessage;
 }
 
-/** The user bubble's top padding row, ANSI stripped; the badge lands here. */
-function bubbleTopRow(user: UserMessageComponent): string {
-	return Bun.stripANSI(user.render(W)[0]!);
+/** A transcript over a fixture context: messages drawn by the real presenter. */
+function transcript(): {
+	ctx: InteractiveModeContext;
+	rows(): string[];
+	/** The user bubble's top padding row (where the badge lands). */
+	bubbleTop(): string;
+	reply(view: AssistantView): string;
+} {
+	const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
+	const rows = () => renderTranscript(ctx, W);
+	return {
+		ctx,
+		rows,
+		bubbleTop: () => rows()[0] ?? "",
+		reply: view => blockText(view.block, W).trim(),
+	};
 }
-
-beforeAll(async () => {
-	await initTheme(false);
-});
-
-beforeEach(async () => {
-	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
-});
-
-afterEach(() => {
-	resetSettingsForTest();
-});
 
 describe("splitReaction", () => {
 	it("lifts an opening emoji and consumes following whitespace", () => {
@@ -79,88 +80,64 @@ describe("splitReaction", () => {
 
 describe("agent reactions in the transcript", () => {
 	it("badges the user bubble on the opening emoji and strips it from the reply", () => {
-		const transcript = new Container();
-		const user = new UserMessageComponent("ship it?");
-		transcript.addChild(user);
-		const reply = new AssistantMessageComponent();
-		reply.pickReactionTarget(transcript.children);
-		transcript.addChild(reply);
+		const t = transcript();
+		t.ctx.presentMessage(user("ship it?"));
+		const reply = t.ctx.presentAssistant();
+		reply.transient.set(true);
 
-		reply.updateContent(msg("🚀"), { transient: true });
-		expect(plain(reply)).toBe("");
-		expect(bubbleTopRow(user)).toEndWith("🚀 ");
+		reply.message.set(msg("🚀"));
+		expect(t.reply(reply)).toBe("");
+		expect(t.bubbleTop()).toEndWith("🚀");
 
-		reply.updateContent(msg("🚀 Shipping now."), { transient: true });
-		expect(plain(reply)).toBe("Shipping now.");
-		expect(bubbleTopRow(user)).toEndWith("🚀 ");
+		reply.message.set(msg("🚀 Shipping now."));
+		expect(t.reply(reply)).toBe("Shipping now.");
+		expect(t.bubbleTop()).toEndWith("🚀");
 
-		reply.updateContent(msg("🚀 Shipping now."));
-		reply.markTranscriptBlockFinalized();
-		expect(plain(reply)).toBe("Shipping now.");
-		expect(bubbleTopRow(user)).toEndWith("🚀 ");
-		expect(Bun.stringWidth(bubbleTopRow(user))).toBe(W);
+		reply.transient.set(false);
+		reply.finalized.set(true);
+		expect(t.reply(reply)).toBe("Shipping now.");
+		expect(t.bubbleTop()).toEndWith("🚀");
 	});
 
 	it("withholds incomplete emoji sequences while streaming", () => {
-		const transcript = new Container();
-		const user = new UserMessageComponent("hi");
-		transcript.addChild(user);
-		const reply = new AssistantMessageComponent();
-		reply.pickReactionTarget(transcript.children);
+		const t = transcript();
+		t.ctx.presentMessage(user("hi"));
+		const reply = t.ctx.presentAssistant();
+		reply.transient.set(true);
 
-		reply.updateContent(msg("🇺"), { transient: true });
-		expect(plain(reply)).toBe("");
-		expect(bubbleTopRow(user)).not.toContain("🇺");
+		reply.message.set(msg("🇺"));
+		expect(t.reply(reply)).toBe("");
+		expect(t.bubbleTop()).not.toContain("🇺");
 
-		reply.updateContent(msg("🇺🇸 sounds good"), { transient: true });
-		expect(plain(reply)).toBe("sounds good");
-		expect(bubbleTopRow(user)).toEndWith("🇺🇸 ");
+		reply.message.set(msg("🇺🇸 sounds good"));
+		expect(t.reply(reply)).toBe("sounds good");
+		expect(t.bubbleTop()).toEndWith("🇺🇸");
 	});
 
 	it("badges a finalized lone emoji with no newline and strips it from the reply", () => {
-		const transcript = new Container();
-		const user = new UserMessageComponent("hi");
-		transcript.addChild(user);
-		const reply = new AssistantMessageComponent();
-		reply.pickReactionTarget(transcript.children);
-		reply.updateContent(msg("👍"));
-		expect(plain(reply)).toBe("");
-		expect(bubbleTopRow(user)).toEndWith("👍 ");
+		const t = transcript();
+		t.ctx.presentMessage(user("hi"));
+		const reply = t.ctx.presentAssistant(msg("👍"));
+		expect(t.reply(reply)).toBe("");
+		expect(t.bubbleTop()).toEndWith("👍");
 	});
 
 	it("rebuilds the badge from persisted text and looks past turn attachments to the bubble", () => {
-		const transcript = new Container();
-		const user = new UserMessageComponent("see @file");
-		transcript.addChild(user);
-		transcript.addChild(new Text("file mention block"));
-		const reply = new AssistantMessageComponent(msg("✅ Done."));
-		reply.pickReactionTarget(transcript.children);
-		expect(bubbleTopRow(user)).toEndWith("✅ ");
-		expect(plain(reply)).toBe("Done.");
-	});
-
-	it("shares the badge row with the live-steering marker on the opposite side", () => {
-		const transcript = new Container();
-		const user = new UserMessageComponent("use tabs", { liveSteered: true });
-		transcript.addChild(user);
-		expect(bubbleTopRow(user)).toStartWith(" *");
-
-		const reply = new AssistantMessageComponent(msg("👍 On it."));
-		reply.pickReactionTarget(transcript.children);
-		expect(bubbleTopRow(user)).toStartWith(" *");
-		expect(bubbleTopRow(user)).toEndWith("👍 ");
-		expect(Bun.stringWidth(bubbleTopRow(user))).toBe(W);
+		const t = transcript();
+		t.ctx.presentMessage(user("see @file"));
+		t.ctx.present(() => jsx("text", { text: "file mention block" }));
+		const reply = t.ctx.presentAssistant(msg("✅ Done."));
+		expect(t.bubbleTop()).toEndWith("✅");
+		expect(t.reply(reply)).toBe("Done.");
 	});
 
 	it("never reacts past an earlier reply: a post-tool continuation keeps its emoji verbatim", () => {
-		const transcript = new Container();
-		const user = new UserMessageComponent("run tests");
-		transcript.addChild(user);
-		transcript.addChild(new AssistantMessageComponent(msg("Running.")));
-		transcript.addChild(new Text("tool card"));
-		const continuation = new AssistantMessageComponent(msg("🎉 All green."));
-		continuation.pickReactionTarget(transcript.children);
-		expect(bubbleTopRow(user)).not.toContain("🎉");
-		expect(plain(continuation)).toBe("🎉 All green.");
+		const t = transcript();
+		t.ctx.presentMessage(user("run tests"));
+		t.ctx.presentAssistant(msg("Running."));
+		t.ctx.present(() => jsx("text", { text: "tool card" }));
+		const continuation = t.ctx.presentAssistant(msg("🎉 All green."));
+		expect(t.bubbleTop()).not.toContain("🎉");
+		expect(t.reply(continuation)).toBe("🎉 All green.");
 	});
 });

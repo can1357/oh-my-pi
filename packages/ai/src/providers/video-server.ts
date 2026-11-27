@@ -278,9 +278,5 @@ export function encodePollResponse(job: VideoJob, req: Request, gatewayId: strin
 	return encodeJobResponse(job, req, gatewayId);
 }
 
-export function formatError(status: number, errorType: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { code: status, type: errorType, message } }), {
-		status,
-		headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
-	});
-}
+/** @deprecated Use `codedErrorResponse` from `auth-gateway/http`. */
+export { codedErrorResponse as formatError } from "../auth-gateway/http";

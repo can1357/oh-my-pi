@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { mergeRefreshedCredential } from "@oh-my-pi/pi-ai/auth/refresh";
+import type { OAuthCredential } from "@oh-my-pi/pi-ai/auth/types";
+import { isDefinitiveOAuthFailure } from "@oh-my-pi/pi-ai/error";
+import { claudeCodeAxiosVersion, getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
@@ -46,13 +49,16 @@ describe("anthropic oauth alignment", () => {
 					access_token: "access-token",
 					refresh_token: "refresh-token",
 					expires_in: 3600,
+					refresh_token_expires_in: 2_592_000,
 					account: { uuid: "account-id", email_address: "user@example.com" },
 					organization: { uuid: "org-id", name: "Team Workspace" },
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
 			);
 		});
+		const before = Date.now();
 		const { result, authUrl } = await loginAnthropic(fetchMock);
+		expect(result.refreshExpires).toBeGreaterThanOrEqual(before + 2_592_000_000);
 		const authorize = new URL(authUrl);
 
 		expect(authorize.origin + authorize.pathname).toBe("https://claude.ai/oauth/authorize");
@@ -70,14 +76,23 @@ describe("anthropic oauth alignment", () => {
 		});
 	});
 
-	it("uses Claude Code headers on refresh and omits response organization drift", async () => {
+	it("refreshes like Claude Code, keeps the server's expiry, and omits response organization drift", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(
 				async (input: string | URL | Request, init?: RequestInit) => {
-					expect(String(input)).toBe("https://api.anthropic.com/v1/oauth/token");
+					expect(String(input)).toBe("https://platform.claude.com/v1/oauth/token");
 					const headers = new Headers(init?.headers);
-					expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
-					expect(headers.get("User-Agent")).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+					expect(headers.get("anthropic-beta")).toBeNull();
+					expect(headers.get("Accept")).toBe("application/json, text/plain, */*");
+					expect(headers.get("User-Agent")).toBe(`axios/${claudeCodeAxiosVersion}`);
+					expect(init?.body).toBe(
+						JSON.stringify({
+							grant_type: "refresh_token",
+							refresh_token: "refresh-123",
+							client_id: atob("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl"),
+							scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins",
+						}),
+					);
 					return new Response(
 						JSON.stringify({
 							access_token: "new-access-token",
@@ -92,6 +107,7 @@ describe("anthropic oauth alignment", () => {
 				{ preconnect: fetch.preconnect },
 			),
 		);
+		const before = Date.now();
 		const result = await refreshAnthropic({
 			access: "old-access",
 			refresh: "refresh-123",
@@ -102,11 +118,71 @@ describe("anthropic oauth alignment", () => {
 
 		expect(result.access).toBe("new-access-token");
 		expect(result.refresh).toBe("new-refresh-token");
+		// Stored as reported; the 5-minute renewal window applies when it is read.
+		expect(result.expires).toBeGreaterThanOrEqual(before + 7_200_000);
 		expect(result.accountId).toBe("new-account");
 		expect(result.email).toBe("refreshed@example.com");
 		expect(result.orgId).toBeUndefined();
 		expect(result.orgName).toBeUndefined();
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the login-stated grant end unless a refresh reports an earlier one", () => {
+		const stored: OAuthCredential = { type: "oauth", access: "a", refresh: "r", expires: 0 };
+		const refreshed = (refreshExpires?: number) => ({ access: "a2", refresh: "r2", expires: 1, refreshExpires });
+		// No end stated at login: a refresh's per-rotation lifetime does not become one.
+		expect(mergeRefreshedCredential(stored, refreshed(500)).refreshExpires).toBeUndefined();
+		expect(mergeRefreshedCredential({ ...stored, refreshExpires: 1_000 }, refreshed(2_000)).refreshExpires).toBe(
+			1_000,
+		);
+		expect(mergeRefreshedCredential({ ...stored, refreshExpires: 1_000 }, refreshed(500)).refreshExpires).toBe(500);
+		expect(mergeRefreshedCredential({ ...stored, refreshExpires: 1_000 }, refreshed()).refreshExpires).toBe(1_000);
+	});
+
+	it("retries a scope-refused refresh without asking for scopes", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (_input: string | URL | Request, init?: RequestInit) => {
+					bodies.push(JSON.parse(String(init?.body)));
+					if (bodies.length === 1)
+						return new Response(JSON.stringify({ error: "invalid_scope" }), { status: 400 });
+					return new Response(
+						JSON.stringify({
+							access_token: "scoped-down-access",
+							refresh_token: "next-refresh",
+							expires_in: 3600,
+							account: { uuid: "account-id", email_address: "user@example.com" },
+						}),
+						{ status: 200 },
+					);
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		);
+
+		const result = await refreshAnthropic({ access: "old-access", refresh: "old-refresh", expires: 0 });
+		expect(result.access).toBe("scoped-down-access");
+		expect(bodies).toHaveLength(2);
+		expect(bodies[0]).toHaveProperty("scope");
+		expect(bodies[1]).not.toHaveProperty("scope");
+	});
+
+	it("judges only a refused grant that is not an account hold as dead", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const cases = [
+			{ status: 400, body: { error: "invalid_grant", error_description: "Refresh token expired" }, dead: true },
+			{ status: 400, body: { error: "invalid_grant", error_description: "account_on_hold" }, dead: false },
+			// A bare-401 message would read as dead to the text heuristics.
+			{ status: 401, body: { error: "invalid_client" }, dead: false },
+		];
+		for (const { status, body, dead } of cases) {
+			fetchSpy.mockImplementation(
+				Object.assign(async () => new Response(JSON.stringify(body), { status }), { preconnect: fetch.preconnect }),
+			);
+			const error = await refreshAnthropic({ access: "a", refresh: "r", expires: 0 }).catch((err: unknown) => err);
+			expect({ status, body, dead: isDefinitiveOAuthFailure(error) }).toEqual({ status, body, dead });
+		}
 	});
 
 	it("fetches bootstrap identity when the token response omits identity", async () => {

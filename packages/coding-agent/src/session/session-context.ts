@@ -1,8 +1,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import { customMessageEntryMessage, isUserRequestEntry } from "./transcript/transcript-entry";
+import {
+	canReplayRemoteCompaction,
+	getAnthropicCompactionPayload,
+	isTurnStartEntry,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
+	type Model,
 	type OpenAIResponsesHistoryPayload,
 	type ServiceTierByFamily,
 } from "@oh-my-pi/pi-ai";
@@ -14,7 +19,9 @@ import {
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isEmptyErrorTurn,
+	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 	PREWALK_PLAN_MESSAGE_TYPE,
+	REWIND_REPORT_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
 import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
@@ -127,6 +134,11 @@ export interface SessionContext {
 	 * Only populated in transcript mode.
 	 */
 	cacheMissExplainedAt?: boolean[];
+	/**
+	 * A model/compaction/plan-mode reset follows the last assistant turn, so the
+	 * next live turn's prompt-cache miss is explained. Only set in transcript mode.
+	 */
+	nextCacheMissExplained?: boolean;
 }
 
 /** Lists session model strings to try when restoring, in fallback order. */
@@ -178,6 +190,14 @@ export interface BuildSessionContextOptions {
 	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
 	 *  (unset: {@link snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET}). */
 	maxFrameDataBytes?: number;
+	/**
+	 * The model that reads this context. A compaction whose provider-native
+	 * payload it cannot replay summarizes nothing for it (the stored summary is a
+	 * placeholder), so the context stands on the previous boundary it can read
+	 * and re-expands the history behind the unreadable one. Ignored for
+	 * transcripts.
+	 */
+	model?: Model;
 }
 
 /** Options for `AgentSession.buildTranscriptSessionContext` (via `SessionProviderBoundary`). */
@@ -234,6 +254,23 @@ export type TranscriptEntry = SessionMessageEntry | CustomMessageEntry;
 
 export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry {
 	return entry.type === "message" || entry.type === "custom_message";
+}
+
+/**
+ * The newest compaction on `path` that `model` can read (see
+ * {@link BuildSessionContextOptions.model}), or null when there is none.
+ * Without a model the newest compaction is the boundary.
+ */
+export function getReadableCompactionEntry(
+	path: readonly SessionEntry[],
+	model: Model | undefined,
+): CompactionEntry | null {
+	for (let i = path.length - 1; i >= 0; i--) {
+		const entry = path[i];
+		if (entry.type !== "compaction") continue;
+		if (!model || canReplayRemoteCompaction(entry.preserveData, model)) return entry;
+	}
+	return null;
 }
 
 export function buildSessionContext(
@@ -308,12 +345,28 @@ export function buildSessionContext(
 	// with the wrong model id, which previously clobbered the user's pick on
 	// resume (issue #849).
 	let hasExplicitDefaultModel = false;
+	// A retry-fallback hop is ephemeral: resume and revival restore the
+	// pre-fallback model, so the thinking level the hop applied (a chain entry's
+	// `:level` suffix) must not outlive it either. Snapshot the level in effect
+	// before the first hop; it wins unless a later change (user pick, restore,
+	// non-fallback model switch) superseded the hop's own entry.
+	let preFallbackThinking: { thinkingLevel: string | undefined; configured: string | undefined } | undefined;
+	let thinkingFromFallbackHop = false;
+	let hasThinkingEntry = false;
+	let previous: SessionEntry | undefined;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel ?? "off";
 			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			hasThinkingEntry = true;
+			thinkingFromFallbackHop = previous?.type === "model_change" && previous.resolvedModelIsFallback === true;
 		} else if (entry.type === "model_change") {
+			if (entry.resolvedModelIsFallback !== true) {
+				preFallbackThinking = undefined;
+			} else if (!preFallbackThinking && hasThinkingEntry) {
+				preFallbackThinking = { thinkingLevel, configured: configuredThinkingLevel };
+			}
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {
 				const role = entry.role ?? "default";
@@ -330,7 +383,8 @@ export function buildSessionContext(
 			// recorded yet. Newer sessions always record an explicit default
 			// model_change at the start of the conversation, so this branch is
 			// only used to keep pre-model_change sessions working.
-			if (!hasExplicitDefaultModel) {
+			// Claude Code's synthetic API errors retain their placeholder model in history, not as a selection.
+			if (!hasExplicitDefaultModel && entry.message.model !== "<synthetic>") {
 				models.default = `${entry.message.provider}/${entry.message.model}`;
 			}
 		} else if (entry.type === "compaction") {
@@ -344,8 +398,16 @@ export function buildSessionContext(
 			mode = entry.mode;
 			modeData = entry.data;
 		}
+		previous = entry;
+	}
+	if (preFallbackThinking && thinkingFromFallbackHop) {
+		thinkingLevel = preFallbackThinking.thinkingLevel;
+		configuredThinkingLevel = preFallbackThinking.configured;
 	}
 
+	if (options?.model && !options.transcript) {
+		compaction = getReadableCompactionEntry(path, options.model);
+	}
 	const injectedTtsrRules = Array.from(injectedTtsrRulesSet);
 
 	// Index on the path of the latest `/clear` boundary, or -1 when none. The
@@ -395,6 +457,25 @@ export function buildSessionContext(
 		cacheMissExplainedAt.push(trackMessageCacheState(msg));
 	};
 
+	// A rewind persists its report twice: as the branch_summary closing the
+	// exploration branch (shown in the transcript) and as the rewind-report
+	// message that follows it (the model-facing framing). Model context keeps
+	// only the latter so each report reaches the provider once.
+	const rewindSummaryIds = new Set<string>();
+	if (!options?.transcript) {
+		for (let i = 1; i < path.length; i++) {
+			const entry = path[i];
+			const previous = path[i - 1];
+			if (
+				entry.type === "custom_message" &&
+				entry.customType === REWIND_REPORT_MESSAGE_TYPE &&
+				previous.type === "branch_summary"
+			) {
+				rewindSummaryIds.add(previous.id);
+			}
+		}
+	}
+
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
@@ -409,13 +490,15 @@ export function buildSessionContext(
 		} else if (entry.type === "custom_message") {
 			if (
 				!options?.transcript &&
-				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE || entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE)
+				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE ||
+					entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE ||
+					entry.customType === PLAN_MODE_CONTEXT_MESSAGE_TYPE)
 			) {
 				return;
 			}
 			const message = customMessageEntryMessage(entry);
 			if (message) pushMessage(message);
-		} else if (entry.type === "branch_summary" && entry.summary) {
+		} else if (entry.type === "branch_summary" && entry.summary && !rewindSummaryIds.has(entry.id)) {
 			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
 	};
@@ -767,6 +850,7 @@ export function buildSessionContext(
 	return {
 		messages,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
+		nextCacheMissExplained: options?.transcript ? pendingReset : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,
 		serviceTier,

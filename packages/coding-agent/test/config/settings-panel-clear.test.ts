@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -6,21 +6,22 @@ import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { SettingsWindow } from "../../src/ui/overlays/settings/settings";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
+import { cfgTaskPerCallModelAllow } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 let state: SettingsTestState | undefined;
 let tempDir: TempDir;
 let agentDir: string;
 let projectDir: string;
-
-beforeAll(async () => {
-	await initTheme();
-});
 
 beforeEach(() => {
 	state = beginSettingsTest();
@@ -47,24 +48,48 @@ it("clearing a settings-panel text field removes the key from config.yml so its 
 	// The panel edits the configured layers: env values are never shown or pre-filled.
 	expect(host.get("hindsight.apiToken")).toBeUndefined();
 
-	const selector = new SettingsSelectorComponent(
-		{
-			availableThinkingLevels: [],
-			thinkingLevel: undefined,
-			availableThemes: ["dark"],
-			providers: [],
-			settings: host,
-			plugins: createPluginSettingsHost(projectDir),
-		},
-		{ onChange: () => {}, onCancel: () => {} },
+	const term = createTestTerminal(
+		() => ({
+			layer: SettingsWindow({
+				context: {
+					availableThinkingLevels: [],
+					availableThemes: ["dark"],
+					providers: [],
+					settings: host,
+					plugins: createPluginSettingsHost(projectDir),
+				},
+				callbacks: { onChange: () => {}, onCancel: () => {} },
+			}),
+		}),
+		{ columns: 120, rows: 40 },
 	);
-
-	for (const ch of "searxng endpoint") selector.handleInput(ch);
-	selector.handleInput("\n"); // open the text field
-	selector.handleInput("\x15"); // clear it
-	selector.handleInput("\n"); // submit
+	try {
+		term.focus(term.surface.layer()[0] ?? null);
+		term.type("searxng endpoint");
+		term.press("enter"); // open the text field
+		term.press("ctrl+u"); // clear it
+		term.press("enter"); // submit
+	} finally {
+		term.dispose();
+	}
 
 	expect(cfgSearxngEndpoint.get(settings)).toBe("https://env.example");
 	await settings.flush();
 	expect(YAML.parse(await Bun.file(configPath).text())).toEqual({ temperature: 0.4 });
+});
+
+it("hides the per-call allowlist editor for a project-supplied list so it cannot be promoted to global", async () => {
+	const projectConfig = path.join(projectDir, ".omp", "settings.json");
+	fs.mkdirSync(path.dirname(projectConfig), { recursive: true });
+	await Bun.write(projectConfig, JSON.stringify({ task: { perCallModelAllow: ["mock/target"] } }));
+	const settings = await Settings.init({ cwd: projectDir, agentDir });
+	expect(cfgTaskPerCallModelAllow.provenance(settings)).toBe("project");
+	const entry = createSettingsHost().entries.find(candidate => candidate.path === "task.perCallModelAllow");
+	expect(entry?.condition?.()).toBe(false);
+});
+
+it("keeps the per-call allowlist editor when only the global layer supplies it", async () => {
+	await Settings.init({ cwd: projectDir, agentDir });
+	const entry = createSettingsHost().entries.find(candidate => candidate.path === "task.perCallModelAllow");
+	expect(entry?.condition?.()).toBe(true);
 });
