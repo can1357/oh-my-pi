@@ -1264,9 +1264,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
+		/** A submitted plan awaits the user's answer: idle work must not summarize its exploration away. */
+		isReviewingPlan: boolean;
 		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
-	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
+	} = {
+		target: undefined,
+		ready: false,
+		isComposing: false,
+		isReviewingPlan: false,
+		scheduledTurn: undefined,
+		presentRecap: undefined,
+	};
 
 	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
@@ -1275,6 +1284,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			activity.target = undefined;
 			activity.ready = false;
 			activity.isComposing = false;
+			activity.isReviewingPlan = false;
 			activity.scheduledTurn = undefined;
 			activity.presentRecap = undefined;
 			previous?.refreshIdleMaintenance();
@@ -1283,8 +1293,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!activity.scheduledTurn) return;
 		activity.target = target;
 		activity.isComposing = untrack(this.composer.text).trim() !== "";
+		activity.isReviewingPlan = this.#planReviewPick !== undefined;
 		target.enableIdleMaintenance({
-			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			isBlocked: () =>
+				!activity.ready || activity.target !== target || activity.isComposing || activity.isReviewingPlan,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
 			// Delivered only while unblocked, so `target` is the session on screen.
 			onRecap: recap => activity.presentRecap?.(recap),
@@ -5159,6 +5171,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#planReviewPick = undefined;
 			}
 			if (pending && this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
+			this.syncIdleMaintenanceView();
 			resolve(choice);
 		};
 		this.#planReviewOwner = owner;
@@ -5199,6 +5212,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewOverlayHandle = showSheet(this.shell, planReviewSheet(model), () => jsx(PlanReview, { model }), {
 			mouse: "any",
 		});
+		this.syncIdleMaintenanceView();
 		return promise;
 	}
 
