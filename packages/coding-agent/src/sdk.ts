@@ -69,12 +69,13 @@ import type { EffectiveExtensionRoots } from "./capability/types";
 import { type OAuthAccountPools, SessionAccountPoolScope } from "./config/account-pools";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
-import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
+import { type HydrateStartupModelCaches, isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
 	disabledProviderIds,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ModelMatchPreferences,
+	modelSelectorProviderHint,
 	parseModelPattern,
 	pickDefaultAvailableModel,
 	providerModelHint,
@@ -84,6 +85,7 @@ import {
 	resolveConfiguredModelPatterns,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
+	resolveProviderModelReference,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
@@ -681,6 +683,8 @@ export interface CreateAgentSessionOptions {
 	 * so interactive startup keeps it off the first-frame path.
 	 */
 	deferRetryFallbackValidation?: boolean;
+	/** @internal Reuse catalog reads made while preparing this launch. */
+	hydrateStartupModelCaches?: HydrateStartupModelCaches;
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
@@ -2090,11 +2094,49 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 	});
 	startupCleanup.defer(unsubscribeCredentialDisabled);
-	// Local-only and never rejects; awaited just before the first catalog read so
-	// its credential/cache I/O overlaps the cwd-scoped discoveries started below.
-	const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
-		modelRegistry.hydrateCredentialScopedModelCaches(),
-	);
+	const deferredModelPatterns = Array.isArray(options.modelPattern)
+		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
+		: options.modelPattern?.trim()
+			? [options.modelPattern.trim()]
+			: [];
+	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
+	const hydrateStartupModelCaches = options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
+	const startStartupModelCacheHydration = (providers?: ReadonlySet<string>) => {
+		const hydration = hydrateStartupModelCaches(providers);
+		// A worker's owner call may reject before we reach the first reader.
+		hydration.catch(() => {});
+		return hydration;
+	};
+	let fullStartupModelCaches: Promise<void> | undefined;
+	const hydrateFullStartupModelCaches = () => (fullStartupModelCaches ??= startStartupModelCacheHydration());
+	const getDefaultSelector = (role: string | undefined) => {
+		const first = resolveConfiguredModelPatterns(role, settings)[0];
+		if (!first) return undefined;
+		const provider = modelSelectorProviderHint(first);
+		return provider ? { provider, id: first.slice(first.indexOf("/") + 1).trim() } : undefined;
+	};
+	// Start local cache I/O while cwd discovery runs, but wait for the journal
+	// before naming resume providers. Unknown or unqualified selectors widen.
+	const startupDefaultRole = settings.getModelRole("default");
+	const startupProvider = options.model
+		? options.hydrateStartupModelCaches && options.model.provider.toLowerCase()
+		: !hasExplicitModel && cfgEnabledModels.get(settings).length === 0
+			? getDefaultSelector(startupDefaultRole)?.provider
+			: undefined;
+	// With a caller-supplied model and no CLI work to reuse, start only the
+	// broad pass. In particular, worker mirrors need one owner RPC, not two.
+	const startupProviderHydration = startupProvider
+		? startStartupModelCacheHydration(new Set([startupProvider]))
+		: undefined;
+	if (
+		!startupProvider &&
+		(hasExplicitModel ||
+			cfgEnabledModels.get(settings).length > 0 ||
+			(startupDefaultRole && startupDefaultRole.trim() !== "default") ||
+			!options.sessionManager?.getLeafId())
+	) {
+		void hydrateFullStartupModelCaches();
+	}
 	// Kick off workspace tree discovery early. The native workspace scan returns
 	// both the rendered-tree input and the AGENTS.md directory-context index, so
 	// startup does not perform a second recursive filesystem search. Subagents
@@ -2326,47 +2368,57 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
-	const deferredModelPatterns = Array.isArray(options.modelPattern)
-		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
-		: options.modelPattern?.trim()
-			? [options.modelPattern.trim()]
+	// Saved model selectors use exact provider lookup, unlike configured model
+	// patterns, which can also be raw aggregator IDs or resolve through aliases.
+	const sessionModelStrings =
+		!hasExplicitModel && hasExistingSession
+			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
-	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
 	const defaultRoleValue = settings.getModelRole("default");
-	let explicitDefaultProviders: Set<string> | undefined;
-	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
-		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
-		if (patterns && patterns.length > 0) {
-			const providers = new Set<string>();
-			for (const pattern of patterns) {
-				const slash = pattern.indexOf("/");
-				const provider = slash > 0 ? pattern.slice(0, slash).trim() : "";
-				if (!provider || /[*?[\]{}]/.test(provider)) {
-					providers.clear();
-					break;
-				}
-				providers.add(provider);
-			}
-			if (providers.size > 0) explicitDefaultProviders = providers;
+	const hasModelScope = cfgEnabledModels.get(settings).length > 0;
+	const defaultSelector = !hasExplicitModel && !hasModelScope ? getDefaultSelector(defaultRoleValue) : undefined;
+	if (options.model) {
+		if (startupProviderHydration) await startupProviderHydration;
+	} else if (hasModelScope || hasExplicitModel || fullStartupModelCaches) {
+		await hydrateFullStartupModelCaches();
+	} else {
+		const providers = new Set<string>();
+		if (defaultSelector) providers.add(defaultSelector.provider);
+		let needsFullCatalog = false;
+		for (const selector of sessionModelStrings) {
+			const provider = modelSelectorProviderHint(selector);
+			if (provider) providers.add(provider);
+			else needsFullCatalog = true;
+		}
+		if (needsFullCatalog) {
+			await hydrateFullStartupModelCaches();
+		} else {
+			if (startupProvider) providers.delete(startupProvider);
+			await Promise.all([startupProviderHydration, providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined]);
 		}
 	}
-	await credentialScopedCacheHydration;
-	if (!options.modelRegistry) {
-		modelRegistry.refreshInBackground();
-	}
+
 	let defaultRoleSpec: ResolvedModelRoleValue = {
 		model: undefined,
 		thinkingLevel: undefined,
 		explicitThinkingLevel: false,
 		warning: undefined,
 	};
-	if (!hasExplicitModel) {
-		const allowedModels = await logger.time("resolveAllowedModels", () =>
-			explicitDefaultProviders
-				? modelRegistry.getAvailableForProviders(explicitDefaultProviders)
-				: resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
-		);
+	if (!hasExplicitModel && defaultRoleValue && defaultRoleValue.trim() !== "default") {
+		const allowedModels = await logger.time("resolveAllowedModels", async () => {
+			if (defaultSelector) {
+				const available = modelRegistry.getAvailableForProviders(new Set([defaultSelector.provider]));
+				// A direct match on the leading pattern wins before raw aggregator
+				// IDs. Don't strip thinking/routing suffixes for this probe: a
+				// literal with that suffix in another roster can beat the stripped id.
+				if (resolveProviderModelReference(defaultSelector.provider, defaultSelector.id, available)) {
+					return available;
+				}
+			}
+			await hydrateFullStartupModelCaches();
+			return resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+		});
 		defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 			resolveModelRoleValue(defaultRoleValue, allowedModels, {
 				settings,
@@ -2378,15 +2430,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	let modelPatternRetryFallbackRole: string | undefined;
-	// Identify session model strings to restore in fallback order. We do an
-	// initial pass here so model-dependent setup (thinking-level resolution,
-	// host preconnect) can use the restored model; extension-registered
-	// providers aren't visible yet, so we retry the preferred candidates once
-	// extensions register below.
-	const sessionModelStrings =
-		!hasExplicitModel && hasExistingSession
-			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
-			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
@@ -2488,6 +2531,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 			});
 	}
+
+	// The tool plan (auto find/judgment, among others) and extension/session
+	// consumers can inspect the entire registry. Fill the remaining providers
+	// while skills and other startup discoveries finish, before those readers.
+	const remainingStartupModelCaches = hydrateFullStartupModelCaches();
 
 	// Re-derives the thinking level whenever startup settles on a different
 	// model than the one (possibly none) the level above was resolved against,
@@ -2983,6 +3031,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			parentPrefix: options.parentTaskPrefix,
 		});
 
+		// The built-in tool plan can read the full registry (for example, auto
+		// find considers cross-provider judge candidates).
+		await remainingStartupModelCaches;
+		if (!options.modelRegistry) modelRegistry.refreshInBackground();
 		// Create built-in tools (already wrapped with meta notice formatting)
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 		const initialBrowserPreludeAvailable = shouldFilterBrowserMCPForPrelude({
