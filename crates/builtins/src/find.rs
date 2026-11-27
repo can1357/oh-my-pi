@@ -4883,6 +4883,10 @@ pub mod matchers {
 					config.sorted_output = true;
 					Some(TrueMatcher.into_box())
 				},
+				"-allow-root" => {
+					config.allow_root = true;
+					Some(TrueMatcher.into_box())
+				},
 				"-maxdepth" => {
 					if i >= args.len() - 1 {
 						return Err(From::from(format!("missing argument to {}", args[i])));
@@ -5051,6 +5055,9 @@ pub struct Config {
 	no_leaf_dirs:      bool,
 	follow:            Follow,
 	new_paths:         Option<Vec<String>>,
+	/// `-allow-root`: permits a starting point that is a filesystem root,
+	/// which [`run_find`] otherwise refuses.
+	allow_root:        bool,
 	files0_argument:   Option<String>,
 	/// `-fprint`/`-fprintf`/`-fprint0`/`-fls` outputs, closed after the search.
 	output_files:      Vec<(String, omp_vfs::File)>,
@@ -5074,6 +5081,7 @@ impl Default for Config {
 			follow:            Follow::Never,
 			new_paths:         None, // This option exclusively for -files0-from argument.
 			files0_argument:   None, //This option also is used for file0-from
+			allow_root:        false,
 			output_files:      Vec::new(),
 		}
 	}
@@ -5351,6 +5359,17 @@ async fn process_dir(
 	process_dir_walk_request(config, deps, host, matcher, quit, &resolved_root, operand).await
 }
 
+/// The filesystem root a resolved starting point names (`/`, `/usr/..`,
+/// `C:\`), if it names one. [`run_find`] refuses such walks without
+/// `-allow-root`; URL providers are never whole disks.
+fn filesystem_root(resolved: &Path) -> Option<PathBuf> {
+	if omp_vfs::is_virtual_path(resolved) {
+		return None;
+	}
+	let normalized = omp_vfs::normalize_lexically(resolved);
+	(normalized.has_root() && normalized.parent().is_none()).then_some(normalized)
+}
+
 async fn do_find(
 	args: &[&str],
 	deps: &dyn Dependencies,
@@ -5384,6 +5403,22 @@ async fn run_find(
 	if config.version_requested {
 		print_version(host);
 		return 0;
+	}
+
+	if !config.allow_root
+		&& let Some(root) = paths.iter().find_map(|path| filesystem_root(&host.resolve(path)))
+	{
+		let _ = writeln!(
+			host.stderr,
+			"find: refusing to search the filesystem root '{}'.\n\
+			 You most likely did not mean this. Never search a full disk: walking every file on the \
+			 machine can take hours to days.\n\
+			 Search the directory you actually need instead: the current directory (`find . ...`), \
+			 the project root, or a specific subdirectory.\n\
+			 Pass -allow-root only when a whole-disk search was explicitly requested.",
+			root.display()
+		);
+		return 1;
 	}
 
 	let mut ret = 0;
@@ -5445,6 +5480,10 @@ Early alpha implementation. Currently the only expressions supported are
  -sorted
     a non-standard extension that sorts directory contents by name before
     processing them. Less efficient, but allows for deterministic output.
+ -allow-root
+    a non-standard extension that permits searching a filesystem root such
+    as /. Without it such searches are refused: a whole-disk walk can take
+    hours to days.
 "
 	);
 }
@@ -5862,6 +5901,23 @@ mod tests {
 				.await;
 		assert_eq!(code, 0, "stderr: {err}");
 		assert_eq!(out, "1 sub/d.txt\n");
+	}
+
+	/// Failure mode: `find /` walked the whole disk for hours. A filesystem
+	/// root, however it is spelled, is refused unless `-allow-root` is passed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn filesystem_root_is_refused_without_allow_root() {
+		let (_dir, root) = fixture();
+		// `-maxdepth 0` keeps a regression from walking the disk.
+		for (cwd, operand) in [(root.as_path(), "/"), (root.as_path(), "/usr/.."), (Path::new("/"), ".")] {
+			let (code, capture) = run_async_util::<Find>(&[operand, "-maxdepth", "0"], "", cwd).await;
+			assert_eq!((code, capture.out().as_str()), (1, ""), "operand: {operand}");
+			assert!(capture.err().contains("-allow-root"), "stderr: {}", capture.err());
+		}
+		let (code, capture) =
+			run_async_util::<Find>(&["/", "-maxdepth", "0", "-allow-root"], "", &root).await;
+		assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "/\n", ""));
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
