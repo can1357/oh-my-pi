@@ -9,6 +9,7 @@
 ### Changed
 
 - Increased row spacing in CJK frames so vision models can distinguish horizontal lines.
+- Switched Claude Opus 5.5 and GPT-6.1 Terra to the denser `8on16-bw` layout for English text.
 
 ## [19.1.1] - 2026-11-23
 

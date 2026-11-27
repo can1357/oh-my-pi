@@ -319,6 +319,15 @@ describe("shape resolution", () => {
 		).toBe(8);
 	});
 
+	it("uses the measured 8×16 grid only for Opus 5.5 and GPT-6.1 Terra", () => {
+		const shapeFor = (id: string) => snapcompact.resolveShape({ api: "openai-completions", id });
+		expect(shapeFor("anthropic/claude-opus-5.5")).toMatchObject({ cellWidth: 8, cellHeight: 16, frameSize: 1932 });
+		expect(shapeFor("claude-opus-5-5")).toMatchObject({ cellWidth: 8, cellHeight: 16, frameSize: 1932 });
+		expect(shapeFor("claude-opus-4-8")).toMatchObject({ cellWidth: 11, cellHeight: 16, frameSize: 1932 });
+		expect(shapeFor("openai/gpt-6.1-terra")).toMatchObject({ cellWidth: 8, cellHeight: 16, frameSize: 1568 });
+		expect(shapeFor("gpt-6.1-sol")).toMatchObject({ cellWidth: 8, cellHeight: 22, frameSize: 1568 });
+	});
+
 	it("detects the ideal shape from the model id across gateways", () => {
 		// A high-res Claude served through an OpenAI-compatible gateway keeps
 		// its own geometry (tracked 8x13), its 1932px frame, and Anthropic's

@@ -64,6 +64,7 @@ import {
 	imageTokens,
 	resolveImageMaxEdge,
 	resolveImageTokenization,
+	resolveSnapcompactVariant,
 } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
@@ -381,8 +382,10 @@ const MODEL_VARIANTS: readonly (readonly [RegExp, IdealShape])[] = [
 ];
 
 /** Eval-ideal format for a model id, or undefined when unmeasured. */
-export function idealShapeVariant(modelId: string): IdealShape | undefined {
-	const identity = classifyModel("", modelId, { lenient: true });
+export function idealShapeVariant(modelId: string, target?: ShapeTarget): IdealShape | undefined {
+	const identity = target?.identity ?? classifyModel(target?.provider ?? "", modelId, { lenient: true });
+	const pin = resolveSnapcompactVariant({ ...target, id: modelId, identity });
+	const variant = isShapeVariantName(pin) ? pin : undefined;
 	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
 	const opusFloor = parseRevision("4.7");
 	if (
@@ -399,9 +402,9 @@ export function idealShapeVariant(modelId: string): IdealShape | undefined {
 		// downscaled under Anthropic's 4,784 visual-token cap ((1932/28)² =
 		// 69² = 4,761 ≤ 4,784 28px patches), and staying below 2000px clears
 		// the stricter ≤2000px limit for requests with more than 20 images.
-		return HIGH_RES_ANTHROPIC_VARIANT;
+		return variant === undefined ? HIGH_RES_ANTHROPIC_VARIANT : { ...HIGH_RES_ANTHROPIC_VARIANT, variant };
 	}
-	return MODEL_VARIANTS.find(([pattern]) => pattern.test(modelId))?.[1];
+	return variant === undefined ? MODEL_VARIANTS.find(([pattern]) => pattern.test(modelId))?.[1] : { variant };
 }
 
 /** What will read the frames: the model id (shape and billing), the wire API
@@ -427,7 +430,7 @@ export interface ShapeTarget {
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
 	if (variant && variant !== "auto") return priceShape(fitHostImageEdge(SHAPE_VARIANTS[variant], model), model);
-	const ideal = configuredShape(model) ?? (model?.id ? idealShapeVariant(model.id) : undefined);
+	const ideal = configuredShape(model) ?? (model?.id ? idealShapeVariant(model.id, model) : undefined);
 	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
 	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
 }

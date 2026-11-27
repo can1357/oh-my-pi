@@ -532,6 +532,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * misreads indentation in frames makes inexact edits.
 	 */
 	"snapcompact-image-reads": { key: "snapcompactImageReads", set: "catalog", shape: "scalar", values: [true, false] },
+	/** Benchmarked Snapcompact grid override; frame size still follows the reader's resolution tier. */
+	"snapcompact-variant": { key: "snapcompactVariant", set: "catalog", shape: "scalar" },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	/** Longest image edge the host passes to the model: it downscales larger images to fit first. */
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
