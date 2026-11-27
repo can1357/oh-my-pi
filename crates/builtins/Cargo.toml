@@ -46,14 +46,12 @@ ast-grep-config = { version = "0.39.9", optional = true }
 ast-grep-core = { workspace = true, optional = true }
 bigdecimal = "0.4"
 bstr = "1.12.0"
-codespan-reporting = { version = "0.13", default-features = false, features = ["std"], optional = true }
 flume = "0.12"
 foldhash = "0.2.0"
 glob = "0.3.1"
 globset = "0.4"
 grep-cli = "0.1"
 grep-matcher = "0.1"
-grep-pcre2 = "0.1"
 grep-printer = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
@@ -65,12 +63,10 @@ icu_decimal = { version = "2.0", default-features = false, features = ["compiled
 icu_locale_core = { version = "2.0", default-features = false, features = ["alloc"] }
 icu_provider = { version = "2.0", default-features = false }
 ignore = "0.4"
-indicatif = "0.18.0"
 jaq-core = "3.1.1"
 jaq-json = "2.0.3"
 jaq-std = "3.0.3"
 jiff = { version = "0.2.18", features = ["tzdb-bundle-platform"] }
-lscolors = { version = "0.21.0", default-features = false, features = ["gnu_legacy"] }
 memchr = "2.7.4"
 nom = "8.0.0"
 num-bigint = "0.4"
@@ -103,15 +99,12 @@ serde_json = "1"
 serde-saphyr = { version = "=2.1.1", default-features = false, features = ["serialize"], optional = true }
 serde_yaml = { version = "0.9", optional = true }
 smallvec.workspace = true
-# `jq` evaluates on a grown stack and bounds its recursion by the stack left.
-stacker = "0.1.25"
 tempfile = "3.15.0"
 # `direnv`: `direnv.toml`.
 toml = { workspace = true, optional = true }
 tokio-util = "0.7"
 xutf.workspace = true
 libc = "0.2.172"
-term_grid = { package = "uutils_term_grid", version = "0.8" }
 
 [dependencies.uucore]
 version = "0.8.0"
@@ -157,7 +150,6 @@ base64.workspace = true
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 lz4_flex = "0.14"
 md-5 = "0.10"
-md4 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
 xxhash-rust = { workspace = true, features = ["xxh3", "xxh64"] }
@@ -229,7 +221,6 @@ default = ["utils"]
   "dep:omp-ast",
   "dep:ast-grep-config",
   "dep:ast-grep-core",
-  "dep:codespan-reporting",
   "dep:serde",
   "dep:serde-saphyr",
   "dep:serde_yaml",

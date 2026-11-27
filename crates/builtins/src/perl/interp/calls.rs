@@ -214,17 +214,24 @@ impl Interp<'_> {
 	}
 
 	/// Call a Perl or native code value with aliased argument cells.
-	pub fn call_sub(&mut self, cv: &Cv, args: Vec<Sv>, cx: Cx) -> PResult<Ret> {
-		self.call_sub_kind(cv, InvokeArgs::Explicit(args), cx, false)
+	pub async fn call_sub_async(&mut self, cv: &Cv, args: Vec<Sv>, cx: Cx) -> PResult<Ret> {
+		self.call_sub_kind(cv, InvokeArgs::Explicit(args), cx, false).await
 	}
 
-	fn call_sub_kind(&mut self, cv: &Cv, args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
-		let result = self.nested(|this| this.call_sub_loop(cv.clone(), args, cx, as_lvalue));
+	/// Sync entry for native callbacks and coercion paths: drives the async
+	/// evaluator on the blocking worker, spilling recursion to the heap queue.
+	pub fn call_sub(&mut self, cv: &Cv, args: Vec<Sv>, cx: Cx) -> PResult<Ret> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.call_sub_async(cv, args, cx)) }
+	}
+
+	async fn call_sub_kind(&mut self, cv: &Cv, args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
+		let result = self.nested(async move |this| Box::pin(this.call_sub_loop(cv.clone(), args, cx, as_lvalue)).await).await;
 		if let Ok(ret) = &result { self.track_ret(ret); }
 		result
 	}
 
-	fn call_sub_loop(&mut self, mut cv: Cv, mut args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
+	async fn call_sub_loop(&mut self, mut cv: Cv, mut args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
 		loop {
 			self.poll()?;
 			let imp = cv.body.borrow().clone();
@@ -232,7 +239,7 @@ impl Interp<'_> {
 			let out = match imp {
 				CodeImpl::Undefined => {
 					let name = cv.name.borrow().clone().unwrap_or_else(|| Rc::from("__ANON__"));
-					return self.call_undefined(&name, args, cx);
+					return self.call_undefined(&name, args, cx).await;
 				}
 				CodeImpl::Constant(values) => return Ok(if cx == Cx::List { Ret::Many(values.to_vec()) }
 				else if values.len() > 1 { Ret::One(Value::Int(values.len() as i64)) }
@@ -269,13 +276,14 @@ impl Interp<'_> {
 					self.active_subs.push((cv.clone(), av.clone(), cx));
 					self.frames.push(frame);
 					self.eval_contexts.push((cx, as_lvalue));
-					let result = self.scoped(|this| {
+					let av_in = av.clone();
+					let result = self.scoped_async(async move |this| { 
 						this.package = body.package.clone();
 						this.active_hints = body.hints.clone();
 						if let Some(id) = body.lexical_register { this.put_resolved_pad(id, Slot::Code(cv.clone())); }
-						if let Some(signature) = &body.signature { this.bind_signature(signature, &av, &cv)?; }
-						if as_lvalue { this.run_lvalue_body(&body.block, cx) } else { this.run_statements(&body.block, cx) }
-					});
+						if let Some(signature) = &body.signature { this.bind_signature(signature, &av_in, &cv).await?; }
+						if as_lvalue { this.run_lvalue_body(&body.block, cx).await } else { this.run_statements_async(&body.block, cx).await }
+					 }).await;
 					self.eval_contexts.pop();
 					self.frames.pop();
 					self.active_subs.pop();
@@ -343,54 +351,54 @@ impl Interp<'_> {
 
 	/// An lvalue sub's result: a reference to the returned scalar container (scalar context); in list context one
 	/// reference per returned item, whole arrays and hashes as `Ref::Array`/`Ref::Hash` so list assignment can fill them.
-	fn lvalue_result(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
-		if cx != Cx::List { return self.eval_lvalue(e).map(|sv| Ret::One(Value::Ref(Ref::Scalar(sv)))); }
+	async fn lvalue_result(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+		if cx != Cx::List { return self.eval_lvalue_async(e).await.map(|sv| Ret::One(Value::Ref(Ref::Scalar(sv)))); }
 		let mut out = Vec::new();
-		self.lvalue_items(e, &mut out)?;
+		self.lvalue_items(e, &mut out).await?;
 		Ok(Ret::Many(out))
 	}
 
-	fn lvalue_items(&mut self, e: &Expr, out: &mut Vec<Value>) -> PResult<()> {
+	async fn lvalue_items(&mut self, e: &Expr, out: &mut Vec<Value>) -> PResult<()> {
 		let e = ungroup(e);
 		match &e.kind {
-			ExprKind::List(items) => for item in items { self.lvalue_items(item, out)?; },
-			ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => out.push(Value::Ref(Ref::Array(self.eval_array(e)?))),
-			ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => out.push(Value::Ref(Ref::Hash(self.eval_hash(e)?))),
-			_ => out.extend(self.eval_aliases(e)?.into_iter().map(|sv| Value::Ref(Ref::Scalar(sv)))),
+			ExprKind::List(items) => for item in items { Box::pin(self.lvalue_items(item, out)).await?; },
+			ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => out.push(Value::Ref(Ref::Array(self.eval_array_async(e).await?))),
+			ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => out.push(Value::Ref(Ref::Hash(self.eval_hash_async(e).await?))),
+			_ => out.extend(self.eval_aliases_async(e).await?.into_iter().map(|sv| Value::Ref(Ref::Scalar(sv)))),
 		}
 		Ok(())
 	}
 
-	fn run_lvalue_body(&mut self, block: &Block, cx: Cx) -> PResult<Ret> {
+	async fn run_lvalue_body(&mut self, block: &Block, cx: Cx) -> PResult<Ret> {
 		let Some((last, before)) = block.stmts.split_last() else { return Err(self.die_msg("Can't return undef from lvalue subroutine")); };
 		for stmt in before {
 			self.loc = stmt.location.clone();
 			self.poll()?;
-			self.run_statement(stmt, Cx::Void)?;
+			self.run_statement(stmt, Cx::Void).await?;
 		}
 		self.loc = last.location.clone();
 		self.poll()?;
 		match &last.kind {
 			StmtKind::Expr(e) => {
 				if matches!(&e.kind, ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Return, _), .. })) {
-					return self.eval(e, Cx::Scalar);
+					return self.eval_async(e, Cx::Scalar).await;
 				}
-				self.lvalue_result(e, cx)
+				self.lvalue_result(e, cx).await
 			}
 			StmtKind::If(branches, otherwise) => {
 				for (test, negate, block) in branches {
-					let value = self.eval_scalar(test)?;
+					let value = self.eval_scalar_async(test).await?;
 					self.commit_declarations();
-					if self.truthy(&value)? != *negate { return self.scoped(|i| i.run_lvalue_body(block, cx)); }
+					if self.truthy(&value)? != *negate { return self.scoped_async(async move |this| Box::pin(this.run_lvalue_body(block, cx)).await).await; }
 				}
-				if let Some(block) = otherwise { return self.scoped(|i| i.run_lvalue_body(block, cx)); }
+				if let Some(block) = otherwise { return self.scoped_async(async move |this| Box::pin(this.run_lvalue_body(block, cx)).await).await; }
 				Err(self.die_msg("Can't return undef from lvalue subroutine"))
 			}
 			_ => Err(self.die_msg("Can't return a temporary from lvalue subroutine")),
 		}
 	}
 
-	fn bind_signature(&mut self, signature: &Signature, av: &Av, cv: &Cv) -> PResult<()> {
+	async fn bind_signature(&mut self, signature: &Signature, av: &Av, cv: &Cv) -> PResult<()> {
 		// Exact-arity scalar signatures need no argument snapshot when every FETCH is
 		// plain: binding cannot call Perl or mutate @_ before subsequent parameters.
 		if signature.scalars_only && av.elems().len() == signature.params.len()
@@ -429,11 +437,11 @@ impl Interp<'_> {
 				}
 				Sigil::Hash => {
 					let values = args[i.min(got)..].iter().map(|a| self.read_sv(a)).collect::<PResult<Vec<_>>>()?;
-					let h = new_hv(); self.fill_hash(&h, values)?; Slot::Hash(h)
+					let h = new_hv(); self.fill_hash_async(&h, values).await?; Slot::Hash(h)
 				}
 				_ => {
 					let v = if let Some(a) = args.get(i) { self.read_sv(a)? }
-					else if let Some(default) = &p.default { self.eval_scalar(default)? } else { Value::Undef };
+					else if let Some(default) = &p.default { self.eval_scalar_async(default).await? } else { Value::Undef };
 					i += 1;
 					Slot::Scalar(new_sv(v))
 				}
@@ -463,17 +471,17 @@ impl Interp<'_> {
 	/// Fully qualified name on the currently executing CV, including native calls.
 	pub fn current_sub_name(&self) -> Option<Rc<str>> { self.active_subs.last()?.0.name.borrow().clone() }
 
-	fn call_undefined(&mut self, name: &str, args: InvokeArgs, cx: Cx) -> PResult<Ret> {
+	async fn call_undefined(&mut self, name: &str, args: InvokeArgs, cx: Cx) -> PResult<Ret> {
 		let qualified = self.qualify(name);
 		let (pkg, func) = qualified.rsplit_once("::").unwrap_or(("main", name));
 		if func != "AUTOLOAD" && let Some(cv) = self.named_code(&format!("{pkg}::AUTOLOAD")) && !matches!(*cv.body.borrow(), CodeImpl::Undefined) {
 			self.sv(&format!("{pkg}::AUTOLOAD")).replace(Value::str(&qualified));
-			return self.call_sub_kind(&cv, args, cx, false);
+			return self.call_sub_kind(&cv, args, cx, false).await;
 		}
 		Err(self.die_msg(format!("Undefined subroutine &{qualified} called")))
 	}
 
-	fn call_args(&mut self, call: &Call, inherit: bool, proto: Option<&PStr>) -> PResult<InvokeArgs> {
+	async fn call_args(&mut self, call: &Call, inherit: bool, proto: Option<&PStr>) -> PResult<InvokeArgs> {
 		let mut out = Vec::new();
 		if let Some(CallSlot::Block(b)) = &call.slot {
 			// Block-prototype calls use an anonymous code value. The front end supplies
@@ -522,38 +530,38 @@ impl Interp<'_> {
 							if spec.is_none() { return Err(self.die_msg("Invalid argument type for subroutine prototype")); }
 						}
 						let value = match spec {
-							Some(b'@') => Value::Ref(Ref::Array(self.eval_array(e)?)),
-							Some(b'%') => Value::Ref(Ref::Hash(self.eval_hash(e)?)),
-							Some(b'$') => Value::Ref(Ref::Scalar(self.eval_lvalue(e)?)),
-							_ => self.reference(e, Cx::Scalar)?.scalar(),
+							Some(b'@') => Value::Ref(Ref::Array(self.eval_array_async(e).await?)),
+							Some(b'%') => Value::Ref(Ref::Hash(self.eval_hash_async(e).await?)),
+							Some(b'$') => Value::Ref(Ref::Scalar(self.eval_lvalue_async(e).await?)),
+							_ => self.reference(e, Cx::Scalar).await?.scalar(),
 						};
 						out.push(new_sv(value));
 					}
 					Some(b'$' | b'_') => {
 						if matches!(&ungroup(e).kind, ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _) | ExprKind::Select(_, Select::ArrayElement(_) | Select::HashElement(_), _)
 							| ExprKind::Int(_) | ExprKind::UInt(_) | ExprKind::Float(_) | ExprKind::String(_) | ExprKind::Version(_)) {
-						let mut aliases = self.eval_aliases(e)?;
+						let mut aliases = self.eval_aliases_async(e).await?;
 						out.append(&mut aliases);
-						} else { out.push(new_sv(self.eval_scalar(e)?)); }
+						} else { out.push(new_sv(self.eval_scalar_async(e).await?)); }
 					}
 					Some(b'*') => {
-						let v = if let ExprKind::Bareword(name) = &ungroup(e).kind { Value::Glob(self.glob(name)) } else { self.eval_scalar(e)? };
+						let v = if let ExprKind::Bareword(name) = &ungroup(e).kind { Value::Glob(self.glob(name)) } else { self.eval_scalar_async(e).await? };
 						out.push(new_sv(v));
 					}
 					Some(b'+' ) => {
 						let v = match &ungroup(e).kind {
-							ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => Value::Ref(Ref::Array(self.eval_array(e)?)),
-							ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => Value::Ref(Ref::Hash(self.eval_hash(e)?)),
-							_ => self.eval_scalar(e)?,
+							ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => Value::Ref(Ref::Array(self.eval_array_async(e).await?)),
+							ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => Value::Ref(Ref::Hash(self.eval_hash_async(e).await?)),
+							_ => self.eval_scalar_async(e).await?,
 						};
 						out.push(new_sv(v));
 					}
-					Some(b'@' | b'%') => { out.extend(self.eval_aliases(e)?); }
-					_ => out.extend(self.eval_aliases(e)?),
+					Some(b'@' | b'%') => { out.extend(self.eval_aliases_async(e).await?); }
+					_ => out.extend(self.eval_aliases_async(e).await?),
 				}
 			}
 			if specs.peek() == Some(&b'_') && !proto.bytes.contains(&b';') { out.push(self.topic()); }
-		} else if out.is_empty() { out = self.eval_aliases(args)?; } else { out.extend(self.eval_aliases(args)?); }
+		} else if out.is_empty() { out = self.eval_aliases_async(args).await?; } else { out.extend(self.eval_aliases_async(args).await?); }
 		Ok(InvokeArgs::Explicit(out))
 	}
 
@@ -579,44 +587,44 @@ impl Interp<'_> {
 		self.lookup_code(&self.qualify(name))
 	}
 
-	pub(super) fn eval_call(&mut self, e: &Expr, call: &Call, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn eval_call(&mut self, e: &Expr, call: &Call, cx: Cx) -> PResult<Ret> {
 		match &call.target {
 			CallTarget::Builtin(b, origin) => {
 				if *origin != BuiltinOrigin::Core && let Some(cv) = self.global_override(*b) {
-					let args = self.call_args(call, false, call.prototype.as_ref())?;
-					return self.call_sub_kind(&cv, args, cx, false);
+					let args = self.call_args(call, false, call.prototype.as_ref()).await?;
+					return self.call_sub_kind(&cv, args, cx, false).await;
 				}
 				if *origin == BuiltinOrigin::Global { return Err(self.die_msg(format!("Undefined subroutine &CORE::GLOBAL::{} called", b.name()))); }
-				if let Some(result) = self.core_call(*b, call, cx) { return result; }
+				if let Some(result) = self.core_call(*b, call, cx).await { return result; }
 				func::call(self, *b, call, cx)
 			}
 			CallTarget::Named(name, amp) => {
-				let args = self.call_args(call, *amp, call.prototype.as_ref())?;
-				if let Some(cv) = self.named_code_at(e, name) { self.call_sub_kind(&cv, args, cx, false) } else { self.call_undefined(name, args, cx) }
+				let args = self.call_args(call, *amp, call.prototype.as_ref()).await?;
+				if let Some(cv) = self.named_code_at(e, name) { self.call_sub_kind(&cv, args, cx, false).await } else { self.call_undefined(name, args, cx).await }
 			}
 			CallTarget::Code(code, amp) => {
-				let value = self.eval_scalar(code)?;
+				let value = self.eval_scalar_async(code).await?;
 				let value = self.overload_deref(Sigil::Code, value)?;
 				let Some(cv) = self.code_value(&value, true)? else { return Err(self.die_msg("Not a CODE reference")); };
-				let args = self.call_args(call, *amp, None)?;
-				self.call_sub_kind(&cv, args, cx, false)
+				let args = self.call_args(call, *amp, None).await?;
+				self.call_sub_kind(&cv, args, cx, false).await
 			}
 			CallTarget::Method(object, method) => {
 				let invocant = match &ungroup(object).kind {
 					ExprKind::Bareword(class) => new_sv(Value::str(class.strip_suffix("::").unwrap_or(class))),
 					ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _)
 					| ExprKind::Select(_, Select::ArrayElement(_) | Select::HashElement(_), _) => {
-						self.eval_match_cell(object)?.unwrap_or_else(|| new_sv(Value::Undef))
+						self.eval_match_cell_async(object).await?.unwrap_or_else(|| new_sv(Value::Undef))
 					}
-					_ => new_sv(self.eval_scalar(object)?),
+					_ => new_sv(self.eval_scalar_async(object).await?),
 				};
-				let dynamic = if let Method::Dynamic(e) = method { Some(self.eval_scalar(e)?) } else { None };
-				let mut args = self.call_args(call, false, None)?.into_vec();
+				let dynamic = if let Method::Dynamic(e) = method { Some(self.eval_scalar_async(e).await?) } else { None };
+				let mut args = self.call_args(call, false, None).await?.into_vec();
 				match (method, dynamic) {
 					(Method::Name(name), _) => self.invoke_method(invocant, name, args, cx),
 					(_, Some(Value::Ref(Ref::Code(cv)))) => {
 						args.insert(0, invocant);
-						self.call_sub(&cv, args, cx)
+						self.call_sub_async(&cv, args, cx).await
 					}
 					(_, Some(value)) => {
 						let name = self.stringify(&value)?;
@@ -635,15 +643,15 @@ impl Interp<'_> {
 		})
 	}
 
-	pub(super) fn call_lvalue(&mut self, call: &Call) -> PResult<Option<Sv>> {
+	pub(super) async fn call_lvalue(&mut self, call: &Call) -> PResult<Option<Sv>> {
 		let (cv, inherit) = match &call.target {
 			CallTarget::Named(name, amp) => (self.named_code(name), *amp),
-			CallTarget::Code(source, amp) => { let value = self.eval_scalar(source)?; (self.code_value(&value, true)?, *amp) }
+			CallTarget::Code(source, amp) => { let value = self.eval_scalar_async(source).await?; (self.code_value(&value, true)?, *amp) }
 			// `CLASS->method = ...` / `$obj->method = ...` with an lvalue method.
 			CallTarget::Method(object, Method::Name(method)) => {
 				let invocant = match &ungroup(object).kind {
 					ExprKind::Bareword(class) => Value::str(class.strip_suffix("::").unwrap_or(class)),
-					_ => self.eval_scalar(object)?,
+					_ => self.eval_scalar_async(object).await?,
 				};
 				let class = match &invocant {
 					Value::Ref(r) => r.blessed().ok_or_else(|| self.die_msg(format!("Can't call method \"{method}\" on unblessed reference")))?,
@@ -652,37 +660,37 @@ impl Interp<'_> {
 				let Some(cv) = self.find_method(&class, method) else {
 					return Err(self.die_msg(format!("Can't locate object method \"{method}\" via package \"{class}\"")));
 				};
-				let mut args = self.call_args(call, false, None)?.into_vec();
+				let mut args = self.call_args(call, false, None).await?.into_vec();
 				args.insert(0, new_sv(invocant));
-				let result = self.call_sub_kind(&cv, InvokeArgs::Explicit(args), Cx::Scalar, true)?.scalar();
+				let result = self.call_sub_kind(&cv, InvokeArgs::Explicit(args), Cx::Scalar, true).await?.scalar();
 				return Ok(match result { Value::Ref(Ref::Scalar(s)) => Some(s), _ => None });
 			}
 			_ => return Ok(None),
 		};
 		let Some(cv) = cv else { return Ok(None); };
-		let args = self.call_args(call, inherit, call.prototype.as_ref())?;
-		Ok(match self.call_sub_kind(&cv, args, Cx::Scalar, true)?.scalar() { Value::Ref(Ref::Scalar(s)) => Some(s), _ => None })
+		let args = self.call_args(call, inherit, call.prototype.as_ref()).await?;
+		Ok(match self.call_sub_kind(&cv, args, Cx::Scalar, true).await?.scalar() { Value::Ref(Ref::Scalar(s)) => Some(s), _ => None })
 	}
 
 	/// Calls a named lvalue sub in list context: references to the scalars, arrays and hashes it returns (see `lvalue_result`).
-	pub(super) fn call_lvalue_list(&mut self, call: &Call) -> PResult<Vec<Value>> {
+	pub(super) async fn call_lvalue_list(&mut self, call: &Call) -> PResult<Vec<Value>> {
 		let CallTarget::Named(name, inherit) = &call.target else { return Ok(Vec::new()); };
 		let Some(cv) = self.named_code(name) else { return Ok(Vec::new()); };
-		let args = self.call_args(call, *inherit, call.prototype.as_ref())?;
-		Ok(self.call_sub_kind(&cv, args, Cx::List, true)?.list())
+		let args = self.call_args(call, *inherit, call.prototype.as_ref()).await?;
+		Ok(self.call_sub_kind(&cv, args, Cx::List, true).await?.list())
 	}
 
-	fn core_call(&mut self, b: Builtin, call: &Call, cx: Cx) -> Option<PResult<Ret>> {
+	async fn core_call(&mut self, b: Builtin, call: &Call, cx: Cx) -> Option<PResult<Ret>> {
 		use Builtin as B;
 		Some(match b {
 			B::Defined | B::Scalar | B::Undef | B::Exists | B::Delete | B::Wantarray | B::Next | B::Last | B::Redo | B::Return | B::Goto |
 			B::Exit | B::Dump | B::Die | B::Warn | B::Eval | B::Evalbytes | B::Require | B::Do | B::Caller | B::Bless | B::Prototype |
-			B::Break | B::Continue | B::Map | B::Grep | B::Sort | B::Import | B::Tie | B::Tied | B::Untie | B::Lock => self.core_builtin(b, call, cx),
+			B::Break | B::Continue | B::Map | B::Grep | B::Sort | B::Import | B::Tie | B::Tied | B::Untie | B::Lock => self.core_builtin(b, call, cx).await,
 			_ => return None,
 		})
 	}
 
-	fn core_builtin(&mut self, b: Builtin, call: &Call, cx: Cx) -> PResult<Ret> {
+	async fn core_builtin(&mut self, b: Builtin, call: &Call, cx: Cx) -> PResult<Ret> {
 		use Builtin as B;
 		let expr = call.args.as_deref().filter(|e| !matches!(&ungroup(e).kind, ExprKind::List(items) if items.is_empty()));
 		let value = match b {
@@ -690,42 +698,42 @@ impl Interp<'_> {
 				let is_defined = match expr.map(ungroup).map(|e| &e.kind) {
 					Some(ExprKind::Variable(Sigil::Code, name) | ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. })) =>
 						self.named_code(name).is_some_and(|c| !matches!(*c.body.borrow(), CodeImpl::Undefined)),
-					Some(ExprKind::Deref(Sigil::Glob, source)) => self.defined_glob_deref(source)?,
+					Some(ExprKind::Deref(Sigil::Glob, source)) => self.defined_glob_deref(source).await?,
 					Some(ExprKind::Deref(Sigil::Code, source) | ExprKind::Call(Call { target: CallTarget::Code(source, true), args: None, .. })) =>
-						self.exempt_code(source, false)?.is_some_and(|c| !matches!(*c.body.borrow(), CodeImpl::Undefined)),
+						self.exempt_code(source, false).await?.is_some_and(|c| !matches!(*c.body.borrow(), CodeImpl::Undefined)),
 					Some(ExprKind::Binary(Binary::Assign, lhs, rhs)) if matches!(lhs.kind, ExprKind::Variable(Sigil::Scalar, _))
 						&& matches!(rhs.kind, ExprKind::Readline(_)) && let Some(assignment) = expr =>
-						self.defined_read_assignment(assignment, lhs, rhs)?,
-					_ => !self.scalar_or_topic(expr)?.is_undef(),
+						self.defined_read_assignment(assignment, lhs, rhs).await?,
+					_ => !self.scalar_or_topic(expr).await?.is_undef(),
 				};
 				perl_bool(is_defined)
 			}
-			B::Scalar => if let Some(e) = expr { self.eval_scalar(e)? } else { Value::Undef },
-			B::Undef => { if let Some(e) = expr { self.undef_target(e)?; } Value::Undef }
-			B::Exists => perl_bool(if let Some(e) = expr { self.exists(e)? } else { false }),
-			B::Delete => return if let Some(e) = expr { self.delete(e, cx) } else { Ok(Ret::no_value(cx)) },
+			B::Scalar => if let Some(e) = expr { self.eval_scalar_async(e).await? } else { Value::Undef },
+			B::Undef => { if let Some(e) = expr { self.undef_target(e).await?; } Value::Undef }
+			B::Exists => perl_bool(if let Some(e) = expr { self.exists(e).await? } else { false }),
+			B::Delete => return if let Some(e) = expr { self.delete(e, cx).await } else { Ok(Ret::no_value(cx)) },
 			B::Wantarray => self.eval_contexts.last().and_then(|&(cx, _)| context_flag(cx)).map_or(Value::Undef, perl_bool),
 			B::Return => {
 				let (cx, lvalue) = self.eval_contexts.last().copied().ok_or_else(|| self.die_msg("Can't return outside a subroutine"))?;
 				let result = if lvalue {
 					let e = expr.ok_or_else(|| self.die_msg("Can't return undef from lvalue subroutine"))?;
-					self.lvalue_result(e, cx)?
-				} else if let Some(e) = expr { self.eval(e, cx)? } else { Ret::no_value(cx) };
+					self.lvalue_result(e, cx).await?
+				} else if let Some(e) = expr { self.eval_async(e, cx).await? } else { Ret::no_value(cx) };
 				return Err(Flow::Return(result));
 			}
 			B::Next | B::Last | B::Redo => {
-				let label = if let Some(e) = expr { let v = self.eval_scalar(e)?; Some(Rc::from(self.stringify(&v)?.to_string_lossy().as_ref())) } else { None };
+				let label = if let Some(e) = expr { let v = self.eval_scalar_async(e).await?; Some(Rc::from(self.stringify(&v)?.to_string_lossy().as_ref())) } else { None };
 				return Err(match b { B::Next => Flow::Next(label), B::Last => Flow::Last(label), _ => Flow::Redo(label) });
 			}
 			B::Goto => {
 				let Some(e) = expr else { return Err(self.die_msg("goto must have label")); };
 				let v = if let ExprKind::Deref(Sigil::Code, source) = &ungroup(e).kind {
-					let value = self.eval_scalar(source)?;
+					let value = self.eval_scalar_async(source).await?;
 					match self.exempt_code_value(value.clone(), false)? {
 						Some(cv) => Value::Ref(Ref::Code(cv)),
 						None => return Err(self.die_msg(format!("Goto undefined subroutine &{}", self.qualify(&value.to_pstr().to_string_lossy())))),
 					}
-				} else { self.eval_scalar(e)? };
+				} else { self.eval_scalar_async(e).await? };
 				if let Value::Ref(Ref::Code(cv)) = v {
 					self.tail_args = self.active_subs.last().map(|(_, av, _)| av.clone());
 					return Err(Flow::Goto(GotoTarget::Sub(cv)));
@@ -733,10 +741,10 @@ impl Interp<'_> {
 				return Err(Flow::Goto(GotoTarget::Label(Rc::from(self.stringify(&v)?.to_string_lossy().as_ref()))));
 			}
 			B::Break | B::Continue => return Err(self.break_when(b == B::Continue)),
-			B::Exit => return Err(Flow::Exit(if let Some(e) = expr { self.eval_scalar(e)?.to_i64() as i32 } else { 0 })),
+			B::Exit => return Err(Flow::Exit(if let Some(e) = expr { self.eval_scalar_async(e).await?.to_i64() as i32 } else { 0 })),
 			B::Dump => return Err(self.die_msg("dump is not supported")),
 			B::Die | B::Warn => {
-				let values = if let Some(e) = expr { self.eval_list(e)? } else { Vec::new() };
+				let values = if let Some(e) = expr { self.eval_list_async(e).await? } else { Vec::new() };
 				if let [v @ Value::Ref(_)] = values.as_slice() {
 					if b == B::Die { return Err(self.die_value(v.clone())); }
 					self.emit_warning_value(v.clone());
@@ -755,7 +763,7 @@ impl Interp<'_> {
 							&& let Some(method) = self.find_method(&pkg, "PROPAGATE") {
 							let loc = self.location();
 							let args = vec![new_sv(prior), new_sv(Value::str(&loc.file)), new_sv(Value::Int(i64::from(loc.line)))];
-							self.with_eval(Cx::Scalar, None, false, |this| this.call_sub(&method, args, Cx::Scalar))?.scalar()
+							self.with_eval_async(Cx::Scalar, None, false, async move |this| this.call_sub_async(&method, args, Cx::Scalar).await).await?.scalar()
 						} else { prior };
 						return Err(self.die_value(propagated));
 					}
@@ -772,13 +780,13 @@ impl Interp<'_> {
 				Value::Int(1)
 			}
 			B::Eval | B::Evalbytes => {
-				let v = self.scalar_or_topic(expr)?;
+				let v = self.scalar_or_topic(expr).await?;
 				let mut source = self.stringify(&v)?;
 				if b == B::Evalbytes {
 					let Some(bytes) = source.downgraded() else { return Err(self.die_msg("Wide character in evalbytes")); };
 					source = PStr::new(bytes, false);
 				}
-				return self.eval_string_mode(&source, cx, b == B::Evalbytes);
+				return self.eval_string_mode(&source, cx, b == B::Evalbytes).await;
 			}
 			B::Require => {
 				if let Some(e) = expr {
@@ -788,11 +796,11 @@ impl Interp<'_> {
 							return self.require_file(&format!("{}.pm", name.replace("::", "/")), Some(name)).map(Ret::One);
 						}
 						ExprKind::Int(_) | ExprKind::UInt(_) | ExprKind::Float(_) | ExprKind::Version(_) => {
-							let version = self.eval_scalar(e)?;
+							let version = self.eval_scalar_async(e).await?;
 							self.check_perl_version(&version)?;
 						}
 						_ => {
-							let v = self.eval_scalar(e)?;
+							let v = self.eval_scalar_async(e).await?;
 							// pp_require: a numeric operand is a version check, not a file name.
 							if matches!(v, Value::Int(_) | Value::UInt(_) | Value::Num(_)) {
 								self.check_perl_version(&v)?;
@@ -811,16 +819,16 @@ impl Interp<'_> {
 				Value::Int(1)
 			}
 			B::Do => {
-				let v = self.scalar_or_topic(expr)?;
+				let v = self.scalar_or_topic(expr).await?;
 				let file = self.stringify(&v)?;
 				return self.do_file(&file.to_string_lossy(), cx);
 			}
 			B::Caller => {
-				let level = if let Some(e) = expr { self.eval_scalar(e)?.to_i64() } else { 0 };
+				let level = if let Some(e) = expr { self.eval_scalar_async(e).await?.to_i64() } else { 0 };
 				return self.caller_builtin(expr.is_some(), level, cx);
 			}
 			B::Bless => {
-				let args = expr.map(|e| self.eval_list(e)).transpose()?.unwrap_or_default();
+				let args = if let Some(e) = expr { self.eval_list_async(e).await? } else { Vec::new() };
 				let Some(Value::Ref(reference)) = args.first() else { return Err(self.die_msg("Can't bless non-reference value")); };
 				let package = if let Some(class) = args.get(1) { Rc::from(self.stringify(class)?.to_string_lossy().as_ref()) } else { self.package() };
 				self.bless_ref(reference, if package.is_empty() { Rc::from("main") } else { package });
@@ -828,7 +836,7 @@ impl Interp<'_> {
 			}
 			B::Prototype => {
 				let v = if let Some(e) = expr {
-					if let ExprKind::Bareword(name) = &ungroup(e).kind { Value::str(name) } else { self.eval_scalar(e)? }
+					if let ExprKind::Bareword(name) = &ungroup(e).kind { Value::str(name) } else { self.eval_scalar_async(e).await? }
 				} else { let topic = self.topic(); self.read_sv(&topic)? };
 				let core_name = match &v { Value::Ref(_) => None, v => v.to_pstr().to_string_lossy().strip_prefix("CORE::").map(str::to_owned) };
 				if let Some(keyword) = core_name {
@@ -844,17 +852,17 @@ impl Interp<'_> {
 			B::Map | B::Grep => return self.transform(b == B::Grep, call, cx),
 			B::Lock => if let Some(e) = expr {
 				match &ungroup(e).kind {
-					ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => Value::Ref(Ref::Array(self.eval_array(e)?)),
-					ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => Value::Ref(Ref::Hash(self.eval_hash(e)?)),
+					ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => Value::Ref(Ref::Array(self.eval_array_async(e).await?)),
+					ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => Value::Ref(Ref::Hash(self.eval_hash_async(e).await?)),
 					// `lock &sub` returns a reference to the sub without calling it.
 					ExprKind::Variable(Sigil::Code, name) | ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) =>
 						match self.variable_slot_at(ungroup(e), Sigil::Code, name)? { Slot::Code(cv) => Value::Ref(Ref::Code(cv)), _ => Value::Undef },
-					_ => self.eval_scalar(e)?,
+					_ => self.eval_scalar_async(e).await?,
 				}
 			} else { Value::Undef },
 			B::Tie | B::Tied | B::Untie => self.tie_builtin(b, expr)?,
 			B::Import => {
-				let args = expr.map(|e| self.eval_list(e)).transpose()?.unwrap_or_default();
+				let args = if let Some(e) = expr { self.eval_list_async(e).await? } else { Vec::new() };
 				let mut args = args.into_iter();
 				if let Some(invocant) = args.next() { return self.call_method(invocant, "import", args.collect(), cx); }
 				Value::Undef
@@ -864,8 +872,8 @@ impl Interp<'_> {
 		Ok(Ret::One(value))
 	}
 
-	fn scalar_or_topic(&mut self, expr: Option<&Expr>) -> PResult<Value> {
-		if let Some(e) = expr { self.eval_scalar(e) }
+	async fn scalar_or_topic(&mut self, expr: Option<&Expr>) -> PResult<Value> {
+		if let Some(e) = expr { self.eval_scalar_async(e).await }
 		else { let topic = self.topic(); self.read_sv(&topic) }
 	}
 
@@ -897,8 +905,8 @@ impl Interp<'_> {
 		Ok(Ret::Many(out))
 	}
 
-	pub(super) fn eval_block(&mut self, block: &Block, cx: Cx) -> PResult<Ret> {
-		self.with_eval(cx, None, false, |this| this.run_block(block, cx))
+	pub(super) async fn eval_block_async(&mut self, block: &Block, cx: Cx) -> PResult<Ret> {
+		self.with_eval_async(cx, None, false, async move |this| this.run_block_async(block, cx).await).await
 	}
 
 	/// Capture a regex action's lexical environment in a callable block.
@@ -937,23 +945,61 @@ impl Interp<'_> {
 	}
 
 	/// Compile and evaluate a string in the caller's package and lexical scope.
-	pub fn eval_string(&mut self, source: &PStr, cx: Cx) -> PResult<Ret> {
-		self.eval_string_mode(source, cx, false)
+	pub async fn eval_string_async(&mut self, source: &PStr, cx: Cx) -> PResult<Ret> {
+		self.eval_string_mode(source, cx, false).await
 	}
 
-	fn eval_string_mode(&mut self, source: &PStr, cx: Cx, bytes: bool) -> PResult<Ret> {
+	/// Sync entry for native callbacks and coercion paths: drives the async
+	/// evaluator on the blocking worker, spilling recursion to the heap queue.
+	pub fn eval_string(&mut self, source: &PStr, cx: Cx) -> PResult<Ret> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_string_async(source, cx)) }
+	}
+
+	async fn eval_string_mode(&mut self, source: &PStr, cx: Cx, bytes: bool) -> PResult<Ret> {
 		let package = self.package();
 		let hints = Hints::clone(&self.active_hints);
 		let mut parse_hints = parser_hints(&hints);
 		if bytes || hints.features.unicode_eval { parse_hints.utf8 = false; }
 		self.eval_serial += 1;
 		let file = format!("(eval {})", self.eval_serial);
-		self.with_eval(cx, Some(source.clone()), false, |this| {
-			let program = this.parse_unit(hints, true, |this| parser::parse_eval(source, &file, 1, &package, parse_hints, this))?;
-			this.run_block(&program.body, cx)
-		})
+		self.with_eval_async(cx, Some(source.clone()), false, async move |this| { 
+			let program = this.parse_unit_async(hints, true, |this| parser::parse_eval(source, &file, 1, &package, parse_hints, this)).await?;
+			this.run_block_async(&program.body, cx).await
+		 }).await
 	}
 
+	/// Async eval frame: runs a recursive body via a boxed-future closure.
+	pub(super) async fn with_eval_async(&mut self, cx: Cx, source: Option<PStr>, require: bool, f: impl AsyncFnOnce(&mut Self) -> PResult<Ret>) -> PResult<Ret> {
+		self.frames.push(self.frame(Some(Rc::from("(eval)")), cx, false, source, require, None));
+		self.eval_contexts.push((cx, false));
+		let error = self.sv("main::@");
+		error.replace(Value::bytes(b""));
+		let saved_location = self.location();
+		let out = f(self).await;
+		self.loc = saved_location;
+		self.eval_contexts.pop();
+		self.frames.pop();
+		// A `goto`/`last`/`next`/`redo` whose label no compiled code has dies where it was raised, inside this eval.
+		let out = match out {
+			Err(Flow::Goto(GotoTarget::Label(label))) if !self.label_known(&label) => Err(self.die_msg(format!("Can't find label {label}"))),
+			Err(flow @ (Flow::Last(Some(_)) | Flow::Next(Some(_)) | Flow::Redo(Some(_)))) => {
+				let (action, label) = match &flow {
+					Flow::Last(Some(l)) => ("last", l.clone()), Flow::Next(Some(l)) => ("next", l.clone()), Flow::Redo(Some(l)) => ("redo", l.clone()),
+					_ => ("last", Rc::from("")),
+				};
+				if self.label_known(&label) { Err(flow) } else { Err(self.die_msg(format!("Label not found for \"{action} {label}\""))) }
+			}
+			out => out,
+		};
+		match out {
+			Err(Flow::Die(v)) if !require => { error.replace(v); Ok(Ret::no_value(cx)) }
+			Ok(v) | Err(Flow::Return(v)) => { error.replace(Value::bytes(b"")); Ok(v.in_context(cx)) }
+			out => out,
+		}
+	}
+
+	/// Sync entry for the compilation boundary (loading.rs): runs a non-recursive body directly.
 	pub(super) fn with_eval(&mut self, cx: Cx, source: Option<PStr>, require: bool, f: impl FnOnce(&mut Self) -> PResult<Ret>) -> PResult<Ret> {
 		self.frames.push(self.frame(Some(Rc::from("(eval)")), cx, false, source, require, None));
 		self.eval_contexts.push((cx, false));
@@ -1251,25 +1297,32 @@ impl Interp<'_> {
 
 	/// Evaluates a compiled format argument line in list context: aliases of the variables it names (so `^` fields
 	/// can chop them), copies of other values.
-	pub fn eval_format_args(&mut self, args: &FormatArgs) -> PResult<Vec<Sv>> {
+	pub async fn eval_format_args_async(&mut self, args: &FormatArgs) -> PResult<Vec<Sv>> {
 		let outer = self.enter_pad(&args.pad);
 		let package = std::mem::replace(&mut self.package, args.package.clone());
 		let hints = std::mem::replace(&mut self.active_hints, args.hints.clone());
 		// A format is sub-like: `return` in an argument line leaves it as Err(Flow::Return).
 		self.eval_contexts.push((Cx::List, false));
-		let result = self.scoped(|this| {
+		let result = self.scoped_async(async move |this| { 
 			let Some((last, before)) = args.program.body.stmts.split_last() else { return Ok(Vec::new()); };
-			for stmt in before { this.run_statement(stmt, Cx::Void)?; }
+			for stmt in before { this.run_statement(stmt, Cx::Void).await?; }
 			match &last.kind {
-				StmtKind::Expr(e) => this.eval_aliases(e),
-				_ => this.run_statement(last, Cx::List).map(|r| aliases(r.list())),
+				StmtKind::Expr(e) => this.eval_aliases_async(e).await,
+				_ => this.run_statement(last, Cx::List).await.map(|r| aliases(r.list())),
 			}
-		});
+		 }).await;
 		self.eval_contexts.pop();
 		self.active_hints = hints;
 		self.package = package;
 		self.leave_pad(outer);
 		result
+	}
+
+	/// Sync entry for native callbacks and coercion paths: drives the async
+	/// evaluator on the blocking worker, spilling recursion to the heap queue.
+	pub fn eval_format_args(&mut self, args: &FormatArgs) -> PResult<Vec<Sv>> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_format_args_async(args)) }
 	}
 }
 

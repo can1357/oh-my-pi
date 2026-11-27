@@ -21,7 +21,7 @@ use std::{
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
 use globset::{Glob, GlobMatcher};
 use grep_matcher::{LineTerminator, Matcher};
-use grep_pcre2::RegexMatcherBuilder as PcreMatcherBuilder;
+use omp_xfs::grep::pcre::RegexMatcherBuilder as PcreMatcherBuilder;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,

@@ -12,23 +12,31 @@ const PURE_LIMIT: u32 = DEPTH_LIMIT - PURE_LEVELS as u32 - 1;
 
 impl Interp<'_> {
 	#[inline]
-	pub(super) fn depth_guard<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+	pub(super) async fn depth_guard<T>(&mut self, f: impl AsyncFnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
 		if self.depth >= DEPTH_LIMIT { return Err(self.die_msg("Deep recursion limit exceeded")); }
 		self.depth += 1;
-		let result = f(self);
+		let result = f(self).await;
 		self.depth -= 1;
 		result
 	}
 
 	/// Evaluate an expression in the context supplied by its parent.
-	pub fn eval(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+	pub async fn eval_async(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		if let Some(value) = self.eval_immediate(e, cx) { return Ok(Ret::One(value)); }
-		self.eval_nonleaf(e, cx)
+		let at = self.depth;
+		descend(at, Box::pin(self.eval_nonleaf(e, cx))).await
 	}
 
-	fn eval_nonleaf(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+	/// Sync entry for native callbacks and coercion paths: drives the async
+	/// evaluator on the blocking worker, spilling recursion to the heap queue.
+	pub fn eval(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_async(e, cx)) }
+	}
+
+	async fn eval_nonleaf(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		let saved = self.enter_location(&e.location);
-		let result = self.nested(|this| this.eval_node(e, cx));
+		let result = self.nested(async move |this| this.eval_node(e, cx).await).await;
 		self.leave_location(&e.location, saved);
 		result
 	}
@@ -36,25 +44,24 @@ impl Interp<'_> {
 	/// An expression statement normally enters a statement frame immediately followed by an
 	/// expression frame. There is no Perl work between the two. In the gaps between stack
 	/// checks, reserve both levels together; at the boundary use the ordinary guarded entry.
-	pub(super) fn eval_statement_expr(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn eval_statement_expr(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		let phase = self.depth % STACK_CHECK_EVERY;
-		if phase == 0 || self.depth >= PURE_LIMIT - 1 { return self.nested(|this| this.eval(e, cx)); }
-		if let Some(v) = self.eval_immediate(e, cx) { return Ok(Ret::One(v)); }
+		if phase == 0 || self.depth >= PURE_LIMIT - 1 { return self.nested(async move |this| this.eval_async(e, cx).await).await; }
 		if phase + 1 == STACK_CHECK_EVERY {
-			return self.nested(|this| this.eval_nonleaf(e, cx));
+			return self.nested(async move |this| Box::pin(this.eval_nonleaf(e, cx)).await).await;
 		}
 		let saved = self.enter_location(&e.location);
 		self.depth += 2;
-		let result = self.eval_node(e, cx);
+		let result = self.eval_node(e, cx).await;
 		self.depth -= 2;
 		self.leave_location(&e.location, saved);
 		result
 	}
 
 	#[inline]
-	fn eval_node(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+	async fn eval_node(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		if let Some(flow) = self.take_pending() { return Err(flow); }
-		let mut result = self.eval_inner(e, cx);
+		let mut result = self.eval_inner(e, cx).await;
 		if let Some(flow) = self.take_pending() { return Err(flow); }
 		if let Ok(ret) = &mut result {
 			ret.apply_context(cx);
@@ -66,7 +73,7 @@ impl Interp<'_> {
 	/// Execute bounded, callback-free operations without entering a recursive evaluator frame.
 	/// A miss must have no side effects: in particular, coercions that can warn or die go through eval_node.
 	#[inline]
-	fn eval_immediate(&mut self, e: &Expr, cx: Cx) -> Option<Value> {
+	pub(super) fn eval_immediate(&mut self, e: &Expr, cx: Cx) -> Option<Value> {
 		match &e.kind {
 			// These operations need an lvalue, a regex, or short-circuit evaluation:
 			// no bounded arithmetic/string probe can handle them.
@@ -135,6 +142,8 @@ impl Interp<'_> {
 	fn plain_number_at(&self, e: &Expr, remaining: u8) -> Option<Num> {
 		match &e.kind {
 			ExprKind::Variable(Sigil::Scalar, name) => plain_num(&*self.numeric_cell(e, name)?.plain_value()?),
+			ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) if remaining != 0 =>
+				self.plain_number_at(inner, remaining - 1),
 			ExprKind::Binary(op @ (Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod | Binary::Pow), a, b) if remaining != 0 =>
 				self.plain_arithmetic(*op, a, b, remaining - 1),
 			_ if !self.in_constant && !self.active_hints.constant_overloads.is_empty() => None,
@@ -188,7 +197,17 @@ impl Interp<'_> {
 		};
 		// A compound assignment's shortcut for direct lexical lvalues does not apply to the global topic.
 		let ExprKind::Variable(Sigil::Scalar, name) = &left.kind else { return None; };
-		let Slot::Scalar(cell) = self.pad_slot_at(left, Sigil::Scalar, name)? else { return None; };
+		// The RHS is checked pure first, so the fallback below cannot leave a side effect on a miss.
+		let rhs = self.plain_number_at(right, PURE_LEVELS)?;
+		let global;
+		let cell: &Sv = match self.pad_slot_at(left, Sigil::Scalar, name) {
+			Some(Slot::Scalar(cell)) => cell,
+			// A package scalar already resolved by an earlier evaluation of this node.
+			_ => match self.cached_package_slot(left, Sigil::Scalar, name) {
+				Some(Slot::Scalar(cell)) => { global = cell; &global }
+				_ => return None,
+			},
+		};
 		let old = plain_num(&*cell.plain_value()?)?;
 		if self.is_readonly_sv(cell) { return None; }
 		let rhs = self.plain_number_at(right, PURE_LEVELS)?;
@@ -202,8 +221,22 @@ impl Interp<'_> {
 	/// a thread-local): a few nested optimized frames stay well within the 128 KiB red zone. Unoptimized frames
 	/// are far larger, so debug builds check at every level.
 	#[inline]
-	pub(super) fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-		if self.depth % STACK_CHECK_EVERY == 0 { stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.depth_guard(f)) } else { self.depth_guard(f) }
+	pub(super) async fn nested<T>(&mut self, f: impl AsyncFnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+		if self.depth % STACK_CHECK_EVERY == 0 { crate::stack::guard(128 * 1024, || ()); }
+		self.depth_guard(f).await
+	}
+
+	/// Sync [`nested`] for callers that cannot await (transform's non-recursive helpers).
+	pub(super) fn nested_sync<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+		if self.depth % STACK_CHECK_EVERY == 0 { crate::stack::guard(128 * 1024, || self.depth_guard_sync(f)) } else { self.depth_guard_sync(f) }
+	}
+
+	fn depth_guard_sync<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+		if self.depth >= DEPTH_LIMIT { return Err(self.die_msg("Deep recursion limit exceeded")); }
+		self.depth += 1;
+		let result = f(self);
+		self.depth -= 1;
+		result
 	}
 
 	/// Leaves that cannot fail, warn, recurse or run Perl code (literals without constant overloading, plain
@@ -225,7 +258,15 @@ impl Interp<'_> {
 	/// Runs `f` with `loc` as the current location, restoring the previous one afterwards. Nested nodes usually
 	/// share their parent's location, which then needs no copying.
 	#[inline]
-	pub(super) fn at_location<T>(&mut self, loc: &Location, f: impl FnOnce(&mut Self) -> T) -> T {
+	pub(super) async fn at_location<T>(&mut self, loc: &Location, f: impl AsyncFnOnce(&mut Self) -> T) -> T {
+		let saved = self.enter_location(loc);
+		let result = f(self).await;
+		self.leave_location(loc, saved);
+		result
+	}
+
+	/// Sync [`at_location`] for callers that cannot await.
+	pub(super) fn at_location_sync<T>(&mut self, loc: &Location, f: impl FnOnce(&mut Self) -> T) -> T {
 		let saved = self.enter_location(loc);
 		let result = f(self);
 		self.leave_location(loc, saved);
@@ -244,14 +285,28 @@ impl Interp<'_> {
 	}
 
 	/// Evaluate an expression, requesting a scalar result.
-	pub fn eval_scalar(&mut self, e: &Expr) -> PResult<Value> {
+	pub async fn eval_scalar_async(&mut self, e: &Expr) -> PResult<Value> {
 		if let Some(value) = self.eval_immediate(e, Cx::Scalar) { return Ok(value); }
-		self.eval_nonleaf(e, Cx::Scalar).map(Ret::scalar)
+		let at = self.depth;
+		descend(at, Box::pin(self.eval_nonleaf(e, Cx::Scalar))).await.map(Ret::scalar)
+	}
+
+	/// Sync entry for native callbacks and coercion paths: drives the async
+	/// evaluator on the blocking worker, spilling recursion to the heap queue.
+	pub fn eval_scalar(&mut self, e: &Expr) -> PResult<Value> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_scalar_async(e)) }
 	}
 	/// Evaluate an expression in list context and copy its values.
-	pub fn eval_list(&mut self, e: &Expr) -> PResult<Vec<Value>> { self.eval(e, Cx::List).map(Ret::list) }
+	pub async fn eval_list_async(&mut self, e: &Expr) -> PResult<Vec<Value>> { self.eval_async(e, Cx::List).await.map(Ret::list) }
 
-	fn eval_inner(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+	/// Sync entry for native callbacks and coercion paths.
+	pub fn eval_list(&mut self, e: &Expr) -> PResult<Vec<Value>> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_list_async(e)) }
+	}
+
+	async fn eval_inner(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		let value = match &e.kind {
 			ExprKind::Int(n) => self.constant_value("integer", Value::Int(*n))?,
 			ExprKind::UInt(n) => self.constant_value("integer", Value::UInt(*n))?,
@@ -260,10 +315,10 @@ impl Interp<'_> {
 			ExprKind::Version(cps) => Value::Str(PStr::from_codepoints(cps.iter().copied())),
 			ExprKind::Quote(kind, parts) => {
 				let s = if *kind == QuoteKind::Glob && let [QuotePart::Expr(e, false)] = parts.as_slice() {
-					let value = self.eval_scalar(e)?;
+					let value = self.eval_scalar_async(e).await?;
 					if let Some(ret) = self.overload_builtin("<>", &value, None, cx)? { return Ok(ret); }
 					self.interpolation_value(e, value, "string")?
-				} else { self.interpolate(parts, InterpMode::String)? };
+				} else { self.interpolate_async(parts, InterpMode::String).await? };
 				match kind {
 					QuoteKind::String => Value::Str(s),
 					QuoteKind::Command => return func::sys::backticks(self, s, cx),
@@ -281,41 +336,41 @@ impl Interp<'_> {
 			ExprKind::Special(Special::Line) => Value::Int(i64::from(e.location.line)),
 			ExprKind::Special(Special::Package(pkg)) => Value::str(pkg),
 			ExprKind::Special(Special::Sub) => self.active_subs.last().map_or(Value::Undef, |(cv, _, _)| Value::Ref(Ref::Code(cv.clone()))),
-			ExprKind::Variable(sigil, name) => return self.eval_var(e, *sigil, name, cx),
-			ExprKind::Deref(sigil, operand) => return self.eval_deref(*sigil, operand, cx),
-			ExprKind::Select(base, select, key) => return self.read_selection(base, *select, key, cx),
-			ExprKind::Array(q) => Value::Ref(Ref::Array(new_av(self.eval_list(q)?))),
+			ExprKind::Variable(sigil, name) => return self.eval_var(e, *sigil, name, cx).await,
+			ExprKind::Deref(sigil, operand) => return self.eval_deref(*sigil, operand, cx).await,
+			ExprKind::Select(base, select, key) => return self.read_selection(base, *select, key, cx).await,
+			ExprKind::Array(q) => Value::Ref(Ref::Array(new_av(self.eval_list_async(q).await?))),
 			ExprKind::Hash(q) => {
 				let h = new_hv();
-				let values = self.eval_list(q)?;
-				self.fill_hash(&h, values)?;
+				let values = self.eval_list_async(q).await?;
+				self.fill_hash_async(&h, values).await?;
 				Value::Ref(Ref::Hash(h))
 			}
 			ExprKind::List(items) => {
 				if cx == Cx::List {
 					let mut values = Vec::new();
-					for operand in items { self.eval(operand, Cx::List)?.append_to(&mut values); }
+					for operand in items { self.eval_async(operand, Cx::List).await?.append_to(&mut values); }
 					return Ok(Ret::Many(values));
 				}
 				let Some((last, earlier)) = items.split_last() else { return Ok(Ret::One(Value::Undef)); };
-				for item in earlier { self.eval(item, Cx::Void)?; }
-				return self.eval(last, cx);
+				for item in earlier { self.eval_async(item, Cx::Void).await?; }
+				return self.eval_async(last, cx).await;
 			}
-			ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) => return self.eval(inner, cx),
-			ExprKind::Declare(kind, class, target, attrs) => return self.read_declaration(*kind, class.as_ref(), target, attrs, e as *const Expr as usize, cx),
-			ExprKind::Unary(op, operand) => return self.unary(*op, operand, cx),
-			ExprKind::Binary(Binary::Assign, a, b) => return self.assign(a, b, cx),
-			ExprKind::Binary(Binary::AssignOp(op), a, b) => return self.compound(*op, a, b, cx).map(Ret::One),
+			ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) => return self.eval_async(inner, cx).await,
+			ExprKind::Declare(kind, class, target, attrs) => return self.read_declaration(*kind, class.as_ref(), target, attrs, e as *const Expr as usize, cx).await,
+			ExprKind::Unary(op, operand) => return self.unary(*op, operand, cx).await,
+			ExprKind::Binary(Binary::Assign, a, b) => return self.assign(a, b, cx).await,
+			ExprKind::Binary(Binary::AssignOp(op), a, b) => return self.compound(*op, a, b, cx).await.map(Ret::One),
 			ExprKind::Binary(Binary::Bind(neg), a, b) => return rx::bind_expr(self, a, b, *neg, cx),
 			ExprKind::Binary(op @ (Binary::And | Binary::Or | Binary::DefinedOr), a, b) => {
-				let value = self.eval_scalar(a)?;
-				return if self.short_circuit(*op, &value)? { self.eval(b, cx) } else { Ok(Ret::One(value)) };
+				let value = self.eval_scalar_async(a).await?;
+				return if self.short_circuit(*op, &value)? { self.eval_async(b, cx).await } else { Ok(Ret::One(value)) };
 			}
-			ExprKind::Binary(op, a, b) => return self.binary(e as *const Expr as usize, *op, a, b, cx),
+			ExprKind::Binary(op, a, b) => return self.binary(e as *const Expr as usize, *op, a, b, cx).await,
 			ExprKind::CompareChain(first, rest) => {
-				let mut left = self.eval_scalar(first)?;
+				let mut left = self.eval_scalar_async(first).await?;
 				for (op, rhs) in rest {
-					let right = self.eval_scalar(rhs)?;
+					let right = self.eval_scalar_async(rhs).await?;
 					let v = self.binary_values(*op, &left, &right)?;
 					if !self.truthy(&v)? { return Ok(Ret::One(perl_bool(false))); }
 					left = right;
@@ -323,21 +378,21 @@ impl Interp<'_> {
 				perl_bool(true)
 			}
 			ExprKind::Conditional(cond, yes, no) => {
-				let branch = if self.eval_truth(cond)? { yes } else { no };
-				return self.eval(branch, cx);
+				let branch = if self.eval_truth(cond).await? { yes } else { no };
+				return self.eval_async(branch, cx).await;
 			}
-			ExprKind::Call(call) => return self.eval_call(e, call, cx),
+			ExprKind::Call(call) => return self.eval_call(e, call, cx).await,
 			ExprKind::Sub(sub) => {
 				let cv = self.make_sub(sub, None, self.capture_pad(sub.body.as_deref()));
 				// `sub : const {...}` runs once now and becomes a constant sub of that value (perlsub).
 				if sub.attributes.iter().any(|attr| attr.name.as_ref() == "const") {
-					let values = self.call_sub(&cv, Vec::new(), Cx::List)?.list();
+					let values = self.call_sub_async(&cv, Vec::new(), Cx::List).await?.list();
 					cv.body.replace(CodeImpl::Constant(Rc::from(values)));
 				}
 				Value::Ref(Ref::Code(cv))
 			}
-			ExprKind::Block(block, true) => return self.eval_block(block, cx),
-			ExprKind::Block(block, false) => return self.run_block(block, cx),
+			ExprKind::Block(block, true) => return self.eval_block_async(block, cx).await,
+			ExprKind::Block(block, false) => return self.run_block_async(block, cx).await,
 			ExprKind::Readline(source) => return func::sys::readline(self, source, cx),
 			ExprKind::FileTest(kind, operand) => return func::sys::file_test(self, *kind, operand.as_deref()).map(Ret::One),
 			ExprKind::Yada => return Err(self.die_msg("Unimplemented")),
@@ -348,17 +403,17 @@ impl Interp<'_> {
 	/// `defined($scalar = <FH>)` needs the assignment's definedness, not another copy
 	/// of the input record. Keep every node frame and evaluate the lvalue *after* reading:
 	/// magic on the handle can change which scalar the name denotes.
-	pub(super) fn defined_read_assignment(&mut self, e: &Expr, lhs: &Expr, rhs: &Expr) -> PResult<bool> {
-		self.at_location(&e.location, |this| this.nested(|this| {
+	pub(super) async fn defined_read_assignment(&mut self, e: &Expr, lhs: &Expr, rhs: &Expr) -> PResult<bool> {
+		self.at_location(&e.location, async move |this| this.nested(async move |this| {
 			if let Some(flow) = this.take_pending() { return Err(flow); }
 			let result = if let ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) = &e.kind {
-				this.defined_read_assignment(inner, lhs, rhs)
+				Box::pin(this.defined_read_assignment(inner, lhs, rhs)).await
 			} else {
-				(|| {
-					let value = this.eval_scalar(rhs)?;
+				(async {
+					let value = this.eval_scalar_async(rhs).await?;
 					let cell = match &lhs.kind {
 						ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(cell)) = this.pad_slot_at(lhs, Sigil::Scalar, name) => cell.clone(),
-						_ => this.eval_lvalue(lhs)?,
+						_ => this.eval_lvalue_async(lhs).await?,
 					};
 					if matches!(value, Value::Str(_) | Value::Undef) && !cell.registered() && !cell.is_magical()
 						&& !this.is_readonly_sv(&cell) {
@@ -374,11 +429,11 @@ impl Interp<'_> {
 						if this.pending.is_none() && matches!(assigned, Value::Ref(Ref::Regexp(_))) { this.track_ret(&Ret::One(assigned)); }
 						Ok(defined)
 					}
-				})()
+				}).await
 			};
 			if let Some(flow) = this.take_pending() { return Err(flow); }
 			result
-		}))
+		}).await).await
 	}
 
 	fn constant_value(&mut self, kind: &str, value: Value) -> PResult<Value> {
@@ -393,14 +448,14 @@ impl Interp<'_> {
 		result.map(Ret::scalar)
 	}
 
-	fn unary(&mut self, op: Unary, operand: &Expr, cx: Cx) -> PResult<Ret> {
+	async fn unary(&mut self, op: Unary, operand: &Expr, cx: Cx) -> PResult<Ret> {
 		use Unary::*;
-		if op == Reference { return self.reference(operand, cx); }
+		if op == Reference { return self.reference(operand, cx).await; }
 		if matches!(op, PreInc | PreDec | PostInc | PostDec) {
 			let target = ungroup(operand);
 			let cell = match &target.kind {
 				ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot_at(target, Sigil::Scalar, name) => sv.clone(),
-				_ => self.eval_lvalue(operand)?,
+				_ => self.eval_lvalue_async(operand).await?,
 			};
 			// Repeated counters (including a newly vivified undef hash element) need neither a
 			// copied old scalar nor a magic STORE. Post-decrement preserves an undef old value.
@@ -433,7 +488,7 @@ impl Interp<'_> {
 			return Ok(Ret::One(result));
 		}
 		let v = if op == Minus && let ExprKind::Bareword(word) = &ungroup(operand).kind { Value::str(word) }
-		else { self.eval_scalar(operand)? };
+		else { self.eval_scalar_async(operand).await? };
 		let result = match op {
 			Plus => v,
 			Minus => {
@@ -457,23 +512,23 @@ impl Interp<'_> {
 		Ok(Ret::One(result))
 	}
 
-	fn binary(&mut self, site: usize, op: Binary, left: &Expr, right: &Expr, cx: Cx) -> PResult<Ret> {
+	async fn binary(&mut self, site: usize, op: Binary, left: &Expr, right: &Expr, cx: Cx) -> PResult<Ret> {
 		use Binary::*;
 		match op {
 			SmartMatch => {
-				let a = self.smartmatch_operand(left)?;
-				let b = self.smartmatch_operand(right)?;
-				return Ok(Ret::One(perl_bool(self.smartmatch(&a, &b)?)));
+				let a = self.smartmatch_operand(left).await?;
+				let b = self.smartmatch_operand(right).await?;
+				return Ok(Ret::One(perl_bool(self.smartmatch(&a, &b).await?)));
 			}
 			Range(three) => {
-				if cx != Cx::List { return self.flip_flop(site, left, right, three).map(Ret::One); }
-				let start = self.eval_scalar(left)?;
-				let end = self.eval_scalar(right)?;
+				if cx != Cx::List { return self.flip_flop(site, left, right, three).await.map(Ret::One); }
+				let start = self.eval_scalar_async(left).await?;
+				let end = self.eval_scalar_async(right).await?;
 				return ops::range(&start, &end).map(Ret::Many).map_err(|m| self.die_msg(m));
 			}
 			Repeat if cx == Cx::List && matches!(&left.kind, ExprKind::Group(_) | ExprKind::List(_)) => {
-				let values = self.eval_list(left)?;
-				let count = self.eval_scalar(right)?;
+				let values = self.eval_list_async(left).await?;
+				let count = self.eval_scalar_async(right).await?;
 				let count = self.numify_with(&count, "repeat (x)")?.into_value().to_i64();
 				if count < 0 { self.warn_category("numeric", "Negative repeat count does nothing"); }
 				if count <= 0 || values.is_empty() { return Ok(Ret::empty()); }
@@ -487,14 +542,14 @@ impl Interp<'_> {
 				return Ok(Ret::Many(result));
 			}
 			Isa => {
-				let value = self.eval_scalar(left)?;
+				let value = self.eval_scalar_async(left).await?;
 				let class = if let ExprKind::Bareword(name) = &ungroup(right).kind { name.clone() }
-				else { let v = self.eval_scalar(right)?; Rc::from(self.stringify(&v)?.to_string_lossy().as_ref()) };
+				else { let v = self.eval_scalar_async(right).await?; Rc::from(self.stringify(&v)?.to_string_lossy().as_ref()) };
 				// pp_isa calls the object's `isa` method when it is overridden, else checks the hierarchy directly.
 				let yes = if let Value::Ref(r) = &value && let Some(pkg) = r.blessed() {
 					let overridden = self.find_method(&pkg, "isa").filter(|cv| !matches!(*cv.body.borrow(), CodeImpl::Native(_)));
 					if let Some(cv) = overridden {
-						let result = self.call_sub(&cv, vec![new_sv(value.clone()), new_sv(Value::Str(PStr::from_str(&class)))], Cx::Scalar)?.scalar();
+						let result = self.call_sub_async(&cv, vec![new_sv(value.clone()), new_sv(Value::Str(PStr::from_str(&class)))], Cx::Scalar).await?.scalar();
 						self.truthy(&result)?
 					} else { self.isa(&pkg, &class)? }
 				} else { false };
@@ -502,8 +557,8 @@ impl Interp<'_> {
 			}
 			_ => {}
 		}
-		let mut a = self.eval_scalar(left)?;
-		let b = self.eval_scalar(right)?;
+		let mut a = self.eval_scalar_async(left).await?;
+		let b = self.eval_scalar_async(right).await?;
 		if op == Concat && let (Value::Str(x), Some(y)) = (&mut a, b.as_pstr()) {
 			x.push(y);
 			return Ok(Ret::One(a));
@@ -520,15 +575,15 @@ impl Interp<'_> {
 		}
 	}
 
-	fn range_test(&mut self, e: &Expr) -> PResult<bool> {
+	async fn range_test(&mut self, e: &Expr) -> PResult<bool> {
 		if matches!(&ungroup(e).kind, ExprKind::Int(_) | ExprKind::UInt(_) | ExprKind::Float(_) | ExprKind::String(_)) {
-			let n = self.eval_scalar(e)?.to_i64();
+			let n = self.eval_scalar_async(e).await?.to_i64();
 			return Ok(self.magic_scalar(".").unwrap_or(Value::Undef).to_i64() == n);
 		}
-		self.eval_truth(e)
+		self.eval_truth(e).await
 	}
 
-	pub(super) fn eval_truth(&mut self, e: &Expr) -> PResult<bool> {
+	pub(super) async fn eval_truth(&mut self, e: &Expr) -> PResult<bool> {
 		use Binary::*;
 		if self.pending.is_none() {
 			match &e.kind {
@@ -536,11 +591,11 @@ impl Interp<'_> {
 				// runs callbacks. Keep its location, depth and deferred exceptions, but don't
 				// materialize an evaluator result or test it for list/regexp/overload magic.
 				ExprKind::Regex(re) if matches!(re.kind, RegexKind::Match(_)) => {
-					return self.at_location(&e.location, |this| this.nested(|this| {
+					return self.at_location(&e.location, async move |this| this.nested(async move |this| {
 						let result = rx::eval_regex(this, re, None, false, Cx::Scalar);
 						if let Some(flow) = this.take_pending() { return Err(flow); }
 						result.map(|ret| ret.scalar().truthy())
-					}));
+					}).await).await;
 				}
 				ExprKind::Variable(Sigil::Scalar, _) => {
 					if let Some(value) = self.leaf_cell(e).and_then(|sv| sv.plain_value())
@@ -553,20 +608,20 @@ impl Interp<'_> {
 						return Ok(comparison_truth(*op, order));
 					}
 					// Already tried the same numeric operands that eval_immediate would inspect.
-					let v = self.eval_nonleaf(e, Cx::Scalar)?.scalar();
+					let v = Box::pin(self.eval_nonleaf(e, Cx::Scalar)).await?.scalar();
 					return self.truthy(&v);
 				}
 				_ => {}
 			}
 		}
-		let v = self.eval_scalar(e)?;
+		let v = self.eval_scalar_async(e).await?;
 		self.truthy(&v)
 	}
 
-	fn flip_flop(&mut self, site: usize, start: &Expr, end: &Expr, three: bool) -> PResult<Value> {
+	async fn flip_flop(&mut self, site: usize, start: &Expr, end: &Expr, three: bool) -> PResult<Value> {
 		let n = self.persistent.borrow().flip_flops.get(&site).copied().unwrap_or(0);
-		if n == 0 && !self.range_test(start)? { return Ok(perl_bool(false)); }
-		let finished = !(three && n == 0) && self.range_test(end)?;
+		if n == 0 && !self.range_test(start).await? { return Ok(perl_bool(false)); }
+		let finished = !(three && n == 0) && self.range_test(end).await?;
 		let n = n.saturating_add(1);
 		if finished {
 			self.persistent.borrow_mut().flip_flops.remove(&site);
@@ -577,25 +632,25 @@ impl Interp<'_> {
 		}
 	}
 
-	fn compound(&mut self, compound: Compound, left: &Expr, right: &Expr, cx: Cx) -> PResult<Value> {
+	async fn compound(&mut self, compound: Compound, left: &Expr, right: &Expr, cx: Cx) -> PResult<Value> {
 		use Binary as B;
 		let op = compound_op(compound);
 		let target = ungroup(left);
 		if let ExprKind::Call(call @ Call { target: CallTarget::Builtin(b @ (Builtin::Substr | Builtin::Pos | Builtin::Vec | Builtin::Keys), _), .. }) = &target.kind {
-			let old = self.eval_scalar(target)?;
+			let old = self.eval_scalar_async(target).await?;
 			if !self.short_circuit(op, &old)? { return Ok(old); }
-			let rhs = self.eval_scalar(right)?;
+			let rhs = self.eval_scalar_async(right).await?;
 			let value = if matches!(op, B::And | B::Or | B::DefinedOr) { rhs } else { self.binary_values(op, &old, &rhs)? };
 			return func::assign(self, *b, call, value);
 		}
 		let cell = match &target.kind {
 			ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot_at(target, Sigil::Scalar, name) => sv.clone(),
-			_ => self.eval_lvalue(left)?,
+			_ => self.eval_lvalue_async(left).await?,
 		};
-		if op == B::Concat && let Some(value) = self.append_in_place(&cell, right, cx)? { return Ok(value); }
+		if op == B::Concat && let Some(value) = self.append_in_place(&cell, right, cx).await? { return Ok(value); }
 		let old = self.read_sv(&cell)?;
 		if !self.short_circuit(op, &old)? { return Ok(old); }
-		let rhs = self.eval_scalar(right)?;
+		let rhs = self.eval_scalar_async(right).await?;
 		let value = self.combine_compound(op, &cell, old, rhs, cx != Cx::Void)?;
 		// The operator's value is its target: a tied target is FETCHed again when that value is used.
 		if cx != Cx::Void && self.scalar_tie(&cell).is_some() { return self.read_sv(&cell); }
@@ -604,7 +659,7 @@ impl Interp<'_> {
 
 	/// `.=` on a plain string cell appends to its buffer (perl's in-place concatenation) instead of copying the
 	/// string; None when the general path must handle it (magic, overloading, undef operands, warnings).
-	fn append_in_place(&mut self, cell: &Sv, right: &Expr, cx: Cx) -> PResult<Option<Value>> {
+	async fn append_in_place(&mut self, cell: &Sv, right: &Expr, cx: Cx) -> PResult<Option<Value>> {
 		let plain = |this: &Self| matches!(cell.plain_value().as_deref(), Some(Value::Str(_))) && !this.is_readonly_sv(cell);
 		if !plain(self) { return Ok(None); }
 		// Literal and lexical string RHSs cannot change the target. Do not allocate a temporary RHS
@@ -618,7 +673,7 @@ impl Interp<'_> {
 			cell.set_pos(None);
 			return Ok(Some(result));
 		}
-		let rhs = self.eval_scalar(right)?;
+		let rhs = self.eval_scalar_async(right).await?;
 		let piece = match &rhs {
 			Value::Str(_) | Value::Int(_) | Value::UInt(_) | Value::Num(_) => rhs,
 			_ => return self.compound_rhs(Compound::Concat, cell, rhs, cx).map(Some),
@@ -634,11 +689,11 @@ impl Interp<'_> {
 		Ok(Some(result))
 	}
 
-	pub(super) fn compound_cell(&mut self, compound: Compound, cell: &Sv, right: &Expr) -> PResult<Value> {
+	pub(super) async fn compound_cell(&mut self, compound: Compound, cell: &Sv, right: &Expr) -> PResult<Value> {
 		let op = compound_op(compound);
 		let old = self.read_sv(cell)?;
 		if !self.short_circuit(op, &old)? { return Ok(old); }
-		let rhs = self.eval_scalar(right)?;
+		let rhs = self.eval_scalar_async(right).await?;
 		self.combine_compound(op, cell, old, rhs, true)
 	}
 
@@ -735,16 +790,18 @@ impl Interp<'_> {
 				comparison(op, Some(if self.hints().bytes { a.bytes.cmp(&b.bytes) } else { ops::str_cmp(&a, &b) }))
 			}
 			Xor => perl_bool(self.truthy(a)? != self.truthy(b)?),
-			SmartMatch => perl_bool(self.smartmatch(a, b)?),
+			// The operands are already evaluated; drive the async matcher on the blocking worker
+			// exactly as the sync entry points do (the arm is otherwise unreachable).
+			SmartMatch => perl_bool(unsafe { crate::deep::run(self.smartmatch(a, b)) }?),
 			_ => return Err(self.die_msg("Invalid binary operator")),
 		})
 	}
 
-	pub(super) fn smartmatch(&mut self, a: &Value, b: &Value) -> PResult<bool> {
-		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.depth_guard(|this| this.smartmatch_inner(a, b)))
+	pub(super) async fn smartmatch(&mut self, a: &Value, b: &Value) -> PResult<bool> {
+		crate::stack::guard(128 * 1024, || self.depth_guard(async move |this| Box::pin(this.smartmatch_inner(a, b)).await)).await
 	}
 
-	fn smartmatch_inner(&mut self, a: &Value, b: &Value) -> PResult<bool> {
+	async fn smartmatch_inner(&mut self, a: &Value, b: &Value) -> PResult<bool> {
 		// perlop "Smartmatch Operator": the right operand's type picks the rule, in this order.
 		if b.is_undef() { return Ok(a.is_undef()); }
 		if let Value::Ref(r) = b && r.blessed().is_some() && !matches!(r, Ref::Regexp(_)) {
@@ -754,13 +811,13 @@ impl Interp<'_> {
 		let left = SmartOperand::of(a);
 		match SmartOperand::of(b) {
 			SmartOperand::Array(right) => {
-				let items = self.smart_elements(&right)?;
+				let items = self.smart_elements(&right).await?;
 				match left {
 					SmartOperand::Array(left) => {
 						if Rc::ptr_eq(&left, &right) { return Ok(true); }
-						let left = self.smart_elements(&left)?;
+						let left = self.smart_elements(&left).await?;
 						if left.len() != items.len() { return Ok(false); }
-						for (x, y) in left.iter().zip(&items) { if !self.smartmatch(x, y)? { return Ok(false); } }
+						for (x, y) in left.iter().zip(&items) { if !self.smartmatch(x, y).await? { return Ok(false); } }
 						Ok(true)
 					}
 					SmartOperand::Hash(h) => {
@@ -773,7 +830,7 @@ impl Interp<'_> {
 					}
 					_ if a.is_undef() => Ok(items.iter().any(Value::is_undef)),
 					_ => {
-						for item in &items { if self.smartmatch(a, item)? { return Ok(true); } }
+						for item in &items { if self.smartmatch(a, item).await? { return Ok(true); } }
 						Ok(false)
 					}
 				}
@@ -784,7 +841,7 @@ impl Interp<'_> {
 					Ok(x.len() == y.len() && x.iter().all(|k| y.contains(k)))
 				}
 				SmartOperand::Array(left) => {
-					for item in self.smart_elements(&left)? { if self.smart_exists(&right, &item)? { return Ok(true); } }
+					for item in self.smart_elements(&left).await? { if self.smart_exists(&right, &item)? { return Ok(true); } }
 					Ok(false)
 				}
 				SmartOperand::Regexp => {
@@ -796,22 +853,22 @@ impl Interp<'_> {
 			},
 			SmartOperand::Code(cv) => {
 				let items: Vec<Value> = match left {
-					SmartOperand::Array(arr) => self.smart_elements(&arr)?,
+					SmartOperand::Array(arr) => self.smart_elements(&arr).await?,
 					SmartOperand::Hash(h) => self.hash_keys(&h)?.iter().map(|k| Value::Str(k.to_pstr())).collect(),
 					_ => {
-						let result = self.call_sub(&cv, vec![new_sv(a.clone())], Cx::Scalar)?.scalar();
+						let result = self.call_sub_async(&cv, vec![new_sv(a.clone())], Cx::Scalar).await?.scalar();
 						return self.truthy(&result);
 					}
 				};
 				for item in items {
-					let result = self.call_sub(&cv, vec![new_sv(item)], Cx::Scalar)?.scalar();
+					let result = self.call_sub_async(&cv, vec![new_sv(item)], Cx::Scalar).await?.scalar();
 					if !self.truthy(&result)? { return Ok(false); }
 				}
 				Ok(true)
 			}
 			SmartOperand::Regexp => match left {
 				SmartOperand::Array(arr) => {
-					for item in self.smart_elements(&arr)? { if self.smart_regex(&item, b)? { return Ok(true); } }
+					for item in self.smart_elements(&arr).await? { if self.smart_regex(&item, b)? { return Ok(true); } }
 					Ok(false)
 				}
 				SmartOperand::Hash(h) => {
@@ -836,8 +893,8 @@ impl Interp<'_> {
 	}
 
 	/// The values of an array operand (tied arrays FETCH each element).
-	fn smart_elements(&mut self, av: &Av) -> PResult<Vec<Value>> {
-		let cells = self.eval_array_aliases(av, false)?;
+	async fn smart_elements(&mut self, av: &Av) -> PResult<Vec<Value>> {
+		let cells = self.eval_array_aliases(av, false).await?;
 		cells.iter().map(|sv| self.read_sv(sv)).collect()
 	}
 
@@ -859,11 +916,11 @@ impl Interp<'_> {
 	}
 
 	/// Evaluates a smartmatch operand: arrays and hashes are taken by reference.
-	pub(super) fn smartmatch_operand(&mut self, e: &Expr) -> PResult<Value> {
+	pub(super) async fn smartmatch_operand(&mut self, e: &Expr) -> PResult<Value> {
 		Ok(match &ungroup(e).kind {
-			ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => Value::Ref(Ref::Array(self.eval_array(e)?)),
-			ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => Value::Ref(Ref::Hash(self.eval_hash(e)?)),
-			_ => self.eval_scalar(e)?,
+			ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => Value::Ref(Ref::Array(self.eval_array_async(e).await?)),
+			ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => Value::Ref(Ref::Hash(self.eval_hash_async(e).await?)),
+			_ => self.eval_scalar_async(e).await?,
 		})
 	}
 
@@ -916,11 +973,17 @@ impl Interp<'_> {
 
 	/// Interpolate quote fragments, preserving bytes and applying case/quotemeta directives.
 	pub fn interpolate(&mut self, parts: &[QuotePart], mode: InterpMode) -> PResult<PStr> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.interpolate_async(parts, mode)) }
+	}
+
+	/// Interpolate quote fragments, preserving bytes and applying case/quotemeta directives.
+	pub async fn interpolate_async(&mut self, parts: &[QuotePart], mode: InterpMode) -> PResult<PStr> {
 		match parts {
 			[] => return Ok(PStr::default()),
 			[QuotePart::Literal(s)] => return Ok(s.clone()),
 			[QuotePart::Expr(e, false)] => {
-				let v = self.eval_scalar(e)?;
+				let v = self.eval_scalar_async(e).await?;
 				if mode == InterpMode::Regex && matches!(&v, Value::Ref(Ref::Regexp(_))) { return Ok(v.to_pstr()); }
 				return self.interpolation_value(e, v, interpolation_op(mode, false, None, None));
 			}
@@ -955,7 +1018,7 @@ impl Interp<'_> {
 						if nonempty { once = None; }
 						continue;
 					}
-					let v = self.eval_scalar(e)?;
+					let v = self.eval_scalar_async(e).await?;
 					let s = if mode == InterpMode::Regex && matches!(v, Value::Ref(Ref::Regexp(_))) { v.to_pstr() }
 					else { self.interpolation_value(e, v, interpolation_op(mode, joined, changes.last().map(|(_, op)| *op), once))? };
 					if !s.is_empty() { once = None; }
@@ -963,7 +1026,7 @@ impl Interp<'_> {
 				}
 				QuotePart::Expr(e, true) => {
 					let sep = self.list_sep();
-					for (i, v) in self.eval_list(e)?.into_iter().enumerate() {
+					for (i, v) in self.eval_list_async(e).await?.into_iter().enumerate() {
 						if i != 0 { span.push(&sep); }
 						let s = self.interpolation_value(e, v, if mode == InterpMode::String { "join or string" } else {
 							interpolation_op(mode, joined, changes.last().map(|(_, op)| *op), once)

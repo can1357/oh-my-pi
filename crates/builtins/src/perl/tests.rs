@@ -246,3 +246,29 @@ async fn corpus() {
 	assert!(selected > 0, "no Perl corpus cases matched {filter:?}");
 	assert_eq!(failed, 0, "{failed}/{selected} Perl corpus cases failed");
 }
+
+/// Heap-driven recursion and unwind on an ordinary worker stack: mutual sub
+/// recursion far deeper than the native stack, then a `die` caught by `eval`.
+#[tokio::test]
+	async fn deep_mutual_recursion_and_die_unwind() {
+		let cwd = tempfile::tempdir().unwrap();
+		let script = "sub even { my $n = shift; return 1 if $n == 0; odd($n - 1) } \
+sub odd { my $n = shift; return 0 if $n == 0; even($n - 1) } \
+print(even(1500) ? \"even\" : \"odd\", \"\\n\"); \
+eval { die \"boom\\n\" }; print($@ =~ /boom/ ? \"caught\" : \"missed\", \"\\n\");";
+		let (status, stdout, stderr) =
+			run_extra_bytes(&["perl", "-e", script], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+		assert_eq!(status, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+		assert_eq!(stdout, b"even\ncaught\n");
+
+		// Past the depth limit the failure is the clean Perl diagnostic, not a native overflow.
+		let over = "sub f { my $n = shift; return 0 if $n == 0; f($n - 1) } f(100000);";
+		let (status, _out, stderr) =
+			run_extra_bytes(&["perl", "-e", over], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+		assert_ne!(status, 0);
+		assert!(
+			String::from_utf8_lossy(&stderr).contains("Deep recursion limit exceeded"),
+			"stderr: {}",
+			String::from_utf8_lossy(&stderr)
+		);
+	}

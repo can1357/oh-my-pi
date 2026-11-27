@@ -101,7 +101,7 @@ impl<'p> Validator<'_, '_, 'p> {
 	fn stmt(&mut self, stmt: &'p Stmt) {
 		if self.depth >= 2048 { self.complain(&stmt.location, "Excessively nested expression"); return; }
 		self.depth += 1;
-		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.stmt_inner(stmt));
+		crate::stack::guard(128 * 1024, || self.stmt_inner(stmt));
 		self.commit_declarations();
 		self.depth -= 1;
 	}
@@ -219,7 +219,7 @@ impl<'p> Validator<'_, '_, 'p> {
 	fn expr(&mut self, e: &'p Expr) {
 		if self.depth >= 2048 { self.complain(&e.location, "Excessively nested expression"); return; }
 		self.depth += 1;
-		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.expr_inner(e));
+		crate::stack::guard(128 * 1024, || self.expr_inner(e));
 		self.depth -= 1;
 	}
 

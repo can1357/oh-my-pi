@@ -14,7 +14,7 @@ mod transform;
 mod validate;
 mod vars;
 
-use std::{cell::{Cell, RefCell}, path::PathBuf, rc::Rc, time::{Duration, Instant, SystemTime}};
+use std::{cell::{Cell, RefCell}, future::Future, path::PathBuf, rc::Rc, time::{Duration, Instant, SystemTime}};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -117,6 +117,20 @@ pub(in crate::perl) fn new_lvalue(lvalue: Lvalue) -> Sv { value::new_lvalue(lval
 
 /// Evaluation success or non-local control flow.
 pub(in crate::perl) type PResult<T> = Result<T, Flow>;
+
+/// How many interpreter recursion levels run as ordinary nested polls on the
+/// native stack before one hands its body to [`crate::deep::run`]'s heap queue.
+/// Debug builds descend at every level: their unoptimized frames are large
+/// enough to matter well before the release interval does.
+pub(in crate::perl) const DESCEND_EVERY: u32 = if cfg!(debug_assertions) { 1 } else { 4 };
+
+/// Awaits one interpreter recursion level, spilling it to the active driver's
+/// heap queue every [`DESCEND_EVERY`] levels. `at` is the parent's depth, read
+/// before `child` borrowed the interpreter. Between spills the child is polled
+/// inline, so only the spill allocates.
+pub(in crate::perl) async fn descend<F: Future>(at: u32, child: F) -> F::Output {
+	if at.is_multiple_of(DESCEND_EVERY) { crate::deep::descend(child).await } else { child.await }
+}
 /// A Rust implementation of a Perl subroutine, given the aliased arguments.
 pub(in crate::perl) type NativeFn = fn(&mut Interp<'_>, Vec<Sv>, Cx) -> PResult<Ret>;
 

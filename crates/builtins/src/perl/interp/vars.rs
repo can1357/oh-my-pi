@@ -655,10 +655,10 @@ impl Interp<'_> {
 		self.scopes.push(scope);
 	}
 
-	pub(super) fn pop_scope(&mut self) {
+	pub(super) async fn pop_scope(&mut self) {
 		let Some(mut scope) = self.scopes.pop() else { return };
 		self.lexicals.unwind(scope.lexical_mark);
-		while let Some(restore) = scope.undo.pop() { self.apply_restore(restore); }
+		while let Some(restore) = scope.undo.pop() { self.apply_restore(restore).await; }
 		scope.pad.clear();
 		scope.declarations.clear();
 		// Keep the emptied vectors for the next block (loop bodies enter a scope per iteration).
@@ -670,14 +670,14 @@ impl Interp<'_> {
 
 	/// Undo the innermost scope's `local`s made since `mark`, keeping its lexicals (a loop body's locals end
 	/// before its `continue` block, which still sees the body's `my` variables).
-	pub(super) fn unwind_locals(&mut self, mark: usize) {
+	pub(super) async fn unwind_locals(&mut self, mark: usize) {
 		let Some(scope) = self.scopes.last_mut() else { return };
 		if scope.undo.len() <= mark { return; }
 		let restores = scope.undo.split_off(mark);
-		for restore in restores.into_iter().rev() { self.apply_restore(restore); }
+		for restore in restores.into_iter().rev() { self.apply_restore(restore).await; }
 	}
 
-	fn apply_restore(&mut self, restore: Restore) {
+	async fn apply_restore(&mut self, restore: Restore) {
 			match restore {
 				Restore::Scalar(g, old) => { g.scalar.replace(old); }
 				Restore::Array(g, old) => { g.array.replace(old); }
@@ -845,8 +845,8 @@ impl Interp<'_> {
 
 	/// `&$name` in the strict-refs-exempt positions (`\&$name`, `defined &$name`, `exists &$name`, `goto &$name`):
 	/// the code slot named by a string, a glob's code slot, or a code reference. `vivify` creates a stub (`\&$name`).
-	pub(super) fn exempt_code(&mut self, source: &Expr, vivify: bool) -> PResult<Option<Cv>> {
-		let v = self.eval_scalar(source)?;
+	pub(super) async fn exempt_code(&mut self, source: &Expr, vivify: bool) -> PResult<Option<Cv>> {
+		let v = self.eval_scalar_async(source).await?;
 		self.exempt_code_value(v, vivify)
 	}
 
@@ -909,7 +909,7 @@ impl Interp<'_> {
 	}
 
 	#[inline]
-	fn cached_package_slot(&self, e: &Expr, sigil: Sigil, name: &str) -> Option<Slot> {
+	pub(super) fn cached_package_slot(&self, e: &Expr, sigil: Sigil, name: &str) -> Option<Slot> {
 		let site = self.global_site(e, Some(sigil), name)?;
 		if site.topic_or_args {
 			if sigil == Sigil::Scalar && let Some(topic) = self.topics.last() { return Some(Slot::Scalar(topic.clone())); }
@@ -1005,13 +1005,21 @@ impl Interp<'_> {
 		result
 	}
 
+	/// Run with a dynamically scoped topic alias, awaiting a recursive body.
+	pub async fn with_topic_async<T>(&mut self, sv: Sv, f: impl AsyncFnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+		self.topics.push(sv);
+		let result = f(self).await;
+		self.topics.pop();
+		result
+	}
+
 	/// The implicit argument array for shift/pop.
 	pub fn default_array(&mut self) -> Av {
 		self.active_subs.last().map(|(_, av, _)| av.clone()).unwrap_or_else(|| self.av("main::ARGV"))
 	}
 
-	pub(super) fn foreach_alias<T>(&mut self, variable: Option<&Expr>, alias: Sv, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-		let Some(variable) = variable else { return self.with_topic(alias, f); };
+	pub(super) async fn foreach_alias<T>(&mut self, variable: Option<&Expr>, alias: Sv, f: impl AsyncFnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+		let Some(variable) = variable else { return self.with_topic_async(alias, f).await; };
 		// `for my \$x (...)` (declared_refs): a fresh lexical bound to each referent.
 		if let ExprKind::Declare(DeclKind::My | DeclKind::State, _, inner, _) = &ungroup(variable).kind
 			&& let ExprKind::Unary(Unary::Reference, dst) = &ungroup(inner).kind
@@ -1019,7 +1027,7 @@ impl Interp<'_> {
 			let value = self.read_sv(&alias)?;
 			let slot = self.ref_value(*sigil, value)?;
 			self.put_pad(*sigil, name.clone(), slot);
-			return f(self);
+			return f(self).await;
 		}
 		if let ExprKind::Unary(Unary::Reference, target) = &ungroup(variable).kind {
 			let value = self.read_sv(&alias)?;
@@ -1029,7 +1037,7 @@ impl Interp<'_> {
 				let slot = self.ref_value(*sigil, value)?;
 				self.put_pad(*sigil, name.clone(), slot);
 				let _ = kind;
-				return f(self);
+				return f(self).await;
 			}
 			if let ExprKind::Variable(sigil, name) = &target.kind {
 				let bound = self.ref_value(*sigil, value)?;
@@ -1039,7 +1047,7 @@ impl Interp<'_> {
 					let qualified = if let Some(Slot::Our(q)) = self.lookup_pad(*sigil, name) { q } else { self.qualify(name) };
 					let gv = self.glob(&qualified);
 					match bound {
-						Slot::Scalar(sv) if name.as_ref() == "_" => return self.with_topic(sv, f),
+						Slot::Scalar(sv) if name.as_ref() == "_" => return self.with_topic_async(sv, f).await,
 						Slot::Scalar(sv) => { let old = gv.scalar.replace(sv); self.add_restore(Restore::Scalar(gv, old)); }
 						Slot::Array(av) => { let old = gv.array.replace(av); self.add_restore(Restore::Array(gv, old)); }
 						Slot::Hash(hv) => { let old = gv.hash.replace(hv); self.add_restore(Restore::Hash(gv, old)); }
@@ -1047,7 +1055,7 @@ impl Interp<'_> {
 						_ => return Err(self.die_msg("Can't modify reference constructor in foreach loop")),
 					}
 				}
-				return f(self);
+				return f(self).await;
 			}
 			return Err(self.die_msg("Can't modify reference constructor in foreach loop"));
 		}
@@ -1055,7 +1063,7 @@ impl Interp<'_> {
 			if matches!(kind, DeclKind::My | DeclKind::State) {
 				if let ExprKind::Variable(Sigil::Scalar, name) = &ungroup(target).kind {
 					self.put_pad(Sigil::Scalar, name.clone(), Slot::Scalar(alias));
-					return f(self);
+					return f(self).await;
 				}
 			} else if *kind == DeclKind::Our {
 				if let ExprKind::Variable(Sigil::Scalar, name) = &ungroup(target).kind { self.put_pad(Sigil::Scalar, name.clone(), Slot::Our(self.qualify(name))); }
@@ -1063,7 +1071,7 @@ impl Interp<'_> {
 			target
 		} else { variable };
 		if let ExprKind::Variable(Sigil::Scalar, name) = &ungroup(target).kind {
-			if name.as_ref() == "_" || name.as_ref() == "main::_" { return self.with_topic(alias, f); }
+			if name.as_ref() == "_" || name.as_ref() == "main::_" { return self.with_topic_async(alias, f).await; }
 			match self.lookup_pad(Sigil::Scalar, name) {
 				Some(Slot::Scalar(_)) => self.put_pad(Sigil::Scalar, name.clone(), Slot::Scalar(alias)),
 				slot => {
@@ -1075,12 +1083,12 @@ impl Interp<'_> {
 					self.add_restore(Restore::Scalar(gv, old));
 				}
 			}
-			return f(self);
+			return f(self).await;
 		}
-		let sv = self.eval_lvalue(target)?;
+		let sv = self.eval_lvalue_async(target).await?;
 		let value = self.read_sv(&alias)?;
 		self.write_sv(&sv, value)?;
-		let out = f(self);
+		let out = f(self).await;
 		if out.is_ok() {
 			let value = self.read_sv(&sv)?;
 			self.write_sv(&alias, value)?;
@@ -1206,16 +1214,16 @@ impl Interp<'_> {
 		Ok(self.package_slot(sigil, &self.qualify(&name)))
 	}
 
-	fn deref(&mut self, sigil: Sigil, source: &Expr, vivify: bool) -> PResult<Slot> {
+	async fn deref(&mut self, sigil: Sigil, source: &Expr, vivify: bool) -> PResult<Slot> {
 		let sigil = slot_sigil(sigil);
 		let source = ungroup(source);
 		let mut target = None;
 		let v = if vivify && vivifiable(source) {
-			let sv = self.eval_lvalue(source)?;
+			let sv = self.eval_lvalue_async(source).await?;
 			let v = self.read_sv(&sv)?;
 			target = Some(sv);
 			v
-		} else { self.eval_scalar(source)? };
+		} else { self.eval_scalar_async(source).await? };
 		let v = self.overload_deref(sigil, v)?;
 		let slot = match (sigil, &v) {
 			(Sigil::Scalar, Value::Ref(Ref::Scalar(s))) => Slot::Scalar(s.clone()),
@@ -1278,22 +1286,22 @@ impl Interp<'_> {
 		Ok(Some(i))
 	}
 
-	fn hash_index(&mut self, key: &Expr) -> PResult<HKey> {
+	async fn hash_index(&mut self, key: &Expr) -> PResult<HKey> {
 		let mut s = PStr::default();
 		if let ExprKind::List(_) = &ungroup(key).kind {
 			let sep = self.subscript_sep();
-			for (i, value) in self.eval_list(key)?.into_iter().enumerate() {
+			for (i, value) in self.eval_list_async(key).await?.into_iter().enumerate() {
 				if i != 0 { s.push(&sep); }
 				s.push(&self.stringify(&value)?);
 			}
 		} else {
-			let value = self.eval_scalar(key)?;
+			let value = self.eval_scalar_async(key).await?;
 			s = self.stringify_owned(value)?;
 		}
 		Ok(HKey::from_pstr(s))
 	}
 
-	fn select_aggregate(&mut self, base: &Expr, sigil: Sigil, arrow: bool, vivify: bool) -> PResult<Option<Slot>> {
+	async fn select_aggregate(&mut self, base: &Expr, sigil: Sigil, arrow: bool, vivify: bool) -> PResult<Option<Slot>> {
 		if !arrow {
 			let base = ungroup(base);
 			if let ExprKind::Variable(_, name) = &base.kind {
@@ -1309,10 +1317,10 @@ impl Interp<'_> {
 				}
 				return self.variable_slot_at(base, sigil, name).map(Some);
 			}
-			if let ExprKind::Deref(_, source) = &ungroup(base).kind { return self.deref(sigil, source, vivify).map(Some); }
+			if let ExprKind::Deref(_, source) = &ungroup(base).kind { return self.deref(sigil, source, vivify).await.map(Some); }
 		}
 		if !vivify {
-			let value = self.eval_scalar(base)?;
+			let value = self.eval_scalar_async(base).await?;
 			if value.is_undef() { return Ok(None); }
 			let value = self.overload_deref(sigil, value)?;
 			return match (sigil, value) {
@@ -1322,7 +1330,7 @@ impl Interp<'_> {
 				(_, value) => self.symbolic(sigil, &value).map(Some),
 			};
 		}
-		self.deref(sigil, base, vivify).map(Some)
+		self.deref(sigil, base, vivify).await.map(Some)
 	}
 
 	/// Plain storage for a scalar or a named array's constant element used as a key (`$h{$F[0]}`).
@@ -1350,7 +1358,7 @@ impl Interp<'_> {
 		}
 	}
 
-	fn hash_subscript_cell(&mut self, h: &Hv, key: &Expr, create: bool) -> PResult<Option<Sv>> {
+	async fn hash_subscript_cell(&mut self, h: &Hv, key: &Expr, create: bool) -> PResult<Option<Sv>> {
 		// Hash::Util retains a Weak for every hash with access restrictions. Neither it nor a tie may be bypassed.
 		if Rc::weak_count(h) == 0 && self.tied_hash(h).is_none() && self.pending.is_none() && self.depth < 8190 {
 			if let ExprKind::String(s) = &key.kind && (self.in_constant || self.active_hints.constant_overloads.is_empty())
@@ -1359,10 +1367,10 @@ impl Interp<'_> {
 				&& let Some(s) = v.as_pstr() && let Some(cell) = byte_hash_cell(h, &s.bytes, s.utf8, create) { return Ok(cell); }
 		}
 		if matches!(&ungroup(key).kind, ExprKind::List(_)) {
-			let key = self.hash_index(key)?;
+			let key = self.hash_index(key).await?;
 			return self.hash_cell(h, key, create);
 		}
-		let v = self.eval_scalar(key)?;
+		let v = self.eval_scalar_async(key).await?;
 		// Evaluating the key can change the hash (including tying or restricting it).
 		if let Value::Int(_) | Value::UInt(_) = v && Rc::weak_count(h) == 0 && self.tied_hash(h).is_none() {
 			match v {
@@ -1380,41 +1388,41 @@ impl Interp<'_> {
 	}
 
 	/// Resolve both halves of a subscript together when the caller needs a cell, not a persistent element address.
-	fn selection_cell(&mut self, base: &Expr, select: Select, key: &Expr, access: CellAccess) -> PResult<Option<Sv>> {
+	async fn selection_cell(&mut self, base: &Expr, select: Select, key: &Expr, access: CellAccess) -> PResult<Option<Sv>> {
 		let vivify = access != CellAccess::Match;
 		let create = access == CellAccess::Write;
 		if let Select::HashElement(arrow) = select {
-			if let Some(Slot::Hash(h)) = self.select_aggregate(base, Sigil::Hash, arrow, vivify)? {
-				return self.hash_subscript_cell(&h, key, create);
+			if let Some(Slot::Hash(h)) = self.select_aggregate(base, Sigil::Hash, arrow, vivify).await? {
+				return self.hash_subscript_cell(&h, key, create).await;
 			}
-			self.hash_index(key)?;
+			self.hash_index(key).await?;
 			return Ok(None);
 		}
-		match self.element(base, select, key, vivify)? {
+		match self.element(base, select, key, vivify).await? {
 			Some(el) => self.element_cell(el, create),
 			None => Ok(None),
 		}
 	}
 
-	fn element(&mut self, base: &Expr, select: Select, key: &Expr, vivify: bool) -> PResult<Option<Element>> {
+	async fn element(&mut self, base: &Expr, select: Select, key: &Expr, vivify: bool) -> PResult<Option<Element>> {
 		match select {
 			Select::ArrayElement(arrow) => {
-				let a = self.select_aggregate(base, Sigil::Array, arrow, vivify)?;
-				let index = self.eval_scalar(key)?.to_i64();
+				let a = self.select_aggregate(base, Sigil::Array, arrow, vivify).await?;
+				let index = self.eval_scalar_async(key).await?.to_i64();
 				Ok(if let Some(Slot::Array(a)) = a { Some(Element::Array(a, index)) } else { None })
 			}
 			Select::HashElement(arrow) => {
-				let h = self.select_aggregate(base, Sigil::Hash, arrow, vivify)?;
-				let key = self.hash_index(key)?;
+				let h = self.select_aggregate(base, Sigil::Hash, arrow, vivify).await?;
+				let key = self.hash_index(key).await?;
 				Ok(if let Some(Slot::Hash(h)) = h { Some(Element::Hash(h, key)) } else { None })
 			}
 			_ => Ok(None),
 		}
 	}
 
-	pub(super) fn ref_element_target(&mut self, e: &Expr) -> PResult<RefTarget> {
+	pub(super) async fn ref_element_target(&mut self, e: &Expr) -> PResult<RefTarget> {
 		if let ExprKind::Select(base, select, key) = &e.kind
-			&& let Some(element) = self.element(base, *select, key, true)? {
+			&& let Some(element) = self.element(base, *select, key, true).await? {
 			return self.element_ref_place(element);
 		}
 		Err(self.die_msg("Can't modify reference constructor in assignment"))
@@ -1474,14 +1482,14 @@ impl Interp<'_> {
 		} else { Ok(Value::Undef) }
 	}
 
-	fn slice(&mut self, base: &Expr, select: Select, key: &Expr, vivify: bool) -> PResult<Vec<(Value, Option<Element>)>> {
+	async fn slice(&mut self, base: &Expr, select: Select, key: &Expr, vivify: bool) -> PResult<Vec<(Value, Option<Element>)>> {
 		let (sigil, arrow) = match select {
 			Select::ArraySlice(arrow) | Select::ArrayPairs(arrow) => (Sigil::Array, arrow),
 			Select::HashSlice(arrow) | Select::HashPairs(arrow) => (Sigil::Hash, arrow),
 			_ => return Ok(Vec::new()),
 		};
-		let aggregate = self.select_aggregate(base, sigil, arrow, vivify)?;
-		let values = self.eval_list(key)?;
+		let aggregate = self.select_aggregate(base, sigil, arrow, vivify).await?;
+		let values = self.eval_list_async(key).await?;
 		let mut selected = Vec::with_capacity(values.len());
 		for value in values {
 			let element = match &aggregate {
@@ -1494,7 +1502,7 @@ impl Interp<'_> {
 		Ok(selected)
 	}
 
-	pub(super) fn read_selection(&mut self, base: &Expr, select: Select, key: &Expr, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn read_selection(&mut self, base: &Expr, select: Select, key: &Expr, cx: Cx) -> PResult<Ret> {
 		// op.c: a key/value slice of a named variable in scalar context suggests the element form.
 		if cx == Cx::Scalar && matches!(select, Select::ArrayPairs(false) | Select::HashPairs(false))
 			&& let ExprKind::Variable(_, name) = &ungroup(base).kind {
@@ -1510,14 +1518,14 @@ impl Interp<'_> {
 		}
 		match select {
 			Select::ArrayElement(_) | Select::HashElement(_) => {
-				match self.selection_cell(base, select, key, CellAccess::Read)? {
+				match self.selection_cell(base, select, key, CellAccess::Read).await? {
 					Some(cell) => self.read_sv(&cell).map(Ret::One),
 					None => Ok(Ret::One(Value::Undef)),
 				}
 			}
 			Select::ListSlice => {
-				let list = self.eval_list(base)?;
-				let keys = self.eval_list(key)?;
+				let list = self.eval_list_async(base).await?;
+				let keys = self.eval_list_async(key).await?;
 				let get = |key: Value| {
 					let n = key.to_i64();
 					let i = if n < 0 { n.saturating_add(list.len() as i64) } else { n };
@@ -1530,12 +1538,12 @@ impl Interp<'_> {
 			Select::GlobSlot => {
 				let g = match &ungroup(base).kind {
 					ExprKind::Variable(Sigil::Glob, name) => self.glob(name),
-					_ => match self.eval_scalar(base)? {
+					_ => match self.eval_scalar_async(base).await? {
 						Value::Glob(g) | Value::Ref(Ref::Glob(g)) => g,
 						_ => return Ok(Ret::One(Value::Undef)),
 					},
 				};
-				let key = self.eval_scalar(key)?;
+				let key = self.eval_scalar_async(key).await?;
 				let key = self.stringify(&key)?;
 				let value = match key.bytes.as_slice() {
 					b"SCALAR" => Value::Ref(Ref::Scalar(g.scalar.borrow().clone())),
@@ -1552,7 +1560,7 @@ impl Interp<'_> {
 			}
 			_ => {
 				let pairs = matches!(select, Select::ArrayPairs(_) | Select::HashPairs(_));
-				let selected = self.slice(base, select, key, true)?;
+				let selected = self.slice(base, select, key, true).await?;
 				if cx != Cx::List {
 					let last = selected.into_iter().last().and_then(|(_, e)| e);
 					return self.read_element(last).map(Ret::One);
@@ -1568,19 +1576,25 @@ impl Interp<'_> {
 	}
 
 	/// Obtain the existing cell of a match target without creating a missing element.
-	pub fn eval_match_cell(&mut self, e: &Expr) -> PResult<Option<Sv>> {
+	pub async fn eval_match_cell_async(&mut self, e: &Expr) -> PResult<Option<Sv>> {
 		let e = ungroup(e);
 		match &e.kind {
 			ExprKind::Select(base, select @ (Select::ArrayElement(_) | Select::HashElement(_)), key) => {
-				self.selection_cell(base, *select, key, CellAccess::Match)
+				self.selection_cell(base, *select, key, CellAccess::Match).await
 			}
-			ExprKind::Variable(Sigil::Scalar, name) if name.as_ref() != "_" && self.readonly_scalar(name) => self.eval_scalar(e).map(|v| Some(new_sv(v))),
-			_ => self.eval_lvalue(e).map(Some),
+			ExprKind::Variable(Sigil::Scalar, name) if name.as_ref() != "_" && self.readonly_scalar(name) => self.eval_scalar_async(e).await.map(|v| Some(new_sv(v))),
+			_ => self.eval_lvalue_async(e).await.map(Some),
 		}
 	}
 
+	/// Sync entry for native callbacks and coercion paths: drives the async evaluator on the blocking worker.
+	pub fn eval_match_cell(&mut self, e: &Expr) -> PResult<Option<Sv>> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_match_cell_async(e)) }
+	}
+
 	/// Evaluate an addressable scalar, autovivifying intermediate references as needed.
-	pub fn eval_lvalue(&mut self, e: &Expr) -> PResult<Sv> {
+	pub async fn eval_lvalue_async(&mut self, e: &Expr) -> PResult<Sv> {
 		let e = ungroup(e);
 		// The location and recursion guard only affect observable results on the slow path.
 		if self.depth < 8192 && let ExprKind::Variable(Sigil::Scalar, name) = &e.kind {
@@ -1608,25 +1622,32 @@ impl Interp<'_> {
 			&& let Some(n) = self.plain_numeric_expr(key)
 			&& let Some(n) = (match n { Num::Int(i) => u64::try_from(i).ok(), Num::UInt(u) => Some(u), _ => None })
 			&& let Some(sv) = h.unsigned_cell(n, true) { return Ok(sv); }
-		self.at_location(&e.location, |this| this.nested(|this| this.lvalue_inner(e)))
+		let at = self.depth;
+		self.at_location(&e.location, async move |this| {  descend(at, Box::pin(this.lvalue_inner(e))).await  }).await
 	}
 
-	fn lvalue_inner(&mut self, e: &Expr) -> PResult<Sv> {
+	/// Sync entry for native callbacks and coercion paths: drives the async evaluator on the blocking worker.
+	pub fn eval_lvalue(&mut self, e: &Expr) -> PResult<Sv> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_lvalue_async(e)) }
+	}
+
+	async fn lvalue_inner(&mut self, e: &Expr) -> PResult<Sv> {
 		match &e.kind {
 			// A block's value as an lvalue (`${ ...; $x }`): its last statement's container.
 			ExprKind::Block(block, false) if matches!(block.stmts.last(), Some(Stmt { kind: StmtKind::Expr(_), .. })) => {
-				return self.scoped(|this| {
+				return self.scoped_async(async move |this| { 
 					let Some((last, before)) = block.stmts.split_last() else { return Err(this.die_msg("Can't modify do block")); };
-					for stmt in before { this.run_statement(stmt, Cx::Void)?; }
+					for stmt in before { this.run_statement(stmt, Cx::Void).await?; }
 					let StmtKind::Expr(e) = &last.kind else { return Err(this.die_msg("Can't modify do block")); };
-					this.eval_lvalue(e)
-				});
+					this.eval_lvalue_async(e).await
+				 }).await;
 			}
 			// The comma operator propagates lvalue context only to its last operand.
 			ExprKind::List(items) if !items.is_empty() => {
 				let (last, earlier) = items.split_last().ok_or_else(|| self.die_msg("Can't modify empty list"))?;
-				for item in earlier { self.eval(item, Cx::Void)?; }
-				return self.eval_lvalue(last);
+				for item in earlier { self.eval_async(item, Cx::Void).await?; }
+				return self.eval_lvalue_async(last).await;
 			}
 			ExprKind::Variable(Sigil::Scalar, name) if plain_lower_name(name) => {
 				if let Slot::Scalar(cell) = self.variable_slot_at(e, Sigil::Scalar, name)? { return Ok(cell); }
@@ -1642,40 +1663,40 @@ impl Interp<'_> {
 				if let Some(v) = self.magic_scalar(name) { self.sv(&self.qualify(name)).replace(v); }
 				if let Slot::Scalar(s) = self.variable_slot_at(e, Sigil::Scalar, name)? { return Ok(s); }
 			}
-			ExprKind::Deref(Sigil::Scalar, from) => if let Slot::Scalar(s) = self.deref(Sigil::Scalar, from, true)? { return Ok(s); },
+			ExprKind::Deref(Sigil::Scalar, from) => if let Slot::Scalar(s) = self.deref(Sigil::Scalar, from, true).await? { return Ok(s); },
 			ExprKind::Select(base, select @ (Select::ArrayElement(_) | Select::HashElement(_)), key) => {
-				if let Some(s) = self.selection_cell(base, *select, key, CellAccess::Write)? { return Ok(s); }
+				if let Some(s) = self.selection_cell(base, *select, key, CellAccess::Write).await? { return Ok(s); }
 			}
 			ExprKind::Declare(kind, _, target, _) => {
-				let targets = self.declare_targets(*kind, target, e as *const Expr as usize)?;
+				let targets = self.declare_targets(*kind, target, e as *const Expr as usize).await?;
 				if let Some(Target::Scalar(s)) = targets.into_iter().next() { return Ok(s); }
 			}
 			ExprKind::Conditional(cond, yes, no) => {
-				let v = self.eval_scalar(cond)?;
+				let v = self.eval_scalar_async(cond).await?;
 				let branch = if self.truthy(&v)? { yes } else { no };
-				return self.eval_lvalue(branch);
+				return self.eval_lvalue_async(branch).await;
 			}
 			ExprKind::Binary(Binary::Assign, target, value) => {
-				let v = self.eval_scalar(value)?;
-				let sv = self.eval_lvalue(target)?;
+				let v = self.eval_scalar_async(value).await?;
+				let sv = self.eval_lvalue_async(target).await?;
 				self.write_sv(&sv, v)?;
 				return Ok(sv);
 			}
 			ExprKind::Binary(Binary::AssignOp(op), target, value) => {
-				let sv = self.eval_lvalue(target)?;
-				self.compound_cell(*op, &sv, value)?;
+				let sv = self.eval_lvalue_async(target).await?;
+				self.compound_cell(*op, &sv, value).await?;
 				return Ok(sv);
 			}
 			ExprKind::Variable(Sigil::LastIndex, name) => {
 				if let Slot::Array(av) = self.variable_slot_at(e, Sigil::Array, name)? { return Ok(new_lvalue(Lvalue::LastIndex(av))); }
 			}
 			ExprKind::Deref(Sigil::LastIndex, source) => {
-				if let Slot::Array(av) = self.deref(Sigil::Array, source, true)? { return Ok(new_lvalue(Lvalue::LastIndex(av))); }
+				if let Slot::Array(av) = self.deref(Sigil::Array, source, true).await? { return Ok(new_lvalue(Lvalue::LastIndex(av))); }
 			}
 			ExprKind::Call(call) => {
 				if let CallTarget::Builtin(b, origin) = call.target && self.builtin_uses_core(b, origin)
 					&& let Some(result) = func::lvalue(self, b, call) { return result; }
-				if let Some(sv) = self.call_lvalue(call)? { return Ok(sv); }
+				if let Some(sv) = self.call_lvalue(call).await? { return Ok(sv); }
 			}
 			_ => {}
 		}
@@ -1683,7 +1704,7 @@ impl Interp<'_> {
 	}
 
 	/// Evaluate an array slot, without converting its elements to scalar values.
-	pub fn eval_array(&mut self, e: &Expr) -> PResult<Av> {
+	pub async fn eval_array_async(&mut self, e: &Expr) -> PResult<Av> {
 		let e = ungroup(e);
 		let slot = match &e.kind {
 			ExprKind::Variable(Sigil::Array, name) => {
@@ -1691,18 +1712,24 @@ impl Interp<'_> {
 					&& let Some(v) = rx::match_array(self, name) { return Ok(new_av(v)); }
 				self.variable_slot_at(e, Sigil::Array, name)?
 			}
-			ExprKind::Deref(Sigil::Array, source) => self.deref(Sigil::Array, source, true)?,
+			ExprKind::Deref(Sigil::Array, source) => self.deref(Sigil::Array, source, true).await?,
 			ExprKind::Declare(kind, _, target, _) => {
-				let targets = self.declare_targets(*kind, target, e as *const Expr as usize)?;
+				let targets = self.declare_targets(*kind, target, e as *const Expr as usize).await?;
 				return match targets.into_iter().next() { Some(Target::Array(a)) => Ok(a), _ => Err(self.die_msg("Not an ARRAY reference")) };
 			}
-			_ => return match self.eval_scalar(e)? { Value::Ref(Ref::Array(a)) => Ok(a), _ => Err(self.die_msg("Not an ARRAY reference")) },
+			_ => return match self.eval_scalar_async(e).await? { Value::Ref(Ref::Array(a)) => Ok(a), _ => Err(self.die_msg("Not an ARRAY reference")) },
 		};
 		if let Slot::Array(a) = slot { Ok(a) } else { Err(self.die_msg("Not an ARRAY reference")) }
 	}
 
+	/// Sync entry for native callbacks and coercion paths: drives the async evaluator on the blocking worker.
+	pub fn eval_array(&mut self, e: &Expr) -> PResult<Av> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_array_async(e)) }
+	}
+
 	/// Evaluate a hash slot, without flattening its keys and values.
-	pub fn eval_hash(&mut self, e: &Expr) -> PResult<Hv> {
+	pub async fn eval_hash_async(&mut self, e: &Expr) -> PResult<Hv> {
 		let e = ungroup(e);
 		let slot = match &e.kind {
 			ExprKind::Variable(Sigil::Hash, name) => {
@@ -1710,20 +1737,26 @@ impl Interp<'_> {
 					&& let Some(h) = rx::match_hv(self, name) { return Ok(h); }
 				self.variable_slot_at(e, Sigil::Hash, name)?
 			}
-			ExprKind::Deref(Sigil::Hash, source) => self.deref(Sigil::Hash, source, true)?,
+			ExprKind::Deref(Sigil::Hash, source) => self.deref(Sigil::Hash, source, true).await?,
 			ExprKind::Declare(kind, _, target, _) => {
-				let targets = self.declare_targets(*kind, target, e as *const Expr as usize)?;
+				let targets = self.declare_targets(*kind, target, e as *const Expr as usize).await?;
 				return match targets.into_iter().next() { Some(Target::Hash(h)) => Ok(h), _ => Err(self.die_msg("Not a HASH reference")) };
 			}
-			_ => return match self.eval_scalar(e)? { Value::Ref(Ref::Hash(h)) => Ok(h), _ => Err(self.die_msg("Not a HASH reference")) },
+			_ => return match self.eval_scalar_async(e).await? { Value::Ref(Ref::Hash(h)) => Ok(h), _ => Err(self.die_msg("Not a HASH reference")) },
 		};
 		if let Slot::Hash(h) = slot { Ok(h) } else { Err(self.die_msg("Not a HASH reference")) }
 	}
 
+	/// Sync entry for native callbacks and coercion paths: drives the async evaluator on the blocking worker.
+	pub fn eval_hash(&mut self, e: &Expr) -> PResult<Hv> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_hash_async(e)) }
+	}
+
 	/// Resolve a bare, glob-valued or reference-valued filehandle expression.
-	pub fn eval_handle(&mut self, e: &Expr) -> PResult<Option<Io>> {
+	pub async fn eval_handle_async(&mut self, e: &Expr) -> PResult<Option<Io>> {
 		if let ExprKind::Bareword(name) = &ungroup(e).kind { return Ok(self.handle(name, false)); }
-		let value = self.eval_scalar(e)?;
+		let value = self.eval_scalar_async(e).await?;
 		Ok(match value {
 			Value::Ref(Ref::Io(io)) => Some(io),
 			Value::Glob(g) | Value::Ref(Ref::Glob(g)) => g.io.borrow().clone(),
@@ -1732,8 +1765,14 @@ impl Interp<'_> {
 		})
 	}
 
-	pub(super) fn defined_glob_deref(&mut self, source: &Expr) -> PResult<bool> {
-		let value = self.eval_scalar(source)?;
+	/// Sync entry for native callbacks and coercion paths: drives the async evaluator on the blocking worker.
+	pub fn eval_handle(&mut self, e: &Expr) -> PResult<Option<Io>> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_handle_async(e)) }
+	}
+
+	pub(super) async fn defined_glob_deref(&mut self, source: &Expr) -> PResult<bool> {
+		let value = self.eval_scalar_async(source).await?;
 		let value = self.overload_deref(Sigil::Glob, value)?;
 		match value {
 			Value::Undef => Ok(false),
@@ -1743,13 +1782,13 @@ impl Interp<'_> {
 		}
 	}
 
-	pub(super) fn eval_var(&mut self, e: &Expr, sigil: Sigil, name: &str, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn eval_var(&mut self, e: &Expr, sigil: Sigil, name: &str, cx: Cx) -> PResult<Ret> {
 		let our = match self.pad_slot_at(e, sigil, name).cloned() {
 			Some(Slot::Our(qualified)) => Some(qualified),
-			Some(slot) => return self.slot_value(slot, sigil, cx),
+			Some(slot) => return self.slot_value(slot, sigil, cx).await,
 			None if matches!(sigil, Sigil::Array | Sigil::LastIndex) && name == "_" => {
 				let slot = self.package_slot(sigil, name);
-				return self.slot_value(slot, sigil, cx);
+				return self.slot_value(slot, sigil, cx).await;
 			}
 			None => {
 				if sigil == Sigil::Scalar && let Some(value) = self.magic_scalar(name) { return Ok(Ret::One(value)); }
@@ -1761,7 +1800,7 @@ impl Interp<'_> {
 		if !matches!(sigil, Sigil::Array | Sigil::LastIndex | Sigil::Hash)
 			|| name.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') && !has_separator(name) {
 			let slot = self.variable_slot_at(e, sigil, name)?;
-			return self.slot_value(slot, sigil, cx);
+			return self.slot_value(slot, sigil, cx).await;
 		}
 		let qual = self.qualify(name);
 		if let Some(name) = qual.strip_prefix("main::") {
@@ -1774,17 +1813,17 @@ impl Interp<'_> {
 			}
 		}
 		let slot = self.package_slot(sigil, our.as_deref().unwrap_or(&qual));
-		self.slot_value(slot, sigil, cx)
+		self.slot_value(slot, sigil, cx).await
 	}
 
-	pub(super) fn eval_deref(&mut self, sigil: Sigil, source: &Expr, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn eval_deref(&mut self, sigil: Sigil, source: &Expr, cx: Cx) -> PResult<Ret> {
 		// Rvalue `$$r`, `@$r`, `%$r` do not autovivify `$r` (perlref); `$#$r`, globs and code still do.
 		let vivify = !matches!(sigil, Sigil::Scalar | Sigil::Array | Sigil::Hash);
-		let slot = self.deref(sigil, source, vivify)?;
-		self.slot_value(slot, sigil, cx)
+		let slot = self.deref(sigil, source, vivify).await?;
+		self.slot_value(slot, sigil, cx).await
 	}
 
-	fn slot_value(&mut self, slot: Slot, sigil: Sigil, cx: Cx) -> PResult<Ret> {
+	async fn slot_value(&mut self, slot: Slot, sigil: Sigil, cx: Cx) -> PResult<Ret> {
 		Ok(match slot {
 			Slot::Scalar(s) => Ret::One(self.read_sv(&s)?),
 			Slot::Array(a) if sigil == Sigil::LastIndex => Ret::One(Value::Int(self.array_len(&a)? as i64 - 1)),
@@ -1794,7 +1833,7 @@ impl Interp<'_> {
 						let elems = a.elems();
 						if elems.iter().all(|sv| !sv.has_read_magic()) { return Ok(Ret::Many(elems.iter().map(|sv| sv.get()).collect())); }
 					}
-					let cells = self.eval_array_aliases(&a, false)?;
+					let cells = self.eval_array_aliases(&a, false).await?;
 					Ret::Many(self.read_alias_values(cells)?)
 				} else { Ret::One(Value::Int(self.array_len(&a)? as i64)) }
 			}
@@ -1818,7 +1857,7 @@ impl Interp<'_> {
 		cells.into_iter().map(|sv| self.read_sv(&sv)).collect()
 	}
 
-	pub(super) fn eval_array_aliases(&mut self, a: &Av, materialize: bool) -> PResult<Vec<Sv>> {
+	pub(super) async fn eval_array_aliases(&mut self, a: &Av, materialize: bool) -> PResult<Vec<Sv>> {
 		if self.tied_array(a).is_none() {
 			return Ok(if materialize { self.array_aliases(a) } else { a.elems().clone() });
 		}
@@ -1837,35 +1876,35 @@ impl Interp<'_> {
 		}).collect())
 	}
 
-	pub(super) fn reference(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn reference(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		let grouped = matches!(&e.kind, ExprKind::Group(_) | ExprKind::List(_));
 		let base = ungroup(e);
 		if !grouped {
 			match &base.kind {
-				ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => return Ok(Ret::One(Value::Ref(Ref::Array(self.eval_array(base)?)))),
-				ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => return Ok(Ret::One(Value::Ref(Ref::Hash(self.eval_hash(base)?)))),
+				ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => return Ok(Ret::One(Value::Ref(Ref::Array(self.eval_array_async(base).await?)))),
+				ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => return Ok(Ret::One(Value::Ref(Ref::Hash(self.eval_hash_async(base).await?)))),
 				ExprKind::Declare(_, _, target, _) => match &target.kind {
-					ExprKind::Variable(Sigil::Array, _) => return Ok(Ret::One(Value::Ref(Ref::Array(self.eval_array(base)?)))),
-					ExprKind::Variable(Sigil::Hash, _) => return Ok(Ret::One(Value::Ref(Ref::Hash(self.eval_hash(base)?)))),
+					ExprKind::Variable(Sigil::Array, _) => return Ok(Ret::One(Value::Ref(Ref::Array(self.eval_array_async(base).await?)))),
+					ExprKind::Variable(Sigil::Hash, _) => return Ok(Ret::One(Value::Ref(Ref::Hash(self.eval_hash_async(base).await?)))),
 					_ => {}
 				},
 				ExprKind::Variable(Sigil::Code, name) => if let Slot::Code(c) = self.variable_slot_at(base, Sigil::Code, name)? { return Ok(Ret::One(Value::Ref(Ref::Code(c)))); },
 				ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) => if let Slot::Code(c) = self.variable_slot(Sigil::Code, name)? { return Ok(Ret::One(Value::Ref(Ref::Code(c)))); },
 				ExprKind::Variable(Sigil::Glob, name) => return Ok(Ret::One(Value::Ref(Ref::Glob(self.glob(name))))),
 				ExprKind::Deref(Sigil::Code, source) | ExprKind::Call(Call { target: CallTarget::Code(source, true), args: None, .. }) => {
-					if let Some(c) = self.exempt_code(source, true)? { return Ok(Ret::One(Value::Ref(Ref::Code(c)))); }
+					if let Some(c) = self.exempt_code(source, true).await? { return Ok(Ret::One(Value::Ref(Ref::Code(c)))); }
 				}
 				ExprKind::Deref(Sigil::Glob, _) => {
-					let v = self.eval_scalar(base)?;
+					let v = self.eval_scalar_async(base).await?;
 					return Ok(Ret::One(if let Value::Glob(g) = v { Value::Ref(Ref::Glob(g)) } else { v }));
 				}
 				ExprKind::Variable(Sigil::Scalar, name) if self.readonly_scalar(name) => {
-					let v = self.eval_scalar(base)?;
+					let v = self.eval_scalar_async(base).await?;
 					return Ok(Ret::One(Value::Ref(Ref::Scalar(new_sv(v)))));
 				}
 				// `\$h{k}` / `\$a[i]` create the element (unlike a deferred sub argument).
 				ExprKind::Select(_, Select::ArrayElement(_) | Select::HashElement(_), _) =>
-					return Ok(Ret::One(Value::Ref(Ref::Scalar(self.eval_lvalue(base)?)))),
+					return Ok(Ret::One(Value::Ref(Ref::Scalar(self.eval_lvalue_async(base).await?)))),
 				_ => {}
 			}
 		}
@@ -1877,17 +1916,17 @@ impl Interp<'_> {
 				if let Slot::Code(c) = self.variable_slot_at(ungroup(part), Sigil::Code, name)? { references.push(Value::Ref(Ref::Code(c))); }
 				continue;
 			}
-			references.extend(self.eval_aliases(part)?.into_iter().map(|s| Value::Ref(Ref::Scalar(s))));
+			references.extend(self.eval_aliases_async(part).await?.into_iter().map(|s| Value::Ref(Ref::Scalar(s))));
 		}
 		if cx == Cx::List { Ok(Ret::Many(references)) }
 		else { Ok(Ret::One(references.pop().unwrap_or(Value::Undef))) }
 	}
 
-	fn declare_one(&mut self, kind: DeclKind, target: &Expr) -> PResult<(Target<'static>, Option<(usize, Slot)>)> {
+	async fn declare_one(&mut self, kind: DeclKind, target: &Expr) -> PResult<(Target<'static>, Option<(usize, Slot)>)> {
 		if matches!(&target.kind, ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Undef, _), args: None, .. })) {
 			return Ok((Target::Skip, None));
 		}
-		if kind == DeclKind::Local { return self.local_target(target).map(|t| (t, None)); }
+		if kind == DeclKind::Local { return self.local_target(target).await.map(|t| (t, None)); }
 		let ExprKind::Variable(sigil, name) = &target.kind else { return Err(self.die_msg("Can't declare this expression")); };
 		let id = self.lexicals.declaration_id(target, *sigil, name);
 		let prepared = self.lexicals.take_prepared(id, name);
@@ -1907,20 +1946,20 @@ impl Interp<'_> {
 		}
 	}
 
-	fn declare_targets_into(&mut self, kind: DeclKind, target: &Expr, targets: &mut Vec<Target<'static>>, pad: &mut Pad) -> PResult<()> {
+	async fn declare_targets_into(&mut self, kind: DeclKind, target: &Expr, targets: &mut Vec<Target<'static>>, pad: &mut Pad) -> PResult<()> {
 		match &ungroup(target).kind {
-			ExprKind::List(items) => for item in items { self.declare_targets_into(kind, item, targets, pad)?; },
+			ExprKind::List(items) => for item in items { Box::pin(self.declare_targets_into(kind, item, targets, pad)).await?; },
 			ExprKind::Declare(DeclKind::Our, _, inner, _) if kind == DeclKind::Local => {
-				self.declare_targets(DeclKind::Our, inner, target as *const Expr as usize)?;
-				self.declare_targets_into(DeclKind::Local, inner, targets, pad)?;
+				Box::pin(self.declare_targets(DeclKind::Our, inner, target as *const Expr as usize)).await?;
+				Box::pin(self.declare_targets_into(DeclKind::Local, inner, targets, pad)).await?;
 			}
 			ExprKind::Select(base, sel @ (Select::ArraySlice(_) | Select::HashSlice(_) | Select::ArrayPairs(_) | Select::HashPairs(_)), key) if kind == DeclKind::Local => {
-				for (_, el) in self.slice(base, *sel, key, true)? {
-					if let Some(el) = el { targets.push(Target::Scalar(self.local_elem(el, false)?)); }
+				for (_, el) in self.slice(base, *sel, key, true).await? {
+					if let Some(el) = el { targets.push(Target::Scalar(Box::pin(self.local_elem(el, false)).await?)); }
 				}
 			}
 			_ => {
-				let (target, binding) = self.declare_one(kind, ungroup(target))?;
+				let (target, binding) = self.declare_one(kind, ungroup(target)).await?;
 				targets.push(target);
 				if let Some(binding) = binding { pad.push(binding); }
 			}
@@ -1928,7 +1967,7 @@ impl Interp<'_> {
 		Ok(())
 	}
 
-	pub(super) fn declare_targets(&mut self, kind: DeclKind, target: &Expr, site: usize) -> PResult<Vec<Target<'static>>> {
+	pub(super) async fn declare_targets(&mut self, kind: DeclKind, target: &Expr, site: usize) -> PResult<Vec<Target<'static>>> {
 		if kind == DeclKind::State {
 			let pad = self.persistent.borrow().vars.get(&site).cloned();
 			if let Some(pad) = pad {
@@ -1949,21 +1988,21 @@ impl Interp<'_> {
 		}
 		let mut targets = Vec::new();
 		let mut pad = Pad::new();
-		self.declare_targets_into(kind, target, &mut targets, &mut pad)?;
+		Box::pin(self.declare_targets_into(kind, target, &mut targets, &mut pad)).await?;
 		if kind == DeclKind::State { self.persistent.borrow_mut().vars.insert(site, pad.clone()); }
 		self.introduce_declarations(kind, pad);
 		Ok(targets)
 	}
 
-	fn local_target(&mut self, e: &Expr) -> PResult<Target<'static>> {
+	async fn local_target(&mut self, e: &Expr) -> PResult<Target<'static>> {
 		match &e.kind {
 			ExprKind::Select(_, Select::HashPairs(_), _) => return Err(self.die_msg("Can't modify key/value hash slice in local")),
 			ExprKind::Select(_, Select::ArrayPairs(_), _) => return Err(self.die_msg("Can't modify index/value array slice in local")),
 			_ => {}
 		}
 		if let ExprKind::Declare(DeclKind::Our, _, target, _) = &e.kind {
-			self.declare_targets(DeclKind::Our, target, e as *const Expr as usize)?;
-			return self.local_target(ungroup(target));
+			Box::pin(self.declare_targets(DeclKind::Our, target, e as *const Expr as usize)).await?;
+			return Box::pin(self.local_target(ungroup(target))).await;
 		}
 		if let ExprKind::Variable(sigil, name) = &e.kind {
 			let qualified = match self.lookup_pad(*sigil, name) {
@@ -2050,23 +2089,23 @@ impl Interp<'_> {
 				_ => {}
 			}
 		}
-		if let ExprKind::Select(base, select, key) = &e.kind && let Some(el) = self.element(base, *select, key, true)? {
-			return self.local_elem(el, false).map(Target::Scalar);
+		if let ExprKind::Select(base, select, key) = &e.kind && let Some(el) = self.element(base, *select, key, true).await? {
+			return Box::pin(self.local_elem(el, false)).await.map(Target::Scalar);
 		}
 		if let ExprKind::Deref(sigil, source) = &e.kind {
-			let value = self.eval_scalar(source)?;
+			let value = self.eval_scalar_async(source).await?;
 			if !matches!(value, Value::Ref(_) | Value::Undef) {
 				let name = value.to_pstr();
 				let qualified = self.qualify(&name.to_string_lossy());
 				self.symbolic(*sigil, &value)?;
 				let target = Expr { location: e.location.clone(), cache: NodeCache::default(), kind: ExprKind::Variable(*sigil, qualified) };
-				return self.local_target(&target);
+				return Box::pin(self.local_target(&target)).await;
 			}
 		}
 		Err(self.die_msg("Can't localize through a reference"))
 	}
 
-	fn local_elem(&mut self, el: Element, delete: bool) -> PResult<Sv> {
+	async fn local_elem(&mut self, el: Element, delete: bool) -> PResult<Sv> {
 		if let Some((object, key)) = self.tied_element(&el)? {
 			let exists = if let Value::Ref(r) = &object && let Some(class) = r.blessed() && self.find_method(&class, "EXISTS").is_some() {
 				let value = self.call_method(object.clone(), "EXISTS", vec![key.clone()], Cx::Scalar)?.scalar();
@@ -2121,53 +2160,53 @@ impl Interp<'_> {
 		}
 	}
 
-	fn collect_ref_targets(&mut self, e: &Expr, targets: &mut Vec<Target<'_>>) -> PResult<()> {
+	async fn collect_ref_targets(&mut self, e: &Expr, targets: &mut Vec<Target<'_>>) -> PResult<()> {
 		match &ungroup(e).kind {
-			ExprKind::List(es) => for e in es { self.collect_ref_targets(e, targets)?; },
+			ExprKind::List(es) => for e in es { Box::pin(self.collect_ref_targets(e, targets)).await?; },
 			ExprKind::Select(base, select @ (Select::ArraySlice(_) | Select::HashSlice(_)), key) => {
-				for (_, element) in self.slice(base, *select, key, true)? {
+				for (_, element) in self.slice(base, *select, key, true).await? {
 					if let Some(el) = element { targets.push(Target::Alias(self.element_ref_place(el)?)); }
 				}
 			}
 			// `\local @a[...] = ...`: localize each element, then alias it.
 			ExprKind::Declare(DeclKind::Local, _, inner, _)
 				if let ExprKind::Select(base, select @ (Select::ArraySlice(_) | Select::HashSlice(_)), key) = &ungroup(inner).kind => {
-				for (_, element) in self.slice(base, *select, key, true)? {
+				for (_, element) in self.slice(base, *select, key, true).await? {
 					if let Some(el) = element {
-						self.local_elem(el.clone(), false)?;
+						Box::pin(self.local_elem(el.clone(), false)).await?;
 						targets.push(Target::Alias(self.element_ref_place(el)?));
 					}
 				}
 			}
-			_ => targets.push(Target::Alias(self.ref_target(e)?)),
+			_ => targets.push(Target::Alias(self.ref_target(e).await?)),
 		}
 		Ok(())
 	}
 
-	fn collect_targets<'e>(&mut self, e: &'e Expr, targets: &mut Vec<Target<'e>>) -> PResult<()> {
+	async fn collect_targets<'e>(&mut self, e: &'e Expr, targets: &mut Vec<Target<'e>>) -> PResult<()> {
 		let e = ungroup(e);
 		match &e.kind {
-			ExprKind::List(items) => for item in items { self.collect_targets(item, targets)?; },
+			ExprKind::List(items) => for item in items { Box::pin(self.collect_targets(item, targets)).await?; },
 			ExprKind::Unary(Unary::Reference, inner) => {
 				self.aliasing_enabled()?;
-				self.collect_ref_targets(inner, targets)?;
+				Box::pin(self.collect_ref_targets(inner, targets)).await?;
 			}
 			ExprKind::Declare(kind, class, target, attrs) => {
 				if let ExprKind::Unary(Unary::Reference, inner) = &ungroup(target).kind {
-					let declarations = self.declare_targets(*kind, inner, e as *const Expr as usize)?;
+					let declarations = self.declare_targets(*kind, inner, e as *const Expr as usize).await?;
 					drop(declarations);
-					targets.push(Target::Alias(self.pending_ref_target(inner)?));
+					targets.push(Target::Alias(self.pending_ref_target(inner).await?));
 				} else {
-					let declared = self.declare_targets(*kind, target, e as *const Expr as usize)?;
+					let declared = self.declare_targets(*kind, target, e as *const Expr as usize).await?;
 					// `my $x : Attr = ...` applies the attributes before the assignment.
-					if *kind != DeclKind::Local { self.apply_declared_attributes(class.as_ref(), attrs, &declared)?; }
+					if *kind != DeclKind::Local { self.apply_declared_attributes(class.as_ref(), attrs, &declared).await?; }
 					targets.extend(declared);
 				}
 			}
 			ExprKind::Variable(Sigil::Array | Sigil::Hash | Sigil::Glob | Sigil::LastIndex, _) | ExprKind::Deref(Sigil::Array | Sigil::Hash | Sigil::Glob | Sigil::LastIndex, _) => {
 				let (sigil, slot) = match &e.kind {
 					ExprKind::Variable(sigil, name) => (*sigil, self.variable_slot_at(e, *sigil, name)?),
-					ExprKind::Deref(sigil, source) => (*sigil, self.deref(*sigil, source, true)?),
+					ExprKind::Deref(sigil, source) => (*sigil, self.deref(*sigil, source, true).await?),
 					_ => return Err(self.die_msg("Can't modify this expression")),
 				};
 				targets.push(Self::slot_target(slot, sigil));
@@ -2175,33 +2214,33 @@ impl Interp<'_> {
 			ExprKind::Select(_, Select::ArrayPairs(_), _) => return Err(self.die_msg("Can't modify index/value array slice in list assignment")),
 			ExprKind::Select(_, Select::HashPairs(_), _) => return Err(self.die_msg("Can't modify key/value hash slice in list assignment")),
 			ExprKind::Select(base, select @ (Select::ArraySlice(_) | Select::HashSlice(_)), key) => {
-				for (_, el) in self.slice(base, *select, key, true)? {
+				for (_, el) in self.slice(base, *select, key, true).await? {
 					if let Some(el) = el && let Some(sv) = self.element_cell(el, true)? { targets.push(Target::Scalar(sv)); }
 				}
 			}
 			ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Undef, _), args: None, .. }) => targets.push(Target::Skip),
 			ExprKind::Call(call @ Call { target: CallTarget::Builtin(b @ (Builtin::Substr | Builtin::Vec | Builtin::Pos | Builtin::Keys), _), .. }) => targets.push(Target::Builtin(*b, call)),
 			ExprKind::Conditional(cond, yes, no) => {
-				let v = self.eval_scalar(cond)?;
+				let v = self.eval_scalar_async(cond).await?;
 				let branch = if self.truthy(&v)? { yes } else { no };
-				self.collect_targets(branch, targets)?;
+				Box::pin(self.collect_targets(branch, targets)).await?;
 			}
 			// `(@a = LIST) = ...`: a list assignment as an lvalue is the containers it assigned to.
 			ExprKind::Binary(Binary::Assign, target, rhs) if Self::list_target(target) => {
-				let (_, cells) = self.assign_list(target, rhs, true)?;
+				let (_, cells) = Box::pin(self.assign_list(target, rhs, true)).await?;
 				targets.extend(cells.into_iter().map(Target::Scalar));
 			}
 			// `((undef) x N) = LIST` skips N values.
 			ExprKind::Binary(Binary::Repeat, list, count) if matches!(&list.kind, ExprKind::Group(_)) => {
 				let mut inner = Vec::new();
-				self.collect_targets(list, &mut inner)?;
+				Box::pin(self.collect_targets(list, &mut inner)).await?;
 				if !inner.iter().all(|t| matches!(t, Target::Skip)) { return Err(self.die_msg("Can't modify repeat (x) in list assignment")); }
-				let count = self.eval_scalar(count)?;
+				let count = self.eval_scalar_async(count).await?;
 				let n = usize::try_from(self.numify(&count)?.wrapping_iv()).unwrap_or(0).saturating_mul(inner.len());
 				targets.extend((0..n).map(|_| Target::Skip));
 			}
 			ExprKind::Call(call @ Call { target: CallTarget::Named(name, _), .. }) if self.named_lvalue(name) => {
-				for item in self.call_lvalue_list(call)? {
+				for item in self.call_lvalue_list(call).await? {
 					targets.push(match item {
 						Value::Ref(Ref::Scalar(sv)) => Target::Scalar(sv),
 						Value::Ref(Ref::Array(av)) => Target::Array(av),
@@ -2210,7 +2249,7 @@ impl Interp<'_> {
 					});
 				}
 			}
-			_ => targets.push(Target::Scalar(self.eval_lvalue(e)?)),
+			_ => targets.push(Target::Scalar(self.eval_lvalue_async(e).await?)),
 		}
 		Ok(())
 	}
@@ -2285,7 +2324,7 @@ impl Interp<'_> {
 		Ok(())
 	}
 
-	pub(super) fn fill_hash(&mut self, h: &Hv, values: impl IntoIterator<Item = Value>) -> PResult<()> {
+	pub(super) async fn fill_hash_async(&mut self, h: &Hv, values: impl IntoIterator<Item = Value>) -> PResult<()> {
 		let mut values = values.into_iter();
 		if let Some(obj) = self.tied_hash(h) {
 			self.call_method(obj.clone(), "CLEAR", Vec::new(), Cx::Void)?;
@@ -2320,7 +2359,7 @@ impl Interp<'_> {
 		})
 	}
 
-	fn assign_array(&mut self, array: &Av, values: impl IntoIterator<Item = Value>) -> PResult<()> {
+	async fn assign_array(&mut self, array: &Av, values: impl IntoIterator<Item = Value>) -> PResult<()> {
 		if Rc::weak_count(array) != 0 {
 			// Both readonly marks and `each` cursors hold a Weak.
 			if modules::readonly_array(self, array) { return Err(self.die_msg("Modification of a read-only value attempted")); }
@@ -2357,12 +2396,12 @@ impl Interp<'_> {
 		self.array_changed(array)
 	}
 
-	fn inplace_reverse(&mut self, lhs: &Expr, rhs: &Expr, cx: Cx) -> PResult<Option<Ret>> {
+	async fn inplace_reverse(&mut self, lhs: &Expr, rhs: &Expr, cx: Cx) -> PResult<Option<Ret>> {
 		let ExprKind::Variable(Sigil::Array, left) = &ungroup(lhs).kind else { return Ok(None); };
 		let ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Reverse, origin), args: Some(arg), .. }) = &ungroup(rhs).kind else { return Ok(None); };
 		let ExprKind::Variable(Sigil::Array, right) = &ungroup(arg).kind else { return Ok(None); };
 		if left.as_ref() != right.as_ref() || !self.builtin_uses_core(Builtin::Reverse, *origin) { return Ok(None); }
-		let array = self.eval_array(lhs)?;
+		let array = self.eval_array_async(lhs).await?;
 		self.data.reset_array(&array);
 		func::data::reverse_in_place(self, &array, cx).map(Some)
 	}
@@ -2381,7 +2420,7 @@ impl Interp<'_> {
 		Ok(())
 	}
 
-	fn assign_list(&mut self, lhs: &Expr, rhs: &Expr, capture: bool) -> PResult<(usize, Vec<Sv>)> {
+	async fn assign_list(&mut self, lhs: &Expr, rhs: &Expr, capture: bool) -> PResult<(usize, Vec<Sv>)> {
 		// Common sub prologue: snapshot the single argument before declaring the scalar,
 		// exactly as list evaluation would, without either a value or a target vector.
 		if !capture && self.pending.is_none() && self.depth < 8192
@@ -2434,26 +2473,26 @@ impl Interp<'_> {
 		if (bare_array || my_array) && let Some(cells) = self.transform_array_rhs(rhs)? {
 			let count = cells.len();
 			let mut targets = Vec::new();
-			self.collect_targets(lhs, &mut targets)?;
+			self.collect_targets(lhs, &mut targets).await?;
 			let Some(Target::Array(array)) = targets.pop() else { return Err(self.die_msg("Not an ARRAY reference")); };
 			if self.tied_array(&array).is_some() || modules::readonly_array(self, &array) {
-				self.assign_array(&array, cells.into_iter().map(|sv| sv.get()))?;
+				self.assign_array(&array, cells.into_iter().map(|sv| sv.get())).await?;
 			} else {
 				if Rc::weak_count(&array) != 0 { self.data.reset_array(&array); }
 				array.replace_elems(cells);
 				self.array_changed(&array)?;
 			}
-			return Ok((count, if capture { self.eval_array_aliases(&array, false)? } else { Vec::new() }));
+			return Ok((count, if capture { self.eval_array_aliases(&array, false).await? } else { Vec::new() }));
 		}
-		let mut values = self.eval_list(rhs)?;
+		let mut values = self.eval_list_async(rhs).await?;
 		let count = values.len();
 		if let ExprKind::Variable(Sigil::Array, name) = &lhs.kind
 			&& let Slot::Array(a) = self.variable_slot_at(lhs, Sigil::Array, name)? {
-			self.assign_array(&a, values.drain(..))?;
+			self.assign_array(&a, values.drain(..)).await?;
 			if matches!(&ungroup(rhs).kind, ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Split, _), .. })) {
 				rx::recycle_list(self, values);
 			}
-			let cells = if capture { self.eval_array_aliases(&a, false)? } else { Vec::new() };
+			let cells = if capture { self.eval_array_aliases(&a, false).await? } else { Vec::new() };
 			return Ok((count, cells));
 		}
 		let mut values = values.into_iter();
@@ -2468,16 +2507,16 @@ impl Interp<'_> {
 			}
 		}
 		let mut targets = Vec::new();
-		self.collect_targets(lhs, &mut targets)?;
+		self.collect_targets(lhs, &mut targets).await?;
 		let mut result = Vec::new();
 		for target in targets {
 			match target {
 				Target::Array(a) => {
-					self.assign_array(&a, values.by_ref())?;
-					if capture { result.extend(self.eval_array_aliases(&a, false)?); }
+					self.assign_array(&a, values.by_ref()).await?;
+					if capture { result.extend(self.eval_array_aliases(&a, false).await?); }
 				}
 				Target::Hash(h) => {
-					self.fill_hash(&h, values.by_ref())?;
+					self.fill_hash_async(&h, values.by_ref()).await?;
 					if capture { result.extend(self.eval_hash_aliases(&h)?); }
 				}
 				Target::Scalar(sv) => {
@@ -2495,25 +2534,25 @@ impl Interp<'_> {
 		Ok((count, result))
 	}
 
-	pub(super) fn assign(&mut self, lhs: &Expr, rhs: &Expr, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn assign(&mut self, lhs: &Expr, rhs: &Expr, cx: Cx) -> PResult<Ret> {
 		let site = ungroup(lhs) as *const Expr as usize;
 		if let ExprKind::Declare(DeclKind::State, _, target, _) = &ungroup(lhs).kind && self.persistent.borrow().vars.contains_key(&site) {
-			return self.read_declaration(DeclKind::State, None, target, &[], site, cx);
+			return self.read_declaration(DeclKind::State, None, target, &[], site, cx).await;
 		}
 		if Self::list_target(lhs) {
-			if let Some(result) = self.inplace_reverse(lhs, rhs, cx)? { return Ok(result); }
-			let (count, result) = self.assign_list(lhs, rhs, cx == Cx::List)?;
+			if let Some(result) = self.inplace_reverse(lhs, rhs, cx).await? { return Ok(result); }
+			let (count, result) = self.assign_list(lhs, rhs, cx == Cx::List).await?;
 			if cx == Cx::List { self.read_alias_values(result).map(Ret::Many) }
 			else { Ok(Ret::One(Value::Int(count as i64))) }
 		} else {
-			let value = self.eval_scalar(rhs)?;
+			let value = self.eval_scalar_async(rhs).await?;
 			// A single scalar container (what `collect_targets` reduces these to), without the target list.
 			let target = ungroup(lhs);
 			if matches!(&target.kind, ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _)
 				| ExprKind::Select(_, Select::ArrayElement(_) | Select::HashElement(_), _)) {
 				let sv = match &target.kind {
 					ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot_at(target, Sigil::Scalar, name) => sv.clone(),
-					_ => self.eval_lvalue(target)?,
+					_ => self.eval_lvalue_async(target).await?,
 				};
 				if cx == Cx::Void { self.store_sv(&sv, value)?; return Ok(Ret::One(Value::Undef)); }
 				let tied = self.scalar_tie(&sv).is_some();
@@ -2524,7 +2563,7 @@ impl Interp<'_> {
 			// `my $x = EXPR`: the declaration's fresh scalar, without the target and pad lists.
 			if let ExprKind::Declare(DeclKind::My, _, inner, attrs) = &target.kind && attrs.is_empty()
 				&& let ExprKind::Variable(Sigil::Scalar, _) = &ungroup(inner).kind {
-				let (decl, binding) = self.declare_one(DeclKind::My, ungroup(inner))?;
+				let (decl, binding) = self.declare_one(DeclKind::My, ungroup(inner)).await?;
 				if let Some(binding) = binding && let Some(scope) = self.scopes.last_mut() { scope.declarations.push(binding); }
 				if let Target::Scalar(sv) = decl {
 					if cx == Cx::Void { self.store_sv(&sv, value)?; return Ok(Ret::One(Value::Undef)); }
@@ -2535,8 +2574,8 @@ impl Interp<'_> {
 			}
 			let mut targets = Vec::new();
 			if matches!(&ungroup(lhs).kind, ExprKind::Call(Call { target: CallTarget::Named(..) | CallTarget::Code(..), .. })) {
-				targets.push(Target::Scalar(self.eval_lvalue(lhs)?));
-			} else { self.collect_targets(lhs, &mut targets)?; }
+				targets.push(Target::Scalar(self.eval_lvalue_async(lhs).await?));
+			} else { self.collect_targets(lhs, &mut targets).await?; }
 			let assigned = if let Some(target) = targets.into_iter().next() {
 				// The assignment's value is its target: a tied target is FETCHed again when that value is used.
 				let tied = match &target { Target::Scalar(sv) if cx != Cx::Void && self.scalar_tie(sv).is_some() => Some(sv.clone()), _ => None };
@@ -2551,7 +2590,7 @@ impl Interp<'_> {
 
 	/// Variable attributes go through `use attributes PKG, \$var, ATTRS` (MODIFY_SCALAR_ATTRIBUTES etc.); PKG is the
 	/// declared class (`my Class $x : Attr`) or the current package.
-	pub(super) fn apply_declared_attributes(&mut self, class: Option<&Rc<str>>, attrs: &[Attribute], targets: &[Target<'_>]) -> PResult<()> {
+	pub(super) async fn apply_declared_attributes(&mut self, class: Option<&Rc<str>>, attrs: &[Attribute], targets: &[Target<'_>]) -> PResult<()> {
 		if attrs.is_empty() { return Ok(()); }
 		let names: Vec<Value> = attrs.iter().map(|attr| {
 			let mut text = PStr::from_str(&attr.name);
@@ -2574,15 +2613,15 @@ impl Interp<'_> {
 		Ok(())
 	}
 
-	pub(super) fn read_declaration(&mut self, kind: DeclKind, class: Option<&Rc<str>>, target: &Expr, attrs: &[Attribute], site: usize, cx: Cx) -> PResult<Ret> {
-		let ts = self.declare_targets(kind, target, site)?;
-		if kind != DeclKind::Local { self.apply_declared_attributes(class, attrs, &ts)?; }
+	pub(super) async fn read_declaration(&mut self, kind: DeclKind, class: Option<&Rc<str>>, target: &Expr, attrs: &[Attribute], site: usize, cx: Cx) -> PResult<Ret> {
+		let ts = self.declare_targets(kind, target, site).await?;
+		if kind != DeclKind::Local { self.apply_declared_attributes(class, attrs, &ts).await?; }
 		let mut values = Vec::new();
 		for t in ts {
 			match t {
 				Target::Scalar(s) => values.push(self.read_sv(&s)?),
-				Target::Array(a) => values.extend(self.slot_value(Slot::Array(a), Sigil::Array, cx)?.list()),
-				Target::Hash(h) => values.extend(self.slot_value(Slot::Hash(h), Sigil::Hash, cx)?.list()),
+				Target::Array(a) => values.extend(self.slot_value(Slot::Array(a), Sigil::Array, cx).await?.list()),
+				Target::Hash(h) => values.extend(self.slot_value(Slot::Hash(h), Sigil::Hash, cx).await?.list()),
 				Target::Glob(g) => values.push(Value::Glob(g)),
 				Target::LastIndex(a) => values.push(Value::Int(self.array_len(&a)? as i64 - 1)),
 				_ => {}
@@ -2591,7 +2630,7 @@ impl Interp<'_> {
 		Ok(Ret::Many(values).in_context(cx))
 	}
 
-	pub(super) fn undef_target(&mut self, e: &Expr) -> PResult<()> {
+	pub(super) async fn undef_target(&mut self, e: &Expr) -> PResult<()> {
 		match &ungroup(e).kind {
 			ExprKind::Variable(Sigil::Code, name) | ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) => {
 				if let Some(cv) = self.named_code(name) { cv.body.replace(CodeImpl::Undefined); }
@@ -2600,10 +2639,10 @@ impl Interp<'_> {
 			_ => {}
 		}
 		let mut targets = Vec::new();
-		self.collect_targets(e, &mut targets)?;
+		self.collect_targets(e, &mut targets).await?;
 		for target in targets {
 			match target {
-				Target::Array(a) => self.assign_array(&a, std::iter::empty())?,
+				Target::Array(a) => self.assign_array(&a, std::iter::empty()).await?,
 				Target::Hash(h) => {
 					// hv_undef frees entries one at a time, so a DESTROY triggered by one sees the rest (and may add more).
 					let holds_objects = || h.entries().values().any(|sv| matches!(sv.get(), Value::Ref(r) if r.blessed().is_some()));
@@ -2617,7 +2656,7 @@ impl Interp<'_> {
 							self.drain_destructors(false)?;
 						}
 					}
-					self.fill_hash(&h, std::iter::empty())?;
+					self.fill_hash_async(&h, std::iter::empty()).await?;
 					// `undef %h` frees the bucket array as well (unlike `%h = ()`).
 					h.entries_mut().shrink_to_fit();
 					if let Some((name, _)) = self.stashes.iter().find(|(_, stash)| Rc::ptr_eq(stash, &h)) {
@@ -2633,9 +2672,9 @@ impl Interp<'_> {
 		Ok(())
 	}
 
-	pub(super) fn exists(&mut self, e: &Expr) -> PResult<bool> {
+	pub(super) async fn exists(&mut self, e: &Expr) -> PResult<bool> {
 		match &ungroup(e).kind {
-			ExprKind::Select(base, select, key) => match self.element(base, *select, key, true)? {
+			ExprKind::Select(base, select, key) => match self.element(base, *select, key, true).await? {
 				Some(Element::Hash(h, key)) => {
 					if let Some(obj) = self.tied_hash(&h) {
 						let exists = self.call_method(obj, "EXISTS", vec![Value::Str(key.to_pstr())], Cx::Scalar)?.scalar();
@@ -2653,13 +2692,13 @@ impl Interp<'_> {
 			},
 			ExprKind::Variable(Sigil::Code, name) | ExprKind::Call(Call { target: CallTarget::Named(name, _), .. }) => Ok(self.named_code(name).is_some()),
 			ExprKind::Deref(Sigil::Code, source) | ExprKind::Call(Call { target: CallTarget::Code(source, true), args: None, .. }) =>
-				Ok(self.exempt_code(source, false)?.is_some()),
+				Ok(self.exempt_code(source, false).await?.is_some()),
 			_ => Err(self.die_msg("exists argument is not a HASH or ARRAY element or a subroutine")),
 		}
 	}
 
-	pub(super) fn delete(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
-		let (cells, single) = self.delete_cells(e)?;
+	pub(super) async fn delete(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+		let (cells, single) = self.delete_cells(e).await?;
 		let mut values = Vec::with_capacity(cells.len());
 		for sv in &cells { values.push(self.read_sv(sv)?); }
 		if single { Ok(Ret::One(values.pop().unwrap_or(Value::Undef))) } else { Ok(Ret::Many(values).in_context(cx)) }
@@ -2667,20 +2706,20 @@ impl Interp<'_> {
 
 	/// Remove the elements named by `delete`'s operand, returning the removed containers (`\delete $h{k}` is the old
 	/// `\$h{k}`) and whether the operand was a single element.
-	pub(super) fn delete_cells(&mut self, e: &Expr) -> PResult<(Vec<Sv>, bool)> {
+	pub(super) async fn delete_cells(&mut self, e: &Expr) -> PResult<(Vec<Sv>, bool)> {
 		let (e, local) = if let ExprKind::Declare(DeclKind::Local, _, e, _) = &ungroup(e).kind { (ungroup(e), true) } else { (ungroup(e), false) };
 		let ExprKind::Select(base, select, key) = &e.kind else { return Err(self.die_msg("delete argument is not a HASH or ARRAY element or slice")); };
 		match select {
 			Select::ArrayElement(_) | Select::HashElement(_) => {
-				let sv = match self.element(base, *select, key, true)? { Some(el) => self.delete_elem(el, local)?, None => new_sv(Value::Undef) };
+				let sv = match self.element(base, *select, key, true).await? { Some(el) => self.delete_elem(el, local).await?, None => new_sv(Value::Undef) };
 				Ok((vec![sv], true))
 			}
 			Select::ArraySlice(_) | Select::ArrayPairs(_) | Select::HashSlice(_) | Select::HashPairs(_) => {
 				let pairs = matches!(select, Select::ArrayPairs(_) | Select::HashPairs(_));
 				let mut result = Vec::new();
-				for (value, el) in self.slice(base, *select, key, true)? {
+				for (value, el) in self.slice(base, *select, key, true).await? {
 					if pairs { result.push(new_sv(value)); }
-					result.push(match el { Some(el) => self.delete_elem(el, local)?, None => new_sv(Value::Undef) });
+					result.push(match el { Some(el) => self.delete_elem(el, local).await?, None => new_sv(Value::Undef) });
 				}
 				Ok((result, false))
 			}
@@ -2698,8 +2737,8 @@ impl Interp<'_> {
 		})
 	}
 
-	fn delete_elem(&mut self, el: Element, local: bool) -> PResult<Sv> {
-		if local { return self.local_elem(el, true); }
+	async fn delete_elem(&mut self, el: Element, local: bool) -> PResult<Sv> {
+		if local { return Box::pin(self.local_elem(el, true)).await; }
 		if let Some((object, key)) = self.tied_element(&el)? { return self.call_method(object, "DELETE", vec![key], Cx::Scalar).map(|r| new_sv(r.scalar())); }
 		Ok(match el {
 			Element::Hash(h, k) => {
@@ -2745,10 +2784,17 @@ impl Interp<'_> {
 	}
 
 	/// Evaluate a list in aliasing context (foreach, map, grep and `@_`).
-	pub fn eval_aliases(&mut self, e: &Expr) -> PResult<Vec<Sv>> {
+	pub async fn eval_aliases_async(&mut self, e: &Expr) -> PResult<Vec<Sv>> {
 		let e = ungroup(e);
 		if let Some(sv) = self.plain_alias(e) { return Ok(vec![sv]); }
-		self.at_location(&e.location, |this| this.nested(|this| this.aliases_inner(e)))
+		let at = self.depth;
+		self.at_location(&e.location, async move |this| {  descend(at, Box::pin(this.aliases_inner(e))).await  }).await
+	}
+
+	/// Sync entry for native callbacks and coercion paths: drives the async evaluator on the blocking worker.
+	pub fn eval_aliases(&mut self, e: &Expr) -> PResult<Vec<Sv>> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.eval_aliases_async(e)) }
 	}
 
 	pub(super) fn readonly_alias(&mut self, value: Value) -> Sv {
@@ -2757,28 +2803,30 @@ impl Interp<'_> {
 		sv
 	}
 
-	fn aliases_inner(&mut self, e: &Expr) -> PResult<Vec<Sv>> {
+	async fn aliases_inner(&mut self, e: &Expr) -> PResult<Vec<Sv>> {
 		match &e.kind {
 			ExprKind::Int(_) | ExprKind::UInt(_) | ExprKind::Float(_) | ExprKind::String(_) | ExprKind::Version(_)
 			| ExprKind::Special(Special::File | Special::Line | Special::Package(_)) => {
-				let value = self.eval_scalar(e)?;
+				let value = self.eval_scalar_async(e).await?;
 				Ok(vec![self.readonly_alias(value)])
 			}
 			ExprKind::List(items) => {
-				let mut list = Vec::with_capacity(items.len());
+				let mut list: Vec<Sv> = Vec::with_capacity(items.len());
 				for item in items {
 					let e = ungroup(item);
-					if let Some(sv) = self.plain_alias(e) { list.push(sv); }
-					else { list.extend(self.at_location(&e.location, |this| this.nested(|this| this.aliases_inner(e)))?); }
+					if let Some(sv) = self.plain_alias(e) { list.push(sv); } else {
+						let cells: Vec<Sv> = self.at_location(&e.location, async move |this| this.nested(async move |this| Box::pin(this.aliases_inner(e)).await).await).await?;
+						list.extend(cells);
+					}
 				}
 				Ok(list)
 			}
 			ExprKind::Declare(kind, _, target, _) => {
 				let mut out = Vec::new();
-				for target in self.declare_targets(*kind, target, e as *const Expr as usize)? {
+				for target in self.declare_targets(*kind, target, e as *const Expr as usize).await? {
 					match target {
 						Target::Scalar(s) => out.push(s),
-						Target::Array(a) => out.extend(self.eval_array_aliases(&a, true)?),
+						Target::Array(a) => out.extend(self.eval_array_aliases(&a, true).await?),
 						Target::Hash(h) => out.extend(self.eval_hash_aliases(&h)?),
 						_ => {}
 					}
@@ -2786,14 +2834,14 @@ impl Interp<'_> {
 				Ok(out)
 			}
 			ExprKind::Variable(Sigil::Scalar, name) if self.readonly_scalar(name) => {
-				let value = self.eval_scalar(e)?;
+				let value = self.eval_scalar_async(e).await?;
 				Ok(vec![self.readonly_alias(value)])
 			}
-			ExprKind::Variable(Sigil::Scalar, name) if self.magic_scalar(name).is_some() => self.eval_lvalue(e).map(|s| vec![s]),
+			ExprKind::Variable(Sigil::Scalar, name) if self.magic_scalar(name).is_some() => self.eval_lvalue_async(e).await.map(|s| vec![s]),
 			// Aliasing an existing hash element is a read, and a negative index before the array's start only fails
 			// when the alias is assigned (defelem: perl only stores when the alias is written).
 			ExprKind::Select(base, select @ (Select::HashElement(_) | Select::ArrayElement(_)), key) => {
-				let cell = match self.element(base, *select, key, true)? {
+				let cell = match self.element(base, *select, key, true).await? {
 					Some(Element::Hash(h, k)) if self.tied_hash(&h).is_none() => {
 						let existing = h.entries().get(&k).cloned();
 						if existing.is_some() {
@@ -2814,17 +2862,17 @@ impl Interp<'_> {
 				};
 				cell.map(|s| vec![s]).ok_or_else(|| self.die_msg("Modification of a read-only value attempted"))
 			}
-			ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _) => self.eval_lvalue(e).map(|s| vec![s]),
+			ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _) => self.eval_lvalue_async(e).await.map(|s| vec![s]),
 			ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _) => {
-				let a = self.eval_array(e)?;
-				self.eval_array_aliases(&a, true)
+				let a = self.eval_array_async(e).await?;
+				self.eval_array_aliases(&a, true).await
 			}
 			ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => {
-				let h = self.eval_hash(e)?;
+				let h = self.eval_hash_async(e).await?;
 				self.eval_hash_aliases(&h)
 			}
 			ExprKind::Select(base, sel @ (Select::ArraySlice(_) | Select::HashSlice(_) | Select::ArrayPairs(_) | Select::HashPairs(_)), key) => {
-				let selected = self.slice(base, *sel, key, true)?;
+				let selected = self.slice(base, *sel, key, true).await?;
 				let mut result = Vec::with_capacity(selected.len());
 				for (key, el) in selected {
 					if matches!(sel, Select::ArrayPairs(_) | Select::HashPairs(_)) { result.push(new_sv(key)); }
@@ -2833,35 +2881,35 @@ impl Interp<'_> {
 				Ok(result)
 			}
 			ExprKind::Conditional(cond, yes, no) => {
-				let v = self.eval_scalar(cond)?;
+				let v = self.eval_scalar_async(cond).await?;
 				let branch = if self.truthy(&v)? { yes } else { no };
-				self.eval_aliases(branch)
+				self.eval_aliases_async(branch).await
 			}
 			// `for (A || B)`: the chosen operand is aliased (lvalue-ish context reaches both sides), but a subscript
 			// on the left is only read, never autovivified.
 			ExprKind::Binary(op @ (Binary::Or | Binary::DefinedOr | Binary::And), first, second) => {
 				let lhs = if matches!(&ungroup(first).kind, ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _)
 					| ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Pos | Builtin::Substr | Builtin::Vec, _), .. })) {
-					self.eval_aliases(first)?.pop().unwrap_or_else(|| new_sv(Value::Undef))
-				} else { new_sv(self.eval_scalar(first)?) };
+					self.eval_aliases_async(first).await?.pop().unwrap_or_else(|| new_sv(Value::Undef))
+				} else { new_sv(self.eval_scalar_async(first).await?) };
 				let value = self.read_sv(&lhs)?;
 				let keep = match op {
 					Binary::Or => self.truthy(&value)?,
 					Binary::DefinedOr => !value.is_undef(),
 					_ => !self.truthy(&value)?,
 				};
-				if keep { Ok(vec![lhs]) } else { self.eval_aliases(second) }
+				if keep { Ok(vec![lhs]) } else { self.eval_aliases_async(second).await }
 			}
 			// `shift`/`pop` hand back the removed element itself (`${\shift}` in an lvalue sub aliases the argument).
 			ExprKind::Call(Call { target: CallTarget::Builtin(b @ (Builtin::Shift | Builtin::Pop), origin), args, .. })
 				if self.builtin_uses_core(*b, *origin) => {
 				let operand = args.as_deref().filter(|e| !matches!(&ungroup(e).kind, ExprKind::List(items) if items.is_empty()));
 				let av = match operand {
-					Some(operand) if matches!(&ungroup(operand).kind, ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _)) => self.eval_array(operand)?,
-					Some(_) => return Ok(aliases(self.eval_list(e)?)),
+					Some(operand) if matches!(&ungroup(operand).kind, ExprKind::Variable(Sigil::Array, _) | ExprKind::Deref(Sigil::Array, _)) => self.eval_array_async(operand).await?,
+					Some(_) => return Ok(aliases(self.eval_list_async(e).await?)),
 					None => self.default_array(),
 				};
-				if self.tied_array(&av).is_some() || modules::readonly_array(self, &av) { return Ok(aliases(self.eval_list(e)?)); }
+				if self.tied_array(&av).is_some() || modules::readonly_array(self, &av) { return Ok(aliases(self.eval_list_async(e).await?)); }
 				self.data.reset_array(&av);
 				let removed = if *b == Builtin::Shift {
 					let mut elems = av.elems_mut();
@@ -2873,26 +2921,26 @@ impl Interp<'_> {
 			// A constant sub's values are read-only, like the literals perl inlines for them.
 			ExprKind::Call(Call { target: CallTarget::Named(name, false), .. })
 				if self.named_code(name).is_some_and(|cv| matches!(*cv.body.borrow(), CodeImpl::Constant(_))) => {
-				let values = self.eval_list(e)?;
+				let values = self.eval_list_async(e).await?;
 				Ok(values.into_iter().map(|v| self.readonly_alias(v)).collect())
 			}
 			// `lock $x` returns `$x` itself.
 			ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Lock, origin), args: Some(operand), .. })
 				if self.builtin_uses_core(Builtin::Lock, *origin) && matches!(&ungroup(operand).kind,
 					ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _) | ExprKind::Select(_, Select::ArrayElement(_) | Select::HashElement(_), _)) =>
-				self.eval_aliases(operand),
+				self.eval_aliases_async(operand).await,
 			// `scalar(EXPR)` passes on the scalar EXPR yields, so `f(scalar substr(...))` aliases the substring.
 			ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Scalar, origin), args: Some(operand), .. })
 				if self.builtin_uses_core(Builtin::Scalar, *origin) && matches!(&ungroup(operand).kind,
 					ExprKind::Variable(Sigil::Scalar, _) | ExprKind::Deref(Sigil::Scalar, _)
 					| ExprKind::Select(_, Select::ArrayElement(_) | Select::HashElement(_), _)
-					| ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Substr | Builtin::Vec | Builtin::Pos, _), .. })) => self.eval_aliases(operand),
+					| ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Substr | Builtin::Vec | Builtin::Pos, _), .. })) => self.eval_aliases_async(operand).await,
 			ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Delete, origin), args: Some(operand), .. })
-				if self.builtin_uses_core(Builtin::Delete, *origin) => self.delete_cells(operand).map(|(cells, _)| cells),
+				if self.builtin_uses_core(Builtin::Delete, *origin) => self.delete_cells(operand).await.map(|(cells, _)| cells),
 			ExprKind::Call(call @ Call { target: CallTarget::Builtin(b @ (Builtin::Substr | Builtin::Vec | Builtin::Pos), origin), .. })
 				if self.builtin_uses_core(*b, *origin) => {
 					if let Some(result) = func::lvalue(self, *b, call) { Ok(vec![result?]) }
-					else { Ok(aliases(self.eval_list(e)?)) }
+					else { Ok(aliases(self.eval_list_async(e).await?)) }
 				}
 			ExprKind::Call(call @ Call { target: CallTarget::Builtin(b, origin), .. })
 				if matches!(b, Builtin::Values | Builtin::Grep | Builtin::Sort)
@@ -2906,10 +2954,10 @@ impl Interp<'_> {
 				}
 			ExprKind::Call(call @ Call { target: CallTarget::Named(name, _), .. }) if self.named_lvalue(name) => {
 				let mut out = Vec::new();
-				for item in self.call_lvalue_list(call)? {
+				for item in self.call_lvalue_list(call).await? {
 					match item {
 						Value::Ref(Ref::Scalar(sv)) => out.push(sv),
-						Value::Ref(Ref::Array(av)) => out.extend(self.eval_array_aliases(&av, true)?),
+						Value::Ref(Ref::Array(av)) => out.extend(self.eval_array_aliases(&av, true).await?),
 						Value::Ref(Ref::Hash(hv)) => out.extend(self.eval_hash_aliases(&hv)?),
 						other => out.push(new_sv(other)),
 					}
@@ -2918,10 +2966,10 @@ impl Interp<'_> {
 			}
 			ExprKind::Binary(Binary::Assign, target, rhs) => {
 				if Self::list_target(target) {
-					self.assign_list(target, rhs, true).map(|(_, cells)| cells)
-				} else { self.eval_lvalue(e).map(|s| vec![s]) }
+					Box::pin(self.assign_list(target, rhs, true)).await.map(|(_, cells)| cells)
+				} else { self.eval_lvalue_async(e).await.map(|s| vec![s]) }
 			}
-			_ => Ok(match self.eval(e, Cx::List)? {
+			_ => Ok(match self.eval_async(e, Cx::List).await? {
 				Ret::One(v) => vec![new_sv(v)],
 				Ret::Many(values) => aliases(values),
 			}),

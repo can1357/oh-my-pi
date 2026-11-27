@@ -299,6 +299,50 @@ fn nextfile_moves_to_the_next_file() {
 	assert_eq!(out, "1\n3\n");
 }
 
+/// Non-tail user recursion (the addend is used only after the recursive call
+/// returns) must survive 20,000 levels on a small, ordinary stack, and hold
+/// the right value once it unwinds. Before the heap queue this ran on a
+/// dedicated 512 MiB thread; the test pins a 512 KiB stack to prove the
+/// recursion now lives on the heap.
+#[test]
+fn deep_non_tail_user_recursion_runs_on_a_small_stack() {
+	// sum(1..20000) == 20000 * 20001 / 2.
+	let prog = "function down(n) { return n <= 0 ? 0 : down(n - 1) + n } BEGIN { print down(20000) }";
+	let out = std::thread::Builder::new()
+		.stack_size(512 * 1024)
+		.spawn(move || run(prog, ""))
+		.expect("spawn the deeply recursing awk thread")
+		.join()
+		.expect("awk must not overflow the stack");
+	assert_eq!(out, "200010000\n");
+}
+
+/// A long *acyclic* call chain — `f0` calls `f1` … calls `fN` — has no
+/// recursion, yet its depth follows where control enters it, so it must be
+/// bounded by the runtime checkpoint on every call, not by a static call-graph
+/// test. 4,000 nested calls on a 512 KiB stack prove the native stack stays
+/// bounded whatever the chain's shape.
+#[test]
+fn long_acyclic_user_chain_runs_on_a_small_stack() {
+	let count = 4000;
+	let mut prog = String::new();
+	for i in 0..count {
+		if i + 1 == count {
+			prog.push_str(&format!("function f{i}() {{ return 1 }} "));
+		} else {
+			prog.push_str(&format!("function f{i}() {{ return f{}() }} ", i + 1));
+		}
+	}
+	prog.push_str("BEGIN { print f0() }");
+	let out = std::thread::Builder::new()
+		.stack_size(512 * 1024)
+		.spawn(move || run(&prog, ""))
+		.expect("spawn the long-chain awk thread")
+		.join()
+		.expect("awk must not overflow the stack");
+	assert_eq!(out, "1\n");
+}
+
 /// Command tests go through the test command runner, which runs command
 /// lines as `sh -c`.
 #[cfg(unix)]
