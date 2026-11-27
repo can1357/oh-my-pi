@@ -58,8 +58,8 @@
  * - Where the directory is unknown (see above), `discard_changes` has no directory to probe for a
  *   git command there, unless its `-C` names one by an absolute path, `~` or `$HOME`, and
  *   `kills_harness` no executable for a relative `killall` path: `cd "$d" && git reset --hard`,
- *   `env -C repo git reset --hard`. A bash `cwd` that is an internal URL or does not resolve makes
- *   the starting directory unknown to them.
+ *   `env -C repo git reset --hard`. A leading `cd` onto an internal URL, or onto a directory that
+ *   does not resolve, makes the starting directory unknown to them.
  * - The probes of one call on one input share {@link PROBE_BUDGET_MS}; in a command that asks more
  *   than fit, such as many distinct `pkill` patterns, the ones left without time count as no match.
  * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
@@ -122,9 +122,9 @@ export interface GuardScope {
 	cwd: string;
 	home: string;
 	/**
-	 * Set when `cwd` only stands in for a directory the guard cannot place, such as a bash `cwd` that
-	 * is an internal URL or does not resolve: the probing rules then start from an unknown directory
-	 * ({@link pipelineProbes}), so that none probes a directory guessed from `cwd`.
+	 * Set when `cwd` only stands in for a directory the guard cannot place, such as the target of a
+	 * leading bash `cd` that is an internal URL or does not resolve: the probing rules then start from
+	 * an unknown directory ({@link pipelineProbes}), so that none probes a directory guessed from `cwd`.
 	 */
 	cwdStandIn?: boolean;
 }

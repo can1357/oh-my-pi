@@ -860,14 +860,6 @@ class ToolCommandRecorder {
 }
 
 /**
- * The input a bash call's guard probes check, keying its probe budget ({@link callProbeBudget}):
- * its command and `cwd`.
- */
-function probeInput(command: string, cwd: unknown): string {
-	return `${typeof cwd === "string" ? cwd : ""}\0${command}`;
-}
-
-/**
  * Bash tool implementation.
  *
  * Executes bash commands with optional timeout and working directory.
@@ -1011,9 +1003,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
-		const guardHit = this.#guardHit(command, input.cwd, {
+		const guardHit = this.#guardHit(command, {
 			probe,
-			budget: probe ? callProbeBudget(probeInput(command, input.cwd), ctx?.toolCall) : undefined,
+			budget: probe ? callProbeBudget(command, ctx?.toolCall) : undefined,
 		});
 		if (guardHit) return { tier: "exec", override: true, reason: guardHit.reason };
 		// Each tool command passes its own approval when it runs; the line itself only reads.
@@ -1024,27 +1016,27 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	/**
 	 * The fixed guard rule (`tools.guardRules`) `command` breaks over its top-level commands, or
 	 * `undefined`, as always with the setting off. The critical patterns are not among the rules:
-	 * they match the raw command line either way.
+	 * they match the raw command line either way. The rules see the call start in the session cwd
+	 * and follow a leading `cd` that execution hoists as part of the command.
 	 */
-	#guardHit(command: string, cwd: unknown, options: ShellGuardOptions): GuardHit | undefined {
+	#guardHit(command: string, options: ShellGuardOptions): GuardHit | undefined {
 		return cfgToolsGuardRules.get(this.session.settings)
-			? findShellGuardHit(command, this.#guardScope(cwd), options)
+			? findShellGuardHit(command, this.#guardScope(command), options)
 			: undefined;
 	}
 	/**
-	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
-	 * resolves it) or the session cwd. An internal-URL cwd, and a `cwd` execution cannot resolve
-	 * (`@local://notes`, left for execution to report), have no host directory the guard can place:
-	 * the rules that read paths see the session cwd for both, and the probing rules an unknown
-	 * directory ({@link GuardScope.cwdStandIn}).
+	 * Where the fixed guard rules see `command` start: the session cwd. A leading `cd ... &&` that
+	 * execution hoists onto a target with no host directory the guard can place (an internal URL such
+	 * as `local://notes`, or one execution cannot resolve, such as `@local://notes`) leaves the
+	 * probing rules an unknown starting directory ({@link GuardScope.cwdStandIn}).
 	 */
-	#guardScope(cwd: unknown): GuardScope {
-		const sessionCwd = this.session.cwd ?? process.cwd();
-		const scope: GuardScope = { cwd: sessionCwd, home: os.homedir() };
-		if (typeof cwd !== "string" || cwd === "") return scope;
-		if (InternalUrlRouter.instance().canHandle(cwd)) return { ...scope, cwdStandIn: true };
+	#guardScope(command: string): GuardScope {
+		const scope: GuardScope = { cwd: this.session.cwd ?? process.cwd(), home: os.homedir() };
+		const cd = extractLeadingCdTarget(command);
+		if (cd?.separator !== "&&") return scope;
 		try {
-			return { ...scope, cwd: resolveToCwd(cwd, sessionCwd) };
+			resolveShellDirectory(cd.path, scope.cwd);
+			return scope;
 		} catch {
 			return { ...scope, cwdStandIn: true };
 		}
@@ -1078,7 +1070,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		};
 	}
 
-	#formatCompoundApprovalDetails(command: string, cwd: unknown): string[] | null {
+	#formatCompoundApprovalDetails(command: string): string[] | null {
 		if (!cfgBashAllowCompoundCommands.get(this.session.settings)) return null;
 		const dialect = bashApprovalDialect(this.session.settings.getShellConfig().shell);
 		if (!dialect) return null;
@@ -1120,13 +1112,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// clause can carry (`size_limit`), or a parse with more pipelines than clauses, leaves the chain
 		// to the plain command row. The rows are checks for this call: their probes share the budget of
 		// the call's approval paths, so they ask nothing the gate already asked.
-		const budget = callProbeBudget(probeInput(command, cwd));
+		const budget = callProbeBudget(command);
 		const segmentGuards = cfgToolsGuardRules.get(this.session.settings)
-			? findPipelineGuardHits(command, this.#guardScope(cwd), { budget })
+			? findPipelineGuardHits(command, this.#guardScope(command), { budget })
 			: [];
 		if (
 			segmentGuards.length > clauses.length ||
-			(!segmentGuards.some(Boolean) && this.#guardHit(command, cwd, { budget }))
+			(!segmentGuards.some(Boolean) && this.#guardHit(command, { budget }))
 		) {
 			return null;
 		}
@@ -1174,11 +1166,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const input = args as Partial<BashToolInput>;
-		const rawCommand = input.command;
+		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "(missing)";
 		if (typeof rawCommand === "string") {
-			const compound = this.#formatCompoundApprovalDetails(command, input.cwd);
+			const compound = this.#formatCompoundApprovalDetails(command);
 			if (compound) return compound;
 		}
 		return [`Command: ${truncateForPrompt(command)}`];

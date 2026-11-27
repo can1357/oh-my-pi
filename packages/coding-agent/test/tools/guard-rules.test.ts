@@ -262,7 +262,6 @@ describe("discard_changes", () => {
 		try {
 			expect(bashApproval(outside.path(), "git reset --hard")).toBe("exec");
 			expect(ruleOf(bashApproval(outside.path(), `cd ${repo} && git reset --hard`))).toBe("discard_changes");
-			expect(ruleOf(bashApproval(outside.path(), "git reset --hard", { cwd: repo }))).toBe("discard_changes");
 			expect(ruleOf(bashApproval(outside.path(), `git -C ${repo} checkout .`))).toBe("discard_changes");
 			// Only top-level commands are read: a discard inside `bash -c` or `eval` is not seen.
 			expect(bashApproval(outside.path(), `bash -c "cd ${repo}; eval 'git checkout .'"`)).toBe("exec");
@@ -286,8 +285,9 @@ describe("discard_changes", () => {
 			]) {
 				expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
 			}
-			// A call `cwd` the guard cannot place leaves the start unknown to the probes.
-			expect(bashApproval(repo, "git reset --hard", { cwd: "@local://notes" })).toBe("exec");
+			// A leading `cd` to a directory the guard cannot place leaves the start unknown to the probes.
+			expect(bashApproval(repo, "cd @local://notes && git reset --hard")).toBe("exec");
+			expect(bashApproval(repo, "cd local://notes && git reset --hard")).toBe("exec");
 			expect(ask).not.toHaveBeenCalled();
 			// An absolute `-C` names its directory wherever the command runs.
 			expect(ruleOf(bashApproval(repo, `env -C /tmp git -C ${repo} reset --hard`))).toBe("discard_changes");
@@ -590,12 +590,12 @@ describe("tools.guardRules", () => {
 		expect(sshRows.some(row => row.includes("cat id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
 	});
 
-	it("decides a call whose `cwd` execution rejects instead of throwing", () => {
+	it("decides a call that first changes to an internal URL directory", () => {
 		const tool = new BashTool(createSession(temp.path(), { "bash.allowCompoundCommands": true }));
 		const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
-		expect(approval({ command: "ls", cwd: "@local://notes" })).toBe("exec");
-		expect(ruleOf(approval({ command: "cat ~/.ssh/id_rsa", cwd: "@local://notes" }))).toBe("credential_read");
-		const rows = tool.formatApprovalDetails({ command: "ls && cat ~/.ssh/id_rsa", cwd: "@local://notes" });
+		expect(approval({ command: "cd @local://notes && ls" })).toBe("exec");
+		expect(ruleOf(approval({ command: "cd @local://notes && cat ~/.ssh/id_rsa" }))).toBe("credential_read");
+		const rows = tool.formatApprovalDetails({ command: "cd @local://notes && ls && cat ~/.ssh/id_rsa" });
 		expect(rows.some(row => row.includes("cat ~/.ssh/id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
 	});
 });
