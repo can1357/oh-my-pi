@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { Effort } from "@oh-my-pi/pi-ai";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	acquireModelRoleMutation,
@@ -545,5 +545,40 @@ describe("model presets", () => {
 		release();
 		expect((await applying).kind).toBe("switched");
 		expect(settings.getModelRole("default")).toBe(OPUS);
+	});
+	describe("setModel against a per-model defaultLevel", () => {
+		function withDefaultLevel(model: Model, defaultLevel: Effort): Model {
+			return {
+				...model,
+				thinking: {
+					mode: "anthropic-adaptive",
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+					defaultLevel,
+				},
+			};
+		}
+
+		it("carries the current level over the target's defaultLevel, clamped to its ladder", async () => {
+			const session = createSession(
+				Settings.isolated({ defaultThinkingLevel: Effort.Medium }),
+				"anthropic/claude-opus-4-7",
+				Effort.Low,
+			);
+			session.setThinkingLevel(Effort.Max);
+
+			await session.setModel(withDefaultLevel(bundled(OPUS), Effort.Medium));
+
+			// The target has no max: the nearest level is xhigh, not its medium default.
+			expect(session.thinkingLevel).toBe(Effort.XHigh);
+		});
+
+		it("adopts the target's defaultLevel when the session has no level to carry", async () => {
+			const session = createSession(Settings.isolated({ defaultThinkingLevel: Effort.Medium }), SONNET, Effort.Low);
+			session.setThinkingLevel(undefined);
+
+			await session.setModel(withDefaultLevel(bundled(OPUS), Effort.XHigh));
+
+			expect(session.thinkingLevel).toBe(Effort.XHigh);
+		});
 	});
 });
