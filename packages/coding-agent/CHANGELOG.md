@@ -224,6 +224,7 @@
 - Fixed `todo` init/append with an unknown field such as `tasks` failing as "Missing list for init operation"; the error now names the unknown field and the expected shape, and the tool description includes parameter examples ([#17052](https://github.com/can1357/oh-my-pi/issues/17052))
 - Fixed `omp config get`/`list` ignoring `--config` overlays, whether passed before or after `config` ([#17092](https://github.com/can1357/oh-my-pi/issues/17092))
 - Setup wizard key hints (provider sign-in, step footer) now spell out keys as words (`Enter`, `Esc`, `Up`/`Down`) instead of keycap glyphs that terminals without those glyphs showed as `?` ([#17411](https://github.com/can1357/oh-my-pi/issues/17411))
+- Fixed a `:max` thinking suffix on Bedrock inference-profile ARNs being sent as part of the model id, causing HTTP 400 ([#16568](https://github.com/can1357/oh-my-pi/issues/16568))
 
 ### Removed
 
