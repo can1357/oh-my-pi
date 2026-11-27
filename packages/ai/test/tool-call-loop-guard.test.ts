@@ -122,9 +122,7 @@ describe("ToolCallLoopGuard", () => {
 		const text = "Testing the next file.";
 		for (let file = 1; file <= 6; file++) {
 			expect(
-				guard.recordTurn(
-					textTurn(`call-${file}`, "bash", { command: `bun test test/case-${file}.test.ts` }, text),
-				),
+				guard.recordTurn(textTurn(`call-${file}`, "bash", { command: `bun test test/case-${file}.test.ts` }, text)),
 			).toBeNull();
 		}
 	});

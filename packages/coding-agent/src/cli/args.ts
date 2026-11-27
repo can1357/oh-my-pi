@@ -303,8 +303,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		// built-in field — so registered flags shadow same-named built-ins here.
 		// `--preset` is reserved by the built-in launch flag: the preset applies
 		// before extensions load, so a same-named extension flag cannot claim it.
-		const extFlag =
-			arg.startsWith("--") && arg !== "--preset" ? extensionFlags?.get(arg.slice(2)) : undefined;
+		const extFlag = arg.startsWith("--") && arg !== "--preset" ? extensionFlags?.get(arg.slice(2)) : undefined;
 		if (extFlag) {
 			const flagName = arg.slice(2);
 			if (extFlag.type === "boolean") {

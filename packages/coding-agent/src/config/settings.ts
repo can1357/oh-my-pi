@@ -355,7 +355,11 @@ export type SettingsMirrorWrite =
 	| { readonly op: "setProjectModelRole"; readonly role: string; readonly modelId: string }
 	| { readonly op: "clearProjectModelRole"; readonly role: string }
 	| { readonly op: "overrideModelRoles"; readonly roles: ReadOnlyDict<string> }
-	| { readonly op: "overrideModelRolesWhole"; readonly roles: ReadOnlyDict<string | null>; readonly untrusted: boolean };
+	| {
+			readonly op: "overrideModelRolesWhole";
+			readonly roles: ReadOnlyDict<string | null>;
+			readonly untrusted: boolean;
+	  };
 
 /** A disk or scope operation a worker mirror runs on its main-thread instance. */
 export type SettingsMirrorRefresh =
