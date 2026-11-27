@@ -4950,7 +4950,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call.
+	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call, or by one whose
+	 * valid payload a todo backend kept from committing.
 	 * Exact retries clear every matching failure. Otherwise the call is treated
 	 * as a corrected retry of the oldest outstanding failure with the same op
 	 * (placeholder task text, missing items, ...); failures of other ops stay queued.
@@ -5324,7 +5325,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
 					this.#scheduleTitleRefresh("replan");
 				}
-				if (toolName === "todo" && !isError && details?.op !== "view") {
+				if (toolName === "todo" && (!isError || details?.uncommitted !== undefined) && details?.op !== "view") {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}

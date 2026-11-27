@@ -604,7 +604,7 @@ interface TodoBackendList {
 }
 
 /** Longest a backend gets to answer `apply`; the extension handler timeout caps it further. */
-export const TODO_APPLY_TIMEOUT_MS = 10_000;
+const TODO_APPLY_TIMEOUT_MS = 10_000;
 
 const NOTHING_SAVED_SUFFIX = "; nothing was saved.";
 const TODO_APPLY_EVENT = "todo_backend_apply";

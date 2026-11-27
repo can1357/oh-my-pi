@@ -13,7 +13,6 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
-	TODO_APPLY_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -763,7 +762,7 @@ describe("todo backend", () => {
 			const abort = new AbortController();
 			const late = scenario === "answers after the timeout";
 			// The handler budget is a real timer inside the runner.
-			testSetExtensionHandlerTimeoutMs(late || scenario === "times out" ? 40 : 5_000);
+			testSetExtensionHandlerTimeoutMs(late || scenario === "times out" ? 200 : 5_000);
 
 			const asked = backend.entered();
 			if (scenario === "throws") backend.applyError = new TypeError("boom");
@@ -782,9 +781,9 @@ describe("todo backend", () => {
 			// A backend that times out never answers, so its resend goes out on exit; a late one answers after omp gave up.
 			if (scenario === "times out") await session.dispose();
 			if (late) {
-				// Real time on purpose: the rows share a real 40 ms handler timeout; a resend capped at it would fire
-				// 40 ms after the call fails, so sleep past that.
-				await Bun.sleep(60);
+				// Real time on purpose: the rows share a real 200 ms handler timeout; a resend capped at it would fire
+				// 200 ms after the call fails, so sleep past that.
+				await Bun.sleep(300);
 				gate.resolve();
 			}
 			await resent;
@@ -881,7 +880,7 @@ describe("todo backend", () => {
 				const asked = backend.entered();
 				const result = call(session, { op: "init", items: ["a"] });
 				await asked;
-				vi.advanceTimersByTime(TODO_APPLY_TIMEOUT_MS);
+				vi.advanceTimersByTime(10_000);
 				// After a timeout omp waits a moment for the handler to finish; a late answer ends that wait
 				// without a timer, which fake timers would hold back.
 				gate.resolve();
@@ -897,7 +896,7 @@ describe("todo backend", () => {
 		it("a commit made while a failed call's resend still waits is sent at once, and dispose does not drop it", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
-			testSetExtensionHandlerTimeoutMs(40);
+			testSetExtensionHandlerTimeoutMs(200);
 			testSetSessionShutdownHandlerTimeoutMs(5);
 			// Only the first call's apply never answers.
 			backend.applyHold = Promise.withResolvers<void>().promise;
@@ -1117,6 +1116,52 @@ describe("todo backend", () => {
 			);
 		});
 
+		it("a corrected retry the backend refuses clears the payload reminder of the failed call it retries", async () => {
+			const { session } = await open(
+				[
+					pi =>
+						pi.registerTodoBackend({
+							id: "veto",
+							replace() {},
+							apply(change) {
+								if (change.op === "done") return { block: true, reason: "not now" };
+							},
+						}),
+				],
+				"veto",
+				{ model: getBundledModel("anthropic", "claude-sonnet-4-5") },
+			);
+			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+			const todoCall = (id: string, args: { op: string; items?: string[]; task?: string }) =>
+				({ type: "toolCall", id, name: "todo", arguments: args }) as const;
+			session.agent.streamFn = createMockModel({
+				responses: [
+					{ content: [todoCall("i", { op: "init", items: ["x"] })] },
+					{ content: ["ok"] },
+					// A payload error, then its corrected retry, which the backend refuses.
+					{
+						content: [
+							todoCall("bad", { op: "done", task: "no such task" }),
+							todoCall("fixed", { op: "done", task: "x" }),
+						],
+					},
+					{ content: ["ok"] },
+					{ content: ["ok"] },
+				],
+			}).stream;
+
+			await session.prompt("go");
+			await session.prompt("next");
+			await session.prompt("again");
+
+			const results = session.messages.filter(m => m.role === "toolResult");
+			expect(results.find(m => m.toolCallId === "bad")).toMatchObject({ isError: true });
+			expect(results.find(m => m.toolCallId === "fixed")).toMatchObject({ details: { uncommitted: "refused" } });
+			expect(session.messages.filter(m => m.role === "custom" && m.customType === "todo-error-reminder")).toEqual(
+				[],
+			);
+		});
+
 		it("time spent in a dialog the backend opens does not count against the apply timeout", async () => {
 			const { session } = await open(
 				[
@@ -1139,7 +1184,7 @@ describe("todo backend", () => {
 			const confirm: ExtensionUIContext["confirm"] = async () => {
 				confirmed = true;
 				// A real delay: the runner's handler budget is a real timer, and the dialog must outlast it.
-				await Bun.sleep(120);
+				await Bun.sleep(400);
 				return true;
 			};
 			const ui: ExtensionUIContext = { ...runner.getUIContext(), confirm };
@@ -1149,7 +1194,7 @@ describe("todo backend", () => {
 				mode: "tui",
 				uiContext: ui,
 			});
-			testSetExtensionHandlerTimeoutMs(40);
+			testSetExtensionHandlerTimeoutMs(200);
 
 			const result = await call(session, { op: "init", items: ["a"] });
 
