@@ -603,6 +603,7 @@ are ignored.
 | `HINDSIGHT_REQUEST_TIMEOUT_MS`     | `hindsight.requestTimeoutMs`    | Integer milliseconds; default `30000`                                             |
 | `HINDSIGHT_REFLECT_TIMEOUT_MS`     | `hindsight.reflectTimeoutMs`    | Integer milliseconds; default `120000`                                            |
 | `HINDSIGHT_RECALL_TIMEOUT_MS`      | `hindsight.recallTimeoutMs`     | Integer milliseconds; default `30000`                                             |
+| `HINDSIGHT_RECALL_COOLDOWN_MS`     | `hindsight.recallCooldownMs`    | Integer milliseconds; default `60000`; `0` or less turns the pause off            |
 | `HINDSIGHT_RETAIN_TIMEOUT_MS`      | `hindsight.retainTimeoutMs`     | Integer milliseconds; default `60000`                                             |
 
 `PI_NO_PTY` is also set internally when CLI `--no-pty` is used.

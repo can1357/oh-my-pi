@@ -9,7 +9,8 @@
  *   the parent's routing and config as an in-process alias does, but its client is main's
  *   client ({@link RemoteHindsightClient}) and its bank set is main's live set
  *   ({@link RemoteHindsightBankSet}), so tool retains/recalls/reflects and bank
- *   confirmations land on main.
+ *   confirmations land on main. It shares main's pause after a failed automatic recall
+ *   ({@link RemoteRecallWait}): main reads and records it on its own clock.
  * - `MnemopiSessionState` → {@link RemoteMnemopiSessionState}: an alias whose parent is
  *   remote holds no banks; it routes every scoped-bank read and write to the parent, so
  *   saves land in main's live SQLite banks.
@@ -68,6 +69,8 @@ const serveHindsightState: RpcServe<HindsightSessionState, HindsightSessionState
 	},
 	"banks.delete": (state, bankId) => state.banksSet.delete(bankId),
 	"banks.list": state => [...state.banksSet],
+	"recallWait.skip": state => state.recallWait.skip(),
+	"recallWait.record": (state, outcome) => state.recallWait.record(outcome),
 };
 
 const serveMnemopiState: RpcServe<MnemopiSessionState, MnemopiSessionStateProtocol> = {

@@ -87,6 +87,7 @@
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
+- Fixed each prompt waiting out the Hindsight recall timeout while the server does not respond: automatic recall now pauses for `hindsight.recallCooldownMs` (default 1 minute, doubling up to 30 minutes) ([#19594](https://github.com/can1357/oh-my-pi/pull/19594) by [@sjawhar](https://github.com/sjawhar))
 
 ### Removed
 

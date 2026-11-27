@@ -6,6 +6,7 @@ const TOUCHED = [
 	"HINDSIGHT_AUTO_RECALL",
 	"HINDSIGHT_AUTO_RETAIN",
 	"HINDSIGHT_DEBUG",
+	"HINDSIGHT_RECALL_COOLDOWN_MS",
 	"HINDSIGHT_RECALL_MAX_TOKENS",
 	"HINDSIGHT_RETAIN_EVERY_N_TURNS",
 	"HINDSIGHT_REQUEST_TIMEOUT_MS",
@@ -44,6 +45,11 @@ describe("loadHindsightConfig HINDSIGHT_* env parsing", () => {
 		);
 		expect(config.requestTimeoutMs).toBe(7000);
 		expect(config.recallMaxTokens).toBe(2048);
+	});
+
+	it("reads the recall pause from HINDSIGHT_RECALL_COOLDOWN_MS", () => {
+		expect(configWith({ HINDSIGHT_RECALL_COOLDOWN_MS: "3000" }).recallCooldownMs).toBe(3000);
+		expect(configWith({ HINDSIGHT_RECALL_COOLDOWN_MS: "0" }).recallCooldownMs).toBe(0);
 	});
 
 	it("treats any non-empty non-truthy boolean value as false", () => {

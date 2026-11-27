@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { setImmediate } from "node:timers/promises";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -62,6 +62,7 @@ describe("queued user delivery policy", () => {
 	const tempDirs: TempDir[] = [];
 
 	afterEach(async () => {
+		setSystemTime();
 		await session?.dispose();
 		for (const dir of tempDirs.splice(0)) dir.removeSync();
 		vi.restoreAllMocks();
@@ -155,6 +156,7 @@ describe("queued user delivery policy", () => {
 		backendId: "mnemopi" | "hindsight",
 		recall: (query: string) => Promise<string | undefined>,
 		policy = false,
+		overrides: Record<string, unknown> = {},
 	) {
 		const dir = TempDir.createSync("@pi-queued-memory-");
 		tempDirs.push(dir);
@@ -173,6 +175,7 @@ describe("queued user delivery policy", () => {
 			"hindsight.autoRetain": false,
 			"hindsight.autoRecall": true,
 			"hindsight.mentalModelsEnabled": false,
+			...overrides,
 		});
 		const backend = await memoryBackend.resolveMemoryBackend(settings);
 		const tools: AgentTool[] = ["old_tool", "new_tool"].map(name => ({
@@ -300,22 +303,46 @@ describe("queued user delivery policy", () => {
 		},
 	);
 
-	it.each(["mnemopi", "hindsight"] as const)(
-		"retries failed real %s recall on the next committed turn",
-		async backendId => {
-			let recalls = 0;
-			const { requests } = await setupMemory(backendId, async () => {
+	it.each([
+		["mnemopi", undefined],
+		["hindsight", { "hindsight.recallCooldownMs": 0 }],
+	] as const)("retries failed real %s recall on the next committed turn", async (backendId, overrides) => {
+		let recalls = 0;
+		const { requests } = await setupMemory(
+			backendId,
+			async () => {
 				if (++recalls === 1) throw new Error("recall unavailable");
 				return "recovered recall";
-			});
-			await session.prompt("lookup unavailable");
-			expect(requests[0].systemPrompt?.join("\n")).not.toContain("recovered recall");
-			await session.prompt("lookup recovered");
-			expect(requests[1].systemPrompt?.join("\n")).toContain("recovered recall");
-			await session.prompt("already recalled");
-			expect(recalls).toBe(2);
-		},
-	);
+			},
+			false,
+			overrides,
+		);
+		await session.prompt("lookup unavailable");
+		expect(requests[0].systemPrompt?.join("\n")).not.toContain("recovered recall");
+		await session.prompt("lookup recovered");
+		expect(requests[1].systemPrompt?.join("\n")).toContain("recovered recall");
+		await session.prompt("already recalled");
+		expect(recalls).toBe(2);
+	});
+
+	it("skips a failed real hindsight recall on the next turns during the pause", async () => {
+		let recalls = 0;
+		const { requests } = await setupMemory("hindsight", async () => {
+			if (++recalls === 1) throw new Error("recall unavailable");
+			return "recovered recall";
+		});
+		await session.prompt("lookup unavailable");
+		await session.prompt("lookup skipped");
+		await session.prompt("lookup skipped again");
+		expect(recalls).toBe(1);
+		expect(requests).toHaveLength(3);
+		for (const request of requests) expect(JSON.stringify(request)).not.toContain("recovered recall");
+
+		setSystemTime(Date.now() + 60_000 + 1_000);
+		await session.prompt("lookup after the wait");
+		expect(recalls).toBe(2);
+		expect(requests.at(-1)?.systemPrompt?.join("\n")).toContain("recovered recall");
+	});
 
 	it.each(["mnemopi", "hindsight"] as const)(
 		"delivers real %s recall with the winning tool policy in the same request",

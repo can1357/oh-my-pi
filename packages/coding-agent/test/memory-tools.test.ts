@@ -69,6 +69,7 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		recallContextTurns: 1,
 		recallMaxQueryChars: 800,
 		recallPromptPreamble: "preamble",
+		recallCooldownMs: 60_000,
 		debug: false,
 		requestTimeoutMs: 30_000,
 		reflectTimeoutMs: 120_000,
@@ -1951,6 +1952,33 @@ describe("recall.execute", () => {
 
 		const tool = MemoryRecallTool.createIf(makeSession(settings))!;
 		await expect(tool.execute("call-5", { query: "anything" })).rejects.toThrow(/HTTP 503/);
+	});
+
+	it("the recall tool neither waits for the pause nor ends it", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		const recallSpy = vi.spyOn(HindsightApi.prototype, "recall").mockRejectedValue(new Error("HTTP 503"));
+		registerState(client, settings, {
+			sessionOverrides: {
+				sessionManager: { getEntries: () => [], getBranch: () => [] },
+			},
+		});
+		const state = registeredState!;
+		// The automatic recall fails, which starts the pause.
+		expect(await state.beforeAgentStartPrompt("Where is the deploy host?")).toBeUndefined();
+		expect(recallSpy).toHaveBeenCalledTimes(1);
+
+		recallSpy.mockResolvedValueOnce({ results: [{ text: "the deploy host is alpha-7", id: "1" }] } as never);
+		const tool = MemoryRecallTool.createIf(makeSession(settings))!;
+		const result = await tool.execute("call-pause", { query: "deploy host" });
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: expect.stringContaining("- the deploy host is alpha-7"),
+		});
+		expect(recallSpy).toHaveBeenCalledTimes(2);
+
+		expect(await state.beforeAgentStartPrompt("And the staging host?")).toBeUndefined();
+		expect(recallSpy).toHaveBeenCalledTimes(2);
 	});
 });
 
