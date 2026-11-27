@@ -847,7 +847,7 @@ fn build_matcher(
 		// this translation step existed.
 		let translated: Vec<String> = patterns
 			.iter()
-			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported))
+			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed))
 			.collect::<Result<_, _>>()
 			.map_err(|error: bre::BreError| error.gnu_message().to_owned())?;
 		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);

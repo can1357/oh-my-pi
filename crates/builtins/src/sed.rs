@@ -1187,10 +1187,16 @@ fn compile_regex(
 	let translated = if context.regex_extended {
 		crate::bre::ere_to_rust(pattern, false)
 	} else {
-		crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported).map(std::borrow::Cow::Owned)
+		crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported, crate::bre::StackedRepeats::Refused).map(std::borrow::Cow::Owned)
 	}
 	.map_err(|e| e.gnu_message().to_string())?;
-	let pattern = translated.as_ref();
+	let multiline_classes;
+	let pattern = if multiline {
+		multiline_classes = exclude_newline_from_negated_classes(translated.as_ref());
+		&multiline_classes
+	} else {
+		translated.as_ref()
+	};
 
 	let mut modifiers = String::new();
 	if icase {
@@ -1214,6 +1220,39 @@ fn compile_regex(
 	})?;
 
 	Ok(Some(compiled))
+}
+
+/// Adds `\n` to every negated bracket class of a translated pattern: under
+/// `M`, GNU sed's `[^x]` stops at the newlines that separate lines, as `.`
+/// does, while the Rust engine's matches them.
+fn exclude_newline_from_negated_classes(pattern: &str) -> String {
+	let mut result = String::with_capacity(pattern.len() + 8);
+	let mut chars = pattern.chars().peekable();
+	// Nesting depth inside a bracket class (Rust classes nest).
+	let mut depth = 0usize;
+	while let Some(c) = chars.next() {
+		result.push(c);
+		match c {
+			'\\' => result.extend(chars.next()),
+			'[' => {
+				if depth == 0 && chars.next_if_eq(&'^').is_some() {
+					result.push_str(r"^\n");
+				} else if depth > 0
+					&& let Some(caret) = chars.next_if_eq(&'^')
+				{
+					result.push(caret);
+				}
+				depth += 1;
+				// A `]` right after the opening is a literal member.
+				if let Some(close) = chars.next_if_eq(&']') {
+					result.push(close);
+				}
+			},
+			']' if depth > 0 => depth -= 1,
+			_ => {},
+		}
+	}
+	result
 }
 
 /// Compile a regular expression replacement string.
@@ -6738,23 +6777,20 @@ fn raw_search(
 /// Ensure that a regex matches GNU sed's default semantics for `.`
 /// through the appropriate use of the s flag.
 pub fn ensure_dotall(pattern: &str) -> String {
-	// Add (?s) if no flags present.
-	if !pattern.starts_with("(?") {
+	// A leading inline flag group, `(?im)`; not a group such as `(?:a*)?`.
+	let flags = pattern
+		.strip_prefix("(?")
+		.and_then(|rest| rest.find(')').map(|close| (&rest[..close], close + 3)))
+		.filter(|(flags, _)| flags.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-'));
+	let Some((flags, end)) = flags else {
 		return format!("(?s){pattern}");
-	}
-
-	let Some(close) = pattern.find(')') else {
-		// Malformed inline flag group.
-		return pattern.to_owned();
 	};
 
-	// Add s flag to ?(...) unless 's' or its complement 'm' is there.
-	let flags = &pattern[2..close];
-
+	// Add the s flag unless 's' or its complement 'm' is there.
 	if flags.contains('m') || flags.contains('s') {
 		pattern.to_owned()
 	} else {
-		format!("(?{flags}s){}", &pattern[close + 1..])
+		format!("(?{flags}s){}", &pattern[end..])
 	}
 }
 
@@ -7177,6 +7213,7 @@ mod tests {
 	fn adds_s_when_no_m_or_s() {
 		assert_eq!(ensure_dotall("(?i)abc"), "(?is)abc");
 		assert_eq!(ensure_dotall("(?)abc"), "(?s)abc");
+		assert_eq!(ensure_dotall("(?:a*)?"), "(?s)(?:a*)?");
 	}
 
 	#[test]
@@ -7192,10 +7229,6 @@ mod tests {
 		assert_eq!(ensure_dotall("(?is)abc"), "(?is)abc");
 	}
 
-	#[test]
-	fn leaves_malformed_flag_group_unchanged() {
-		assert_eq!(ensure_dotall("(?iabc"), "(?iabc");
-	}
 }
 }
 pub mod in_place {
@@ -9768,6 +9801,46 @@ mod tests {
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "alpha\nPLUSadded\n-removed\n context\nPLUSanother\n");
 		assert_eq!(capture.err(), "");
+	}
+
+	// Failure: `s/a**/X/` and friends were accepted; GNU sed refuses a `*` or
+	// interval stacked on another repetition. A following `\?`/`\+` stays legal.
+	#[test]
+	fn builtin_rejects_stacked_repetition() {
+		for (script, char) in [
+			(r"s/a**/X/", 8),
+			(r"s/a*\{2\}/X/", 12),
+			(r"s/a\+*/X/", 9),
+			(r"s/a\?\{2\}/X/", 13),
+			(r"s/\(a\)**/X/", 12),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "aaab\n", "/");
+			assert_eq!(code, 1, "{script}");
+			assert_eq!(
+				capture.err(),
+				format!("sed: -e expression #1, char {char}: Invalid preceding regular expression\n"),
+				"{script}"
+			);
+		}
+		for (script, out) in [(r"s/a*\?/X/", "Xb\n"), (r"s/a*\+/X/", "Xb\n"), ("s/^**/X/", "Xaaab\n")] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "aaab\n", "/");
+			assert_eq!((code, capture.out().as_str()), (0, out), "{script}");
+		}
+	}
+
+	// Failure: under `M`, `[^x]` matched the newline between lines, so
+	// `N;s/[^x]*/X/M` replaced both lines instead of the first.
+	#[test]
+	fn builtin_multiline_negated_class_stops_at_newline() {
+		for (script, out) in [
+			("N;s/[^x]*/X/M", "X\nb\n"),
+			("N;s/a[^x]b/X/M", "a\nb\n"),
+			("N;s/a[^x]b/X/", "X\n"),
+			("N;s/[^]x]*$/X/M", "X\nb\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "a\nb\n", "/");
+			assert_eq!((code, capture.out().as_str()), (0, out), "{script}");
+		}
 	}
 
 	#[test]
