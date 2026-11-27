@@ -57,6 +57,12 @@ app.history.search: []
 | `app.transcript.pageDown`    | `PageDown`                                                            | Scroll the fullscreen transcript down a page; at the end it follows new output again                                                                   |
 | `app.transcript.top`         | `Ctrl+Home`                                                           | Scroll the fullscreen transcript to its start                                                                                                          |
 | `app.transcript.bottom`      | `Ctrl+End`                                                            | Scroll the fullscreen transcript to its end and follow new output                                                                                      |
+| `app.transcript.lineUp` / `lineDown` | Unbound | Scroll the fullscreen transcript by one line. |
+| `app.transcript.halfPageUp` / `halfPageDown` | Unbound | Scroll by half the fullscreen transcript window. |
+| `app.transcript.previousPrompt` / `nextPrompt` | `Alt+PageUp` / `Alt+PageDown` | Go to the previous or next user prompt. |
+| `app.transcript.search` | `Alt+/` | Find text without replacing the draft. Enter / Shift+Enter step through results; Escape cancels and returns to the original position; Ctrl+Enter closes at the match. |
+| `app.transcript.selectLeft` / `selectRight` / `selectUp` / `selectDown` / `selectLineStart` / `selectLineEnd` / `clearSelection` | Unbound | Adjust or clear the active transcript selection without reaching for the mouse. Bind these explicitly to avoid taking composer selection and dequeue keys. |
+| `app.transcript.copySelection` | `Alt+C`, `Ctrl+Shift+C`, `Super+C` | Copy the selected transcript text, including when automatic copying is disabled. |
 | `app.clipboard.pasteTextRaw` | `Ctrl+Shift+V`, `Alt+Shift+V`                                         | Paste clipboard text without collapsing it                                                                                                             |
 | `app.clipboard.pasteImage`   | Linux: `Ctrl+V`; macOS: `Ctrl+V`, `Cmd+V`; Windows: `Ctrl+V`, `Alt+V` | Paste from the clipboard (image preferred, text fallback)                                                                                              |
 | `app.stt.pushToTalk`         | `Space`                                                               | Hold to record and release to transcribe. Remap this action or set it to `[]` to disable push-to-talk without disabling speech-to-text.                |

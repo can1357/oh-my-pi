@@ -9,7 +9,7 @@
 ### Added
 
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Added the `fullscreen` screen mode (`HostOptions.screen`, `TermBackendOptions.screen`): alternate-screen frames with the dock pinned to the bottom and `main` in an app-owned window that follows the tail or stays anchored, scrolled by `Host.scroll()`/`TermBackend.scroll()` and the mouse wheel; history is written only by the shutdown flush, and a session that drew only fullscreen frames never clears native history on resize or display reset ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe))
+- Added opt-in fullscreen terminal rendering: a scrollable transcript above a pinned dock, a draggable scrollbar, character/word/line selection and incremental search. The normal exit can append the transcript or keep the original screen ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe) and [#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 ### Added
 
 - `TextEdit.paste` marks an edit that types a bracketed paste ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))

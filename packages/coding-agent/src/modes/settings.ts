@@ -402,7 +402,7 @@ export const cfgTuiScreen = register({
 		label: "Screen",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with the composer pinned to the bottom and the transcript scrolled in omp (PgUp/PgDn, Ctrl+Home/Ctrl+End, mouse wheel), written to the terminal when omp exits. Fullscreen reports the mouse wheel, so native text selection becomes ${shift}+drag (Option+drag in iTerm2); /copy picks text without the mouse`;
+			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with the composer pinned to the bottom and the transcript scrolled in omp (PgUp/PgDn, Ctrl+Home/Ctrl+End, mouse wheel), written to the terminal on exit unless Fullscreen Exit Transcript is off. Drag to select text; double-click selects a word, triple-click a line. ${shift}+drag (Option+drag in iTerm2) bypasses omp selection`;
 		},
 		options: [
 			{
@@ -416,6 +416,68 @@ export const cfgTuiScreen = register({
 				description: "Alternate screen, composer pinned to the bottom, transcript scrolled in omp",
 			},
 		],
+	},
+});
+
+export const cfgTuiCopyOnSelect = register({
+	id: "tui.copyOnSelect",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Copy on Select",
+		description: "Copy a fullscreen text selection on release (default true).",
+	},
+});
+
+export const cfgTuiWheelLines = register({
+	id: "tui.wheelLines",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Wheel Lines",
+		description: "Fullscreen wheel rows per report; zero follows gesture velocity.",
+	},
+});
+
+export const cfgTuiFullscreenMouse = register({
+	id: "tui.fullscreenMouse",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Mouse",
+		description:
+			"Use the mouse for transcript selection, scrollbar and wheel. Off leaves selection to the terminal; use keyboard scrolling instead.",
+	},
+});
+
+export const cfgTuiExitTranscript = register({
+	id: "tui.exitTranscript",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Exit Transcript",
+		description:
+			"Write the transcript to the normal screen on exit. Off restores the original screen without appending it.",
+	},
+});
+
+export const cfgTuiScrollbar = register({
+	id: "tui.scrollbar",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Scrollbar",
+		description: "Show the fullscreen scrollbar when there is overflow (default true).",
 	},
 });
 
@@ -687,7 +749,7 @@ export const cfgTuiMouse = register({
 		label: "Mouse Click-to-Focus",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and mouse capture stops wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and in inline mode mouse capture stops native wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
 		},
 	},
 });
