@@ -1,10 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 
 /** Whether a model transport can suppress native reasoning while private scratchpad thoughts are active. */
 export function supportsExternalThinking(model: Model | null | undefined): boolean {
-	if (!model) return false;
+	if (!model || resolveCatalogPolicy(model).classifierCotExtraction === true) return false;
 	const compat = model.compat;
 	const requiresThinking =
 		model.api === "anthropic-messages" &&

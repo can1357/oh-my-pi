@@ -1,4 +1,6 @@
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { getDialectDefinition } from "./factory";
 
 /**
@@ -8,33 +10,28 @@ import { getDialectDefinition } from "./factory";
  * 3: a replayed unsigned `thought` part is schema-accepted but silently
  * discarded — neither recalled nor influencing generation).
  *
- * The Anthropic/Claude dialect is the primary exception: Anthropic's
- * `reasoning_extraction` classifier blocks requests that replay prior
- * reasoning inside `<thinking>` / `antml:thinking` tags — it reads the
- * wrapped chain-of-thought as an attempt to duplicate model outputs and
- * refuses (Fable) or leaks it as visible reasoning (Opus / Sonnet / Haiku /
- * Mythos). Every Anthropic-dialect Claude model therefore receives prior
- * reasoning as bare assistant prose: no tag, no wrapper, no trailing newline.
- * Heat is cumulative (block count and early-conversation position also raise
- * it), so this lowers per-block signal but does not license unbounded replay.
+ * Readers whose catalog policy sets `classifierCotExtraction` (Claude) get an
+ * empty string: Anthropic's `reasoning_extraction` classifier treats prior
+ * reasoning quoted back as text — tagged or bare — as extraction, so callers
+ * omit the block instead of demoting it.
  *
- * Harmony and Gemma are the other exceptions: their `renderThinking` emits
- * chat-template control tokens (`<|channel|>analysis`, `<|channel>thought`)
- * that must not appear inside a structured native message, so they fall back
- * to a plain `<think>` block. Every other dialect's thinking form is
+ * Harmony and Gemma fall back to a plain `<think>` block: their
+ * `renderThinking` emits chat-template control tokens that must not appear
+ * inside a structured native message. Every other dialect's thinking form is
  * inline-safe XML tags or a markdown fence.
  *
  * The result does not append a delimiter; callers that flatten adjacent blocks
  * into a single string must insert their own separator.
- *
- * Distinct from {@link DialectDefinition.renderThinking}, which targets the
- * owned-dialect *text transport* where those control tokens are legal.
  */
-export function renderDemotedThinking(modelId: string, text: string): string {
+export function renderDemotedThinking(model: string | CatalogPolicyInputs, text: string): string {
 	if (!text) return "";
+	const reader =
+		typeof model === "string"
+			? { id: model, provider: "", api: "openai-completions" as const, reasoning: true }
+			: model;
+	if (resolveCatalogPolicy(reader).classifierCotExtraction === true) return "";
 	text = text.toWellFormed();
-	const dialect = preferredDialect(modelId);
-	if (dialect === "anthropic") return text;
+	const dialect = preferredDialect(reader.id);
 	if (dialect === "harmony" || dialect === "gemma") return `<think>\n${text}\n</think>`;
 	return getDialectDefinition(dialect).renderThinking(text);
 }

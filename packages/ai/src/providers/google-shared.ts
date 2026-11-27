@@ -294,7 +294,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						});
 					} else {
 						parts.push({
-							text: renderDemotedThinking(model.id, block.thinking),
+							text: renderDemotedThinking(model, block.thinking),
 						});
 					}
 				} else if (block.type === "toolCall") {

@@ -294,14 +294,7 @@ describe("anthropic-messages foreign-signed thinking escalation", () => {
 		expect(result.disabledFeatures).toContain("thinking-replay");
 	});
 
-	it("recovers a same-deployment model switch whose latest turn carries a sibling model's signature", async () => {
-		// A model fallback hop (e.g. the classifier-refusal walk) can move a
-		// conversation to another Claude on the same custom deployment. The
-		// latest turn keeps its signature on the wire — Anthropic's rule for its
-		// own most recent response — so a proxy that will not verify a sibling
-		// model's signature 400s. The escalation must cover that cross-model
-		// replay too, or the hop dead-ends on `Invalid signature in thinking
-		// block` instead of answering.
+	it("avoids an invalid-signature retry when switching models on an unverified custom deployment", async () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const capturedPayloads: unknown[] = [];
 		let attempt = 0;
@@ -327,17 +320,12 @@ describe("anthropic-messages foreign-signed thinking escalation", () => {
 		}
 		const result = await stream.result();
 
-		// The first attempt proves the premise: the sibling model's signature
-		// reaches the wire on the latest turn, unstripped.
-		expect(extractPriorAssistantBlocks(capturedPayloads[0]).find(block => block.type === "thinking")?.signature).toBe(
-			"sig_minted_for_sonnet",
-		);
-		expect(attempt).toBe(3);
+		expect(attempt).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
-		const escalatedBlocks = extractPriorAssistantBlocks(capturedPayloads[2]);
-		expect(escalatedBlocks.find(block => block.type === "thinking")).toBeUndefined();
-		expect(escalatedBlocks.find(block => block.type === "text")?.text).toBe("The README covers the CLI.");
-		expect(result.disabledFeatures).toContain("thinking-replay");
+		const blocks: unknown[] = extractPriorAssistantBlocks(capturedPayloads[0]);
+		expect(blocks).toEqual([
+			{ type: "text", text: "The README covers the CLI.", cache_control: { type: "ephemeral" } },
+		]);
 	});
 });

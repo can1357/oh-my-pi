@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import { type AnthropicConversionOptions, convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
@@ -257,7 +256,7 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		const assistants = params.filter(p => p.role === "assistant");
 		const priorBlocks = assistants[0].content as WireBlock[];
 		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toBe(renderDemotedThinking(target.id, "visible reasoning"));
+		expect(text).toBeUndefined();
 		expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
 		expect(priorBlocks.find(b => b.type === "redacted_thinking")).toBeUndefined();
 	});
@@ -414,33 +413,23 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 			return content as WireBlock[];
 		};
 
-		it("replays another provider's reasoning under another credential as demoted text", () => {
-			const target = officialTarget();
-			expect(assistantBlocks(conversation(codexTurn))).toEqual([
-				{ type: "text", text: renderDemotedThinking(target.id, "codex private plan") },
-				{ type: "text", text: "Codex answer" },
-			]);
+		it("omits another provider's private reasoning under another credential", () => {
+			expect(assistantBlocks(conversation(codexTurn))).toEqual([{ type: "text", text: "Codex answer" }]);
 			expect(assistantBlocks(conversation(kimiTurn({ credentialId: OTHER_CREDENTIAL })))).toEqual([
-				{ type: "text", text: renderDemotedThinking(target.id, "kimi private plan") },
 				{ type: "text", text: "Kimi answer" },
 			]);
 		});
 
-		it("replays another provider's reasoning from before a compaction as demoted text", () => {
-			const target = officialTarget();
+		it("omits another provider's private reasoning from before a compaction", () => {
 			const messages: Message[] = [
 				{ role: "user", content: "Compacted session summary", historyRewriteAt: 100, timestamp: 100 },
 				kimiTurn({ timestamp: 50 }),
 				makeUser("Continue"),
 			];
-			expect(assistantBlocks(messages)).toEqual([
-				{ type: "text", text: renderDemotedThinking(target.id, "kimi private plan") },
-				{ type: "text", text: "Kimi answer" },
-			]);
+			expect(assistantBlocks(messages)).toEqual([{ type: "text", text: "Kimi answer" }]);
 		});
 
-		it("keeps a non-Claude model's reasoning from before a compaction on the same gateway", () => {
-			// A gateway target replays unsigned thinking natively instead of as text.
+		it("omits a non-Claude model's private reasoning before compaction on the same gateway", () => {
 			const gatewayTarget = makeAnthropicModel({ provider: "openrouter", id: "anthropic/claude-fable-5-1" });
 			expect(gatewayTarget.thinking?.prefixBinding).toBe(true);
 			const messages: Message[] = [
@@ -450,7 +439,6 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 			];
 			const params = convertAnthropicMessages(messages, gatewayTarget, false);
 			expect(params.find(param => param.role === "assistant")?.content).toEqual([
-				{ type: "thinking", thinking: "kimi private plan", signature: "" },
 				{ type: "text", text: "Kimi answer" },
 			]);
 		});
@@ -774,7 +762,7 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		// unsigned block to text) and no stale `sig_prior` reaches the wire.
 		expect(thinking).toBeUndefined();
 		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toContain("prior reasoning");
+		expect(text).toBeUndefined();
 		const wireBlobs = JSON.stringify(priorBlocks);
 		expect(wireBlobs).not.toContain("sig_prior");
 	});
@@ -813,7 +801,7 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		const thinking = priorBlocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
 		expect(thinking).toBeUndefined();
 		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toContain("sonnet reasoning");
+		expect(text).toBeUndefined();
 		const wireBlobs = JSON.stringify(priorBlocks);
 		expect(wireBlobs).not.toContain("sig_sonnet");
 	});
@@ -865,9 +853,8 @@ describe("Latest-turn foreign thinking signatures (model switch mid tool-loop)",
 		// verify, and official Anthropic never replays unsigned thinking.
 		expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
 		expect(JSON.stringify(blocks)).not.toContain(KIMI_SIG);
-		// The reasoning survives as demoted text ahead of the visible text.
 		const texts = blocks.filter(b => b.type === "text") as WireTextBlock[];
-		expect(texts[0]?.text).toBe(renderDemotedThinking(target.id, reasoning));
+		expect(JSON.stringify(blocks)).not.toContain(reasoning);
 		expect(texts.some(t => t.text.includes("렌더링"))).toBe(true);
 		// The pending tool loop stays intact.
 		const toolUse = blocks.find(b => b.type === "tool_use") as WireToolUseBlock | undefined;
@@ -921,7 +908,7 @@ describe("Latest-turn foreign thinking signatures (model switch mid tool-loop)",
 		expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
 		expect(JSON.stringify(blocks)).not.toContain(KIMI_SIG);
 		const text = blocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toBe(renderDemotedThinking(target.id, reasoning));
+		expect(text).toBeUndefined();
 	});
 
 	it("keeps the latest ABANDONED same-model turn untouched (byte-for-byte rule)", () => {

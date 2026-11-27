@@ -446,6 +446,27 @@ describe("history:// protocol", () => {
 		).rejects.toThrow("Invalid history://current route");
 	});
 
+	it("leaves reasoning out of another agent's transcript for a reasoning-refusing reader, not for user reads", async () => {
+		await withTempDir(async dir => {
+			const file = path.join(dir, "Archived.jsonl");
+			const fixture = sessionFixtureJsonl().replace(
+				'{"type":"text","text":"parked reply"}',
+				'{"type":"thinking","thinking":"PRIVATE_DISK_TRACE"},{"type":"text","text":"parked reply"}',
+			);
+			await Bun.write(file, fixture);
+			registerArtifactsDir(dir);
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const url = "history://Archived?detail=thinking:full,assistant:full";
+			const raw = await InternalUrlRouter.instance().resolve(url);
+			expect(raw.content).toContain("PRIVATE_DISK_TRACE");
+			const resource = await InternalUrlRouter.instance().resolve(url, {
+				session: makeToolSession(dir, undefined, { getActiveModel: () => model }),
+			});
+			expect(resource.content).toContain("parked reply");
+			expect(resource.content).not.toContain("PRIVATE_DISK_TRACE");
+		});
+	});
+
 	it("read applies selectors to caller-bound full history", async () => {
 		const settings = Settings.isolated();
 		cfgCompactionExperimentalContextManagement.set(settings, true);

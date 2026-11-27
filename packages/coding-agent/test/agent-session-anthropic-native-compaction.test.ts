@@ -263,7 +263,7 @@ describe("AgentSession Anthropic native compaction", () => {
 		);
 	});
 
-	it("leaves out other models' reasoning the session stopped sending after a refusal", async () => {
+	it("keeps other models' reasoning out of the request, the refusal retry and the compaction prefix", async () => {
 		using tempDir = TempDir.createSync("@pi-anthropic-native-compaction-stripped-");
 		const refusal = sse([
 			{
@@ -287,7 +287,6 @@ describe("AgentSession Anthropic native compaction", () => {
 			request === 1 ? refusal : request === 2 ? answer(request) : captured(),
 		);
 		try {
-			// An earlier Kimi turn: its reasoning reaches Claude as text.
 			const user = { role: "user" as const, content: "Plan the migration", timestamp: 1 };
 			const kimiTurn = {
 				role: "assistant" as const,
@@ -320,7 +319,7 @@ describe("AgentSession Anthropic native compaction", () => {
 		}
 
 		const [refused, live, compaction] = requests;
-		expect(JSON.stringify(refused.messages)).toContain("kimi private plan");
+		expect(JSON.stringify(refused.messages)).not.toContain("kimi private plan");
 		expect(JSON.stringify(live.messages)).not.toContain("kimi private plan");
 		expect(withoutCacheControl(compaction.messages)).toEqual(
 			withoutCacheControl(live.messages.slice(0, compaction.messages.length)),

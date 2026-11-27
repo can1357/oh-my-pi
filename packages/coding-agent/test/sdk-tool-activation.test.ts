@@ -364,9 +364,9 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getActiveToolNames()).not.toContain("think");
 
 			await session.setModel(fable);
-			expect(session.getToolByName("think")).toBeDefined();
-			expect(session.getActiveToolNames()).toContain("think");
-			expect(session.systemPrompt.join("\n")).toContain("other tools become callable when it completes");
+			expect(session.getToolByName("think")).toBeUndefined();
+			expect(session.getActiveToolNames()).not.toContain("think");
+			expect(session.systemPrompt.join("\n")).not.toContain("other tools become callable when it completes");
 
 			await session.setModel(responses);
 			expect(session.getActiveToolNames()).toContain("think");

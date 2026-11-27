@@ -20,10 +20,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  */
 
 const model: Model<"anthropic-messages"> = buildModel({
-	id: "cf-anthropic/claude-opus-4-8",
-	name: "Claude Opus 4.8 via cloudflared",
+	id: "custom-reasoning-model",
+	name: "Custom reasoning model",
 	api: "anthropic-messages",
-	provider: "cf-anthropic",
+	provider: "signature-proxy",
 	baseUrl: "https://opencode.cloudflare.dev/anthropic",
 	reasoning: true,
 	input: ["text"],
@@ -55,8 +55,8 @@ const priorTurnContext: Context = {
 				{ type: "text", text: "The README covers the CLI." },
 			],
 			api: "anthropic-messages",
-			provider: "cf-anthropic",
-			model: "cf-anthropic/claude-opus-4-8",
+			provider: model.provider,
+			model: model.id,
 			usage: {
 				input: 0,
 				output: 0,

@@ -102,6 +102,17 @@ describe("Bedrock Nova unsigned reasoning replay", () => {
 		}
 	});
 
+	test("omits unsigned thinking for Bedrock Claude without sending an empty text block", async () => {
+		const claudeModel: Model<"bedrock-converse-stream"> = buildModel({
+			...novaModel,
+			id: "global.anthropic.claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+		});
+		const payload = await captureReplayPayload(claudeModel, contextWithUnsignedThinking(claudeModel.id));
+		const assistantMessage = (payload as { messages: Array<{ role: string; content: unknown[] }> }).messages[1];
+		expect(assistantMessage.content).toEqual([{ text: "I found the relevant code." }]);
+	});
+
 	test("also demotes unsigned thinking for a Nova-backed application-inference-profile ARN", async () => {
 		const profileModel: Model<"bedrock-converse-stream"> = buildModel({
 			id: novaProfileArn,

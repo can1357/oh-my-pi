@@ -1460,7 +1460,8 @@ function convertMessages(
 								// content survives, just no longer typed as a reasoning block. This matches how
 								// every other provider (Anthropic, Google, OpenAI-completions) handles thinking
 								// blocks it can't safely replay.
-								contentBlocks.push({ text: renderDemotedThinking(model.id, c.thinking) });
+								const demoted = renderDemotedThinking(model, c.thinking);
+								if (demoted) contentBlocks.push({ text: demoted });
 							}
 							break;
 						default:

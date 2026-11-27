@@ -215,6 +215,16 @@ function summaryText(text: string, includeThinking: boolean): string {
 	return includeThinking ? text : textWithoutThinking(text);
 }
 
+/** An agent transcript message as the calling model may read it: reasoning goes when it excludes reasoning. */
+function historyReaderMessage(message: AgentMessage, context: ResolveContext | undefined): AgentMessage {
+	const reader = context?.session?.getActiveModel?.();
+	if (message.role !== "assistant" || !reader || readerIncludesThinking(reader)) return message;
+	return {
+		...message,
+		content: message.content.filter(block => block.type !== "thinking" && block.type !== "redactedThinking"),
+	};
+}
+
 function appendRawMessage(lines: string[], message: AgentMessage, includeThinking: boolean): void {
 	switch (message.role) {
 		case "user":
@@ -514,7 +524,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (!ref) {
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
-			const disk = await this.#resolveFromDisk(url, agentId, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(url, agentId, preferredArtifactDir, context);
 			if (disk) return { ...disk, url: url.href };
 
 			const known = visible.map(candidate => candidate.id);
@@ -533,7 +543,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.
-			const disk = await this.#resolveFromDisk(url, ref.id, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(url, ref.id, preferredArtifactDir, context);
 			if (disk) return { ...disk, url: url.href };
 			if (ref.status === "running") {
 				// Registered before its session or JSONL exists: the worker is alive,
@@ -556,7 +566,10 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			throw new Error(`Agent ${ref.id} has no transcript: session is gone and no session file was retained`);
 		}
 
-		const content = renderTranscriptMessages(messages, historyViewOptions(url, `# ${ref.id} (${ref.status})`)).text;
+		const content = renderTranscriptMessages(
+			messages.map(message => historyReaderMessage(message, context)),
+			historyViewOptions(url, `# ${ref.id} (${ref.status})`),
+		).text;
 		return {
 			url: url.href,
 			content,
@@ -578,11 +591,15 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		url: InternalUrl,
 		agentId: string,
 		preferredArtifactDir?: string,
+		context?: ResolveContext,
 	): Promise<InternalResource | undefined> {
 		const match = await this.#findOnDisk(agentId, preferredArtifactDir);
 		if (!match) return undefined;
 		const messages = await loadSessionMessagesReadOnly(match.file);
-		const content = renderTranscriptMessages(messages, historyViewOptions(url, `# ${match.id} (on disk)`)).text;
+		const content = renderTranscriptMessages(
+			messages.map(message => historyReaderMessage(message, context)),
+			historyViewOptions(url, `# ${match.id} (on disk)`),
+		).text;
 		return {
 			url: "",
 			content,
