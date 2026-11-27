@@ -9,7 +9,7 @@ import {
 } from "../../src/text/markdown";
 import { setMarkdownLook } from "../../src/text/markdown/look";
 import { visibleWidth } from "../../src/text/width";
-import { loadThemeSync } from "../../src/theme";
+import { createTheme, loadThemeJsonSync, loadThemeSync } from "../../src/theme";
 
 const theme = loadThemeSync("dark");
 
@@ -106,6 +106,16 @@ describe("lists", () => {
 		expect(plain(source, 30).filter(Boolean)).toEqual(["• Hyphen", "• Asterisk", "• Plus"]);
 		const ascii = loadThemeSync("dark", { symbolPreset: "ascii" });
 		expect(plain(source, 30, { theme: ascii }).filter(Boolean)).toEqual(["* Hyphen", "* Asterisk", "* Plus"]);
+	});
+
+	it("wraps a nested first item after a wide theme marker without losing text", () => {
+		const wide = createTheme({ ...loadThemeJsonSync("dark"), symbols: { overrides: { "md.bullet": ">>" } } });
+		expect(plain("-\n  - abcde", 10, { theme: wide })).toEqual([">> >> abcd", "      e"]);
+		expect(plain("<ul><li>HTML</li></ul>\n\n- Markdown", 20, { theme: wide })).toEqual([
+			">> HTML",
+			"",
+			">> Markdown",
+		]);
 	});
 
 	it("keeps task checkboxes in the marker and hangs rows under the task text", () => {

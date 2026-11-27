@@ -32,7 +32,7 @@ import {
 import { EXTENSION_LINK_ID, extensionLinkTest } from "./links";
 import { mermaidRows } from "./mermaid";
 import { markdownLook } from "./look";
-import { type MarkdownStyles, markdownStyles, stylePrefix } from "./styles";
+import { type MarkdownStyles, markdownStyles, stylePrefix, unorderedListMarker } from "./styles";
 import { growingTableCell, repairOrphanClosingFence, speculativeStreamingSource } from "./stream";
 import { renderTable } from "./table";
 
@@ -464,7 +464,7 @@ function renderDisplayMath(r: Renderer, latex: string, width: number, ctx: Inlin
 }
 
 function listMarker(r: Renderer, token: Tokens.List, index: number): string {
-	if (!token.ordered) return `${r.options.theme.symbols.symbol("md.bullet") || "•"} `;
+	if (!token.ordered) return unorderedListMarker(r.options.theme);
 	const start = token.start === "" ? 1 : token.start;
 	return `${start + index}. `;
 }
@@ -494,9 +494,10 @@ function renderListItem(r: Renderer, item: Tokens.ListItem, marker: string, widt
 		if (isBlank(child)) continue;
 		let rows: Row[];
 		if (child.type === "list") {
-			const nested = renderList(r, child as Tokens.List, Math.max(1, width - NESTED_LIST_INDENT), ctx);
-			const pad = spaces(NESTED_LIST_INDENT);
-			rows = prefixRows(nested, first ? lead + spaces(Math.max(0, NESTED_LIST_INDENT - markerWidth)) : pad, pad);
+			const nestedIndent = Math.min(width - 1, Math.max(NESTED_LIST_INDENT, first ? markerWidth : 0));
+			const nested = renderList(r, child as Tokens.List, width - nestedIndent, ctx);
+			const pad = spaces(nestedIndent);
+			rows = prefixRows(nested, first ? lead + spaces(nestedIndent - markerWidth) : pad, pad);
 		} else if (first && checkbox && (child.type === "text" || child.type === "paragraph")) {
 			const hang = markerWidth + checkbox.length;
 			rows = prefixRows(renderBlock(r, child, Math.max(1, width - hang), ctx), lead + checkbox, spaces(hang));
