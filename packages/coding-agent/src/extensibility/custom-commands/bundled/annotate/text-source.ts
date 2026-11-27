@@ -145,10 +145,11 @@ export async function selectSessionTextReviewSource(
 				terminalRows: () => ui.size().rows,
 				title: "Select message to annotate",
 				actionLabel: "select",
+				explicitTurnPick: true,
 				onPick: (content: string, label: string, source: CopyPickSource) => done({ content, label, ...source }),
 				onCancel: () => done(undefined),
 			}),
-		{ overlay: true },
+		{ overlay: true, fullscreen: true },
 	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
 }

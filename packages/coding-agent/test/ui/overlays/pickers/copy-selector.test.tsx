@@ -103,7 +103,7 @@ test("the primary Copy action picks the outlined turn; its preview action picks 
 		),
 	);
 	ui.send({ ev: "action", sf: ui.sf, id: ui.node("picker").id, act: "pick" });
-	ui.send({ ev: "action", sf: ui.sf, id: ui.node("section", "b0").id, act: "copy" });
+	ui.send({ ev: "action", sf: ui.sf, id: ui.node("section", "b0").id, act: "pick" });
 	expect(picked).toEqual([text, "print(1)"]);
 });
 

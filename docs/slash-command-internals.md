@@ -496,6 +496,8 @@ answers or relax these branch guards.
 | `/annotate path/to/file`        | Text read from a file                                                        |
 | `/annotate "text"`              | Literal text                                                                 |
 
+To annotate just one block from a session message, highlight the message and choose **Blocks** in Tern (or press Right), then select the block. Choose **Select** (or press Enter) at the message level to keep the whole message.
+
 The whole remainder after `/annotate` is one source specification (`CustomCommand.execute` receives it verbatim as `rawArgs`):
 
 - A remainder wrapped in matching `"` or `'` is literal text; only the outer pair is stripped and the interior is kept byte-for-byte.
