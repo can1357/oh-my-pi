@@ -329,7 +329,7 @@ export class RateLimits implements LimitsApi {
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
 
-		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId, options?.blockScope);
+		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
 		const requestedBlockedUntilMs = now + (options?.retryAfterMs ?? DEFAULT_BLOCK_MS);
 		let blockedUntil = requestedBlockedUntilMs;
@@ -539,14 +539,9 @@ export class RateLimits implements LimitsApi {
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
 			const retryAfterMs = extractProviderRetryHint(provider, message, options?.baseUrl);
-			// A refusal from a meter the usage report does not carry backs off
-			// under its own scope, which a healthy plan report cannot lift.
-			const refusalBlock =
-				message === undefined ? undefined : this.#deps.strategies(provider)?.refusalBlock?.(message);
 			const mark = await this.markReached(provider, sessionId, {
-				retryAfterMs: retryAfterMs ?? refusalBlock?.durationMs,
+				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,
-				blockScope: refusalBlock?.blockScope,
 				baseUrl: options?.baseUrl,
 				modelId: options?.modelId,
 				apiKey: options?.apiKey,

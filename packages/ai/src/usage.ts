@@ -541,15 +541,6 @@ export interface CredentialRankingStrategy {
 		/** Allow an incomplete report only when a shared (`scope.shared`) limit reset matches the stored block deadline. */
 		resetMatchRequired?: boolean;
 	}[];
-	/**
-	 * Backoff for a usage-limit refusal, identified by its error text, that
-	 * spends a meter no usage report carries. The scope must be among
-	 * {@link blockScopes} for every request and never among
-	 * {@link healableBlockScopes}: a healthy report says nothing about that
-	 * meter. `durationMs` stands in for the generic hintless block, since only
-	 * a later request can show the cap has cleared.
-	 */
-	refusalBlock?(message: string): { blockScope: string; durationMs: number } | undefined;
 	/** Whether fresh reports can heal legacy account-wide quota backoffs. */
 	healsGlobalBlocks?: boolean;
 	/** Fallback window durations (ms) when limits don't specify durationMs. */

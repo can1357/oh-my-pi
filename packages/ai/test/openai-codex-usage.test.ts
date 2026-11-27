@@ -682,17 +682,8 @@ describe("openai-codex usage parser", () => {
 		const chat = codexRankingStrategy.blockScope?.({ modelId: "gpt-5.3-codex" });
 		const spark = codexRankingStrategy.blockScope?.({ modelId: "gpt-5.3-codex-spark" });
 		expect(chat).not.toBe(spark);
-		// The subscription-sharing cap gates every model, so its block applies to both.
-		expect(codexRankingStrategy.blockScopes?.({ modelId: "gpt-5.3-codex" })).toEqual([
-			"chat",
-			"shared",
-			"subscription-sharing",
-		]);
-		expect(codexRankingStrategy.blockScopes?.({ modelId: "gpt-5.3-codex-spark" })).toEqual([
-			"spark",
-			"shared",
-			"subscription-sharing",
-		]);
+		expect(codexRankingStrategy.blockScopes?.({ modelId: "gpt-5.3-codex" })).toEqual(["chat", "shared"]);
+		expect(codexRankingStrategy.blockScopes?.({ modelId: "gpt-5.3-codex-spark" })).toEqual(["spark", "shared"]);
 		// Reconciliation runs with no request context and must heal every scope.
 		expect(codexRankingStrategy.blockScopes?.()).toEqual(["chat", "spark", "shared"]);
 	});
