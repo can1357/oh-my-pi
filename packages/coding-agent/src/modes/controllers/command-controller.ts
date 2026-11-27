@@ -327,8 +327,10 @@ export class CommandController {
 		this.showCommandReport({ title, body: () => markdownView(markdown.trim()) });
 	}
 
+	/** Roll a failed move back, applying each cwd through `applyCwdChange` as a return to where the session was. */
 	async #restoreAfterMoveFailure(
 		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
+		applyCwdChange: (cwd: string, restore: boolean) => Promise<boolean>,
 		initialError?: unknown,
 	): Promise<void> {
 		if (initialError !== undefined) {
@@ -343,7 +345,7 @@ export class CommandController {
 			const actual = this.ctx.sessionManager.getCwd();
 			let realigned = false;
 			try {
-				realigned = await this.ctx.applyCwdChange(actual);
+				realigned = await applyCwdChange(actual, true);
 			} catch {}
 			if (!realigned) {
 				this.ctx.showError(
@@ -360,14 +362,14 @@ export class CommandController {
 
 		let sourceRestored = false;
 		try {
-			sourceRestored = await this.ctx.applyCwdChange(previousState.cwd);
+			sourceRestored = await applyCwdChange(previousState.cwd, true);
 		} catch {}
 		if (sourceRestored) return;
 
 		const actual = this.ctx.sessionManager.getCwd();
 		let realigned = false;
 		try {
-			realigned = await this.ctx.applyCwdChange(actual);
+			realigned = await applyCwdChange(actual, true);
 		} catch {}
 		if (!realigned) {
 			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
@@ -1879,21 +1881,38 @@ export class CommandController {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return false;
 		}
-		let applied = false;
+		// A failed move applies the source cwd again after rolling the session file back. Only the last
+		// application's memory warning names where the session ends up, so it shows once they all settled.
+		let memoryWarning: string | undefined;
+		const applyCwdChange = (cwd: string, restore: boolean): Promise<boolean> => {
+			memoryWarning = undefined;
+			return this.ctx.applyCwdChange(cwd, {
+				restore,
+				onWarning: warning => {
+					memoryWarning = warning;
+				},
+			});
+		};
 		try {
-			applied = await this.ctx.applyCwdChange(resolvedPath);
-		} catch (error) {
-			await this.#restoreAfterMoveFailure(previousState, error);
-			return false;
-		}
-		if (!applied) {
-			await this.#restoreAfterMoveFailure(previousState);
-			return false;
-		}
+			let applied = false;
+			try {
+				applied = await applyCwdChange(resolvedPath, false);
+			} catch (error) {
+				await this.#restoreAfterMoveFailure(previousState, applyCwdChange, error);
+				return false;
+			}
+			if (!applied) {
+				await this.#restoreAfterMoveFailure(previousState, applyCwdChange);
+				return false;
+			}
 
-		this.ctx.updateEditorBorderColor();
-		await this.ctx.reloadTodos();
-		return true;
+			this.ctx.updateEditorBorderColor();
+			await this.ctx.reloadTodos();
+			return true;
+		} finally {
+			// A rollback that ended in shutdown disposed the session; nothing is left to warn about.
+			if (memoryWarning && !this.ctx.session.isDisposed) this.ctx.showWarning(memoryWarning);
+		}
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {

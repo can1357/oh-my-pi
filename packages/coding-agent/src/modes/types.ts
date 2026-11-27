@@ -379,6 +379,17 @@ export interface ResumeSessionOptions {
 	continuation?: SessionContinuation;
 }
 
+/** How {@link InteractiveModeContext.applyCwdChange} re-scopes the session and reports memory. */
+export interface CwdChangeOptions {
+	/** The session returns to a directory after a failed move; see `CwdRescopeOptions.restore`. */
+	restore?: boolean;
+	/**
+	 * Receives the memory warning for the directory the call leaves the session in, at most once per call.
+	 * A caller that applies a cwd again during a rollback shows only the last call's warning.
+	 */
+	onWarning: (warning: string) => void;
+}
+
 export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
 	/** Tool calls whose existing live block remains the sole render owner across a rebuild. */
@@ -1000,7 +1011,7 @@ export interface InteractiveModeContext {
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
-	applyCwdChange(newCwd: string): Promise<boolean>;
+	applyCwdChange(newCwd: string, options: CwdChangeOptions): Promise<boolean>;
 
 	// Selector handling
 	showSettingsSelector(): void;
