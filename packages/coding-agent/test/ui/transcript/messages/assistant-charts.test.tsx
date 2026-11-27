@@ -10,6 +10,7 @@ import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
 import { TerminalImages } from "@oh-my-pi/pi-tui/driver/images/store";
 import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import {
 	chartFence,
@@ -47,6 +48,9 @@ function reply(text: string): AssistantMessage {
 		timestamp: 1,
 	} as AssistantMessage;
 }
+
+/** A reference before the charted table whose definition comes after it. */
+const REFERENCED = `See [details][d].\n\n${TABLE}\nMore.\n\n[d]: https://example.com/x\n`;
 
 afterEach(() => setTableCharts("off"));
 
@@ -122,11 +126,18 @@ describe("a reply's table charts in Tern", () => {
 		await using _ = ui;
 		expect(prose("t0")).toBe("Latencies:\n\n| Model | Latency (ms) |\n| --- | --- |\n| alpha | 120 |");
 	});
+
+	test("prose before a chart carries the reference definitions written after it", async () => {
+		setTableCharts("always");
+		const { ui, prose } = await show(REFERENCED, { tableCharts: true });
+		await using _ = ui;
+		expect(prose("t0")).toStartWith("[d]: https://example.com/x\n\nSee [details][d].");
+	});
 });
 
 type ImageProtocol = NonNullable<TerminalCapabilities["images"]>;
 
-function terminalReply(protocol: ImageProtocol, { live = false } = {}) {
+function terminalReply(protocol: ImageProtocol, { live = false, text = REPLY } = {}) {
 	const capabilities = () => ({ ...KITTY, images: protocol });
 	const images = new TerminalImages({ capabilities });
 	const theme = loadThemeSync("dark");
@@ -136,7 +147,7 @@ function terminalReply(protocol: ImageProtocol, { live = false } = {}) {
 	const figureCell = signal<typeof DEFAULT_FIGURE_CELL | undefined>(DEFAULT_FIGURE_CELL);
 	const block = transcript.append(() => (
 		<AssistantMessageBlock
-			model={{ message: reply(REPLY), finalized, transient: live, tableCharts: true, figureCell }}
+			model={{ message: reply(text), finalized, transient: live, tableCharts: true, figureCell }}
 		/>
 	));
 	return { block, finalized, figureCell, images, paint: () => paintNode(env, block.node, 80), transcript };
@@ -162,6 +173,20 @@ test.each(protocols)("paints a table's chart before following prose on %s", asyn
 		expect(tableEnd).toBeGreaterThanOrEqual(0);
 		expect(image).toBeGreaterThan(tableEnd);
 		expect(output.indexOf("Delta is the slowest.")).toBeGreaterThan(image);
+	} finally {
+		transcript.clear();
+	}
+});
+
+test("terminal prose before a chart resolves a reference defined after it", async () => {
+	setTableCharts("always");
+	const { block, paint, transcript } = terminalReply("kitty", { text: REFERENCED });
+	try {
+		transcript.settle(block);
+		await figureWorkSettled();
+		const output = stripEscapes(paint().rows.join("\n"));
+		expect(output).toContain("See details");
+		expect(output).not.toContain("[details][d]");
 	} finally {
 		transcript.clear();
 	}
