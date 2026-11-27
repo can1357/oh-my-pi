@@ -96,7 +96,7 @@ test("emits complete OSC 133 zones only on first retirement, not during viewport
 		dock.set(["1", "2", "3", "4", "5", "6", "7"]);
 		backend.renderNow();
 		const zones = () =>
-			Array.from(output().matchAll(/\x1b]133;A\x07(.*?)\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07/g), match =>
+			Array.from(output().matchAll(/\x1b]133;A\x07\x1b]133;B\x07(.*?)\x1b]133;C\x07\x1b]133;D;0\x07/g), match =>
 				Bun.stripANSI(match[1]!).trim(),
 			);
 		expect(zones()).toEqual(["first prompt"]);
