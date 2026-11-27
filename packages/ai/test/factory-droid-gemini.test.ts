@@ -6,7 +6,7 @@ import * as AIError from "../src/error";
 import { SKIP_THOUGHT_SIGNATURE } from "../src/providers/google-shared";
 import { withCredentialRedaction } from "../src/providers/transform-messages";
 import type { AssistantMessage, Context, Model, StopReason, ToolResultMessage } from "../src/types";
-import { type CapturedRequest, captureFetch, finishChunk, gemini } from "./helpers/factory-droid";
+import { type CapturedRequest, captureFetch, factoryModel, finishChunk, gemini } from "./helpers/factory-droid";
 
 type Contents = Array<{ role: string; parts: Array<Record<string, unknown>> }>;
 
@@ -678,16 +678,13 @@ describe("Factory Droid gemini wire — native replay policy", () => {
 		});
 	});
 
-	it("sends xhigh as the Gemini API's lowercase thinking level", async () => {
-		const { captured } = await run(
-			"hi",
-			undefined,
-			{ requestPolicy: argonPolicy, reasoning: Effort.XHigh, thinkingDialect: "level-medium" },
-			{ ...argon(), id: "gemini-4-neon" },
-		);
-		expect(captured[0].body.generationConfig).toEqual({
-			maxOutputTokens: 65536,
-			thinkingConfig: { includeThoughts: true, thinkingLevel: "xhigh" },
+	it.each([
+		["gemini-4-neon", "xhigh"],
+		["gemini-4-argon", "HIGH"],
+	])("sends xhigh on %s as %s according to its effort ladder", async (id, expected) => {
+		const { captured } = await run("hi", undefined, { reasoning: Effort.XHigh }, factoryModel(id));
+		expect(captured[0].body.generationConfig).toMatchObject({
+			thinkingConfig: { includeThoughts: true, thinkingLevel: expected },
 		});
 	});
 

@@ -1,6 +1,7 @@
 import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
@@ -43,9 +44,9 @@ import { sanitizeFactoryDroidToolName } from "./tool-names";
 /**
  * OMP effort → Gemini thinkingLevel (low/minimal→LOW, medium→MEDIUM when
  * supported, xhigh→the Gemini API's lowercase `xhigh`, else HIGH). `xhigh`
- * arrives only for ladders that expose it (Gemini 4 Neon).
+ * arrives only for ladders that expose it.
  */
-function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean): "LOW" | "MEDIUM" | "HIGH" | "xhigh" {
+function geminiThinkingLevel(effort: Effort | undefined, supportsMedium: boolean): "LOW" | "MEDIUM" | "HIGH" | "xhigh" {
 	switch (effort) {
 		case "low":
 		case "minimal":
@@ -448,7 +449,7 @@ export function streamFactoryDroidGemini(
 							: {
 									includeThoughts: true,
 									thinkingLevel: geminiThinkingLevel(
-										options.reasoning,
+										clampThinkingLevelForModel(model, options.reasoning),
 										options.thinkingDialect === "level-medium",
 									),
 								},
