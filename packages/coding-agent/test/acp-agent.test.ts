@@ -481,6 +481,10 @@ class FakeAgentSession {
 		return false;
 	}
 
+	getEvalPreludes(): [] {
+		return [];
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
 	}
@@ -3668,7 +3672,7 @@ describe("ACP agent", () => {
 
 		await harness.agent.prompt({
 			sessionId: created.sessionId,
-			prompt: [{ type: "text", text: "/fast status" }],
+			prompt: [{ type: "text", text: "/session info" }],
 		});
 
 		const chunks = harness.updates.filter(
@@ -3680,7 +3684,7 @@ describe("ACP agent", () => {
 				update =>
 					update.update.sessionUpdate === "agent_message_chunk" &&
 					update.update.content.type === "text" &&
-					update.update.content.text === "Fast mode is off.",
+					update.update.content.text.includes("Fast tier: off"),
 			),
 		).toBe(true);
 

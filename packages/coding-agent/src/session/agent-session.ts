@@ -150,7 +150,7 @@ import {
 	withUpstreamPinOf,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
+import { type FastServiceTier, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
@@ -13373,19 +13373,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.getAvailableEffortSelectors();
 	}
 
-	/** Reports whether `/fast` is enabled for the active model family. */
+	/** Reports whether the active model family has selected Fast or Ultrafast. */
 	isFastModeEnabled(): boolean {
 		return this.#models.isFastModeEnabled();
 	}
 
-	/** Reports whether priority service is realized by the active model. */
+	/** Reports whether Fast or Ultrafast service is realized by the active model. */
 	isFastModeActive(): boolean {
 		return this.#models.isFastModeActive();
 	}
 
-	/** Reports whether a fresh session on `model` realizes a fast tier from configured `tier.*` settings. */
-	isFastModeConfiguredFor(model: Model): boolean {
-		return this.#models.isFastModeConfiguredFor(model);
+	/** Returns the fast tier a fresh session on `model` realizes from configured `tier.*` settings. */
+	configuredFastTier(model: Model): FastServiceTier | undefined {
+		return this.#models.configuredFastTier(model);
 	}
 
 	/** Effective wire service tier for a request to `model` under the live per-family tiers. */
@@ -13523,7 +13523,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	/** Reports whether `/fast ultra` (the OpenAI `ultrafast` tier) is selected for the active model. */
+	/** Reports whether the OpenAI `ultrafast` tier is selected for the active model. */
 	isUltrafastModeEnabled(): boolean {
 		return this.#models.isUltrafastModeEnabled();
 	}

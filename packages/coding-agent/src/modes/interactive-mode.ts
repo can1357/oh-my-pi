@@ -1771,10 +1771,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.focusedAgentId !== undefined) return;
 			if (untrack(() => this.viewSession.messages.length) === 0) freshContext = facts.context;
 			if (!freshContext) return;
-			// A fresh session runs at the configured tier, not this one's `/fast` toggle.
+			// A fresh session runs at the configured tier, not this one's selected tier.
 			const model = untrack(() => this.session.model);
-			const fastMode = model !== undefined && this.session.isFastModeConfiguredFor(model);
-			cache.writeStatus(project, predictStatus(facts, settings, { context: freshContext, fastMode }));
+			const fastTier = model && this.session.configuredFastTier(model);
+			cache.writeStatus(project, predictStatus(facts, settings, { context: freshContext, fastTier }));
 		});
 	}
 

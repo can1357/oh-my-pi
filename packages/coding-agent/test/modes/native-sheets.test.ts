@@ -10,10 +10,11 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SpotlightDetails, SpotlightOriginal } from "@oh-my-pi/pi-coding-agent/tools/details/spotlight";
-import { nativeRendering, signal } from "@oh-my-pi/pi-tui";
+import { createRoot, effect, nativeRendering, signal } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { createDashboardController } from "../../src/autoresearch/dashboard";
 import { createExperimentState } from "../../src/autoresearch/state";
 import type { AutoresearchDashboardRuntime } from "../../src/ui/apps/autoresearch";
@@ -151,6 +152,39 @@ describe("sheets Tern draws", () => {
 
 		ui.type(ESCAPE);
 		closed();
+	});
+
+	it("shows Fast and computer use together in the native /session info sheet", async () => {
+		await using ui = await nativeShell(mode.shell);
+		session.setFastMode(true);
+		await executeBuiltinSlashCommand("/session info", { ctx: mode });
+
+		const { screen } = sheetOf(ui);
+		const modes = ui.children(screen).find(section => section.p.head === "Modes");
+		if (!modes) throw new Error("Session info is missing its Modes section");
+		const rows = ui.children(modes).find(row => row.k === "kv")?.p.items;
+		expect(rows).toEqual(
+			expect.arrayContaining([
+				{ k: "Fast tier", v: [{ t: "Fast (priority)" }] },
+				{ k: "Computer use", v: [{ t: "disabled" }] },
+				{ k: "Computer prelude", v: [{ t: "inactive" }] },
+			]),
+		);
+	});
+
+	it("sends the native rocket icon with the Ultrafast completion", async () => {
+		await using ui = await nativeShell(mode.shell);
+		mode.composer.setText("/ult");
+		await mode.refreshSlashCommandState(undefined, []);
+		const ready = Promise.withResolvers<void>();
+		const dispose = createRoot(stop => {
+			effect(() => {
+				if (mode.composer.completing()) ready.resolve();
+			});
+			return stop;
+		});
+		await withTimeout(ready.promise, 1000, "Ultrafast completion did not open").finally(dispose);
+		expect(ui.node("item", "ultrafast").p.icon).toBe("rocket");
 	});
 
 	it("mounts the jobs sheet as Background jobs and closes it from its Close control", async () => {

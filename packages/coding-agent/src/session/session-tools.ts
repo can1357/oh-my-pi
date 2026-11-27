@@ -2018,7 +2018,7 @@ export class SessionTools {
 	/**
 	 * Builds the hidden notice reconciling the eval preludes the model knows with
 	 * the live set. Delivered with the next user prompt instead of rebuilding the
-	 * system prompt, so a mid-session toggle (`/computer on`) keeps the provider
+	 * system prompt, so toggling `/computer` mid-session keeps the provider
 	 * cache prefix intact.
 	 *
 	 * Known preludes are the committed base snapshot, then every prelude notice

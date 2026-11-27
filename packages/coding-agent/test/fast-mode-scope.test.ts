@@ -9,11 +9,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import {
-	lookupBuiltinSlashCommand,
-	type SlashCommandRuntime,
-} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { withOfficialAnthropicEndpoint } from "./helpers/anthropic-endpoint";
 
 withOfficialAnthropicEndpoint();
@@ -229,7 +226,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.setUltrafastMode(true)).toBe(false);
 	});
 
-	it("selects Ultrafast on an advertising Codex model and clears it with /fast off", async () => {
+	it("clears Ultrafast when the session API disables fast service", async () => {
 		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
 		expect(session.setUltrafastMode(true)).toBe(true);
 		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
@@ -240,44 +237,53 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
 	});
-	// The /fast command's message contract, driven through the builtin's
-	// portable handler: the text-mode/ACP runtime is where the reply is the
-	// only signal a host sees (the TUI overlays it with the session notice).
-	const fastCommand = lookupBuiltinSlashCommand("fast");
-
-	async function runFastCommand(session: AgentSession, args: string): Promise<string[]> {
+	async function runCommand(session: AgentSession, text: string) {
 		const outputs: string[] = [];
-		const result = await fastCommand!.handle!({ name: "fast", args, text: `/fast ${args}`.trim() }, {
+		const result = await executeAcpBuiltinSlashCommand(text, {
 			session,
-			output: (text: string) => {
-				outputs.push(text);
+			sessionManager: session.sessionManager,
+			settings: session.settings,
+			cwd: session.sessionManager.getCwd(),
+			output: message => {
+				outputs.push(message);
 			},
-		} as unknown as SlashCommandRuntime);
-		expect(result).toEqual({ consumed: true });
-		return outputs;
+			refreshCommands: () => {},
+			reloadPlugins: async () => {},
+		});
+		return { result, outputs };
 	}
 
-	it("reports /fast off as unavailable for a model with no service-tier control", async () => {
+	it("reports /fast as unavailable for a model with no service-tier control", async () => {
 		const session = await createSessionForModel(fireworksModel());
-		expect(await runFastCommand(session, "off")).toEqual(["Fast mode is unavailable for the current model."]);
+		const { outputs } = await runCommand(session, "/fast");
+		expect(outputs[0]).toContain("unavailable");
 		expect(session.serviceTierByFamily).toEqual({});
 	});
 
-	it("reports bare /fast as unavailable for a model with no service-tier control", async () => {
-		const session = await createSessionForModel(fireworksModel());
-		expect(await runFastCommand(session, "")).toEqual(["Fast mode is unavailable for the current model."]);
-		expect(await runFastCommand(session, "toggle")).toEqual(["Fast mode is unavailable for the current model."]);
+	it("switches between distinct Fast and Ultrafast tiers and toggles each off", async () => {
+		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
+		await runCommand(session, "/fast");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/ultrafast");
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		const { outputs } = await runCommand(session, "/session info");
+		expect(outputs[0]).toContain("Fast tier: Ultrafast");
+		await runCommand(session, "/fast");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/fast");
+		expect(session.serviceTierByFamily).toEqual({});
+		await runCommand(session, "/ultrafast");
+		await runCommand(session, "/ultrafast");
 		expect(session.serviceTierByFamily).toEqual({});
 	});
 
-	it("disables fast mode with /fast off and toggles it both ways for a family model", async () => {
-		const session = await createSession("anthropic", "claude-sonnet-4-5");
-		session.setFastMode(true);
-		expect(await runFastCommand(session, "off")).toEqual(["Fast mode disabled."]);
-		expect(session.serviceTierByFamily).toEqual({});
-		expect(await runFastCommand(session, "")).toEqual(["Fast mode enabled."]);
-		expect(session.serviceTierByFamily.anthropic).toBe("priority");
-		expect(await runFastCommand(session, "")).toEqual(["Fast mode disabled."]);
-		expect(session.serviceTierByFamily).toEqual({});
+	it("keeps /fast ultra as an enable-only alias and rejects explicit /fast off", async () => {
+		const session = await createSessionForModel(codexModel(["ultrafast"]));
+		await runCommand(session, "/fast ultra");
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		await runCommand(session, "/fast ultra");
+		const { result } = await runCommand(session, "/fast off");
+		expect(result).toEqual({ consumed: true, failed: true });
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
 	});
 });

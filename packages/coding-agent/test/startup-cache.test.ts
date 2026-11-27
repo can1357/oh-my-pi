@@ -27,7 +27,7 @@ const prediction: StatusPrediction = {
 		thinkingLevel: "high",
 		usingSubscription: true,
 		autoCompact: true,
-		fastMode: false,
+		fastTier: "ultrafast",
 		context: { tokens: 6_000, window: 200_000, percent: 3 },
 	},
 };
