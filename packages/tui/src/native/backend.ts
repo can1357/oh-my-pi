@@ -177,6 +177,8 @@ export class NativeBackend {
 	/** Input is being routed: whatever it changes is an echo. */
 	#echoing = false;
 	#unsubscribe: (() => void)[] = [];
+	/** Output held: no frame is sent until released. */
+	#held = false;
 
 	constructor(options: NativeBackendOptions) {
 		this.#options = options;
@@ -265,9 +267,34 @@ export class NativeBackend {
 		this.#reconciler = undefined;
 	}
 
+	/**
+	 * Hold the screen: no frame is sent until the hold is released, so a
+	 * streaming turn stops scrolling the surface while the user reads back.
+	 * Changes keep accumulating in the reconciler; the release sends the latest
+	 * state in one frame.
+	 *
+	 * @returns Whether the hold state changed.
+	 */
+	setOutputHold(hold: boolean): boolean {
+		if (!this.#running || this.#held === hold) return false;
+		this.#held = hold;
+		if (hold) {
+			this.#cancelFrame?.();
+			this.#cancelFrame = undefined;
+		} else {
+			this.requestFrame();
+		}
+		return true;
+	}
+
+	/** Whether {@link setOutputHold} is holding the output. */
+	getOutputHold(): boolean {
+		return this.#held;
+	}
+
 	/** Schedule a frame. */
 	requestFrame(): void {
-		if (!this.#running || this.#surfaceState === "lost" || this.#cancelFrame) return;
+		if (!this.#running || this.#held || this.#surfaceState === "lost" || this.#cancelFrame) return;
 		this.#cancelFrame = this.#clock!.setTimeout(() => {
 			this.#cancelFrame = undefined;
 			this.flush();
@@ -278,12 +305,13 @@ export class NativeBackend {
 	flush(): boolean {
 		this.#cancelFrame?.();
 		this.#cancelFrame = undefined;
-		if (!this.#running) return false;
+		if (!this.#running || this.#held) return false;
 		return this.#send(false);
 	}
 
 	#halt(): void {
 		this.#running = false;
+		this.#held = false;
 		this.#clearFrames();
 		for (const off of this.#unsubscribe.splice(0)) off();
 	}
@@ -506,9 +534,11 @@ export class NativeBackend {
 				)
 					return;
 				if (this.#surfaceState === "open") {
+					logger.debug("TSP: terminal does not know the surface; reopening it", { sf: this.id });
 					this.#surfaceState = "reopening";
 					this.#reopen();
 				} else if (this.#surfaceState === "reopening") {
+					logger.warn("TSP: surface lost; frames stop until the terminal reports it gone", { sf: this.id });
 					this.#surfaceState = "lost";
 					this.#opened = false;
 					this.#clearFrames();

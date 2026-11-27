@@ -10,7 +10,7 @@ import {
 	synchronizedOutputDefault,
 	synchronizedOutputOverride,
 } from "../../src/driver/caps/env";
-import { detectTerminalId, resolveJamoWidth, type TerminalId } from "../../src/driver/caps/identity";
+import { detectTerminalId, emojiSupportFor, resolveJamoWidth, type TerminalId } from "../../src/driver/caps/identity";
 import { classifyMultiplexer, hasMultiplexerSession, insideMultiplexer } from "../../src/driver/mux/detect";
 import {
 	tmuxAllowsPassthrough,
@@ -44,9 +44,25 @@ describe("terminal identity", () => {
 		[{ REX_SESSION: "s1", COLORTERM: "truecolor", VTE_VERSION: "8400" }, "trueColor"],
 		[{ COLORTERM: "24bit" }, "trueColor"],
 		[{ TERM: "xterm-256color" }, "base"],
+		[{ WT_SESSION: "1" }, "windowsTerminal"],
+		[{ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal", COLORTERM: "truecolor" }, "windowsTerminal"],
+		[{ WT_SESSION: "1", TERM_PROGRAM: "vscode" }, "vscode"],
+		[{ WT_SESSION: "1", WEZTERM_PANE: "0" }, "wezterm"],
+		[{ WT_SESSION: "1", TERM_PROGRAM: "Tabby" }, "base"],
+		[{ WT_SESSION: "1", SSH_CONNECTION: "a 1 b 22", COLORTERM: "truecolor" }, "trueColor"],
+		[{ WT_SESSION: "1", TMUX: "/tmp/t,1,0" }, "base"],
+		[{ WT_SESSION: "1", ZELLIJ: "0" }, "base"],
+		[{ WT_SESSION: "1", TERM: "screen-256color" }, "base"],
 		[{}, "base"],
 	] as const)("%j → %s", (env, expected) => {
 		expect(detectTerminalId(env)).toBe(expected);
+	});
+
+	it("gives a local Windows Terminal the true-color, synchronized-output profile it had through WT_SESSION", () => {
+		const env = { WT_SESSION: "1", TERM: "xterm-256color" };
+		const caps = capabilitiesFromEnv(env, { ...direct, platform: "win32", id: detectTerminalId(env) });
+		expect(caps).toMatchObject({ truecolor: true, synchronizedOutput: true, hyperlinks: false, images: null });
+		expect(caps.emoji).toEqual({ vs16Wide: true, bareFits: false });
 	});
 
 	it("uses the attached tmux client's identity when the pane says tmux", () => {
@@ -68,6 +84,37 @@ describe("terminal identity", () => {
 		const plain = { TERM: "xterm-256color", COLORTERM: "truecolor" };
 		expect(resolveJamoWidth(detectTerminalId(plain), plain)).toBe("platform");
 		expect(resolveJamoWidth("ghostty", {})).toBe(2);
+	});
+});
+
+describe("emoji support", () => {
+	it.each([
+		["kitty", { vs16Wide: true, bareFits: true }],
+		["rio", { vs16Wide: true, bareFits: false }],
+		// Wide only after the driver's Unicode 14 push.
+		["wezterm", { vs16Wide: false, bareFits: true }],
+		["alacritty", { vs16Wide: false, bareFits: false }],
+		// Unknown: conservative until probed.
+		["base", { vs16Wide: false, bareFits: false }],
+	] as const)("%s → %j", (id, expected) => {
+		expect(emojiSupportFor(id, {})).toEqual(expected);
+	});
+
+	it("drops U+FE0F forms inside a multiplexer and keeps the outer terminal's bare-glyph fit", () => {
+		expect(emojiSupportFor("kitty", { TMUX: "/tmp/t,1,0" })).toEqual({ vs16Wide: false, bareFits: true });
+		expect(emojiSupportFor("ghostty", { ZELLIJ: "0" })).toEqual({ vs16Wide: false, bareFits: true });
+		expect(emojiSupportFor("rio", { STY: "x" })).toEqual({ vs16Wide: false, bareFits: false });
+		// Orca keeps the direct render path.
+		expect(emojiSupportFor("kitty", { ORCA_PANE_KEY: "k", ORCA_WORKTREE_ID: "w" })).toEqual({
+			vs16Wide: true,
+			bareFits: true,
+		});
+	});
+
+	it("seeds the environment capabilities", () => {
+		const env = { TMUX: "/tmp/t,1,0", TERM_PROGRAM: "tmux" };
+		expect(capabilitiesFromEnv(env, { ...direct, id: "kitty" }).emoji).toEqual({ vs16Wide: false, bareFits: true });
+		expect(capabilitiesFromEnv({}, { ...direct, id: "kitty" }).emoji).toEqual({ vs16Wide: true, bareFits: true });
 	});
 });
 

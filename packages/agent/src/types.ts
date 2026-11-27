@@ -101,6 +101,8 @@ export interface AgentTurnEndContext {
 	additionalMessages?: AgentMessage[];
 	/** True when the current tool-loop batch is continuing without yielding to post-turn steering. */
 	willContinue: boolean;
+	/** Tool calls in `message` that resolved to no tool (unknown name), so nothing ran. */
+	unresolvedToolCallIds?: string[];
 }
 
 export interface AgentPreModelCallStop {

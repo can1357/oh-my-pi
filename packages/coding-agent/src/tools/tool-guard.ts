@@ -14,6 +14,7 @@
  * Before that, the session's TTSR gate rules (`gate: before`) judge every call, including one the
  * user approved in a prompt, whether or not the guard is on.
  */
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ToolTier } from "@oh-my-pi/pi-agent-core";
@@ -34,7 +35,7 @@ import type { ToolGuardCall } from "../extensibility/extensions/runner";
 import questionFile from "../prompts/judge/tool-guard.json" with { type: "json" };
 import refusedTemplate from "../prompts/tools/tool-guard-refused.md" with { type: "text" };
 import { operatorTitleText, textFromContent } from "../session/messages";
-import { isMCPToolName } from "./builtin-names";
+import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
 	cfgToolGuardAllowances,
 	cfgToolGuardAskedThreshold,
@@ -43,9 +44,9 @@ import {
 } from "./settings";
 import {
 	extractFlatShellCommandSegments,
+	extractLeadingCdTarget,
 	isShellEnvironmentAssignment,
 	lexShellCommand,
-	tokenizeShellSegments,
 } from "./shell-tokenize";
 
 const QUESTIONS = judgeQuestions(questionFile);
@@ -123,6 +124,8 @@ const GIT_GLOBAL_FLAGS = wordTable(
 		"-v --version -h --help --html-path --man-path --info-path",
 );
 const FIND_ACTIONS = wordTable("-exec -execdir -ok -okdir -delete -fprint -fprint0 -fprintf -fls");
+/** Read-only commands whose arguments {@link readOnlyArguments} checks: an expanded argument hides what it checks. */
+const ARGUMENT_CHECKED = wordTable("tree printf uniq date hostname file");
 /** Prefixes that run the rest of the line as the command; reads stay reads under the first group. */
 const READ_WRAPPERS = wordTable("time nice timeout command");
 const SCRIPT_WRAPPERS = wordTable("time nice timeout command sudo doas env nohup exec");
@@ -136,6 +139,10 @@ const RUNNERS = wordTable("uv poetry pipenv pdm hatch rye");
 const SCRIPT_SUFFIX = /\.(?:py|sh|js|mjs|ts|rb|pl)$/;
 /** Interpreter options that take a value before the script. */
 const SCRIPT_VALUE_OPTIONS = wordTable("-o +o -O +O -W -X -I --require");
+/** Node options that load a module before the script; a local file named there runs first. */
+const NODE_PRELOADS = wordTable("-r --require --import --loader --experimental-loader");
+/** A preload that names a file rather than a package (`./hook.js`, `/tmp/x.cjs`, `~/x.mjs`). Node resolves any other specifier (`dotenv/config`, `pkg/preload.js`, even `hook.js`) as a package in `node_modules`, never in the working directory. */
+const LOCAL_MODULE = /^(?:\.{0,2}\/|~\/)/;
 /** The system's own programs (`/usr/bin/env`), never shown as scripts. */
 const SYSTEM_TREES = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/System", "/nix", "/opt/homebrew"];
 
@@ -182,10 +189,10 @@ export interface ToolGuardHost {
 	/** Stops the run after too many refusals; `reason` names them. */
 	stop(reason: string): void;
 	/**
-	 * The machine's resource pressure, read only for calls that reach the judge; undefined when unknown.
-	 * Defaults to {@link readHostPressure} for the working directory.
+	 * The machine's resource pressure, with disk space for `dir` (where the call runs), read only for calls
+	 * that reach the judge; undefined when unknown. Defaults to {@link readHostPressure}.
 	 */
-	hostPressure?(): Promise<HostPressure | undefined>;
+	hostPressure?(dir: string): Promise<HostPressure | undefined>;
 	/** Judges the call against the session's TTSR gate rules. */
 	gate?(call: ToolGuardCall, signal?: AbortSignal): Promise<GateVerdict>;
 }
@@ -212,7 +219,48 @@ function resolveWord(word: string, base: string): string | undefined {
 	return path.resolve(base, word);
 }
 
-/** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`). */
+/**
+ * Whether the shell may turn the word `raw` into a different word, or into several: a parameter or command
+ * expansion outside single quotes (`$ACTION`, `"$X"`, `` `cmd` ``), or an unquoted glob or brace expansion that
+ * can yield an option such as `-delete`: one at the word's start (`*`, `[-]delete`, `{-delete,}`) or after a
+ * leading dash (`-delete*` beside a file named `-delete`, `-{delete,}`). Any other literal prefix pins what the
+ * expansion begins with.
+ */
+function expandsWord(raw: string): boolean {
+	let quote: string | undefined;
+	let lead: string | undefined;
+	for (let i = 0; i < raw.length; i++) {
+		const char = raw[i];
+		if (char === "\\" && quote !== "'") lead ??= raw[++i];
+		else if (char === quote) quote = undefined;
+		else if (quote === undefined && (char === "'" || char === '"')) quote = char;
+		else if (quote !== "'" && (char === "$" || char === "`")) return true;
+		else if (quote === undefined && "*?[{".includes(char) && (lead === undefined || lead === "-")) return true;
+		else lead ??= char;
+	}
+	return false;
+}
+
+/** `env` options that take the next word as their value when nothing follows them in the word: GNU `-u NAME`, BSD `-P PATH`, `-L`/`-U USER`. */
+const ENV_VALUE_FLAGS = "uPLU";
+
+/**
+ * How `env OPTION` moves where its command starts: `"unknown"` for `-C DIR` and `-S STRING`, which run the command
+ * in another directory or from a split string the words do not show; otherwise how many following words it takes.
+ */
+function envOperands(option: string): number | "unknown" {
+	if (option.startsWith("--")) {
+		if (longOption(option, ["--chdir", "--split-string"])) return "unknown";
+		return !option.includes("=") && longOption(option, ["--unset"]) ? 1 : 0;
+	}
+	for (let j = 1; j < option.length; j++) {
+		if (option[j] === "C" || option[j] === "S") return "unknown";
+		if (ENV_VALUE_FLAGS.includes(option[j])) return j === option.length - 1 ? 1 : 0;
+	}
+	return 0;
+}
+
+/** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`); empty when an `env` option hides where the command runs. */
 function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 	let rest = words;
 	for (;;) {
@@ -223,7 +271,11 @@ function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 		while (rest.length > 0 && rest[0].startsWith("-")) {
 			const option = rest[0];
 			rest = rest.slice(1);
-			if ((name === "nice" && option === "-n") || (name === "sudo" && (option === "-u" || option === "-g"))) {
+			if (name === "env") {
+				const operands = envOperands(option);
+				if (operands === "unknown") return [];
+				rest = rest.slice(operands);
+			} else if ((name === "nice" && option === "-n") || (name === "sudo" && (option === "-u" || option === "-g"))) {
 				rest = rest.slice(1);
 			}
 		}
@@ -244,8 +296,10 @@ function longOption(arg: string, options: readonly string[], exact: readonly str
 	return options.some(option => name.startsWith(option) || option.startsWith(name));
 }
 
-/** Read-subcommand options that write a file or run a program: `--output=F`, external diff and textconv drivers, `git grep --open-files-in-pager`. */
-const GIT_EXEC_OPTIONS = ["--output", "--open-files-in-pager", "--ext-diff", "--textconv"];
+/** Read-subcommand options that write a file or run a program: `--output=F`, external diff and textconv drivers, `git grep --open-files-in-pager`, and `git cat-file --filters`, which runs the smudge filter. */
+const GIT_EXEC_OPTIONS = ["--output", "--open-files-in-pager", "--ext-diff", "--textconv", "--filters"];
+/** Real options that begin a judged long option without being one: `--text` (`-a`), and `git cat-file --filter=SPEC` and `git rev-list --filter=SPEC`, which choose objects. */
+const GIT_EXACT = ["--text", "--filter"];
 /** `git grep -O[CMD]`, also inside a cluster (`-iO`), runs a pager on the matching files. */
 const GIT_PAGER_FLAG = /^-[^-]*O/;
 /** Legacy `git config` actions that read a value or list them. */
@@ -273,7 +327,7 @@ function readOnlyGit(args: string[]): boolean {
 	const positional = rest.filter(arg => !arg.startsWith("-"));
 	const flags = rest.filter(arg => arg.startsWith("-"));
 	if (sub === undefined) return true;
-	if (flags.some(flag => GIT_PAGER_FLAG.test(flag) || longOption(flag, GIT_EXEC_OPTIONS, ["--text"]))) return false;
+	if (flags.some(flag => GIT_PAGER_FLAG.test(flag) || longOption(flag, GIT_EXEC_OPTIONS, GIT_EXACT))) return false;
 	if (inTable(GIT_READS, sub)) return true;
 	if (sub === "branch") return positional.length === 0 && flags.every(flag => inTable(GIT_BRANCH_LISTING, flag));
 	if (sub === "remote" || sub === "stash" || sub === "tag") {
@@ -398,6 +452,7 @@ function unquotedRedirect(raw: string): boolean {
 function readOnlySegment(text: string): boolean {
 	const tokens = lexShellCommand(text);
 	const words: string[] = [];
+	const raws: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
 		if (token.kind !== "word") continue;
@@ -429,6 +484,7 @@ function readOnlySegment(text: string): boolean {
 			continue;
 		}
 		words.push(token.value);
+		raws.push(token.raw);
 	}
 	const command = unwrapCommand(words, READ_WRAPPERS);
 	// An assignment (`PATH=/tmp/x git status`, `export PATH=...; git status`) changes which program a
@@ -442,7 +498,13 @@ function readOnlySegment(text: string): boolean {
 	const name = command[0];
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
-	if (inTable(READ_ONLY_COMMANDS, name)) return readOnlyArguments(name, args);
+	// A command whose arguments decide whether it writes (`find . $ACTION` with `ACTION=-delete`) is judged
+	// when the shell expands one of them into words this scanner never sees.
+	const expanded = raws.slice(words.length - args.length).some(expandsWord);
+	if (inTable(READ_ONLY_COMMANDS, name)) {
+		return !(expanded && inTable(ARGUMENT_CHECKED, name)) && readOnlyArguments(name, args);
+	}
+	if (expanded) return false;
 	switch (name) {
 		case "find":
 			return !args.some(arg => inTable(FIND_ACTIONS, arg));
@@ -470,35 +532,41 @@ export function isReadOnlyCommand(command: string): boolean {
 	return segments.length > 0 && segments.every(segment => readOnlySegment(segment.text));
 }
 
-/** The file a simple command runs as code, as written; undefined for code in the call or a module. */
-function scriptFile(words: string[]): string | undefined {
+/** The files a simple command runs as code, as written: a node preload (`-r ./hook.js`) before its script. Code in the call or a module is none. */
+function scriptFiles(words: string[]): string[] {
 	const command = unwrapCommand(words, SCRIPT_WRAPPERS);
 	const program = command[0];
-	if (program === undefined) return undefined;
+	if (program === undefined) return [];
 	const name = path.basename(program);
 	const args = command.slice(1);
 	// A sourced file (`source .env`) is often credentials; the judge reasons from the call text alone.
-	if (name === "source" || name === ".") return undefined;
+	if (name === "source" || name === ".") return [];
 	if (inTable(RUNNERS, name) && args[0] === "run") {
 		const rest = args.slice(1);
 		while (rest.length > 0 && rest[0].startsWith("-")) rest.shift();
-		if (rest.length === 0) return undefined;
-		return SCRIPT_SUFFIX.test(rest[0]) ? rest[0] : scriptFile(rest);
+		if (rest.length === 0) return [];
+		return SCRIPT_SUFFIX.test(rest[0]) ? [rest[0]] : scriptFiles(rest);
 	}
 	const shell = inTable(SHELLS, name);
-	if (!shell && !INTERPRETER.test(name)) return program.includes("/") ? program : undefined;
+	if (!shell && !INTERPRETER.test(name)) return program.includes("/") ? [program] : [];
+	const files: string[] = [];
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
-		if (arg === "-") return undefined;
-		if (inTable(SCRIPT_VALUE_OPTIONS, arg)) {
+		if (arg === "-") return files;
+		const option = arg.split("=", 1)[0];
+		if (name === "node" && inTable(NODE_PRELOADS, option)) {
+			const value = option === arg ? args[++i] : arg.slice(option.length + 1);
+			if (value !== undefined && LOCAL_MODULE.test(value)) files.push(value);
+		} else if (inTable(SCRIPT_VALUE_OPTIONS, arg)) {
 			i++;
 		} else if (!arg.startsWith("-") && !arg.startsWith("+")) {
-			return arg;
+			files.push(arg);
+			return files;
 		} else if (!arg.startsWith("--") && (shell ? arg.slice(1).includes("c") : /[cemrE]/.test(arg.slice(1)))) {
-			return undefined; // code in the call (`-c`, `-e`) or a module (`-m`)
+			return files; // code in the call (`-c`, `-e`) or a module (`-m`)
 		}
 	}
-	return undefined;
+	return files;
 }
 
 /** Files a command writes by redirection or `tee`; a script it writes itself is shown in the call. */
@@ -513,21 +581,65 @@ function writtenWords(segment: string[]): string[] {
 	return written;
 }
 
-/** The files a shell command runs as code (`python x.py`, `bash x.sh`, `./x`, `uv run x.py`), at most three. Sourced files are never read: they are often credentials. */
+/** Separators that run the next command in the shell the previous one left: `&&`, `;` and newlines. */
+const SEQUENTIAL = /^(?:&&|[;\n])*$/;
+
+/** Where `cd DIR`, `pushd DIR` or a bare `cd` moves from `base`; undefined for a move the call does not show (`cd -`, `popd`, a bare `pushd`, an expanded name). */
+function changedDirectory(command: string[], base: string): string | undefined {
+	const [name, ...args] = command;
+	let i = 0;
+	while (i < args.length && args[i].startsWith("-") && args[i] !== "-") {
+		if (args[i++] === "--") break;
+	}
+	const target = args[i];
+	if (name === "popd" || target === "-" || (target === undefined && name !== "cd")) return undefined;
+	return resolveWord(target ?? "~", base);
+}
+
+/**
+ * The files a shell command runs as code (`python x.py`, `bash x.sh`, `./x`, `uv run x.py`), at most three. Sourced files are never read: they are often credentials.
+ * A script after `cd DIR &&` resolves in DIR; after a directory change the scanner cannot follow (`cd -`, `popd`, a change inside a pipeline, group or `||`), none is shown.
+ */
 export function scriptsRun(command: string, cwd: string): string[] {
-	const segments = tokenizeShellSegments(command);
+	const tokens = lexShellCommand(command);
+	const grouped = tokens.some(token => token.kind === "separator" && /[()]/.test(token.raw));
+	// Each simple command with the operators before and after it, split as `tokenizeShellSegments` splits.
+	const segments: { words: string[]; before: string; after: string }[] = [];
+	let words: string[] = [];
+	let before = "";
+	for (const token of tokens) {
+		if (token.kind === "word") {
+			if (token.value.length > 0) words.push(token.value);
+		} else if (/[\n;&|()]/.test(token.raw) && words.length > 0) {
+			const operators = token.raw.replace(/[ \t]/g, "");
+			segments.push({ words, before, after: operators });
+			words = [];
+			before = operators;
+		}
+	}
+	if (words.length > 0) segments.push({ words, before, after: "" });
+	let base: string | undefined = cwd;
 	const written = new Set<string>();
 	const found: string[] = [];
 	for (const segment of segments) {
-		for (const word of writtenWords(segment)) {
-			const target = resolveWord(word, cwd);
+		if (base === undefined) break;
+		for (const word of writtenWords(segment.words)) {
+			const target = resolveWord(word, base);
 			if (target) written.add(target);
 		}
-		const script = scriptFile(segment);
-		const file = script === undefined ? undefined : resolveWord(script, cwd);
-		if (file === undefined || written.has(file) || found.includes(file)) continue;
-		if (SYSTEM_TREES.some(tree => file === tree || file.startsWith(`${tree}/`))) continue;
-		found.push(file);
+		const plain =
+			segment.words[0] === "builtin" || segment.words[0] === "command" ? segment.words.slice(1) : segment.words;
+		if (inTable(DIRECTORY_CHANGES, plain[0] ?? "")) {
+			const sequential = !grouped && SEQUENTIAL.test(segment.before) && SEQUENTIAL.test(segment.after);
+			base = sequential ? changedDirectory(plain, base) : undefined;
+			continue;
+		}
+		for (const script of scriptFiles(segment.words)) {
+			const file = resolveWord(script, base);
+			if (file === undefined || written.has(file) || found.includes(file)) continue;
+			if (SYSTEM_TREES.some(tree => file === tree || file.startsWith(`${tree}/`))) continue;
+			found.push(file);
+		}
 	}
 	return found.slice(0, SCRIPTS_SHOWN);
 }
@@ -556,12 +668,53 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	}
 	if (call.tier === "write") {
 		const targets = call.targets ?? [];
-		// Internal URLs (`local://`) are the session's own artifacts.
-		if (targets.length > 0) return targets.some(target => !target.includes("://") && !pathIsWithin(cwd, target));
-		// Built-in write-tier tools without targets keep session state; an MCP tool can act anywhere.
-		return isMCPToolName(call.toolName);
+		if (targets.length > 0) return targets.some(target => !staysInside(target, cwd));
+		// A write-tier tool without targets is judged unless it only keeps this session's own state.
+		return !inTable(SESSION_STATE_TOOLS, call.toolName);
 	}
 	return true;
+}
+
+/** Write-tier tools without targets that change only the session's own state: its notebook, its context, and fresh temp images. */
+const SESSION_STATE_TOOLS = wordTable("context_notes new_context generate_image");
+
+/** Internal URLs that are the session's own artifacts (`local://`). */
+const SESSION_URL = /^local:\/\//;
+
+/**
+ * Whether a write to `target` stays in the session: a {@link SESSION_URL}, or a file inside `cwd` once symlinks
+ * are followed, through the deepest existing ancestor for a file not yet there. Any other URL (`https://`,
+ * `ssh://`) is judged.
+ */
+function staysInside(target: string, cwd: string): boolean {
+	if (SESSION_URL.test(target)) return true;
+	if (target.includes("://")) return false;
+	return pathIsWithin(cwd, resolveToCwd(target, cwd), { throughMissing: true });
+}
+
+/**
+ * The directory a bash call's process runs in, as bash resolves it: its `cwd` (`~` expanded), moved by a leading
+ * `cd DIR &&` / `cd DIR;` (bash hoists one into the directory when no `cwd` is given; with one, the shell starts
+ * there and then moves). A URL directory, or one that does not exist, leaves the session's directory.
+ */
+function processDirectory(command: string | undefined, runIn: string | undefined, cwd: string): string {
+	if (runIn?.includes("://")) return cwd;
+	const isDirectory = (dir: string): boolean => fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory() === true;
+	let dir = runIn ? resolveToCwd(runIn, cwd) : cwd;
+	if (!isDirectory(dir)) return cwd;
+	const cd = command === undefined ? null : extractLeadingCdTarget(command);
+	if (cd && !cd.path.includes("://")) {
+		const moved = resolveShellDirectory(cd.path, dir);
+		if (isDirectory(moved)) dir = moved;
+	}
+	return dir;
+}
+
+/** How far a judge's distribution may sum from 1 through rounding before the answer counts as malformed. */
+const DISTRIBUTION_SLACK = 0.05;
+
+function isProbability(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 /** The refusal for `answers`, when the named risks reach `thresholds.risk` and P(asked) stays below `thresholds.asked`. */
@@ -572,15 +725,19 @@ export function guardVerdict(
 	const { risk, asked } = answers;
 	if (risk?.type !== "choice" || asked?.type !== "noul") return undefined;
 	const probabilities: Record<string, number> = risk.probabilities ?? { [risk.choice]: 1 };
+	// A malformed answer (a value outside 0-1, or a distribution that does not sum to 1) lets the call through.
+	const values = Object.values(probabilities);
+	if (!values.every(isProbability) || Math.abs(values.reduce((sum, p) => sum + p, 0) - 1) > DISTRIBUTION_SLACK) {
+		return undefined;
+	}
 	let riskProbability = 0;
 	let top: RiskLabel | undefined;
 	for (const label of RISK_LABELS) {
 		const p = probabilities[label] ?? 0;
-		if (!Number.isFinite(p)) return undefined;
 		riskProbability += p;
 		if (top === undefined || p > (probabilities[top] ?? 0)) top = label;
 	}
-	if (top === undefined || !Number.isFinite(asked.noul)) return undefined;
+	if (top === undefined || !isProbability(asked.noul)) return undefined;
 	if (riskProbability < thresholds.risk || asked.noul >= thresholds.asked) return undefined;
 	const rubric = QUESTIONS.risk.criteria[top] ?? top;
 	return {
@@ -813,7 +970,11 @@ export class ToolGuard {
 			const allowances = cfgToolGuardAllowances.get(authority)?.trim();
 			const command = call.toolName === "bash" ? stringArg(call.args, "command") : undefined;
 			const runIn = stringArg(call.args, "cwd");
-			const scripts = command === undefined ? [] : scriptsRun(command, runIn ? path.resolve(cwd, runIn) : cwd);
+			// Resolved as bash resolves it (`~` expanded); a URL directory runs its process in the session's.
+			const urlCwd = runIn?.includes("://") === true;
+			const runDir = runIn && !urlCwd ? resolveToCwd(runIn, cwd) : cwd;
+			const scripts = command === undefined || urlCwd ? [] : scriptsRun(command, runDir);
+			const processDir = processDirectory(command, runIn, cwd);
 			const shown: JsonValue[] = [];
 			for (const file of scripts) shown.push({ path: file, content: await readScript(file) });
 			const state: Record<string, JsonValue> = {
@@ -832,7 +993,7 @@ export class ToolGuard {
 			};
 			const pressure = await untilAborted(
 				deadline,
-				this.#host.hostPressure ? this.#host.hostPressure() : readHostPressure(cwd),
+				this.#host.hostPressure ? this.#host.hostPressure(processDir) : readHostPressure(processDir),
 			).catch(() => undefined);
 			if (pressure) state.host = summarizeHostPressure(pressure);
 			// A judge that ignores its signal still cannot hold the call past the deadline or an abort.

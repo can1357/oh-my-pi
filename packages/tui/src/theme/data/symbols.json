@@ -850,6 +850,13 @@
 			"key.right": "Right"
 		}
 	},
+	"fallbacks": {
+		"status.success": "✓",
+		"status.done": "✓",
+		"status.warning": "▲",
+		"status.aborted": "■",
+		"checkbox.checked": "▣"
+	},
 	"spinners": {
 		"unicode": {
 			"status": ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],

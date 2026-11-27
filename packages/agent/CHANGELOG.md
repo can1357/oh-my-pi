@@ -2,14 +2,16 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added optional `AgentTool.matcherSections(args)` hook returning each touched file's section of a multi-file payload, so pre-execution TTSR gates judge each file on its own ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
-
 ### Fixed
 
+- Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
+- Fixed `generateHandoffFromContext` sending no output limit, so a server without its own limit could stream a handoff forever; the request is now capped at `MAX_SUMMARY_TOKENS` and ends as an incomplete-output failure ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
 - Corrected OpenTelemetry chat spans to report the model that actually served the response.
+
+### Added
+
+- Added optional `AgentTool.matcherSections(args)` hook returning each touched file's section of a multi-file payload, so pre-execution TTSR gates judge each file on its own ([#19893](https://github.com/can1357/oh-my-pi/pull/19893) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.1] - 2026-11-25
 

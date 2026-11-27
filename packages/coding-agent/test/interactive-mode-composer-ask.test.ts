@@ -119,4 +119,31 @@ describe("composer under a waiting ask", () => {
 		expect(composerRoles().has("omp.composer.skip")).toBe(false);
 		expect(composerRoles().has("omp.composer.send")).toBe(true);
 	});
+
+	// The `ask` tool shows the HTML form; extensions' `ui.askDialog` shows the rich ask dialog.
+	it.each([
+		["ask tool form", (signal: AbortSignal) => mode.getToolUIContext()?.formDialog?.(FORM, { signal })],
+		[
+			"ask dialog",
+			(signal: AbortSignal) =>
+				mode
+					.getToolUIContext()
+					?.askDialog?.([{ id: "go", question: "Proceed?", options: [{ label: "Yes" }, { label: "No" }] }], {
+						signal,
+					}),
+		],
+	] as const)("lets Alt+L reset the display while the %s holds the keys (#20771)", async (surface, open) => {
+		const reset = vi.spyOn(mode, "resetDisplayAfterAppearanceRefresh").mockImplementation(() => {});
+		const abort = new AbortController();
+		const ask = open(abort.signal);
+		if (!ask) throw new Error(`the interactive mode offers no ${surface}`);
+		await term.settle();
+		expect(mode.shell.focused()?.props().role).toBe("omp.ask.card");
+
+		term.press("alt+l");
+		await term.settle();
+		expect(reset).toHaveBeenCalledTimes(1);
+		abort.abort();
+		await ask;
+	});
 });

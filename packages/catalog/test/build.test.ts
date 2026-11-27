@@ -257,7 +257,6 @@ describe("buildModel", () => {
 		const cases: [string, string][] = [
 			["Anthropic: Claude Opus 4.6 (Fast) ($$$$)", "Claude Opus 4.6 (Fast)"],
 			["Claude Opus 4.5 (latest)", "Claude Opus 4.5"],
-			["Gemini 2.5 Flash (Thinking) (Antigravity)", "Gemini 2.5 Flash (Thinking)"],
 			["Stealth: Claude Opus 4.6 (20% off)", "Claude Opus 4.6"],
 			["NousResearch: Hermes 2 Pro (retires Jun 5)", "Hermes 2 Pro"],
 			["Z.ai: GLM 5", "GLM 5"],

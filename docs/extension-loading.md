@@ -2,8 +2,6 @@
 
 This document covers how the coding agent discovers and loads extension modules at startup. Scanned native/configured directories auto-discover `.ts` and `.js`; explicitly named files and installed-plugin manifest entries may also use `.mjs` and `.cjs`.
 
-It does **not** cover [`gemini-extension.json` manifest extensions](./gemini-manifest-extensions.md), which are documented separately.
-
 ## What this subsystem does
 
 Extension loading builds an ordered list of module entry files, imports the modules concurrently with Bun, then binds their factories sequentially in path order. It returns:
@@ -123,7 +121,7 @@ Behavior split:
   `extensions:` settings and installed OMP extension packages are excluded from
   that sibling surface.
 - Executable custom tool and custom command modules follow the same
-  explicit-only contract: ambient `.omp/tools`, `.claude/tools`, `.codex/tools`,
+  explicit-only contract: ambient `.omp/tools`,
   marketplace and installed-plugin tools are not imported, and no custom
   command modules are loaded. Tools under explicitly named extension packages'
   `tools/` directories still load.

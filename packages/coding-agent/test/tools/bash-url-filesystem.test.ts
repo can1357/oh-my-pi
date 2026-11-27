@@ -36,7 +36,7 @@ afterEach(async () => {
 });
 
 async function run(command: string, cwd?: string): Promise<{ text: string; isError: boolean | undefined }> {
-	const result = await new BashTool(session).execute("call", { command, ...(cwd ? { cwd } : {}) });
+	const result = await new BashTool(session).execute("call", { command: cwd ? `cd ${cwd} && ${command}` : command });
 	return { text: result.content.find(c => c.type === "text")?.text ?? "", isError: result.isError };
 }
 

@@ -8,10 +8,10 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
-import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { replaceTabs, truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { argsSummaryCells } from "../../tools/args";
 import type { McpTerm } from "../../tools/mcp";
-import { expandHint, moreLinesHint, spinnerGlyph } from "./frame";
+import { expandHint, hangingWrap, moreLinesHint, spinnerGlyph } from "./frame";
 import { COLLAPSED_TREE, EXPANDED_TREE, jsonTreeRows } from "./json-tree";
 import { defineToolLook, toolProps } from "./look";
 import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
@@ -36,7 +36,12 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 		if (term.args) {
 			const summary = argsSummaryCells(term.args, Math.max(SUMMARY_MIN, cx.width - 4));
 			callRows.push(
-				...wrap(` ${theme.fg("dim", theme.symbols.symbol("tree.last"))} ${theme.fg("dim", summary)}`, cx.width),
+				...hangingWrap(
+					` ${theme.fg("dim", theme.symbols.symbol("tree.last"))} `,
+					"    ",
+					theme.fg("dim", summary),
+					cx.width,
+				),
 			);
 		}
 	}
@@ -54,7 +59,9 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 	const output: string[] = [];
 	let hint: string | undefined;
 	if (term.json !== undefined) {
-		output.push(...jsonTreeRows(theme, term.json, expanded ? EXPANDED_TREE : COLLAPSED_TREE).rows);
+		// Tree rows are cut to the width: a wrapped row would restart left of its gutter.
+		const tree = jsonTreeRows(theme, term.json, expanded ? EXPANDED_TREE : COLLAPSED_TREE).rows;
+		output.push(...tree.map(row => truncate(row, cx.width)));
 		if (!expanded) hint = expandHint(theme);
 	} else {
 		const text = term.error ?? term.text;
@@ -78,7 +85,14 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 		}
 	}
 	const lines =
-		expanded && term.args ? [theme.fg("dim", "Args"), ...jsonTreeRows(theme, term.args).rows, "", ...output] : output;
+		expanded && term.args
+			? [
+					theme.fg("dim", "Args"),
+					...jsonTreeRows(theme, term.args).rows.map(row => truncate(row, cx.width)),
+					"",
+					...output,
+				]
+			: output;
 	for (const line of lines) rows.push(...(line === "" ? [""] : wrap(line, cx.width)));
 	if (hint) rows.push(...wrap(hint, cx.width));
 	return { rows };

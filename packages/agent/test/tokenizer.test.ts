@@ -644,7 +644,6 @@ describe("countMessage replayed thinking", () => {
 		["another Gemini model's turn to Gemini", gemini, reader("google", "gemini-3-flash-preview"), false],
 		["a Claude turn to Factory Gemini", factoryGemini, reader("anthropic", "claude-opus-5-5"), false],
 		["Factory Gemini's own turn", factoryGemini, { ...factoryGemini, api: "google-generative-ai" }, true],
-		["a Gemini CLI turn to Factory Gemini", factoryGemini, { ...gemini, api: "google-gemini-cli" }, true],
 		["another GLM's turn to a compatible Anthropic endpoint", glm, getBundledModel("zai", "glm-5.2") as Model, true],
 		[
 			"a MiniMax turn to a compatible Anthropic endpoint",

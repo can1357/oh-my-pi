@@ -55,6 +55,8 @@ import type {
 	OAuthLoginIdentity,
 	OAuthProviderId,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	ObservedUsageInput,
 	Provider,
 	RedeemResetCreditOptions,
@@ -219,6 +221,10 @@ export type AuthStorageProtocol = {
 	"oauth.refresh": RpcMethod<
 		[id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions],
 		AuthCredentialSnapshotEntry
+	>;
+	"oauth.signOut": RpcMethod<
+		[provider: string, credentialId: number, options?: OAuthSignOutOptions],
+		OAuthSignOutResult
 	>;
 
 	"sessions.pin": RpcMethod<

@@ -16,10 +16,9 @@ behavior {
 	// `opencode` key now maps to `opencode-zen`, so fresh discovery never emits
 	// it, but its legacy rows survived as previous-snapshot zombies (no
 	// descriptor makes it authoritative to prune), surfacing a dead, un-authable
-	// `opencode` provider in the picker. `google-gemini-cli` was removed as a
-	// standalone provider; its `google-gemini-cli` API id remains for
-	// Antigravity/custom users.
-	retired-providers "wafer-pass" "wandb" "opencode" "google-gemini-cli"
+	// `opencode` provider in the picker. `google-gemini-cli` and
+	// `google-antigravity` were removed outright.
+	retired-providers "wafer-pass" "wandb" "opencode" "google-gemini-cli" "google-antigravity"
 
 	// ClinePass exposes gateway-specific limits, pricing, and reasoning
 	// controls; matching them by bare model id contaminates unrelated proxy
@@ -30,7 +29,7 @@ behavior {
 	// These hosts reuse an unchanged message prefix across turns; history
 	// rewrites otherwise discard their warm prompt cache.
 	append-only-context-providers "deepseek" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" \
-		"google-antigravity" "google" "google-vertex"
+		"google" "google-vertex"
 
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
@@ -63,23 +62,6 @@ behavior {
 		fallback "auto" substring="composer"
 	}
 
-	// Antigravity reports backend-family counters, with a separate weekly bucket
-	// for Gemini 4 Argon. Exact memberships cover bundled/current ids; fallbacks
-	// preserve the same counter for newly discovered family ids.
-	quota-tiers provider="google-antigravity" {
-		tier "anthropic" "claude-opus-4-6"
-		tier "google-argon" "gemini-4-argon"
-		tier "google" "gemini-3-pro" "gemma-3" "tab_flash_lite_preview" \
-			"tab_jump_flash_lite_preview"
-		tier "openai" "gpt-oss-120b" "openai/gpt-oss-120b"
-		fallback "anthropic" substring="claude-"
-		fallback "google-argon" substring="gemini-4-argon"
-		fallback "google" substring="gemini-"
-		fallback "google" substring="gemma-"
-		fallback "google" substring="tab_"
-		fallback "openai" substring="gpt-"
-		fallback "openai" substring="openai/"
-	}
 	// Codex Spark consumes an independent meter. The broad chat fallback follows
 	// Spark so the specific suffix wins for discovered ids.
 	quota-tiers provider="openai-codex" {
@@ -208,10 +190,6 @@ behavior {
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
 		prefix="grok-imagine-video" prefix="grok-stt-" prefix="grok-voice-"
-	// Antigravity still advertises the Gemini 3.5 Flash wire ids, but every
-	// request to them answers with a retirement notice instead of a reply.
-	// `gemini-3-flash` is the family's recycled alias and routes to the same ids.
-	exclude-models provider="google-antigravity" exact="gemini-3.5-flash" exact="gemini-3-flash"
 	// Meta's /v1/models lists image generation and transcription SKUs beside
 	// the Muse Spark chat models, and SAM segmentation beside them.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-" prefix="sam-"
@@ -379,6 +357,15 @@ behavior {
 		limits "kimi-for-coding" max-tokens=32768
 		limits "kimi-for-coding-highspeed" max-tokens=32768
 	}
+	// Same per-family output ceilings for the global (kimi.ai) deployment.
+	model-limits provider="kimi-code-global" {
+		limits "k3" max-tokens=131072
+		limits "k3-256k" max-tokens=131072
+		limits "k3.1-pro" max-tokens=131072
+		limits "k3.1-pro-highspeed" max-tokens=131072
+		limits "kimi-for-coding" max-tokens=32768
+		limits "kimi-for-coding-highspeed" max-tokens=32768
+	}
 	// Bedrock lists conversational SKUs OMP cannot drive over Converse
 	// tool-calling: Jamba, Titan Text Express, and Mistral 7B v0.
 	exclude-models provider="amazon-bedrock" prefix="ai21.jamba" prefix="amazon.titan-text-express" \
@@ -400,26 +387,12 @@ behavior {
 		limits "minimax-m2.5" context=196608 max-tokens=32768
 	}
 
-	// Antigravity discovery reports no pricing (the subscription bills through
-	// Google); price rows at their first-party equivalents, Vertex before
-	// Anthropic for Claude ids. Aliases map ids whose peer ships differently.
-	pricing-peer provider="google-antigravity" peers="google" "google-vertex" "anthropic" {
-		alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
-		alias "gemini-3.1-pro" peer-id="gemini-3.1-pro-preview"
-		alias "claude-opus-4-5" peer-id="claude-opus-4-5@20251101"
-		alias "claude-opus-4-6" peer-id="claude-opus-4-6@default"
-		alias "claude-sonnet-4-5" peer-id="claude-sonnet-4-5@20250929"
-		alias "claude-sonnet-4-6" peer-id="claude-sonnet-4-6@default"
-		alias "claude-opus-5-5" peer-id="claude-opus-5-5@default"
-		alias "claude-sonnet-5-5" peer-id="claude-sonnet-5-5@default"
-	}
 	// SuperGrok surfaces a few models under IDs that differ from their public
 	// xai equivalent, so the exact-id price mirror misses them.
 	pricing-peer provider="xai-oauth" peers="xai" {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
 	}
-	// Token Plan rows report zero cost upstream; like the Antigravity and
-	// SuperGrok rules above, they show the pay-as-you-go equivalent (Credits
+	// Token Plan rows report zero cost upstream; like the SuperGrok rules above, they show the pay-as-you-go equivalent (Credits
 	// overflow is billed at the PAYG list price). MiniMax-M3.1-Flash-Preview has
 	// no published price and borrows the MiniMax-M3 rate as an estimate.
 	pricing-peer provider="minimax-code" peers="minimax" {
@@ -437,7 +410,6 @@ behavior {
 		model "claude-haiku-5.5"
 		model "haiku-5-5"
 		model "haiku-5.5"
-		model "google-antigravity/gemini-3.8-flash"
 		model "gemini-3.8-flash"
 		model "gemini-3-8-flash"
 		model "gemini-3.7-flash"
@@ -510,7 +482,6 @@ behavior {
 	role-defaults "image" {
 		model "openai/gpt-image-2"
 		model "openai-codex/gpt-image-2"
-		model "google-antigravity/gemini-3-pro-image"
 		model "xai/grok-imagine-image"
 		model "xai-oauth/grok-imagine-image"
 		model "openrouter/google/gemini-3-pro-image"

@@ -57,7 +57,7 @@ describe("MCPManager connection status events", () => {
 		const manager = new MCPManager(workDir);
 		const events: McpConnectionStatusEvent[] = [];
 		const missingCommand = path.join(workDir, "missing-mcp-server");
-		const configPath = path.join(os.homedir(), ".codex", "config.toml");
+		const configPath = path.join(workDir, ".codex", "config.toml");
 
 		try {
 			const result = await manager.connectServers(
@@ -72,7 +72,7 @@ describe("MCPManager connection status events", () => {
 						provider: "codex",
 						providerName: "Codex",
 						path: configPath,
-						level: "user",
+						level: "project",
 					},
 				},
 				event => events.push(event),

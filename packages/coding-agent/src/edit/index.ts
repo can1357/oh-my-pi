@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,6 +26,7 @@ import {
 	type EditWriteRequest,
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import {
@@ -263,7 +265,7 @@ function mergeDiagnosticsWithWarnings(
 	};
 }
 
-function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFileResult {
+function toPerFileResult(file: EditFileOutcome, mode: EditMode, checkoutNotice?: string): EditToolPerFileResult {
 	let diagnostics = parseDiagnostics(file.diagnosticsJson);
 	if (mode === "patch" || mode === "apply_patch") {
 		diagnostics = mergeDiagnosticsWithWarnings(diagnostics, file.warnings);
@@ -271,6 +273,7 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 	const resultPath = file.moveTo ?? file.path;
 	return {
 		path: resultPath,
+		checkoutNotice,
 		diff: file.diff,
 		firstChangedLine: file.firstChangedLine,
 		diagnostics,
@@ -286,9 +289,58 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 	};
 }
 
-function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): EditToolDetails | undefined {
+function createCheckoutNotice(cwd: string): ((target: string) => string | undefined) | undefined {
+	try {
+		const sessionRepo = vcs.git(cwd);
+		if (!sessionRepo) return undefined;
+		const session = sessionRepo.info();
+		// Git may record a linked worktree's gitdir through a resolved symlink (macOS `/var` → `/private/var`).
+		const sessionCommonDir = realpathSync(session.commonDir);
+		const sessionGitDir = realpathSync(session.gitDir);
+		const byDirectory = new Map<string, string | undefined>();
+		let sessionBranch: string | undefined;
+		return target => {
+			if (!path.isAbsolute(target)) return undefined;
+			const dir = path.dirname(target);
+			if (byDirectory.has(dir)) return byDirectory.get(dir);
+			let note: string | undefined;
+			try {
+				const targetRepo = vcs.git(dir);
+				const checkout = targetRepo?.info();
+				if (
+					targetRepo &&
+					checkout &&
+					realpathSync(checkout.commonDir) === sessionCommonDir &&
+					realpathSync(checkout.gitDir) !== sessionGitDir
+				) {
+					if (sessionBranch === undefined) {
+						const sessionHead = sessionRepo.headSync();
+						sessionBranch = sessionHead.branch ?? sessionHead.commit?.slice(0, 8);
+					}
+					const targetHead = targetRepo.headSync();
+					const targetBranch = targetHead.branch ?? targetHead.commit?.slice(0, 8);
+					if (sessionBranch && targetBranch) note = `Edited worktree: ${targetBranch} (session: ${sessionBranch})`;
+				}
+			} catch (error) {
+				logger.debug("Could not resolve edited worktree", { error: String(error) });
+			}
+			byDirectory.set(dir, note);
+			return note;
+		};
+	} catch (error) {
+		logger.debug("Could not resolve session checkout for edit", { error: String(error) });
+		return undefined;
+	}
+}
+
+function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode, cwd: string): EditToolDetails | undefined {
 	if (files.length === 0) return undefined;
-	const perFileResults = files.map(file => toPerFileResult(file, mode));
+	const checkoutNotice = createCheckoutNotice(cwd);
+	const perFileResults = files.map(file => {
+		const notice =
+			checkoutNotice?.(file.moveTo ?? file.path) ?? (file.moveTo ? checkoutNotice?.(file.path) : undefined);
+		return toPerFileResult(file, mode, notice);
+	});
 	if (perFileResults.length === 1) {
 		const [file] = perFileResults;
 		return {
@@ -299,6 +351,7 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
 			move: file.move,
 			sourcePath: file.sourcePath,
 			path: file.path,
+			checkoutNotice: file.checkoutNotice,
 			oldText: file.oldText,
 			newText: file.newText,
 			snapshotsPruned: file.snapshotsPruned,
@@ -778,13 +831,17 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode);
+		const details = aggregateDetails(outcome.files, this.mode, this.session.cwd);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),
 		};
 		const record = createEditBlackboxRecorder(this.session, this.mode, params);
 		const notes: string[] = [];
+		if (details?.checkoutNotice) notes.push(details.checkoutNotice);
+		for (const file of details?.perFileResults ?? []) {
+			if (file.checkoutNotice) notes.push(`${file.checkoutNotice} — ${path.relative(this.session.cwd, file.path)}`);
+		}
 		for (const file of outcome.files) {
 			if (!file.parseRegressed || file.oldText === undefined || file.newText === undefined) continue;
 			const snapshot: AppliedEditSnapshot = {

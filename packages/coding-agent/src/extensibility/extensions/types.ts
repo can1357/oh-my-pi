@@ -2176,8 +2176,9 @@ export interface ExtensionAPI {
 	 * full. Never mutate the block's `args` or `result`: they are omp's live objects. omp may ask
 	 * again at any time (a transcript rebuild, a data change) and keeps no earlier answer: answer
 	 * from the block and the extension's own state only, keyed by block id rather than by run. A
-	 * block the user expanded is always drawn in full, and `display.hideToolActivity` still hides
-	 * tool activity. A focused subagent, a collab guest and the transcript overlays draw stock
+	 * block the user expanded is always drawn in full, and `display.toolActivity: hidden` still hides
+	 * tool activity; a tool call no presenter answers for draws as `display.toolActivity` says (one
+	 * activity row under `concise`). A focused subagent, a collab guest and the transcript overlays draw stock
 	 * cards. Display only: the session, exports and model context are unchanged. Returns a
 	 * disposer that removes the presenter. Presenters run synchronously while the transcript draws,
 	 * so keep them cheap. Interactive mode only, and only while the
