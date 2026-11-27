@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type as schemaType } from "@oh-my-pi/omptype";
 import { streamAzureOpenAIResponses } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -51,7 +51,6 @@ const LOOKUP_TOOL: Tool = {
 const httpModel = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 
 const cleanups: Array<() => unknown> = [];
-const originalAgentDir = piUtils.getAgentDir();
 const originalWebSocket = global.WebSocket;
 
 beforeEach(() => {
@@ -59,11 +58,26 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) await cleanup();
+	// Last in, first out: a later override is undone before the one it saw.
+	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	global.WebSocket = originalWebSocket;
-	piUtils.setAgentDir(originalAgentDir);
 	vi.restoreAllMocks();
 });
+
+/** The process-wide profile selection that `setAgentDir` and `setProfile` rewrite. */
+const PROFILE_ENV_KEYS = ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+
+/** Snapshot the profile env; the returned function puts it back and rebuilds the profile and dirs from it. */
+function saveProfileState(): () => void {
+	const saved = PROFILE_ENV_KEYS.map(key => [key, process.env[key]] as const);
+	return () => {
+		for (const [key, value] of saved) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		piUtils.__resetDirsFromEnvForTests();
+	};
+}
 
 function withCreatedBy<T extends Record<string, unknown>>(item: T, createdBy: CreatedBy): T {
 	return createdBy === undefined ? item : { ...item, created_by: createdBy };
@@ -273,9 +287,13 @@ class CodexStubSocket {
 }
 
 function codexWebSocketRoute(createdBy: CreatedBy): ChainRoute {
+	const restoreProfileState = saveProfileState();
 	const tempDir = piUtils.TempDir.createSync("@pi-created-by-replay-");
 	piUtils.setAgentDir(tempDir.path());
-	cleanups.push(() => tempDir.remove());
+	cleanups.push(() => {
+		restoreProfileState();
+		return tempDir.remove();
+	});
 	const requests: Array<Record<string, unknown>> = [];
 	global.WebSocket = class extends CodexStubSocket {
 		constructor(url: string) {
@@ -334,11 +352,13 @@ async function runChain(route: ChainRoute, createdBy: CreatedBy) {
 	return { requests: route.requests(), stored: [...storedItems(first), ...storedItems(second)] };
 }
 
-describe.each([
+const CHAIN_ROUTES = [
 	["the HTTP route", httpRoute],
 	["the Responses WebSocket session", webSocketRoute],
 	["the Codex WebSocket session", codexWebSocketRoute],
-] as const)("created_by on %s", (_route, makeRoute) => {
+] as const;
+
+describe.each(CHAIN_ROUTES)("created_by on %s", (_route, makeRoute) => {
 	it.each(CREATED_BY_VALUES)(
 		"replays stored items without created_by (%s) and still chains the next request",
 		async (_label, createdBy) => {
@@ -361,6 +381,45 @@ describe.each([
 			expect(inputs).toEqual(control.requests.map(inputOf));
 		},
 	);
+});
+
+// ============================================================================
+// Teardown: a later test, or a later file in the same process, keeps its profile
+// ============================================================================
+
+interface ProfileState {
+	profile: string | undefined;
+	agentDir: string;
+	env: Array<string | undefined>;
+}
+
+function profileState(): ProfileState {
+	return {
+		profile: piUtils.getActiveProfile(),
+		agentDir: piUtils.getAgentDir(),
+		env: PROFILE_ENV_KEYS.map(key => process.env[key]),
+	};
+}
+
+describe("teardown under a named profile", () => {
+	let restoreProfileState: () => void;
+	let selected: ProfileState;
+	beforeAll(() => {
+		restoreProfileState = saveProfileState();
+		piUtils.setProfile("created-by-teardown");
+		selected = profileState();
+	});
+	afterAll(() => restoreProfileState());
+
+	// Each case first reads what the teardown of the case before it left.
+	it.each(CHAIN_ROUTES)("finds the profile still selected, then runs a case on %s", async (_route, makeRoute) => {
+		expect(profileState()).toEqual(selected);
+		await runChain(makeRoute(null), null);
+	});
+
+	it("finds the profile still selected after the last case", () => {
+		expect(profileState()).toEqual(selected);
+	});
 });
 
 // ============================================================================
