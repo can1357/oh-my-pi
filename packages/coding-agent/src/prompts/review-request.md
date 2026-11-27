@@ -17,11 +17,11 @@
 Index is the file's 1-based position in the full PR diff; excluded files leave gaps. Assign each file with its exact Diff URL below.
 
 {{#table files headers="Index|File|+/-|Type|Diff URL"}}
-{{diffIndex}} | {{path}} | +{{linesAdded}}/-{{linesRemoved}} | {{ext}} | `{{diffUrl}}`
+{{diffIndex}} | {{path}}{{#if renamedFrom}} (from `{{renamedFrom}}`){{/if}} | +{{linesAdded}}/-{{linesRemoved}} | {{ext}} | `{{diffUrl}}`
 {{/table}}
 {{else}}
 {{#table files headers="File|+/-|Type"}}
-{{path}} | +{{linesAdded}}/-{{linesRemoved}} | {{ext}}
+{{path}}{{#if renamedFrom}} (from `{{renamedFrom}}`){{/if}} | +{{linesAdded}}/-{{linesRemoved}} | {{ext}}
 {{/table}}
 {{/if}}
 {{else}}
@@ -51,8 +51,8 @@ Group files by locality, e.g.:
 
 Reviewer MUST:
 1. Focus ONLY on assigned files
-2. {{#if skipDiff}}{{#if prDiffUrl}}MUST read assigned PR file diffs using the exact Diff URL in the Changed Files table or `{{prDiffUrl}}/all{{prDiffQuery}}`; NEVER use local `git diff`/`git show` for PR diff content{{else}}{{#if diffInstruction}}{{diffInstruction}}{{else}}MUST run `git diff`/`git show` for assigned files{{/if}}{{/if}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
-3. {{#if suppliedPatch}}NEVER read local workspace files for file context; the supplied diff may not match the checkout{{else}}{{#if prDiffUrl}}NEVER read local workspace files for PR file context; use the fetched PR diff, the exact Diff URL in the Changed Files table, or `{{prDiffUrl}}/all{{prDiffQuery}}` only{{else}}{{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}{{/if}}{{/if}}
+2. {{#if skipDiff}}{{#if prDiffUrl}}MUST read assigned PR file diffs using the exact Diff URL in the Changed Files table or `{{prDiffUrl}}/all{{prDiffQuery}}`; NEVER use local `git diff`/`git show` for PR diff content{{else}}{{#if rangeBase}}MUST run `git diff {{rangeBase}}..{{rangeHead}} -- <assigned paths>` for assigned files; for a renamed or copied file include both its source and destination paths from the Changed Files table; NEVER use the working tree or a symbolic ref{{else}}{{#if diffInstruction}}{{diffInstruction}}{{else}}MUST run `git diff`/`git show` for assigned files{{/if}}{{/if}}{{/if}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
+3. {{#if suppliedPatch}}NEVER read local workspace files for file context; the supplied diff may not match the checkout{{else}}{{#if prDiffUrl}}NEVER read local workspace files for PR file context; use the fetched PR diff, the exact Diff URL in the Changed Files table, or `{{prDiffUrl}}/all{{prDiffQuery}}` only{{else}}{{#if rangeHead}}MUST read file context with `git show {{rangeHead}}:<path>`; for deleted paths use `git show {{rangeBase}}:<path>`; for a rename's source path use `git show {{rangeBase}}:<path>`; for submodule/gitlink paths use `git ls-tree` or the submodule diff; NEVER trust the working tree{{else}}{{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}{{/if}}{{/if}}{{/if}}
 4. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
 
 {{#if skipDiff}}
@@ -81,3 +81,7 @@ _Full diff too large ({{len files}} files). Showing first ~{{linesPerFile}} line
 
 {{additionalInstructions}}
 {{/if}}
+
+### Final Response
+
+After every reviewer task finishes, your final response MUST contain the complete consolidated review, including all findings, file and line references, severity, verdicts, reviewed scope, and any reviewer errors. Do not replace the findings with a status-only or process-only summary.

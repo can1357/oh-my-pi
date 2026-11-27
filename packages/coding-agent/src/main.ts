@@ -1397,6 +1397,8 @@ export async function createSessionManager(
 	options: {
 		nativeFlagOwnership?: "preliminary" | "resolved";
 		onSessionContinuation?: (continuation: SessionContinuation) => void;
+		/** Start a new session even when auto-resume is configured. */
+		freshSession?: boolean;
 	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
@@ -1509,7 +1511,7 @@ export async function createSessionManager(
 	// buildSessionOptions restores the session's model/thinking instead of
 	// overriding them with CLI defaults.
 	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
-	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
+	if (parsed.goal === undefined && !options.freshSession && cfgAutoResume.get(activeSettings)) {
 		const manager = await forkIfMovedAway(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
@@ -1970,6 +1972,10 @@ interface RunRootCommandDependencies {
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
+	/** Prebuilt or extension-aware first prompt for a subcommand-owned single-shot run. */
+	initialPrompt?: string | ((parsed: Args, settings: Settings) => string);
+	/** Do not inherit autoResume for a subcommand-owned single-shot run. */
+	freshSession?: boolean;
 }
 const DEFAULT_RUN_ROOT_DEPENDENCIES: RunRootCommandDependencies = {};
 
@@ -1996,6 +2002,10 @@ export async function runRootCommand(
 		logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
+		if (deps.initialPrompt !== undefined) {
+			parsedArgs.print = true;
+			if (typeof deps.initialPrompt !== "function") parsedArgs.messages = [];
+		}
 		try {
 			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 		} catch (error: unknown) {
@@ -2077,15 +2087,22 @@ export async function runRootCommand(
 		// See getDbBusyTimeoutMs().
 		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
-		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
+		const pipedInput =
+			isProtocolMode || deps.initialPrompt !== undefined
+				? undefined
+				: await logger.time("readPipedInput", readPipedInput);
 		// Without a terminal on stdin the TUI cannot run, so such a launch is always
 		// headless: a piped or argv prompt runs like `-p`, and one with no prompt
 		// fails with a usage error instead of booting the interactive stack and
 		// exiting silently.
 		const stdinIsTerminal = process.stdin.isTTY === true;
 		const autoPrint =
-			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
-		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+			deps.initialPrompt === undefined &&
+			(pipedInput !== undefined || !stdinIsTerminal) &&
+			!parsedArgs.print &&
+			parsedArgs.mode === undefined;
+		const isInteractive =
+			deps.initialPrompt === undefined && !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
 		// The TUI owns the Tern pane or cmux workspace it draws in; an omp its commands start sees the claim and
 		// keeps its browser tabs out of this session's pane.
 		if (isInteractive) claimTerminal();
@@ -2365,6 +2382,7 @@ export async function runRootCommand(
 					isProtocolMode ? keepSessionInPlace : promptMoveSession,
 					{
 						nativeFlagOwnership: "preliminary",
+						freshSession: deps.freshSession === true,
 						onSessionContinuation: continuation => resumedContinuations.push(continuation),
 					},
 				);
@@ -2686,6 +2704,10 @@ export async function runRootCommand(
 				},
 			};
 			const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
+			if (deps.initialPrompt !== undefined) {
+				initialArgs.print = true;
+				if (typeof deps.initialPrompt !== "function") initialArgs.messages = [];
+			}
 			normalizeContinueSessionArgs(initialArgs, rawArgs);
 			try {
 				validateSessionPersistenceArgs(initialArgs);
@@ -2730,6 +2752,12 @@ export async function runRootCommand(
 					cfgPlanDefaultOnStartup.get(settingsInstance) && cfgPlanEnabled.get(settingsInstance),
 				);
 			}
+			const extensionAwareInitialPrompt =
+				typeof deps.initialPrompt === "function" ? deps.initialPrompt(initialArgs, settingsInstance) : undefined;
+			if (extensionAwareInitialPrompt !== undefined) {
+				initialArgs.messages = [];
+				initialArgs.fileArgs = [];
+			}
 			if (autoPrintNeedsArgPrompt && initialArgs.messages.length === 0 && initialArgs.fileArgs.length === 0) {
 				exitWithoutTerminal();
 			}
@@ -2741,12 +2769,16 @@ export async function runRootCommand(
 							}),
 						)
 					: undefined;
-			const { initialMessage, initialImages } = buildInitialMessage({
+			const builtInitialMessage = buildInitialMessage({
 				parsed: initialArgs,
 				fileText: processedFiles?.text,
 				fileImages: processedFiles?.images,
 				stdinContent: pipedInput,
 			});
+			const initialMessage =
+				extensionAwareInitialPrompt ??
+				(typeof deps.initialPrompt === "string" ? deps.initialPrompt : builtInitialMessage.initialMessage);
+			const initialImages = builtInitialMessage.initialImages;
 
 			const showStartupSplash = shouldShowStartupSplash({
 				configured: cfgStartupShowSplash.get(settingsInstance),

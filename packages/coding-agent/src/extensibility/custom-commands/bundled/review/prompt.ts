@@ -21,6 +21,8 @@ type RenderedAnnotation = CodeReviewAnnotation & {
 
 interface ReviewPromptFile {
 	path: string;
+	/** Source path for a rename or copy, when it differs from the destination. */
+	renamedFrom?: string;
 	diffIndex: number;
 	diffUrl?: string;
 	linesAdded: number;
@@ -48,8 +50,10 @@ function renderReviewPromptFile(
 	prDiffUrl?: string,
 	prDiffQuery = "",
 ): ReviewPromptFile {
+	const renamedFrom = file.oldPath && file.newPath && file.oldPath !== file.newPath ? file.oldPath : undefined;
 	return {
 		path: file.path,
+		renamedFrom,
 		diffIndex: file.diffIndex,
 		diffUrl: prDiffUrl ? `${prDiffUrl}/${file.diffIndex}${prDiffQuery}` : undefined,
 		linesAdded: file.linesAdded,
@@ -138,6 +142,8 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 		rawDiff: target.rawDiff.trim(),
 		diffInstruction: target.diffInstruction,
 		contextInstruction: target.contextInstruction,
+		rangeBase: target.rangeBase,
+		rangeHead: target.rangeHead,
 		suppliedPatch: target.kind === "patch",
 		prDiffUrl: target.prDiffUrl,
 		prDiffQuery,

@@ -19,6 +19,7 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- `omp review --base <ref> [--head <ref>]` runs a headless PR-style review of a local revision range ([#20623](https://github.com/can1357/oh-my-pi/pull/20623) by [@suzmii](https://github.com/suzmii))
 
 ### Changed
 

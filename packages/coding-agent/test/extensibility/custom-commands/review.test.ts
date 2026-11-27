@@ -4,6 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings, withActiveSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
+import { buildReviewPrompt } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/prompt";
+import {
+	createResolvedReviewTarget,
+	resolveBaseBranchTarget,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/target";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -36,6 +41,8 @@ const SAMPLE_PR_DIFF = `diff --git a/src/pr.ts b/src/pr.ts
 -export const pr = false;
 +export const pr = true;
 `;
+
+const supportsReftable = (await $`git init -h`.quiet().nothrow().text()).includes("--ref-format");
 
 interface SelectCall {
 	title: string;
@@ -78,6 +85,16 @@ function makeUserEntry(id: string, content: string): SessionEntry {
 			timestamp: Date.now(),
 		},
 	};
+}
+
+async function initGitFixture(dir: string): Promise<VcsGitRepo> {
+	await $`git init -q -b main`.cwd(dir).quiet();
+	const repository = vcs.requireGit(dir);
+	await repository.configSet("user.email", "test@example.com");
+	await repository.configSet("user.name", "Test");
+	await repository.configSet("commit.gpgSign", "false");
+	await repository.configSet("tag.gpgSign", "false");
+	return repository;
 }
 
 interface EditorCall {
@@ -1000,6 +1017,202 @@ describe("ReviewCommand", () => {
 			expect(featureResult).toContain("Reviewing changes between `main` and `feature`");
 			expect(featureResult).toContain("a.txt");
 			expect(featureResult).not.toContain("base-only.txt");
+			// The interactive PR Style keeps its existing prompt contract: the
+			// CLI-only range pinning must not leak into the TUI path.
+			expect(featureResult).toContain("MAY read full file context as needed via `read`");
+			expect(featureResult).not.toContain("git show ");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("pins explicit CLI ranges to exact SHAs and the repository root", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-range-"));
+		try {
+			const repository = await initGitFixture(dir);
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await repository.stageFiles(["a.txt"]);
+			await repository.commitCreate("init", {});
+
+			await repository.checkoutNewBranch("feature");
+			await fs.writeFile(path.join(dir, "a.txt"), "two\n");
+			await repository.stageFiles(["a.txt"]);
+			await repository.commitCreate("feature-change", {});
+
+			// main advances independently; the CLI range must exclude this
+			// base-only commit and review only feature...merge-base.
+			await repository.checkout("main");
+			await fs.writeFile(path.join(dir, "base-only.txt"), "base\n");
+			await repository.stageFiles(["base-only.txt"]);
+			await repository.commitCreate("base-advance", {});
+			await repository.checkout("feature");
+
+			const subdir = path.join(dir, "sub");
+			await fs.mkdir(subdir);
+			const target = await resolveBaseBranchTarget(subdir, "main", "feature", { pinRange: true });
+			const prompt = buildReviewPrompt(target);
+			const featureSha = await repository.resolveRef("feature");
+			const mergeBase = await repository.mergeBase("main", "feature");
+			if (!mergeBase || !featureSha) throw new Error("fixture must resolve main, feature, and their merge base");
+
+			expect(target.rangeBase).toBe(mergeBase);
+			expect(target.rangeHead).toBe(featureSha);
+			expect(prompt).toContain(`### Repository\n\n\`${vcs.repo(dir)!.root()}\``);
+			expect(prompt).toContain(`git show ${featureSha}:<path>`);
+			expect(prompt).toContain(`git show ${target.rangeBase}:<path>`);
+			expect(prompt).toContain("a.txt");
+			expect(prompt).toContain("+two");
+			expect(prompt).not.toContain("base-only.txt");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps exact range SHAs in delegated large-diff instructions", () => {
+		const rawDiff = `diff --git a/big.ts b/big.ts
+--- a/big.ts
++++ b/big.ts
+@@ -1 +1 @@
+-${"a".repeat(30_000)}
++${"b".repeat(30_000)}
+`;
+		const target = createResolvedReviewTarget(
+			"base-branch",
+			"Reviewing a large range (PR-style)",
+			rawDiff,
+			"No changes",
+			{ rangeBase: "111111111111", rangeHead: "222222222222" },
+		);
+
+		const prompt = buildReviewPrompt(target);
+
+		expect(prompt).toContain("your final response MUST contain the complete consolidated review");
+		expect(prompt).toContain("git diff 111111111111..222222222222 -- <assigned paths>");
+		expect(prompt).toContain("git show 222222222222:<path>");
+		expect(prompt).toContain("for deleted paths use `git show 111111111111:<path>`");
+		expect(prompt).not.toContain(rawDiff);
+	});
+
+	it("peels annotated tags before resolving a review range", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-tag-"));
+		try {
+			const repository = await initGitFixture(dir);
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await repository.stageFiles(["a.txt"]);
+			const baseCommit = await repository.commitCreate("init", {});
+			await vcs.tagCreate(dir, "v1", "v1");
+
+			await repository.checkoutNewBranch("feature");
+			await fs.writeFile(path.join(dir, "a.txt"), "two\n");
+			await repository.stageFiles(["a.txt"]);
+			const headCommit = await repository.commitCreate("feature-change", {});
+
+			const target = await resolveBaseBranchTarget(dir, "refs/tags/v1", "feature", { pinRange: true });
+
+			expect(target.rangeBase).toBe(baseCommit);
+			expect(target.rangeHead).toBe(headCommit);
+			expect(target.rawDiff).toContain("+two");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it.skipIf(!supportsReftable)("peels annotated tags in reftable repositories", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-reftable-tag-"));
+		try {
+			// The in-process VCS backend cannot open a reftable repository, so its
+			// fixture plumbing must go through the Git CLI.
+			await $`git init -q --ref-format=reftable --initial-branch=main`.cwd(dir).quiet();
+			await $`git config user.email test@example.com`.cwd(dir).quiet();
+			await $`git config user.name Test`.cwd(dir).quiet();
+			await $`git config commit.gpgSign false`.cwd(dir).quiet();
+			await $`git config tag.gpgSign false`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(dir).quiet();
+			await $`git commit -qm init`.cwd(dir).quiet();
+			const baseCommit = (await $`git rev-parse HEAD`.cwd(dir).quiet().text()).trim();
+			if (!baseCommit) throw new Error("reftable fixture must have a base commit");
+			await vcs.tagCreate(dir, "v1", "v1");
+
+			const repository = vcs.requireGit(dir);
+			const tagObject = await repository.resolveRef("refs/tags/v1");
+			if (!tagObject) throw new Error("reftable fixture must have an annotated tag");
+			const details = await repository.commitDetails(`${tagObject}^{commit}`);
+
+			expect(details.sha).toBe(baseCommit);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps both sides of renamed paths in delegated large-diff assignments", () => {
+		const rename = [
+			"diff --git a/src/old.ts b/src/new.ts",
+			"similarity index 90%",
+			"rename from src/old.ts",
+			"rename to src/new.ts",
+			"--- a/src/old.ts",
+			"+++ b/src/new.ts",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+		].join("\n");
+		const filler = Array.from({ length: 20 }, (_, index) =>
+			[
+				`diff --git a/src/file-${index}.ts b/src/file-${index}.ts`,
+				`--- a/src/file-${index}.ts`,
+				`+++ b/src/file-${index}.ts`,
+				"@@ -1 +1 @@",
+				"-old",
+				"+new",
+			].join("\n"),
+		).join("\n");
+		const target = createResolvedReviewTarget(
+			"base-branch",
+			"Reviewing a large range (PR-style)",
+			`${rename}\n${filler}`,
+			"No changes",
+			{ rangeBase: "111111111111", rangeHead: "222222222222" },
+		);
+
+		const prompt = buildReviewPrompt(target);
+
+		expect(prompt).toContain("src/new.ts (from `src/old.ts`)");
+		expect(prompt).toContain(
+			"for a renamed or copied file include both its source and destination paths from the Changed Files table",
+		);
+		expect(prompt).toContain("for a rename's source path use `git show 111111111111:<path>`");
+	});
+
+	it("directs submodule paths to tree or submodule diff context", () => {
+		const rawDiff = [
+			"diff --git a/vendor b/vendor",
+			"index 1111111..2222222 160000",
+			"--- a/vendor",
+			"+++ b/vendor",
+			"@@ -1 +1 @@",
+			"-Subproject commit 1111111",
+			"+Subproject commit 2222222",
+		].join("\n");
+		const target = createResolvedReviewTarget("base-branch", "Reviewing a range (PR-style)", rawDiff, "No changes", {
+			rangeBase: "111111111111",
+			rangeHead: "222222222222",
+		});
+
+		const prompt = buildReviewPrompt(target);
+
+		expect(prompt).toContain("for submodule/gitlink paths use `git ls-tree` or the submodule diff");
+	});
+
+	it("fails an explicit CLI range on an invalid ref", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-bad-ref-"));
+		try {
+			const repository = await initGitFixture(dir);
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await repository.stageFiles(["a.txt"]);
+			await repository.commitCreate("init", {});
+
+			await expect(resolveBaseBranchTarget(dir, "missing")).rejects.toThrow("Cannot resolve base ref `missing`");
 		} finally {
 			await removeWithRetries(dir);
 		}

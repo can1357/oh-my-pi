@@ -249,6 +249,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.readHelp,
 	},
 	{
+		name: "review",
+		load: () => import("./commands/review").then(m => m.default),
+		help: commandHelp.reviewHelp,
+	},
+	{
 		name: "render",
 		load: () => import("./commands/render").then(m => m.default),
 		help: commandHelp.renderHelp,
@@ -327,7 +332,7 @@ for (const command of commands) {
 }
 
 /** Commands that accept launch-global flags before their command token. */
-export const LAUNCH_FLAG_COMMANDS: Readonly<Record<string, true>> = { launch: true, acp: true };
+export const LAUNCH_FLAG_COMMANDS: Readonly<Record<string, true>> = { launch: true, acp: true, review: true };
 
 /** Whether a token names a registered top-level command or alias. */
 export function isSubcommand(first: string | undefined): boolean {

@@ -92,6 +92,16 @@ export function clone(url, target, options = {}, signal) {
 	return api().vcsGitClone(url, target, options, signal);
 }
 
+/** Create an annotated tag in a Git checkout. */
+export async function tagCreate(dir, name, message, ref = "HEAD") {
+	const repository = requireGit(dir);
+	const result = await $`git tag -a ${name} -m ${message} ${ref}`.cwd(repository.info().repoRoot).quiet().nothrow();
+	if (result.exitCode !== 0) {
+		const detail = result.stderr.toString().trim() || result.stdout.toString().trim();
+		throw vcsError("Cli", detail || `git tag failed with exit code ${result.exitCode}`);
+	}
+}
+
 /** Sever a copied working tree from shared git metadata. */
 export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
 	return api().vcsDetachGitDir(worktreeRoot, sourceCommonDir, signal);

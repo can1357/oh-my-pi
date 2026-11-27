@@ -52,6 +52,39 @@ describe("run() per-command help", () => {
 		expect(writes.join("")).toContain("prints good things");
 		expect(writes.join("")).toContain("--verbose");
 	});
+
+	it("does not treat --help after the options separator as command help", async () => {
+		let ran = false;
+		class TrailingHelpCommand extends Command {
+			static description = "records execution";
+			async run(): Promise<void> {
+				ran = true;
+			}
+		}
+		const commands: CommandEntry[] = [{ name: "run", load: async () => TrailingHelpCommand }];
+
+		await run({ bin: "omp", version: "0.0.0", argv: ["run", "--", "--help"], commands });
+
+		expect(ran).toBe(true);
+	});
+
+	it("delegates help detection to commands that parse values", async () => {
+		let ran = false;
+		class ValueAwareCommand extends Command {
+			static description = "records execution";
+			static isHelpRequest(argv: readonly string[]) {
+				return argv.at(-1) === "--help" && !argv.includes("--prompt");
+			}
+			async run(): Promise<void> {
+				ran = true;
+			}
+		}
+		const commands: CommandEntry[] = [{ name: "run", load: async () => ValueAwareCommand }];
+
+		await run({ bin: "omp", version: "0.0.0", argv: ["run", "--prompt", "--help"], commands });
+
+		expect(ran).toBe(true);
+	});
 });
 
 describe("run() root help", () => {
