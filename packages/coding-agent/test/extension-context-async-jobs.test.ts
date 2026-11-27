@@ -17,6 +17,7 @@ import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-j
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 function createRunner(asyncJobs?: ExtensionAsyncJobAccess): ExtensionRunner {
@@ -178,6 +179,25 @@ describe("ExtensionContext.asyncJobs", () => {
 			expect(text).not.toContain("\u001b");
 			expect(text.length).toBeLessThanOrEqual(ASYNC_JOB_LABEL_MAX_CHARS);
 		}
+		gate.resolve("unused");
+	});
+
+	it("keeps only the tail of an oversized progress report, as a background bash job's output does", async () => {
+		const ctx = await extensionContext();
+		const gate = Promise.withResolvers<string>();
+		const progressed = Promise.withResolvers<void>();
+		const log = Array.from({ length: 20_000 }, (_, line) => `remote log line ${line}`).join("\n");
+		const jobId = ctx.asyncJobs!.register("remote log", async ({ reportProgress }) => {
+			await reportProgress(log);
+			progressed.resolve();
+			return await gate.promise;
+		});
+
+		await progressed.promise;
+		const progress = session!.asyncJobManager!.getJob(jobId)!.progressText!;
+		expect(Buffer.byteLength(progress)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		expect(progress.split("\n").length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
+		expect(progress).toEndWith("remote log line 19999");
 		gate.resolve("unused");
 	});
 

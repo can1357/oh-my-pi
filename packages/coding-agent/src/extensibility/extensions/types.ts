@@ -848,7 +848,10 @@ export interface ExtensionAsyncJobRunContext {
 	jobId: string;
 	/** Aborted when the job is cancelled (by `cancel`, the job list, or session teardown). */
 	signal: AbortSignal;
-	/** Replace the job's latest progress text, which job views show as its output while it runs. */
+	/**
+	 * Replace the job's latest progress text, which job views show as its output while it runs. Like a background
+	 * `bash` job's output, only its last 50 KB (at most 3000 lines) is kept.
+	 */
 	reportProgress(text: string): Promise<void>;
 }
 

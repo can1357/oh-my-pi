@@ -566,7 +566,7 @@ pi.registerTool({
 });
 ```
 
-`options.intent` is the one-line purpose job views show next to the label. The label and intent are each stripped of terminal escapes, collapsed to one line, and cut to 120 characters, since job views render them and every `wait` report repeats them; `reportProgress(text)` replaces the job's latest progress text, which job views show as its output while it runs. `register` throws when the session's running-job limit is reached.
+`options.intent` is the one-line purpose job views show next to the label. The label and intent are each stripped of terminal escapes, collapsed to one line, and cut to 120 characters, since job views render them and every `wait` report repeats them; `reportProgress(text)` replaces the job's latest progress text, which job views show as its output while it runs; like a background `bash` job's output, only its last 50 KB (at most 3000 lines) is kept. `register` throws when the session's running-job limit is reached.
 
 ### External agents (`ctx.agents`)
 
