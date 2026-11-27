@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Auth-gateway `/v1/chat/completions` `response_format` and `/v1/responses` `text.format` structured-output requests now get a 400 instead of being served as unconstrained text ([#20815](https://github.com/can1357/oh-my-pi/issues/20815))
 - Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
 - Speech synthesis rejects a 2xx response with a JSON body as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added xAI speech-to-text support, including use through the authentication gateway.

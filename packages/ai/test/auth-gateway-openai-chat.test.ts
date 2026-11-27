@@ -145,7 +145,6 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 			top_p: 0.9,
 			stop: ["\n\n"],
 			tool_choice: { type: "function", function: { name: "lookup" } },
-			response_format: { type: "json_object" },
 			stream_options: { include_usage: true },
 		});
 
@@ -188,8 +187,19 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(parsed.options.topP).toBe(0.9);
 		expect(parsed.options.stopSequences).toEqual(["\n\n"]);
 		expect(parsed.options.toolChoice).toEqual({ name: "lookup" });
-		expect(parsed.options.responseFormat).toEqual({ type: "json_object" });
 		expect(parsed.options.extra).toEqual({ includeStreamingUsage: true });
+	});
+
+	it("rejects structured-output response_format instead of serving it unconstrained (#20815)", () => {
+		const base = { model: "m", messages: [{ role: "user", content: "hi" }] };
+		const jsonSchema = { type: "json_schema", json_schema: { name: "place", schema: { type: "object" } } };
+		for (const response_format of [jsonSchema, { type: "json_object" }]) {
+			expect(() => parseRequest({ ...base, response_format })).toThrow(
+				/response_format \(structured output\) is unsupported/,
+			);
+		}
+		expect(parseRequest({ ...base, response_format: { type: "text" } }).modelId).toBe("m");
+		expect(parseRequest({ ...base, response_format: null }).modelId).toBe("m");
 	});
 
 	it("replays a client's Gemini signature to the resolved model in the form its transport sends", () => {
