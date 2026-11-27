@@ -710,6 +710,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	// and repairs the one recoverable shape (missing `op`, unambiguous payload).
 	readonly lenientArgValidation = true;
 	readonly stringCoercionError = todoItemStringError;
+	readonly preserveStringsInArrayUnions = true;
 
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {

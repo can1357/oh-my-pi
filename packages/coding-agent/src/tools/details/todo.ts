@@ -1,4 +1,4 @@
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText, tryParseJson } from "@oh-my-pi/pi-utils";
 import { formatMoreItems } from "../../utils/render-utils";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "../../utils/text-width";
@@ -149,13 +149,20 @@ function splitTaskList(content: string, known: ReadonlySet<string>): string[] {
 
 /**
  * Task contents a todo `task` arg targets, shared by the todo tool and its renderer. A string naming
- * a task verbatim is one target; otherwise a string flattening several tasks (`"a; b"`, `"a, b"`,
- * newline- or space-separated) splits like a path list, with parts trimmed and unquoted (see
- * {@link TASK_LIST_DELIMITERS}). Array entries expand the same way; absent, `""` and `[]` target none.
+ * a task verbatim is one target; otherwise a JSON-encoded array is read as a list, and a string
+ * flattening several tasks (`"a; b"`, `"a, b"`, newline- or space-separated) splits like a path list,
+ * with parts trimmed and unquoted (see {@link TASK_LIST_DELIMITERS}). Array entries also split on
+ * delimiters; absent, `""` and `[]` target none.
  */
 export function todoTaskTargets(phases: readonly TodoPhase[], task: string | readonly string[] | undefined): string[] {
 	if (task === undefined || task === "") return [];
 	const known = new Set(phases.flatMap(phase => phase.tasks.map(item => item.content)));
+	if (typeof task === "string" && !known.has(task) && task.trimStart().startsWith("[")) {
+		const parsed = tryParseJson(task.trim());
+		if (Array.isArray(parsed) && parsed.every(item => typeof item === "string")) {
+			return parsed.flatMap(content => splitTaskList(content, known));
+		}
+	}
 	return (typeof task === "string" ? [task] : task).flatMap(content => splitTaskList(content, known));
 }
 

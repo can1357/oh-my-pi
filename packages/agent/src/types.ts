@@ -1256,6 +1256,8 @@ export interface AgentTool<
 	lenientArgValidation?: boolean;
 	/** Return an error to reject string coercion at a path. Receives the original call arguments. */
 	stringCoercionError?: (path: readonly string[], args: Readonly<ToolCall["arguments"]>) => string | undefined;
+	/** Keep JSON-array-shaped strings verbatim where the schema accepts both strings and arrays. */
+	preserveStringsInArrayUnions?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it
 	 * before it starts — to deliver a queued steering message. A function

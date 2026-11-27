@@ -86,7 +86,7 @@
 
 ### Fixed
 
-- Todo calls reject non-string task labels and explain how to pass phases ([#20709](https://github.com/can1357/oh-my-pi/pull/20709) by [@softsock](https://github.com/softsock)).
+- Todo calls reject non-string task labels, explain how to pass phases, and select literal JSON-array labels by their exact text ([#20709](https://github.com/can1357/oh-my-pi/pull/20709) by [@softsock](https://github.com/softsock)).
 - Edit results now show the edited branch and the session branch when a file is changed in another linked Git worktree ([#20801](https://github.com/can1357/oh-my-pi/pull/20801) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 - A running subagent no longer publishes a task progress update when only its elapsed time changed: such updates now go out at most every 5 seconds, which keeps elapsed timers moving and cuts task update traffic to RPC clients, session observers and transcripts by about 8x ([#20810](https://github.com/can1357/oh-my-pi/pull/20810) by [@Xytronix](https://github.com/Xytronix))
 - Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back

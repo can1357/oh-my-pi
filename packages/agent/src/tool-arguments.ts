@@ -21,7 +21,7 @@ export type ToolArgumentSource = "parsed" | "payload";
  * @throws the validation error when the tool is strict or the arguments failed to parse.
  */
 export function validateAgentToolArguments(
-	tool: Tool & Pick<AgentTool, "lenientArgValidation" | "stringCoercionError">,
+	tool: Tool & Pick<AgentTool, "lenientArgValidation" | "stringCoercionError" | "preserveStringsInArrayUnions">,
 	toolCall: ToolCall,
 	source: ToolArgumentSource = "parsed",
 ): ToolCall["arguments"] {
@@ -30,6 +30,7 @@ export function validateAgentToolArguments(
 			keepUnknownRootKeys: tool.lenientArgValidation,
 			stringCoercionError:
 				tool.stringCoercionError && (path => tool.stringCoercionError?.(path, toolCall.arguments)),
+			preserveStringsInArrayUnions: tool.preserveStringsInArrayUnions,
 		});
 		// Kept unknown root keys must not smuggle the internal sentinels past validation.
 		return tool.lenientArgValidation ? withoutSentinels(validated) : validated;

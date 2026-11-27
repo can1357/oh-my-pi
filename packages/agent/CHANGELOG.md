@@ -5,6 +5,7 @@
 ### Added
 
 - Tools can use `AgentTool.stringCoercionError` to reject string coercion at specific argument paths and tailor the error to the original call ([#20709](https://github.com/can1357/oh-my-pi/pull/20709) by [@softsock](https://github.com/softsock)).
+- Tools can use `AgentTool.preserveStringsInArrayUnions` to interpret JSON-array-shaped strings themselves ([#20709](https://github.com/can1357/oh-my-pi/pull/20709) by [@softsock](https://github.com/softsock)).
 
 ### Fixed
 

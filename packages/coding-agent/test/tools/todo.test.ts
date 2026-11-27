@@ -606,8 +606,35 @@ describe("TodoTool task label validation", () => {
 		});
 		const result = await tool.execute("encoded", args as typeof tool.parameters.infer);
 		expect(result.details?.phases[0]?.tasks[0]?.content).toBe(label);
-		const done = await tool.execute("done", { op: "done", task: label });
+		const selector = validateAgentToolArguments(tool, {
+			type: "toolCall",
+			id: "done",
+			name: "todo",
+			arguments: { op: "done", task: label },
+		});
+		const done = await tool.execute("done", selector as typeof tool.parameters.infer);
 		expect(done.details?.phases[0]?.tasks[0]?.status).toBe("completed");
+	});
+
+	it("completes the verbatim JSON array label before interpreting it as a list of task selectors", async () => {
+		const tool = new TodoTool(createSession());
+		const label = JSON.stringify(["Other"]);
+		const run = (id: string, args: typeof tool.parameters.infer) => {
+			const validated = validateAgentToolArguments(tool, { type: "toolCall", id, name: "todo", arguments: args });
+			return tool.execute(id, validated as typeof tool.parameters.infer);
+		};
+		await run("init", { op: "init", items: [label, "Other", "Next", "Last"] });
+		const done = await run("literal", { op: "done", task: label });
+		expect(done.details?.phases[0]?.tasks).toEqual([
+			{ content: label, status: "completed" },
+			{ content: "Other", status: "in_progress" },
+			{ content: "Next", status: "pending" },
+			{ content: "Last", status: "pending" },
+		]);
+		const array = await run("array", { op: "done", task: ["Other"] });
+		expect(array.details?.completedTasks?.map(task => task.content)).toEqual(["Other"]);
+		const encoded = await run("encoded", { op: "done", task: JSON.stringify(["Next", "Last"]) });
+		expect(encoded.details?.completedTasks?.map(task => task.content)).toEqual(["Next", "Last"]);
 	});
 });
 

@@ -1779,6 +1779,7 @@ const CAPTURE_ADVERTISED_KEYS = [
 const CAPTURE_DROPPED_KEYS = [
 	"execute",
 	"stringCoercionError",
+	"preserveStringsInArrayUnions",
 	"servesToolCommandLine",
 	"openArgStream",
 	"docTopics",

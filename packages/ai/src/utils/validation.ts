@@ -675,6 +675,7 @@ interface ArgumentNormalizationOptions {
 	insideContent?: boolean;
 	speculativeUnion?: boolean;
 	stringCoercionError?: StringCoercionError;
+	preserveStringsInArrayUnions?: boolean;
 }
 
 function normalizeOptionalNullsForSchema(
@@ -686,6 +687,7 @@ function normalizeOptionalNullsForSchema(
 		insideContent = false,
 		speculativeUnion = false,
 		stringCoercionError,
+		preserveStringsInArrayUnions,
 	}: ArgumentNormalizationOptions = {},
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
@@ -709,6 +711,7 @@ function normalizeOptionalNullsForSchema(
 				insideContent,
 				speculativeUnion,
 				stringCoercionError,
+				preserveStringsInArrayUnions,
 			});
 			if (
 				branchMatchesSchema(branch, normalized.value, root) &&
@@ -728,6 +731,7 @@ function normalizeOptionalNullsForSchema(
 				insideContent,
 				speculativeUnion: speculativeUnion || selectedBranch !== branch,
 				stringCoercionError,
+				preserveStringsInArrayUnions,
 			});
 			if (!normalized.changed) continue;
 
@@ -749,6 +753,7 @@ function normalizeOptionalNullsForSchema(
 				isRoot,
 				insideContent,
 				stringCoercionError,
+				preserveStringsInArrayUnions,
 			});
 			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
 				return { value: repaired.args, changed: true };
@@ -775,6 +780,7 @@ function normalizeOptionalNullsForSchema(
 				insideContent,
 				speculativeUnion,
 				stringCoercionError,
+				preserveStringsInArrayUnions,
 			});
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
@@ -798,6 +804,7 @@ function normalizeOptionalNullsForSchema(
 				insideContent,
 				speculativeUnion,
 				stringCoercionError: childStringCoercionError(stringCoercionError, String(i)),
+				preserveStringsInArrayUnions,
 			});
 			if (!normalized.changed) continue;
 			if (!changed) {
@@ -876,6 +883,7 @@ function normalizeOptionalNullsForSchema(
 			insideContent: insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
 			speculativeUnion,
 			stringCoercionError: childStringCoercionError(stringCoercionError, key),
+			preserveStringsInArrayUnions,
 		});
 		if (!normalized.changed) continue;
 
@@ -2058,6 +2066,8 @@ export interface ValidateToolArgumentsOptions {
 	keepUnknownRootKeys?: boolean;
 	/** Return an error to require a string argument to have been supplied as text. */
 	stringCoercionError?: StringCoercionError;
+	/** Keep JSON-array-shaped strings verbatim where the schema accepts both strings and arrays. */
+	preserveStringsInArrayUnions?: boolean;
 }
 
 /** A tool refused stringification, so lenient validation must not retry the original arguments. */
@@ -2113,8 +2123,9 @@ export function validateToolArguments(
 		changed = true;
 	}
 
-	const { stringCoercionError } = options;
-	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs, { stringCoercionError });
+	const { stringCoercionError, preserveStringsInArrayUnions } = options;
+	const normalizationOptions = { stringCoercionError, preserveStringsInArrayUnions };
+	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs, normalizationOptions);
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
 		changed = true;
@@ -2139,10 +2150,12 @@ export function validateToolArguments(
 
 	// Then re-shape JSON-stringified arrays whose schema accepts both string
 	// and array. Otherwise downstream tools receive the encoded string.
-	const stringEncodedArrayNorm = normalizeStringEncodedArrayUnions(json, normalizedArgs);
-	if (stringEncodedArrayNorm.changed) {
-		normalizedArgs = stringEncodedArrayNorm.value;
-		changed = true;
+	if (!preserveStringsInArrayUnions) {
+		const stringEncodedArrayNorm = normalizeStringEncodedArrayUnions(json, normalizedArgs);
+		if (stringEncodedArrayNorm.changed) {
+			normalizedArgs = stringEncodedArrayNorm.value;
+			changed = true;
+		}
 	}
 
 	const identifierStringNormalizationAfterArray = normalizeIdentifierStringWhitespace(normalizedArgs);
@@ -2165,7 +2178,7 @@ export function validateToolArguments(
 	if (result.success) return result.value as ToolCall["arguments"];
 
 	const droppedRootKeys = options.keepUnknownRootKeys ? new Map<string, unknown>() : undefined;
-	const coercionOptions = { stringCoercionError, droppedRootKeys };
+	const coercionOptions = { ...normalizationOptions, droppedRootKeys };
 	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, coercionOptions);
 	normalizedArgs = coercionOutcome.args;
 	changed ||= coercionOutcome.changed;
@@ -2222,6 +2235,7 @@ interface CoercionPassOptions {
 	isRoot?: boolean;
 	insideContent?: boolean;
 	stringCoercionError?: StringCoercionError;
+	preserveStringsInArrayUnions?: boolean;
 	droppedRootKeys?: Map<string, unknown>;
 }
 
@@ -2235,7 +2249,13 @@ function runCoercionPasses(
 	ctx: ValidationContext,
 	args: unknown,
 	initial: ContextValidationResult,
-	{ isRoot = true, insideContent = false, stringCoercionError, droppedRootKeys }: CoercionPassOptions = {},
+	{
+		isRoot = true,
+		insideContent = false,
+		stringCoercionError,
+		preserveStringsInArrayUnions,
+		droppedRootKeys,
+	}: CoercionPassOptions = {},
 ): { args: unknown; result: ContextValidationResult; changed: boolean } {
 	const { json } = ctx;
 	const root = ctx.kind === "json" ? (ctx.root ?? json) : json;
@@ -2268,6 +2288,7 @@ function runCoercionPasses(
 			insideContent,
 			speculativeUnion,
 			stringCoercionError,
+			preserveStringsInArrayUnions,
 		});
 		if (nullNormalization.changed) {
 			normalizedArgs = nullNormalization.value;
@@ -2290,10 +2311,12 @@ function runCoercionPasses(
 		// have just unwrapped a JSON-stringified object at the root or inside a
 		// nested field — exposing `string | string[]` descendants the initial
 		// pre-validation pass could not reach.
-		const stringEncodedArrayNormPass = normalizeStringEncodedArrayUnions(json, normalizedArgs);
-		if (stringEncodedArrayNormPass.changed) {
-			normalizedArgs = stringEncodedArrayNormPass.value;
-			passChanged = true;
+		if (!preserveStringsInArrayUnions) {
+			const stringEncodedArrayNormPass = normalizeStringEncodedArrayUnions(json, normalizedArgs);
+			if (stringEncodedArrayNormPass.changed) {
+				normalizedArgs = stringEncodedArrayNormPass.value;
+				passChanged = true;
+			}
 		}
 
 		const identifierStringNormalizationAfterArrayPass = normalizeIdentifierStringWhitespace(
