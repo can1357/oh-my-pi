@@ -118,12 +118,25 @@ describe("height shrink (Resize-tagged rows)", () => {
 			vt.resize(20, 4);
 			await vt.settle();
 			const mark = vt.writes.length;
-			vt.present({ history: { id: 1, rows: ["v0", "v1"] }, viewport: ["v2", "v3", "v4", "dock"], cursor: null });
+			vt.present({
+				history: {
+					id: 1,
+					rows: ["v0", "v1", "v2"],
+					marks: [
+						{ row: 0, before: "\x1b]133;A\x07", after: "\x1b]133;B\x07" },
+						{ row: 2, before: "\x1b]133;A\x07", after: "\x1b]133;B\x07" },
+					],
+				},
+				viewport: ["v3", "v4", "dock"],
+				cursor: null,
+			});
+			const written = vt.since(mark);
+			expect(written).toContain("\x1b]133;A\x07v2\x1b]133;B\x07");
 			if (confirmed) {
-				expect(vt.since(mark)).not.toContain("v0");
+				expect(written).not.toContain("v0");
 				expect(vt.transcript()).toEqual(["v0", "v1", "v2", "v3", "v4", "dock"]);
 			} else {
-				expect(vt.since(mark)).toContain("v0");
+				expect(written).toContain("\x1b]133;A\x07v0\x1b]133;B\x07");
 			}
 		});
 	}

@@ -186,6 +186,7 @@ function createContext(): {
 		handleCleanseEscape,
 		hasActiveCleanse,
 		dismissCommandReport: vi.fn(() => false),
+		dismissDeferredCommandOutput: vi.fn(() => false),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),

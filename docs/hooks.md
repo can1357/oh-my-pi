@@ -71,8 +71,7 @@ by `hookCapability` through the extension runner.
 
 Paths are deduplicated by absolute path. With `ambient: false`, native/installed
 discovery is skipped, but configured package roots can still contribute hook
-factories. Foreign user sources require opt-in via `enabledProviders`; project
-sources are unaffected by that user-level gate.
+factories.
 
 ### Native discovery location
 
@@ -85,7 +84,7 @@ A factory directly under `<cwd>/.omp/hooks/` is not found by ambient native
 discovery; put it in `pre/` or `post/`, or supply its path explicitly. Dot-prefixed
 entries and non-files are skipped. The directory and basename supply capability
 metadata/deduplication keys, not automatic event registration: the factory must
-still call `pi.on(...)`. This mirrors `.claude/hooks/pre|post/`. Only `.ts`/`.js`
+still call `pi.on(...)`. Only `.ts`/`.js`
 factories from the hook capability are appended to the extension pipeline.
 Explicit extension paths use the shared module resolver. See
 [Extension Loading](./extension-loading.md) for load order and disable controls.

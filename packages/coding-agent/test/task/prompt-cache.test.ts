@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import type { Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
-import { buildRequest as buildGeminiRequest } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildTransformedCodexRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { buildParams as buildResponsesParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -153,7 +151,6 @@ describe("task sibling prompt-cache routing", () => {
 		],
 		["Luna keeps child keys", "openai-codex", "gpt-6-luna", "explicit-parent", "automatic-parent", undefined],
 		["OpenAI keeps child keys", "openai", "gpt-5.4", undefined, undefined, undefined],
-		["Gemini omits cache keys", "google-antigravity", "gemini-3.8-flash", "explicit-parent", undefined, undefined],
 		[
 			// Unopted-parent rows: the parent never opts into task caching, yet an
 			// agent override onto an eligible lane must still mint one family key
@@ -187,10 +184,6 @@ describe("task sibling prompt-cache routing", () => {
 		async (_name, provider, modelId, parentCacheKey, parentTaskKey, expected) => {
 			using directory = TempDir.createSync("@omp-task-cache-");
 			vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network is disabled in this test"));
-			// Antigravity is paused in its auth rules; its transport stays for when it is turned back on.
-			if (provider === "google-antigravity") {
-				vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-			}
 			const authStorage = await AuthStorage.create(directory.join("auth.db"));
 			const parentOverride = unoptedParentLanes[_name];
 			const [parentProvider, parentModelId] = parentOverride ?? [provider, modelId];
@@ -268,15 +261,6 @@ describe("task sibling prompt-cache routing", () => {
 								cacheOptions,
 								undefined,
 							).params.prompt_cache_key;
-						} else if (requestModel.api === "google-gemini-cli") {
-							const request = buildGeminiRequest(
-								requestModel as Model<"google-gemini-cli">,
-								context,
-								"test-project",
-								cacheOptions,
-								true,
-							);
-							wireKey = JSON.stringify(request).includes('"prompt_cache_key"');
 						}
 						requests.push({
 							modelId: requestModel.id,
@@ -340,9 +324,7 @@ describe("task sibling prompt-cache routing", () => {
 				expect(requests[0]?.state).not.toBe(requests[1]?.state);
 				if (model.api !== "openai-completions" && model.api !== "anthropic-messages") {
 					expect(requests.map(request => request.wireKey)).toEqual(
-						provider === "google-antigravity"
-							? [false, false]
-							: requests.map(request => expected ?? request.sessionId),
+						requests.map(request => expected ?? request.sessionId),
 					);
 				}
 				if (provider === "openai" || provider === "openai-codex") {

@@ -1,13 +1,22 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { recapBlock } from "../../../src/modes/controllers/event-blocks";
 import { initTheme } from "../../../src/ui/theme/service";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { isSettled } from "@oh-my-pi/pi-tui";
 import type { PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { createModeTerminal } from "../../helpers/mode-terminal";
 import { blockText } from "../../helpers/transcript-text";
 
 beforeAll(() => {
@@ -165,6 +174,134 @@ describe("EventController message_start (user role)", () => {
 		expect(addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
 		await pending;
+	});
+});
+
+/** The text of every user message the `addMessageToChat` calls received, in call order. */
+function renderedUserTexts(calls: ReadonlyArray<readonly [AgentMessage, ...unknown[]]>): string[] {
+	return calls.map(([message]) => {
+		if (message.role !== "user") throw new Error(`Expected user message, got ${message.role}`);
+		return typeof message.content === "string"
+			? message.content
+			: message.content
+					.filter(content => content.type === "text")
+					.map(content => content.text)
+					.join("\n");
+	});
+}
+
+describe("EventController message_start (optimistic submission on InteractiveMode)", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let mode: InteractiveMode;
+	let session: AgentSession;
+	let tempDir: TempDir;
+
+	beforeAll(async () => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-message-start-optimistic-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		authStorage = createInMemoryAuthStorage();
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	beforeEach(() => {
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
+		mode.isInitialized = true;
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		mode?.stop();
+		await session?.dispose();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		tempDir.removeSync();
+		resetSettingsForTest();
+	});
+
+	it("replaces raw slash optimistic text when message_start carries expanded content", async () => {
+		const controller = new EventController(mode);
+		const addMessageSpy = vi.spyOn(mode, "addMessageToChat");
+
+		mode.startPendingSubmission({ text: "/jira-task" });
+		mode.rebuildChatFromMessages();
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "Expanded Jira task prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+
+		expect(renderedUserTexts(addMessageSpy.mock.calls)).toEqual([
+			"/jira-task",
+			"/jira-task",
+			"Expanded Jira task prompt",
+		]);
+		expect(mode.shell.transcript.blocks()).toHaveLength(1);
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+		expect(mode.locallySubmittedUserSignatures.has("/jira-task\u00000")).toBe(false);
+	});
+
+	it("does not replace a pending optimistic prompt with another local user event", async () => {
+		const controller = new EventController(mode);
+		const addMessageSpy = vi.spyOn(mode, "addMessageToChat");
+
+		mode.startPendingSubmission({ text: "/jira-task" });
+		mode.locallySubmittedUserSignatures.add("queued before prompt\u00000");
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "queued before prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+
+		expect(mode.optimisticUserMessageSignature).toBe("/jira-task\u00000");
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
+		expect(mode.locallySubmittedUserSignatures.has("queued before prompt\u00000")).toBe(false);
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "Expanded Jira task prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+
+		expect(renderedUserTexts(addMessageSpy.mock.calls)).toEqual([
+			"/jira-task",
+			"queued before prompt",
+			"Expanded Jira task prompt",
+		]);
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
 	});
 });
 

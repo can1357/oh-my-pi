@@ -647,6 +647,8 @@ function fileParts(
 	const link = line ? { ...paths, line } : paths;
 
 	const body: JSXNode[] = [];
+	const checkoutNotice = details?.checkoutNotice && sanitizeText(details.checkoutNotice);
+	if (checkoutNotice) body.push(<NoteText message={checkoutNotice} />);
 	let errorText = "";
 	if (isError) {
 		const display = details && "displayErrorText" in details ? details.displayErrorText : undefined;
@@ -660,8 +662,12 @@ function fileParts(
 	if (diagnostics) body.push(<DiagnosticsSection diagnostics={diagnostics} />);
 	const stats = diffText ? diffStats(diffText) : { added: 0, removed: 0 };
 
-	// Terminal: a delete or move-only result is one status row; anything else a card.
-	const inline = !isError && !details?.diff && !details?.diagnostics && (op === "delete" || rename !== undefined);
+	const inline =
+		!isError &&
+		!checkoutNotice &&
+		!details?.diff &&
+		!details?.diagnostics &&
+		(op === "delete" || rename !== undefined);
 	let card: EditCard;
 	if (inline) {
 		card = {
@@ -676,6 +682,7 @@ function fileParts(
 		};
 	} else {
 		const parts: EditBodyPart[] = [];
+		if (checkoutNotice) parts.push({ k: "note", text: checkoutNotice });
 		const headerDiff = isError ? undefined : details?.diff || previewDiff;
 		if (isError) {
 			if (errorText) parts.push({ k: "error", text: errorText });

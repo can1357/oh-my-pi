@@ -211,6 +211,9 @@ function entryBody(theme: Theme, model: ContextViewerModel, width: number, heigh
 		...entryMetadata(entry, true).flatMap(line => wrap(theme.fg("dim", line), contentWidth)),
 		...body.split("\n").flatMap(line => (line ? wrap(line, contentWidth) : [""])),
 	];
+	// Scroll keys leave the tree unbuilt and `entryOffset` is a plain field: this read is what repaints the
+	// terminal when they move it (covered by the viewer's terminal scroll test).
+	void model.nativeScroll;
 	model.entryOffset = Math.max(0, Math.min(model.entryOffset, Math.max(0, lines.length - height)));
 	return scrolled(theme, lines, model.entryOffset, height, width);
 }

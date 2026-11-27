@@ -1810,7 +1810,10 @@ export class TernTab implements InProcessRunTab {
 	// ─── Selectors and targets ────────────────────────────────────────────
 
 	#spec(selector: string | TernSelector): TernSelector {
-		return typeof selector === "string" ? parseTernSelector(selector) : selector;
+		if (typeof selector === "object" && selector !== null && typeof selector.engine === "string") return selector;
+		// Eval code reaches here unchecked: `waitFor(1500)`, `waitFor(() => …)` or null must fail as a selector
+		// naming what to call instead, not inside the page kit as `Unsupported selector engine undefined`.
+		return parseTernSelector(selector as string);
 	}
 
 	/** Viewport offset of `frame`'s content box in the main frame. */
@@ -3036,7 +3039,8 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/** Readable text/markdown of the page. */
-	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
+	async extract(formatArg?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string> {
+		const format = formatArg ?? "markdown";
 		return await this.#quickRead("tab.extract()", async () => {
 			const html = await this.pageContent();
 			const readable = await extractReadableFromHtml(html, this.#url, format, opts);
@@ -4557,6 +4561,16 @@ export class TernPageFacade {
 
 	async setCookie(...cookies: unknown[]): Promise<void> {
 		await this.#tab.setCookies(...cookies);
+	}
+
+	/** Puppeteer's header override; the web view sends only its own headers, so non-empty ones say what works. */
+	async setExtraHTTPHeaders(headers: Record<string, string>): Promise<void> {
+		if (headers !== null && typeof headers === "object" && Object.keys(headers).length === 0) return;
+		throw new ToolError(
+			`page.setExtraHTTPHeaders() is not supported on the ${this.#tab.product} browser backend: extra HTTP headers cannot be added to the web view's navigations and subresources. ` +
+				"For HTTP basic auth, use tab.emulate({ credentials: { username, password } }); " +
+				'for other headers, open a tab in omp\'s own browser with browser.open({ name, app: "own", url }) and call tab.emulate({ headers }).',
+		);
 	}
 
 	on(event: unknown, _handler?: unknown): never {

@@ -171,6 +171,15 @@ describe("InputController.presentLargePasteMenu actions", () => {
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("payload");
 	});
 
+	it("inserts the raw text as editable text when selected", async () => {
+		const { controller, spies } = createContext({ choice: "Insert as editable text" });
+
+		await controller.presentLargePasteMenu("line one\nline two", 2);
+
+		expect(spies.insertText).toHaveBeenCalledWith("line one\nline two");
+		expect(spies.insertTextAttachment).not.toHaveBeenCalled();
+	});
+
 	it("pastes inline when the menu is cancelled, so the content is not lost", async () => {
 		const { controller, spies } = createContext({ choice: undefined });
 

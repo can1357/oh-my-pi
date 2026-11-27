@@ -325,6 +325,34 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("says what holds a new tab another debugger already attached to, and what to do", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: {} }));
+		await flush();
+		const createId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: createId, method: "Target.createTarget", params: { url: "about:blank" } }),
+		);
+		ack(bridge, ext, "createTab", { tab: tab({ tabId: 9, url: "about:blank" }) });
+		await flush();
+		nack(bridge, ext, "attach", "Another debugger is already attached to the tab with id: 9.");
+		await flush();
+		ack(bridge, ext, "removeTab");
+		await flush();
+		expect(cdp.messages.find(m => m.id === createId)).toMatchObject({
+			error: {
+				message: expect.stringMatching(
+					/already attached to the tab with id: 9\. Something in this Chrome attaches a debugger .*app: "own"/,
+				),
+			},
+		});
+	});
+
 	it("creates a Target.createTarget background tab without selecting it", () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

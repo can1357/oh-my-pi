@@ -133,6 +133,14 @@ describe("collectShakeRegions — tool results", () => {
 		expect(regions[0].entry).toBe(older);
 	});
 
+	test("skips tool results no larger than the recovery placeholder", () => {
+		const tiny = messageEntry(toolResultMessage("bash", "ok"));
+		const large = messageEntry(toolResultMessage("bash", "x".repeat(400)));
+		const regions = collectShakeRegions([tiny, large], tokenizer, cfg());
+		expect(regions).toHaveLength(1);
+		expect(regions[0].entry).toBe(large);
+	});
+
 	test("minSavings gates the whole batch", () => {
 		const entry = messageEntry(toolResultMessage("bash", "q".repeat(800)));
 		const tokens = tokenizer.countMessage(entry.message);

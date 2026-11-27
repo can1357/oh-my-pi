@@ -15,6 +15,7 @@ import { resolveToolTier } from "./approval";
 import { findHintVisible } from "./jfind";
 import { applyListLimit } from "./list-limit";
 import {
+	assertNotFilesystemRoot,
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
 	normalizePathLikeInput,
@@ -246,9 +247,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const aliasResolvedPatterns = this.#rootPathAlias
 				? rawPatterns.map(pattern => (/^\/+$/.test(pattern) ? "." : pattern))
 				: rawPatterns;
-			if (aliasResolvedPatterns.some(pattern => /^\/+$/.test(pattern))) {
-				throw new ToolError("Searching from root directory '/' is not allowed");
-			}
+			// Without the alias a slash-only pattern is the root, refused before
+			// resolveSearchBase would collapse it to the workspace.
+			assertNotFilesystemRoot(aliasResolvedPatterns.filter(pattern => /^\/+$/.test(pattern)));
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");
@@ -298,11 +299,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					];
 			const scopePath = multiPattern?.scopePath ?? formatScopePath(targets[0].searchPath);
 
-			for (const target of targets) {
-				if (target.searchPath === "/") {
-					throw new ToolError("Searching from root directory '/' is not allowed");
-				}
-			}
+			assertNotFilesystemRoot(targets.map(target => target.searchPath));
 
 			const effectiveLimit = limit ?? DEFAULT_LIMIT;
 			const includeHidden = hidden ?? true;

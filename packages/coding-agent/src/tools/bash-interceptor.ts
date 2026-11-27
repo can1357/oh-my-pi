@@ -5,8 +5,18 @@
  * this interceptor provides helpful error messages directing them to use
  * the specialized tools instead.
  */
-import { extractFlatShellCommandSegments, withoutLeadingEnvironmentAssignments } from "./shell-tokenize";
-import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
+import {
+	extractFlatShellCommandSegments,
+	tokenizeShellSegments,
+	withoutLeadingEnvironmentAssignments,
+} from "./shell-tokenize";
+import type { Settings } from "../config/settings";
+import {
+	type BashInterceptorRule,
+	cfgBashInterceptorEnabled,
+	cfgBashInterceptorPatterns,
+	DEFAULT_BASH_INTERCEPTOR_RULES,
+} from "../exec/settings";
 
 export interface InterceptionResult {
 	/** If true, the bash command should be blocked */
@@ -84,4 +94,35 @@ export function checkBashInterception(
 	}
 
 	return { block: false };
+}
+
+/** Whether the first simple command of `command` is a session tool command. */
+function startsWithToolCommand(command: string, names: ReadonlySet<string>): boolean {
+	const first = tokenizeShellSegments(command)[0]?.[0];
+	return first !== undefined && names.has(first);
+}
+
+/**
+ * The configured interceptor's message for a shell command (bash tool and eval `sh()`), or
+ * undefined when it may run. Checks the raw command and the one after a leading `cd … &&`
+ * (`command`) so the wrapper hides neither shell-navigation rules nor the dedicated-tool command.
+ * A command led by a session tool command is that tool's own call and is never intercepted.
+ * `name` set (a bash service) drops rules redirecting to `bash` itself.
+ */
+export function bashInterception(
+	settings: Settings,
+	rawCommand: string,
+	command: string,
+	name: string | undefined,
+	toolNames: string[],
+	toolCommands: ReadonlySet<string>,
+): string | undefined {
+	if (!cfgBashInterceptorEnabled.get(settings)) return undefined;
+	const rules = cfgBashInterceptorPatterns.get(settings).filter(rule => !name || rule.tool !== "bash");
+	for (const commandToCheck of rawCommand === command ? [command] : [rawCommand, command]) {
+		if (startsWithToolCommand(commandToCheck, toolCommands)) continue;
+		const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand);
+		if (interception.block) return interception.message ?? "Command blocked";
+	}
+	return undefined;
 }

@@ -441,6 +441,17 @@ describe("transcript OSC 8 links", () => {
 			{ hyperlinks: true },
 		).join("\n");
 		expect(extractLinkUris(page)).toContain("https://example.com/app");
+		const local = printRows(
+			() =>
+				EmbedFigure({
+					embed: { kind: "iframe", src: "demo/index.html#B", label: "demo" },
+					showImages: false,
+					host,
+				}),
+			80,
+			{ hyperlinks: true },
+		).join("\n");
+		expect(extractLinkUris(local)).toContain(`${fileUri(path.join(PROJECT, "demo/index.html"))}#B`);
 	});
 });
 

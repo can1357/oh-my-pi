@@ -285,7 +285,7 @@ export class IrcBus implements IrcBusApi {
 		const mesh = ref || options.localOnly ? undefined : agentMesh();
 		const peer = mesh && parsePeerAddress(message.to);
 		if (mesh && peer && peer.pid !== process.pid) {
-			// Another omp instance in this project: the mesh forwards it, and the
+			// Another omp instance (any project): the mesh forwards it, and the
 			// recipient's own bus decides how it lands.
 			return mesh.send(peer, message.from, message.body, message.progress);
 		}

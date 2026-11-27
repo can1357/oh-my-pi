@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from robomp import persona
+from robomp.github_client import IssueIndexEntry
 from robomp.worker import DirectiveInfo, ReleaseTaskContext, ThreadMessage
 
 
@@ -274,3 +275,27 @@ def test_release_todo_phases_end_in_retag() -> None:
     phases = persona.seed_phases("handle_release_ci")
     assert [phase["name"] for phase in phases] == ["Diagnose", "Fix", "Retag"]
     assert phases[-1]["tasks"][-1] == "Call release_retag and end the turn"
+
+
+def test_kickoff_lists_duplicate_candidates_with_state() -> None:
+    original = IssueIndexEntry(
+        repo="octo/widget",
+        number=10,
+        is_pull_request=False,
+        title="Ctrl+C kills subagents",
+        body="",
+        state="closed",
+        state_reason="not_planned",
+        merged_at="",
+        author="bob",
+        labels=(),
+        comments=0,
+        created_at="",
+        updated_at="",
+        html_url="",
+    )
+    out = persona.kickoff(repo=_Repo(), issue=_Issue(), workspace=_Workspace(), candidates=[original])
+    assert "- #10 (issue, closed (not_planned)) Ctrl+C kills subagents" in out
+    # Unknown (index not built) must not read as "no duplicates exist".
+    unknown = persona.kickoff(repo=_Repo(), issue=_Issue(), workspace=_Workspace(), candidates=None)
+    assert "gh_search_issues" in unknown.split("Closest matches", 1)[1].split("---", 1)[0]

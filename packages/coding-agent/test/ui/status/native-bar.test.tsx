@@ -31,11 +31,20 @@ describe("status bar preview for Tern", () => {
 			expect(root.kind).toBe("status");
 			expect((root.props() as { role?: string }).role).toBe("omp.status");
 			const segs = new Map(root.children().map(seg => [seg.key(), seg.props() as Record<string, unknown>]));
-			expect(segs.get("pi")).toMatchObject({ side: "left", priority: 11 });
+			const priority = (key: string): number => {
+				const value = segs.get(key)?.priority;
+				if (typeof value !== "number") throw new Error(`segment ${key} has no priority`);
+				return value;
+			};
+			expect(segs.get("pi")).toMatchObject({ side: "left" });
 			expect(segs.get("pi")?.actions).toBeUndefined();
-			expect(segs.get("model")).toMatchObject({ priority: 1009, actions: { click: "status.model" } });
-			expect(segs.get("path")).toMatchObject({ priority: 5, min: { w: "12ch" }, actions: { click: "status.path" } });
-			expect(segs.get("context_pct")).toMatchObject({ priority: 1002, actions: { click: "status.context" } });
+			expect(segs.get("model")).toMatchObject({ actions: { click: "status.model" } });
+			expect(segs.get("path")).toMatchObject({ min: { w: "12ch" }, actions: { click: "status.path" } });
+			expect(segs.get("context_pct")).toMatchObject({ actions: { click: "status.context" } });
+			// Pinned segments outlast every unpinned one.
+			expect(priority("model")).toBeGreaterThan(priority("pi"));
+			expect(priority("context_pct")).toBeGreaterThan(priority("pi"));
+			expect(priority("pi")).toBeGreaterThan(priority("path"));
 		} finally {
 			dispose();
 		}

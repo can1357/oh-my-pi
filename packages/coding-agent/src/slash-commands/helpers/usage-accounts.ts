@@ -17,36 +17,37 @@ export interface UsageAccountIdentity {
 	refreshExpires?: number;
 	/** Epoch ms the OAuth access token expires; a long-lived login's outlasts its ~30d grant. */
 	expires?: number;
+	/** HTTP status (401/403) of this credential's latest rejected usage fetch; a re-login restores usage. */
+	usageAuthRejected?: number;
+}
+
+/** Re-login hint for an account whose usage fetch the provider rejected as unauthorized. */
+export function usageAuthRejectedHint(account: UsageAccountIdentity): string | undefined {
+	if (account.usageAuthRejected === undefined) return undefined;
+	return `usage auth rejected (${account.usageAuthRejected}); re-login to restore usage`;
 }
 
 /** Flatten every stored credential (OAuth and API key) into identity rows for unreported-account detection. */
 export function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	const accounts: UsageAccountIdentity[] = [];
-	const all = authStorage.credentials.all();
-	for (const provider in all) {
-		const entry = all[provider];
-		const credentials = Array.isArray(entry) ? entry : [entry];
-		for (const credential of credentials) {
-			if (credential.type === "oauth") {
-				accounts.push({
-					provider,
-					type: "oauth",
-					email: credential.email,
-					accountId: credential.accountId,
-					projectId: credential.projectId,
-					enterpriseUrl: credential.enterpriseUrl,
-					orgId: credential.orgId,
-					orgName: credential.orgName,
-					authorizedAt: credential.authorizedAt,
-					refreshExpires: credential.refreshExpires,
-					expires: credential.expires,
-				});
-			} else {
-				accounts.push({ provider, type: "api_key" });
-			}
-		}
-	}
-	return accounts;
+	return authStorage.credentials.snapshot().credentials.map(({ provider, id, credential }) => {
+		const usageAuthRejected = authStorage.usage.authRejection(provider, id);
+		return {
+			provider,
+			type: credential.type,
+			...(credential.type === "oauth" && {
+				email: credential.email,
+				accountId: credential.accountId,
+				projectId: credential.projectId,
+				enterpriseUrl: credential.enterpriseUrl,
+				orgId: credential.orgId,
+				orgName: credential.orgName,
+				authorizedAt: credential.authorizedAt,
+				refreshExpires: credential.refreshExpires,
+				expires: credential.expires,
+			}),
+			...(usageAuthRejected !== undefined && { usageAuthRejected }),
+		};
+	});
 }
 
 /**
@@ -97,8 +98,7 @@ function reportIdentifiers(report: UsageReport): Set<string> {
  * no identity at all (or the credential is an API key alongside existing
  * reports), we can't attribute, so we don't claim the account is missing.
  * The tradeoff: once a provider returns any report, its identity-less rows
- * are never flagged, so a failed fetch for one of several identity-less
- * logins of the same provider (e.g. two Devin browser logins) goes unshown.
+ * need an explicit per-credential rejection to establish that their probe failed.
  */
 export function collectUnreportedAccounts(
 	reports: UsageReport[],
@@ -112,7 +112,7 @@ export function collectUnreportedAccounts(
 	}
 	return accounts.filter(account => {
 		const providerReports = byProvider.get(account.provider) ?? [];
-		if (providerReports.length === 0) return true;
+		if (account.usageAuthRejected !== undefined || providerReports.length === 0) return true;
 		if (account.type === "api_key") return false;
 		// Org-decisive attribution when EITHER side carries an org (Anthropic
 		// multi-subscription): two orgs share every other identifier, so an
@@ -127,8 +127,7 @@ export function collectUnreportedAccounts(
 		// subset (an org-only account, with no base identifiers, is covered by
 		// any same-org report). The email/account fallback below applies only
 		// when both sides are org-less. When both the account and a report carry
-		// an email, it decides: Codex Team seats share an account id and
-		// Antigravity accounts share one Google project.
+		// an email, it decides: Codex Team seats share an account id.
 		const accountOrg = account.orgId?.toLowerCase();
 		const email = account.email?.toLowerCase();
 		const ids = [account.email, account.accountId, account.projectId]
