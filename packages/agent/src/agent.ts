@@ -439,7 +439,10 @@ export class Agent {
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
-	/** What this Agent's previous main request sent per call; side requests leave it alone. */
+	/**
+	 * What this Agent's previous main request sent per call; side requests leave it alone. `reset` replaces it, and a
+	 * run keeps the one it started with.
+	 */
 	#repeatedPerCallMessages = new RepeatedPerCallMessages();
 	#standbyTools: AgentTool[] = [];
 	#steeringQueue: AgentMessage[] = [];
@@ -1776,9 +1779,11 @@ export class Agent {
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();
 		this.#state.error = undefined;
-		// The conversation these messages belonged to ends here: the next one compares with nothing, and the copies
-		// the record held (a parked subagent's images and tool results among them) are released with it.
-		this.#repeatedPerCallMessages.clear();
+		// The conversation these messages belonged to ends here, so the next run compares with nothing. A run already
+		// under way keeps the record it started with: a request it prepares or has out after this, whenever answered,
+		// settles against that record, and the copies it held (a parked subagent's images and tool results among them)
+		// go with the run.
+		this.#repeatedPerCallMessages = new RepeatedPerCallMessages();
 		this.clearAllQueues();
 	}
 

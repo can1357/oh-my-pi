@@ -8,8 +8,9 @@
  * mark the next request's changed note repeated although no request carried it.
  *
  * "Previous" must also mean this conversation. `Agent.reset()` ends one (`newSession`, a cleared context, and the
- * memory release of a disposed parked-subagent session all call it), so the record is dropped there, with the copies
- * it held; a request of the conversation that ended records nothing, whenever its answer arrives.
+ * memory release of a disposed parked-subagent session all call it), so the record is replaced there; a request of the
+ * conversation that ended records nothing for the next one, whether the reset lands while the request is out or while
+ * it is still being prepared.
  */
 import { describe, expect, it } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -252,5 +253,56 @@ describe("the per-call record is the last request the provider answered", () => 
 		expect(contexts[2]?.messages.at(-1)?.content).toBe("status: idle");
 		expect(isPerCallContextMessage(contexts[2]?.messages.at(-1))).toBe(true);
 		expect(isRepeatedPerCallContextMessage(contexts[2]?.messages.at(-1))).toBe(false);
+	});
+
+	it("does not let a request prepared across a reset restore the record", async () => {
+		const server = gateway();
+		const contexts: Context[] = [];
+		let hold = false;
+		const inTransform = Promise.withResolvers<void>();
+		const released = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model },
+			getApiKey: () => "not-a-secret",
+			streamFn: (streamModel, context, options) => {
+				contexts.push(context);
+				return streamSimple(streamModel, context, { ...options, fetch: server.fetch });
+			},
+			transformContext: async messages => {
+				const status: AgentMessage = { role: "user", content: "status: idle", timestamp: 0 };
+				markPerCallContextMessage(status);
+				return [...messages, status];
+			},
+			// The host's provider-context transform awaits (an image description, a blob store); the reset lands then.
+			transformProviderContext: async context => {
+				if (hold) {
+					inTransform.resolve();
+					await released.promise;
+				}
+				return context;
+			},
+		});
+
+		const stored = (): AgentMessage[] => [{ role: "user", content: "first", timestamp: 1_000 }];
+		await agent.prompt(stored());
+		await agent.prompt(stored());
+		hold = true;
+		const inFlight = agent.prompt(stored());
+		await inTransform.promise;
+		// A new session starts before the request is compared with the record.
+		agent.reset();
+		released.resolve();
+		// The reset emptied the state under a running loop; what that run ends with is not this test's subject.
+		await inFlight.catch(() => {});
+		hold = false;
+		await agent.prompt(stored());
+
+		expect(server.bodies).toHaveLength(4);
+		// Control: inside one conversation the note at this place is repeated, so the assertions below can fail.
+		expect(isRepeatedPerCallContextMessage(contexts[1]?.messages.at(-1))).toBe(true);
+		// The third request belonged to the conversation the reset ended, so its answer recorded nothing for this one.
+		expect(contexts[3]?.messages.at(-1)?.content).toBe("status: idle");
+		expect(isPerCallContextMessage(contexts[3]?.messages.at(-1))).toBe(true);
+		expect(isRepeatedPerCallContextMessage(contexts[3]?.messages.at(-1))).toBe(false);
 	});
 });
