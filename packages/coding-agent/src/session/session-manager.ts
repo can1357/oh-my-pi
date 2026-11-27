@@ -2694,7 +2694,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
-			inheritedThroughEntryId: this.#header.inheritedThroughEntryId,
+			inheritedThroughEntryId: inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries),
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;

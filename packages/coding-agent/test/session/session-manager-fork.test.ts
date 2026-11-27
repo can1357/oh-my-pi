@@ -639,7 +639,11 @@ describe("SessionManager.forkFrom", () => {
 		const source = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
 		const branchedFile = source.createBranchedSession("u1");
 		expect((await headerOf(branchedFile))?.inheritedThroughEntryId).toBe("u1");
-		await Promise.all([copy.close(), source.close()]);
+
+		const forked = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
+		const fork = await forked.fork();
+		expect((await headerOf(fork?.newSessionFile))?.inheritedThroughEntryId).toBe("a1");
+		await Promise.all([copy.close(), source.close(), forked.close()]);
 	});
 
 	for (const { name, createStorage, padding } of [
