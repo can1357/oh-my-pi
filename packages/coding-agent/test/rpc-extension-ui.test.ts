@@ -184,8 +184,11 @@ await runRpcMode(session, {
 		expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
 	}, 30_000);
 
-	/** Spawns an RPC runtime whose extension awaits a form in `session_start` and has a `/probe` command. */
-	async function spawnStartupDialogRuntime(temp: TempDir) {
+	/**
+	 * Spawns an RPC runtime whose extension awaits a form in `session_start` and has a `/probe` command. With
+	 * `requestShutdown`, `session_start` first asks for a deferred shutdown, as an extension's `ctx.shutdown()` does.
+	 */
+	async function spawnStartupDialogRuntime(temp: TempDir, options: { requestShutdown?: boolean } = {}) {
 		const fixturePath = temp.join("runtime.ts");
 		const sourceDir = path.resolve(import.meta.dir, "../src");
 		await Bun.write(
@@ -207,6 +210,7 @@ const { session } = await createAgentSession({
       handler: async (_args, ctx) => ctx.ui.notify("askDialog:" + typeof ctx.ui.askDialog),
     });
     pi.on("session_start", async (_event, ctx) => {
+      ${options.requestShutdown ? "ctx.shutdown();" : ""}
       ctx.ui.notify(JSON.stringify((await ctx.ui.formDialog("<form><input name='trust'></form>"))?.data));
     });
   }],
@@ -224,7 +228,7 @@ await runRpcMode(session);
 		});
 	}
 
-	it("answers a dialog session_start awaits, running commands sent meanwhile only after startup, in order", async () => {
+	it("answers reads sent while session_start awaits a form, before startup finishes, in order", async () => {
 		await using temp = await TempDir.create("@rpc-startup-dialog-");
 		const child = await spawnStartupDialogRuntime(temp);
 		const stderr = new Response(child.stderr).text();
@@ -234,14 +238,16 @@ await runRpcMode(session);
 			if (!isRecord(frame)) continue;
 			if (frame.type === "extension_ui_request" && frame.method === "form") {
 				formId = frame.id;
-				// Held until startup finishes; a premature response would precede the form's notify.
-				// set_ask_dialog is served during startup and takes effect independently of forms.
+				// The handshake and the state reads are answered while startup still awaits the form; the prompt
+				// waits for startup to finish. set_ask_dialog is served during startup and takes effect.
+				child.stdin.write(`${JSON.stringify({ id: "np", type: "negotiate_protocol", protocolVersion: 2 })}\n`);
 				for (const id of ["s1", "s2"]) child.stdin.write(`${JSON.stringify({ id, type: "get_state" })}\n`);
 				child.stdin.write(`${JSON.stringify({ id: "p", type: "prompt", message: "/probe" })}\n`);
 				child.stdin.write(`${JSON.stringify({ id: "s3", type: "get_state" })}\n`);
 				child.stdin.write(`${JSON.stringify({ id: "ask", type: "set_ask_dialog", enabled: true })}\n`);
 				await child.stdin.flush();
 			} else if (frame.type === "response" && frame.id === "ask") {
+				// Every frame above was read before this one was answered, so the form is answered only after them.
 				seen.push("ask");
 				child.stdin.write(
 					`${JSON.stringify({ type: "extension_ui_response", id: formId, data: { trust: "yes" } })}\n`,
@@ -249,19 +255,132 @@ await runRpcMode(session);
 				await child.stdin.flush();
 			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
 				seen.push(String(frame.message));
-			} else if (frame.type === "response" && typeof frame.id === "string" && /^(s\d|p)$/.test(frame.id)) {
+				// Drain stdout to its end once the probe has run: closing the reader early would break the child's
+				// output pipe, and closing stdin before the form is answered would reject it.
+				if (frame.message === "askDialog:function") child.stdin.end();
+			} else if (frame.type === "response" && typeof frame.id === "string" && /^(np|s\d|p)$/.test(frame.id)) {
 				seen.push(`${frame.id}:${frame.success}`);
-				// Drain stdout to its end: closing the reader early would break the child's output pipe.
-				if (frame.id === "s3") child.stdin.end();
 			}
 		}
 		await child.exited;
-		// The probe's own frames race the later state responses; every other frame's order is fixed.
+		// The prompt's own response races the probe's notify; the reads come before the form's notify, which
+		// startup emits once the form is answered, and the probe runs only after startup.
 		expect(
-			seen.filter(entry => entry !== "p:true" && entry !== "askDialog:function"),
+			seen.filter(entry => entry !== "p:true" && entry !== "ask"),
 			await stderr,
-		).toEqual(["ask", '{"trust":"yes"}', "s1:true", "s2:true", "s3:true"]);
-		expect(seen).toContain("askDialog:function");
+		).toEqual(["np:true", "s1:true", "s2:true", "s3:true", '{"trust":"yes"}', "askDialog:function"]);
+		expect(seen).toContain("ask");
+	}, 30_000);
+
+	it("holds a command that changes the session while startup runs, and the reads queued behind it", async () => {
+		await using temp = await TempDir.create("@rpc-startup-dialog-hold-");
+		const child = await spawnStartupDialogRuntime(temp);
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		let formId: unknown;
+		let sessionName: unknown;
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "extension_ui_request" && frame.method === "form") {
+				formId = frame.id;
+				child.stdin.write(`${JSON.stringify({ id: "n", type: "set_session_name", name: "renamed" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "s", type: "get_state" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "ask", type: "set_ask_dialog", enabled: true })}\n`);
+				await child.stdin.flush();
+			} else if (frame.type === "response" && frame.id === "ask") {
+				// The rename and the read behind it were read before this answer. Run at once, both would be answered
+				// before the form's answer is even read; held, both wait for startup to finish.
+				seen.push("ask");
+				child.stdin.write(
+					`${JSON.stringify({ type: "extension_ui_response", id: formId, data: { trust: "yes" } })}\n`,
+				);
+				await child.stdin.flush();
+			} else if (frame.type === "available_commands_update" && !seen.includes("commands")) {
+				// The last step of startup. A held command answered before it would have been released early, ahead of
+				// the goal reconcile whose tool set it could otherwise change. Only the first one is recorded: a later
+				// command-metadata change emits another.
+				seen.push("commands");
+			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+				seen.push(String(frame.message));
+			} else if (frame.type === "response" && (frame.id === "n" || frame.id === "s")) {
+				seen.push(`${frame.id}:${frame.success}`);
+				if (frame.id === "s") {
+					sessionName = isRecord(frame.data) ? frame.data.sessionName : undefined;
+					child.stdin.end();
+				}
+			}
+		}
+		await child.exited;
+		expect(seen, await stderr).toEqual(["ask", '{"trust":"yes"}', "commands", "n:true", "s:true"]);
+		// The read queued behind the rename ran after it.
+		expect(sessionName).toBe("renamed");
+	}, 30_000);
+
+	it("defers a shutdown session_start requests until startup finishes, answering a read meanwhile", async () => {
+		await using temp = await TempDir.create("@rpc-startup-dialog-shutdown-");
+		const child = await spawnStartupDialogRuntime(temp, { requestShutdown: true });
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		let formId: unknown;
+		// stdin stays open, and nothing is queued when startup ends: only the shutdown checked at the end of
+		// startup can end the process.
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "extension_ui_request" && frame.method === "form") {
+				formId = frame.id;
+				child.stdin.write(`${JSON.stringify({ id: "s", type: "get_state" })}\n`);
+				await child.stdin.flush();
+			} else if (frame.type === "response" && frame.id === "s") {
+				// Answered during startup: the shutdown requested before it must not end the process mid-startup.
+				seen.push(`s:${frame.success}`);
+				child.stdin.write(
+					`${JSON.stringify({ type: "extension_ui_response", id: formId, data: { trust: "yes" } })}\n`,
+				);
+				await child.stdin.flush();
+			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+				seen.push(String(frame.message));
+			}
+		}
+		const exitCode = await child.exited;
+		expect({ seen, exitCode, signal: child.signalCode }, await stderr).toEqual({
+			seen: ["s:true", '{"trust":"yes"}'],
+			exitCode: 0,
+			signal: null,
+		});
+	}, 30_000);
+
+	it("answers a command held for startup before a shutdown requested in session_start exits", async () => {
+		await using temp = await TempDir.create("@rpc-startup-dialog-shutdown-held-");
+		const child = await spawnStartupDialogRuntime(temp, { requestShutdown: true });
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		let formId: unknown;
+		// stdin stays open: only the deferred shutdown can end the process, and it must not take the held
+		// command's response with it.
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "extension_ui_request" && frame.method === "form") {
+				formId = frame.id;
+				child.stdin.write(`${JSON.stringify({ id: "s", type: "get_state" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "ns", type: "new_session" })}\n`);
+				await child.stdin.flush();
+			} else if (frame.type === "response" && (frame.id === "s" || frame.id === "ns")) {
+				seen.push(`${frame.id}:${frame.success}`);
+				if (frame.id !== "s") continue;
+				child.stdin.write(
+					`${JSON.stringify({ type: "extension_ui_response", id: formId, data: { trust: "yes" } })}\n`,
+				);
+				await child.stdin.flush();
+			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+				seen.push(String(frame.message));
+			}
+		}
+		const exitCode = await child.exited;
+		expect({ seen, exitCode, signal: child.signalCode }, await stderr).toEqual({
+			seen: ["s:true", '{"trust":"yes"}', "ns:true"],
+			exitCode: 0,
+			signal: null,
+		});
 	}, 30_000);
 
 	it("rejects a dialog session_start awaits when stdin closes, so the process still exits", async () => {
