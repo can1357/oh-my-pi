@@ -62,6 +62,8 @@ export function getExtraHelpText(): string {
   SCW_SECRET_KEY             - Scaleway Generative APIs models
   OTARI_API_KEY              - Otari AI gateway (workspace models)
   OTARI_BASE_URL             - Otari API root (EU or self-hosted, e.g. https://host/api/v1)
+  TRUSTEDROUTER_API_KEY      - TrustedRouter attested AI gateway (live model discovery)
+  TRUSTEDROUTER_BASE_URL     - TrustedRouter API root override (default https://api.trustedrouter.com/v1)
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)

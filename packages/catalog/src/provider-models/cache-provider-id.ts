@@ -13,6 +13,7 @@ import {
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
 import { OTARI_US_BASE_URL } from "../wire/otari";
+import { normalizeTrustedRouterBaseUrl } from "../wire/trustedrouter";
 
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
@@ -100,6 +101,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return Bun.env.OTARI_BASE_URL?.trim() || OTARI_US_BASE_URL;
 		case "refuseless":
 			return "https://api.refuseless.com/v1";
+		case "trustedrouter":
+			return normalizeTrustedRouterBaseUrl(Bun.env.TRUSTEDROUTER_BASE_URL);
 		case "bifrost":
 			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":
@@ -201,6 +204,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// raw configured value while `charmHyperModelManagerOptions` passes a
 			// `/v1`-suffixed one; both must land on one namespace.
 			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
+		}
+		case "trustedrouter": {
+			// Public `/v1/models` roster does not vary by key, so scope by the
+			// normalized endpoint (default, regional via `TRUSTEDROUTER_BASE_URL`,
+			// or a custom proxy override) rather than credential.
+			const baseUrl = normalizeTrustedRouterBaseUrl(options.baseUrl?.trim() || Bun.env.TRUSTEDROUTER_BASE_URL);
+			return `trustedrouter:models-v1:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "kimi-code":
 		case "kimi-code-global": {

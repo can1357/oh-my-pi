@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added TrustedRouter (`trustedrouter`) provider with live public `/v1/models` discovery, `trustedrouter/*` routing presets, and `/login trustedrouter` (`TRUSTEDROUTER_API_KEY`, optional `TRUSTEDROUTER_BASE_URL`, validated against `/v1/key`) ([#20621](https://github.com/can1357/oh-my-pi/pull/20621) by [@jperla](https://github.com/jperla))
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)

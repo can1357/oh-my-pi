@@ -85,6 +85,7 @@ export type KnownProvider =
 	| "stepfun"
 	| "synthetic"
 	| "together"
+	| "trustedrouter"
 	| "typesafe"
 	| "umans"
 	| "venice"
