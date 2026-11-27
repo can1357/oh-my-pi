@@ -10,6 +10,7 @@
 - Added OpenAI's `gpt-transcribe` speech-to-text model, the replacement for `whisper-1`, `gpt-4o-transcribe`, and `gpt-4o-mini-transcribe`, which OpenAI shuts down on 2027-02-26.
 - Added OpenRouter speech-to-text models `openai/gpt-transcribe`, `openai/whisper-large-v3-turbo`, `nvidia/nemotron-3.5-transcribe`, `elevenlabs/scribe-v2`, `assemblyai/universal-3-6-pro`, `deepgram/nova-3`, `qwen/qwen3-asr-1.7b`, and `x-ai/grok-stt-2.0`.
 - Added DeepInfra text-to-speech models `Qwen/Qwen3-TTS` and `sesame/csm-1b`.
+- `productIdentityKey` (`@oh-my-pi/pi-catalog/identity`) gives one key to a model across its providers, spellings and routes, and separate keys to products that share a class, family and revision; `productIdentityKeys` gives a row the keys of both the id its provider is sent and its own catalog id ([#19682](https://github.com/can1357/oh-my-pi/pull/19682) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

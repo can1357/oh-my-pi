@@ -100,6 +100,22 @@ type CredentialBackoff = { until: number; timed: boolean; probeAfter: number; pe
  */
 type PersistedBlockScopes = ReadonlyMap<string, number> | null | undefined;
 
+/**
+ * Latest block deadline of each cause for one credential and request; the
+ * latest of the three is {@link CredentialBlocks.blockedUntil}'s deadline.
+ */
+export interface CredentialBlockDeadlines {
+	/** Usage-limit blocks: the catch-all key and each requested quota scope. */
+	usage?: number;
+	/**
+	 * Account-policy blocks: the `account-policy` and `oauth-org-policy` scopes
+	 * and each requested `model-policy:` scope.
+	 */
+	accountPolicy?: number;
+	/** Authentication blocks: the `auth` scope (a 401) and the `oauth-refresh-failure` scope. */
+	auth?: number;
+}
+
 /** Latch for unrecoverably corrupt persisted block stores, shared with the credential pool. */
 export class BlockStoreHealth {
 	readonly #sourceLabel: string | undefined;
@@ -370,6 +386,44 @@ export class CredentialBlocks implements BlocksApi {
 			}
 		}
 		return blockedUntil;
+	}
+
+	/**
+	 * {@link CredentialBlocks.blockedUntil} for the same credential and request
+	 * scopes, split by cause and built on the same in-memory and persisted reads.
+	 */
+	blockedUntilByCause(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		blockScopes: readonly string[],
+	): CredentialBlockDeadlines {
+		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
+		if (credentialId === undefined) return {};
+		const persistedScopes = this.#readPersistedCredentialBlockScopes(credentialId, providerKey);
+		const latestBlockedUntil = (scopes: readonly string[]): number | undefined => {
+			let blockedUntil: number | undefined;
+			for (const scope of scopes) {
+				const scopeBlockedUntil = this.#exactBlockedUntil(credentialId, providerKey, scope, persistedScopes);
+				if (scopeBlockedUntil !== undefined && (blockedUntil === undefined || scopeBlockedUntil > blockedUntil)) {
+					blockedUntil = scopeBlockedUntil;
+				}
+			}
+			return blockedUntil;
+		};
+		const accountPolicyScopes: string[] = [ACCOUNT_POLICY_BLOCK_SCOPE, OAUTH_ORG_POLICY_BLOCK_SCOPE];
+		const authScopes: string[] = [AUTH_BLOCK_SCOPE, OAUTH_REFRESH_FAILURE_BLOCK_SCOPE];
+		const usageScopes = [""];
+		for (const scope of blockScopes) {
+			if (scope.length === 0 || accountPolicyScopes.includes(scope) || authScopes.includes(scope)) continue;
+			if (scope.startsWith(MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX)) accountPolicyScopes.push(scope);
+			else usageScopes.push(scope);
+		}
+		return {
+			usage: latestBlockedUntil(usageScopes),
+			accountPolicy: latestBlockedUntil(accountPolicyScopes),
+			auth: latestBlockedUntil(authScopes),
+		};
 	}
 
 	/** Checks if a credential is temporarily blocked due to usage limits. */
