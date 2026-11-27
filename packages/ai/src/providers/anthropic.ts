@@ -4125,6 +4125,57 @@ export function buildAnthropicSystemBlocks(
 	return blocks.length > 0 ? blocks : undefined;
 }
 
+/** Inputs for {@link buildGitHubCopilotAnthropicHeaders}. */
+export interface GitHubCopilotAnthropicHeaderArgs {
+	model: Pick<Model<"anthropic-messages">, "provider" | "providerType" | "headers">;
+	/** Copilot credential: a bare token or the OAuth login's JSON envelope. */
+	apiKey: string;
+	/** Effective endpoint (`resolveAnthropicBaseUrl`); selects the `anthropic-version`. */
+	baseUrl: string | undefined;
+	/** The only betas sent: Copilot's proxy rejects Anthropic's own beta set. */
+	extraBetas?: readonly string[];
+	stream: boolean;
+	/** Caller headers; they override every built header. */
+	headers?: Record<string, string>;
+	/** Per-request Copilot headers (`buildCopilotDynamicHeaders`). */
+	dynamicHeaders?: Record<string, string>;
+	sessionId?: string;
+	parentSessionId?: string;
+	dropPromptCacheBetas?: boolean;
+}
+
+/**
+ * Headers for a GitHub Copilot `/v1/messages` request, shared by streaming
+ * Messages and hosted web search so both reach Copilot's proxy identically.
+ */
+export function buildGitHubCopilotAnthropicHeaders(args: GitHubCopilotAnthropicHeaderArgs): Record<string, string> {
+	const { model, extraBetas = [] } = args;
+	const mergedHeaders = mergeHeaders(
+		{
+			Accept: args.stream ? "text/event-stream" : "application/json",
+			"Content-Type": "application/json",
+			"anthropic-version": resolveAnthropicApiVersion(args.baseUrl),
+			"Anthropic-Dangerous-Direct-Browser-Access": "true",
+			Authorization: `Bearer ${parseGitHubCopilotApiKey(args.apiKey).accessToken}`,
+			...(extraBetas.length > 0 ? { "anthropic-beta": buildBetaHeader([], extraBetas) } : {}),
+		},
+		model.headers,
+		args.dynamicHeaders,
+		args.headers,
+	);
+	// No enforced-key filter: a caller-supplied `anthropic-beta` lands verbatim,
+	// cache betas included unless `dropPromptCacheBetas` strips them.
+	const headers = args.dropPromptCacheBetas ? stripHeaderBetas(mergedHeaders, promptCacheBetas) : mergedHeaders;
+	applyInferenceHeaders(headers, {
+		provider: model.provider,
+		providerType: model.providerType,
+		protocol: "anthropic",
+		sessionId: args.sessionId,
+		parentSessionId: args.parentSessionId,
+	});
+	return headers;
+}
+
 export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): AnthropicClientOptionsResult {
 	const {
 		model,
@@ -4194,36 +4245,19 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
 	if (model.provider === "github-copilot") {
-		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
-		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
-		// features. Forward only caller-supplied betas.
-		const betaFeatures = [...extraBetas];
-		const mergedCopilotHeaders = mergeHeaders(
-			{
-				Accept: stream ? "text/event-stream" : "application/json",
-				"Content-Type": "application/json",
-				"anthropic-version": resolveAnthropicApiVersion(baseUrl),
-				"Anthropic-Dangerous-Direct-Browser-Access": "true",
-				Authorization: `Bearer ${copilotApiKey}`,
-				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
-			},
-			model.headers,
-			dynamicHeaders,
+		const defaultHeaders = buildGitHubCopilotAnthropicHeaders({
+			model,
+			apiKey,
+			baseUrl,
+			extraBetas,
+			stream,
 			headers,
-		);
-		// Unlike the generic builder below, this branch has no enforced-key
-		// filter: a caller-supplied `anthropic-beta` lands in the default
-		// headers verbatim, cache betas included.
-		const defaultHeaders = dropPromptCacheBetas
-			? stripHeaderBetas(mergedCopilotHeaders, promptCacheBetas)
-			: mergedCopilotHeaders;
-		applyInferenceHeaders(defaultHeaders, {
-			provider: model.provider,
-			providerType: model.providerType,
-			protocol: "anthropic",
+			dynamicHeaders,
 			sessionId,
 			parentSessionId,
+			dropPromptCacheBetas,
 		});
+		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
 
 		return {
 			isOAuthToken: false,
