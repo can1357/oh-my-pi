@@ -664,13 +664,14 @@ export class HtmlFormModel {
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
 		// A key release neither scrolls nor drops the scroll.
 		if (key.kind === "release") return this.#key(routed);
-		const { scrolled, highlightBelow } = this.painted;
+		// The scroll actually on screen: a resize may have shrunk it, and keys between paints have already spent some.
+		const scrolled = Math.min(untrack(this.scrollBack), this.painted.scrolled);
 		const box = this.#activeBox();
 		const mode = box && this.vim(box)?.mode;
 		const down = listKeyId(routed) === "down" || (key.id === "j" && mode !== undefined && untrack(mode) === "normal");
 		// Down (Vim `j` in a text box too) scrolls back until the highlight shows, then moves it.
-		if (scrolled > 0 && highlightBelow && down) {
-			this.scrollBack.set(Math.min(untrack(this.scrollBack), scrolled) - 1);
+		if (scrolled > 0 && this.painted.highlightBelow && down) {
+			this.scrollBack.set(scrolled - 1);
 			return true;
 		}
 		this.#keepScroll = false;
