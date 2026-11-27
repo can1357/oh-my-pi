@@ -241,6 +241,17 @@ function walkNodes(root: unknown, visit: (node: BabelNode) => void): void {
 	}
 }
 
+const IMPORT_KEYWORD = "import";
+
+/**
+ * Source range of the `import` keyword of a dynamic `import(...)`. Babel parses it as an
+ * `ImportExpression` spanning the whole call, which always opens with the keyword.
+ */
+function dynamicImportKeywordRange(node: BabelNode): { start: number; end: number } | undefined {
+	if (node.type !== "ImportExpression") return undefined;
+	return { start: node.start, end: node.start + IMPORT_KEYWORD.length };
+}
+
 function buildOptionsLiteral(node: BabelImportDeclaration): string | undefined {
 	const attrs = node.attributes;
 	if (!attrs || attrs.length === 0) return undefined;
@@ -304,14 +315,12 @@ export async function rewriteImports(code: string): Promise<string> {
 		edits.push({ start: decl.start, end: decl.end, text: rewriteImportNode(decl) });
 	}
 
-	// Dynamic `import(...)` expressions (anywhere) get their callee swapped for `__omp_import__`
-	// so the specifier resolves against the session cwd instead of the worker module's URL.
+	// Dynamic `import(...)` expressions (anywhere) get their `import` keyword swapped for
+	// `__omp_import__` so the specifier resolves against the session cwd instead of the worker
+	// module's URL.
 	walkNodes(ast, node => {
-		if (node.type !== "CallExpression") return;
-		const call = node as unknown as { callee?: { type?: string; start?: number; end?: number } };
-		const callee = call.callee;
-		if (callee?.type !== "Import" || typeof callee.start !== "number" || typeof callee.end !== "number") return;
-		edits.push({ start: callee.start, end: callee.end, text: DYNAMIC_IMPORT_CALLEE });
+		const keyword = dynamicImportKeywordRange(node);
+		if (keyword) edits.push({ ...keyword, text: DYNAMIC_IMPORT_CALLEE });
 	});
 
 	if (edits.length === 0) return code;
@@ -383,13 +392,8 @@ export async function rewriteDynamicImports(code: string, callee = "__omp_import
 	type Edit = { start: number; end: number; text: string };
 	const edits: Edit[] = [];
 	walkNodes(ast, node => {
-		if (node.type !== "CallExpression") return;
-		const call = node as unknown as { callee?: { type?: string; start?: number; end?: number } };
-		const callCallee = call.callee;
-		if (callCallee?.type !== "Import" || typeof callCallee.start !== "number" || typeof callCallee.end !== "number") {
-			return;
-		}
-		edits.push({ start: callCallee.start, end: callCallee.end, text: callee });
+		const keyword = dynamicImportKeywordRange(node);
+		if (keyword) edits.push({ ...keyword, text: callee });
 	});
 
 	if (edits.length === 0) return code;

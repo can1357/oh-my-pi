@@ -79,7 +79,7 @@ function parseExtensionSource(source: string, importerPath: string): ParseResult
 	// Installing specifier hooks needs no parser; only a real source rewrite does.
 	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
-	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
+	const plugins: ParserPlugin[] = ["decorators-legacy"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
 		plugins.push("typescript");
 	}
@@ -530,9 +530,7 @@ function collectExtensionSpecifierReferences(
 			}
 		} else if (node.type === "CallExpression") {
 			const callee = asAstNode(node.callee);
-			if (callee?.type === "Import") {
-				record("import", nodeArgument(node, 0));
-			} else if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
+			if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
 				record("require", nodeArgument(node, 0));
 			} else if (isCreateRequireInvocation(callee, createRequireBindings, moduleNamespaceBindings)) {
 				// `createRequire(base)(spec)` — pin the invoked bare dependency so it

@@ -1,8 +1,8 @@
 diff --git a/lib/puppeteer/api/ElementHandle.js b/lib/puppeteer/api/ElementHandle.js
-index 81454fe2af73518f7e76f04cbe3a7f170d735fa5..ee6b042c87861f00d7fcbb6e3eb6e87af232ebbd 100644
+index 63c5df3c495c92d918a56e2059ed74255cf07a1a..5a6bb8e1c0654375e1775114bdef09428850139f 100644
 --- a/lib/puppeteer/api/ElementHandle.js
 +++ b/lib/puppeteer/api/ElementHandle.js
-@@ -102,6 +102,36 @@ import { throwIfDisposed } from '../util/decorators.js';
+@@ -103,6 +103,36 @@ import { throwIfDisposed } from '../util/decorators.js';
  import { _isElementHandle } from './ElementHandleSymbol.js';
  import { JSHandle } from './JSHandle.js';
  import { NodeLocator } from './locators/locators.js';
@@ -39,7 +39,7 @@ index 81454fe2af73518f7e76f04cbe3a7f170d735fa5..ee6b042c87861f00d7fcbb6e3eb6e87a
  /**
   * A given method will have it's `this` replaced with an isolated version of
   * `this` when decorated with this decorator.
-@@ -299,6 +329,7 @@ let ElementHandle = (() => {
+@@ -300,6 +330,7 @@ let ElementHandle = (() => {
           * trying to adopt it multiple times
           */
          isolatedHandle = __runInitializers(this, _instanceExtraInitializers);
@@ -47,7 +47,7 @@ index 81454fe2af73518f7e76f04cbe3a7f170d735fa5..ee6b042c87861f00d7fcbb6e3eb6e87a
          /**
           * @internal
           */
-@@ -335,19 +366,37 @@ let ElementHandle = (() => {
+@@ -336,19 +367,37 @@ let ElementHandle = (() => {
          async getProperties() {
              return await this.handle.getProperties();
          }
@@ -87,7 +87,7 @@ index 81454fe2af73518f7e76f04cbe3a7f170d735fa5..ee6b042c87861f00d7fcbb6e3eb6e87a
          }
          /**
           * @internal
-@@ -371,7 +420,7 @@ let ElementHandle = (() => {
+@@ -372,7 +421,7 @@ let ElementHandle = (() => {
           * @internal
           */
          async dispose() {
@@ -96,7 +96,7 @@ index 81454fe2af73518f7e76f04cbe3a7f170d735fa5..ee6b042c87861f00d7fcbb6e3eb6e87a
          }
          /**
           * @internal
-@@ -555,15 +604,27 @@ let ElementHandle = (() => {
+@@ -556,15 +605,27 @@ let ElementHandle = (() => {
          async $$eval(selector, pageFunction, ...args) {
              const env_2 = { stack: [], error: void 0, hasError: false };
              try {
@@ -129,7 +129,7 @@ index 81454fe2af73518f7e76f04cbe3a7f170d735fa5..ee6b042c87861f00d7fcbb6e3eb6e87a
                  ]);
                  return result;
 diff --git a/lib/puppeteer/api/Frame.js b/lib/puppeteer/api/Frame.js
-index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf6545bb59b86 100644
+index 7d91019325a088a77f3bed4b5f57dc8d0f0d7dfe..6c3ba98ce538ed53b4cd86b9f086a5ee8e28a182 100644
 --- a/lib/puppeteer/api/Frame.js
 +++ b/lib/puppeteer/api/Frame.js
 @@ -119,6 +119,36 @@ export var FrameEvent;
@@ -169,8 +169,8 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
  /**
   * Represents a DOM frame.
   *
-@@ -277,12 +307,21 @@ let Frame = (() => {
-             super();
+@@ -282,12 +312,21 @@ let Frame = (() => {
+             this.logger = logger;
          }
          #_document;
 +        #_mainDocument;
@@ -193,7 +193,7 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
                      return document;
                  });
              }
-@@ -295,6 +334,7 @@ let Frame = (() => {
+@@ -300,6 +339,7 @@ let Frame = (() => {
           */
          clearDocumentHandle() {
              this.#_document = undefined;
@@ -201,7 +201,7 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
          }
          /**
           * @returns The frame element associated with this frame (if any).
-@@ -345,8 +385,9 @@ let Frame = (() => {
+@@ -350,8 +390,9 @@ let Frame = (() => {
           * See {@link Page.evaluateHandle} for details.
           */
          async evaluateHandle(pageFunction, ...args) {
@@ -212,7 +212,7 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
          }
          /**
           * Behaves identically to {@link Page.evaluate} except it's run within
-@@ -355,8 +396,9 @@ let Frame = (() => {
+@@ -360,8 +401,9 @@ let Frame = (() => {
           * See {@link Page.evaluate} for details.
           */
          async evaluate(pageFunction, ...args) {
@@ -223,7 +223,7 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
          }
          /**
           * @internal
-@@ -458,9 +500,10 @@ let Frame = (() => {
+@@ -463,9 +505,10 @@ let Frame = (() => {
           * @returns A promise to the result of the function.
           */
          async $eval(selector, pageFunction, ...args) {
@@ -235,7 +235,7 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
              return await document.$eval(selector, pageFunction, ...args);
          }
          /**
-@@ -498,9 +541,10 @@ let Frame = (() => {
+@@ -503,9 +546,10 @@ let Frame = (() => {
           * @returns A promise to the result of the function.
           */
          async $$eval(selector, pageFunction, ...args) {
@@ -247,7 +247,7 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
              return await document.$$eval(selector, pageFunction, ...args);
          }
          /**
-@@ -577,7 +621,8 @@ let Frame = (() => {
+@@ -582,7 +626,8 @@ let Frame = (() => {
           * @returns the promise which resolve when the `pageFunction` returns a truthy value.
           */
          async waitForFunction(pageFunction, options = {}, ...args) {
@@ -258,11 +258,11 @@ index 8698d2a5a976b277344fe42e90ffe985bdf0fbd7..62c3b7ca8ec987cc62ceacec69acf654
          /**
           * The full HTML contents of the frame, including the DOCTYPE.
 diff --git a/lib/puppeteer/cdp/ExecutionContext.js b/lib/puppeteer/cdp/ExecutionContext.js
-index c67098fd6c9f66666ad2b41d5b7dea42e1991833..8cb17f9acc50ff47bbbd5faf09112e05558c4af2 100644
+index a7b75e83b8dd282b4e675fbcb88326208604ad51..d2e105e8d4c1cb8cf2a93c7f554d613d2f33cde7 100644
 --- a/lib/puppeteer/cdp/ExecutionContext.js
 +++ b/lib/puppeteer/cdp/ExecutionContext.js
-@@ -201,7 +201,10 @@ export class ExecutionContext extends EventEmitter {
-     #puppeteerUtil;
+@@ -229,7 +229,10 @@ export class ExecutionContext extends EventEmitter {
+      */
      get puppeteerUtil() {
          let promise = Promise.resolve();
 -        if (!this.#bindingsInstalled) {
@@ -271,9 +271,9 @@ index c67098fd6c9f66666ad2b41d5b7dea42e1991833..8cb17f9acc50ff47bbbd5faf09112e05
 +        // Do not install globals that page scripts can read or replace.
 +        if (!this.#bindingsInstalled && this.#name) {
              promise = Promise.all([
-                 this.#addBindingWithoutThrowing(ariaQuerySelectorBinding),
-                 this.#addBindingWithoutThrowing(ariaQuerySelectorAllBinding),
-@@ -326,14 +329,19 @@ export class ExecutionContext extends EventEmitter {
+                 this.#addBindingWithoutThrowing(ExecutionContext.getOrCreateAriaQuerySelectorBinding(this.#logger)),
+                 this.#addBindingWithoutThrowing(ExecutionContext.getOrCreateAriaQuerySelectorAllBinding(this.#logger)),
+@@ -354,14 +357,19 @@ export class ExecutionContext extends EventEmitter {
          return await this.#evaluate(false, pageFunction, ...args);
      }
      async #evaluate(returnByValue, pageFunction, ...args) {
@@ -296,7 +296,7 @@ index c67098fd6c9f66666ad2b41d5b7dea42e1991833..8cb17f9acc50ff47bbbd5faf09112e05
              const { exceptionDetails, result: remoteObject } = await this.#client
                  .send('Runtime.evaluate', {
                  expression: expressionWithSourceUrl,
-@@ -352,9 +360,8 @@ export class ExecutionContext extends EventEmitter {
+@@ -380,9 +388,8 @@ export class ExecutionContext extends EventEmitter {
              return this.#world.createCdpHandle(remoteObject);
          }
          const functionDeclaration = stringifyFunction(pageFunction);
@@ -309,19 +309,19 @@ index c67098fd6c9f66666ad2b41d5b7dea42e1991833..8cb17f9acc50ff47bbbd5faf09112e05
          try {
              callFunctionOnPromise = this.#client.send('Runtime.callFunctionOn', {
 diff --git a/lib/puppeteer/cdp/Frame.js b/lib/puppeteer/cdp/Frame.js
-index 4e27013ad8f9b89ee13913e55bba243cc8bf9662..42c4bf547443aa01955dde6f4e0f4d5385ca3c96 100644
+index 24c2e3157d77c1c8acea25fe60fde9f48732ebf6..aff660fea4d5a5adaea48bbb9151042883b02e5a 100644
 --- a/lib/puppeteer/cdp/Frame.js
 +++ b/lib/puppeteer/cdp/Frame.js
-@@ -276,7 +276,7 @@ let CdpFrame = (() => {
+@@ -303,7 +303,7 @@ let CdpFrame = (() => {
                  this.#client.send('Runtime.addBinding', {
                      name: CDP_BINDING_PREFIX + binding.name,
                  }),
--                this.evaluate(binding.initSource).catch(debugCatchError),
-+                this.mainRealm().evaluate(binding.initSource).catch(debugCatchError),
+-                this.evaluate(binding.initSource).catch(error => {
++                this.mainRealm().evaluate(binding.initSource).catch(error => {
+                     this.#logger?.(DEBUG_PREFIXES.error)?.(error);
+                 }),
              ]);
-         }
-         async removeExposedFunctionBinding(binding) {
-@@ -289,7 +289,7 @@ let CdpFrame = (() => {
+@@ -318,7 +318,7 @@ let CdpFrame = (() => {
                  this.#client.send('Runtime.removeBinding', {
                      name: CDP_BINDING_PREFIX + binding.name,
                  }),
@@ -331,10 +331,10 @@ index 4e27013ad8f9b89ee13913e55bba243cc8bf9662..42c4bf547443aa01955dde6f4e0f4d53
                      // @ts-expect-error: In a different context.
                      globalThis[name] = undefined;
 diff --git a/lib/puppeteer/cdp/FrameManager.js b/lib/puppeteer/cdp/FrameManager.js
-index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12bd64e5de 100644
+index 92217b2a5a572c35bbc41bf3d6846f337a0c20d2..08796f79a44e5c3d1cf012a61453f9fcfad3f9b0 100644
 --- a/lib/puppeteer/cdp/FrameManager.js
 +++ b/lib/puppeteer/cdp/FrameManager.js
-@@ -13,6 +13,7 @@ import { disposeSymbol } from '../util/disposable.js';
+@@ -66,6 +66,7 @@ import { DisposableStack, disposeSymbol } from '../util/disposable.js';
  import { isErrorLike } from '../util/ErrorLike.js';
  import { CdpIssue } from './CdpIssue.js';
  import { CdpPreloadScript } from './CdpPreloadScript.js';
@@ -342,10 +342,10 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
  import { isTargetClosedError } from './Connection.js';
  import { CdpDeviceRequestPromptManager } from './DeviceRequestPrompt.js';
  import { ExecutionContext } from './ExecutionContext.js';
-@@ -43,6 +44,13 @@ export class FrameManager extends EventEmitter {
-      * frameNavigated event usually contains the latest information.
+@@ -97,6 +98,13 @@ export class FrameManager extends EventEmitter {
+      * usually contains the latest information.
       */
-     #frameNavigatedReceived = new Set();
+     #frameNavigatedReceived = new WeakMap();
 +    // xxx-stealth: coalesce concurrent world re-acquisitions per frame so the
 +    // frameNavigated/init/load triggers don't stomp each other's contexts.
 +    #acquireQueued = new Set();
@@ -355,11 +355,11 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
 +    #navigations = new WeakMap();
      #deviceRequestPromptManagerMap = new WeakMap();
      #frameTreeHandled;
-     get timeoutSettings() {
-@@ -144,6 +152,12 @@ export class FrameManager extends EventEmitter {
+     #logger;
+@@ -211,6 +219,12 @@ export class FrameManager extends EventEmitter {
          });
          session.on('Page.frameNavigated', async (event) => {
-             this.#frameNavigatedReceived.add(event.frame.id);
+             this.#navigatedFrames(session).add(event.frame.id);
 +            // xxx-stealth: count before the first await, so an acquisition whose
 +            // probe answers arrive together with this event already sees it.
 +            const navigated = this.frame(event.frame.id);
@@ -367,9 +367,9 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
 +                this.#navigations.set(navigated, this.#navigationCount(navigated) + 1);
 +            }
              await this.#frameTreeHandled?.valueOrThrow();
-             void this.#onFrameNavigated(event.frame, event.type);
+             void this.#onFrameNavigated(session, event.frame, event.type);
          });
-@@ -191,9 +205,18 @@ export class FrameManager extends EventEmitter {
+@@ -323,9 +337,20 @@ export class FrameManager extends EventEmitter {
                      this.#frameTreeHandled?.resolve();
                  }),
                  client.send('Page.setLifecycleEventsEnabled', { enabled: true }),
@@ -387,21 +387,23 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
 +                client.send('Page.addScriptToEvaluateOnNewDocument', {
 +                    source: `//# sourceURL=${PuppeteerURL.INTERNAL_URL}`,
 +                    worldName: UTILITY_WORLD_NAME,
-+                }).catch(debugCatchError),
++                }).catch(error => {
++                this.#logger?.(DEBUG_PREFIXES.error)?.(error);
++            }),
                  ...(frame
                      ? Array.from(this.#scriptsToEvaluateOnNewDocument.values())
                      : []).map(script => {
-@@ -346,6 +369,7 @@ export class FrameManager extends EventEmitter {
+@@ -550,6 +575,7 @@ export class FrameManager extends EventEmitter {
              return;
          }
-         frame = new CdpFrame(this, frameId, parentFrameId, session);
+         frame = new CdpFrame(this, frameId, parentFrameId, targetSession ?? session, this.#logger);
 +        this.#installContextProviders(frame);
          this._frameTree.addFrame(frame);
          this.emit(FrameManagerEvent.FrameAttached, frame);
      }
-@@ -376,6 +400,196 @@ export class FrameManager extends EventEmitter {
-         frame._navigated(framePayload);
+@@ -591,6 +617,206 @@ export class FrameManager extends EventEmitter {
          this.emit(FrameManagerEvent.FrameNavigated, frame);
+         this.emit(FrameManagerEvent.FrameNavigatedNewDocument, frame);
          frame.emit(FrameEvent.FrameNavigated, navigationType);
 +        // xxx-stealth: Runtime.enable is off, so navigation does not notify the
 +        // worlds when their contexts die. Invalidate them and pull fresh contexts
@@ -493,7 +495,9 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
 +                worldName: UTILITY_WORLD_NAME,
 +                grantUniveralAccess: true,
 +            })
-+                .catch(debugCatchError);
++                .catch(error => {
++                this.#logger?.(DEBUG_PREFIXES.error)?.(error);
++            });
 +            const utilityId = iso && typeof iso.executionContextId === 'number' ? iso.executionContextId : undefined;
 +            if (this.#navigationCount(frame) !== navigations) {
 +                return;
@@ -540,7 +544,7 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
 +            }
 +        }
 +        catch (error) {
-+            debugCatchError(error);
++            this.#logger?.(DEBUG_PREFIXES.error)?.(error);
 +        }
 +    }
 +    // xxx-stealth: resolve a frame's MAIN-world execution context id without
@@ -565,7 +569,9 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
 +                expression: 'globalThis',
 +                serializationOptions: { serialization: 'idOnly' },
 +            })
-+                .catch(debugCatchError);
++                .catch(error => {
++                this.#logger?.(DEBUG_PREFIXES.error)?.(error);
++            });
 +            return parse(globalThis?.result?.objectId);
 +        }
 +        if (utilityId === undefined) {
@@ -577,33 +583,39 @@ index 2322aa136a47b446e2a7b2c4f0bc751f2fb821d0..5c88a7a3205276262d979fe2a00b4b12
 +            contextId: utilityId,
 +            serializationOptions: { serialization: 'idOnly' },
 +        })
-+            .catch(debugCatchError);
++            .catch(error => {
++                this.#logger?.(DEBUG_PREFIXES.error)?.(error);
++            });
 +        const utilDocObjectId = utilDoc?.result?.objectId;
 +        if (typeof utilDocObjectId !== 'string') {
 +            return undefined;
 +        }
 +        const described = await session
 +            .send('DOM.describeNode', { objectId: utilDocObjectId })
-+            .catch(debugCatchError);
++            .catch(error => {
++                this.#logger?.(DEBUG_PREFIXES.error)?.(error);
++            });
 +        const backendNodeId = described?.node?.backendNodeId;
 +        if (typeof backendNodeId !== 'number') {
 +            return undefined;
 +        }
 +        const mainNode = await session
 +            .send('DOM.resolveNode', { backendNodeId })
-+            .catch(debugCatchError);
++            .catch(error => {
++                this.#logger?.(DEBUG_PREFIXES.error)?.(error);
++            });
 +        return parse(mainNode?.object?.objectId);
      }
      async #createIsolatedWorld(session, name) {
          const key = `${session.id()}:${name}`;
 diff --git a/lib/puppeteer/cdp/IsolatedWorld.js b/lib/puppeteer/cdp/IsolatedWorld.js
-index b0619734a9eeb884f3ac4ffff39b540226aaf818..7e577d8a0200f0201742fd0a471edc9792c35a3f 100644
+index 48a575b08b525d4dfe514483f0a53af4e5e1b13c..f22269643a70016f795c638635877b605034b052 100644
 --- a/lib/puppeteer/cdp/IsolatedWorld.js
 +++ b/lib/puppeteer/cdp/IsolatedWorld.js
-@@ -21,6 +21,13 @@ export class IsolatedWorld extends Realm {
-     #worldId;
+@@ -22,6 +22,13 @@ export class IsolatedWorld extends Realm {
      #origin;
      #frameOrWorker;
+     #logger;
 +    // xxx-stealth: lazy context provider. With Runtime.enable disabled there
 +    // are no executionContextCreated events to push contexts, so the world resolves
 +    // its context on demand the first time it is needed after a navigation.
@@ -611,10 +623,10 @@ index b0619734a9eeb884f3ac4ffff39b540226aaf818..7e577d8a0200f0201742fd0a471edc97
 +    setContextProvider(provider) {
 +        this.#contextProvider = provider;
 +    }
-     constructor(frameOrWorker, timeoutSettings, worldId) {
+     constructor(frameOrWorker, timeoutSettings, worldId, logger) {
          super(timeoutSettings);
          this.#frameOrWorker = frameOrWorker;
-@@ -72,6 +79,19 @@ export class IsolatedWorld extends Realm {
+@@ -74,6 +81,19 @@ export class IsolatedWorld extends Realm {
       * Waits for the next context to be set on the isolated world.
       */
      async #waitForExecutionContext() {
@@ -635,16 +647,15 @@ index b0619734a9eeb884f3ac4ffff39b540226aaf818..7e577d8a0200f0201742fd0a471edc97
          const result = await firstValueFrom(fromEmitterEvent(this.#emitter, 'context').pipe(raceWith(fromEmitterEvent(this.#emitter, 'disposed').pipe(map(() => {
              // The message has to match the CDP message expected by the WaitTask class.
 diff --git a/lib/puppeteer/cdp/WebWorker.js b/lib/puppeteer/cdp/WebWorker.js
-index 3d68f887920ded269eb641273a5a13dee235ae1d..b4cc8fc1bcdfaf7fa58e169f8fe27225ac494e44 100644
+index 38bb499dcd2e811ca2e8ae98c2ac4ed33f6fa0e9..23710433f0419ceaf58443d62ae719c31bc5f763 100644
 --- a/lib/puppeteer/cdp/WebWorker.js
 +++ b/lib/puppeteer/cdp/WebWorker.js
-@@ -29,9 +29,21 @@ export class CdpWebWorker extends WebWorker {
-         this.#targetType = targetType;
-         this.#world = new IsolatedWorld(this, new TimeoutSettings(), MAIN_WORLD);
-         this.#emitter = new EventEmitter();
+@@ -91,8 +91,22 @@ export class CdpWebWorker extends WebWorker {
+         this.#targetType = target.type();
+         this.#world = new IsolatedWorld(this, new TimeoutSettings(), MAIN_WORLD, logger);
+         this.#emitter = new EventEmitter(undefined, logger);
 -        this.#client.once('Runtime.executionContextCreated', async (event) => {
--            this.#world.setContext(new ExecutionContext(client, event.context, this.#world));
--        });
+-            this.#world.setContext(new ExecutionContext(client, event.context, this.#world, logger));
 +        // xxx-stealth: acquire the worker's execution context via an idOnly
 +        // globalThis evaluate instead of Runtime.enable + executionContextCreated.
 +        void this.#client
@@ -656,21 +667,24 @@ index 3d68f887920ded269eb641273a5a13dee235ae1d..b4cc8fc1bcdfaf7fa58e169f8fe27225
 +            const objectId = res?.result?.objectId;
 +            const id = typeof objectId === 'string' ? Number.parseInt(objectId.split('.')[1] ?? '', 10) : NaN;
 +            if (!Number.isNaN(id)) {
-+                this.#world.setContext(new ExecutionContext(client, { id }, this.#world));
++                this.#world.setContext(new ExecutionContext(client, { id }, this.#world, logger));
 +            }
 +        })
-+            .catch(debugCatchError);
++            .catch((err) => {
++            return this.#logger?.(DEBUG_PREFIXES.error)?.(err);
+         });
          this.#client.once('Inspector.workerScriptLoaded', () => {
              this.#workerLoaded.resolve();
-         });
-@@ -68,7 +80,6 @@ export class CdpWebWorker extends WebWorker {
-         networkManager
-             ?.addClient(this.#client)
-             .catch(debugCatchError ?? (() => { }));
--        this.#client.send('Runtime.enable').catch(debugCatchError ?? (() => { }));
+@@ -145,9 +159,6 @@ export class CdpWebWorker extends WebWorker {
+         // registers a later Disconnected listener that stops forwarding, so the
+         // opposite order would drop those RequestFailed events.
+         this.#forwardNetworkEvents(netManager);
+-        this.#client.send('Runtime.enable').catch((err) => {
+-            return this.#logger?.(DEBUG_PREFIXES.error)?.(err);
+-        });
      }
-     mainRealm() {
-         return this.#world;
+     /**
+      * Network manager for workers that are not owned by a page (service and
 diff --git a/lib/puppeteer/common/QueryHandler.js b/lib/puppeteer/common/QueryHandler.js
 index 8c406cf90e0f9d899efaa5acb6a636a86f32e37e..185ef5954b2b95b708855ed68e8327a8c51f9e70 100644
 --- a/lib/puppeteer/common/QueryHandler.js
@@ -706,10 +720,13 @@ index 8c406cf90e0f9d899efaa5acb6a636a86f32e37e..185ef5954b2b95b708855ed68e8327a8
                  catch (e_3) {
                      env_4.error = e_3;
 diff --git a/lib/puppeteer/common/WaitTask.js b/lib/puppeteer/common/WaitTask.js
-index eee0d68b24442c5628266663a2d6334a7f1f1540..1216fe4ee94de5544652973227180574c272dab2 100644
+index afddefff770d2af33d14d6fa72d3624865906376..afd6fe869698d1127266d328f64523a68a1e52ed 100644
 --- a/lib/puppeteer/common/WaitTask.js
 +++ b/lib/puppeteer/common/WaitTask.js
-@@ -6,5 +6,6 @@
+@@ -3,10 +3,11 @@
+  * Copyright 2022 Google Inc.
+  * SPDX-License-Identifier: Apache-2.0
+  */
 +import { JSHandle } from '../api/JSHandle.js';
  import { Deferred } from '../util/Deferred.js';
  import { isErrorLike } from '../util/ErrorLike.js';
@@ -717,7 +734,9 @@ index eee0d68b24442c5628266663a2d6334a7f1f1540..1216fe4ee94de5544652973227180574
 -import { TimeoutError } from './Errors.js';
 +import { ProtocolError, TimeoutError } from './Errors.js';
  import { LazyArg } from './LazyArg.js';
-@@ -156,6 +157,17 @@ export class WaitTask {
+ /**
+  * @internal
+@@ -170,6 +171,17 @@ export class WaitTask {
              if (error.message.includes('Cannot find context with specified id')) {
                  return;
              }
@@ -735,7 +754,7 @@ index eee0d68b24442c5628266663a2d6334a7f1f1540..1216fe4ee94de5544652973227180574
              // Errors coming from WebDriver BiDi. TODO: Adjust messages after
              // https://github.com/w3c/webdriver-bidi/issues/540 is resolved.
              if (error.message.includes('DiscardedBrowsingContextError')) {
-@@ -176,6 +188,9 @@ export class WaitTask {
+@@ -190,6 +202,9 @@ export class WaitTask {
   */
  export class TaskManager {
      #tasks = new Set();
@@ -746,10 +765,10 @@ index eee0d68b24442c5628266663a2d6334a7f1f1540..1216fe4ee94de5544652973227180574
          this.#tasks.add(task);
      }
 diff --git a/lib/puppeteer/common/util.js b/lib/puppeteer/common/util.js
-index b185921857e559f3379924e96dd1dd6345b73374..6ae091b197767645d01e25afbb7d8628d1dbdae7 100644
+index 6f6ff5dfb9477ce412a94709c1faebdd2d435d85..95c735500002009d485b11cb5d438fc20985da00 100644
 --- a/lib/puppeteer/common/util.js
 +++ b/lib/puppeteer/common/util.js
-@@ -80,7 +80,9 @@ export const withSourcePuppeteerURLIfNone = (functionName, object) => {
+@@ -70,7 +70,9 @@ export const withSourcePuppeteerURLIfNone = (functionName, object) => {
          // Second element is the caller of this function.
          // Third element is the caller of the caller of this function
          // which is precisely what we want.
@@ -761,10 +780,10 @@ index b185921857e559f3379924e96dd1dd6345b73374..6ae091b197767645d01e25afbb7d8628
      const site = new Error().stack;
      Error.prepareStackTrace = original;
 diff --git a/lib/puppeteer/node/ChromeLauncher.js b/lib/puppeteer/node/ChromeLauncher.js
-index fb7fe66ecb99fd207b99c1e9a9ae00769f0b9a20..af5284b9ee8226e78fa0243ec2f83a631bbaca9d 100644
+index db185f7dead29fd27ee683d2f239fc29ffda84b2..d59beec66c2ce6d333631cb705efecbfadc5751c 100644
 --- a/lib/puppeteer/node/ChromeLauncher.js
 +++ b/lib/puppeteer/node/ChromeLauncher.js
-@@ -131,22 +131,12 @@ export class ChromeLauncher extends BrowserLauncher {
+@@ -134,24 +134,12 @@ export class ChromeLauncher extends BrowserLauncher {
          ].filter(feature => {
              return feature !== '';
          });
@@ -781,6 +800,8 @@ index fb7fe66ecb99fd207b99c1e9a9ae00769f0b9a20..af5284b9ee8226e78fa0243ec2f83a63
 -            'MediaRouter',
 -            'OptimizationHints',
 -            'WebUIReloadButton',
+-            'WebUIOmniboxPopup',
+-            'WebUIOmniboxAimPopup',
 -            ...(turnOnExperimentalFeaturesForTesting
 -                ? []
 -                : [
@@ -793,12 +814,12 @@ index fb7fe66ecb99fd207b99c1e9a9ae00769f0b9a20..af5284b9ee8226e78fa0243ec2f83a63
          ]
              .filter(feature => {
 diff --git a/lib/puppeteer/node/NodeWebSocketTransport.js b/lib/puppeteer/node/NodeWebSocketTransport.js
-index a1af6472f4fb346978e3bd073ddb34963b129da2..951b5968947edaf24775716ccbab31d3fe98fabe 100644
+index 1aaa9765ee7380e1f2c96922d50991c624b996b2..e96b855af5f0c0febf4de64e0565e60df9451b2b 100644
 --- a/lib/puppeteer/node/NodeWebSocketTransport.js
 +++ b/lib/puppeteer/node/NodeWebSocketTransport.js
-@@ -25,7 +25,11 @@ export class NodeWebSocketTransport {
+@@ -39,7 +39,11 @@ export class NodeWebSocketTransport {
              ws.addEventListener('open', () => {
-                 return resolve(new NodeWebSocketTransport(ws));
+                 return resolve(new NodeWebSocketTransport(ws, logger, options));
              });
 -            ws.addEventListener('error', reject);
 +            // Reject with an Error carrying the handshake failure: the raw
