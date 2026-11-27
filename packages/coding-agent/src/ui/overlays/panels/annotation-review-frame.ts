@@ -6,6 +6,7 @@
  * the key hints, the note editor or the note chooser.
  */
 import { padTo, replaceTabs, sliceColumns, truncate, visibleWidth, wrap, wrapChars } from "@oh-my-pi/pi-tui/text/width";
+import { renderSpans } from "@oh-my-pi/pi-tui/text/highlight";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { ReviewDiffFile } from "../../../extensibility/custom-commands/bundled/annotate/annotation-types";
 import { keyGlyph } from "../../styles/panels/common";
@@ -116,6 +117,7 @@ function diffBody(model: AnnotationReviewModel, width: number, cursor: number, t
 		lines.push(theme.fg("dim", "No diff hunks; this may be a rename-only change"));
 		return { lines, rowBySource };
 	}
+	const syntax = model.sourceSyntax();
 	const nav = theme.symbols.symbol("nav.cursor");
 	let sourceIndex = 0;
 	for (const row of file.rows) {
@@ -136,12 +138,20 @@ function diffBody(model: AnnotationReviewModel, width: number, cursor: number, t
 		const prefix = `${marker}${String(number ?? "").padStart(4)} `;
 		const color =
 			row.kind === "added" ? "toolDiffAdded" : row.kind === "removed" ? "toolDiffRemoved" : "toolDiffContext";
-		const pieces = wrapChars(replaceTabs(sanitizeText(row.content)), Math.max(1, width - GUTTER - prefix.length));
+		const highlighted = syntax?.[sourceIndex];
+		const source =
+			highlighted === undefined
+				? replaceTabs(sanitizeText(row.content))
+				: renderSpans(
+						highlighted.map(span => (span.s === undefined ? { ...span, s: color } : span)),
+						theme,
+					);
+		const pieces = wrapChars(source, Math.max(1, width - GUTTER - prefix.length));
 		const selected = model.focus === "diff" && sourceIndex === cursor;
 		(pieces.length > 0 ? pieces : [""]).forEach((piece, i) => {
 			const gutter = selected && i === 0 ? fit(`${nav} `, GUTTER) : " ".repeat(GUTTER);
 			const lead = i === 0 ? theme.fg(color, prefix) : " ".repeat(prefix.length);
-			const line = `${gutter}${lead}${theme.fg(color, piece)}`;
+			const line = `${gutter}${lead}${highlighted === undefined ? theme.fg(color, piece) : piece}`;
 			lines.push(truncate(selected ? theme.bg("selectedBg", fit(line, width)) : line, width, "…"));
 		});
 		sourceIndex++;
@@ -153,6 +163,7 @@ function textBody(model: AnnotationReviewModel, width: number, cursor: number, t
 	const lines: string[] = [];
 	const rowBySource: number[] = [];
 	const textWidth = Math.max(1, width - GUTTER);
+	const syntax = model.sourceSyntax();
 	const nav = theme.symbols.symbol("nav.cursor");
 	for (const entry of model.textNotes) {
 		if (entry.annotation.scope === "text") lines.push(...callout(theme, entry.annotation.note, width, "text note"));
@@ -163,7 +174,10 @@ function textBody(model: AnnotationReviewModel, width: number, cursor: number, t
 				lines.push(...callout(theme, entry.annotation.note, width));
 		}
 		rowBySource[sourceIndex] = lines.length;
-		const pieces = wrapChars(replaceTabs(sanitizeText(source)), textWidth);
+		const highlighted = syntax?.[sourceIndex];
+		const sourceText =
+			highlighted === undefined ? replaceTabs(sanitizeText(source)) : renderSpans(highlighted, theme);
+		const pieces = wrapChars(sourceText, textWidth);
 		const selected = model.focus === "diff" && sourceIndex === cursor;
 		(pieces.length > 0 ? pieces : [""]).forEach((piece, i) => {
 			const gutter = selected && i === 0 ? fit(`${nav} `, GUTTER) : " ".repeat(GUTTER);

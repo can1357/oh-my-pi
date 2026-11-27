@@ -504,6 +504,8 @@ The whole remainder after `/annotate` is one source specification (`CustomComman
 
 Argument completion offers the modes, a `./` file-path starter, and a quote starter. `CustomCommand.getArgumentCompletions(prefix, cwd)` receives the live session cwd, so file suggestions follow `/move` and `/wt`.
 
+The annotation pane syntax-highlights supported file types, selected code blocks with a known language, and diff contents in ANSI terminals and Tern. Line notes still refer to the original source line or old/new diff line, including when the display wraps.
+
 **Code review.** The menu lists up to three GitHub PRs or GitLab MRs referenced in the conversation, then the local diff kinds. `/annotate code-review` takes the same arguments as `/review`; a ref or `#N`/`!N` skips the menu. The diff is resolved once in the review checkout and frozen (`ResolvedReviewTarget`); the overlay and the reviewer prompt read the same snapshot, filtered by the same exclusion rules as `/review` (`src/extensibility/custom-commands/bundled/review/diff.ts`). The overlay offers **Continue with LLM review** (submits the `/review` prompt with the notes as operator focus) and **Paste annotations into prompt**. Both include the optional `[focus]` text. Nothing is posted to GitHub or GitLab.
 
 Without an interactive UI, `code-review` delegates to `/review` instead of opening the annotation overlay; text-source annotation refuses to send a message.

@@ -9,6 +9,7 @@
 
 ### Added
 
+- `/annotate` syntax-highlights source files, selected code blocks, and diffs in ANSI terminals and Tern without changing what each note refers to.
 - Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
 - Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
 - Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.

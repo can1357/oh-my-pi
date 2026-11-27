@@ -1,6 +1,7 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { expect, it } from "bun:test";
 import type { UiEvent } from "@oh-my-pi/pi-tui";
+import { cellGrid, plainRows } from "@oh-my-pi/pi-tui/testing/cells";
 import { corpusEnvironment } from "@oh-my-pi/pi-tui/testing/corpus";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import type {
@@ -8,7 +9,10 @@ import type {
 	TextReviewSource,
 } from "../../../../src/extensibility/custom-commands/bundled/annotate/annotation-types";
 import { AnnotationReview } from "../../../../src/ui/overlays/panels/annotation-review";
-import { AnnotationReviewModel } from "../../../../src/ui/overlays/panels/annotation-review-model";
+import {
+	type AnnotationReviewInput,
+	AnnotationReviewModel,
+} from "../../../../src/ui/overlays/panels/annotation-review-model";
 import { type Driver, panelSuite } from "./harness";
 
 function diffFile(
@@ -71,6 +75,99 @@ const ESC = "\x1b";
 const PGDN = "\x1b[6~";
 const PGUP = "\x1b[5~";
 const SHIFT_DOWN = "\x1b[1;2B";
+
+function mountReview(input: AnnotationReviewInput, initialColumns: number) {
+	const { theme } = corpusEnvironment("dark");
+	const rows = 24;
+	let columns = initialColumns;
+	const model = new AnnotationReviewModel(input, { onComplete() {} }, { theme, size: () => ({ columns, rows }) });
+	const terminal = createTestTerminal(() => ({ layer: <AnnotationReview model={model} /> }), {
+		columns,
+		rows,
+		theme: theme(),
+	});
+	terminal.focus(terminal.surface.layer()[0]!);
+	return {
+		model,
+		terminal,
+		theme: theme(),
+		resize(width: number) {
+			columns = width;
+			terminal.resize(width, rows);
+		},
+		addNote(text: string) {
+			terminal.press("a");
+			terminal.paste(text);
+			terminal.press("enter");
+		},
+	};
+}
+
+function foreground(rows: readonly string[], text: string): string | undefined {
+	for (const row of cellGrid(rows)) {
+		const index = row.findIndex(
+			(_, i) =>
+				row
+					.slice(i, i + text.length)
+					.map(cell => cell.ch)
+					.join("") === text,
+		);
+		if (index !== -1) return row[index]!.fg;
+	}
+	return undefined;
+}
+
+it("colors a wrapped code line and keeps its exact source quote after resize", () => {
+	const quote = `\tconst wrappedValue = "${"wide ".repeat(20)}";`;
+	const source = { id: "wrapped", label: "wrapped", text: `first\n${quote}\nlast` };
+	const code = mountReview({ kind: "text", source: { ...source, kind: "code", language: "typescript" } }, 36);
+	const prose = mountReview({ kind: "text", source: { ...source, kind: "message" } }, 36);
+	try {
+		expect(plainRows(code.terminal.rows()).filter(row => row.includes("wide wide")).length).toBeGreaterThan(1);
+		const keyword = foreground([code.theme.fg("syntaxKeyword", "const")], "const");
+		expect(foreground(code.terminal.rows(), "const")).toBe(keyword);
+		expect(foreground(prose.terminal.rows(), "const")).not.toBe(keyword);
+		code.terminal.press("down");
+		code.resize(100);
+		code.addNote("text note");
+		expect(code.model.getTextAnnotations()).toEqual([{ scope: "line", line: 2, quote, note: "text note" }]);
+	} finally {
+		prose.terminal.dispose();
+		code.terminal.dispose();
+	}
+});
+
+it("colors each side independently and preserves old/new patch anchors", () => {
+	const path = "src/value.ts";
+	const hunkHeader = "@@ -40 +40 @@";
+	const removed = "/* old comment starts here";
+	const added = "const newValue = 42;";
+	const file = diffFile(path, hunkHeader, [
+		{ kind: "removed", raw: `-${removed}`, content: removed, oldLine: 40, hunkHeader },
+		{ kind: "added", raw: `+${added}`, content: added, newLine: 40, hunkHeader },
+	]);
+	const review = mountReview({ kind: "diff", files: [file], mode: "Reviewing changes" }, 76);
+	try {
+		expect(foreground(review.terminal.rows(), "old comment")).toBe(
+			foreground([review.theme.fg("syntaxComment", "old comment")], "old comment"),
+		);
+		expect(foreground(review.terminal.rows(), "const")).toBe(
+			foreground([review.theme.fg("syntaxKeyword", "const")], "const"),
+		);
+		review.terminal.press("enter");
+		review.addNote("old-side note");
+		review.resize(100);
+		review.terminal.press("down");
+		review.addNote("new-side note");
+		const anchor = { scope: "line" as const, path, oldPath: path, newPath: path, hunkHeader, occurrence: 1 };
+		expect(review.model.getAnnotations()).toEqual([
+			{ ...anchor, rawLine: `-${removed}`, oldLine: 40, note: "old-side note" },
+			{ ...anchor, rawLine: `+${added}`, newLine: 40, note: "new-side note" },
+		]);
+	} finally {
+		review.terminal.dispose();
+	}
+});
 
 const SETUPS: Record<string, { text?: boolean; rows: number; files?: ReviewDiffFile[] }> = {
 	"short-terminal": { rows: 12 },
