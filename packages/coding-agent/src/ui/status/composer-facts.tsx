@@ -95,6 +95,10 @@ interface Fact {
 	readonly motion?: SegMotion;
 }
 
+function sanitizeStatusSpans(spans: readonly TspSpan[] | undefined): TspSpan[] | undefined {
+	return spans?.map(span => ({ ...span, t: sanitizeDisplaySingleLine(span.t) }));
+}
+
 function cacheFactProps(
 	cache: PromptCacheStatus,
 	now: number,
@@ -184,7 +188,7 @@ export function composerFacts(props: {
 						key: `hook-${index}`,
 						role: style?.role ?? "omp.composer.fact",
 						priority: 0,
-						spans: dim(style?.spans?.map(span => ({ ...span, t: sanitizeDisplaySingleLine(span.t) })) ?? [{ t: text }]),
+						spans: dim(sanitizeStatusSpans(style?.spans) ?? [{ t: text }]),
 					});
 			});
 		}
@@ -387,7 +391,7 @@ export function StatusBarPreview(props: {
 						key={`hook-${index}`}
 						role={state.hookStyles?.[index]?.role ?? "omp.status.hook"}
 						text={state.hookStyles?.[index]?.spans ? undefined : sanitizeStatusText(status)}
-						spans={state.hookStyles?.[index]?.spans?.map(span => ({ ...span, t: sanitizeDisplaySingleLine(span.t) }))}
+						spans={sanitizeStatusSpans(state.hookStyles?.[index]?.spans)}
 						wrap="none"
 					/>
 				))}
