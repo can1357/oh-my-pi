@@ -15,7 +15,6 @@ export * from "./types";
 export * from "./utils";
 export * from "./wire/codex";
 export * from "./wire/coreweave";
-export * from "./wire/gemini-headers";
 export * from "./wire/github-copilot";
 export * from "./wire/image-fetchers";
 export * from "./wire/kiro";

@@ -7,8 +7,8 @@ import type { TinyModelDtype } from "../tiny/dtype";
  * - `transformers` — a transformers.js / ONNX Whisper repo, loaded by the
  *   `@huggingface/transformers` `automatic-speech-recognition` pipeline.
  * - `sherpa` — a sherpa-onnx (Next-gen Kaldi) offline or native streaming model,
- *   loaded by the native `sherpa-onnx-node` addon. Used for NVIDIA Parakeet
- *   and Nemotron.
+ *   loaded by the native `sherpa-onnx-node` addon. Used for the Parakeet-family
+ *   transducers (Fluid Speech Pro, Parakeet) and Nemotron.
  *
  * The worker resolves the spec by key and loads the model lazily (kept warm
  * afterwards). Both engines run inside the hard-killed subprocess worker.
@@ -47,14 +47,16 @@ export interface SherpaSttModelSpec extends SttModelBase {
 	modelType: string;
 	/** Model files (relative to the repo root) fetched into the local cache. */
 	files: { encoder: string; decoder: string; joiner: string; tokens: string };
+	/** ONNX external-data weight files the graphs in `files` load by relative name; fetched alongside them. */
+	externalData: readonly string[];
 }
 
 export type SttModelSpec = TransformersSttModelSpec | SherpaSttModelSpec;
 
 /**
  * Speech models. Defaults to the multilingual {@link DEFAULT_STT_MODEL_KEY}.
- * Whisper uses transformers.js; Parakeet and native streaming Nemotron use
- * sherpa-onnx.
+ * Whisper uses transformers.js; the Parakeet-family transducers and native
+ * streaming Nemotron use sherpa-onnx.
  */
 export const STT_MODELS = [
 	{
@@ -88,10 +90,29 @@ export const STT_MODELS = [
 		sizeHint: "~600 MB",
 	},
 	{
-		key: "parakeet-tdt-0.6b-v3",
+		key: "fluid-speech-pro",
 		engine: "sherpa",
 		mode: "offline",
-		repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+		repo: "FluidVoice-Labs/fluid-speech-pro-onnx",
+		modelType: "nemo_transducer",
+		files: {
+			encoder: "encoder-model.int8.onnx",
+			decoder: "decoder.int8.onnx",
+			joiner: "joiner.int8.onnx",
+			tokens: "vocab.txt",
+		},
+		externalData: ["encoder-model.int8.onnx.data", "decoder.int8.onnx.data", "joiner.int8.onnx.data"],
+		englishOnly: false,
+		label: "Fluid Speech Pro (SoTA)",
+		description:
+			"Fluid Speech Pro 0.63B, 25 European languages. Most accurate open model under 1B; holds up with noise and music in the room. Default.",
+		sizeHint: "~800 MB",
+	},
+	{
+		key: "parakeet-tdt-0.6b-v2",
+		engine: "sherpa",
+		mode: "offline",
+		repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
 		modelType: "nemo_transducer",
 		files: {
 			encoder: "encoder.int8.onnx",
@@ -99,11 +120,11 @@ export const STT_MODELS = [
 			joiner: "joiner.int8.onnx",
 			tokens: "tokens.txt",
 		},
-		englishOnly: false,
-		label: "Parakeet TDT v3 (SoTA)",
-		description:
-			"NVIDIA Parakeet TDT 0.6B v3, 25 languages. Open ASR Leaderboard leader — best accuracy and far fastest decoding. Default.",
-		sizeHint: "~680 MB",
+		externalData: [],
+		englishOnly: true,
+		label: "Parakeet TDT v2 (English)",
+		description: "NVIDIA Parakeet TDT 0.6B v2, English only. Most accurate English dictation at the same speed.",
+		sizeHint: "~650 MB",
 	},
 	{
 		key: "nemotron-streaming-en-0.6b",
@@ -117,6 +138,7 @@ export const STT_MODELS = [
 			joiner: "joiner.int8.onnx",
 			tokens: "tokens.txt",
 		},
+		externalData: [],
 		englishOnly: true,
 		label: "Nemotron 0.6B (live streaming, English)",
 		description:
@@ -126,10 +148,11 @@ export const STT_MODELS = [
 ] as const satisfies readonly SttModelSpec[];
 
 /**
- * SoTA default — NVIDIA Parakeet TDT 0.6B v3 (sherpa-onnx). Tops the Open ASR
- * Leaderboard on accuracy while decoding ~20× faster than Whisper large-v3.
+ * SoTA default — Fluid Speech Pro (sherpa-onnx), a post-trained Parakeet TDT
+ * 0.6B v3: #2 open model on the Open ASR Leaderboard and the best under 1B,
+ * decoding dictation dozens of times faster than real time on a CPU.
  */
-export const DEFAULT_STT_MODEL_KEY = "parakeet-tdt-0.6b-v3";
+export const DEFAULT_STT_MODEL_KEY = "fluid-speech-pro";
 
 export type SttModelKey = (typeof STT_MODELS)[number]["key"];
 
@@ -140,7 +163,8 @@ export const STT_MODEL_VALUES = [
 	"whisper-base",
 	"whisper-small",
 	"whisper-large-v3-turbo",
-	"parakeet-tdt-0.6b-v3",
+	"fluid-speech-pro",
+	"parakeet-tdt-0.6b-v2",
 	"nemotron-streaming-en-0.6b",
 ] as const satisfies readonly SttModelKey[];
 

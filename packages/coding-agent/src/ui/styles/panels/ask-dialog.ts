@@ -293,6 +293,7 @@ defineRolePainter("col", "omp.ask.card", (node: UiNode, cx): Block => {
 			content.push(`${padTo(truncate(line, inner - 1, ""), inner - 1)}${bar}`);
 		}
 	}
-	if (skip) content.push(theme.fg("warning", truncate(`⚠ ${skip}`, inner, "…")));
+	if (skip)
+		content.push(theme.fg("warning", truncate(`${theme.symbols.symbol("status.warning")} ${skip}`, inner, "…")));
 	return { rows: boxRows(theme, title(model), content, cx.width) };
 });

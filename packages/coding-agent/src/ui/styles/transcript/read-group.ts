@@ -60,7 +60,7 @@ function notes(cx: PaintContext, row: ReadTermRow): string {
 	let out = "";
 	if (row.correctedFrom) out += theme.fg("dim", ` (corrected from ${row.correctedFrom})`);
 	if (row.conflicts)
-		out += ` ${theme.fg("warning", `(⚠ ${row.conflicts} conflict${row.conflicts === 1 ? "" : "s"})`)}`;
+		out += ` ${theme.fg("warning", `(${theme.symbols.symbol("status.warning")} ${row.conflicts} conflict${row.conflicts === 1 ? "" : "s"})`)}`;
 	return out;
 }
 
@@ -123,17 +123,22 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 	const pad = " ".repeat(terminalPaddingX());
 	const indent = `${pad}  `;
 	const previews = (term.previews ?? []).flatMap(preview => previewRows(cx, preview, width));
-	if (!term.count) return { rows: wrap(`${pad}${bullet} ${title(cx)}`, width) };
+	const bulletPrefix = `${pad}${bullet} `;
+	const bulletHang = " ".repeat(visibleWidth(bulletPrefix));
+	if (!term.count) return { rows: hangingWrap(bulletPrefix, bulletHang, title(cx), width) };
 	if (term.count === 1) {
 		const rows: string[] = [];
 		const single = term.single;
 		if (single) {
-			rows.push(...wrap(`${pad}${glyph(cx, single.status)} ${title(cx)} ${readPath(cx, single)}`.trimEnd(), width));
-			for (const usage of single.usage) rows.push(...wrap(theme.fg("dim", indent + usage), width));
+			const prefix = `${pad}${glyph(cx, single.status)} `;
+			rows.push(
+				...hangingWrap(prefix, " ".repeat(visibleWidth(prefix)), `${title(cx)} ${readPath(cx, single)}`, width),
+			);
+			for (const usage of single.usage) rows.push(...hangingWrap(indent, indent, theme.fg("dim", usage), width));
 		}
 		return { rows: [...rows, ...previews] };
 	}
-	const rows = wrap(`${pad}${bullet} ${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
+	const rows = hangingWrap(bulletPrefix, bulletHang, `${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
 	const tree = term.tree ?? [];
 	const branch = theme.symbols.symbol("tree.branch");
 	const last = theme.symbols.symbol("tree.last");
@@ -153,7 +158,8 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 				width,
 			),
 		);
-		for (const usage of row.usage) rows.push(...wrap(theme.fg("dim", `${indent}${continuation} ${usage}`), width));
+		const usagePrefix = theme.fg("dim", `${indent}${continuation} `);
+		for (const usage of row.usage) rows.push(...hangingWrap(usagePrefix, usagePrefix, theme.fg("dim", usage), width));
 	});
 	return { rows: [...rows, ...previews] };
 }

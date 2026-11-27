@@ -171,7 +171,7 @@ Side-channel artifacts outside the model tool result:
    - `attach`: explicit `adapter` wins. A `pid` selects the runtime adapter by the live process's executable image (not its display name). A `port` serving a V8 inspector prefers `js-debug-adapter`; other ports prefer `debugpy`. If none match, native debuggers then the first available adapter are tried.
 - **Custom adapter config**
    - Debug adapters can be added or overridden with `dap.json`, `.dap.json`, `dap.yaml`, `.dap.yaml`, `dap.yml`, or `.dap.yml`.
-   - Search order: selected cwd, its project config dirs (`.omp/`, `.claude/`, `.codex/`, `.gemini/`), enabled user config dirs (`~/.omp/agent/`, Claude's active config directory, `~/.codex/`, `~/.gemini/`), plugin roots, then home-root fallback. `CLAUDE_CONFIG_DIR` overrides Claude's user directory. Files are merged from lowest to highest priority.
+   - Search order: selected cwd, its project config dirs (`.omp/`, `.claude/`, `.codex/`), enabled user config dirs (`~/.omp/agent/`, Claude's active config directory, `~/.codex/`), plugin roots, then home-root fallback. `CLAUDE_CONFIG_DIR` overrides Claude's user directory. Files are merged from lowest to highest priority.
    - Config shape may be either `{ "adapters": { ... } }` or a top-level adapter map.
    - Adapter fields:
       - `command`: executable name or path. Required.

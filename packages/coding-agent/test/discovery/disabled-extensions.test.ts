@@ -100,21 +100,21 @@ describe("disabledExtensions runtime filtering", () => {
 	test("keeps the runtime context winner active in the dashboard when its competitor is disabled", async () => {
 		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
 		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# active project instructions\n");
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# disabled project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# disabled project instructions\n");
 
-		const disabledExtensions = ["context-file:project:GEMINI.md", "context-file:user:GEMINI.md"];
+		const disabledExtensions = ["context-file:project:CLAUDE.md", "context-file:user:CLAUDE.md"];
 		const settings = Settings.isolated({ disabledExtensions });
 		initializeWithSettings(settings);
 
 		const runtime = await loadCapability<ContextFile>(contextFileCapability.id, { cwd: tempDir });
 		const dashboard = await loadAllExtensions(tempDir, disabledExtensions);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(runtime.items.map(file => path.basename(file.path))).toContain("AGENTS.md");
 		expect(agents?.state).toBe("active");
-		expect(gemini?.state).toBe("disabled");
+		expect(claude?.state).toBe("disabled");
 	});
 
 	test("shows the enabled agents skill when an opted-out Claude skill has the same name", async () => {
@@ -150,56 +150,56 @@ describe("disabledExtensions runtime filtering", () => {
 	test("deduplicates against the caller's session-local disabled list, not global settings", async () => {
 		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
 		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# active project instructions\n");
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# session-disabled project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# session-disabled project instructions\n");
 
 		// Process-global settings disable nothing; the disablement is session-local.
 		initializeWithSettings(Settings.isolated({ disabledExtensions: [] }));
 
-		const disabledIds = ["context-file:project:GEMINI.md", "context-file:user:GEMINI.md"];
+		const disabledIds = ["context-file:project:CLAUDE.md", "context-file:user:CLAUDE.md"];
 		const dashboard = await loadAllExtensions(tempDir, disabledIds);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(agents?.state).toBe("active");
-		expect(gemini?.state).toBe("disabled");
+		expect(claude?.state).toBe("disabled");
 	});
 
 	test("deduplicates against an empty snapshot when the caller omits disabled IDs", async () => {
 		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
 		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# lower-priority project instructions\n");
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# higher-priority project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# higher-priority project instructions\n");
 
-		initializeWithSettings(Settings.isolated({ disabledExtensions: ["context-file:project:GEMINI.md"] }));
+		initializeWithSettings(Settings.isolated({ disabledExtensions: ["context-file:project:CLAUDE.md"] }));
 
 		const dashboard = await loadAllExtensions(tempDir);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(agents?.state).toBe("shadowed");
-		expect(gemini?.state).toBe("active");
+		expect(claude?.state).toBe("active");
 	});
 
 	test("marks a disabled lower-priority row shadowed when an enabled higher-priority item owns the key", async () => {
 		// Enabled builtin .omp/AGENTS.md (priority 100) already exists at project
-		// depth 0 from beforeEach; add a lower-priority .gemini/GEMINI.md at the
+		// depth 0 from beforeEach; add a lower-priority .claude/CLAUDE.md at the
 		// same depth and disable it.
-		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
-		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# disabled lower-priority instructions\n");
+		await fs.mkdir(path.join(tempDir, ".claude"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".claude", "CLAUDE.md"), "# disabled lower-priority instructions\n");
 
-		const disabledIds = ["context-file:project:GEMINI.md"];
+		const disabledIds = ["context-file:project:CLAUDE.md"];
 		initializeWithSettings(Settings.isolated({ disabledExtensions: disabledIds }));
 
 		const dashboard = await loadAllExtensions(tempDir, disabledIds);
 		const agents = dashboard.find(extension => extension.path === path.join(tempDir, ".omp", "AGENTS.md"));
-		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+		const claude = dashboard.find(extension => extension.path === path.join(tempDir, ".claude", "CLAUDE.md"));
 
 		expect(agents?.state).toBe("active");
-		expect(gemini?.state).toBe("disabled");
+		expect(claude?.state).toBe("disabled");
 		// The disabled loser must stay shadowed so the dashboard does not treat
 		// it as an independently toggleable row.
-		expect(gemini && isShadowedExtension(gemini)).toBe(true);
+		expect(claude && isShadowedExtension(claude)).toBe(true);
 	});
 
 	test("lists configured package modules exactly as the loader gates them (#17736)", async () => {

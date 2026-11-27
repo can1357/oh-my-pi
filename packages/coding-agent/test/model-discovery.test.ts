@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -703,125 +702,15 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(getModelsForProvider(registry, "openai-codex").length).toBeGreaterThan(0);
 	});
 
-	test("Antigravity discovery unions every account's roster and routes each model to an account serving it", async () => {
-		// Antigravity is paused in its auth rules; its discovery stays for when it is turned back on.
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-		// Account A's plan omits Claude 5.5; account B's serves it. Discovery is
-		// authoritative, so reading only one account's roster would prune Claude
-		// 5.5 for both whenever A is the account discovery happens to pick.
-		await authStorage.credentials.set("google-antigravity", [
-			{
-				type: "oauth",
-				access: "token-a",
-				refresh: "refresh-a",
-				expires: Date.now() + 3_600_000,
-				email: "a@example.com",
-				projectId: "project-a",
-			},
-			{
-				type: "oauth",
-				access: "token-b",
-				refresh: "refresh-b",
-				expires: Date.now() + 3_600_000,
-				email: "b@example.com",
-				projectId: "project-b",
-			},
-		]);
-		const gemini = { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true } };
-		const claude = Object.fromEntries(
-			["low", "medium", "high"].map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }]),
-		);
-		const rosters: Record<string, object> = {
-			"Bearer token-a": { models: gemini },
-			"Bearer token-b": { models: { ...gemini, ...claude } },
-		};
-		const fetchMock: FetchImpl = async (input, init) => {
-			const url = String(input);
-			if (url.includes(":fetchAvailableModels")) {
-				const roster = rosters[new Headers(init?.headers).get("authorization") ?? ""];
-				return roster ? Response.json(roster) : new Response("Unauthorized", { status: 401 });
-			}
-			return new Response("version: 2.19.1\n");
-		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-
-		await registry.refreshProvider("google-antigravity", "online");
-
-		const opus = registry.find("google-antigravity", "claude-opus-5-5");
-		expect(opus?.accountAccess).toEqual({ "b@example.com": {} });
-		expect(registry.find("google-antigravity", "gemini-3.1-pro")?.accountAccess).toEqual({
-			"a@example.com": {},
-			"b@example.com": {},
-		});
-		// Bundled rows that no account serves stay pruned.
-		expect(registry.find("google-antigravity", "claude-sonnet-5-5")).toBeUndefined();
-
-		// A session pinned to account A moves to B for a model only B serves.
-		const sessionId = "antigravity-claude-session";
-		const accountA = authStorage.oauth.accounts("google-antigravity")[0];
-		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
-		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
-		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
-	});
-
-	test("Antigravity routing still works for an account whose login stored no email", async () => {
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-		// Google's userinfo lookup is optional at login; such a credential keeps
-		// only its project id, which must still tag and select the account.
-		await authStorage.credentials.set("google-antigravity", [
-			{
-				type: "oauth",
-				access: "token-a",
-				refresh: "refresh-a",
-				expires: Date.now() + 3_600_000,
-				email: "a@example.com",
-				projectId: "project-a",
-			},
-			{
-				type: "oauth",
-				access: "token-b",
-				refresh: "refresh-b",
-				expires: Date.now() + 3_600_000,
-				projectId: "project-b",
-			},
-		]);
-		const gemini = { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true } };
-		const claude = Object.fromEntries(
-			["low", "medium", "high"].map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }]),
-		);
-		const rosters: Record<string, object> = {
-			"Bearer token-a": { models: gemini },
-			"Bearer token-b": { models: { ...gemini, ...claude } },
-		};
-		const fetchMock: FetchImpl = async (input, init) => {
-			if (String(input).includes(":fetchAvailableModels")) {
-				const roster = rosters[new Headers(init?.headers).get("authorization") ?? ""];
-				return roster ? Response.json(roster) : new Response("Unauthorized", { status: 401 });
-			}
-			return new Response("version: 2.19.1\n");
-		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-
-		await registry.refreshProvider("google-antigravity", "online");
-
-		const opus = registry.find("google-antigravity", "claude-opus-5-5");
-		expect(opus?.accountAccess).toEqual({ "project-b": {} });
-		const sessionId = "antigravity-emailless-session";
-		const accountA = authStorage.oauth.accounts("google-antigravity")[0];
-		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
-		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
-		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
-	});
-
 	test("configured discovery suppresses built-in special OAuth discovery", async () => {
-		await authStorage.credentials.set("google-antigravity", {
+		await authStorage.credentials.set("openai-codex", {
 			type: "oauth",
-			access: "fresh-google-antigravity",
-			refresh: "refresh-google-antigravity",
+			access: "fresh-openai-codex",
+			refresh: "refresh-openai-codex",
 			expires: Date.now() + 3_600_000,
 		});
 		writeRawModelsJson({
-			"google-antigravity": {
+			"openai-codex": {
 				baseUrl: "http://127.0.0.1:4893",
 				api: "openai-completions",
 				auth: "none",
@@ -833,7 +722,7 @@ describe("ModelRegistry runtime discovery", () => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:4893/v1/models") {
 				return Response.json({
-					data: [{ id: "configured-antigravity-model", context_length: 65_536 }],
+					data: [{ id: "configured-codex-model", context_length: 65_536 }],
 				});
 			}
 			unexpectedUrls.push(url);
@@ -841,10 +730,10 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 
-		await registry.refreshProvider("google-antigravity", "online");
+		await registry.refreshProvider("openai-codex", "online");
 
 		expect(unexpectedUrls).toEqual([]);
-		const configuredModel = registry.find("google-antigravity", "configured-antigravity-model");
+		const configuredModel = registry.find("openai-codex", "configured-codex-model");
 		expect(configuredModel?.baseUrl).toBe("http://127.0.0.1:4893");
 		expect(configuredModel?.contextWindow).toBe(65_536);
 	});

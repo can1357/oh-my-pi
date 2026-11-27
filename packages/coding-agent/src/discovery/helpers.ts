@@ -63,11 +63,6 @@ export const SOURCE_PATHS = {
 		userAgent: ".codex",
 		projectDir: ".codex",
 	},
-	gemini: {
-		userBase: ".gemini",
-		userAgent: ".gemini",
-		projectDir: ".gemini",
-	},
 	opencode: {
 		userBase: ".config/opencode",
 		userAgent: ".config/opencode",

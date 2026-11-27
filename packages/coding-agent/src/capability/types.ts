@@ -2,7 +2,7 @@
  * Core types for the capability-based config discovery system.
  *
  * This architecture inverts control: instead of callers knowing about paths like
- * `.claude`, `.codex`, `.gemini`, they simply ask for `load("mcps")` and get back
+ * `.claude`, `.codex`, they simply ask for `load("mcps")` and get back
  * a unified array of MCP servers.
  */
 
@@ -86,7 +86,7 @@ export interface Provider<T> {
 	 * Priority (higher = checked first, wins on conflicts).
 	 * Suggested ranges:
 	 *   100+ : Primary providers (omp, pi)
-	 *   50-99: Tool-specific providers (claude, codex, gemini)
+	 *   50-99: Tool-specific providers (claude, codex)
 	 *   1-49 : Shared standards (mcp-json, agents-md)
 	 */
 	priority: number;

@@ -19,11 +19,19 @@ export interface ToolCallLoopTurn {
 	readonly toolResults: readonly ToolResultMessage[];
 	/** The turn also delivered context outside its tool results (extension `additionalContext`). */
 	readonly injectedContext?: boolean;
+	/** Calls that named no tool the harness could resolve, so nothing ran. */
+	readonly unresolvedToolCallIds?: readonly string[];
 }
 
-/** Details needed to steer the model away from a repeated tool call. */
+/**
+ * Details needed to steer the model away from a tool-call loop.
+ *
+ * `repeated_tool_call`: the same calls repeated across consecutive turns.
+ * `unresolved_tool_call`: consecutive turns called only tools that do not
+ * exist, whatever their names or arguments; the reported call is the latest.
+ */
 export interface RepeatedToolCallDetection {
-	readonly kind: "repeated_tool_call";
+	readonly kind: "repeated_tool_call" | "unresolved_tool_call";
 	readonly toolName: string;
 	readonly count: number;
 	readonly resultSummary: string;
@@ -68,13 +76,17 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 	return summarizeText(textParts.join("\n"), RESULT_SUMMARY_LIMIT);
 }
 
-/** Detects consecutive identical assistant tool calls across model turns. */
+/**
+ * Detects tool-call loops across model turns: consecutive identical calls, and
+ * consecutive turns whose every call failed to resolve to a tool.
+ */
 export class ToolCallLoopGuard {
 	#threshold: number;
 	#exemptTools: ReadonlySet<string>;
 	#exemptionAlias: ((call: ToolCall) => string | undefined) | undefined;
 	#lastHash: string | undefined;
 	#count = 0;
+	#unresolvedCount = 0;
 
 	/** Keeps transport-specific exemption policy outside the shared repetition detector. */
 	constructor(options: ToolCallLoopGuardOptions) {
@@ -96,9 +108,16 @@ export class ToolCallLoopGuard {
 		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
+			this.#unresolvedCount = 0;
 			return null;
 		}
-		if (toolCalls.every(tc => this.#isExempt(tc))) {
+		const unresolvedIds = turn.unresolvedToolCallIds;
+		if (unresolvedIds !== undefined && toolCalls.every(tc => unresolvedIds.includes(tc.id))) {
+			// Nothing ran, so no state changed: varying the missing name or its
+			// arguments is still no progress. Exemptions cover real polling
+			// tools; a call that resolved to nothing polls nothing.
+			this.#unresolvedCount++;
+		} else if (toolCalls.every(tc => this.#isExempt(tc))) {
 			// An exempt poll its tool flagged useless (a wait that elapsed or found
 			// nothing to wait for) is skipped, so alternating it with a repeated call
 			// cannot hide the loop. Any other exempt turn, failures included, may have
@@ -110,8 +129,11 @@ export class ToolCallLoopGuard {
 			if (!idle) {
 				this.#lastHash = undefined;
 				this.#count = 0;
+				this.#unresolvedCount = 0;
 			}
 			return null;
+		} else {
+			this.#unresolvedCount = 0;
 		}
 
 		const canonicalCalls = toolCalls
@@ -125,12 +147,26 @@ export class ToolCallLoopGuard {
 			this.#count = 1;
 		}
 
+		// The unresolved streak wins a tie: "that tool does not exist" is the
+		// corrective an identical miss needs, not "change the arguments".
+		if (this.#unresolvedCount >= this.#threshold) {
+			return this.#detection("unresolved_tool_call", toolCalls[toolCalls.length - 1]!, this.#unresolvedCount, turn);
+		}
 		if (this.#count < this.#threshold) return null;
 		const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
+		return this.#detection("repeated_tool_call", reportCall, this.#count, turn);
+	}
+
+	#detection(
+		kind: RepeatedToolCallDetection["kind"],
+		reportCall: ToolCall,
+		count: number,
+		turn: ToolCallLoopTurn,
+	): RepeatedToolCallDetection {
 		return {
-			kind: "repeated_tool_call",
+			kind,
 			toolName: reportCall.name,
-			count: this.#count,
+			count,
 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),

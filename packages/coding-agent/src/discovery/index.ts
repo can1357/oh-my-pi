@@ -6,7 +6,6 @@
  */
 // Import capability definitions (ensures capabilities are defined before providers register)
 import "../capability/context-file";
-import "../capability/extension";
 import "../capability/extension-module";
 import "../capability/hook";
 import "../capability/instruction";
@@ -32,7 +31,6 @@ import "./cline";
 import "./agents";
 import "./codex";
 import "./cursor";
-import "./gemini";
 import "./opencode";
 import "./github";
 import "./mcp-json";
@@ -75,7 +73,6 @@ export {
 	setEnabledProviders,
 } from "../capability";
 export type { ContextFile } from "../capability/context-file";
-export type { Extension, ExtensionManifest } from "../capability/extension";
 export type { ExtensionModule } from "../capability/extension-module";
 export type { Hook } from "../capability/hook";
 export type { Instruction } from "../capability/instruction";

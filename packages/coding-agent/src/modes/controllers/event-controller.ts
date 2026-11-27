@@ -508,6 +508,7 @@ export class EventController {
 			model_changed: async () => {
 				vocalizer.enforceProviderPolicy();
 				this.ctx.statusLine.refresh();
+				this.ctx.showActiveModelNotice();
 			},
 			// Header rebuild is owned by InteractiveMode's own session
 			// subscription (mirrors model_changed); nothing to do here.
@@ -1361,6 +1362,8 @@ export class EventController {
 			this.#turnStartedAt = undefined;
 		}
 		this.#clearApprovalPreviewGates();
+		// A session that started on a plan model has had no switch to announce it.
+		this.ctx.showActiveModelNotice();
 		// A new turn cannot inherit a foreground tool execution. A dropped
 		// agent_end (for example after a renderer exception) otherwise leaves a
 		// live-only tool card without a persisted result; ordered transcript

@@ -481,7 +481,7 @@ describe("stats scheduled response costs", () => {
 		const dated = {
 			...codexReferenceModel,
 			id: "dated-card-model",
-			provider: "google-antigravity",
+			provider: "google",
 			cost: {
 				input: 2,
 				output: 10,
@@ -510,7 +510,7 @@ describe("stats scheduled response costs", () => {
 					const stats = createCodexGptStats(entryId);
 					stats.provider = dated.provider;
 					stats.model = dated.id;
-					stats.api = "google-gemini-cli";
+					stats.api = "google-generative-ai";
 					stats.timestamp = timestamp;
 					stats.usage = {
 						input: 1_000_000,

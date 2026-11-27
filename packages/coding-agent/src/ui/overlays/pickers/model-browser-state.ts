@@ -55,6 +55,7 @@ import {
 	tieredPerf,
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import { fuzzyHits, fuzzyRank } from "../../../utils/fuzzy";
 import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { editLine, type LineState } from "../settings/line-edit";
@@ -937,7 +938,11 @@ export class ModelBrowserState {
 					const provider = (rest[start] as ModelBrowserItem).provider;
 					let end = start + 1;
 					while (end < rest.length && (rest[end] as ModelBrowserItem).provider === provider) end++;
-					order.push({ group: `provider:${provider}:${start}`, label: provider, count: end - start });
+					order.push({
+						group: `provider:${provider}:${start}`,
+						label: connectedProviderName(provider),
+						count: end - start,
+					});
 					push(rest.slice(start, end));
 					start = end;
 				}

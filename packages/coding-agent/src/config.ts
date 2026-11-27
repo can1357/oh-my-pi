@@ -18,7 +18,6 @@ const priorityList: Array<{ dir: string; userBase?: () => string }> = [
 	{ dir: CONFIG_DIR_NAME, userBase: getAgentDir },
 	{ dir: ".claude", userBase: () => resolveClaudePaths().configDir },
 	{ dir: ".codex" },
-	{ dir: ".gemini" },
 ];
 
 // =============================================================================
@@ -84,8 +83,8 @@ export function getChangelogPath(): string | undefined {
 // =============================================================================
 
 /**
- * User-level: the omp agent dir (~/.omp/agent), Claude's active config directory, ~/.codex, ~/.gemini
- * Project-level: .omp, .claude, .codex, .gemini
+ * User-level: the omp agent dir (~/.omp/agent), Claude's active config directory, ~/.codex
+ * Project-level: .omp, .claude, .codex
  */
 const USER_CONFIG_BASES = priorityList.map(({ dir, userBase }) => ({
 	base: userBase ?? (() => path.join(os.homedir(), dir)),

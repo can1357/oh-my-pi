@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { providerActiveNotice } from "@oh-my-pi/pi-catalog/compat/auth";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
@@ -37,7 +38,7 @@ import {
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import type { Shell, TranscriptBlock } from "../../ui/shell";
-import { NoticeLine, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
+import { NoticeLine, StatusBlock, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { normalizeBlobExtension } from "../../utils/image-format";
 import { imageAttachmentSource } from "../../utils/image-source";
@@ -98,7 +99,13 @@ export type ReplayTarget = Pick<
 };
 
 /** What a history replay reads of a session context. */
-export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained">;
+export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained"> & {
+	/**
+	 * The messages are a later part of the session (a branch's tail, a sibling branch below its
+	 * fork): the run they open in may have started above them.
+	 */
+	readonly clipped?: boolean;
+};
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -242,6 +249,8 @@ export class UiHelpers {
 	#lastStatus: { readonly block: TranscriptBlock; readonly message: string } | undefined;
 	/** Status, warning and error lines: a keyed status updates in place only with these below it. */
 	readonly #notices = new WeakSet<TranscriptBlock>();
+	/** Session and model the last active-model notice named; cleared while no declaring provider serves. */
+	#activeModelNoticeKey: string | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -282,12 +291,24 @@ export class UiHelpers {
 		}
 
 		const collapse = options?.collapse ?? true;
-		const last = this.#lastStatus;
-		if (collapse && last && transcript.blocks().at(-1) === last.block && !transcript.retired(last.block)) {
-			transcript.remove(last.block);
-		}
+		if (collapse) this.#withdrawLastStatus();
 		const block = this.#presentNotice(factory);
 		this.#lastStatus = collapse ? { block, message } : undefined;
+	}
+
+	/** Withdraw the last collapsible status (a progress line such as "Transcribing...") once it is moot. */
+	clearStatus(): void {
+		this.#withdrawLastStatus();
+		this.#lastStatus = undefined;
+	}
+
+	/** Remove the last collapsible status while nothing came after it in the transcript. */
+	#withdrawLastStatus(): void {
+		const transcript = this.ctx.shell.transcript;
+		const last = this.#lastStatus;
+		if (last && transcript.blocks().at(-1) === last.block && !transcript.retired(last.block)) {
+			transcript.remove(last.block);
+		}
 	}
 
 	#presentNotice(factory: () => ReturnType<typeof jsx>): TranscriptBlock {
@@ -455,6 +476,9 @@ export class UiHelpers {
 		// a run gets the turn's totals, and with them the native footer under its
 		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
 		const turnUsage = new TurnUsageTally();
+		// A clipped replay can open partway through a run: until a run starts in view, the tally would
+		// cover only the replayed part, so that run gets no totals.
+		let runStartUnseen = sessionContext.clipped === true;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usage = pendingUsage;
@@ -651,7 +675,10 @@ export class UiHelpers {
 					);
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
-				if (turnSummary) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				if (turnSummary && !runStartUnseen) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				// The tally starts over after a run's last reply, so the next run counts whole even when nothing
+				// marks its start (an agent-attributed custom message resets nothing below).
+				if (message.stopReason !== "toolUse") runStartUnseen = false;
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(ctx.settings) && assistantUsageIsBilled(message.usage)
 						? message.usage
@@ -759,6 +786,7 @@ export class UiHelpers {
 				if (message.role === "user" && message.attribution !== "agent") {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				// A synthetic developer message initiates a fresh run (auto-continue,
 				// /goal, approved plan): replay must not inherit the preceding user
@@ -770,10 +798,12 @@ export class UiHelpers {
 					// turn's own prompt: anchor the delta to it instead of clearing.
 					turnStartedAt = message.userInitiated ? message.timestamp : undefined;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				this.addMessageToChat(message, undefined, ctx);
 			}
@@ -1037,6 +1067,32 @@ export class UiHelpers {
 
 	showError(errorMessage: string): void {
 		this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
+	}
+
+	/**
+	 * The line a provider declares for its models (`active-notice`), such as "Using your Acme Pro
+	 * plan · Acme 2", once per model the viewed session switches to or first runs.
+	 */
+	showActiveModelNotice(): void {
+		const session = this.ctx.viewSession;
+		const model = session.model;
+		const notice = model ? providerActiveNotice(model.provider) : undefined;
+		const key =
+			model && notice ? `${session.sessionManager.getSessionId()}\n${model.provider}/${model.id}` : undefined;
+		if (key === this.#activeModelNoticeKey) return;
+		this.#activeModelNoticeKey = key;
+		if (!model || !notice) return;
+		const text = `${notice} · ${model.name}`;
+		this.#presentNotice(() =>
+			jsx(StatusBlock, {
+				rows: [
+					{
+						parts: [{ text, color: "dim" }],
+						native: { tone: "info", icon: `provider:${model.provider}`, message: [{ t: text, s: "dim" }] },
+					},
+				],
+			}),
+		);
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
