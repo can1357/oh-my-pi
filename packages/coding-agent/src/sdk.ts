@@ -4671,7 +4671,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				ovnfs: ovnfsCommand(settings),
 				secretsEnabled: obfuscator?.obfuscates() === true,
-				resultShaping: spotlightExperiment ? SHAPE_RULE : undefined,
+				// Shaping needs `read` to bring cut lines back; without it nothing is shaped (`shapingExperiment`).
+				resultShaping: spotlightExperiment && toolNames.includes("read") ? SHAPE_RULE : undefined,
 				workspaceTree: workspaceTreePromise ?? emptyWorkspaceTree,
 				includeWorkspaceTree,
 				memoryBackend: memoryBackend?.id,
