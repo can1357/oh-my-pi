@@ -461,8 +461,8 @@ describe("LSP diagnostics freshness", () => {
 			enableFormat: false,
 			enableDiagnostics: true,
 		});
-		await writethrough(stylesPath, ".section {}\n", undefined, undefined, { id: "batch", flush: false });
-		const result = await writethrough(tsPath, 'import styles from "./probe.module.scss";\n', undefined, undefined, {
+		await writethrough(stylesPath, ".section {}\n", undefined, { id: "batch", flush: false });
+		const result = await writethrough(tsPath, 'import styles from "./probe.module.scss";\n', undefined, {
 			id: "batch",
 			flush: true,
 		});
@@ -605,7 +605,6 @@ describe("LSP diagnostics freshness", () => {
 			"export const value: number = 'x';\n",
 			undefined,
 			undefined,
-			undefined,
 			() => handle,
 		);
 
@@ -699,7 +698,6 @@ describe("LSP diagnostics freshness", () => {
 			"export const value: number = 'x';\n",
 			undefined,
 			undefined,
-			undefined,
 			() => handle,
 		);
 		deferredController.abort();
@@ -750,7 +748,6 @@ describe("LSP diagnostics freshness", () => {
 		const inline = await writethrough(
 			filePath,
 			"export const value: number = 'x';\n",
-			undefined,
 			undefined,
 			undefined,
 			() => handle,

@@ -1,6 +1,5 @@
 import type { WriteToolDetails } from "./details/write";
 import { Database } from "bun:sqlite";
-import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -49,6 +48,7 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
+import { assertLocalFileNotHeldOpen } from "./file-write-io";
 
 import { isReadTruncationNotice } from "./hashline-format";
 import { hasColumnTruncationClause, isColumnTruncationNotice } from "./output-meta-format";
@@ -1041,7 +1041,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
 			if (existing) {
 				try {
-					assertNotHeldOpen(absolutePath);
+					await assertLocalFileNotHeldOpen(absolutePath);
 				} catch (error) {
 					throw new ToolError(`Cannot write '${path}': ${(error as Error).message}`);
 				}
@@ -1122,7 +1122,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				absolutePath,
 				writeContent,
 				signal,
-				undefined,
 				batchRequest,
 				dst => deferred?.begin(dst),
 				async committed => {

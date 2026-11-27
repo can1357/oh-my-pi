@@ -41,6 +41,7 @@ import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
 	AUTO_UPDATE_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
+	FILE_WRITE_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
@@ -329,6 +330,13 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
 		await import("./stats/activity-worker");
+		return true;
+	}
+	if (arg === FILE_WRITE_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		// The worker must attach its message handler only in its own thread.
+		await import("./tools/file-write-worker");
 		return true;
 	}
 	if (arg === TRANSCRIPT_INDEX_WORKER_ARG) {

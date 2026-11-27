@@ -1291,7 +1291,6 @@ export class EditTool implements AgentTool<TInput> {
 			request.path,
 			request.content,
 			signal,
-			Bun.file(request.path),
 			request.lspBatchId ? { id: request.lspBatchId, flush: request.flushLsp } : undefined,
 			destination => {
 				if (destination !== request.path) return undefined;

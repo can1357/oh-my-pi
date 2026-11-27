@@ -75,22 +75,20 @@ await fs.writeFile(target, body(0));
 try {
 	console.log("\n--- writethroughNoop (LSP off — default edit path) ---");
 	for (let i = 1; i <= 3; i++) {
-		await timeCall(`noop write #${i}`, () => writethroughNoop(target, body(i), undefined, Bun.file(target)));
+		await timeCall(`noop write #${i}`, () => writethroughNoop(target, body(i)));
 	}
 
 	console.log("\n--- diagnostics, NO deferred channel (blocks until settle/timeout) ---");
 	const wtDiag = createLspWritethrough(REPO, { enableDiagnostics: true, enableFormat: false });
 	for (let i = 10; i <= 14; i++) {
 		const label = i === 10 ? "write #1 (COLD: spawn+warm)" : `write #${i - 9} (warm)`;
-		await timeCall(label, () => wtDiag(target, body(i), undefined, Bun.file(target)));
+		await timeCall(label, () => wtDiag(target, body(i)));
 	}
 
 	console.log("\n--- diagnostics, WITH deferred channel (short inline wait, then late) ---");
 	for (let i = 30; i <= 34; i++) {
 		const { handle } = makeDeferred(`write #${i - 29}`);
-		await timeCall(`write #${i - 29} (inline)`, () =>
-			wtDiag(target, body(i), undefined, Bun.file(target), undefined, () => handle),
-		);
+		await timeCall(`write #${i - 29} (inline)`, () => wtDiag(target, body(i), undefined, undefined, () => handle));
 	}
 	// Give any in-flight late fetches a moment to land before teardown.
 	await Bun.sleep(6000);
@@ -98,7 +96,7 @@ try {
 	console.log("\n--- format writethrough (formatOnWrite) ---");
 	const wtFmt = createLspWritethrough(REPO, { enableDiagnostics: false, enableFormat: true });
 	for (let i = 20; i <= 22; i++) {
-		await timeCall(`write #${i - 19}`, () => wtFmt(target, body(i), undefined, Bun.file(target)));
+		await timeCall(`write #${i - 19}`, () => wtFmt(target, body(i)));
 	}
 } finally {
 	await fs.rm(target, { force: true });
