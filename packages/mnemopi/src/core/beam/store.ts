@@ -235,11 +235,12 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
  *
  * Rows are addressed by rowid, not `id`: `id TEXT PRIMARY KEY` admits NULL (a
  * database rebuilt by SQLite's `.recover` can hold such rows), and one NULL id in
- * the keep set makes `id NOT IN (...)` unknown for every row. A rowid is never
- * NULL. It is read and bound as decimal text because it can exceed 2^53. Only
- * string ids reach `purgeWorkingMemoryArtifacts`. The `wm_ad` trigger removes a
- * search entry by id, which cannot match a NULL id, so for each trimmed row with
- * no id the trim removes one `fts_working` entry with no id and the same text.
+ * the keep set makes `id NOT IN (...)` unknown for every row outside it, so the
+ * size half selects none of them. A rowid is never NULL. It is read and bound as
+ * decimal text because it can exceed 2^53. Only string ids reach
+ * `purgeWorkingMemoryArtifacts`. The `wm_ad` trigger removes a search entry by
+ * id, which cannot match a NULL id, so for each trimmed row with no id the trim
+ * removes one `fts_working` entry with no id and the same text.
  */
 function trimWorkingMemory(beam: BeamMemoryState): void {
 	const limit = beam.config.workingMemoryLimit;

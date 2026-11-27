@@ -4,9 +4,9 @@
  * `id TEXT PRIMARY KEY` on a rowid table admits NULL, and a database rebuilt by SQLite's `.recover`
  * can hold such a row. Addressed by id, the trim has two defects: `id NOT IN (keep set)` is unknown,
  * never true, for the row itself, so the row is never trimmed; and while the row is among the newest
- * `workingMemoryLimit` rows, the NULL in the keep set makes the test unknown for every other row, so
- * the overflow half trims nothing. These tests hold that such a row is trimmed like any other, stops
- * no other trim, and leaves no search entry behind.
+ * `workingMemoryLimit` rows, the NULL in the keep set makes the test unknown for every row outside
+ * it, so the overflow half trims nothing. These tests hold that such a row is trimmed like any
+ * other, stops no other trim, and leaves no search entry behind.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
