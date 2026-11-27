@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises";
 import * as path from "node:path";
 import { type ApiKeyResolver, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { allowsAutomaticMnemopiRecall } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
@@ -164,7 +165,9 @@ export const mnemopiBackend: MemoryBackend = {
 			const state = getMnemopiSessionState(session);
 			const primary = state?.aliasOf ?? state;
 			const parts = [prompt.render(mnemopiInstructions)];
-			if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
+			if (primary?.lastRecallSnippet && allowsAutomaticMnemopiRecall(session?.model)) {
+				parts.push(primary.lastRecallSnippet);
+			}
 			const rendered = parts.join("\n\n").trim();
 			if (!rendered) return undefined;
 			return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));
@@ -172,13 +175,17 @@ export const mnemopiBackend: MemoryBackend = {
 	},
 
 	async beforeAgentStartPrompt(session, promptText, signal): Promise<MemoryPromptPreparation | undefined> {
+		const allowRecall = allowsAutomaticMnemopiRecall(session.model);
 		const state = getMnemopiSessionState(session);
 		const preparation = await state?.beforeAgentStartPrompt(promptText, signal);
 		if (!state || !preparation) return undefined;
 		return {
 			context: preparation.context,
 			notice: preparation.notice,
-			commit: () => getMnemopiSessionState(session) === state && preparation.commit(),
+			commit: () =>
+				allowsAutomaticMnemopiRecall(session.model) === allowRecall &&
+				getMnemopiSessionState(session) === state &&
+				preparation.commit(),
 		};
 	},
 

@@ -15,6 +15,11 @@ provider "antigravity-cli" {
 	// included in the signed-in plan instead.
 	pricing-status "included"
 
+	// Empirical workaround for prompt-dependent 429s; it does not affect quota limits.
+	neutral-prompt-opening #true
+	inline-tool-descriptors #false
+	automatic-mnemopi-recall #false
+
 	// The roster `agy acp` 1.5.12 advertises in `session/new` config options
 	// (orchestrators omitted: they drive agy's own subagents, which this
 	// transport replaces). Context windows are the `usage_update.size` agy

@@ -614,6 +614,8 @@ export interface BuildSystemPromptOptions {
 	evalPreludes?: readonly Pick<EvalPreludeDefinition, "name" | "guidance">[];
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced in the workstation block. */
 	model?: string;
+	/** Whether the built-in system prompt uses the neutral opening selected by catalog policy. */
+	neutralPromptOpening?: boolean;
 	/** Whether to surface `model` in the workstation block. Default: true. */
 	includeModelInPrompt?: boolean;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
@@ -760,6 +762,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		crossInstanceAgents = false,
 		evalPreludes = [],
 		model,
+		neutralPromptOpening = false,
 		includeModelInPrompt = true,
 		personality = "default",
 		includeWorkspaceTree = false,
@@ -1132,6 +1135,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		cwd: promptCwd,
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
+		neutralPromptOpening,
 		// An explicit eager-tasks mode lifts balanced/restrained wording to eager; gated has its own eager-tasks text.
 		delegationTier: eagerTasks && delegationBias !== "gated" ? "eager" : delegationBias,
 		personality: personalityBlock,

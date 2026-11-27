@@ -34,3 +34,8 @@ export function resolveCatalogPolicy(
 	catalogPolicyCache.set(key, policy);
 	return policy;
 }
+
+/** Whether the model accepts automatically recalled Mnemopi text in the system prompt. */
+export function allowsAutomaticMnemopiRecall(model: CatalogPolicyInputs | undefined): boolean {
+	return model === undefined || resolveCatalogPolicy(model).automaticMnemopiRecall !== false;
+}

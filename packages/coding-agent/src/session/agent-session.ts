@@ -92,7 +92,7 @@ import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/provider
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
+import { allowsAutomaticMnemopiRecall, resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -211,6 +211,8 @@ import type { IrcMessage } from "../irc/irc-types";
 import type { JobWidgetEntry } from "../tools/details/job-widget";
 import type { DaemonCompletionEvent } from "../daemon/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
+import { cfgMemoryBackend } from "../memory-backend/settings";
+import type { MemoryPromptPreparation } from "../memory-backend/types";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
@@ -1812,6 +1814,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.agent.emitExternalEvent({ type: "message_end", message: record });
 		}
+	}
+
+	#createRecallChangeMessage(notice: NonNullable<MemoryPromptPreparation["notice"]>): CustomMessage {
+		return {
+			role: "custom",
+			customType: MEMORY_RECALL_CHANGES_MESSAGE_TYPE,
+			content: notice.content,
+			details: notice.details,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
 	}
 
 	/** Draw and save the rows kept out of context that a live run queued (see {@link #pendingExcludedRows}). */
@@ -5869,7 +5883,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			for (;;) {
 				try {
-					if (!this.agent.state.isStreaming) onStart?.();
+					if (!this.agent.state.isStreaming) {
+						onStart?.();
+						if (isAutomaticRetry && cfgMemoryBackend.get(this.settings) === "mnemopi") {
+							const pending = this.getMnemopiSessionState()?.preparePendingRecallNotice();
+							if (pending?.commit() && pending.notice) {
+								this.#recordWithoutTurn([this.#createRecallChangeMessage(pending.notice)]);
+							}
+						}
+					}
 					await this.agent.continue(signal, { queuedOnly: request.options.queuedOnly });
 					return { status: "completed" };
 				} catch (error) {
@@ -9944,10 +9966,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#memory.transition;
 			laps.lap("memoryMs");
 			if (!isCurrent()) return cancelled;
+			const allowRecall = allowsAutomaticMnemopiRecall(this.model);
+			const memoryPolicyIsCurrent = () => allowsAutomaticMnemopiRecall(this.model) === allowRecall;
 			const sourceBase = this.#tools.baseSystemPrompt;
-			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
+			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(
+				prompt,
+				() => isCurrent() && memoryPolicyIsCurrent(),
+				signal,
+			);
 			laps.lap("systemPromptMs");
 			if (!isCurrent()) return cancelled;
+			if (!memoryPolicyIsCurrent()) continue;
 			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
 			laps.lap("hooksMs");
 			if (!isCurrent()) return cancelled;
@@ -9966,15 +9995,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!overrideIsCurrent()) continue;
 			const messages: AgentMessage[] = [];
 			if (basePreparation.memoryNotice) {
-				messages.push({
-					role: "custom",
-					customType: MEMORY_RECALL_CHANGES_MESSAGE_TYPE,
-					content: basePreparation.memoryNotice.content,
-					details: basePreparation.memoryNotice.details,
-					display: false,
-					attribution: "agent",
-					timestamp: Date.now(),
-				});
+				messages.push(this.#createRecallChangeMessage(basePreparation.memoryNotice));
 			}
 			const attribution = "attribution" in message ? message.attribution : undefined;
 			for (const payload of result?.messages ?? []) {
@@ -10000,13 +10021,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (!isCurrent()) return cancelled;
 			}
 			laps.lap("messagesMs");
-			if (!overrideIsCurrent()) continue;
+			if (!memoryPolicyIsCurrent() || !overrideIsCurrent()) continue;
 			logger.debug("Agent start prepared", { origin, attempts: attempt + 1, ...laps.record() });
 			return {
 				baseToolCommandCatalogDelivered: result?.systemPrompt === undefined,
 				commit: () => {
 					// No await may separate ownership validation from publishing memory and policy.
-					if (!isCurrent() || !overrideIsCurrent()) return undefined;
+					if (!isCurrent() || !memoryPolicyIsCurrent() || !overrideIsCurrent()) return undefined;
 					if (basePreparation.commit?.() === false) return undefined;
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);

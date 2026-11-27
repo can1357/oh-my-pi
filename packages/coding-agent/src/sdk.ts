@@ -37,6 +37,7 @@ import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/opena
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { syncOpenAIResponsesHistoryTexts } from "@oh-my-pi/pi-ai/utils";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { $env, isInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
@@ -4374,12 +4375,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 		};
 
-		// Resolve the live inline-descriptors setting against the active model.
-		// `auto` enforces the per-model policy (inline for Gemini, off otherwise), so
-		// a mid-session model switch re-decides it. Prompt and agent (description
-		// pruning) must agree: every prompt rebuild re-syncs the agent's pruning.
+		// Use the same descriptor placement for the system prompt and the active model's tool schemas.
 		const resolveInlineToolDescriptors = (): boolean =>
-			shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(settings), (agent?.state.model ?? model)?.id);
+			shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(settings), agent?.state.model ?? model);
 		// Latest memory backend instructions rendered for advisor system prompts.
 		// Populated by the initial rebuildSystemPrompt below (before the session is
 		// constructed) and refreshed on every later rebuild via
@@ -4635,6 +4633,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? { mode: "compact", toolNames: [...toolNames, ...mountedPromptToolNames] }
 					: { mode: "full" },
 			);
+			const promptModel = agent?.state.model ?? model;
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
@@ -4682,6 +4681,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				crossInstanceAgents: cfgTaskCrossInstance.get(settings),
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
+				neutralPromptOpening: promptModel ? resolveCatalogPolicy(promptModel).neutralPromptOpening === true : false,
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
 				personality: agentKind === "sub" ? "none" : cfgPersonality.get(settings),
 				subagent: agentKind === "sub",

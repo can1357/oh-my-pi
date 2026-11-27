@@ -9,7 +9,9 @@
  * another memory store, a context reset, or a branch that edits the first prompt.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Judge, Model } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -34,6 +36,8 @@ import {
 	MnemopiSessionState,
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { clipRecallContent } from "@oh-my-pi/pi-mnemopi";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -179,6 +183,247 @@ async function recalledTranscript(memory: string) {
 	const sessionFile = await writeTranscript(live.session.sessionManager);
 	return { dir, live, id, block, sessionFile };
 }
+
+it("does not inject automatic Mnemopi recall into Antigravity CLI prompts but retains manual recall", async () => {
+	const dir = tempDir();
+	const memory = "The deploy host is alpha-7 on the internal network.";
+	const regularModel = getBundledModel("google", "gemini-3-pro-preview");
+	const antigravity = getBundledModel("antigravity-cli", "gemini-4-hydrogen");
+	const live = startProcess(dir, newSession(dir), {}, { model: regularModel });
+	live.rememberScoped(memory, { extract: false });
+	expect((await firstTurn(live)).block).toContain(memory);
+
+	Object.defineProperty(live.session, "model", { value: antigravity });
+	const instructions = await mnemopiBackend.buildDeveloperInstructions(
+		dir.path(),
+		dir.path(),
+		live.session.settings,
+		live.session,
+	);
+	expect(instructions).not.toContain(memory);
+
+	const fresh = startProcess(dir, newSession(dir), {}, { model: antigravity });
+	const skipped = await mnemopiBackend.beforeAgentStartPrompt?.(fresh.session, PROMPT);
+	expect(skipped?.context).toBeUndefined();
+	skipped?.commit();
+	const sessionFile = await writeTranscript(fresh.session.sessionManager);
+	Object.defineProperty(fresh.session, "model", { value: regularModel });
+	expect((await mnemopiBackend.beforeAgentStartPrompt?.(fresh.session, PROMPT))?.context).toBeUndefined();
+	const resumed = await resume(dir, sessionFile, dir);
+	expect((await firstTurn(resumed)).block).toBeUndefined();
+	expect((await fresh.recallResultsScoped(PROMPT)).map(result => result.content)).toContain(memory);
+});
+
+it("does not persist undisclosed memories from the background Antigravity CLI recall path", async () => {
+	const dir = tempDir();
+	const model = getBundledModel("antigravity-cli", "gemini-4-hydrogen");
+	const live = startProcess(dir, newSession(dir), {}, { model });
+	live.rememberScoped("The deploy host is alpha-7 on the internal network.", { extract: false });
+	const manager = live.session.sessionManager;
+	manager.appendMessage({ role: "user", content: PROMPT, timestamp: Date.now() });
+	await live.maybeRecallOnAgentStart();
+
+	const sessionFile = await writeTranscript(manager);
+	const resumed = await resume(dir, sessionFile, dir);
+	expect((await firstTurn(resumed)).block).toBeUndefined();
+});
+
+it("delivers a first request without stale recall after switching to Antigravity CLI during lookup", async () => {
+	const dir = tempDir();
+	const settings = Settings.isolated({
+		"memory.backend": "mnemopi",
+		"mnemopi.dbPath": dir.join("mnemopi.db"),
+		"mnemopi.noEmbeddings": true,
+		"mnemopi.llmMode": "none",
+		"mnemopi.autoRetain": false,
+		"compaction.enabled": false,
+	});
+	const google = getBundledModel("google", "gemini-3-pro-preview");
+	const antigravity = getBundledModel("antigravity-cli", "gemini-4-hydrogen");
+	const auth = createInMemoryAuthStorage();
+	auth.keys.setRuntime(google.provider, "test-key");
+	auth.keys.setRuntime(antigravity.provider, "test-key");
+	const agent = new Agent({ initialState: { model: google, systemPrompt: ["Base instructions"], tools: [] } });
+	const seen: Array<{ model: string; prompt: string; messages: string }> = [];
+	const mock = createMockModel();
+	agent.streamFn = (model, context, options) => {
+		seen.push({
+			model: model.provider,
+			prompt: context.systemPrompt?.join("\n") ?? "",
+			messages: JSON.stringify(context.messages),
+		});
+		mock.push({ content: ["ok"] });
+		return mock.stream(model, context, options);
+	};
+	const manager = SessionManager.inMemory(dir.path());
+	const session = new AgentSession({
+		agent,
+		sessionManager: manager,
+		modelRegistry: new ModelRegistry(auth, dir.join("models.yml")),
+		settings,
+	});
+	const state = new MnemopiSessionState({
+		sessionId: session.sessionId,
+		config: loadMnemopiConfig(settings, dir.path()),
+		session,
+	});
+	setMnemopiSessionState(session, state);
+	const fact = "The deploy host is alpha-7 on the internal network.";
+	state.rememberScoped(fact, { extract: false });
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const collect = state.collectScopedRecallResults.bind(state);
+	const delayed = vi.spyOn(state, "collectScopedRecallResults").mockImplementation(async query => {
+		entered.resolve();
+		await release.promise;
+		return collect(query);
+	});
+	const turn = session.sendUserMessage(PROMPT);
+	try {
+		await entered.promise;
+		await session.setModel(antigravity);
+		release.resolve();
+		await turn;
+		expect(seen).toHaveLength(1);
+		expect(seen[0]!.model).toBe("antigravity-cli");
+		expect(seen[0]!.messages).toContain(PROMPT);
+		expect(seen[0]!.prompt).not.toContain(fact);
+	} finally {
+		release.resolve();
+		await turn.catch(() => {});
+		delayed.mockRestore();
+		await session.dispose();
+		auth.close();
+	}
+});
+
+it.each(["unchanged", "updated", "forgotten", "fallback"] as const)("restores cached recall (%s)", async change => {
+	const original = "The deploy host is alpha-7 on the internal network.";
+	const updated = "The deploy host is beta-9 on the internal network.";
+	const { dir, live, id, block, sessionFile } = await recalledTranscript(original);
+	if (change === "updated") expect(live.editScopedMemory("update", id, { content: updated }).status).toBe("updated");
+	if (change === "fallback") expect(live.editScopedMemory("forget", id).status).toBe("deleted");
+	if (!block) throw new Error("Expected the transcript to contain recalled memories");
+	const google = getBundledModel("google", "gemini-3-pro-preview");
+	const antigravity = getBundledModel("antigravity-cli", "gemini-4-hydrogen");
+	const settings = Settings.isolated({
+		"memory.backend": "mnemopi",
+		"mnemopi.scoping": "global",
+		"mnemopi.dbPath": dir.join("mnemopi.db"),
+		"mnemopi.noEmbeddings": true,
+		"mnemopi.llmMode": "none",
+		"mnemopi.autoRetain": false,
+		"compaction.enabled": false,
+		"retry.enabled": change === "fallback",
+		"retry.baseDelayMs": 5,
+		"retry.fallbackChains": { default: [`${google.provider}/${google.id}`] },
+	});
+	if (change === "fallback") {
+		settings.setModelRole("default", `${antigravity.provider}/${antigravity.id}`);
+	}
+	const auth = createInMemoryAuthStorage();
+	auth.keys.setRuntime(google.provider, "test-key");
+	auth.keys.setRuntime(antigravity.provider, "test-key");
+	const manager = await SessionManager.open(sessionFile, dir.join("sessions"));
+	const agent = new Agent({
+		initialState: { model: antigravity, systemPrompt: ["Base instructions"], tools: [] },
+		convertToLlm,
+	});
+	const seen: Array<{ provider: string; prompt: string; notices: string[] }> = [];
+	const mock = createMockModel();
+	agent.streamFn = (model, context, options) => {
+		const notices: string[] = [];
+		for (const message of context.messages) {
+			if (message.role !== "developer") continue;
+			const text =
+				typeof message.content === "string"
+					? message.content
+					: message.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
+			if (text.includes("Long-term memories recalled at the start")) notices.push(text);
+		}
+		seen.push({ provider: model.provider, prompt: context.systemPrompt?.join("\n") ?? "", notices });
+		mock.push(
+			change === "fallback" && model.provider === antigravity.provider
+				? { throw: "overloaded_error: provider returned error 503" }
+				: { content: ["ok"] },
+		);
+		return mock.stream(model, context, options);
+	};
+	const session: AgentSession = new AgentSession({
+		agent,
+		sessionManager: manager,
+		modelRegistry: new ModelRegistry(auth, dir.join("models.yml")),
+		settings,
+		rebuildSystemPrompt: async () => {
+			const memory = await mnemopiBackend.buildDeveloperInstructions(dir.path(), dir.path(), settings, session);
+			return { systemPrompt: ["Base instructions", ...(memory ? [memory] : [])] };
+		},
+	});
+	const state = new MnemopiSessionState({
+		sessionId: session.sessionId,
+		config: loadMnemopiConfig(settings, dir.path()),
+		session,
+	});
+	setMnemopiSessionState(session, state);
+	const lookup = vi.spyOn(state, "collectScopedRecallResults");
+	try {
+		await session.sendUserMessage("Continue on Antigravity");
+		if (change === "fallback") {
+			await session.waitForIdle();
+			expect(seen.map(({ provider }) => provider)).toEqual(["antigravity-cli", "google"]);
+			expect(seen[0]!.prompt).not.toContain(block);
+			expect(seen[0]!.notices).toEqual([]);
+			expect(seen[1]!.prompt).toContain(block);
+			expect(seen[1]!.notices).toHaveLength(1);
+			expect(seen[1]!.notices[0]).toContain("No longer in memory");
+			expect(seen[1]!.notices[0]).toContain(original);
+			const notes = manager
+				.getBranch()
+				.filter(
+					entry => entry.type === "custom_message" && entry.customType === MEMORY_RECALL_CHANGES_MESSAGE_TYPE,
+				);
+			expect(notes).toMatchObject([{ content: seen[1]!.notices[0], display: false }]);
+			expect(lookup).not.toHaveBeenCalled();
+			return;
+		}
+		if (change === "forgotten") expect(live.editScopedMemory("forget", id).status).toBe("deleted");
+		await session.sendUserMessage("Ask another question on Antigravity");
+		await session.setModel(google);
+		await session.sendUserMessage("Continue on Google");
+		await session.sendUserMessage("Ask another question on Google");
+		await session.setModel(antigravity);
+		await session.sendUserMessage("Switch back to Antigravity");
+
+		expect(seen.map(({ provider }) => provider)).toEqual([
+			"antigravity-cli",
+			"antigravity-cli",
+			"google",
+			"google",
+			"antigravity-cli",
+		]);
+		expect(seen[0]!.prompt).not.toContain(block);
+		expect(seen[1]!.prompt).not.toContain(block);
+		expect(seen[2]!.prompt).toContain(block);
+		expect(seen[4]!.prompt).not.toContain(block);
+		expect(seen[0]!.notices).toEqual([]);
+		expect(seen[1]!.notices).toEqual([]);
+		const notices = seen[2]!.notices;
+		if (change === "unchanged") {
+			expect(notices).toEqual([]);
+		} else {
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain(original);
+			if (change === "updated") expect(notices[0]).toContain(`Now: ${updated}`);
+			else expect(notices[0]).toContain("No longer in memory");
+		}
+		expect(seen[3]!.notices).toEqual(notices);
+		expect(lookup).not.toHaveBeenCalled();
+	} finally {
+		lookup.mockRestore();
+		await session.dispose();
+		auth.close();
+	}
+});
 
 describe("Mnemopi recall across a resume", () => {
 	it("sends the recalled block unchanged, with no note, when its memories are unchanged", async () => {

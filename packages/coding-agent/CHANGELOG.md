@@ -136,6 +136,7 @@
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
 - Declining a provider's consent screen during `/login` or `omp login` now reports the sign-in as canceled, in the terminal and on the browser page, instead of as a failed login
+- Mitigate reported Antigravity CLI 429s associated with prompt content: use a neutral built-in opening, keep tool descriptions in schemas in `auto` mode, and omit automatic first-turn Mnemopi recall from the provider's system prompt. Manual memory lookup and retention are unchanged ([#20637](https://github.com/can1357/oh-my-pi/pull/20637) by [@sandk0](https://github.com/sandk0))
 
 ### Removed
 

@@ -18,6 +18,7 @@ import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 describe("inline tool descriptors across model switches", () => {
 	const gemini = getBundledModel("google", "gemini-3-pro-preview");
 	const glm = getBundledModel("opencode-go", "glm-5.3-flash");
+	const antigravity = getBundledModel("antigravity-cli", "gemini-4-hydrogen");
 	let dir: string;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -29,6 +30,7 @@ describe("inline tool descriptors across model switches", () => {
 		authStorage = await AuthStorage.create(path.join(dir, "auth.db"));
 		authStorage.keys.setRuntime("google", "test-key");
 		authStorage.keys.setRuntime("opencode-go", "test-key");
+		authStorage.keys.setRuntime("antigravity-cli", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -81,6 +83,42 @@ describe("inline tool descriptors across model switches", () => {
 			expect(back.prompt).toContain("type read = (");
 		});
 	}
+
+	it("switches the bundled Antigravity CLI prompt even when both providers keep descriptions in schemas", async () => {
+		const projectRule = "Require approval before changing the project version.";
+		const { session } = await createAgentSession({
+			cwd: dir,
+			agentDir: dir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ includeModelInPrompt: false }),
+			model: glm,
+			appendSystemPrompt: projectRule,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["read"],
+		});
+		sessions.push(session);
+
+		const before = await providerView(session);
+		expect(before.prompt).toStartWith("You are omp's trusted coding assistant.");
+		await session.setModel(antigravity);
+		const onAntigravity = await providerView(session);
+		expect(onAntigravity.prompt).toStartWith("You are a coding assistant.");
+		expect(onAntigravity.prompt).toContain(projectRule);
+		expect(onAntigravity.prompt).not.toContain("type read = (");
+		expect(onAntigravity.readDescription).not.toBe("");
+
+		await session.setModel(glm);
+		expect((await providerView(session)).prompt).toStartWith("You are omp's trusted coding assistant.");
+	});
+
 	for (const systemPrompt of ["Fixed agent instructions.", ["Fixed agent instructions."]]) {
 		it(`restores required descriptions after switching with a fixed ${typeof systemPrompt === "string" ? "string" : "array"} prompt`, async () => {
 			const { session } = await createAgentSession({

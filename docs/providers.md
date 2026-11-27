@@ -20,6 +20,12 @@ The sign-in belongs to the machine that started it. Google binds it to a key gen
 
 `/logout google-ai-ultra` offers two actions per account: **Sign out on this device** deletes the sign-in from this machine only, and **Disconnect Google Account** also revokes it at Google, ending it on every device. If Google cannot confirm the revocation, `omp` still deletes the local copy; remove `omp` at [Google Account Connections](https://myaccount.google.com/connections).
 
+## Antigravity CLI prompt compatibility
+
+The `antigravity-cli` provider (`agy acp`) uses a neutral introduction in the built-in system prompt. With `inlineToolDescriptors: auto`, descriptions stay in the tool schemas. These catalog defaults mitigate prompt-dependent 429s observed with some requests. Explicit `inlineToolDescriptors` settings and custom prompt templates still take precedence.
+
+Mnemopi omits automatically recalled memories from the Antigravity CLI system prompt, including when you switch to Antigravity CLI from another model. Starting on Antigravity CLI skips the first-turn lookup rather than deferring it. If the resumed transcript already has a recall block, switching to a model whose policy allows automatic recall restores that block without a new lookup. The first request after the switch carries a notice of any updates or removals Mnemopi has not already reported. This also applies when that request is an automatic retry on the fallback model. Later requests may replay that notice as part of the conversation history. Manual memory lookup and retention remain available, and other models still honor `mnemopi.autoRecall`.
+
 ## Factory Droid
 
 The `factory-droid` provider uses Factory's Droid subscription gateway directly. No `droid` binary, daemon, or SDK subprocess is needed for login or inference.

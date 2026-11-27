@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { isRecord, logger, prompt, stringProperty, structuredCloneJSON, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
@@ -542,6 +543,7 @@ export class SessionTools {
 	#promptInlineDescriptors: boolean | undefined;
 	/** `systemPromptTemplates` path selected for the model the base prompt was rendered for. */
 	#promptTemplate: string | undefined;
+	#promptCatalogPolicyKey: number;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	/**
@@ -646,6 +648,7 @@ export class SessionTools {
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 		this.#promptTemplate = this.#currentPromptTemplate();
+		this.#promptCatalogPolicyKey = this.#currentCatalogPromptPolicyKey();
 	}
 
 	/** Mutable registry shared with controller hosts that inspect available tools. */
@@ -1182,7 +1185,7 @@ export class SessionTools {
 	#currentInlineDescriptors(): boolean | undefined {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
-		return shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(this.#host.settings), activeModel.id);
+		return shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(this.#host.settings), activeModel);
 	}
 
 	/** `systemPromptTemplates` path the active model selects; a change replaces the whole instruction block. */
@@ -1201,24 +1204,30 @@ export class SessionTools {
 		return `delegation-bias:${resolveDelegationBias(activeModel)}|inline-descriptors:${this.#currentInlineDescriptors()}`;
 	}
 
+	#currentCatalogPromptPolicyKey(): number {
+		const model = this.#host.model();
+		if (!model) return 0;
+		const policy = resolveCatalogPolicy(model);
+		return (policy.neutralPromptOpening === true ? 1 : 0) | (policy.automaticMnemopiRecall === false ? 2 : 0);
+	}
+
 	/**
-	 * Rebuilds model-dependent tool prompts after a model change.
+	 * Rebuilds model-dependent parts of the prompt after a model change.
 	 *
-	 * `retryFallback` marks a hop down the retry fallback chain. It keeps the Model line and the
-	 * Delegation wording the prompt was rendered with: re-rendering them changed the prompt's bytes,
-	 * and the provider then wrote the whole cached conversation again on every hop. It still rebuilds
-	 * when the hop changes what the request must carry for the new model: the edit-mode policy
-	 * (#11983), the inline-descriptor decision, which also turns provider-side description pruning
-	 * on or off (#14200), or the `systemPromptTemplates` entry the model selects. The kept key makes a
-	 * later switch back to the rendered model a no-op, and a deliberate switch (`/model`, `setModel`)
-	 * compares against the model the prompt describes.
+	 * During `retryFallback`, changes to the displayed model name or delegation guidance
+	 * alone do not trigger a rebuild: changing the prompt can invalidate the provider cache.
+	 * Rebuild when the edit mode (#11983), descriptor placement (#14200), selected template,
+	 * or catalog prompt policy changes. An explicit switch also considers which model
+	 * the current prompt was built for.
 	 */
 	async syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
-		const templateChanged = this.#currentPromptTemplate() !== this.#promptTemplate;
+		const promptVariantChanged =
+			this.#currentPromptTemplate() !== this.#promptTemplate ||
+			this.#currentCatalogPromptPolicyKey() !== this.#promptCatalogPolicyKey;
 		if (options?.retryFallback) {
 			const inlineDescriptorsChanged = this.#currentInlineDescriptors() !== this.#promptInlineDescriptors;
-			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged || templateChanged) {
+			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged || promptVariantChanged) {
 				await this.refreshBaseSystemPrompt();
 			}
 			return;
@@ -1226,7 +1235,7 @@ export class SessionTools {
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
-		if (editModeChanged || modelChanged || templateChanged) {
+		if (editModeChanged || modelChanged || promptVariantChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
 	}
@@ -1684,6 +1693,7 @@ export class SessionTools {
 			this.#promptModelKey = this.#currentPromptModelKey();
 			this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 			this.#promptTemplate = this.#currentPromptTemplate();
+			this.#promptCatalogPolicyKey = this.#currentCatalogPromptPolicyKey();
 			this.#setBasePromptToolCommandNames(rebuiltToolCommandCatalogNames);
 			// The rebuilt prompt is a fresh roster snapshot. Keep the complete
 			// pending delta for a turn override that hides it, while separately
@@ -2664,6 +2674,7 @@ export class SessionTools {
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				this.#promptTemplate = this.#currentPromptTemplate();
+				this.#promptCatalogPolicyKey = this.#currentCatalogPromptPolicyKey();
 				this.#lastAppliedToolSignature = signature;
 				this.#recordPromptRoster(activeToolNames);
 				return true;
@@ -2706,6 +2717,7 @@ export class SessionTools {
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+				this.#promptCatalogPolicyKey = this.#currentCatalogPromptPolicyKey();
 				return true;
 			},
 		};
