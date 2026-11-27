@@ -398,13 +398,18 @@ async function classifyWriteFailure(dst: string, error: unknown): Promise<WriteF
 	return { kind: "retry" };
 }
 
-export async function writeFileWithFallback(dst: string, content: string, signal?: AbortSignal): Promise<void> {
+export async function writeFileWithFallback(
+	dst: string,
+	content: string,
+	file?: BunFile,
+	signal?: AbortSignal,
+): Promise<void> {
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,
 	// which bounds the loop at two writes.
 	for (let attempt = 0; ; attempt++) {
 		try {
-			await writeLocalFile(dst, content, signal);
+			await writeLocalFile(dst, content, signal, file ?? dst);
 			return;
 		} catch (error) {
 			signal?.throwIfAborted();

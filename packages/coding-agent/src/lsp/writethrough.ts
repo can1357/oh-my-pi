@@ -135,7 +135,7 @@ export type WritethroughCallback = (
 	dst: string,
 	content: string,
 	signal?: AbortSignal,
-	/** Retained for SDK callers; the worker writes to `dst`. */
+	/** Optional destination handle; `dst` remains the path for LSP notifications. */
 	file?: BunFile,
 	batch?: LspWritethroughBatchRequest,
 	getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
@@ -147,18 +147,19 @@ export async function writethroughNoop(
 	dst: string,
 	content: string,
 	signal?: AbortSignal,
-	_file?: BunFile,
+	file?: BunFile,
 	_batch?: LspWritethroughBatchRequest,
 	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 	onCommitted?: WritethroughCommitHook,
 ): Promise<WritethroughResult> {
-	await writeFileWithFallback(dst, content, signal);
+	await writeFileWithFallback(dst, content, file, signal);
 	await onCommitted?.(content);
 	return { finalContent: content };
 }
 
 interface PendingWritethrough {
 	dst: string;
+	file?: BunFile;
 	changeType: FileChangeType;
 	/**
 	 * The bytes this entry committed. The flush prefers a fresh read of `dst` so
@@ -408,6 +409,7 @@ async function runLspWritethrough(
 	options: ResolvedWritethroughOptions,
 	changeType: FileChangeType,
 	signal?: AbortSignal,
+	file?: BunFile,
 	deferred?: {
 		onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void;
 		signal: AbortSignal;
@@ -429,7 +431,7 @@ async function runLspWritethrough(
 		if (submitted?.content !== value) {
 			submitted = {
 				content: value,
-				promise: writeFileWithFallback(dst, value, signal).then(() => {
+				promise: writeFileWithFallback(dst, value, file, signal).then(() => {
 					diskContent = value;
 				}),
 			};
@@ -704,6 +706,7 @@ async function flushWritethroughBatch(
 			options,
 			entry.changeType,
 			signal,
+			entry.file,
 			deferredInner,
 			// Earlier entries ran their own calls' hooks when those calls wrote them.
 			{ contentAlreadyWritten: true, onCommitted: entry.dst === requestedDst ? onCommitted : undefined },
@@ -737,7 +740,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		dst: string,
 		content: string,
 		signal?: AbortSignal,
-		_file?: BunFile,
+		file?: BunFile,
 		batch?: LspWritethroughBatchRequest,
 		getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 		onCommitted?: WritethroughCommitHook,
@@ -758,6 +761,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 				resolvedOptions,
 				changeType,
 				signal,
+				file,
 				deferredInner,
 				{ onCommitted },
 			);
@@ -768,7 +772,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		// File commits are never deferred: the batch owns only LSP post-processing,
 		// so a later flush cannot replay an obsolete whole-file snapshot.
 		try {
-			await writethroughNoop(dst, content, signal);
+			await writethroughNoop(dst, content, signal, file);
 		} catch (error) {
 			if (batch.flush) {
 				const pending = writethroughBatches.get(batch.id);
@@ -795,7 +799,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		}
 
 		const state = getOrCreateWritethroughBatch(batch.id, resolvedOptions);
-		state.entries.set(dst, { dst, changeType, content });
+		state.entries.set(dst, { dst, file, changeType, content });
 		if (!batch.flush) {
 			// The flush formats and diagnoses this entry after this call returns, so
 			// these bytes are the call's result: run its hook on them now.

@@ -1,6 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import type { BunFile } from "bun";
 import { FILE_WRITE_WORKER_ARG } from "../cli/worker-selectors";
 import { type FileWriteIoRequest, type FileWriteIoResult, FileWriteState } from "./file-write-protocol";
 
@@ -37,7 +38,12 @@ function ensureWorker(): Worker {
 	return thread;
 }
 
-async function requestIo(dst: string, content?: string, signal?: AbortSignal): Promise<void> {
+async function requestIo(
+	guardPath: string,
+	target: string | BunFile,
+	content: string | undefined,
+	signal?: AbortSignal,
+): Promise<void> {
 	signal?.throwIfAborted();
 	const thread = ensureWorker();
 	if (pending.size === 0) thread.ref();
@@ -57,7 +63,7 @@ async function requestIo(dst: string, content?: string, signal?: AbortSignal): P
 	};
 	signal?.addEventListener("abort", onAbort, { once: true });
 	try {
-		thread.postMessage({ id, dst, content, state } satisfies FileWriteIoRequest);
+		thread.postMessage({ id, guardPath, target, content, state } satisfies FileWriteIoRequest);
 		await request.promise;
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
@@ -66,12 +72,17 @@ async function requestIo(dst: string, content?: string, signal?: AbortSignal): P
 }
 
 /** The check and Bun's small-file write fast path both issue synchronous syscalls. */
-export function writeLocalFile(dst: string, content: string, signal?: AbortSignal): Promise<void> {
-	return requestIo(dst, content, signal);
+export function writeLocalFile(
+	dst: string,
+	content: string,
+	signal?: AbortSignal,
+	target: string | BunFile = dst,
+): Promise<void> {
+	return requestIo(dst, target, content, signal);
 }
 
 export function assertLocalFileNotHeldOpen(dst: string, signal?: AbortSignal): Promise<void> {
-	return requestIo(dst, undefined, signal);
+	return requestIo(dst, dst, undefined, signal);
 }
 
 /** Installed CLI probe: start the bundled worker and verify its output on disk. */
@@ -81,7 +92,7 @@ export async function smokeTestFileWriteWorker(): Promise<void> {
 		await using dir = await TempDir.create("@omp-file-write-smoke-");
 		const dst = dir.join("probe.txt");
 		const expected = "omp file write worker smoke\n";
-		await writeLocalFile(dst, expected, deadline);
+		await writeLocalFile(dst, expected, deadline, Bun.file(dst));
 		if ((await Bun.file(dst).text()) !== expected) {
 			throw new Error("file write worker smoke: unexpected file contents");
 		}

@@ -160,9 +160,9 @@ describe("EditTool patch post-write verification", () => {
 		]);
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 		const realWrite = fileWriteFallback.writeFileWithFallback;
-		vi.spyOn(fileWriteFallback, "writeFileWithFallback").mockImplementation(async (dst, content) => {
+		vi.spyOn(fileWriteFallback, "writeFileWithFallback").mockImplementation(async (dst, content, file, signal) => {
 			if (dst === secondPath) return;
-			await realWrite(dst, content);
+			await realWrite(dst, content, file, signal);
 		});
 
 		const session = makeSession(tempDir, {

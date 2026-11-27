@@ -6,12 +6,12 @@ import { type FileWriteIoRequest, type FileWriteIoResult, FileWriteState } from 
 if (!parentPort) throw new Error("file write worker: missing parentPort");
 const port = parentPort;
 
-async function write({ id, dst, content, state }: FileWriteIoRequest): Promise<void> {
+async function write({ id, guardPath, target, content, state }: FileWriteIoRequest): Promise<void> {
 	if (state && Atomics.load(state, 0) === FileWriteState.Cancelled) return;
 	let result: FileWriteIoResult;
 	try {
 		// Same process as the caller: the guard checks the process's SQLite locks.
-		assertNotHeldOpen(dst);
+		assertNotHeldOpen(guardPath);
 		if (content !== undefined) {
 			// The guard can itself block in metadata I/O. Claim the mutation only
 			// once it finishes, so cancellation still wins during that check.
@@ -21,7 +21,7 @@ async function write({ id, dst, content, state }: FileWriteIoRequest): Promise<v
 			) {
 				return;
 			}
-			await Bun.write(dst, content);
+			await Bun.write(target, content);
 		}
 		result = { id };
 	} catch (cause) {

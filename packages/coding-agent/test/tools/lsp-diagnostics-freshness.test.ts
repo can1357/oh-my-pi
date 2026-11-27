@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { open, rename } from "node:fs/promises";
 import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -156,11 +157,13 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", createFormatter(format)]]);
 		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
 		const write = fileWriteIo.writeLocalFile;
-		const writes = vi.spyOn(fileWriteIo, "writeLocalFile").mockImplementationOnce(async (dst, content, signal) => {
-			started.resolve();
-			await release.promise;
-			await write(dst, content, signal);
-		});
+		const writes = vi
+			.spyOn(fileWriteIo, "writeLocalFile")
+			.mockImplementationOnce(async (dst, content, signal, target) => {
+				started.resolve();
+				await release.promise;
+				await write(dst, content, signal, target);
+			});
 		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true });
 		const output = writethrough(filePath, "committed\n");
 		await started.promise;
@@ -189,6 +192,43 @@ describe("LSP diagnostics freshness", () => {
 		expect(result.finalContent).toBe(formatted);
 		expect(await Bun.file(filePath).text()).toBe(formatted);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"keeps writing to the SDK descriptor after its path is replaced",
+		async () => {
+			const dst = tempDir.join("sdk.ts");
+			const renamed = tempDir.join("renamed.ts");
+			const next = tempDir.join("next.ts");
+			await Bun.write(dst, "original");
+			const descriptor = await open(dst, "r+");
+			try {
+				await rename(dst, renamed);
+				await Bun.write(dst, "user save");
+				const file = Bun.file(descriptor.fd);
+				const formatted = "fmt data";
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+				vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([
+					["formatter", createFormatter(async () => formatted)],
+				]);
+				vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+				const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: true });
+
+				await writethrough(dst, "raw data", undefined, file);
+				// The descriptor's position advances across the raw and formatted writes.
+				expect(await Bun.file(renamed).text()).toBe("raw datafmt data");
+				expect(await Bun.file(dst).text()).toBe("user save");
+
+				const id = "sdk-descriptor";
+				await writethrough(dst, "raw data", undefined, file, { id, flush: false });
+				expect(await Bun.file(renamed).text()).toBe("raw datafmt dataraw data");
+				await writethrough(next, "another file", undefined, undefined, { id, flush: true });
+				expect(await Bun.file(renamed).text()).toBe("raw datafmt dataraw datafmt data");
+				expect(await Bun.file(dst).text()).toBe("user save");
+			} finally {
+				await descriptor.close();
+			}
+		},
+	);
 
 	it("announces watched-file creates even when no server owns the file type", async () => {
 		const filePath = path.join(tempDir.path(), "probe.module.scss");

@@ -1232,7 +1232,7 @@ export class EditTool implements AgentTool<TInput> {
 			const mode = await movedFileMode(request.path);
 			const destination = journaled ? await readSnapshot(request.moveTo) : undefined;
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
-			await writeFileWithFallback(request.moveTo, request.content, signal);
+			await writeFileWithFallback(request.moveTo, request.content, undefined, signal);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			journal(request.path, null);
