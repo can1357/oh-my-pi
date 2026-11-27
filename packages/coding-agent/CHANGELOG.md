@@ -125,6 +125,7 @@
 - Restored automatic discovery of the Windows Chrome relay from WSL2 with mirrored networking ([#20809](https://github.com/can1357/oh-my-pi/pull/20809) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - Managed Chromium tabs now use the browser's own hardware concurrency in pages and workers rather than overriding it in pages alone.
 - Emulating a larger viewport on an attached Chromium tab no longer resizes the browser window shared with the user's other tabs.
+- The bash tool's builtin `grep` prints invalid-regex errors as one GNU-style line (`grep: Unmatched ( or \(`), treats an unclosed `-E` interval such as `a{1` as literal text, prints `--` between groups for `-A0`/`-B0`/`-C0`, and no longer ends file errors with `(os error N)`
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
