@@ -425,6 +425,31 @@ describe("AgentLifecycleManager", () => {
 		await expect(lifecycle.ensureLive("7-Sub")).rejects.toThrow(/cannot be revived.*no reviver registered/);
 	});
 
+	it("a permanently refused revive names the cause and is not retried on later wakes", async () => {
+		registry.register({
+			id: "7b-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/7b-Sub.jsonl",
+			status: "parked",
+		});
+		let factoryCalls = 0;
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				factoryCalls++;
+				return { refused: "it ran isolated" };
+			},
+			() => TTL,
+		);
+
+		await expect(lifecycle.ensureLive("7b-Sub")).rejects.toThrow(
+			'Agent "7b-Sub" is parked and cannot be resumed: it ran isolated. Its transcript remains readable at history://7b-Sub.',
+		);
+		await expect(lifecycle.ensureLive("7b-Sub")).rejects.toThrow(/cannot be resumed: it ran isolated/);
+		expect(factoryCalls).toBe(1);
+	});
+
 	it("a failed cold revive is not sticky: the next ensureLive re-runs the factory", async () => {
 		const revived = makeSessionStub();
 		registry.register({
