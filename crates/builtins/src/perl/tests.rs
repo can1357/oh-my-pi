@@ -157,21 +157,30 @@ async fn run_case(case: &Case) -> Result<String, Box<dyn std::error::Error>> {
 	Ok(differences)
 }
 
-/// SIGPIPE's default action ends the program with status 141 and nothing
-/// more: a print loop into a pipe nobody reads stops (it used to spin
-/// forever), and so does output still buffered at exit. The corpus cannot
-/// hold these cases: its oracle dies of the signal itself.
+/// A signal's default action ends the program where it stands, as the
+/// kernel kills perl: status 128 + the signal, and no END block, destructor
+/// or buffered output. SIGPIPE stops a print loop into a pipe nobody reads
+/// (it used to spin forever), and output still buffered at exit, after END.
+/// The corpus cannot hold these cases: its oracle dies of the signal itself.
 #[tokio::test]
-async fn sigpipe_default_action_ends_the_program() {
+async fn signal_default_action_ends_the_program() {
+	const LEFTOVERS: &str = "END { print STDERR 'END' } sub DESTROY { print STDERR 'DESTROY' } my $o = bless {}; \
+	                         open F, '>', 'out' or die; print F 'buffered';";
 	let cwd = tempfile::tempdir().unwrap();
-	for script in [
-		"pipe(R, W) or die; close R; select W; $| = 1; print 1 while 1;",
-		"pipe(R, W) or die; close R; print W 'buffered';",
-	] {
+	let run = async |script: &str| {
 		let (status, _, stderr) =
 			run_extra_bytes(&["perl", "-e", script], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
-		assert_eq!((status, String::from_utf8_lossy(&stderr)), (141, "".into()), "{script}");
+		(status, String::from_utf8_lossy_owned(stderr))
+	};
+	for (death, status) in [
+		("pipe(R, W) or die; close R; select W; $| = 1; print 1 while 1;", 141),
+		("kill 'TERM', $$; print STDERR 'survived';", 143),
+	] {
+		assert_eq!(run(&format!("{LEFTOVERS} {death}")).await, (status, String::new()), "{death}");
+		assert_eq!(fs::read(cwd.path().join("out")).unwrap(), b"", "{death}");
 	}
+	let at_exit = "END { print STDERR 'END' } pipe(R, W) or die; close R; print W 'buffered';";
+	assert_eq!(run(at_exit).await, (141, "END".into()));
 }
 
 #[tokio::test]
