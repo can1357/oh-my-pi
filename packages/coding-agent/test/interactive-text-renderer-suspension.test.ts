@@ -1,10 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { cfgExtensionAssistantTextRenderers } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -16,7 +17,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal, type ModeTerminal, transcriptText } from "./helpers/mode-terminal";
 
-describe("assistant text renderers of a suspended extension", () => {
+describe("interactive extension suspension", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
@@ -34,7 +35,7 @@ describe("assistant text renderers of a suspended extension", () => {
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		modelRegistry = new ModelRegistry(authStorage);
-		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
@@ -109,6 +110,60 @@ describe("assistant text renderers of a suspended extension", () => {
 	}
 
 	const chat = () => transcriptText(mode.shell);
+
+	it("hides only the suspended extension's widgets and restores them on resume", async () => {
+		const runtime = new ExtensionRuntime();
+		const bus = new EventBus();
+		const cwd = tempDir.path();
+		let lateUpdate: (() => void) | undefined;
+		const widget = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_start", (_event, ctx) => {
+					ctx.ui.setWidget("above", ["SUSPEND ABOVE"]);
+					ctx.ui.setWidget("below", () => ({ render: () => ["SUSPEND BELOW"] }), { placement: "belowEditor" });
+					lateUpdate = () => {
+						ctx.ui.setWidget("above", ["LATE UPDATE"]);
+						ctx.ui.setWidget("keep", undefined);
+					};
+				});
+			},
+			cwd,
+			bus,
+			runtime,
+			path.join(cwd, "widget.ts"),
+		);
+		const other = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_start", (_event, ctx) => {
+					ctx.ui.setWidget("keep", ["KEEP WIDGET"]);
+				});
+			},
+			cwd,
+			bus,
+			runtime,
+			path.join(cwd, "other.ts"),
+		);
+		const runner = new ExtensionRunner([widget, other], runtime, cwd, session.sessionManager, modelRegistry);
+		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => runner });
+		await mode.init({ suppressWelcomeIntro: true });
+		const has = (rows: string[], text: string) => rows.some(row => row.includes(text));
+		const bothVisible = (rows: string[]) =>
+			has(rows, "SUSPEND ABOVE") && has(rows, "SUSPEND BELOW") && has(rows, "KEEP WIDGET");
+		await term.waitFor(bothVisible);
+
+		runner.setSuspendedExtensions(extension => extension === widget);
+		lateUpdate?.();
+		await term.waitFor(
+			rows =>
+				!has(rows, "SUSPEND ABOVE") &&
+				!has(rows, "SUSPEND BELOW") &&
+				!has(rows, "LATE UPDATE") &&
+				has(rows, "KEEP WIDGET"),
+		);
+
+		runner.setSuspendedExtensions(() => false);
+		await term.waitFor(bothVisible);
+	});
 
 	it("stops drawing with them while suspended, and draws with them again on resume", async () => {
 		const runner = await initWithShoutingExtension();

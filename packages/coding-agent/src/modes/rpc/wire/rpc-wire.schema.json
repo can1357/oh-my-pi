@@ -142,6 +142,17 @@
 				"clientOmit": []
 			},
 			{
+				"name": "clear_context",
+				"doc": "Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs.",
+				"params": null,
+				"result": "ClearContextResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "open_session",
 				"doc": "Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.",
 				"params": "OpenSessionParams",
@@ -794,7 +805,7 @@
 			},
 			{
 				"name": "logout",
-				"doc": "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+				"doc": "Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless).",
 				"params": "LogoutParams",
 				"result": "LogoutResult",
 				"nullable": false,
@@ -1191,6 +1202,15 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"aiu": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
+				},
+				"aiuMissing": {
+					"type": "boolean",
+					"description": "The model reports AI credits and this call's billing frame never arrived."
 				}
 			},
 			"required": [
@@ -3342,6 +3362,23 @@
 				"acuCost"
 			]
 		},
+		"SessionAiu": {
+			"type": "object",
+			"properties": {
+				"nano": {
+					"type": "number",
+					"description": "Reported charge in nano-AIU (1e9 = 1 AI credit)."
+				},
+				"unknownCalls": {
+					"type": "integer",
+					"description": "Calls whose billing frame never arrived; positive makes `nano` a lower bound."
+				}
+			},
+			"required": [
+				"nano",
+				"unknownCalls"
+			]
+		},
 		"SessionStats": {
 			"type": "object",
 			"properties": {
@@ -3377,6 +3414,10 @@
 				},
 				"credits": {
 					"$ref": "#/$defs/SessionCredits"
+				},
+				"aiu": {
+					"$ref": "#/$defs/SessionAiu",
+					"description": "Server-reported AI credits of the session and its subagent tree."
 				},
 				"routedModels": {
 					"type": "object",
@@ -6522,6 +6563,17 @@
 				}
 			}
 		},
+		"ClearContextResult": {
+			"type": "object",
+			"properties": {
+				"droppedCount": {
+					"type": "number"
+				}
+			},
+			"required": [
+				"droppedCount"
+			]
+		},
 		"OpenSessionParams": {
 			"type": "object",
 			"properties": {
@@ -7401,6 +7453,9 @@
 			"type": "object",
 			"properties": {
 				"remainingSource": {
+					"type": "string"
+				},
+				"signOutError": {
 					"type": "string"
 				}
 			}

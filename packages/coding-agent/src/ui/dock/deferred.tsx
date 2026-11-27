@@ -2,7 +2,8 @@
 /**
  * Command output queued while the agent streams (`deferredCommand` slot):
  * `/usage` and friends answer at once from the dock, and the real panels
- * enter the transcript when the agent pauses.
+ * enter the transcript when the agent pauses. The interrupt key (Esc) hides
+ * the preview; the panels still enter the transcript.
  *
  * - Natively (role `omp.hud.deferred`): the panels in a column capped at
  *   `maxRows` lines, then a dim note.
@@ -11,6 +12,8 @@
  *   note counts the rows left out.
  */
 import { For, type JSXNode, signal } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { keyLabel } from "../keys/hints";
 import "../styles/dock";
 
 /** Never shrink the preview below this, even on a short terminal. */
@@ -30,6 +33,8 @@ export class DeferredCommandModel {
 	/** Commands whose output waits (one command may queue several panels). */
 	readonly commands = signal(0);
 	readonly maxRows = signal(DEFERRED_MIN_ROWS);
+	/** The key that hides the preview (the interrupt key). */
+	readonly dismissKey = signal("escape");
 }
 
 /** `1 command output`, `3 command outputs`. */
@@ -50,7 +55,7 @@ export function DeferredCommand(props: { readonly model: DeferredCommandModel })
 				<text
 					spans={[
 						{
-							t: `${queuedOutputs(model.commands())} — shown in full in the transcript when the agent pauses`,
+							t: `${queuedOutputs(model.commands())} — shown in full in the transcript when the agent pauses · ${keyLabel(currentTheme(), model.dismissKey())} to hide`,
 							s: "dim",
 						},
 					]}

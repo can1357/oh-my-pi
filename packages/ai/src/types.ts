@@ -49,7 +49,7 @@ import type { DevinOptions } from "./providers/devin";
 import type { FactoryDroidOptions } from "./providers/factory-droid";
 import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
-import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
+import type { GoogleInteractionsOptions } from "./providers/google-interactions";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
@@ -83,7 +83,7 @@ export interface ApiOptionsMap {
 	"openai-codex-responses": OpenAICodexResponsesOptions;
 	"azure-openai-responses": AzureOpenAIResponsesOptions;
 	"google-generative-ai": GoogleOptions;
-	"google-gemini-cli": GoogleGeminiCliOptions;
+	"google-interactions": GoogleInteractionsOptions;
 	"google-vertex": GoogleVertexOptions;
 	"kiro-api": KiroOptions;
 	"ollama-chat": OllamaChatOptions;
@@ -517,8 +517,13 @@ export interface OpenAIPromptCacheOptions {
 	 * `cacheRetention` resolves to `long`, otherwise `30m`.
 	 */
 	ttl?: "30m" | "12h";
-	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
-	breakpoint?: "latest-stable-message" | "none";
+	/**
+	 * Explicit-mode marker placement. `message-boundaries` (default) marks the end
+	 * of the leading instructions, each user message, and each run of tool
+	 * outputs, so every request reads the prefix the previous one wrote; `none`
+	 * places no markers, leaving caching to markers the payload already carries.
+	 */
+	breakpoint?: "message-boundaries" | "none";
 }
 export type OpenAIResponseInclude =
 	| "file_search_call.results"
@@ -529,6 +534,9 @@ export type OpenAIResponseInclude =
 	| "code_interpreter_call.outputs"
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
+
+/** Why a replay-safe retry discarded an attempt; see {@link StreamOptions.onDiscardedAttempt}. */
+export type DiscardedAttemptReason = "empty-completion" | "provider-error";
 
 export interface StreamOptions {
 	temperature?: number;
@@ -784,6 +792,13 @@ export interface StreamOptions {
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	/**
+	 * Receives each attempt a replay-safe retry discards (an empty completion, a
+	 * transient provider error) before the replacement request is sent. The
+	 * provider may have billed it; the delivered result never carries its usage.
+	 * Attempts with no tokens and no billing frame (a bare 429 or 5xx) are not reported.
+	 */
+	onDiscardedAttempt?: (message: AssistantMessage, reason: DiscardedAttemptReason) => void;
+	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use
 	 * this because silence is their expected result; interactive agent turns
@@ -942,8 +957,6 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * providers ignore it. Callers own the cache lifecycle and compatibility.
 	 */
 	cachedContent?: string;
-	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
-	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	/**
 	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
 	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is
@@ -1337,6 +1350,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** The user wrote this input during a live voice call; it does not return the answer to the screen. */
+	duringLiveCall?: true;
 	/** True when the provider delivered this steer into the response it was streaming (`response.steer`). Display-only; never sent. */
 	liveSteered?: boolean;
 	/** Timestamp of a client-side history rewrite represented by this message. */

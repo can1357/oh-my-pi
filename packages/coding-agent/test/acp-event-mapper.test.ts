@@ -75,6 +75,7 @@ class ReplayTestSession {
 	sessionManager: SessionManager;
 	sessionId: string;
 	model: Model | undefined = TEST_MODEL;
+	modelRegistry = { awaitBackgroundRefresh: async (): Promise<void> => {} };
 	thinkingLevel: string | undefined;
 	customCommands: [] = [];
 	skills: [] = [];

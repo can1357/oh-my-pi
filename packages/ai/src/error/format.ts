@@ -6,11 +6,17 @@ import {
 	rewriteCopilotError,
 } from "../utils/http-inspector";
 import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
-import { LLAMA_CPP_TOOL_CALL_PARSE_PATTERN } from "./flags";
+import { isOpenCodeFreeTierGateMessage, LLAMA_CPP_TOOL_CALL_PARSE_PATTERN } from "./flags";
 
 function rewriteOllamaToolCallJsonError(message: string): string {
 	if (!LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(message)) return message;
 	return `Local Ollama model emitted malformed tool-call JSON and llama.cpp rejected it (HTTP 500). This is usually a deterministic model-output failure after context degradation, not a transient server outage; reload the model or reduce context, then retry.\n${message}`;
+}
+
+/** Matched on the provider's text, not the provider id, so custom providers fronting Zen get it too. */
+function rewriteOpenCodeFreeTierError(message: string): string {
+	if (!isOpenCodeFreeTierGateMessage(message)) return message;
+	return `OpenCode Zen only serves its free models to the OpenCode app, so omp cannot use this one; your key still works for paid Zen models. Pick another model with /model, or run this one in OpenCode.\n${message}`;
 }
 
 /** Inputs that steer {@link formatMessage}'s formatter selection. */
@@ -45,5 +51,6 @@ export async function formatMessage(error: unknown, opts: FormatMessageOptions =
 	if (opts.provider === "ollama") {
 		message = rewriteOllamaToolCallJsonError(message);
 	}
+	message = rewriteOpenCodeFreeTierError(message);
 	return message;
 }

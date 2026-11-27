@@ -25,7 +25,7 @@ on-api "openai-completions" "openai-responses" "openai-codex-responses" "azure-o
 }
 
 // Google wires bill Gemini 3's fixed `media_resolution` budget per image.
-on-api "google-generative-ai" "google-gemini-cli" "google-vertex" priority=-1 {
+on-api "google-generative-ai" "google-vertex" priority=-1 {
 	image-tokenization {
 		regime "fixed"
 		tokens 1120

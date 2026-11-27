@@ -49,8 +49,10 @@ export interface UserMessageModel {
 	readonly reaction?: Reactive<string | undefined>;
 	/** Whether a host handles transcript actions (controls are only shown when one does). */
 	readonly actions?: Reactive<boolean>;
-	/** Mark the bubble as a shell prompt zone (OSC 133) in the terminal. */
+	/** Whether the terminal may mark this prompt (OSC 133) when it enters scrollback. */
 	readonly promptZones?: Reactive<boolean>;
+	/** The message identity, shared by new views of the same prompt after a transcript rebuild. */
+	readonly promptZoneKey?: object;
 	/** Copy (`copy-message`), Edit & resend (`edit-turn`) and turn hold-menu actions. */
 	readonly onAction?: (act: string) => void;
 }
@@ -203,6 +205,7 @@ export function UserMessage(props: { model: UserMessageModel }): JSXNode {
 			}
 			term={() => ({
 				zones: read(model.promptZones) !== false,
+				zoneKey: model.promptZoneKey,
 				steered: model.liveSteered === true,
 				reaction: read(model.reaction),
 			})}

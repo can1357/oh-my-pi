@@ -297,7 +297,7 @@ async function divergedWithContinuationWrittenLast(
 function rpcHost(switchedTo: string[]): RpcOpenSessionSession {
 	return {
 		sessionFile: agentDir?.join("startup.jsonl"),
-		sessionId: "startup",
+		sessionManager: { getSessionId: () => "startup" },
 		messages: [],
 		model: undefined,
 		setModel: async () => ({ switched: true }),

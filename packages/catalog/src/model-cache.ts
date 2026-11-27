@@ -22,8 +22,8 @@ import type { Api, Model } from "./types";
 // rerun the compat cascade. Request headers are intentionally omitted:
 // arbitrary provider-defined header names can carry credentials. v15
 // invalidates unbundled OpenAI-compatible rows that ignored provider-reported
-// token limits. v14 invalidates Antigravity rows predating per-SKU
-// `antigravityWireProfiles` (model_enum label, output cap, SKU thinking). v13 replaces
+// token limits. v14 invalidates rows predating per-SKU
+// wire profiles (model_enum label, output cap, SKU thinking). v13 replaces
 // sparse ModelSpec rows with materialized rows and records the exact app/rules/
 // builder policy that produced them. v12 invalidated Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
@@ -32,7 +32,7 @@ import type { Api, Model } from "./types";
 // headers and records which model ids lost headers or cannot be rebuilt.
 // v9 invalidated Kimi Code rows predating live effort and protocol metadata;
 // v8 invalidated Codex discovery rows predating provider-native V2 compaction
-// metadata; v7 invalidated rows predating the Antigravity Gemini budget-mode
+// metadata; v7 invalidated rows predating the Gemini budget-mode
 // migration (cached specs still carrying `thinking.mode: "google-level"` and
 // the old 3.5-flash effort routing); v6 invalidated rows that may contain the
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating

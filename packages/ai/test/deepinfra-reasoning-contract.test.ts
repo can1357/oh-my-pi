@@ -252,4 +252,22 @@ describe("DeepInfra reasoning wire contract (oh-my-pi#9522)", () => {
 		expect(assistant).toBeDefined();
 		expect(assistant?.reasoning_content).toBe("");
 	});
+
+	it("normalizes tool-only assistant content to '' when the reasoning_content placeholder is injected", () => {
+		// DeepSeek rejects null content alongside reasoning_content, so a pure
+		// tool-use turn (no text part) must replay `content: ""`.
+		const model = deepinfraDeepseekModel();
+		const turn = assistantTurn(model, [
+			{
+				type: "toolCall",
+				id: "call_deepinfra_tool_only",
+				name: "list_files",
+				arguments: { path: "." },
+			} as ToolCall,
+		]);
+		const messages = convertMessages(model, { messages: [turn] }, model.compat);
+		const assistant = findAssistantWireMessage(messages);
+		expect(assistant).toBeDefined();
+		expect(assistant?.content).toBe("");
+	});
 });

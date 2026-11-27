@@ -39,6 +39,21 @@ function makeOpenCodeGoQwen37Model(): Model<"anthropic-messages"> {
 	});
 }
 
+function makeOpenCodeZenClaudeModel(): Model<"anthropic-messages"> {
+	return buildModel({
+		id: "claude-haiku-4-5",
+		name: "Claude Haiku 4.5",
+		api: "anthropic-messages",
+		provider: "opencode-zen",
+		baseUrl: "https://opencode.ai/zen/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	});
+}
+
 const testContext: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 };
@@ -93,6 +108,19 @@ describe("Anthropic Copilot auth config", () => {
 		expect(result.stopReason).toBe("error");
 		expect(requestedApiKeys[0]).toBe("opencode_test_key");
 		expect(requestedAuthorizations[0]).toBeNull();
+	});
+
+	it("authenticates OpenCode Zen Claude models with X-Api-Key, not bearer-only", () => {
+		const options = buildAnthropicClientOptions({
+			model: makeOpenCodeZenClaudeModel(),
+			apiKey: "sk-zen-test",
+			stream: true,
+		});
+
+		// The client adds `X-Api-Key` from `apiKey`; the bearer `Authorization`
+		// header must not be sent (Zen's Anthropic gateway rejects it).
+		expect(options.apiKey).toBe("sk-zen-test");
+		expect(options.defaultHeaders.Authorization).toBeUndefined();
 	});
 
 	it("unwraps structured Copilot credentials before setting Authorization", () => {
@@ -234,6 +262,42 @@ describe("Anthropic Copilot auth config", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedInitiators[0]).toBe("agent");
+	});
+
+	it("sends the conversation id as X-Client-Session-Id on Copilot message requests", async () => {
+		const requestedSessionIds: Array<string | null> = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedSessionIds.push(getRequestHeader(input, init, "X-Client-Session-Id"));
+			return new Response(JSON.stringify({ error: { type: "authentication_error", message: "Unauthorized" } }), {
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		const result = await streamAnthropic(makeCopilotClaudeModel(), testContext, {
+			apiKey: "ghu_test_copilot_token",
+			fetch: fetchMock as unknown as typeof fetch,
+			sessionId: "session-123",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(requestedSessionIds[0]).toBe("session-123");
+	});
+
+	it("keeps a caller-supplied X-Client-Session-Id on Copilot requests", () => {
+		const result = buildAnthropicClientOptions({
+			model: makeCopilotClaudeModel(),
+			apiKey: "ghu_test",
+			extraBetas: [],
+			stream: true,
+			dynamicHeaders: {},
+			headers: { "x-client-session-id": "caller-session" },
+			sessionId: "session-123",
+		});
+
+		const keys = Object.keys(result.defaultHeaders).filter(key => key.toLowerCase() === "x-client-session-id");
+		expect(keys).toHaveLength(1);
+		expect(result.defaultHeaders[keys[0]]).toBe("caller-session");
 	});
 
 	it("keeps the CLI identity on Enterprise message requests", async () => {

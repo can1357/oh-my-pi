@@ -22,6 +22,7 @@ await judge(state, questions, { images?: [path | ImageContent, …] }) → `{id:
     - Every question sees the same state and is answered independently: batch independent questions into one call.
     - Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking.
     - Two or more states → `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, never a loop of `judge()`.
+    - The judge does not reason: ask explicit, atomic questions about observable facts and combine the answers in code. Not "is this spam?" but "promises an unexpected prize?", "sender name conflicts with email domain?", "pressures to act fast?".
     `questions`: `{id: q}` where q is one of
       `{type: "choice", instructions, criteria: {label: rubric | {{#if py}}None{{else}}null{{/if}}, …}}` → `{choice, probabilities: {label: p}, confidence}` (≥2 labels)
       `{type: "bool", instructions, criteria?: {true?: {{#if py}}str{{else}}string{{/if}}, false?: {{#if py}}str{{else}}string{{/if}}}}` → `{bool: P(yes)}`

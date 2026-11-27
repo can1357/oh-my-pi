@@ -682,6 +682,9 @@ pub struct Usage {
 	pub cttl: Option<Map<String, Value>>,
 	pub server: Option<Map<String, Value>>,
 	pub credits: Option<Map<String, Value>>,
+	pub aiu: Option<Map<String, Value>>,
+	/// The model reports AI credits and this call's billing frame never arrived.
+	pub aiu_missing: Option<bool>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -728,6 +731,12 @@ impl Serialize for Usage {
 		if let Some(value) = &self.credits {
 			map.serialize_entry("credits", value)?;
 		}
+		if let Some(value) = &self.aiu {
+			map.serialize_entry("aiu", value)?;
+		}
+		if let Some(value) = &self.aiu_missing {
+			map.serialize_entry("aiuMissing", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"input" if self.input.is_some() => continue,
@@ -743,6 +752,8 @@ impl Serialize for Usage {
 				"cttl" if self.cttl.is_some() => continue,
 				"server" if self.server.is_some() => continue,
 				"credits" if self.credits.is_some() => continue,
+				"aiu" if self.aiu.is_some() => continue,
+				"aiuMissing" if self.aiu_missing.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -768,6 +779,8 @@ impl<'de> Deserialize<'de> for Usage {
 			cttl: take(&mut extra, "cttl"),
 			server: take(&mut extra, "server"),
 			credits: take(&mut extra, "credits"),
+			aiu: take(&mut extra, "aiu"),
+			aiu_missing: take(&mut extra, "aiuMissing"),
 			extra,
 		})
 	}
@@ -3429,6 +3442,15 @@ pub struct SessionCredits {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionAiu {
+	/// Reported charge in nano-AIU (1e9 = 1 AI credit).
+	pub nano: f64,
+	/// Calls whose billing frame never arrived; positive makes `nano` a lower bound.
+	#[serde(rename = "unknownCalls")]
+	pub unknown_calls: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStats {
 	#[serde(rename = "sessionId")]
 	pub session_id: String,
@@ -3450,6 +3472,9 @@ pub struct SessionStats {
 	pub session_file: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub credits: Option<SessionCredits>,
+	/// Server-reported AI credits of the session and its subagent tree.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub aiu: Option<SessionAiu>,
 	#[serde(rename = "routedModels", default, skip_serializing_if = "Option::is_none")]
 	pub routed_models: Option<BTreeMap<String, f64>>,
 	/// Failed edits by the engine's `errorKind`.
@@ -5411,6 +5436,12 @@ pub struct NewSessionParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClearContextResult {
+	#[serde(rename = "droppedCount")]
+	pub dropped_count: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenSessionParams {
 	#[serde(rename = "sessionDir")]
 	pub session_dir: String,
@@ -5835,6 +5866,8 @@ pub struct LogoutParams {
 pub struct LogoutResult {
 	#[serde(rename = "remainingSource", default, skip_serializing_if = "Option::is_none")]
 	pub remaining_source: Option<String>,
+	#[serde(rename = "signOutError", default, skip_serializing_if = "Option::is_none")]
+	pub sign_out_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6539,6 +6572,20 @@ impl Command for NewSessionCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<CancellationResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ClearContextCommand {}
+
+impl Command for ClearContextCommand {
+	const NAME: &'static str = "clear_context";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ClearContextResult;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<ClearContextResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
 	}
 }
 
@@ -7544,7 +7591,7 @@ impl Command for GetLogoutAccountsCommand {
 	}
 }
 
-/// Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.
+/// Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogoutCommand {
 	#[serde(rename = "providerId")]

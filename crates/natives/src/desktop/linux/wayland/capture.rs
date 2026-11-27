@@ -13,7 +13,7 @@ use ashpd::desktop::{
 use image::RgbaImage;
 
 use super::{
-	pipewire::{self, PipeWire, PixelFormat, Plane, SpaHook, SpaPod, StreamEvents, VideoFormat},
+	pipewire::{self, PipeWire, PixelFormat, SpaChunk, SpaHook, SpaPod, StreamEvents, VideoFormat},
 	portal::{read_token, store_token, until_deadline},
 };
 use crate::desktop::{
@@ -138,21 +138,22 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 	}
 }
 
-fn rgba_from_buffer(format: VideoFormat, plane: &Plane<'_>) -> Result<RgbaImage, String> {
+fn rgba_from_buffer(
+	format: VideoFormat,
+	chunk: SpaChunk,
+	source: &[u8],
+) -> Result<RgbaImage, String> {
 	let VideoFormat { width, height, .. } = format;
 	if width == 0 || height == 0 {
 		return Err("PipeWire negotiated an empty frame".to_string());
 	}
-	let offset = plane.chunk.offset as usize;
-	let bytes = plane.chunk.size as usize;
-	let stride = plane.chunk.stride;
+	let offset = chunk.offset as usize;
+	let bytes = chunk.size as usize;
+	let stride = chunk.stride;
 	if stride <= 0 {
 		return Err(format!("PipeWire returned unsupported frame stride {stride}"));
 	}
 	let stride = stride as usize;
-	let source = plane
-		.memory
-		.ok_or_else(|| "PipeWire frame buffer is not memory-mapped".to_string())?;
 	let end = offset
 		.checked_add(bytes)
 		.ok_or_else(|| "PipeWire frame size overflow".to_string())?
@@ -263,7 +264,11 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
 		listener.frame = Some(if format.width == 0 || format.height == 0 {
 			Err(DesktopError::capture_failed("PipeWire negotiated an empty frame"))
 		} else if listener.pixels {
-			rgba_from_buffer(format, &plane)
+			plane
+				.with_memory(|bytes| rgba_from_buffer(format, plane.chunk, bytes))
+				.unwrap_or_else(|| {
+					Err("PipeWire frame buffer is not memory-mapped readable".to_string())
+				})
 				.map(|image| CapturedFrame {
 					image:  Some(image),
 					width:  format.width,

@@ -332,7 +332,7 @@ class WorkerPool:
             self._cancel_hooks.pop(row.delivery_id, None)
             if slot_acquired and self._slot_pool is not None:
                 try:
-                    _reap_slot(slot_uid)
+                    await asyncio.to_thread(_reap_slot, slot_uid)
                 finally:
                     self._slot_pool.release(slot_uid)
             await self._reclaim_event_caches(row)

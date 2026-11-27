@@ -89,7 +89,7 @@ export const cfgWorktreeClone = register({
 		group: "Isolation",
 		label: "Clone Checkout into Worktrees",
 		description:
-			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; falls back to a plain checkout when the filesystem cannot clone",
+			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored files carry over: build artifacts (node_modules, target) and also ignored secrets such as .env files and signing keys; falls back to a plain checkout when the filesystem cannot clone",
 	},
 });
 
@@ -508,7 +508,7 @@ export const cfgTaskEnableLsp = register({
 	},
 });
 
-/** Allow interactive instances in the same folder to discover and message each other's agents. */
+/** Allow interactive instances on this machine to discover and message each other's agents. */
 export const cfgTaskCrossInstance = register({
 	id: "task.crossInstance",
 	type: "boolean",
@@ -517,7 +517,7 @@ export const cfgTaskCrossInstance = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Cross-Instance Agent Messaging",
-		description: "Let other omp instances in this folder read agent outputs and send messages that can wake agents",
+		description: "Let other omp instances on this machine read agent outputs and send messages that can wake agents",
 	},
 });
 
@@ -530,10 +530,11 @@ export const cfgTaskMaxRecursionDepth = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Max Task Recursion",
-		description: "How many levels deep subagents can spawn their own subagents",
+		description:
+			"Subagent generations allowed, counting from this session: 0 disables subagents entirely, 1 lets this session spawn but not its subagents",
 		options: [
 			{ value: "-1", label: "Unlimited" },
-			{ value: "0", label: "None" },
+			{ value: "0", label: "Disabled" },
 			{ value: "1", label: "Single" },
 			{ value: "2", label: "Double" },
 			{ value: "3", label: "Triple" },

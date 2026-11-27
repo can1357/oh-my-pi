@@ -15,6 +15,7 @@ Any list of ≥ ~20 homogeneous items with a bucket/yes-no/score question: commi
 1. **Decide** — one `eval` cell, before any data is loaded, define as constants:
    - **Unit**: what one `state` is (file diff, hunk, log line, row). Prefer the smallest unit that still carries enough context to answer.
    - **Questions**: independent `judge` questions with fixed ids. One `choice` for the primary bucket; optional `bool`/`score` for secondary facts. Every criterion label is one sentence of observable evidence; labels exhaustive + mutually exclusive; include an explicit catch-all ("unrelated"/"other") and a "mixed" label when a unit can straddle.
+     The judge does not reason: a bucket that needs inference ("is this spam?") becomes atomic `bool` questions about observable facts ("promises an unexpected prize?", "sender name conflicts with email domain?"), combined in code.
    - **Pre-filter**: deterministic exclusions (path prefix, extension, size, pure deletions) that skip judging. Log how many units it removed.
    - **Escalation rule**: which verdicts and which uncertainty (e.g. top probability `< 0.7`, `bool` in `0.3..0.7`, error) you will read yourself.
    - **Cap**: max state size; truncate with a visible marker and count truncations.

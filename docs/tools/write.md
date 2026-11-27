@@ -80,7 +80,7 @@ Single-shot result.
 
 - It rejects high-confidence mis-dispatched read targets: a missing selector-shaped filename with empty content, or a missing semicolon-joined list of selector paths. Existing literal paths win; non-empty content is the escape hatch for a single deliberate selector-shaped filename.
 - Plan-mode policy and path resolution run before mutation. An existing target that is neither a regular file nor a directory (including through a symlink) is refused; existing regular files then pass the generated-file guard, which opens and reads the file head on the main thread and could block forever on such a target.
-- If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused. This also applies to text handler-owned resources.
+- If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused; a missing target is refused too, since the new file would be an incomplete copy. This also applies to text handler-owned resources.
 - ACP bridge `writeTextFile` is tried first when available; otherwise the session writethrough writes the content. LSP settings may format, synchronize, and diagnose the write.
 - When the written (post-format) content starts with `#!` and not `#![`, adds execute bits (`mode | 0o111`, `chmod a+x`) once those bytes are on disk — after ACP `writeTextFile`, or in the writethrough before `textDocument/didSave` and LSP diagnostics (returned in the result or delivered late).
 
@@ -216,7 +216,7 @@ content: ""
 - A file-backed URL write whose target is an existing directory fails with `<scheme>:// URL must resolve to a file: <url>`.
 - URI-like unknown targets fail rather than writing local files.
 - Empty writes to missing selector-shaped targets and semicolon-joined selector lists are rejected as likely read/write mis-dispatches.
-- Incomplete read projections that would discard unseen source are rejected; re-read omitted ranges and replace the whole file, or use `edit` for a partial change.
+- Incomplete read projections that would discard unseen source, or create a new file from one, are rejected; re-read omitted ranges and replace the whole file, or use `edit` for a partial change.
 - Conflict scope writes are read-only; invalid/stale ids, malformed bulk directives, missing `@base`, and stale marker locations surface `ToolError`.
 - Archive read/write failures and unexpected SQLite exceptions are wrapped in `ToolError(error.message)`.
 - If no LSP server matches or LSP formatting/diagnostics times out, file writes still complete; diagnostics may be omitted.
