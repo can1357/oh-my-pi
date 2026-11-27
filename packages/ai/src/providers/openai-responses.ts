@@ -79,6 +79,7 @@ import {
 	rememberOpenAIReasoningEffortFallback,
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
+import { markMissingCopilotUsageFrame } from "./github-copilot-billing";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import { OpenAIResponsesRequestRejection } from "./openai-request-error";
 import type {
@@ -1655,6 +1656,7 @@ const streamOpenAIResponsesOnce = (
 		}
 		output.duration = performance.now() - startTime;
 		if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+		markMissingCopilotUsageFrame(model, output);
 		if (output.stopReason === "error" || output.stopReason === "aborted") {
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 		} else {

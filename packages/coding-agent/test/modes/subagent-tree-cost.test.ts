@@ -295,7 +295,7 @@ describe("sumSubagentTreeCost", () => {
 			if (!model) throw new Error("Expected a bundled Copilot Messages model");
 			const billed = (nano?: number): AssistantMessage => ({
 				...assistant(model, 0.1, 1),
-				usage: { ...usage(0.1), ...(nano === undefined ? {} : { aiu: { nano } }) },
+				usage: { ...usage(0.1), ...(nano === undefined ? { aiuMissing: true } : { aiu: { nano } }) },
 			});
 			const manager = SessionManager.inMemory();
 			manager.appendMessage(billed(2_000_000_000));

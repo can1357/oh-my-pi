@@ -1,4 +1,3 @@
-import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
 /** nano-AIU per AI credit. */
@@ -6,10 +5,6 @@ export const NANO_AIU_PER_CREDIT = 1e9;
 
 /** A recorded model call: an assistant message or a `model_usage` entry, possibly as a raw transcript record. */
 export interface AiuCall {
-	provider?: unknown;
-	model?: unknown;
-	api?: unknown;
-	stopReason?: unknown;
 	usage?: unknown;
 }
 
@@ -22,19 +17,16 @@ export interface AiuTotals {
 }
 
 /**
- * The AI credits one call was charged: nano-AIU when its billing frame arrived, `"unknown"` when its
- * model declares one (`reports-aiu`) and none came, undefined when the model reports no credits or the
- * call ended on an error or abort before any token (it never reached the frame).
+ * The AI credits one call was charged: nano-AIU when its billing frame arrived, `"unknown"` when the
+ * transport recorded the frame as missing (`usage.aiuMissing`), undefined otherwise: the model reports
+ * no credits, the call failed before any token, or the transcript predates the frame.
  */
 export function callAiu(call: AiuCall): number | "unknown" | undefined {
-	const { provider, model, api, usage } = call;
-	if (typeof provider !== "string" || typeof model !== "string" || typeof api !== "string") return undefined;
-	if (!provider || !model || !api || !isRecord(usage)) return undefined;
-	if (resolveCatalogPolicy({ provider, id: model, api }).reportsAiu !== true) return undefined;
+	const usage = call.usage;
+	if (!isRecord(usage)) return undefined;
 	const nano = isRecord(usage.aiu) ? usage.aiu.nano : undefined;
 	if (typeof nano === "number" && Number.isFinite(nano) && nano >= 0) return nano;
-	if ((call.stopReason === "error" || call.stopReason === "aborted") && usage.totalTokens === 0) return undefined;
-	return "unknown";
+	return usage.aiuMissing === true ? "unknown" : undefined;
 }
 
 /** Add one call's {@link callAiu} to `totals` in place. */

@@ -144,7 +144,7 @@ import {
 	claudeToolPrefix,
 	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
-import { applyCopilotUsageFrame } from "./github-copilot-billing";
+import { applyCopilotUsageFrame, markMissingCopilotUsageFrame } from "./github-copilot-billing";
 import {
 	buildCopilotDynamicHeaders,
 	getCachedCopilotIntegrationId,
@@ -3932,6 +3932,7 @@ const streamAnthropicOnce = (
 					providerSessionState.cacheControlOptionsUnsupported = true;
 				}
 			}
+			markMissingCopilotUsageFrame(model, output);
 			stream.push({
 				type: "done",
 				reason: output.stopReason,
@@ -3955,6 +3956,7 @@ const streamAnthropicOnce = (
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			markMissingCopilotUsageFrame(model, output);
 			stream.push({
 				type: "error",
 				reason: output.stopReason,

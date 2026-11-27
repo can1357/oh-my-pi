@@ -487,6 +487,7 @@ function resetUsageCost(usage: Usage | undefined): void {
 	usage.credits = undefined;
 	usage.premiumRequests = undefined;
 	usage.aiu = undefined;
+	usage.aiuMissing = undefined;
 }
 
 /** Clear child billing kept in task results without discarding their token counts. */

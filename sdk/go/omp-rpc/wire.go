@@ -498,6 +498,8 @@ type Usage struct {
 	Server          map[string]json.RawMessage `json:"server,omitempty"`
 	Credits         map[string]json.RawMessage `json:"credits,omitempty"`
 	Aiu             map[string]json.RawMessage `json:"aiu,omitempty"`
+	// The model reports AI credits and this call's billing frame never arrived.
+	AiuMissing *bool `json:"aiuMissing,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -524,6 +526,7 @@ func (v *Usage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("server", &out.Server)
 	d.optional("credits", &out.Credits)
 	d.optional("aiu", &out.Aiu)
+	d.optional("aiuMissing", &out.AiuMissing)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err

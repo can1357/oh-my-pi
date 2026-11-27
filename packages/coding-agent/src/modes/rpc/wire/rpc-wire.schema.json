@@ -1196,6 +1196,10 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"aiuMissing": {
+					"type": "boolean",
+					"description": "The model reports AI credits and this call's billing frame never arrived."
 				}
 			},
 			"required": [

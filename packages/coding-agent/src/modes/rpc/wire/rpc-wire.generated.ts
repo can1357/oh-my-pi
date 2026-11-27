@@ -90,6 +90,8 @@ export interface Usage {
 	server?: Record<string, unknown>;
 	credits?: Record<string, unknown>;
 	aiu?: Record<string, unknown>;
+	/** The model reports AI credits and this call's billing frame never arrived. */
+	aiuMissing?: boolean;
 }
 
 /** Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope. */

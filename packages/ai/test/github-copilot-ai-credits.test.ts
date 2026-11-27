@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { parseCopilotUsageFrame } from "@oh-my-pi/pi-ai/providers/github-copilot-billing";
 import type { ResponseStreamEvent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { processResponsesStream } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
@@ -172,6 +173,34 @@ describe("Responses: copilot_usage on response.completed", () => {
 		const output = await runResponses("openai", { copilot_usage: COPILOT_USAGE });
 		expect(output.usage.aiu).toBeUndefined();
 	});
+
+	it("marks a finished reply without a frame as missing one, and a framed reply not", async () => {
+		const completed = (terminal: Record<string, unknown>) =>
+			streamOpenAIResponses(makeResponsesModel("github-copilot"), context, {
+				apiKey: "ghu_test",
+				fetch: vi.fn(async () =>
+					sse([
+						{
+							type: "response.completed",
+							response: {
+								id: "resp_1",
+								status: "completed",
+								output: [],
+								usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+							},
+							...terminal,
+						},
+					]),
+				) as unknown as typeof fetch,
+			}).result();
+
+		const frameless = await completed({});
+		expect(frameless.usage.aiu).toBeUndefined();
+		expect(frameless.usage.aiuMissing).toBe(true);
+		const framed = await completed({ copilot_usage: COPILOT_USAGE });
+		expect(framed.usage.aiu?.nano).toBe(436_590_000);
+		expect(framed.usage.aiuMissing).toBeUndefined();
+	});
 });
 
 function sse(events: Array<Record<string, unknown>>): Response {
@@ -256,6 +285,26 @@ describe("Messages: copilot_usage on message_delta", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(result.usage.aiu).toBeUndefined();
+		// Recorded as a missed frame, unlike a transcript from before the frame was read.
+		expect(result.usage.aiuMissing).toBe(true);
+	});
+
+	it("does not mark a request that failed before any token", async () => {
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ error: { message: "bad request" } }), {
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+		const result = await streamAnthropic(makeCopilotClaudeModel(), context, {
+			apiKey: "ghu_test",
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.usage.totalTokens).toBe(0);
+		expect(result.usage.aiuMissing).toBeUndefined();
 	});
 });
 

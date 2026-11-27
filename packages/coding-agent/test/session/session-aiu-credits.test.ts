@@ -1,12 +1,19 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, StopReason, Usage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
-function usage(totalTokens: number, aiuNano?: number): Usage {
+/** Usage carrying a billing frame (`aiuNano`), a recorded miss (`missing`), or neither (a legacy transcript). */
+function usage(totalTokens: number, aiuNano?: number, missing?: boolean): Usage {
 	return {
 		input: totalTokens,
 		output: 0,
@@ -14,13 +21,15 @@ function usage(totalTokens: number, aiuNano?: number): Usage {
 		cacheWrite: 0,
 		totalTokens,
 		...(aiuNano === undefined ? {} : { aiu: { nano: aiuNano } }),
+		...(missing ? { aiuMissing: true } : {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
 
-/** A Copilot Claude reply (`reports-aiu`) unless another provider is named. */
+/** A Copilot Claude reply unless another provider is named. */
 function reply(opts: {
 	aiuNano?: number;
+	missing?: boolean;
 	tokens?: number;
 	stopReason?: StopReason;
 	provider?: string;
@@ -33,7 +42,7 @@ function reply(opts: {
 		model: "claude-sonnet-5.5",
 		stopReason: opts.stopReason ?? "stop",
 		timestamp: 1,
-		usage: usage(opts.tokens ?? 10, opts.aiuNano),
+		usage: usage(opts.tokens ?? 10, opts.aiuNano, opts.missing),
 	};
 }
 
@@ -42,24 +51,50 @@ function credits(manager: SessionManager): { nano: number; unknownCalls: number 
 	return { nano: stats.aiuNano, unknownCalls: stats.aiuUnknownCalls };
 }
 
+async function writeTranscript(file: string, lines: unknown[]): Promise<void> {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await Bun.write(file, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
+}
+
+const timestamp = new Date().toISOString();
+
+function header(id: string, cwd: string, inheritedThroughEntryId?: string): Record<string, unknown> {
+	return {
+		type: "session",
+		version: CURRENT_SESSION_VERSION,
+		id,
+		timestamp,
+		cwd,
+		...(inheritedThroughEntryId ? { inheritedThroughEntryId } : {}),
+	};
+}
+
+function userEntry(id: string): Record<string, unknown> {
+	return { type: "message", id, parentId: null, timestamp, message: { role: "user", content: "hi", timestamp: 1 } };
+}
+
+function replyEntry(id: string, parentId: string, message: AssistantMessage): Record<string, unknown> {
+	return { type: "message", id, parentId, timestamp, message };
+}
+
 describe("session AI-credit accounting", () => {
-	it("counts credits where calls are recorded and marks a missing billing frame as unknown", () => {
+	it("counts credits where calls are recorded and a recorded missing frame as unknown", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendMessage({ role: "user", content: "hi", timestamp: 1 });
 		manager.appendMessage(reply({ aiuNano: 500_000_000 }));
-		// A side request whose frame never arrived: unknown spend, not free.
+		// A side request the transport recorded as frameless: unknown spend, not free.
 		manager.appendModelUsage(
 			{
 				purpose: "recap",
 				api: "openai-responses",
 				provider: "github-copilot",
 				model: "gpt-5.5",
-				usage: usage(20),
+				usage: usage(20, undefined, true),
 				stopReason: "stop",
 			},
 			{ sessionId: manager.getSessionId(), parentId: manager.getLeafId() },
 		);
-		// A request that failed before any token never reached the frame.
+		// A request that failed before any token never reached the frame, so carries no marker.
 		manager.appendMessage(reply({ tokens: 0, stopReason: "error" }));
 		// Providers without the frame are neither counted nor unknown.
 		manager.appendMessage(reply({ provider: "anthropic" }));
@@ -80,23 +115,13 @@ describe("session AI-credit accounting", () => {
 	it("leaves a reset fork's copied calls to its parent, on fork and after reload", async () => {
 		using tempDir = TempDir.createSync("@omp-session-aiu-fork-");
 		const cwd = path.join(tempDir.path(), "project");
-		const sessionDir = path.join(tempDir.path(), "sessions");
-		await fs.mkdir(sessionDir, { recursive: true });
-		const sourceFile = path.join(sessionDir, "source.jsonl");
-		const timestamp = new Date().toISOString();
-		const lines = [
-			{ type: "session", version: CURRENT_SESSION_VERSION, id: "aiu-source", timestamp, cwd },
-			{
-				type: "message",
-				id: "u1",
-				parentId: null,
-				timestamp,
-				message: { role: "user", content: "hi", timestamp: 1 },
-			},
-			{ type: "message", id: "a1", parentId: "u1", timestamp, message: reply({ aiuNano: 3_000_000_000 }) },
-			{ type: "message", id: "a2", parentId: "a1", timestamp, message: reply({}) },
-		];
-		await Bun.write(sourceFile, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
+		const sourceFile = path.join(tempDir.path(), "sessions", "source.jsonl");
+		await writeTranscript(sourceFile, [
+			header("aiu-source", cwd),
+			userEntry("u1"),
+			replyEntry("a1", "u1", reply({ aiuNano: 3_000_000_000 })),
+			replyEntry("a2", "a1", reply({ missing: true })),
+		]);
 
 		const plain = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "plain"), undefined, {
 			suppressBreadcrumb: true,
@@ -118,5 +143,76 @@ describe("session AI-credit accounting", () => {
 		const reopened = await SessionManager.open(resetFile);
 		expect(credits(reopened)).toEqual({ nano: 1_000_000_000, unknownCalls: 0 });
 		await Promise.all([plain.close(), reset.close(), reopened.close()]);
+	});
+
+	it("counts every call when the header marks an entry the transcript does not hold", async () => {
+		using tempDir = TempDir.createSync("@omp-session-aiu-dangling-");
+		const cwd = path.join(tempDir.path(), "project");
+		const file = path.join(tempDir.path(), "sessions", "dangling.jsonl");
+		await writeTranscript(file, [
+			header("aiu-dangling", cwd, "rolled-away"),
+			userEntry("u1"),
+			replyEntry("a1", "u1", reply({ aiuNano: 2_000_000_000 })),
+		]);
+
+		const manager = await SessionManager.open(file);
+		expect(credits(manager)).toEqual({ nano: 2_000_000_000, unknownCalls: 0 });
+		await manager.close();
+	});
+});
+
+describe("resumed session AI credits", () => {
+	const sessions: AgentSession[] = [];
+	afterEach(async () => {
+		await Promise.all(sessions.splice(0).map(session => session.dispose()));
+	});
+
+	async function resume(file: string): Promise<AgentSession> {
+		const model = getBundledModel("github-copilot", "claude-sonnet-4.5");
+		if (!model) throw new Error("Expected a bundled Copilot Claude model");
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: await SessionManager.open(file),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
+		});
+		sessions.push(session);
+		return session;
+	}
+
+	it("shows no credits for a transcript recorded before the billing frame was read", async () => {
+		using tempDir = TempDir.createSync("@omp-session-aiu-legacy-");
+		const file = path.join(tempDir.path(), "sessions", "legacy.jsonl");
+		await writeTranscript(file, [
+			header("aiu-legacy", tempDir.path()),
+			userEntry("u1"),
+			replyEntry("a1", "u1", reply({})),
+			replyEntry("a2", "a1", reply({})),
+		]);
+
+		const session = await resume(file);
+		await session.hydratePersistedSubagents();
+		// Neither `0.000+ cr` nor two frameless calls: older builds never read the frame.
+		expect(session.getSessionStats().aiu).toBeUndefined();
+	});
+
+	it("counts a persisted subagent's credits after a restart", async () => {
+		using tempDir = TempDir.createSync("@omp-session-aiu-tree-");
+		const file = path.join(tempDir.path(), "sessions", "root.jsonl");
+		await writeTranscript(file, [
+			header("aiu-root", tempDir.path()),
+			userEntry("u1"),
+			replyEntry("a1", "u1", reply({ aiuNano: 1_000_000_000 })),
+		]);
+		await writeTranscript(path.join(tempDir.path(), "sessions", "root", "Worker.jsonl"), [
+			header("aiu-worker", tempDir.path()),
+			userEntry("w1"),
+			replyEntry("w2", "w1", reply({ aiuNano: 2_000_000_000 })),
+			replyEntry("w3", "w2", reply({ missing: true })),
+		]);
+
+		const session = await resume(file);
+		await session.hydratePersistedSubagents();
+		expect(session.getSessionStats().aiu).toEqual({ nano: 3_000_000_000, unknownCalls: 1 });
 	});
 });

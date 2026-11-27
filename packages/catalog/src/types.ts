@@ -279,7 +279,7 @@ export interface Usage {
 	};
 	/**
 	 * GitHub Copilot server-reported AI-credit meter (`copilot_usage` frame).
-	 * Absent when the server sent no billing frame; absent means unknown, NOT zero.
+	 * Absent when the server sent no billing frame (see {@link aiuMissing}); never zero for a missing frame.
 	 * Kept apart from `cost` (a local dollar estimate) and `premiumRequests` (request
 	 * billing). 1 AIU = 1 AI credit = $0.01.
 	 */
@@ -294,6 +294,12 @@ export interface Usage {
 			output?: number;
 		};
 	};
+	/**
+	 * Set when the model declares a billing frame (`reports-aiu`) and the call finished without one: its
+	 * charge is unknown, not zero. Absent on calls that report no credits, on calls that failed before any
+	 * token, and on transcripts recorded before the frame was read.
+	 */
+	aiuMissing?: boolean;
 	cost: {
 		input: number;
 		output: number;

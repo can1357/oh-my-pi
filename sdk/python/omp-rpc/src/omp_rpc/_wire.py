@@ -281,6 +281,8 @@ class Usage(TypedDict):
     server: NotRequired[JsonObject]
     credits: NotRequired[JsonObject]
     aiu: NotRequired[JsonObject]
+    aiuMissing: NotRequired[bool]
+    """The model reports AI credits and this call's billing frame never arrived."""
 
 
 ParentIrc = TypedDict("ParentIrc", {"from": "str", "body": "str"})

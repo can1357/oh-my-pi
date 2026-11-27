@@ -82,6 +82,7 @@ export const messageDefs = {
 		"server?": JSON_OBJECT,
 		"credits?": JSON_OBJECT,
 		"aiu?": JSON_OBJECT,
+		"aiuMissing?": doc("boolean", "The model reports AI credits and this call's billing frame never arrived."),
 		cost: "UsageCost",
 	},
 

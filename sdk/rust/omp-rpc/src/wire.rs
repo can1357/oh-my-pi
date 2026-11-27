@@ -683,6 +683,8 @@ pub struct Usage {
 	pub server: Option<Map<String, Value>>,
 	pub credits: Option<Map<String, Value>>,
 	pub aiu: Option<Map<String, Value>>,
+	/// The model reports AI credits and this call's billing frame never arrived.
+	pub aiu_missing: Option<bool>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -732,6 +734,9 @@ impl Serialize for Usage {
 		if let Some(value) = &self.aiu {
 			map.serialize_entry("aiu", value)?;
 		}
+		if let Some(value) = &self.aiu_missing {
+			map.serialize_entry("aiuMissing", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"input" if self.input.is_some() => continue,
@@ -748,6 +753,7 @@ impl Serialize for Usage {
 				"server" if self.server.is_some() => continue,
 				"credits" if self.credits.is_some() => continue,
 				"aiu" if self.aiu.is_some() => continue,
+				"aiuMissing" if self.aiu_missing.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -774,6 +780,7 @@ impl<'de> Deserialize<'de> for Usage {
 			server: take(&mut extra, "server"),
 			credits: take(&mut extra, "credits"),
 			aiu: take(&mut extra, "aiu"),
+			aiu_missing: take(&mut extra, "aiuMissing"),
 			extra,
 		})
 	}

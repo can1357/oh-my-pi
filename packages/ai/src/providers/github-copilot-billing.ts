@@ -1,4 +1,6 @@
-import type { Usage } from "@oh-my-pi/pi-catalog/types";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
+import type { Api, Model, Usage } from "@oh-my-pi/pi-catalog/types";
+import type { AssistantMessage } from "../types";
 import { isRecord } from "../utils";
 
 type CopilotAiu = NonNullable<Usage["aiu"]>;
@@ -49,4 +51,17 @@ export function applyCopilotUsageFrame(usage: Usage, event: unknown): void {
 	if (!isRecord(event)) return;
 	const aiu = parseCopilotUsageFrame(event.copilot_usage);
 	if (aiu) usage.aiu = aiu;
+}
+
+/**
+ * Record a missing billing frame on a finished call: a `reports-aiu` model whose reply carried none gets
+ * `usage.aiuMissing`, so consumers count it as unknown spend instead of inferring it (a transcript from
+ * before the frame was read carries neither). A call that ended on an error or abort before any token
+ * never reached the frame and stays unmarked.
+ */
+export function markMissingCopilotUsageFrame(model: Model<Api>, message: AssistantMessage): void {
+	const usage = message.usage;
+	if (usage.aiu || resolveCatalogPolicy(model).reportsAiu !== true) return;
+	if ((message.stopReason === "error" || message.stopReason === "aborted") && usage.totalTokens === 0) return;
+	usage.aiuMissing = true;
 }
