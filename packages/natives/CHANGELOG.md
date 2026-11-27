@@ -18,6 +18,7 @@
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
+- Fixed rustc dep-info checksum computation failing for vendored `.sublime-syntax` files whose filenames contain spaces by renaming `Regular Expressions (Elixir).sublime-syntax` to `Regular-Expressions-Elixir.sublime-syntax` and `Git Ignore.sublime-syntax` to `Git-Ignore.sublime-syntax`; the syntax display names and scopes are unchanged.
 
 ## [19.2.1] - 2026-11-25
 
