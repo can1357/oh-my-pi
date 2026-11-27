@@ -149,6 +149,7 @@
 - `xargs` treats an external command that exits 141 as an ordinary failure (status 123), as GNU does; only a command really ended by SIGPIPE stops it with status 125
 - The bash tool's builtin `sed` reports regex and runtime errors in GNU's words and locations, supports `W`, `F`, the `M` address/substitution flag and backslash delimiters, and reports unopenable `w`/`-f` files and directory operands with GNU's messages and exit status 4
 - The bash tool's builtin `sed` refuses a `*` or interval stacked on another repetition (`s/a**/X/`) as GNU does, and with `M` a `[^x]` no longer matches the newline between lines; stacked quantifiers such as `a*\?` or `-E 'a*?'` in `grep`, `sed` and `nl` now repeat the whole piece instead of acting as a lazy star
+- The bash tool's builtin `sed` locates a newline used as the `s`/`y` delimiter where GNU does, and reads `-f DIR` as an empty script instead of failing
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Ctrl+C and Ctrl+D on an empty startup composer exit cleanly even while an extension or custom tool is loading.

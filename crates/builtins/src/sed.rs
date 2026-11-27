@@ -643,7 +643,7 @@ use crate::sed::{
 	delimited_parser::{ERR_UNTERMINATED_Y, parse_char_escape, parse_regex, parse_transliteration},
 	error_handling::{
 		ScriptLocation, compilation_error, compilation_error_before, compilation_error_through_newline,
-		invalid_reference, semantic_error,
+		invalid_reference, newline_delimiter_error, semantic_error,
 	},
 	fast_regex::Regex,
 	named_writer::NamedWriter,
@@ -1358,7 +1358,7 @@ fn compile_subst_command(
 ) -> SedResult<CommandHandling> {
 	line.advance(); // move past 's'
 	if line.eol() {
-		return compilation_error(lines, line, ERR_UNTERMINATED_S);
+		return newline_delimiter_error(lines, line, ERR_UNTERMINATED_S);
 	}
 
 	let regex_mode = if context.regex_extended {
@@ -1415,7 +1415,7 @@ fn compile_trans_command(
 ) -> SedResult<CommandHandling> {
 	line.advance(); // move past 'y'
 	if line.eol() {
-		return compilation_error(lines, line, ERR_UNTERMINATED_Y);
+		return newline_delimiter_error(lines, line, ERR_UNTERMINATED_Y);
 	}
 
 	let source = parse_transliteration(lines, line)?;
@@ -5077,6 +5077,20 @@ pub fn compilation_error<T>(
 	msg: impl ToString,
 ) -> SedResult<T> {
 	located_compilation_error(lines, lines.char_offset(line, true), msg)
+}
+
+/// Fails with `msg` for a command at the end of its line, whose delimiter
+/// would be the newline: GNU locates it past that newline
+/// ([`ScriptLineProvider::newline_delimiter_offset`]).
+pub fn newline_delimiter_error<T>(
+	lines: &mut ScriptLineProvider,
+	line: &ScriptCharProvider,
+	msg: impl ToString,
+) -> SedResult<T> {
+	match lines.newline_delimiter_offset() {
+		Some(offset) => located_compilation_error(lines, offset, msg),
+		None => compilation_error(lines, line, msg),
+	}
 }
 
 /// Fails with a compile error found before reading the current character, in GNU's format.
@@ -8875,7 +8889,7 @@ pub mod script_line_provider {
 
 use std::{
 	fmt,
-	io::{BufRead, BufReader},
+	io::{self, BufRead, BufReader},
 	path::PathBuf,
 };
 
@@ -8974,6 +8988,21 @@ impl ScriptLineProvider {
 		self.line_start + self.line_len
 	}
 
+	/// Returns GNU's `char` count when a command's delimiter would be the
+	/// newline ending the current line: the newline, plus the character after
+	/// it unless that is another newline or the end of the source. `None` when
+	/// the line has no newline.
+	pub fn newline_delimiter_offset(&mut self) -> Option<usize> {
+		if !self.line_terminated {
+			return None;
+		}
+		let next = match &mut self.state {
+			State::Active { reader, .. } => reader.fill_buf().ok().and_then(|bytes| bytes.first().copied()),
+			_ => None,
+		};
+		Some(self.line_end_offset() + usize::from(next.is_some_and(|byte| byte != b'\n')))
+	}
+
 	/// Returns where GNU locates script errors it finds at run time: char 0 of
 	/// the last expression, or the line after the last newline of the last file.
 	pub fn end_origin(&self) -> String {
@@ -9059,7 +9088,12 @@ impl ScriptLineProvider {
 					let file = self.paths.fs().open(self.paths.resolve(p)).map_err(|e| {
 						SedError::new(4, format!("couldn't open file {}: {}", p.display(), strip_errno(&e)))
 					})?;
-					Box::new(BufReader::new(file))
+					// GNU reads a directory as an empty script.
+					if file.metadata().is_ok_and(|meta| meta.is_dir()) {
+						Box::new(io::empty())
+					} else {
+						Box::new(BufReader::new(file))
+					}
 				}
 			},
 		};
@@ -9826,6 +9860,34 @@ mod tests {
 			let (code, capture) = crate::host::run_util::<Sed>(&[script], "aaab\n", "/");
 			assert_eq!((code, capture.out().as_str()), (0, out), "{script}");
 		}
+	}
+
+	// Failure: a newline as the `s`/`y` delimiter was located at the command
+	// letter (char 1); GNU counts the newline and the character after it.
+	#[test]
+	fn builtin_locates_a_newline_delimiter_like_gnu() {
+		for (script, location) in [
+			("s\na\nb\n", "char 3: unterminated `s'"),
+			("y\na\nb\n", "char 3: unterminated `y'"),
+			("1s\na\nb\n", "char 4: unterminated `s'"),
+			("s\n", "char 2: unterminated `s'"),
+			("s\n\n", "char 2: unterminated `s'"),
+			("s", "char 1: unterminated `s'"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "a\n", "/");
+			assert_eq!(code, 1, "{script:?}");
+			assert_eq!(capture.err(), format!("sed: -e expression #1, {location} command\n"), "{script:?}");
+		}
+	}
+
+	// Failure: `-f DIR` failed with "Is a directory"; GNU reads it as an
+	// empty script.
+	#[test]
+	fn builtin_reads_a_directory_script_as_empty() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::create_dir(dir.path().join("d")).unwrap();
+		let (code, capture) = crate::host::run_util::<Sed>(&["-f", "d", "-e", "p"], "a\n", dir.path());
+		assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "a\na\n", ""));
 	}
 
 	// Failure: under `M`, `[^x]` matched the newline between lines, so
