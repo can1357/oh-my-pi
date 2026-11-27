@@ -43,6 +43,7 @@ use crate::{
 		Children, Image, LatestImage, RunOptions, RunOutcome, RunStdio, Session, SessionConfig,
 		SessionError,
 	},
+	sys::NativeSpawner,
 	taps::PipeTaps,
 	vfs::VfsFs,
 };
@@ -257,6 +258,10 @@ pub type ShellExecuteResult = ShellRunResult;
 /// for it. Set when a session is created, cleared when it is dropped.
 type ActiveSession = Arc<parking_lot::Mutex<Option<SessionHandles>>>;
 
+/// The spawners of a shell's sessions: the current one, and ended ones while
+/// externals they abandoned are still being ended ([`Shell::settled`]).
+type Spawners = Arc<parking_lot::Mutex<Vec<NativeSpawner>>>;
+
 struct SessionHandles {
 	/// The live externals of the session's run in flight.
 	children: Children,
@@ -279,6 +284,8 @@ pub struct Shell {
 	process:     bool,
 	/// The URL mounts of the session (`urlmap`); a fork starts with a copy.
 	mounts:      Mounts,
+	/// See [`Spawners`].
+	spawners:    Spawners,
 }
 
 impl Shell {
@@ -339,6 +346,7 @@ impl Shell {
 			active: ActiveSession::default(),
 			process: false,
 			mounts: Mounts::default(),
+			spawners: Spawners::default(),
 		}
 	}
 
@@ -412,6 +420,7 @@ impl Shell {
 			self.config.clone(),
 			self.process,
 			self.mounts.clone(),
+			self.spawners.clone(),
 			run_config,
 			on_chunk,
 			&mut cancel_token,
@@ -472,6 +481,34 @@ impl Shell {
 			.live_external_jobs()
 			.await
 			.map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX))
+	}
+
+	/// Resolves once every external this shell's sessions started has been
+	/// reaped, except detached ones (`nohup`), which run on by design. A
+	/// cancelled run ends before the externals it abandoned do: they get
+	/// `TERM`, then `KILL` after a grace, in the background of this process
+	/// ([`NativeSpawner::settled`]). A process that exits after such a run
+	/// waits here, or it leaves them running, or unreaped, behind it.
+	pub async fn settled(&self) {
+		let spawners = self.spawners.lock().clone();
+		for spawner in spawners {
+			spawner.settled().await;
+		}
+	}
+
+	/// Ends the session. The background jobs it still holds end with it,
+	/// except detached ones (`nohup`): their externals get `TERM`, then `KILL`
+	/// after a grace, in the background of this process, and
+	/// [`Shell::settled`] waits for that. A cancel spares some jobs: those of
+	/// earlier commands (the sourced snapshot's included) and those a `TERM` or
+	/// `EXIT` trap of the cancelled command starts. Only this ends them. The
+	/// next [`Shell::run`] starts a new session. Waits for a command in flight
+	/// to end; [`Shell::abort`] it first to stop it. [`Shell::abort`] does
+	/// nothing to a command that is still setting up its session (sourcing the
+	/// snapshot) or waiting for an earlier command to end.
+	pub async fn close(&self) {
+		*self.session.lock().await = None;
+		*self.active.lock() = None;
 	}
 }
 
@@ -634,6 +671,7 @@ async fn run_shell_session(
 	config: ShellConfig,
 	process: bool,
 	mounts: Mounts,
+	spawners: Spawners,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	ct: &mut CancelToken,
@@ -650,7 +688,9 @@ async fn run_shell_session(
 			let core = if let Some(core) = &mut *session_guard {
 				core
 			} else {
-				let core = create_session_as(&config, Some(&tokio_cancel), process, mounts).await?;
+				let core =
+					create_session_as(&config, Some(&tokio_cancel), process, mounts, Some(&spawners))
+						.await?;
 				*active.lock() = Some(SessionHandles::of(&core.session));
 				session_guard.insert(core)
 			};
@@ -1004,16 +1044,18 @@ async fn create_session_for_run(
 	config: &ShellConfig,
 	cancel_token: Option<&CancellationToken>,
 ) -> Result<ShellSessionCore> {
-	create_session_as(config, cancel_token, false, Mounts::default()).await
+	create_session_as(config, cancel_token, false, Mounts::default(), None).await
 }
 
 /// [`create_session_for_run`] with `mounts` in front of its filesystem; with
-/// `process`, the session of a process's own shell ([`Shell::for_process`]).
+/// `process`, the session of a process's own shell ([`Shell::for_process`]);
+/// with `spawners`, the session's spawner joins them ([`Shell::settled`]).
 async fn create_session_as(
 	config: &ShellConfig,
 	cancel_token: Option<&CancellationToken>,
 	process: bool,
 	mounts: Mounts,
+	spawners: Option<&Spawners>,
 ) -> Result<ShellSessionCore> {
 	let cancel = cancel_token.cloned().unwrap_or_default();
 	let runtime = tokio::runtime::Handle::current();
@@ -1047,6 +1089,15 @@ async fn create_session_as(
 		None => Session::new(session_config),
 	}
 	.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
+	// Before setup runs anything: a cancel while the snapshot is sourced
+	// abandons the externals it started too.
+	if let Some(spawners) = spawners {
+		let mut list = spawners.lock();
+		// An ended session's spawner gets no new externals: drop it once they
+		// are all reaped.
+		list.retain(|spawner| !spawner.is_settled());
+		list.push(session.spawner().clone());
+	}
 	let mut core = ShellSessionCore {
 		session,
 		slot,

@@ -25,6 +25,16 @@ import { parseShellProcessArgs } from "./shell-process-protocol";
  */
 const INTERRUPT_SETTLE_MS = 250;
 
+/**
+ * How long this process waits, once a signal ended its command, for the
+ * command's programs to end and be reaped. The spawner sends KILL to what TERM
+ * did not end after its grace (1 s); the rest covers reaping on a loaded host.
+ * A program that even KILL does not end in this time (one in uninterruptible
+ * sleep) is left behind, as it was before this process waited at all. Below the
+ * 5 s `omp ps stop` gives a service before it sends KILL.
+ */
+const SETTLE_LIMIT_MS = 3_000;
+
 /** Run the shell process `args` (the argv after the worker selector) describe, then exit with the command's status. */
 export async function runShellProcess(args: readonly string[]): Promise<never> {
 	const spec = parseShellProcessArgs(args);
@@ -42,6 +52,9 @@ export async function runShellProcess(args: readonly string[]): Promise<never> {
 	/** The status this process exits with once a signal ended the command. */
 	let signalStatus: number | undefined;
 	const stop = (status: number): void => {
+		// One stop request can arrive as several signals: the daemon sends TERM to the
+		// process group, then to this process, and a terminal's runner adds HUP. The
+		// first decides the status; the bounded wait below ends this process.
 		signalStatus ??= status;
 		abort.abort();
 	};
@@ -72,6 +85,16 @@ export async function runShellProcess(args: readonly string[]): Promise<never> {
 	} catch (error) {
 		process.stderr.write(`omp: ${error instanceof Error ? error.message : String(error)}\n`);
 		status = 1;
+	}
+	// The cancel ends the command before its programs: they get TERM, then KILL
+	// after a grace, in the background of this process. Exiting first would leave
+	// them running, or unreaped, behind it. Closing the shell also ends the jobs
+	// the cancel spares: those the sourced script or the command's TERM or EXIT
+	// trap started. A program the command detached (`nohup`) runs on, and is not
+	// waited for.
+	if (signalStatus !== undefined) {
+		await shell.close();
+		await Promise.race([shell.settled(), Bun.sleep(SETTLE_LIMIT_MS)]);
 	}
 	process.exit(status);
 }

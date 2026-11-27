@@ -726,6 +726,51 @@ fn dropped_detached_external_runs_on_and_is_no_leftover() {
 	until("reaped after its exit", || proc::info(pid).is_none());
 }
 
+/// `settled` resolves once an abandoned external has been reaped, after the
+/// grace's KILL when it ignores TERM, and never waits for a detached one.
+#[test]
+fn settled_waits_until_abandoned_externals_are_reaped_but_not_for_detached_ones() {
+	let grace = Duration::from_millis(300);
+	let env = EnvView::default();
+	let s = spawner(Sessions::Inherit, grace);
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.build()
+		.unwrap();
+	let settle = |within: Duration| {
+		runtime
+			.block_on(async { tokio::time::timeout(within, s.settled()).await })
+			.is_ok()
+	};
+	assert!(s.is_settled() && settle(Duration::ZERO), "nothing spawned yet");
+
+	let a = argv(&["/bin/sleep", "30"]);
+	let mut detached = spec(&a, &env, NEW);
+	detached.lineage = crate::bash::Lineage { label: 7, detached: true };
+	let p = s.spawn(detached).unwrap();
+	let detached_pid = p.pid() as i32;
+	drop(p);
+	assert!(s.is_settled() && settle(Duration::ZERO), "a detached external is not waited for");
+	assert!(live(detached_pid), "and it runs on");
+
+	// `exec` keeps the ignored TERM: one process that only the grace's KILL
+	// ends.
+	let b = sh("trap '' TERM; exec /bin/sleep 30");
+	let p = s.spawn(spec(&b, &env, NEW)).unwrap();
+	let pid = p.pid() as i32;
+	until("exec'd", || proc::info(pid).is_some_and(|i| i.name == "sleep"));
+	assert!(!s.is_settled(), "a running external is waited for");
+	let start = Instant::now();
+	drop(p);
+	assert!(settle(LONG), "settled once the abandoned external is reaped");
+	assert!(start.elapsed() >= grace, "not before the grace's KILL");
+	assert!(proc::info(pid).is_none(), "reaped, not a zombie");
+
+	// SAFETY: plain syscall; the detached pid is unreaped while the sleep runs.
+	assert_eq!(unsafe { libc::kill(detached_pid, libc::SIGKILL) }, 0);
+	until("detached reaped after its exit", || proc::info(detached_pid).is_none());
+}
+
 /// The shell tears down while a detached external runs: its `ExtProc` is
 /// dropped, but what it writes after that still reaches the engine object,
 /// as a pipe would carry it, and its end of file completes the work. With no

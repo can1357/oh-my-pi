@@ -11,6 +11,8 @@
 - Added `renderHtml` for rendering HTML as Markdown or plain text, with automatic reader-content selection by default, a `mode: "full"` option for retaining all visible content, and configurable hidden-content handling.
 - Added `Reader` for step-by-step URL reading through host-provided HTTP and browser I/O, with the same reader-content and hidden-content options as `renderHtml`.
 - Added `analyzeBashApproval(command, dialect?)`, a synchronous Bash 5.3 and Zsh 5.9 AST analyzer for approving `bash` tool commands.
+- `Shell.settled()` resolves once every program the shell's commands started has ended and been reaped, except programs started with `nohup` ([#20189](https://github.com/can1357/oh-my-pi/pull/20189) by [@sjawhar](https://github.com/sjawhar))
+- `Shell.close()` ends the session and the background jobs it still holds, except programs started with `nohup`; `settled()` resolves once their programs have ended ([#20189](https://github.com/can1357/oh-my-pi/pull/20189) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

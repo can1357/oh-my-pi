@@ -85,7 +85,7 @@ use crate::{
 	},
 	commands::SessionCommands,
 	host::{PiHost, SpawnObserver, TERM_GRACE},
-	sys::{OutputDecoding, Sessions},
+	sys::{NativeSpawner, OutputDecoding, Sessions},
 	tools::{ToolCalls, ToolConfig},
 	vfs::VfsFs,
 };
@@ -563,6 +563,8 @@ pub struct Session {
 	waker:    Waker,
 	children: Children,
 	image:    LatestImage,
+	/// The host's spawner, which outlives a run's abandoned externals.
+	spawner:  NativeSpawner,
 }
 
 impl Session {
@@ -624,6 +626,7 @@ impl Session {
 		host.set_spawn_observer(Arc::new(children.clone()));
 		host.set_vfs(vfs);
 		host.set_tools(tools.clone());
+		let spawner = host.spawner().clone();
 		let tools = ToolCalls::new(tools, host.spawn_log(), waker.clone());
 		// A subshell's background in-engine work ends with it: nothing
 		// (no process for `pkill`, no job for `kill %N`) could reach it.
@@ -661,7 +664,7 @@ impl Session {
 			image: image.clone(),
 		};
 		runtime.spawn(driver.serve());
-		Ok(Self { jobs: Some(jobs), waker, children, image })
+		Ok(Self { jobs: Some(jobs), waker, children, image, spawner })
 	}
 
 	/// The session's state as of its last command boundary; see
@@ -674,6 +677,14 @@ impl Session {
 	/// [`Session::run`] borrows the session.
 	pub fn children(&self) -> Children {
 		self.children.clone()
+	}
+
+	/// The spawner of this session's externals. It outlives the session while
+	/// externals a cancel abandoned are being ended: they get `TERM`, then
+	/// `KILL` after [`TERM_GRACE`], in the background of this process
+	/// ([`NativeSpawner::settled`] waits for that).
+	pub const fn spawner(&self) -> &NativeSpawner {
+		&self.spawner
 	}
 
 	/// Number of background jobs (`cmd &`) still running an external

@@ -855,6 +855,28 @@ export declare class Shell {
    */
   liveBackgroundJobCount(): Promise<number>
   /**
+   * Resolves once every program this shell's commands started has ended
+   * and been reaped, except those a command detached (`nohup`), which run
+   * on. A cancelled `run` resolves before the programs it abandoned end:
+   * they get TERM, then KILL after a grace, in the background of this
+   * process. A process that exits after a cancelled run awaits this first,
+   * or it leaves them running, or unreaped, behind it.
+   */
+  settled(): Promise<void>
+  /**
+   * Ends the session. The background jobs it still holds end with it,
+   * except those a command detached (`nohup`): their programs get TERM,
+   * then KILL after a grace, in the background of this process, and
+   * `settled` waits for that. A cancel spares the jobs of earlier commands
+   * (the sourced snapshot's included) and those a TERM or EXIT trap of the
+   * cancelled command starts; only this ends them. The next `run` starts a
+   * new session. Waits for a command in flight to end; `abort()` it first
+   * to stop it. `abort()` does nothing to a command that is still setting
+   * up its session (sourcing the snapshot) or waiting for an earlier
+   * command to end.
+   */
+  close(): Promise<void>
+  /**
    * Every live external this shell session holds, whether a run is in
    * flight or not: background jobs (`cmd &`, `nohup cmd &`) earlier runs
    * left running included. Each is unreaped while held, so its pid names

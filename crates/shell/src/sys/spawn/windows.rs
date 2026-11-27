@@ -141,9 +141,12 @@ fn raw(h: &impl AsRawHandle) -> HANDLE {
 
 /// Platform state of a spawner: the jobs it created.
 pub(super) struct State {
-	jobs:    Mutex<Jobs>,
+	jobs:                Mutex<Jobs>,
 	/// Started with the first job on a pseudoconsole.
-	watcher: Mutex<Option<Arc<Watcher>>>,
+	watcher:             Mutex<Option<Arc<Watcher>>>,
+	/// Externals not detached whose exit (and pending KILL sweep) their
+	/// waiter has not seen yet ([`super::NativeSpawner::settled`]).
+	pub(super) unreaped: super::Unreaped,
 }
 
 struct Jobs {
@@ -152,10 +155,11 @@ struct Jobs {
 }
 
 impl State {
-	pub(super) const fn new() -> Self {
+	pub(super) fn new() -> Self {
 		Self {
-			jobs:    Mutex::new(Jobs { list: Vec::new(), next_sweep: SWEEP }),
-			watcher: Mutex::new(None),
+			jobs:     Mutex::new(Jobs { list: Vec::new(), next_sweep: SWEEP }),
+			watcher:  Mutex::new(None),
+			unreaped: super::Unreaped::default(),
 		}
 	}
 
@@ -965,11 +969,22 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	};
 	let inner = Arc::new(Inner { process, wake, job });
 	let (w_inner, w_tracker) = (Arc::clone(&inner), Arc::clone(&tracker));
+	// Weak: the waiter keeps the spawner's state alive no longer than before.
+	let w_shared = Arc::downgrade(shared);
+	if !lineage.detached {
+		shared.state.unreaped.add(pid);
+	}
 	let started = thread::Builder::new()
 		.name("obash-wait".into())
 		.stack_size(SMALL_STACK)
-		.spawn(move || wait_loop(&w_inner, &w_tracker));
+		.spawn(move || {
+			wait_loop(&w_inner, &w_tracker);
+			if let Some(shared) = w_shared.upgrade() {
+				shared.state.unreaped.remove(pid);
+			}
+		});
 	if let Err(e) = started {
+		shared.state.unreaped.remove(pid);
 		return Err(undo(&inner.process, e));
 	}
 	Ok(Box::new(WinProc {

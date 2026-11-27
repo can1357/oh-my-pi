@@ -87,6 +87,7 @@
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
+- Fixed a named service or `pty` command stopped by SIGTERM or SIGHUP leaving behind the programs its command started, including ones that ignore TERM or that a trap started in the background; its shell process now ends them before it exits, waiting at most 3 seconds ([#20189](https://github.com/can1357/oh-my-pi/pull/20189) by [@sjawhar](https://github.com/sjawhar))
 
 ### Removed
 
