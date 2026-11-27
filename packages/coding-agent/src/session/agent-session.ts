@@ -14021,7 +14021,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const isChanging = !routedModelsAreEqual(currentModel, model);
 		if (currentModel) {
 			// Requests from here on open fresh provider sessions. A response still streaming over the
-			// retired ones keeps them until its run ends.
+			// retired ones keeps them until its run ends — the whole run, tool turns included, so an
+			// idle Codex WebSocket stays connected that long.
 			this.#closeProviderSessionsForModelSwitch(currentModel, model, this.agent.waitForIdle());
 			if (isChanging) {
 				this.#clearInheritedProviderPromptCacheKey();
@@ -14132,8 +14133,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Moves the provider sessions a switch from `currentModel` to `nextModel` invalidates out of
-	 * `#providerSessionState`, so later requests open fresh ones, and closes every retired session once
-	 * `closeAfter` settles (at once without it).
+	 * `#providerSessionState`, so later requests open fresh ones, and closes those sessions once
+	 * `closeAfter` settles (at once without it). Sessions an earlier switch retired keep their own
+	 * deadline; `#closeAllProviderSessions` closes whatever is still retired.
 	 */
 	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model, closeAfter?: Promise<void>): void {
 		const providerKeys = new Set<string>();
@@ -14162,9 +14164,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 
+		const retired: ProviderSessionState[] = [];
 		for (const providerKey of providerKeys) {
 			const state = this.#providerSessionState.get(providerKey);
 			if (!state) continue;
+			retired.push(state);
 			this.#retiredProviderSessions.set(state, providerKey);
 			this.#providerSessionState.delete(providerKey);
 		}
@@ -14172,17 +14176,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (completionsPrefixToEvict !== undefined) {
 			for (const [key, state] of this.#providerSessionState) {
 				if (!key.startsWith(completionsPrefixToEvict)) continue;
+				retired.push(state);
 				this.#retiredProviderSessions.set(state, key);
 				this.#providerSessionState.delete(key);
 			}
 		}
 
-		if (closeAfter) void closeAfter.then(() => this.#closeRetiredProviderSessions());
-		else this.#closeRetiredProviderSessions();
+		if (retired.length === 0) return;
+		if (closeAfter) void closeAfter.then(() => this.#closeRetiredProviderSessions(retired));
+		else this.#closeRetiredProviderSessions(retired);
 	}
 
-	#closeRetiredProviderSessions(): void {
-		for (const [state, providerKey] of this.#retiredProviderSessions) {
+	/** Closes `states` (every retired session by default) that are still open, once each. */
+	#closeRetiredProviderSessions(
+		states: Iterable<ProviderSessionState> = [...this.#retiredProviderSessions.keys()],
+	): void {
+		for (const state of states) {
+			const providerKey = this.#retiredProviderSessions.get(state);
+			if (providerKey === undefined) continue;
+			this.#retiredProviderSessions.delete(state);
 			try {
 				state.close();
 			} catch (error) {
@@ -14192,7 +14204,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				});
 			}
 		}
-		this.#retiredProviderSessions.clear();
 	}
 
 	// =========================================================================

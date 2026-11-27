@@ -20,6 +20,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getTestModel } from "./helpers/model-fixtures";
 
@@ -376,6 +377,49 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(dispatches[1]?.state).toBe(opened);
 		expect(retired.close).toHaveBeenCalledTimes(1);
 		expect(opened.close).not.toHaveBeenCalled();
+	});
+
+	it("keeps a switch's retired sessions open when a later reset closes provider sessions mid-run", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-switch-scoped-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory());
+		sessions.push(session);
+
+		const retired = { close: vi.fn() } satisfies ProviderSessionState;
+		session.providerSessionState.set(`openai-responses:${openaiModel.provider}`, retired);
+		// Exiting vibe mode rewrites history, which closes the current Codex session at once.
+		session.agent.replaceMessages([
+			{
+				role: "custom",
+				customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+				content: "Vibe mode directive",
+				display: false,
+				timestamp: Date.now(),
+			},
+		]);
+		const firstStream = new AssistantMessageEventStream();
+		const started = Promise.withResolvers<void>();
+		session.agent.streamFn = () => {
+			started.resolve();
+			return firstStream;
+		};
+
+		const run = session.agent.prompt("First request");
+		try {
+			await started.promise;
+			await session.setModel(codexModel);
+			const codexState = { close: vi.fn() } satisfies ProviderSessionState;
+			session.providerSessionState.set("openai-codex-responses", codexState);
+			session.setVibeModeState(undefined);
+			expect(codexState.close).toHaveBeenCalledTimes(1);
+			// The first response still streams over the session the switch retired.
+			expect(retired.close).not.toHaveBeenCalled();
+		} finally {
+			firstStream.push({ type: "done", reason: "stop", message: createReply(openaiModel) });
+			await run;
+		}
+
+		expect(retired.close).toHaveBeenCalledTimes(1);
 	});
 
 	it("closes provider sessions a model switch retired when the session is disposed before its run settles", async () => {
