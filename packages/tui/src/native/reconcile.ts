@@ -143,7 +143,7 @@ export interface ResolvedEvent {
 	readonly event: UiEvent;
 }
 
-function escapeSegment(segment: string): string {
+export function escapeSegment(segment: string): string {
 	return segment.replace(/[%/~^]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 

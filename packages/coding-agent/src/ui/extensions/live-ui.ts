@@ -1,5 +1,6 @@
 import { derivedNode, getOwner, onCleanup, type UiNode } from "@oh-my-pi/pi-tui";
 import { bubbleEvent, keypathOf } from "@oh-my-pi/pi-tui/dispatch";
+import { escapeSegment } from "@oh-my-pi/pi-tui/native/reconcile";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -8,17 +9,12 @@ import type { Composer } from "../composer";
 import { ensureTerminalStylesLoaded } from "../shell/shell";
 import type { Shell, TranscriptBlock } from "../shell";
 
-/** Native ids escape these characters before joining structural key segments. */
-function segment(key: string): string {
-	return key.replace(/[%/~^]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
 /** Match structural children, including the native reconciler's duplicate-key suffixes. */
 function childAt(nodes: readonly UiNode[], key: string): UiNode | undefined {
 	const counts = new Map<string, number>();
 	for (let i = 0; i < nodes.length; i++) {
 		const node = nodes[i]!;
-		const base = node.key() === undefined ? String(i) : segment(node.key()!);
+		const base = node.key() === undefined ? String(i) : escapeSegment(node.key()!);
 		const duplicate = counts.get(base) ?? 0;
 		counts.set(base, duplicate + 1);
 		if ((duplicate === 0 ? base : `${base}~${duplicate}`) === key) return node;
