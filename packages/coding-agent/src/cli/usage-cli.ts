@@ -29,6 +29,7 @@ import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatProviderName } from "../modes/view-model/chrome/format";
 import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { errorMessage, formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -596,14 +597,14 @@ function formatReloginDeadline(
 			: stated
 				? "refresh token expired"
 				: "grant is past Anthropic's ~30d lifetime";
-		return `  ${chalk.red(`⚠ ${label} — ${reason}; re-login now`)}`;
+		return `  ${chalk.red(`${currentTheme().symbols.symbol("status.warning")} ${label} — ${reason}; re-login now`)}`;
 	}
 	const reason = tokenBound
 		? "access token expires"
 		: stated
 			? "refresh token expires"
 			: "Anthropic expires OAuth grants ~30d after login";
-	return `  ${chalk.yellow(`⚠ ${label} — re-login within ${formatDuration(remaining)} (${reason})`)}`;
+	return `  ${chalk.yellow(`${currentTheme().symbols.symbol("status.warning")} ${label} — re-login within ${formatDuration(remaining)} (${reason})`)}`;
 }
 
 /**

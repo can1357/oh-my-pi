@@ -60,7 +60,7 @@ function notes(cx: PaintContext, row: ReadTermRow): string {
 	let out = "";
 	if (row.correctedFrom) out += theme.fg("dim", ` (corrected from ${row.correctedFrom})`);
 	if (row.conflicts)
-		out += ` ${theme.fg("warning", `(⚠ ${row.conflicts} conflict${row.conflicts === 1 ? "" : "s"})`)}`;
+		out += ` ${theme.fg("warning", `(${theme.symbols.symbol("status.warning")} ${row.conflicts} conflict${row.conflicts === 1 ? "" : "s"})`)}`;
 	return out;
 }
 

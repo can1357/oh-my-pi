@@ -16,6 +16,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, type JSXNode, onCleanup, signal, untrack } from "@oh-my-pi/pi-tui";
 import { replaceTabs, truncate } from "@oh-my-pi/pi-tui/text/width";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import {
 	type AskDialogPrompt,
@@ -863,7 +864,7 @@ export function AskDialog(props: AskDialogProps): JSXNode {
 							motionKey="skip"
 							role="omp.ask.skip"
 							wrap="word"
-							spans={[{ s: "warning", t: `⚠ ${notice}` }]}
+							spans={[{ s: "warning", t: `${currentTheme().symbols.symbol("status.warning")} ${notice}` }]}
 						/>
 					)
 				);

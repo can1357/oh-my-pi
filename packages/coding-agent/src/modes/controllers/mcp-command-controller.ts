@@ -695,7 +695,10 @@ export class MCPCommandController {
 				status.set(
 					options?.suppressDisconnectedWarning
 						? currentTheme().fg("muted", `◌ Connection check complete for "${name}"`)
-						: currentTheme().fg("warning", `⚠ Could not connect to "${name}" yet`),
+						: currentTheme().fg(
+								"warning",
+								`${currentTheme().symbols.symbol("status.warning")} Could not connect to "${name}" yet`,
+							),
 				);
 			}
 			return state;
@@ -778,7 +781,12 @@ export class MCPCommandController {
 				);
 				lines.push("");
 			} else {
-				lines.push(currentTheme().fg("warning", `⚠ Server added but not yet connected`));
+				lines.push(
+					currentTheme().fg(
+						"warning",
+						`${currentTheme().symbols.symbol("status.warning")} Server added but not yet connected`,
+					),
+				);
 				lines.push(
 					currentTheme().fg(
 						"muted",
