@@ -56,10 +56,9 @@ describe.skipIf(process.platform === "win32")("AgentSession leftovers of another
 		} catch {}
 	});
 
-	it("does not reap a process another omp's bash call left running under the same session id", async () => {
+	/** Another omp process whose bash tool leaves `cmd &` running under `sessionId`; resolves with that leftover's pid. */
+	async function startForeignLeftover(sessionId: string): Promise<number> {
 		const dir = tempDir.path();
-		const sessionManager = SessionManager.inMemory(dir);
-		const sessionId = sessionManager.getSessionId();
 		const pidFile = path.join(dir, "leftover.pid");
 
 		await Bun.write(
@@ -106,8 +105,11 @@ await Bun.sleep(300_000);
 			// Tagged as a leftover of this session id.
 			expect(fs.readFileSync(`/proc/${leftoverPid}/environ`, "utf8")).toContain(`OMP_BASH_SESSION=${sessionId}`);
 		}
+		return leftoverPid;
+	}
 
-		// The render-side session: same id, this process, reaping on (the default).
+	/** A session with `sessionManager`'s id in this process, reaping on (the default), disposed. */
+	async function disposeSession(sessionManager: SessionManager): Promise<void> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
 		const session = new AgentSession({
@@ -117,9 +119,28 @@ await Bun.sleep(300_000);
 			modelRegistry: sharedModelRegistry,
 		});
 		await session.dispose();
+	}
 
-		// The reap SIGKILLs before dispose resolves; give the signal time to land.
+	it("does not reap a process another live omp's bash call left running under the same session id", async () => {
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const pid = await startForeignLeftover(sessionManager.getSessionId());
+
+		await disposeSession(sessionManager);
+		// Proving a kill did not happen needs a real window: the SIGKILL would have landed in it.
 		await Bun.sleep(200);
-		expect(alive(leftoverPid)).toBe(true);
+		expect(alive(pid)).toBe(true);
+	}, 60_000);
+
+	it("reaps the `&` leftover of an omp that died without its session-end reap", async () => {
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const pid = await startForeignLeftover(sessionManager.getSessionId());
+		worker?.kill("SIGKILL");
+		await worker?.exited;
+		expect(alive(pid)).toBe(true);
+
+		await disposeSession(sessionManager);
+		// The SIGKILL is sent before dispose resolves; the process table drops the pid once it lands.
+		for (let i = 0; i < 500 && alive(pid); i++) await Bun.sleep(10);
+		expect(alive(pid)).toBe(false);
 	}, 60_000);
 });
