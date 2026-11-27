@@ -20,7 +20,7 @@
 
 ### Fixed
 
-- Markdown lists use the symbol preset's bullet, and H3–H6 use indentation instead of showing the heading syntax.
+- Markdown lists use the symbol preset's bullet, and H3–H6 use indentation instead of showing the heading syntax. ([#20727](https://github.com/can1357/oh-my-pi/pull/20727) by [@paulodearaujo](https://github.com/paulodearaujo))
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.
