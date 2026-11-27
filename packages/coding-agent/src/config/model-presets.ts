@@ -77,7 +77,9 @@ export function getModelPreset(settings: Settings, name: string): PresetLookup {
 export function applyModelPresetOverrides(
 	settings: Settings,
 	name: string,
-): { kind: "applied"; defaultThinkingLevel: ModelPreset["defaultThinkingLevel"] } | PresetLookup {
+):
+	| { kind: "applied"; defaultThinkingLevel: ModelPreset["defaultThinkingLevel"] }
+	| Exclude<PresetLookup, { kind: "found" }> {
 	const owned = settings.getOwnedModelPreset(name);
 	if (!owned) return { kind: "missing" };
 	const preset = parseModelPreset(owned.entry);
