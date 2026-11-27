@@ -279,7 +279,7 @@ export interface AgentSessionConfig {
 	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */
 	evalToolSession?: ToolSession;
 	/** Loaded skills already discovered by the SDK. */
-	skills?: Skill[];
+	skills?: readonly Skill[];
 	/** Frozen routing hints shared with the system prompt and later skillful notices. */
 	skillDescriptions?: SkillDescriptionCatalog;
 	/** MCP eval namespace hints; {@link AgentSession.startHintCompression} starts them with the skill hints. */
