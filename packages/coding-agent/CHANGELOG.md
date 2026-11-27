@@ -281,6 +281,7 @@
 
 ### Removed
 
+- Removed the experimental `tools.speculativeExecution.enabled` and `tools.speculativeExecution.maxInFlight` settings (off by default); speculative `read` and eval shadow-cell execution are gone, while `task.speculativeLaunch` is unchanged
 - omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
 - Fixed an empty toast with only a checkmark appearing in Tern each time dictation finished transcribing.

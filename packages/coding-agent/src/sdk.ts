@@ -5145,10 +5145,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			return result;
 		};
 		// Live-bound speculation config: the Agent captures this object once at
-		// construction but reads `enabled` per turn (and `maxInFlight` per drain)
-		// through getters, so mid-session settings UI toggles take effect without
-		// a session recreate. The single shared host keeps its evidence across
-		// toggles; per-turn coordinator close never touches it.
+		// construction but reads `enabled` per turn through a getter, so
+		// mid-session settings UI toggles take effect without a session recreate.
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
 		let mainRequestProvider: string | undefined;
 
