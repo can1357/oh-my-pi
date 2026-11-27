@@ -1418,10 +1418,10 @@ impl<'a> Scanner<'a> {
 		let b = self.at(i);
 		if !self.source.utf8 || b < 128 { return (u32::from(b), i + 1); }
 		let tail = self.tail(i);
-		let width = (b.leading_ones() as usize).clamp(1, 4);
-		if let Some(c) = tail.get(..width).and_then(|b| std::str::from_utf8(b).ok()).and_then(|s| s.chars().next()) {
-			(u32::from(c), i + width)
-		} else { (u32::from(b), i + 1) }
+		xutf::valid_prefix(&tail[..tail.len().min(char::MAX_LEN_UTF8)])
+			.chars()
+			.next()
+			.map_or((u32::from(b), i + 1), |c| (u32::from(c), i + c.len_utf8()))
 	}
 
 	fn err(&self, msg: &str, at: usize) -> String { diagnostic(self.source, msg, Some(at)) }
