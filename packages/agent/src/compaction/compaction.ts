@@ -209,6 +209,15 @@ export interface CompactionSettings {
 export const DEFAULT_RESERVE_TOKENS = 16384;
 
 /**
+ * Ceiling on the default compaction trigger (`thresholdPercent`/`thresholdTokens`
+ * unset). Every request re-reads the whole context from the prompt cache, so the
+ * cost of a long cycle grows with absolute size, not with the window's share:
+ * 1M-class windows (past ~812K, where 85% would land above this) compact here.
+ * A configured percentage, fixed trigger, or model base is not capped.
+ */
+export const DEFAULT_THRESHOLD_CEILING_TOKENS = 690_000;
+
+/**
  * Hysteresis band under the compaction trigger. Maintenance counts as having
  * resolved threshold pressure only when residual context lands at or below
  * `COMPACTION_RECOVERY_BAND × threshold`. Re-checking against the raw threshold
@@ -439,9 +448,9 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
 	}
 	const baseWindowTokens = settings.baseWindowTokens;
-	if (typeof baseWindowTokens === "number" && Number.isFinite(baseWindowTokens) && baseWindowTokens > 0) {
-		contextWindow = Math.min(contextWindow, baseWindowTokens);
-	}
+	const scaledFromBase =
+		typeof baseWindowTokens === "number" && Number.isFinite(baseWindowTokens) && baseWindowTokens > 0;
+	if (scaledFromBase) contextWindow = Math.min(contextWindow, baseWindowTokens);
 
 	// Percentage-based threshold. The default absolute reserve can exceed bundled
 	// small-context windows, or nearly consume a 16k-class window; in those
@@ -450,7 +459,9 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 	// configured reserves still define the usable prompt budget.
 	const thresholdPercent = settings.thresholdPercent;
 	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
-		return promptBudgetTokens(contextWindow, settings);
+		const budget = promptBudgetTokens(contextWindow, settings);
+		// A model entry's base is a window the user chose to scale from; only the bare default stops at the ceiling.
+		return scaledFromBase ? budget : Math.min(budget, DEFAULT_THRESHOLD_CEILING_TOKENS);
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
 	return Math.floor(contextWindow * (clampedThresholdPercent / 100));

@@ -549,7 +549,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.remoteStreamingV2Enabled` = `true`
 - `compaction.v2RetainedMessageBudget` = `64000`
-- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used.
+- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used: the window less its reserve, at most `DEFAULT_THRESHOLD_CEILING_TOKENS` (690,000), so 1M-class windows compact at 690K.
 - `compaction.modelThresholds` = `{}`; `provider/model-id` or `provider/…*` prefix → a token base the threshold policy scales in place of the window (dropping a global `thresholdTokens`), a fixed trigger (`"f90000"`), or a percentage replacing both thresholds, while that model is active. Editable from the `/models` Roles view (`k`). See [Settings](./settings.md#context-compaction-and-memory).
 - `task.agentCompactionThresholdOverrides` = `{}`; exact-name task/eval agent → token count (`90000`) or percentage (`"80%"`) replacing both thresholds for that agent only. See [Settings](./settings.md#context-compaction-and-memory).
 - `compaction.idleEnabled` = `false`

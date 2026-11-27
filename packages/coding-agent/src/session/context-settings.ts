@@ -163,7 +163,7 @@ export const cfgCompactionThresholdPercent = register({
 		label: "Compaction Threshold",
 		description: "Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior",
 		options: [
-			{ value: "default", label: "Default", description: "Legacy reserve-based threshold" },
+			{ value: "default", label: "Default", description: "Window less its reserve, at most 690K tokens" },
 			{ value: "10", label: "10%", description: "Extremely early maintenance" },
 			{ value: "20", label: "20%", description: "Very early maintenance" },
 			{ value: "30", label: "30%", description: "Early maintenance" },

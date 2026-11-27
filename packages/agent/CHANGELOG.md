@@ -14,6 +14,10 @@
 
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
 
+### Changed
+
+- `resolveThresholdTokens()` caps the reserve-based default trigger at `DEFAULT_THRESHOLD_CEILING_TOKENS` (690,000), so 1M-class windows compact at 690K instead of 85% of the window; a configured percentage, fixed trigger, or `baseWindowTokens` is not capped
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

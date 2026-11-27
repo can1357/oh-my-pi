@@ -73,6 +73,7 @@
 
 ### Changed
 
+- Models with 1M-class context windows (Claude extended context, GPT-6.2 Astra and Sol at 922K) auto-compact at 690K tokens by default instead of 85% of the window, cutting cache-read cost on long sessions; set `compaction.thresholdPercent`, `compaction.thresholdTokens`, or a `/models` compaction limit to compact later
 - Back-to-back idle `wait` calls on jobs and services stretch their top window to the session's prompt-cache lifetime less 1m (up to 30m) instead of a fixed 4m, as reply waits already did
 - Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - Updated task prompt to forbid full builds or test suites mid‑flight and allow quick scoped checks
