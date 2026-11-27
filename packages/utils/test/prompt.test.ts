@@ -71,6 +71,20 @@ describe("format: structure", () => {
 		expect(prompt.format("<self/>\nx")).toBe("<self/>\nx");
 	});
 
+	it("compacts prompt lead-ins to lists and fenced examples without changing example content", () => {
+		const input =
+			"Rules:\n\n- one\n- two\n\nSteps:\n\n1. first\n\nOutput:\n\n```\na:\n\n- b\n```\n\nAnother paragraph.";
+		expect(prompt.format(input, { renderPhase: "pre-render" })).toBe(
+			"Rules:\n- one\n- two\n\nSteps:\n1. first\n\nOutput:\n```\na:\n\n- b\n```\n\nAnother paragraph.",
+		);
+		expect(prompt.render(input)).toBe(input);
+	});
+
+	it("keeps separators that do not introduce an adjacent list or fenced example", () => {
+		const input = "A paragraph.\n\n- item\n\nNote:\n\nSeparate prose.\n\nNumbering:\n\n2. continued";
+		expect(prompt.format(input, { renderPhase: "pre-render" })).toBe(input);
+	});
+
 	it("keeps blank handling inside code fences verbatim", () => {
 		const input = "```\na\n\n\n\nb\n```";
 		expect(prompt.format(input)).toBe(input);

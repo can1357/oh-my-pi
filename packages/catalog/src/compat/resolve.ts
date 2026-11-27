@@ -591,6 +591,7 @@ function detectOpenAICompat(
 		streamFirstEventTimeoutMs: d.isLocalServingBackend ? 0 : undefined,
 		streamIdleTimeoutMs,
 		stripDeepseekSpecialTokens: false,
+		neutralizeDeepseekSpecialTokens: false,
 		// Present as a key so models.yml `compat` can set it; unset unless a rule assigns it.
 		stripThinkingHistory: undefined,
 		// URL-derived like the Responses field; unset off the official OpenAI API.

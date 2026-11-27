@@ -8,6 +8,7 @@ import {
 	prepareCompaction,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -63,14 +64,59 @@ describe("summarization input budget", () => {
 		}
 	});
 
+	test("preserves a whole message that fits beside a large output allowance", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		try {
+			const text = `BEGIN HISTORY${" work".repeat(30_000)} END OF HISTORY`;
+			await generateSummary(
+				[{ role: "user", content: text, timestamp: 1 }],
+				{ ...getModel(128_000), maxTokens: 64_000 },
+				16_384,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				{ summaryMaxTokens: 50_000 },
+			);
+			expect(spy.mock.calls).toHaveLength(1);
+			expect(promptTextOf(spy.mock.calls[0])).toContain(text);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	test("packs each window for the actual summary returned by the previous request", async () => {
+		const text = " work".repeat(2_000);
+		const size = new Tokenizer(getModel(40_000)).countTokens(text, "strict");
+		const output = size * 2;
+		const model = getModel(Math.ceil((output + size * 2.5) / 0.8));
+		const messages: AgentMessage[] = Array.from({ length: 5 }, (_, i) => ({
+			role: "user",
+			content: `segment-${i}${text}`,
+			timestamp: i,
+		}));
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage("short"))
+			.mockResolvedValueOnce(createAssistantMessage(text));
+		try {
+			await generateSummary(messages, model, 16_384, "key", undefined, undefined, undefined, {
+				summaryMaxTokens: output,
+			});
+			const segments = spy.mock.calls.map(call => promptTextOf(call).match(/segment-\d/g));
+			expect(segments).toEqual([["segment-0", "segment-1"], ["segment-2"], ["segment-3", "segment-4"]]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
 	test("folds a conversation larger than the summarizer window across calls", async () => {
 		let call = 0;
 		const spy = vi
 			.spyOn(ai, "completeSimple")
 			.mockImplementation(async () => createAssistantMessage(`summary ${++call}`));
 		try {
-			// 40k-token window leaves ~4k of conversation budget after the summary
-			// reserve, so ~48k tokens of conversation cannot be one prompt.
+			// The conversation plus the requested output exceeds the discounted 40k window.
 			const messages = Array.from({ length: 12 }, (_, i) => turn(i, 4_000)).flat();
 			const summary = await generateSummary(messages, getModel(40_000), 16_384, "test-key");
 
@@ -131,21 +177,23 @@ describe("summarization input budget", () => {
 		// reserves exceeds a 40k window outright, and overflow recovery would then
 		// bail at the very floor that caused the rejection. The floor scales with
 		// the window instead, so a small-context model still folds successfully.
-		const providerCapChars = 26_000; // what a 40k window can host next to the reserves
+		const providerCapChars = 26_000;
+		const accepted: string[] = [];
 		const spy = vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
 			const prompt = promptTextOf([_model, context]);
 			if (prompt.length > providerCapChars) {
 				throw new Error(`400 prompt is too long: ${prompt.length} tokens > ${providerCapChars} maximum`);
 			}
+			accepted.push(prompt);
 			return createAssistantMessage("summary");
 		});
 		try {
 			const messages = Array.from({ length: 12 }, (_, i) => turn(i, 4_000)).flat();
 			const summary = await generateSummary(messages, getModel(40_000), 16_384, "test-key");
 			expect(summary).toBe("summary");
-			for (const prompt of spy.mock.calls.map(promptTextOf)) {
-				expect(prompt.length).toBeLessThanOrEqual(providerCapChars);
-			}
+			expect(accepted.length).toBeGreaterThan(1);
+			expect(accepted[0]).toContain("turn 0");
+			expect(accepted.at(-1)).toContain("turn 11");
 		} finally {
 			spy.mockRestore();
 		}

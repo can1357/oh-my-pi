@@ -445,7 +445,8 @@ interface TabApi {
 	screenshot(opts?: ScreenshotOptions): Promise<string | ScreenshotChangeResult>;
 	diffScreenshot(baselinePath: string, opts?: DiffScreenshotOptions): Promise<DiffScreenshotResult>;
 	pdf(opts?: PdfOptions): Promise<string>;
-	extract(format?: ReadableFormat, opts?: ReadableExtractOptions): Promise<string>;
+	/** `format` null (Python `extract(None, selector=…)`) means the default, like an omitted one. */
+	extract(format?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string>;
 	click(
 		selector: string,
 		opts?: { button?: "left" | "right" | "middle" | "back" | "forward"; count?: number },
@@ -3202,8 +3203,9 @@ export class WorkerCore {
 			},
 			screenshot: opts =>
 				read(describeScreenshot(opts), quickOpMs, sig => this.#captureScreenshot(shots, sig, opts)),
-			extract: (format = "markdown", opts) =>
-				read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
+			extract: (formatArg, opts) => {
+				const format = formatArg ?? "markdown";
+				return read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
 					const html = (await untilAborted(sig, () => page.content())) as string;
 					const result = await extractReadableFromHtml(html, page.url(), format, opts);
 					if (!result) {
@@ -3218,7 +3220,8 @@ export class WorkerCore {
 						);
 					}
 					return content;
-				}),
+				});
+			},
 			click: (selector, opts) =>
 				act(
 					`tab.click(${JSON.stringify(selector)})`,

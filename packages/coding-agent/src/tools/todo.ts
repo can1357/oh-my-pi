@@ -357,6 +357,11 @@ function rejectNonTextTasks(items: readonly string[], errors: string[]): boolean
 	return rejected;
 }
 
+const INIT_SHAPE_HINT =
+	'init wants list: [{"phase": "Name", "items": ["task", ...]}] or flat items: ["task", ...] (JSON arrays, not strings)';
+
+const TODO_FIELDS = new Set(["op", "list", "task", "phase", "items"]);
+
 /** Default phase name for flat `init` and `append` to an empty list. */
 const DEFAULT_INIT_PHASE = "Tasks";
 
@@ -369,7 +374,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	const flat = entry.items && entry.items.length > 0 ? [{ phase: entry.phase, items: entry.items }] : undefined;
 	const list = entry.list?.length ? entry.list : (flat ?? entry.list);
 	if (!list) {
-		errors.push("Missing list for init operation");
+		errors.push(`Missing list for init operation; ${INIT_SHAPE_HINT}`);
 		return [];
 	}
 	// An empty phase name cannot be explicitly targeted, so it gets the default.
@@ -527,6 +532,15 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
  * for a normal model retry.
  */
 function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntryValue | string {
+	// Undeclared keys are otherwise dropped silently, so `{op:"init", tasks:[...]}`
+	// would fail as "missing list" without telling the model which key was wrong.
+	if (isRecord(raw) && (raw.op === "init" || raw.op === "append")) {
+		const unknown = Object.keys(raw).filter(key => !TODO_FIELDS.has(key));
+		if (unknown.length > 0) {
+			const names = unknown.map(key => `"${key}"`).join(", ");
+			return `Invalid todo arguments: unknown field ${names}; ${raw.op === "init" ? INIT_SHAPE_HINT : 'append wants items: ["task", ...] and optional phase'}`;
+		}
+	}
 	const direct = todoSchema(raw);
 	if (!(direct instanceof type.errors)) return direct;
 	if (isRecord(raw) && raw.op === undefined) {

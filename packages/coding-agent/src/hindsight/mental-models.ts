@@ -302,23 +302,34 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	// to recall-only context.
 	if (budgetChars < minRenderBudgetChars()) return "";
 
+	const bodies = models.map(m => (m.content ?? "").trim());
+	const complete = `<mental_models>\n${models.map((m, i) => `${sectionHeader(m)}${bodies[i]}`).join(SECTION_SEPARATOR)}\n</mental_models>`;
+	if (complete.length <= budgetChars) return complete;
+
 	const truncatedOverhead = `<mental_models>\n${TRUNCATION_MARKER}\n</mental_models>`.length;
 	const cleanOverhead = `<mental_models>\n\n</mental_models>`.length;
 	const innerBudget = Math.max(0, budgetChars - truncatedOverhead);
 	const headerCost = models.reduce((sum, m) => sum + sectionHeader(m).length, 0);
 	const separatorCost = SECTION_SEPARATOR.length * Math.max(0, models.length - 1);
-	const perModelBudget = Math.max(
-		120,
-		Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
-	);
+	// Water-fill the body budget: models shorter than an even share keep their
+	// full body and their unused share is redistributed to the longer ones.
+	const bodyBudgets = Array.from({ length: models.length }, () => 0);
+	let remaining = Math.max(0, innerBudget - headerCost - separatorCost);
+	const order = bodies.map((_, i) => i).sort((a, b) => bodies[a].length - bodies[b].length);
+	for (let k = 0; k < order.length; k++) {
+		const i = order[k];
+		const share = Math.max(120, Math.floor(remaining / (order.length - k)));
+		bodyBudgets[i] = Math.min(bodies[i].length, share);
+		remaining = Math.max(0, remaining - bodyBudgets[i]);
+	}
 
 	const sections: string[] = [];
 	let consumed = 0;
 	let truncated = false;
 	for (const model of models) {
 		const header = sectionHeader(model);
-		const body = (model.content ?? "").trim();
-		const truncatedBody = truncateTo(body, perModelBudget);
+		const body = bodies[sections.length];
+		const truncatedBody = truncateTo(body, bodyBudgets[sections.length]);
 		if (truncatedBody.length < body.length) truncated = true;
 		const section = `${header}${truncatedBody}`;
 		const sectionCost = section.length + (sections.length > 0 ? SECTION_SEPARATOR.length : 0);

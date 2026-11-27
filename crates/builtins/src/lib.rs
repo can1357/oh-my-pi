@@ -145,6 +145,10 @@ mod entr;
 mod env;
 #[cfg(all(feature = "util.errno", unix))]
 mod errno;
+/// Command lines sized to what one `exec` takes, for `xargs`, `find -exec +`
+/// and `fd -X`.
+#[cfg(any(feature = "util.fd", feature = "util.find", feature = "util.xargs"))]
+mod exec_line;
 #[cfg(feature = "util.fd")]
 mod fd;
 #[cfg(all(feature = "util.file", any(unix, windows)))]

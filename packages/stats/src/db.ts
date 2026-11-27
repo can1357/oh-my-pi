@@ -12,7 +12,7 @@ import {
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { $envpos, getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
-import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
+import { classifyAgentType, type ParseSessionResult, readResetFork, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
 import {
 	mergeRanges,
@@ -171,6 +171,12 @@ const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 // approval recording shipped are re-parsed once so older cursors stay put.
 const TOOL_APPROVALS_BACKFILL_KEY = "tool_approvals_v1";
 const TOOL_APPROVALS_SINCE_MS = Date.parse("2026-11-01T00:00:00Z");
+// A reset fork (`/tan`) now leaves the requests, prompts, tool calls, approvals and Spotlight rows of its
+// copied prefix to its parent; a clone an older build synced before its parent still owns them. Re-parsing
+// the reset forks and their parents from byte zero once hands them back (see `replayInheritedPrefixes`).
+const INHERITED_PREFIX_REPLAY_KEY = "inherited_prefix_replay_v1";
+/** Header reads {@link replayInheritedPrefixes} keeps in flight. */
+const INHERITED_PREFIX_SCAN_FILES = 64;
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -239,6 +245,7 @@ export async function initDb(): Promise<Database> {
 			cache_write_tokens INTEGER NOT NULL,
 			total_tokens INTEGER NOT NULL,
 			premium_requests REAL NOT NULL,
+			aiu_nano REAL,
 			cost_input REAL NOT NULL,
 			cost_output REAL NOT NULL,
 			cost_cache_read REAL NOT NULL,
@@ -500,6 +507,10 @@ export async function initDb(): Promise<Database> {
 	const messageColumns = db.query("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+	}
+	// Server-reported Copilot AI credits (nano-AIU). NULL means unknown, never zero.
+	if (!messageColumns.some(column => column.name === "aiu_nano")) {
+		db.run("ALTER TABLE messages ADD COLUMN aiu_nano REAL");
 	}
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
@@ -880,6 +891,49 @@ function reparseModifiedSince(database: Database, key: string, sinceMs: number):
 }
 
 /**
+ * Hand each reset fork's copied prefix back to its parent once ({@link INHERITED_PREFIX_REPLAY_KEY}) by
+ * dropping the cursors of the reset forks ({@link readResetFork}) and their parents: the sync rebuilds both
+ * from byte zero, so a fork gives up every copied row and its parent takes them back when both land in
+ * one batch. A parent ingested in an earlier batch is blocked by the fork's old rows, whose removal marks
+ * a reconciliation replay; a full sync runs it before returning. Only the header line of any other
+ * transcript is read, and nothing of it is re-parsed. Runs under the sync lock, before the sync reads cursors.
+ */
+export async function replayInheritedPrefixes(): Promise<void> {
+	const database = db;
+	if (!database) return;
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(INHERITED_PREFIX_REPLAY_KEY);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	const files = database
+		.query<{ session_file: string }, []>("SELECT session_file FROM file_offsets")
+		.all()
+		.map(offset => offset.session_file);
+	const fileById = new Map<string, string>();
+	const forks: { sessionFile: string; parentSession?: string }[] = [];
+	for (let start = 0; start < files.length; start += INHERITED_PREFIX_SCAN_FILES) {
+		const batch = files.slice(start, start + INHERITED_PREFIX_SCAN_FILES);
+		const headers = await Promise.all(batch.map(readResetFork));
+		headers.forEach((header, index) => {
+			if (!header) return;
+			if (header.id !== undefined) fileById.set(header.id, batch[index]);
+			if (header.resetFork) forks.push({ sessionFile: batch[index], parentSession: header.parentSession });
+		});
+	}
+	const dropCursor = database.query("DELETE FROM file_offsets WHERE session_file = ?");
+	database.transaction(() => {
+		for (const { sessionFile, parentSession } of forks) {
+			dropCursor.run(sessionFile);
+			// A fork names its parent by session id; a branch, by file.
+			if (parentSession !== undefined) dropCursor.run(fileById.get(parentSession) ?? parentSession);
+		}
+		database
+			.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(INHERITED_PREFIX_REPLAY_KEY, BACKFILL_COMPLETE);
+	})();
+}
+
+/**
  * Drop the arm columns of a database written while sessions drew arms, once
  * (while `spotlight_sessions.arm` exists). Sessions of any arm but the one that shipped
  * were never shaped with the shipped algorithm: their Spotlight rows go now,
@@ -1018,6 +1072,10 @@ function* parsedRows<T>(
 	select: (result: ParseSessionResult) => Iterable<T>,
 ): Generator<T> {
 	for (const result of results) yield* select(result);
+}
+
+function isValidAiuNano(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 /**
@@ -1283,6 +1341,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"cache_write_tokens",
 			"total_tokens",
 			"premium_requests",
+			"aiu_nano",
 			"cost_input",
 			"cost_output",
 			"cost_cache_read",
@@ -1300,6 +1359,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			ttft = excluded.ttft,
 			purpose = excluded.purpose,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
+			aiu_nano = excluded.aiu_nano,
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
 			cost_cache_read = excluded.cost_cache_read,
@@ -1313,6 +1373,8 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 		for (const s of stats) {
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
+			const reportedNano = s.usage.aiu?.nano;
+			const aiuNano = isValidAiuNano(reportedNano) ? reportedNano : null;
 			writer.add(
 				s.sessionFile,
 				[s.entryId, s.timestamp],
@@ -1334,6 +1396,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.usage.cacheWrite,
 					s.usage.totalTokens,
 					s.usage.premiumRequests ?? 0,
+					aiuNano,
 					cost.input,
 					cost.output,
 					cost.cacheRead,
@@ -1392,6 +1455,7 @@ function rowToMessageStats(row: any): MessageStats {
 			cacheWrite: row.cache_write_tokens,
 			totalTokens: row.total_tokens,
 			premiumRequests: row.premium_requests ?? 0,
+			...(row.aiu_nano !== null && row.aiu_nano !== undefined ? { aiu: { nano: row.aiu_nano as number } } : {}),
 			cost: {
 				input: row.cost_input,
 				output: row.cost_output,

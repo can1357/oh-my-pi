@@ -30,6 +30,12 @@ export function formatEstimatedCost(value: number, unpricedRequests: number, dig
 	return value === 0 && unpricedRequests > 0 ? "N/A" : formatCost(value, digits);
 }
 
+/** Server-reported AI credits from nano-AIU (1 AIU = 1 credit); null (no request reported any) reads as a dash, not 0. */
+export function formatAiCredits(nano: number | null | undefined): string {
+	if (nano === null || nano === undefined) return "—";
+	return (nano / 1e9).toLocaleString(NUMBER_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 /**
  * Whether one request's zero cost means unknown spend rather than free usage.
  * Mirrors the server's `unpricedRequestSql`: `xai-oauth` is billed through a

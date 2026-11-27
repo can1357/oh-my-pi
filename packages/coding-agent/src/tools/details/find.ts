@@ -57,8 +57,10 @@ export interface FindStats {
 	unanswered: number;
 	/** Entries judged by name. */
 	judged: number;
-	/** Files whose content was read and sent. */
+	/** Files read for sketch routing. */
 	filesRead: number;
+	/** Files with a usable verification score for at least one full passage. */
+	filesVerified: number;
 	fileBytes: number;
 	inputTokens: number;
 	outputTokens: number;

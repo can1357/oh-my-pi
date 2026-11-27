@@ -470,13 +470,13 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.setSessionName(name);
 	}
 
-	registerProvider(name: string, config: ProviderConfig): void {
+	registerProvider(name: string, config: ProviderConfig): void | Promise<void> {
 		this.extension.registersProviders = true;
-		this.runtime.registerProvider(name, config, this.extension.path);
+		return this.runtime.registerProvider(name, config, this.extension.path);
 	}
 
-	unregisterProvider(name: string): void {
-		this.runtime.unregisterProvider(name, this.extension.path);
+	unregisterProvider(name: string): void | Promise<void> {
+		return this.runtime.unregisterProvider(name, this.extension.path);
 	}
 }
 

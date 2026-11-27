@@ -5,6 +5,7 @@
  * (see `cli/completion-gen.ts`), so it never drifts from the actual CLI surface.
  */
 
+import * as fs from "node:fs";
 import { APP_NAME, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { Args, type CliConfig, Command, type CommandCtor } from "@oh-my-pi/pi-utils/cli";
 import { completionsHelp as commandHelp } from "../cli/command-help";
@@ -54,8 +55,26 @@ export default class Completions extends Command {
 			return;
 		}
 
-		await Bun.write(Bun.stdout, await generateLiveCompletion(shell));
+		writeStdoutFully(await generateLiveCompletion(shell));
 		await postmortem.quit(0);
+	}
+}
+
+/**
+ * Write all of `text` to fd 1, tracking the written offset across partial
+ * writes and `EAGAIN`. `Bun.write(Bun.stdout, …)` can replay the first chunk
+ * when fd 1 is a non-blocking pipe, corrupting `eval "$(omp completions zsh)"`.
+ */
+function writeStdoutFully(text: string): void {
+	const buf = Buffer.from(text, "utf8");
+	let offset = 0;
+	while (offset < buf.length) {
+		try {
+			offset += fs.writeSync(1, buf, offset, buf.length - offset);
+		} catch (err) {
+			if (!(err instanceof Error && "code" in err && err.code === "EAGAIN")) throw err;
+			Bun.sleepSync(1);
+		}
 	}
 }
 

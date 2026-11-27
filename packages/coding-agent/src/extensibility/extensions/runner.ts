@@ -40,7 +40,7 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
-import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+import type { SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
@@ -76,6 +76,7 @@ import type {
 	Extension,
 	ExtensionActions,
 	ExtensionAgentIdentity,
+	ExtensionAsyncJobAccess,
 	ExtensionAnnotationsAPI,
 	ExtensionAnnotationsFactory,
 	ExtensionCommandContext,
@@ -641,7 +642,7 @@ export class ExtensionRunner {
 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
 	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
-	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
+	#asyncJobs?: ExtensionAsyncJobAccess;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -660,6 +661,7 @@ export class ExtensionRunner {
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	#providerChanges = new Map<string, Promise<void>>();
 	/** Latest pending delivery per extension; see {@link #reserveDeliveryTurns}. Absent while idle. */
 	#deliveryTails = new Map<Extension, Promise<void>>();
 	#initialized = false;
@@ -918,7 +920,8 @@ export class ExtensionRunner {
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
-		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		/** The owning session's async jobs; absent outside a session. */
+		asyncJobs?: ExtensionAsyncJobAccess,
 		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
@@ -927,7 +930,7 @@ export class ExtensionRunner {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
-		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#asyncJobs = asyncJobs;
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
 	}
 
@@ -1005,12 +1008,14 @@ export class ExtensionRunner {
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
-		this.runtime.registerProvider = (name, config, sourceId) => {
-			this.modelRegistry.registerProvider(name, config, sourceId);
-		};
-		this.runtime.unregisterProvider = name => {
-			this.modelRegistry.unregisterProvider(name);
-		};
+		this.runtime.registerProvider = (name, config, sourceId) =>
+			this.#changeProvider(name, () => {
+				const register = () => this.modelRegistry.registerProvider(name, config, sourceId);
+				const preparing = this.modelRegistry.prepareProviderAuth([{ name, config }]);
+				return preparing ? preparing.then(register) : register();
+			});
+		this.runtime.unregisterProvider = name =>
+			this.#changeProvider(name, () => this.modelRegistry.unregisterProvider(name));
 
 		// Context actions (required)
 		this.#getModel = contextActions.getModel;
@@ -1633,6 +1638,26 @@ export class ExtensionRunner {
 		return allShortcuts;
 	}
 
+	/** Wait for provider registrations initiated by live extension factories. */
+	async settleProviderRegistrations(): Promise<void> {
+		if (this.#providerChanges.size > 0) await Promise.all(this.#providerChanges.values());
+	}
+
+	#changeProvider(name: string, apply: () => void | Promise<void>): void | Promise<void> {
+		const previous = this.#providerChanges.get(name);
+		const change = previous ? previous.then(apply) : apply();
+		if (!change) return;
+		const complete = () => {
+			if (this.#providerChanges.get(name) === settled) this.#providerChanges.delete(name);
+		};
+		const settled = change.then(complete, () => {
+			complete();
+			logger.warn("Extension could not change provider registration", { provider: name });
+		});
+		this.#providerChanges.set(name, settled);
+		return change;
+	}
+
 	onError(listener: ExtensionErrorListener): () => void {
 		this.#errorListeners.add(listener);
 		return () => this.#errorListeners.delete(listener);
@@ -1999,7 +2024,8 @@ export class ExtensionRunner {
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
+			getAsyncJobSnapshot: () => this.#asyncJobs?.getSnapshot() ?? null,
+			cancelAsyncJob: id => this.#asyncJobs?.cancel(id) ?? false,
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,

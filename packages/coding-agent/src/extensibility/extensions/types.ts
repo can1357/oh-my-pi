@@ -75,6 +75,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import type { KeyEvent } from "@oh-my-pi/pi-tui";
+import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import type { AutocompleteItem, AutocompleteProvider } from "../../autocomplete/autocomplete";
@@ -295,6 +296,8 @@ export interface ExtensionOverlayHandle {
 	readonly closed: boolean;
 	/** Close the overlay (idempotent); the `custom()` promise stays pending until `done` is called. */
 	close(): void;
+	/** Whether keyboard focus is on the overlay or a node inside it (false once closed). */
+	isFocused(): boolean;
 }
 
 /** Options for `ExtensionUIContext.custom()`. */
@@ -303,6 +306,8 @@ export interface ExtensionCustomOptions {
 	overlay?: boolean;
 	/** Take the whole screen (the terminal's alternate screen) while the overlay is open. */
 	fullscreen?: boolean;
+	/** Terminal mouse reporting while the overlay is open; omitted inherits the underlying mode. */
+	mouse?: MouseTracking;
 	/** Invoked with the overlay handle once the overlay is open (overlay mode only). */
 	onHandle?: (handle: ExtensionOverlayHandle) => void;
 	/** Abort the custom UI and reject its promise. */
@@ -626,6 +631,12 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/** Host wiring for the owning session's async jobs, backing `ctx.getAsyncJobSnapshot`/`ctx.cancelAsyncJob`. */
+export interface ExtensionAsyncJobAccess {
+	getSnapshot(): AsyncJobSnapshot | null;
+	cancel(id: string): boolean;
+}
+
 /**
  * The agent a session runs. Extension factories are rebound to every subagent session
  * (task tool, eval `agent()`, `/tan` clones), so this tells a handler which agent it is serving.
@@ -836,6 +847,11 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
+	/**
+	 * Cancel a running async job this session owns (an id from {@link getAsyncJobSnapshot}), as `/jobs kill <id>`
+	 * does. Returns false when this session owns no running job by that id, or no session owns the context.
+	 */
+	cancelAsyncJob(id: string): boolean;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
@@ -1269,6 +1285,10 @@ export interface BeforeSubagentSpawnEvent {
 	patterns: string[];
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	/** ID of the `task` tool call that dispatched this child; absent for eval and direct SDK spawns. */
+	parentToolCallId?: string;
+	/** Position of this child's item in that call's `tasks[]` (0 for the flat shape); set with `parentToolCallId`. */
+	itemIndex?: number;
 }
 
 export type {
@@ -1587,6 +1607,20 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
+/**
+ * The interactive TUI switched the session it shows: focused a subagent, hopped to another one,
+ * or returned to the main session. Fires on the main session once the new view is attached.
+ */
+export interface AgentViewChangedEvent {
+	type: "agent_view_changed";
+	/** Agent now shown; undefined for the main session. */
+	agentId: string | undefined;
+	/** Agent shown before; undefined for the main session. */
+	previousAgentId: string | undefined;
+	/** Session id of the session now shown. */
+	sessionId: string;
+}
+
 interface ToolEventIdentity {
 	toolCallId: string;
 	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
@@ -1771,7 +1805,8 @@ export type ExtensionEvent =
 	| ToolApprovalResolvedEvent
 	| PlanReviewRequestedEvent
 	| PlanReviewResolvedEvent
-	| ModeChangedEvent;
+	| ModeChangedEvent
+	| AgentViewChangedEvent;
 
 // ============================================================================
 // Event Results
@@ -2026,6 +2061,7 @@ export interface ExtensionAPI {
 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
+	on(event: "agent_view_changed", handler: ExtensionHandler<AgentViewChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
@@ -2307,12 +2343,13 @@ export interface ExtensionAPI {
 	 * If only `baseUrl` is provided: overrides the URL for existing models.
 	 * If `streamSimple` is provided: registers a custom API stream handler.
 	 * If `stream`/`generateImage`/`webSearch`/`rules` are provided: takes over those parts of the provider.
+	 * Await live registrations before using a provider; custom auth may need to open its local store.
 	 *
 	 * @example
 	 * // Own an existing provider's wire requests and flip a KDL rule for its models
 	 * pi.registerProvider("google-generative-ai", {
 	 *   stream: myGeminiStream,
-	 *   rules: { "prompt-perturbation": true },
+	 *   rules: { "requires-native-tools": true },
 	 * });
 	 *
 	 * @example
@@ -2341,15 +2378,16 @@ export interface ExtensionAPI {
 	 *   baseUrl: "https://proxy.example.com"
 	 * });
 	 */
-	registerProvider(name: string, config: ProviderConfig): void;
+	registerProvider(name: string, config: ProviderConfig): void | Promise<void>;
 
 	/**
 	 * Unregister a provider previously registered by an extension.
 	 *
 	 * Removes extension-provided models and restores overridden built-in models.
 	 * Has no effect when the provider is not registered.
+	 * Await live removal if a registration for the provider is still pending.
 	 */
-	unregisterProvider(name: string): void;
+	unregisterProvider(name: string): void | Promise<void>;
 
 	/** Shared event bus for extension communication. */
 	events: EventBus;
@@ -2538,10 +2576,10 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
-	/** Queue a provider registration until initialization, then apply it immediately. */
-	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
+	/** Queue a provider registration until initialization, then apply it using its auth owner. */
+	registerProvider(name: string, config: ProviderConfig, sourceId: string): void | Promise<void>;
 	/** Remove a queued or initialized provider registration. */
-	unregisterProvider(name: string, sourceId: string): void;
+	unregisterProvider(name: string, sourceId: string): void | Promise<void>;
 	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
 	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
 }

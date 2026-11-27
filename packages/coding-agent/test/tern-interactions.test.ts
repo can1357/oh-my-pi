@@ -138,7 +138,7 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			await draft("discard me");
 			await ctl("key", process.platform === "darwin" ? "Meta+a" : "Ctrl+a");
 			await enterText("keep @sample-no");
-			await click(await visible(".sf-item", n => n.text?.includes("sample-note.txt") === true, "file suggestion"));
+			await click(await visible(".pk-row", n => n.text?.includes("sample-note.txt") === true, "file suggestion"));
 			const kept = "keep @sample-note.txt";
 			await draft(kept);
 

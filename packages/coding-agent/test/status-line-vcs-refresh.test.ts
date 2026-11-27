@@ -233,14 +233,14 @@ describe("status line VCS refresh", () => {
 		expect(lineText(line)).toContain("branch-a");
 
 		cwd = "/repo/b";
-		line.applyCwdChange();
+		line.invalidateVcs();
 		expect(lineText(line)).not.toContain("branch-a");
 		await flushStatus();
 		expect(lineText(line)).toContain("branch-b");
 
 		// A cwd without a repository shows no git facts.
 		cwd = "/no/repo";
-		line.applyCwdChange();
+		line.invalidateVcs();
 		lineText(line);
 		await flushStatus();
 		expect(lineText(line)).not.toContain("branch-");

@@ -17,6 +17,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 //   "consume:"   -> handled, never reaches the agent
 //   "transform:" -> replaced with untrimmed text
 //   "slow:"      -> unchanged, after many I/O round trips so a later submission would overtake it if unordered
+//   "hold:"      -> unchanged once a clear reaches its session_clear hook
 // Session switches take the same detour, so a frame sent right after `new_session` is read before it commits.
 async function ioDetour(): Promise<void> {
 	for (let index = 0; index < 50; index++) await Bun.file(import.meta.path).text();
@@ -26,6 +27,7 @@ authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(process.cwd(), "models.yml"));
 const sessionManager = SessionManager.inMemory(process.cwd());
 const runtime = new ExtensionRuntime();
+const clearing = Promise.withResolvers<void>();
 const extension = await loadExtensionFromFactory(
 	pi => {
 		pi.on("input", async event => {
@@ -33,7 +35,12 @@ const extension = await loadExtensionFromFactory(
 			if (event.text.startsWith("consume:")) return { handled: true };
 			if (event.text.startsWith("transform:")) return { text: "  transformed by hook\n" };
 			if (event.text.startsWith("slow:")) await ioDetour();
+			if (event.text.startsWith("hold:")) await clearing.promise;
 			return undefined;
+		});
+		pi.on("session_clear", async () => {
+			clearing.resolve();
+			await ioDetour();
 		});
 		pi.on("session_before_switch", async () => {
 			await ioDetour();

@@ -13,6 +13,12 @@ export type OAuthCredentials = {
 	accountId?: string;
 	apiEndpoint?: string;
 	/**
+	 * GitHub Copilot: the account meters usage in AI credits
+	 * (`token_based_billing`), so requests record no premium-request estimate.
+	 * Read at login and from each Copilot quota fetch; absent when unknown.
+	 */
+	tokenBasedBilling?: boolean;
+	/**
 	 * Organization/workspace the token is scoped to (e.g. an Anthropic org
 	 * UUID or canonical Factory org ID). Lets one account email hold
 	 * credentials for multiple subscriptions.

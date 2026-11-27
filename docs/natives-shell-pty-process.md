@@ -49,7 +49,7 @@ Rust starts a `omp_shell::session::Session` (the bash engine driven by a task on
 - the engine's bash builtins (`exec` never replaces this process; `suspend` refuses),
 - pi's in-process utilities and process commands (`lsof`, `pgrep`, `pkill`, `pidwait`, `ps`, `sleep`, `top`) as engine commands from `omp_builtins::extras` (see the next section); `kill` is the engine builtin and refuses to signal this process, its process group or its ancestors,
 - `timeout`, `nohup` (detaches its operand so it survives shell teardown; withheld when `PI_DISABLE_NOHUP_BUILTIN` is set) and an opt-in `git` as host callouts (`crates/shell/src/tools`); anything a `git` layer does not take runs the git binary with the original arguments:
-   - `PI_SMART_GIT` serves supported `git worktree add` invocations through `omp-vcs`: copy-on-write clone, worktree registration, and reconciliation to the target commit, with an in-process checkout fallback when cloning is unavailable;
+   - `PI_SMART_GIT` serves supported `git worktree add` invocations through `omp-vcs`: copy-on-write clone, worktree registration, and reconciliation to the target commit, with an in-process checkout fallback when cloning is unavailable. The clone carries the source checkout's ignored files, including secrets such as `.env` files, not only build caches (see `docs/cli-reference.md`, "Worktree clones");
    - `PI_GIT_GUARD` (set by the coding agent from `bash.gitGuard`; `crates/shell/src/git/guard.rs`) judges git commands that discard or move work by the checkout they run in. In a repository's main checkout, which other sessions may share, it refuses with exit status 1: `stash` other than `list`/`show`/`create`, `reset --hard`, `reset` to a commit other than HEAD's, `switch` and `checkout` of a branch or commit, `checkout` of paths and working-tree `restore` unless the repository is mid-merge/rebase/cherry-pick/revert (unmerged index entries or the operation's state files; a finished rebase's leftover `REBASE_HEAD` does not count) and even then not forced or whole-tree forms, starting `rebase`/`merge`/`pull`/`cherry-pick`/`revert` (allowing `--continue`/`--abort`/`--quit`, and `--skip` where supported, only when that matching operation is underway), `commit --amend` (except dry-run forms), and `clean` (except `-n`/`--dry-run`). A linked worktree of a non-bare repository (`core.bare = false`), and a submodule inside one, run everything: `reset`/`checkout`/`switch`/`restore` forms that discard uncommitted tracked changes first record them as a `git stash create` commit on the `refs/omp/discarded` reflog and say so on stderr (refused instead when it recurses into submodules, through `--recurse-submodules` or `submodule.recurse`, since that record does not hold their changes), and `stash pop`/`apply`/`drop`/`branch`/`clear` refuse a stash-list entry whose `WIP on <branch>:`/`On <branch>:` subject names another branch, a detached HEAD, or no branch. It judges the expanded argv in the directory git actually runs in (`cd` and `-C` applied); `--git-dir`/`--work-tree`/`GIT_DIR`-style redirection is refused, since the repository it changes is not the one found from the directory,
 - skip-list for shell-sensitive vars (`PS1`, `PWD`, `SHLVL`, bash function exports, etc.),
 - a non-exported `env="$env"` fallback so PowerShell-style `$env:NAME` survives parameter expansion unless the user shadows `env`.
@@ -191,13 +191,14 @@ Concurrency guard:
 
 ### Spawn/attach/write/read/terminate patterns
 
-- PTY opened via `portable_pty::native_pty_system().openpty(...)`.
-- On Windows, `openpty()` is run on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
+- PTY opened with `openpty` (Unix; the child leads its own session with the PTY as controlling terminal) or a ConPTY pseudoconsole (Windows; a sideloaded `conpty.dll` wins over the system's).
+- On Windows, the pseudoconsole is opened on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
 - `start()` runs the command through the configured shell:
    - `cmd.exe`/`cmd` gets `/c`,
    - `powershell`/`pwsh` gets `-Command`,
    - other shells get `-lc`.
-- `startArgv()` passes each argument directly to `portable_pty::CommandBuilder`.
+- `startArgv()` passes each argument to the program unchanged (Windows quotes each for `CommandLineToArgvW`); the program is looked up on the child environment's `PATH` (plus `PATHEXT` on Windows).
+- A missing or non-directory `cwd` falls back to `HOME` (`USERPROFILE` on Windows).
 - PTY commands inherit the process environment after stripping Git repository-location overrides; explicit PTY `env` values can add them back.
 - Default size is `120x40`; dimensions are clamped (`cols 20..400`, `rows 5..200`) on start and resize.
 - `write(data: string)` sends the string's UTF-8 bytes to PTY stdin.

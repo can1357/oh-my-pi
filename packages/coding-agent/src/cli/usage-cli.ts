@@ -61,6 +61,7 @@ import {
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
+	usageAuthRejectedHint,
 	collectUnreportedAccounts,
 	selectReportableAccounts,
 	type UsageAccountIdentity,
@@ -982,7 +983,12 @@ export function formatUsageBreakdown(
 
 		for (const account of providerUnreported) {
 			const label = accountIdentityLabel(account, redaction);
-			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
+			const rejected = usageAuthRejectedHint(account);
+			lines.push(
+				rejected
+					? `  ${chalk.red(`${currentTheme().symbols.symbol("status.warning")} ${label} — ${rejected}`)}`
+					: `  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`,
+			);
 			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
 				lines.push(
 					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, accountOAuthIdentity(account), undefined, policyOptions)))}`,
