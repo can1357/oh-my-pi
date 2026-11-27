@@ -5258,7 +5258,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
 				// Empty and thinking-only stops still need recovery while the handoff runs.
-				if (speculativeHandoff && (assistantMsg.stopReason !== "stop" || assistantTurnDelivered(assistantMsg))) {
+				// Preserve the existing settle path for completed server-tool output.
+				if (
+					speculativeHandoff &&
+					(assistantMsg.stopReason !== "stop" ||
+						assistantTurnDelivered(assistantMsg) ||
+						assistantMsg.content.some(content => content.type === "anthropicServerTool"))
+				) {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#skippedPostTurnSpeculationCompletion = speculativeHandoff;
 				}

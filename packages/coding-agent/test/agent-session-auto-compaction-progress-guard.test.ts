@@ -1347,11 +1347,27 @@ describe("AgentSession auto-compaction progress guard", () => {
 	});
 
 	it.each([
-		{ kind: "unsigned", thinkingSignature: undefined },
-		{ kind: "signed", thinkingSignature: "sig" },
+		{
+			name: "retries an unsigned thinking-only stop",
+			thinkingSignature: undefined,
+			serverToolOutput: false,
+			expectedContinuations: 1,
+		},
+		{
+			name: "retries a signed thinking-only stop",
+			thinkingSignature: "sig",
+			serverToolOutput: false,
+			expectedContinuations: 1,
+		},
+		{
+			name: "settles a stop with completed server-tool output and signed thinking",
+			thinkingSignature: "sig",
+			serverToolOutput: true,
+			expectedContinuations: 0,
+		},
 	])(
-		"retries a $kind thinking-only stop while speculative handoff is still running",
-		async ({ thinkingSignature }) => {
+		"$name while speculative handoff is still running",
+		async ({ thinkingSignature, serverToolOutput, expectedContinuations }) => {
 			cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
 			cfgCompactionEnabled.set(session.settings, true);
 			cfgCompactionAsyncEnabled.set(session.settings, true);
@@ -1381,6 +1397,18 @@ describe("AgentSession auto-compaction progress guard", () => {
 				content: [{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature }],
 				timestamp: speculativeTrigger.timestamp + 1,
 			};
+			if (serverToolOutput) {
+				thinkingStop.content.push(
+					{
+						type: "anthropicServerTool",
+						block: { type: "server_tool_use", id: "search-1", name: "web_search", input: { query: "fixture" } },
+					},
+					{
+						type: "anthropicServerTool",
+						block: { type: "web_search_tool_result", tool_use_id: "search-1", content: [] },
+					},
+				);
+			}
 			try {
 				sessionManager.appendMessage(thinkingStop);
 				session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
@@ -1390,7 +1418,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 				await session.waitForIdle();
 
 				expect(session.compactionSpeculation).toBe("running");
-				expect(continueSpy).toHaveBeenCalledTimes(1);
+				expect(continueSpy).toHaveBeenCalledTimes(expectedContinuations);
 				if (!thinkingSignature) {
 					expect(sessionManager.getBranch()).not.toContainEqual(
 						expect.objectContaining({ type: "message", message: thinkingStop }),
