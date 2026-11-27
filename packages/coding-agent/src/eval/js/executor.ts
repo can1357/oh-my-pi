@@ -6,6 +6,7 @@ import {
 } from "../../tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import { formatTimeoutNotice } from "../../tools/details/bash";
+import { PAGE_ONLY_GLOBAL_RE } from "../../tools/browser/tab-protocol";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -248,7 +249,15 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 						header: Error.prototype.toString.call(error),
 					})
 				: String(error);
-		outputSink.push(message);
+		// The cell's own code reached for a page global (`document.querySelector(…)` written for the page). Checked by
+		// name: the worker's error arrives rebuilt as a plain Error carrying it.
+		const pageGlobal =
+			error instanceof Error && error.name === "ReferenceError" && PAGE_ONLY_GLOBAL_RE.test(error.message);
+		outputSink.push(
+			pageGlobal
+				? `${message}\nEval code runs in omp's Bun runtime, not in a page; run page code in a browser tab with tab.evaluate(() => …).`
+				: message,
+		);
 		const summary = await outputSink.dump();
 		return {
 			output: summary.output,

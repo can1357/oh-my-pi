@@ -51,6 +51,14 @@
 - Alt+L (reset terminal display), Ctrl+T, Ctrl+R, Ctrl+G and Ctrl+Shift+O work again while an ask form or ask dialog holds focus ([#20771](https://github.com/can1357/oh-my-pi/issues/20771))
 - A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"
 - Browser helper calls (`tab.goto`, `tab.click`, `tab.evaluate`, etc.) and tab reuse on Tern, WebKit, and cmux tabs no longer queue behind another tab's long-running `tab.run()`, and queued `tab.run()` timeouts now name the tab and agent holding the queue
+- Fixed `tab.waitFor(1500)`, `tab.waitFor(() => …)` and other non-string selectors on Tern and WebKit tabs failing with `Unsupported selector engine undefined` or `null is not an object (evaluating 'sel.engine')`; they now fail like on Chromium, naming the sleep or `page.waitForFunction` to use instead
+- Fixed a Chromium action on a selector the page cannot parse (`'input[name=q], label/Query'`) waiting out the whole action timeout; it now fails at once, and says that a `label/`-style prefix cannot join a CSS list
+- `tab.wait()`, `tab.waitForTimeout()`, `tab.waitForLoadState()`, `tab.waitForURL()`, `tab.navigate()`, `tab.$()`, `tab.$$()`, `tab.on()` and `tab.setExtraHTTPHeaders()` in eval JavaScript now say what to call instead of failing with `is not a function`
+- `page.setExtraHTTPHeaders()` in `tab.run` on Tern and WebKit tabs now says to use `tab.emulate({ credentials })` for basic auth or omp's own browser for other headers, instead of failing with `is not a function`
+- An eval JavaScript cell that uses `document`, `window`, `location` or another page-only global now says to run that code in the page with `tab.evaluate(...)`
+- A timed-out direct helper call on Tern, WebKit and cmux tabs now names the helper that stalled and how to raise the time limit
+- `tab.storage()` without a storage kind and `tab.setCookies([])` now say what they expected instead of "Storage kind must be local or session" and "malformed cookie input"
+- A relay tab Chrome refuses because another debugger already holds every new tab now says what holds it and how to get past it
 - The resume picker's **All projects** scope shows each session's folder in rows and the preview, and search matches folder paths there ([#20746](https://github.com/can1357/oh-my-pi/issues/20746))
 - Reading `history://current/full` on Claude no longer returns the model's own earlier reasoning as text, which Anthropic refuses as `reasoning_extraction` ([#19740](https://github.com/can1357/oh-my-pi/issues/19740))
 - The completion popup keeps the selected entry visible when descriptions wrap and hides its scrollbar when all entries fit ([#20731](https://github.com/can1357/oh-my-pi/issues/20731))
