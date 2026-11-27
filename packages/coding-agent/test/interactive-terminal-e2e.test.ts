@@ -334,4 +334,56 @@ describe("libkitty end-to-end", () => {
 		expect(buffer().some(row => row.includes(TOOL_MARKER))).toBe(false);
 		expect(viewport().some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
 	});
+
+	it("keeps a reply above an open ask form in scrollback or on screen", async () => {
+		const markers = Array.from({ length: 30 }, (_, i) => `Reply marker ${i + 1} of 30.`);
+		mode.stop();
+		term.dispose();
+		start(100, 30);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		mode.addMessageToChat({
+			role: "assistant",
+			content: [{ type: "text", text: markers.join("\n\n") }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		await term.waitFor(screen => screen.some(row => row.includes(markers.at(-1)!)));
+
+		// A form taller than the rows the reply leaves free.
+		const options = Array.from(
+			{ length: 8 },
+			(_, i) => `<label><input type="radio" name="q" value="${i}"> Option ${i}</label>`,
+		);
+		const closed = new AbortController();
+		void mode.getToolUIContext()!.formDialog!(
+			`<form><p>Pick one?</p>${options.join("")}<textarea name="notes"></textarea></form>`,
+			{ signal: closed.signal },
+		);
+		await term.waitFor(screen => screen.some(row => row.includes("Option 7")));
+		const misplaced = () => {
+			const rows = buffer();
+			return markers.filter(marker => rows.filter(row => row.includes(marker)).length !== 1);
+		};
+		try {
+			for (let i = 0; i < 10 && misplaced().length > 0; i++) await term.settle();
+			expect(misplaced()).toEqual([]);
+			expect(viewport().some(row => row.includes(markers.at(-1)!))).toBe(true);
+		} finally {
+			closed.abort();
+		}
+		await term.waitFor(screen => !screen.some(row => row.includes("Option 7")));
+		expect(misplaced()).toEqual([]);
+	});
 });

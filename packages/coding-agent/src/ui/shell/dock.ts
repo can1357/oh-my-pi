@@ -89,12 +89,12 @@ export const NATIVE_DOCK: readonly DockSlot[] = [
 export const NATIVE_TAIL: readonly DockSlot[] = ["pendingShell", "ask"];
 
 /**
- * Slots drawn over the live transcript in a plain terminal: their rows take no
- * room from it, so the transcript rows that still fit above them stay on
- * screen, and the ones they cover come back when the slot empties instead of
- * moving into history.
+ * Slots drawn over the live transcript in a plain terminal. The live rows they
+ * push off the top are neither on screen nor in history until the slot
+ * empties, so only blocks the user opens and dismisses belong here, not an ask
+ * answered by reading the transcript above it.
  */
-export const COVERING: readonly DockSlot[] = ["report", "ask"];
+export const COVERING: readonly DockSlot[] = ["report"];
 
 /** The dock's slots. */
 export class Dock {
