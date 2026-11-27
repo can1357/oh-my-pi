@@ -353,10 +353,32 @@ fn deep_non_tail_user_recursion_runs_on_a_small_stack() {
 	assert_eq!(out, "200010000\n");
 }
 
+/// A builtin resumes through the tree walker every fourth activation. The
+/// native poll budget must count these reentries, not total AWK call depth.
+#[test]
+fn mixed_function_continuations_run_on_a_small_stack() {
+	let prog = "function a(n) { return n ? b(n) : 0 }
+	            function b(n) { return c(n) }
+	            function c(n) { return d(n) }
+	            function d(n) { return int(a(n-1)) + 1 }
+	            BEGIN { print a(2000) }";
+	let out = std::thread::Builder::new().stack_size(512 * 1024).spawn(move || run(prog, "")).unwrap().join().unwrap();
+	assert_eq!(out, "2000\n");
+}
+
+#[test]
+fn nonlocal_exit_discards_partially_evaluated_arguments() {
+	let prog = r#"function skip(a) { a["seen"]++; if (NR == 1) next; return a["seen"] }
+	              function add(x,y) { return x+y }
+	              function outer(a,t) { t=3; return add(t++,skip(a))+t }
+	              { print outer(xs) }"#;
+	assert_eq!(run(prog, "first\nsecond\n"), "9\n");
+}
+
 /// A long *acyclic* call chain — `f0` calls `f1` … calls `fN` — has no
-/// recursion, yet its depth follows where control enters it, so it must be
-/// bounded by the runtime checkpoint on every call, not by a static call-graph
-/// test. 4,000 nested calls on a 512 KiB stack prove the native stack stays
+/// recursion, yet its frames must still be kept off the native stack; an
+/// acyclicity test alone cannot justify inlining. 4,000 nested calls on a
+/// 512 KiB stack prove the native stack stays
 /// bounded whatever the chain's shape.
 #[test]
 fn long_acyclic_user_chain_runs_on_a_small_stack() {

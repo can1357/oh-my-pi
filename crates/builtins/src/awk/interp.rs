@@ -13,6 +13,9 @@ use std::{
 	time::{SystemTime, UNIX_EPOCH},
 };
 
+mod calls;
+
+use calls::{Calls, Mark};
 use rand::{RngExt as _, SeedableRng as _, rngs::StdRng};
 use rustc_hash::FxHashMap;
 
@@ -33,12 +36,28 @@ use crate::{
 };
 
 /// Evaluate `expr` at a statement position: immediately when it is
-/// callback-free ([`Interp::eval_fast`]), else through the asynchronous
+/// non-suspending ([`Interp::eval_fast`]), else through the asynchronous
 /// evaluator. A macro, not a helper, so the immediate case builds no future.
 macro_rules! eval_maybe {
 	($s:ident, $e:expr) => {
 		if let Some(value) = $s.eval_fast($e) { value } else { $s.eval($e).await }
 	};
+}
+
+/// Keep the immediate loop body out of the future altogether. The proof is
+/// made once, before the loop, not once per statement per iteration.
+macro_rules! loop_body {
+	($s:ident, $body:ident, $immediate:ident) => {{
+		$s.check_cancel()?;
+		if $immediate {
+			for stmt in $body {
+				let Stmt::Expr(expr) = stmt else { unreachable!("checked loop body") };
+				$s.eval_fast_ok(expr)?;
+			}
+		} else if let Some(flow) = $s.loop_body($body).await? {
+			return Ok(flow);
+		}
+	}};
 }
 
 /// Why evaluation stopped early.
@@ -81,10 +100,8 @@ pub(super) type Array = FxHashMap<Bytes, Value>;
 
 /// One user-function activation.
 struct Frame {
-	/// Start of this frame's scalars in `Interp::locals`.
-	scalars: usize,
-	/// Indexes into `Interp::arrays` of this frame's array parameters.
-	arrays:  Vec<usize>,
+	mark: Mark,
+	resume: usize,
 }
 
 /// An assignable location, with any subscript or field index evaluated.
@@ -119,8 +136,8 @@ struct Input {
 const MAX_FIELD: f64 = 10_000_000.0;
 /// Deepest user-function call nesting.
 const MAX_DEPTH: usize = 50_000;
-/// How many user-function calls run as ordinary nested polls on the native
-/// stack before one hands its body to [`crate::deep::run`]'s heap queue.
+/// How many interpreter reentries through delegated AST operations run as
+/// native polls before one hands its body to [`crate::deep::run`]'s heap queue.
 /// Debug builds descend at every call: their unoptimized frames are large
 /// enough to matter well before the release interval does.
 #[cfg(debug_assertions)]
@@ -147,8 +164,13 @@ pub(super) struct Interp<'a> {
 	empty:        Bytes,
 	globals:      Vec<Value>,
 	arrays:       Vec<Array>,
+	/// Current scalar parameters and pending operands, in evaluation order.
 	locals:       Vec<Value>,
 	frames:       Vec<Frame>,
+	/// Array parameter slots are aliases into `arrays`, not copied maps.
+	bindings:     Vec<usize>,
+	calls:        Calls<'a>,
+	poll_depth:   usize,
 
 	record:       Vec<u8>,
 	scratch:      Vec<u8>,
@@ -312,15 +334,15 @@ fn boxed_flow<'s>(future: impl Future<Output = R<Flow>> + 's) -> Pin<Box<dyn Fut
 	Box::pin(future)
 }
 
-/// Depth budget for the immediate evaluator: a callback-free subtree deeper
+/// Depth budget for the immediate evaluator: a non-suspending subtree deeper
 /// than this falls back to the asynchronous path, so native recursion in the
 /// fast path stays small.
 const FAST_DEPTH: u8 = 8;
 
-/// Whether `expr` is callback-free and shallow enough for
-/// [`Interp::eval_fast`]. Anything reachable from here has no user call and
-/// no side effect that the asynchronous evaluator would need to replay.
-fn fast_ok(expr: &Expr, depth: u8) -> bool {
+/// Prove that evaluation will finish without suspending, before performing
+/// any effects. A function plan may inline only a bounded leaf; the plan's
+/// own immediate expressions are checked with `calls = None` (no user calls).
+fn fast_ok(expr: &Expr, depth: u8, calls: Option<&Calls<'_>>) -> bool {
 	if depth == 0 {
 		return false;
 	}
@@ -333,35 +355,36 @@ fn fast_ok(expr: &Expr, depth: u8) -> bool {
 		| Expr::Var(_)
 		| Expr::LengthArray(_)
 		| Expr::ArrayArg(_) => true,
-		Expr::Group(inner) => fast_ok(inner, d),
-		Expr::Field(index) => fast_ok(index, d),
-		Expr::Unary(_, operand) => fast_ok(operand, d),
-		Expr::Incr { target, .. } => fast_lvalue_ok(target, d),
-		Expr::In(index, _) => index.iter().all(|expr| fast_ok(expr, d)),
-		Expr::Index(_, index) => index.iter().all(|expr| fast_ok(expr, d)),
-		Expr::Binary(a, _, b) | Expr::And(a, b) | Expr::Or(a, b) => fast_ok(a, d) && fast_ok(b, d),
-		Expr::Cond(a, b, c) => fast_ok(a, d) && fast_ok(b, d) && fast_ok(c, d),
+		Expr::Group(inner) => fast_ok(inner, d, calls),
+		Expr::Field(index) => fast_ok(index, d, calls),
+		Expr::Unary(_, operand) => fast_ok(operand, d, calls),
+		Expr::Incr { target, .. } => fast_lvalue_ok(target, d, calls),
+		Expr::In(index, _) => index.iter().all(|expr| fast_ok(expr, d, calls)),
+		Expr::Index(_, index) => index.iter().all(|expr| fast_ok(expr, d, calls)),
+		Expr::Binary(a, _, b) | Expr::And(a, b) | Expr::Or(a, b) => fast_ok(a, d, calls) && fast_ok(b, d, calls),
+		Expr::Cond(a, b, c) => fast_ok(a, d, calls) && fast_ok(b, d, calls) && fast_ok(c, d, calls),
 		Expr::Assign(target, value) | Expr::AugAssign(target, _, value) => {
-			fast_lvalue_ok(target, d) && fast_ok(value, d)
+			fast_lvalue_ok(target, d, calls) && fast_ok(value, d, calls)
 		},
 		// A literal regex has already been compiled; a dynamic one needs
 		// `Interp::compile`, which stays on the asynchronous path.
-		Expr::Match(left, _, right) => fast_ok(left, d) && matches!(&**right, Expr::RegexArg(..)),
+		Expr::Match(left, _, right) => fast_ok(left, d, calls) && matches!(&**right, Expr::RegexArg(..)),
+		Expr::UserCall { func, args, .. } => calls.is_some_and(|c| c.can_inline(*func)) && args.iter().all(|e| fast_ok(e, d, calls)),
 		_ => false,
 	}
 }
 
 /// Whether `expr` resolves to an assignable place without recursing.
-fn fast_lvalue_ok(expr: &Expr, depth: u8) -> bool {
+fn fast_lvalue_ok(expr: &Expr, depth: u8, calls: Option<&Calls<'_>>) -> bool {
 	if depth == 0 {
 		return false;
 	}
 	let d = depth - 1;
 	match expr {
 		Expr::Var(_) => true,
-		Expr::Field(index) => fast_ok(index, d),
-		Expr::Index(_, index) => index.iter().all(|expr| fast_ok(expr, d)),
-		Expr::Group(inner) => fast_lvalue_ok(inner, d),
+		Expr::Field(index) => fast_ok(index, d, calls),
+		Expr::Index(_, index) => index.iter().all(|expr| fast_ok(expr, d, calls)),
+		Expr::Group(inner) => fast_lvalue_ok(inner, d, calls),
 		_ => false,
 	}
 }
@@ -377,6 +400,9 @@ impl<'a> Interp<'a> {
 			arrays: (0..prog.arrays.len()).map(|_| Array::default()).collect(),
 			locals: Vec::new(),
 			frames: Vec::new(),
+			bindings: Vec::new(),
+			calls: Calls::new(prog),
+			poll_depth: 0,
 			record: Vec::new(),
 			scratch: Vec::new(),
 			record_str: false,
@@ -620,16 +646,19 @@ impl<'a> Interp<'a> {
 		if let Some(pre) = pre {
 			self.exec_simple(pre).await?;
 		}
+		let immediate_body = self.immediate_block(body);
+		let immediate_cond = cond.is_some_and(|e| self.immediate(e));
+		let immediate_post = post.and_then(|s| self.immediate_stmt(s));
 		loop {
 			if let Some(cond) = cond
-				&& !eval_maybe!(self, cond)?.truthy()
+				&& !(if immediate_cond { self.eval_fast_ok(cond) } else { self.eval(cond).await })?.truthy()
 			{
 				break;
 			}
-			if let Some(flow) = self.loop_body(body).await? {
-				return Ok(flow);
-			}
-			if let Some(post) = post {
+			loop_body!(self, body, immediate_body);
+			if let Some(e) = immediate_post {
+				self.eval_fast_ok(e)?;
+			} else if let Some(post) = post {
 				self.exec_simple(post).await?;
 			}
 		}
@@ -640,41 +669,47 @@ impl<'a> Interp<'a> {
 	async fn exec_for_in(&mut self, var: &ScalarRef, array: &ArrayRef, body: &[Stmt]) -> R<Flow> {
 		let index = self.array_index(array.slot)?;
 		let keys: Vec<Bytes> = self.arrays[index].keys().cloned().collect();
+		let immediate_body = self.immediate_block(body);
 		for key in keys {
 			self.set_scalar(var.slot, Value::Str(key))?;
-			if let Some(flow) = self.loop_body(body).await? {
-				return Ok(flow);
-			}
+			loop_body!(self, body, immediate_body);
 		}
 		Ok(Flow::Normal)
 	}
 
 	/// `while (cond) body`.
 	async fn exec_while(&mut self, cond: &Expr, body: &[Stmt]) -> R<Flow> {
-		while eval_maybe!(self, cond)?.truthy() {
-			if let Some(flow) = self.loop_body(body).await? {
-				return Ok(flow);
-			}
+		let immediate_body = self.immediate_block(body);
+		let immediate_cond = self.immediate(cond);
+		while (if immediate_cond { self.eval_fast_ok(cond) } else { self.eval(cond).await })?.truthy() {
+			loop_body!(self, body, immediate_body);
 		}
 		Ok(Flow::Normal)
 	}
 
 	/// `do body while (cond)`.
 	async fn exec_do_while(&mut self, body: &[Stmt], cond: &Expr) -> R<Flow> {
+		let immediate_body = self.immediate_block(body);
+		let immediate_cond = self.immediate(cond);
 		loop {
-			if let Some(flow) = self.loop_body(body).await? {
-				return Ok(flow);
-			}
-			if !eval_maybe!(self, cond)?.truthy() {
+			loop_body!(self, body, immediate_body);
+			if !(if immediate_cond { self.eval_fast_ok(cond) } else { self.eval(cond).await })?.truthy() {
 				break;
 			}
 		}
 		Ok(Flow::Normal)
 	}
 
+	fn immediate_stmt<'s>(&self, stmt: &'s Stmt) -> Option<&'s Expr> {
+		if let Stmt::Expr(expr) = stmt && self.immediate(expr) { Some(expr) } else { None }
+	}
+
+	fn immediate_block(&self, body: &[Stmt]) -> bool {
+		body.iter().all(|s| self.immediate_stmt(s).is_some())
+	}
+
 	/// Runs a loop body; `Some` is a flow that ends the loop.
 	async fn loop_body(&mut self, body: &[Stmt]) -> R<Option<Flow>> {
-		self.check_cancel()?;
 		Ok(match self.exec_block(body).await? {
 			Flow::Normal | Flow::Continue => None,
 			Flow::Break => Some(Flow::Normal),
@@ -953,7 +988,7 @@ impl<'a> Interp<'a> {
 			},
 			Expr::AugAssign(target, op, value) => {
 				let place = self.place(target).await?;
-				let current = self.get_place(&place)?.num();
+				let current = self.place_num(&place)?;
 				let right = self.eval_child(value).await?.num();
 				let result = Value::Num(arith(*op, current, right)?);
 				self.set_place(place, result.clone())?;
@@ -993,7 +1028,7 @@ impl<'a> Interp<'a> {
 			},
 			Expr::Incr { target, decr, pre } => {
 				let place = self.place(target).await?;
-				let old = self.get_place(&place)?.num();
+				let old = self.place_num(&place)?;
 				let new = if *decr { old - 1.0 } else { old + 1.0 };
 				self.set_place(place, Value::Num(new))?;
 				Value::Num(if *pre { new } else { old })
@@ -1012,19 +1047,18 @@ impl<'a> Interp<'a> {
 		})
 	}
 
-	/// Evaluates `expr` synchronously when it is callback-free and shallow
-	/// enough (see [`fast_ok`]), so ordinary operands — arithmetic, literals,
-	/// variables, fields, lvalues — need no boxed future. `None` means the
-	/// subtree must go through the asynchronous path. The gate is checked
-	/// before any effect, so nothing is ever partially evaluated and replayed.
+	fn immediate(&self, expr: &Expr) -> bool {
+		fast_ok(expr, FAST_DEPTH, Some(&self.calls))
+	}
+
+	/// `None` delegates the entire expression without replaying any effects.
 	fn eval_fast(&mut self, expr: &Expr) -> Option<R<Value>> {
-		if fast_ok(expr, FAST_DEPTH) { Some(self.eval_fast_ok(expr, FAST_DEPTH)) } else { None }
+		if self.immediate(expr) { Some(self.eval_fast_ok(expr)) } else { None }
 	}
 
 	/// The immediate evaluator body; only reached through [`fast_ok`], which
 	/// has already established that every node here is supported.
-	fn eval_fast_ok(&mut self, expr: &Expr, depth: u8) -> R<Value> {
-		let d = depth - 1;
+	fn eval_fast_ok(&mut self, expr: &Expr) -> R<Value> {
 		Ok(match expr {
 			Expr::Num(n) => Value::Num(*n),
 			Expr::Str(s) => Value::Str(Rc::clone(s)),
@@ -1036,9 +1070,9 @@ impl<'a> Interp<'a> {
 				Value::Num(self.arrays[index].len() as f64)
 			},
 			Expr::ArrayArg(array) => return error(format!("can't use array {:?} in scalar context", array.name)),
-			Expr::Group(inner) => self.eval_fast_ok(inner, d)?,
+			Expr::Group(inner) => self.eval_fast_ok(inner)?,
 			Expr::Unary(op, operand) => {
-				let value = self.eval_fast_ok(operand, d)?;
+				let value = self.eval_fast_ok(operand)?;
 				match op {
 					UnOp::Not => Value::boolean(!value.truthy()),
 					UnOp::Neg => Value::Num(-value.num()),
@@ -1046,7 +1080,7 @@ impl<'a> Interp<'a> {
 				}
 			},
 			Expr::Field(index) => {
-				let n = self.eval_fast_ok(index, d)?.num();
+				let n = self.fast_num(index)?;
 				if n < 0.0 || n.is_nan() {
 					return error(format!("trying to access out of range field {}", n as i64));
 				}
@@ -1056,67 +1090,83 @@ impl<'a> Interp<'a> {
 				self.get_field(n as usize)
 			},
 			Expr::Index(array, index) => {
-				let key = self.fast_subscript(index, d)?;
+				let key = self.fast_subscript(index)?;
 				let slot = self.array_index(array.slot)?;
 				self.arrays[slot].entry(key).or_insert(Value::Null).clone()
 			},
 			Expr::In(index, array) => {
-				let key = self.fast_subscript(index, d)?;
+				let key = self.fast_subscript(index)?;
 				let slot = self.array_index(array.slot)?;
 				Value::boolean(self.arrays[slot].contains_key(&key[..]))
 			},
+			Expr::Binary(left, op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow), right) => {
+				Value::Num(arith(*op, self.fast_num(left)?, self.fast_num(right)?)?)
+			},
 			Expr::Binary(left, op, right) => {
-				let left = self.eval_fast_ok(left, d)?;
-				let right = self.eval_fast_ok(right, d)?;
+				let left = self.eval_fast_ok(left)?;
+				let right = self.eval_fast_ok(right)?;
 				self.binary(*op, &left, &right)?
 			},
 			Expr::And(left, right) => {
-				Value::boolean(self.eval_fast_ok(left, d)?.truthy() && self.eval_fast_ok(right, d)?.truthy())
+				Value::boolean(self.eval_fast_ok(left)?.truthy() && self.eval_fast_ok(right)?.truthy())
 			},
 			Expr::Or(left, right) => {
-				Value::boolean(self.eval_fast_ok(left, d)?.truthy() || self.eval_fast_ok(right, d)?.truthy())
+				Value::boolean(self.eval_fast_ok(left)?.truthy() || self.eval_fast_ok(right)?.truthy())
 			},
 			Expr::Cond(cond, yes, no) => {
-				if self.eval_fast_ok(cond, d)?.truthy() {
-					self.eval_fast_ok(yes, d)?
+				if self.eval_fast_ok(cond)?.truthy() {
+					self.eval_fast_ok(yes)?
 				} else {
-					self.eval_fast_ok(no, d)?
+					self.eval_fast_ok(no)?
 				}
 			},
 			Expr::Match(left, negate, right) => {
 				let Expr::RegexArg(regex, _) = &**right else { unreachable!("fast_ok gates the regex") };
-				let value = self.eval_fast_ok(left, d)?;
+				let value = self.eval_fast_ok(left)?;
 				let text = self.to_str(&value);
 				Value::boolean(regex.is_match(&text) != *negate)
 			},
 			Expr::Incr { target, decr, pre } => {
-				let place = self.place_fast(target, d)?;
-				let old = self.get_place(&place)?.num();
+				let place = self.place_fast(target)?;
+				let old = self.place_num(&place)?;
 				let new = if *decr { old - 1.0 } else { old + 1.0 };
 				self.set_place(place, Value::Num(new))?;
 				Value::Num(if *pre { new } else { old })
 			},
 			Expr::Assign(target, value) => {
-				let place = self.place_fast(target, d)?;
-				let value = self.eval_fast_ok(value, d)?;
+				let place = self.place_fast(target)?;
+				let value = self.eval_fast_ok(value)?;
 				self.set_place(place, value.clone())?;
 				value
 			},
 			Expr::AugAssign(target, op, value) => {
-				let place = self.place_fast(target, d)?;
-				let current = self.get_place(&place)?.num();
-				let right = self.eval_fast_ok(value, d)?.num();
+				let place = self.place_fast(target)?;
+				let current = self.place_num(&place)?;
+				let right = self.fast_num(value)?;
 				let result = Value::Num(arith(*op, current, right)?);
 				self.set_place(place, result.clone())?;
 				result
 			},
+			Expr::UserCall { func, args, .. } => self.call_inline(*func, args)?,
 			_ => unreachable!("fast_ok gates the rest"),
 		})
 	}
 
-	/// An assignable location, resolved without recursing.
-	fn place_fast(&mut self, expr: &Expr, depth: u8) -> R<Place> {
-		let d = depth - 1;
+	/// Numeric operands need neither an owned scalar nor an Rc increment.
+	fn fast_num(&mut self, expr: &Expr) -> R<f64> {
+		Ok(match expr {
+			Expr::Num(n) => *n,
+			Expr::Var(var) => match var.slot {
+				Slot::Global(i) => self.globals[i].num(),
+				Slot::Local(i) => self.locals[self.frame_base() + i].num(),
+				_ => self.get_scalar(var.slot)?.num(),
+			},
+			_ => self.eval_fast_ok(expr)?.num(),
+		})
+	}
+
+	/// An assignable location in a prechecked immediate expression.
+	fn place_fast(&mut self, expr: &Expr) -> R<Place> {
 		Ok(match expr {
 			Expr::Var(var) => match var.slot {
 				Slot::Global(index) => Place::Global(index),
@@ -1125,7 +1175,7 @@ impl<'a> Interp<'a> {
 				Slot::Unresolved => return error(format!("internal error: unresolved {:?}", var.name)),
 			},
 			Expr::Field(index) => {
-				let n = self.eval_fast_ok(index, d)?.num();
+				let n = self.eval_fast_ok(index)?.num();
 				if n < 0.0 || n.is_nan() {
 					return error(format!("trying to access out of range field {}", n as i64));
 				}
@@ -1134,17 +1184,16 @@ impl<'a> Interp<'a> {
 				}
 				Place::Field(n as usize)
 			},
-			Expr::Index(array, index) => Place::Elem(self.array_index(array.slot)?, self.fast_subscript(index, d)?),
-			Expr::Group(inner) => return self.place_fast(inner, depth),
+			Expr::Index(array, index) => Place::Elem(self.array_index(array.slot)?, self.fast_subscript(index)?),
+			Expr::Group(inner) => return self.place_fast(inner),
 			_ => return error("assignment to non-lvalue"),
 		})
 	}
 
 	/// An array subscript built from immediate operands.
-	fn fast_subscript(&mut self, index: &[Expr], depth: u8) -> R<Bytes> {
-		let d = depth - 1;
+	fn fast_subscript(&mut self, index: &[Expr]) -> R<Bytes> {
 		if let [single] = index {
-			let value = self.eval_fast_ok(single, d)?;
+			let value = self.eval_fast_ok(single)?;
 			return Ok(self.to_str(&value));
 		}
 		let mut key = Vec::new();
@@ -1152,18 +1201,21 @@ impl<'a> Interp<'a> {
 			if i > 0 {
 				key.extend_from_slice(&self.subsep);
 			}
-			let value = self.eval_fast_ok(expr, d)?;
+			let value = self.eval_fast_ok(expr)?;
 			self.push_str(&value, &mut key);
 		}
 		Ok(Rc::from(key))
 	}
 
-	/// Evaluates a subexpression: immediately when it is callback-free ([`eval_fast`]),
-	/// else behind one boxed future (the cycle edge a recursive `async fn` needs).
+	/// Direct calls already have their own bounded continuation. Other
+	/// suspending operands need a box to break the recursive future type.
 	async fn eval_child(&mut self, expr: &Expr) -> R<Value> {
 		match self.eval_fast(expr) {
 			Some(value) => value,
-			None => self.eval_boxed(expr).await,
+			None => match expr {
+				Expr::UserCall { func, args, .. } => self.call_user(*func, args).await,
+				_ => self.eval_boxed(expr).await,
+			},
 		}
 	}
 
@@ -1273,13 +1325,13 @@ impl<'a> Interp<'a> {
 	// ── Variables and places ────────────────────────────────────────────
 
 	fn frame_base(&self) -> usize {
-		self.frames.last().map_or(0, |frame| frame.scalars)
+		self.frames.last().map_or(0, |frame| frame.mark.scalars)
 	}
 
 	fn array_index(&self, slot: ArraySlot) -> R<usize> {
 		match slot {
 			ArraySlot::Global(index) => Ok(index),
-			ArraySlot::Local(index) => match self.frames.last().and_then(|frame| frame.arrays.get(index)) {
+			ArraySlot::Local(index) => match self.frames.last().and_then(|frame| self.bindings.get(frame.mark.bindings + index)) {
 				Some(&index) => Ok(index),
 				None => error("internal error: bad local array"),
 			},
@@ -1329,6 +1381,14 @@ impl<'a> Interp<'a> {
 			},
 			Expr::Field(index) => Place::Field(self.field_index(index).await?),
 			_ => return error("assignment to non-lvalue"),
+		})
+	}
+
+	fn place_num(&mut self, place: &Place) -> R<f64> {
+		Ok(match place {
+			Place::Global(i) => self.globals[*i].num(),
+			Place::Local(i) => self.locals[*i].num(),
+			_ => self.get_place(place)?.num(),
 		})
 	}
 
@@ -1724,61 +1784,6 @@ impl<'a> Interp<'a> {
 	}
 
 	// ── Functions ───────────────────────────────────────────────────────
-
-	async fn call_user(&mut self, index: usize, args: &[Expr]) -> R<Value> {
-		let prog = self.prog;
-		let Some(function) = prog.functions.get(index) else {
-			return error("call to undefined function");
-		};
-		if self.frames.len() >= MAX_DEPTH {
-			return error(format!("function call nesting too deep in {:?}", function.name));
-		}
-		let mut scalars = Vec::with_capacity(function.kinds.len());
-		let mut arrays = Vec::new();
-		for (i, kind) in function.kinds.iter().enumerate() {
-			match kind {
-				Param::Scalar(_) => scalars.push(match args.get(i) {
-					Some(arg) => self.eval_child(arg).await?,
-					None => Value::Null,
-				}),
-				Param::Array(_) => arrays.push(match args.get(i) {
-					Some(Expr::ArrayArg(array)) => Some(self.array_index(array.slot)?),
-					Some(_) => return error(format!("can't pass scalar as array param of {:?}", function.name)),
-					None => None,
-				}),
-			}
-		}
-		let mark = self.arrays.len();
-		let arrays: Vec<usize> = arrays
-			.into_iter()
-			.map(|array| {
-				array.unwrap_or_else(|| {
-					self.arrays.push(Array::default());
-					self.arrays.len() - 1
-				})
-			})
-			.collect();
-		let base = self.locals.len();
-		self.locals.extend(scalars);
-		self.frames.push(Frame { scalars: base, arrays });
-		// Recursion that follows the input would grow the native stack once
-		// per call; every `DESCEND_EVERY`th one instead hands its body to
-		// `deep::run`'s heap queue, which unwinds back to the driver loop.
-		let descend_here = self.frames.len().is_multiple_of(DESCEND_EVERY);
-		let body = self.exec_block_boxed(&function.body);
-		let result = if descend_here {
-			crate::deep::descend(body).await
-		} else {
-			body.await
-		};
-		self.frames.pop();
-		self.locals.truncate(base);
-		self.arrays.truncate(mark);
-		Ok(match result? {
-			Flow::Return(value) => value,
-			_ => Value::Null,
-		})
-	}
 
 	/// A builtin's numeric argument, defaulting to 0 when absent.
 	async fn arg_num(&mut self, args: &[Expr], i: usize) -> R<f64> {
