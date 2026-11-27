@@ -39,7 +39,7 @@ pub(crate) enum BreError {
 	InvalidCharacterRange,
 	/// A `(` (ERE) or `\(` (BRE) that is never closed.
 	UnmatchedParen,
-	/// A BRE `\)` that closes no group.
+	/// A `)` (sed's ERE) or `\)` (BRE) that closes no group.
 	UnmatchedCloseParen,
 	/// A BRE `\{` with no closing `\}`.
 	UnmatchedBrace,
@@ -54,12 +54,9 @@ pub(crate) enum BreError {
 }
 
 impl BreError {
-	/// The BSD wording `sed` and `nl` print; conditions only grep's ERE
-	/// validation raises have no BSD form and use glibc's.
-	#[cfg_attr(
-		not(any(feature = "util.sed", feature = "util.nl")),
-		allow(dead_code, reason = "only sed and nl print the BSD wording")
-	)]
+	/// The BSD wording `nl` prints; conditions only the ERE validation raises
+	/// have no BSD form and use glibc's.
+	#[cfg_attr(not(feature = "util.nl"), allow(dead_code, reason = "only nl prints the BSD wording"))]
 	pub(crate) fn message(self) -> &'static str {
 		match self {
 			Self::RepetitionOperandMissing => "repetition-operator operand invalid",
@@ -472,20 +469,17 @@ fn push_class_literal(result: &mut String, c: char) {
 	result.push(c);
 }
 
-/// Translate bracket expressions in an ERE. Grep additionally reads a
-/// non-interval `{` and an unopened `)` as literals, and rejects repetition
-/// without an operand and the other patterns glibc refuses.
+/// Translate bracket expressions in an ERE, rejecting repetition without an
+/// operand and the other patterns glibc refuses. Both tools read a
+/// non-interval `{` as a literal; grep also reads an unopened `)` as one,
+/// where sed rejects it.
 #[cfg(any(feature = "util.grep", feature = "util.sed"))]
 pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, BreError> {
-	if !grep && !pattern.contains('[') {
-		return Ok(Cow::Borrowed(pattern));
-	}
-
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	let mut has_atom = false;
-	// Grep only: numbers of the groups still open, the count opened so far,
-	// and a bit per closed group `\1`-`\9` may name.
+	// Numbers of the groups still open, the count opened so far, and a bit
+	// per closed group `\1`-`\9` may name.
 	let mut open_groups = Vec::new();
 	let mut groups = 0u32;
 	let mut closed_groups = 0u16;
@@ -495,16 +489,14 @@ pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, Bre
 				result.push(c);
 				match chars.next() {
 					Some(next) => {
-						if grep
-							&& let Some(group @ 1..=9) = next.to_digit(10)
+						if let Some(group @ 1..=9) = next.to_digit(10)
 							&& closed_groups & (1 << group) == 0
 						{
 							return Err(BreError::InvalidBackReference);
 						}
 						result.push(next);
 					},
-					None if grep => return Err(BreError::TrailingBackslash),
-					None => {},
+					None => return Err(BreError::TrailingBackslash),
 				}
 				has_atom = true;
 				continue;
@@ -514,25 +506,26 @@ pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, Bre
 				has_atom = true;
 				continue;
 			},
-			'(' if grep => {
+			'(' => {
 				groups += 1;
 				open_groups.push(groups);
 				has_atom = false;
 			},
-			')' if grep => {
+			')' => {
 				match open_groups.pop() {
 					Some(group) if group <= 9 => closed_groups |= 1 << group,
 					Some(_) => {},
 					// GNU grep reads a `)` that closes no group as a literal.
-					None => result.push('\\'),
+					None if grep => result.push('\\'),
+					None => return Err(BreError::UnmatchedCloseParen),
 				}
 				has_atom = true;
 			},
-			'(' | '|' | '^' | '$' => has_atom = false,
-			'*' | '+' | '?' if grep && !has_atom => {
+			'|' | '^' | '$' => has_atom = false,
+			'*' | '+' | '?' if !has_atom => {
 				return Err(BreError::RepetitionOperandMissing);
 			},
-			'{' if grep => match classify_brace(chars.clone()) {
+			'{' => match classify_brace(chars.clone()) {
 				Brace::Interval | Brace::Invalid(BreError::IntervalTooBig) if !has_atom => {
 					return Err(BreError::RepetitionOperandMissing);
 				},
@@ -841,6 +834,23 @@ mod tests {
 		] {
 			assert!(ere_to_rust(pattern, true).is_ok(), "should accept {pattern}");
 		}
+	}
+
+	#[cfg(feature = "util.sed")]
+	#[test]
+	fn sed_ere_rejects_what_glibc_refuses() {
+		// `sed -E 's/a)/x/'` must fail like GNU sed, not match a literal `)`.
+		for (pattern, error) in [
+			("a)", BreError::UnmatchedCloseParen),
+			("(a", BreError::UnmatchedParen),
+			("*a", BreError::RepetitionOperandMissing),
+			("a|*b", BreError::RepetitionOperandMissing),
+			("{1}", BreError::RepetitionOperandMissing),
+			(r"(a)\2", BreError::InvalidBackReference),
+		] {
+			assert_eq!(ere_to_rust(pattern, false), Err(error), "{pattern}");
+		}
+		assert!(ere_to_rust("(a)+{1}|b**", false).is_ok());
 	}
 
 	#[cfg(feature = "util.grep")]
