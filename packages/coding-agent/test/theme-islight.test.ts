@@ -61,6 +61,20 @@ describe("getResolvedThemeColors HTML export defaults", () => {
 		expect(colors.text).toBe("#e5e5e7");
 		expect(colors.userMessageText).toBe("#e5e5e7");
 	});
+
+	// Regression for #16374: these palettes define `text` but left the slots
+	// empty, so composer and message text fell back to the generic grey/black.
+	it.each([
+		["dark-catppuccin", "#cdd6f4"],
+		["light-catppuccin", "#4c4f69"],
+		["dark-rose-pine", "#e0def4"],
+		["dark-github", "#c9d1d9"],
+		["dark-celestial", "#d5d8da"],
+	])("uses the %s palette text color", async (name, hex) => {
+		const colors = await getResolvedThemeColors(name);
+		expect(colors.text.toLowerCase()).toBe(hex);
+		expect(colors.userMessageText.toLowerCase()).toBe(hex);
+	});
 	let tempAgentDir: string | undefined;
 	let originalAgentDir = "";
 	let originalAgentDirEnv: string | undefined;

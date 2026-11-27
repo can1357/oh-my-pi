@@ -645,7 +645,9 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	}
 	const inner = cx.width - 4;
 	const view = currentView(model);
-	const skip = look.skipNotice ? wrap(theme.fg("warning", `⚠ ${flattenLine(look.skipNotice)}`), inner) : [];
+	const skip = look.skipNotice
+		? wrap(theme.fg("warning", `${theme.symbols.symbol("status.warning")} ${flattenLine(look.skipNotice)}`), inner)
+		: [];
 	const limit = Math.max(1, Math.floor(look.terminalRows * HEIGHT_RATIO) - CHROME_ROWS);
 	const layouts: TextareaLayouts = new Map();
 	let column = buildColumn(cx, look, view, inner, layouts);

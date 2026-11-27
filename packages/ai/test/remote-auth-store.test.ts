@@ -964,21 +964,21 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 	test("hands a provider's lone usage report only to a credential its identity cannot contradict", async () => {
 		// Bob's fetch succeeded and Alice's failed, so the aggregate holds one
-		// Antigravity report. The shared project must not give Alice Bob's
+		// Vertex report. The shared project must not give Alice Bob's
 		// exhausted pool, and her header overlay must not land on his row.
 		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
 		const now = Date.now();
 		const projectId = "shared-project";
 		const weeklyLimit = (usedFraction: number): UsageLimit => ({
-			id: "google-antigravity:weekly",
+			id: "google-vertex:weekly",
 			label: "Weekly",
-			scope: { provider: "google-antigravity", projectId, windowId: "weekly" },
+			scope: { provider: "google-vertex", projectId, windowId: "weekly" },
 			window: { id: "weekly", label: "Weekly" },
 			amount: { usedFraction, unit: "percent" },
 			status: usedFraction >= 1 ? "exhausted" : "ok",
 		});
 		const bobReport: UsageReport = {
-			provider: "google-antigravity",
+			provider: "google-vertex",
 			fetchedAt: now,
 			limits: [weeklyLimit(1)],
 			metadata: { email: "bob@example.com", projectId },
@@ -1028,9 +1028,9 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		});
 		const alice = credential({ email: "alice@example.com", projectId });
 		try {
-			expect(await remoteStore.getUsageReport("google-antigravity", alice)).toBeNull();
+			expect(await remoteStore.getUsageReport("google-vertex", alice)).toBeNull();
 			const bob = await remoteStore.getUsageReport(
-				"google-antigravity",
+				"google-vertex",
 				credential({ email: "bob@example.com", projectId }),
 			);
 			expect(bob?.metadata?.email).toBe("bob@example.com");
@@ -1045,17 +1045,17 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			}
 
 			const aliceOverlay: UsageReport = {
-				provider: "google-antigravity",
+				provider: "google-vertex",
 				fetchedAt: now,
 				limits: [weeklyLimit(0.1)],
 				metadata: { email: "alice@example.com", projectId },
 			};
-			expect(remoteStore.ingestUsageReport("google-antigravity", alice, aliceOverlay)).toBe(true);
-			const antigravityRows = (await remoteStore.fetchUsageReports())
-				?.filter(report => report.provider === "google-antigravity")
-				.map(report => [report.metadata?.email, requireLimit(report, "google-antigravity:weekly").status])
+			expect(remoteStore.ingestUsageReport("google-vertex", alice, aliceOverlay)).toBe(true);
+			const sharedProjectRows = (await remoteStore.fetchUsageReports())
+				?.filter(report => report.provider === "google-vertex")
+				.map(report => [report.metadata?.email, requireLimit(report, "google-vertex:weekly").status])
 				.toSorted();
-			expect(antigravityRows).toEqual([
+			expect(sharedProjectRows).toEqual([
 				["alice@example.com", "ok"],
 				["bob@example.com", "exhausted"],
 			]);

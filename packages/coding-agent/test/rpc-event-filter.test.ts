@@ -72,6 +72,8 @@ describe("set_event_filter over RPC", () => {
 					XDG_DATA_HOME: home,
 					PI_CODING_AGENT_DIR: join(home, ".omp/agent"),
 					NO_COLOR: "1",
+					// Test runtime: keeps the child off the OS keychain.
+					PI_TEST_RUNTIME: "1",
 				},
 				stdin: "pipe",
 				stdout: "pipe",

@@ -266,6 +266,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: true,
+	emoji: { vs16Wide: false, bareFits: false },
 };
 
 /** See the module docs. */

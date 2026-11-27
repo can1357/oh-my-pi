@@ -31,7 +31,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { initTheme } from "../src/ui/theme/service";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createModeTerminal, type ModeTerminal } from "./helpers/mode-terminal";
-import { createTestSession } from "./utilities";
+import { assistantMsg, createTestSession, userMsg } from "./utilities";
 
 import {
 	cfgAutocompleteMaxVisible,
@@ -45,6 +45,7 @@ import {
 	cfgStartupShowSplash,
 	cfgTuiImeSafeCursor,
 	cfgTuiResizeScrollback,
+	cfgTuiScreen,
 	cfgTuiVimMode,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -258,6 +259,7 @@ describe("startup prepaint frame", () => {
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 			vim: cfgTuiVimMode.get(settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
+			screen: cfgTuiScreen.get(settings),
 		};
 	});
 
@@ -764,5 +766,88 @@ describe("startup prepaint frame", () => {
 		const window = sonnet.contextWindow ?? 0;
 		expect(window).not.toBe(base.facts.context.window);
 		expect(other.facts.context).toEqual({ tokens: 12_000, window, percent: (12_000 / window) * 100 });
+	});
+
+	it("starts a fullscreen session on the alternate screen without erasing the shell's scrollback", async () => {
+		const lease = await prepaint({ columns: 80, rows: 24, preferences: { screen: "fullscreen" } });
+		expect(term.engine.isMainScreen).toBe(false);
+		expect(term.memory.output.join("")).not.toContain("\x1b[3J");
+		await lease.frame.shell.stop();
+		expect(term.engine.isMainScreen).toBe(true);
+	});
+
+	it("switches a prepaint started from a stale cached screen mode to the resolved one", async () => {
+		term = createModeTerminal({ columns: 80, rows: 24 });
+		beginStartupComposer({ driver: term.memory.options, version: "test", cache: false, preferences: config });
+		await term.waitFor(rows => rows.length > 0);
+		expect(term.engine.isMainScreen).toBe(true);
+		applyStartupComposerPreferences({ ...config, screen: "fullscreen", theme: {} });
+		await term.waitFor(() => !term.engine.isMainScreen);
+	});
+
+	// Cold launch first clears native history while painting the prepaint welcome.
+	// Once InteractiveMode is ready, a normal replay can offer resumed transcript
+	// rows and repaint the viewport without another destructive reset. On conhost a
+	// second ED3-then-ED2 reset would archive the prepaint frame into scrollback
+	// after ED3 already ran, leaving a stale welcome above the live UI (#9597).
+	describe("cold-launch native history reset", () => {
+		// Every destructive reset emits one erase-scrollback (ED3). Count that
+		// operation without coupling to the ED2/ED3 ordering.
+		const ERASE_SCROLLBACK = "\x1b[3J";
+
+		/** Erase-scrollback operations in `output`. */
+		function countResets(output: readonly string[]): number {
+			const all = output.join("");
+			let n = 0;
+			for (let i = all.indexOf(ERASE_SCROLLBACK); i !== -1; i = all.indexOf(ERASE_SCROLLBACK, i + 1)) n++;
+			return n;
+		}
+
+		// `resuming` mirrors `main.ts` `runInteractiveMode`: `false` on a plain `omp`
+		// launch, `true` for --continue/--resume/--fork.
+		async function coldLaunch(resuming: boolean): Promise<{
+			resets: number;
+			welcomeRows: number;
+			scrollBuffer: string;
+		}> {
+			const lease = await prepaint({ rows: 30, version: "18.0.4" });
+			const testSession = await createTestSession({ inMemory: true });
+			if (resuming) {
+				testSession.sessionManager.appendMessage(userMsg("resume marker question"));
+				testSession.sessionManager.appendMessage(assistantMsg("resume marker answer"));
+			}
+			const mode = adopt(lease, testSession.session, "18.0.4");
+			try {
+				await mode.init({ suppressWelcomeIntro: resuming, clearInitialTerminalHistory: true });
+				await mode.renderInitialMessages({ preserveExistingChat: true });
+				if (resuming) await term.waitFor(() => term.text().includes("resume marker answer"));
+				await term.settle();
+				const rows = term.text().split("\n");
+				return {
+					resets: countResets(term.memory.output),
+					welcomeRows: rows.filter(l => l.includes("18.0.4")).length,
+					scrollBuffer: rows.join("\n"),
+				};
+			} finally {
+				mode.stop();
+				await mode.shell.stop();
+				await testSession.cleanup();
+			}
+		}
+
+		it("clears native history once on a fresh launch, leaving one welcome header", async () => {
+			const { resets, welcomeRows } = await coldLaunch(false);
+			// The first clear already owns the final welcome frame; the replay must not
+			// clear again, or conhost promotes that frame into scrollback (duplicate).
+			expect(resets).toBe(1);
+			expect(welcomeRows).toBe(1);
+		});
+
+		it("replays a resumed transcript without clearing native history again", async () => {
+			const { resets, scrollBuffer, welcomeRows } = await coldLaunch(true);
+			expect(resets).toBe(1);
+			expect(scrollBuffer).toContain("resume marker answer");
+			expect(welcomeRows).toBe(1);
+		});
 	});
 });

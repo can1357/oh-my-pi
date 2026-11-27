@@ -36,11 +36,20 @@ description = "Post a comment on the inbound thread (PR for PR conversations/rev
 body = "Markdown comment body."
 number = "Optional issue/PR override. Defaults to the inbound thread."
 
+[gh_close_duplicate]
+description = "Close the originating issue as already tracked or already fixed: posts one comment headed `Duplicate of #N` (or `Fixed in <sha>`) plus `body`, labels it `duplicate`, and closes it (`duplicate` / `completed`). Requires `classify_issue` first. Refuses an issue a human reopened."
+
+[gh_close_duplicate.parameters]
+duplicate_of = "Issue or PR number that already tracks or fixed this problem. Omit when passing `fixed_in`."
+fixed_in = "SHA of the default-branch commit that already fixed this when no issue or PR tracks it. Omit when passing `duplicate_of`."
+body = "One or two sentences for the reporter: why it is the same problem and where it stands (release carrying the fix, or the tracking issue). The `Duplicate of`/`Fixed in` line and the reopen note are added for you."
+
 [gh_push_branch]
 description = "Push the workspace branch to origin. Pre-publish gate (when the repo defines them): `bun run fix` → amend any formatter diff into your HEAD commit → `bun check`. On `bun check` failure, fix the cause and retry. Pre-existing breakage on `main` against the same paths NOT caused by your diff → retry with `skip_checks=true` and document the bypass in the follow-up comment. Dirty-tree gate runs unconditionally. Commit messages carrying shell-literal `\\n` escapes are rewritten to real newlines before the push."
 
 [gh_push_branch.parameters]
 branch = "Optional branch override; defaults to the workspace branch."
+base = "Optional base branch the pre-push gates diff against (default: repo default). Pass the same `base` you will give `gh_open_pr`."
 skip_checks = "Bypass `bun run fix` + `bun check`. Use ONLY after verifying (e.g. `git diff origin/<default>..HEAD` against the failing paths) the failure exists on `main` and is NOT caused by your diff. Dirty-tree gate still runs — commit everything first."
 
 [release_ci_status]
@@ -87,10 +96,13 @@ description = "Irrecoverably abandon this task WITHOUT posting any visible messa
 reason = "Internal diagnosis for the operator. Concrete, specific, blameless. NEVER shown to the reporter."
 
 [fetch_issue_thread]
-description = "Refetch the originating issue and its comments. Use sparingly."
+description = "Fetch an issue or PR thread (body + comments) of the current repo: the originating issue by default, or `number` to read a duplicate candidate before judging it."
+
+[fetch_issue_thread.parameters]
+number = "Issue or PR number to read instead of the originating issue."
 
 [gh_search_issues]
-description = "Search issues AND pull requests in the current repo. Served from a local index of every issue/PR (webhook-fed, periodically reconciled), so calls are free — search liberally during triage to find duplicates and already-merged fixes before classifying."
+description = "Search issues AND pull requests in the current repo. Served from a local index of every issue/PR (webhook-fed, periodically reconciled), so calls are free — search liberally during triage to find duplicates and already-merged fixes before classifying. Keywords are OR'd and ranked by relevance (title hits weigh more): pass distinctive symptom words, error strings and synonyms together; best matches come first."
 
 [gh_search_issues.parameters]
 query = "GitHub issue-search syntax: bare keywords plus qualifiers like `is:pr`, `is:closed`, `is:merged`, `label:bug`, `author:<login>`. NEVER include a `repo:` qualifier — scope is applied automatically."
@@ -131,4 +143,4 @@ question = "answer in a single gh_post_comment; no PR, no repro"
 enhancement = "post one thoughtful gh_post_comment on feasibility/scope; no PR"
 proposal = "post one thoughtful gh_post_comment on feasibility/scope; no PR"
 invalid = "post one explanatory gh_post_comment; no further action"
-duplicate = "post one explanatory gh_post_comment; no further action"
+duplicate = "call gh_close_duplicate once (it comments and closes the issue); no further action"

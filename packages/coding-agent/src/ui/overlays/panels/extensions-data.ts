@@ -132,9 +132,9 @@ export function filterByProvider(extensions: Extension[], providerId: string): E
 	return providerId === "all" ? extensions : extensions.filter(ext => ext.source.provider === providerId);
 }
 
-/** An item's state from its source: disabled by the user, shadowed, provider off, or `~/` source not opted in. */
+/** An item's state from its source: disabled by the user, shadowed, or provider off. */
 export function resolveExtensionState(
-	source: { provider: string; level: string },
+	source: { provider: string },
 	disabled: boolean,
 	shadowed: boolean,
 	providers: readonly ExtensionProvider[],
@@ -143,8 +143,6 @@ export function resolveExtensionState(
 	if (shadowed) return { state: "shadowed", disabledReason: "shadowed" };
 	const provider = providers.find(entry => entry.id === source.provider);
 	if (provider?.enabled === false) return { state: "disabled", disabledReason: "provider-disabled" };
-	if (source.level === "user" && provider?.userSourceEnabled === false)
-		return { state: "disabled", disabledReason: "user-opt-in" };
 	return { state: "active" };
 }
 
@@ -515,11 +513,9 @@ export function enablementLabel(state: ExtensionState, reason?: string, shadowed
 			return `Disabled (${
 				reason === "provider-disabled"
 					? "provider disabled"
-					: reason === "user-opt-in"
-						? "~/ config not enabled"
-						: reason === "item-disabled"
-							? "manually disabled"
-							: "unknown"
+					: reason === "item-disabled"
+						? "manually disabled"
+						: "unknown"
 			})`;
 		case "shadowed":
 			return `Shadowed${shadowedBy ? ` by ${sanitizeDisplayText(shadowedBy)}` : ""}`;

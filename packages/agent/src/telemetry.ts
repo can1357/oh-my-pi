@@ -616,8 +616,6 @@ function mapProviderNameToOtel(provider: string | undefined): string | undefined
 		case "amazon-bedrock":
 			return "aws.bedrock";
 		case "google":
-		case "google-antigravity":
-		case "google-gemini-cli":
 			return "gcp.gemini";
 		case "google-vertex":
 			return "gcp.vertex_ai";

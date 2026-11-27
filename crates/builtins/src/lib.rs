@@ -57,6 +57,15 @@ mod quoting_style;
 mod time_zone;
 #[cfg(any(feature = "util.cp", feature = "util.mv"))]
 mod progress;
+/// Refusal of whole-disk walks, shared by the recursive search utilities.
+#[cfg(any(
+	feature = "util.ast-grep",
+	feature = "util.fd",
+	feature = "util.find",
+	feature = "util.grep",
+	feature = "util.rg"
+))]
+mod root_guard;
 
 // ── Utility builtins ──────────────────────────────────────────────────────────
 // Ports of the standalone command-line utilities the shell ships in-process.

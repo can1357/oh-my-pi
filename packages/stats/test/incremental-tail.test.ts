@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, getFileOffset, getRecentRequests, initDb } from "@oh-my-pi/omp-stats/db";
+import * as parser from "@oh-my-pi/omp-stats/parser";
 import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -439,6 +440,35 @@ describe("incremental stats ingestion", () => {
 		await syncAllSessions({ workers: 1 });
 		expect(getOverallStats().totalRequests).toBe(1);
 		await fs.writeFile(file, assistant("new"));
+		await syncAllSessions({ workers: 1 });
+		expect(
+			getRecentRequests()
+				.map(row => row.entryId)
+				.sort(),
+		).toEqual(["new", "shared"]);
+	});
+
+	it("recovers requests from an unchanged fork that was unreadable during reconciliation", async () => {
+		const original = await session(assistant("shared"));
+		await syncAllSessions({ workers: 1 });
+		const fork = path.join(path.dirname(original), "fork.jsonl");
+		await Bun.write(fork, assistant("shared"));
+		await syncAllSessions({ workers: 1 });
+		await fs.writeFile(original, assistant("new"));
+		await syncAllSessions({ workers: 1, files: [original] });
+
+		const parse = parser.parseSessionFile;
+		const probe = spyOn(parser, "parseSessionFile").mockImplementation((file, ...args) => {
+			if (file === fork) throw Object.assign(new Error("locked"), { code: "EACCES" });
+			return parse(file, ...args);
+		});
+		try {
+			await syncAllSessions({ workers: 1 });
+			expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
+		} finally {
+			probe.mockRestore();
+		}
+		closeDb();
 		await syncAllSessions({ workers: 1 });
 		expect(
 			getRecentRequests()

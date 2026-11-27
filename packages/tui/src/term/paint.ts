@@ -11,6 +11,7 @@
  * Painters never write to the terminal and never keep their own caches of
  * reactive state; they are pure functions of what they read.
  */
+import type { HistoryRowMark } from "../driver/contract";
 import type { CellSize } from "../driver/images/fit";
 import type { ImageRequest, ImageRows, ImageSource } from "../driver/images/store";
 import type { UiKind, UiNode } from "../node";
@@ -40,6 +41,8 @@ export interface Hit {
 /** What a painter returns: rows (none wider than the width it got), plus cursor and hit regions. */
 export interface Block {
 	readonly rows: readonly string[];
+	/** A one-shot mark on a top-level main block, written only when its row enters history. */
+	readonly historyMark?: HistoryRowMark & { readonly key: object };
 	/** Hardware cursor (the focused editor's caret), in this block's coordinates. */
 	readonly cursor?: Cell;
 	/** Mouse targets, in this block's coordinates. */
@@ -69,6 +72,10 @@ function sameBlock(a: Block, b: Block): boolean {
 		a.cursor?.row !== b.cursor?.row ||
 		a.cursor?.col !== b.cursor?.col
 	)
+		return false;
+	const x = a.historyMark;
+	const y = b.historyMark;
+	if (x !== y && (!x || !y || x.key !== y.key || x.row !== y.row || x.before !== y.before || x.after !== y.after))
 		return false;
 	if (a.rows !== b.rows) {
 		for (let i = 0; i < a.rows.length; i++) if (a.rows[i] !== b.rows[i]) return false;

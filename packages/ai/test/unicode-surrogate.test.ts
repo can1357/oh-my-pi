@@ -5,17 +5,16 @@ import type { Api, Context, Model, OptionsForApi, ToolResultMessage } from "@oh-
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { e2eApiKey, resolveApiKey } from "./oauth";
 
-// Empty schema for test tools - must be proper OBJECT type for Cloud Code Assist
+// Empty schema for test tools - must be a proper OBJECT type
 const emptySchema = type({});
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
-	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
 
 /**
  * Test for Unicode surrogate pair handling in tool results.
@@ -467,89 +466,6 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 			async () => {
 				const llm = getBundledModel("github-copilot", "claude-sonnet-4");
 				await testUnpairedHighSurrogate(llm, { apiKey: githubCopilotToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-	});
-
-	describe("Google Antigravity Provider Unicode Handling", () => {
-		it.skipIf(!antigravityToken)(
-			"gemini-3.8-flash - should handle emoji in tool results",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-3.8-flash");
-				await testEmojiInToolResults(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"gemini-3.8-flash - should handle real-world LinkedIn comment data with emoji",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-3.8-flash");
-				await testRealWorldLinkedInData(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"gemini-3.8-flash - should handle unpaired high surrogate (0xD83D) in tool results",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-3.8-flash");
-				await testUnpairedHighSurrogate(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"claude-sonnet-4-5 - should handle emoji in tool results",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "claude-sonnet-4-5");
-				await testEmojiInToolResults(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"claude-sonnet-4-5 - should handle real-world LinkedIn comment data with emoji",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "claude-sonnet-4-5");
-				await testRealWorldLinkedInData(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"claude-sonnet-4-5 - should handle unpaired high surrogate (0xD83D) in tool results",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "claude-sonnet-4-5");
-				await testUnpairedHighSurrogate(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"gpt-oss-120b-medium - should handle emoji in tool results",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gpt-oss-120b-medium");
-				await testEmojiInToolResults(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"gpt-oss-120b-medium - should handle real-world LinkedIn comment data with emoji",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gpt-oss-120b-medium");
-				await testRealWorldLinkedInData(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"gpt-oss-120b-medium - should handle unpaired high surrogate (0xD83D) in tool results",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gpt-oss-120b-medium");
-				await testUnpairedHighSurrogate(llm, { apiKey: antigravityToken });
 			},
 			{ retry: 3, timeout: 30000 },
 		);

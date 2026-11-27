@@ -106,9 +106,8 @@ Bundled into dist/cli.js and the omp executable:
 
 - @opentelemetry/api 1.9.1 — Apache-2.0
 - @opentelemetry/api-logs 0.220.0 — Apache-2.0
-- @opentelemetry/context-async-hooks 2.11.0 — Apache-2.0
+- @opentelemetry/context-async-hooks 2.9.0 — Apache-2.0
 - @opentelemetry/core 2.9.0 — Apache-2.0
-- @opentelemetry/core 2.11.0 — Apache-2.0
 - @opentelemetry/exporter-logs-otlp-proto 0.220.0 — Apache-2.0
 - @opentelemetry/exporter-metrics-otlp-http 0.220.0 — Apache-2.0
 - @opentelemetry/exporter-metrics-otlp-proto 0.220.0 — Apache-2.0
@@ -116,13 +115,11 @@ Bundled into dist/cli.js and the omp executable:
 - @opentelemetry/otlp-exporter-base 0.220.0 — Apache-2.0
 - @opentelemetry/otlp-transformer 0.220.0 — Apache-2.0
 - @opentelemetry/resources 2.9.0 — Apache-2.0
-- @opentelemetry/resources 2.11.0 — Apache-2.0
 - @opentelemetry/sdk-logs 0.220.0 — Apache-2.0
 - @opentelemetry/sdk-metrics 2.9.0 — Apache-2.0
-- @opentelemetry/sdk-metrics 2.11.0 — Apache-2.0
-- @opentelemetry/sdk-trace 2.11.0 — Apache-2.0
-- @opentelemetry/sdk-trace-base 2.11.0 — Apache-2.0
-- @opentelemetry/sdk-trace-node 2.11.0 — Apache-2.0
+- @opentelemetry/sdk-trace 2.9.0 — Apache-2.0
+- @opentelemetry/sdk-trace-base 2.9.0 — Apache-2.0
+- @opentelemetry/sdk-trace-node 2.9.0 — Apache-2.0
 - @opentelemetry/semantic-conventions 1.43.0 — Apache-2.0
 - axe-core 4.13.0 — MPL-2.0
 
@@ -445,9 +442,8 @@ THE SOFTWARE.
 Used by:
 - @opentelemetry/api 1.9.1 (LICENSE)
 - @opentelemetry/api-logs 0.220.0 (LICENSE)
-- @opentelemetry/context-async-hooks 2.11.0 (LICENSE)
+- @opentelemetry/context-async-hooks 2.9.0 (LICENSE)
 - @opentelemetry/core 2.9.0 (LICENSE)
-- @opentelemetry/core 2.11.0 (LICENSE)
 - @opentelemetry/exporter-logs-otlp-proto 0.220.0 (LICENSE)
 - @opentelemetry/exporter-metrics-otlp-http 0.220.0 (LICENSE)
 - @opentelemetry/exporter-metrics-otlp-proto 0.220.0 (LICENSE)
@@ -455,13 +451,11 @@ Used by:
 - @opentelemetry/otlp-exporter-base 0.220.0 (LICENSE)
 - @opentelemetry/otlp-transformer 0.220.0 (LICENSE)
 - @opentelemetry/resources 2.9.0 (LICENSE)
-- @opentelemetry/resources 2.11.0 (LICENSE)
 - @opentelemetry/sdk-logs 0.220.0 (LICENSE)
 - @opentelemetry/sdk-metrics 2.9.0 (LICENSE)
-- @opentelemetry/sdk-metrics 2.11.0 (LICENSE)
-- @opentelemetry/sdk-trace 2.11.0 (LICENSE)
-- @opentelemetry/sdk-trace-base 2.11.0 (LICENSE)
-- @opentelemetry/sdk-trace-node 2.11.0 (LICENSE)
+- @opentelemetry/sdk-trace 2.9.0 (LICENSE)
+- @opentelemetry/sdk-trace-base 2.9.0 (LICENSE)
+- @opentelemetry/sdk-trace-node 2.9.0 (LICENSE)
 - @opentelemetry/semantic-conventions 1.43.0 (LICENSE)
 - @puppeteer/browsers 3.0.6 (no license file in package; Apache-2.0 per package.json)
 - chromium-bidi 16.0.1 (LICENSE)
