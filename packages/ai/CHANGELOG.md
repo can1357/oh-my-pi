@@ -16,6 +16,7 @@
 ### Fixed
 
 - Fixed `ToolCallLoopGuard` missing a streak of turns whose every tool call names a nonexistent tool when the names or arguments vary; such a streak now trips the guard at the same threshold as an `unresolved_tool_call` detection ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
+- Fixed OpenCode Zen free models (e.g. `muse-spark-1.3-contributor-free`) failing with a bare `403 FreeTierError` and then rotating through and blocking every stored Zen key: Zen serves its free tier only to the OpenCode app, so omp now fails once with an explanation pointing at `/model`, and your keys keep working for paid Zen models ([#12306](https://github.com/can1357/oh-my-pi/issues/12306))
 - Fixed Claude replaying its own unsigned reasoning as plain text when the latest turn ended without running its tool calls (e.g. cut off by the output limit mid-thinking), which Anthropic refuses as `reasoning_extraction` ([#19740](https://github.com/can1357/oh-my-pi/issues/19740))
 - Fixed authentication-gateway requests so configured authorization headers are honored regardless of capitalization, with API-key fallback when the header is missing or empty.
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.

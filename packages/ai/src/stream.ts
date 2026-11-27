@@ -696,6 +696,8 @@ function isRetryableUpstreamError(
 	message: string | undefined,
 ): boolean {
 	if (AIError.isAuthRetryableError(error)) return true;
+	// Zen's free tier serves only the OpenCode app: every key 403s identically (#12306).
+	if (AIError.isOpenCodeFreeTierGateMessage(message)) return false;
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex

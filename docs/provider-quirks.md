@@ -1780,6 +1780,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 
 - **Interactive CLI Login Flow**: Declared in `packages/catalog/src/compat/rules/auth/opencode-zen.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`): it opens `https://opencode.ai/auth` in the browser and prompts the user to paste their API key.
 - **Wire Authentication**: Credentials across both Anthropic and OpenAI-compatible protocol endpoints are passed via `X-Api-Key` headers rather than standard Bearer tokens.
+- **Free tier is OpenCode-app-only**: Zen answers free models (`big-pickle`, `*-free`, `*-contributor-free`) from any other client with `403 FreeTierError` ("OpenCode's free tier can only be used from within OpenCode"). `AIError.isOpenCodeFreeTierGateMessage` keeps that refusal out of credential refresh and rotation, so it never blocks a key that still serves paid Zen models, and `formatMessage` prefixes an explanation pointing at `/model` (#12306).
 
 ### Catalog model handling
 

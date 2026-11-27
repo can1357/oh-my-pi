@@ -7,6 +7,7 @@ import {
 	isAccountPolicyError,
 	isClinePassSurfaceGateMessage,
 	isOAuthExpiry,
+	isOpenCodeFreeTierGateMessage,
 	isUsageLimit,
 	status,
 } from "./flags";
@@ -108,6 +109,8 @@ export function isAuthRetryableError(error: unknown): boolean {
 	// A Cline surface-gate 403 is per-model client policy, not a credential
 	// problem: sibling keys fail identically, so rotation only burns them.
 	if (isClinePassSurfaceGateMessage(message)) return false;
+	// Zen's free tier is likewise reserved to the OpenCode app (#12306).
+	if (isOpenCodeFreeTierGateMessage(message)) return false;
 	if (status === 401 || status === 403) return true;
 	return isUsageLimitOutcome(status, message);
 }
