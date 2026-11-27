@@ -7,7 +7,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { MotionMode } from "../config/motion-presets";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ApprovalMode } from "../tools/approval";
-import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
@@ -471,6 +472,14 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		if (!path.isAbsolute(trustedPath)) {
 			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
 		}
+	}
+
+	// A --no-tools session loads no extensions; an explicit one would be silently ignored.
+	if (
+		result.noTools &&
+		((result.extensions?.length ?? 0) > 0 || (result.hooks?.length ?? 0) > 0 || trustedFlagCount > 0)
+	) {
+		throw new CliUsageError("--no-tools cannot be combined with --extension, -e, --hook, or --trusted-extension");
 	}
 
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {

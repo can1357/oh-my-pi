@@ -84,6 +84,13 @@ function metricCandidateKeys(modelId: string): string[] {
 	return keys;
 }
 
+const kResolvedMetrics = Symbol("metrics.resolved");
+
+/** A row tagged with its last {@link CatalogMetricsIndex.resolve} result. */
+interface ResolvedMetricsTagged {
+	[kResolvedMetrics]?: { index: CatalogMetricsIndex; version: number; metrics: CatalogMetrics | undefined };
+}
+
 /**
  * Index of catalog metrics over every scored model seen so far. Built once per
  * discovery cycle by the model registry and per provider by the model manager;
@@ -93,6 +100,8 @@ function metricCandidateKeys(modelId: string): string[] {
 export class CatalogMetricsIndex {
 	#exact = new Map<string, CatalogMetrics>();
 	#canonical = new Map<string, ScoredEntry>();
+	/** Bumped by every {@link add}: a row's memoized resolution holds for one version. */
+	#version = 0;
 
 	constructor(models?: Iterable<Model<Api>>) {
 		if (models) this.add(models);
@@ -104,6 +113,7 @@ export class CatalogMetricsIndex {
 
 	/** Record the metrics of every scored model; later rows fill fields earlier rows left unset. */
 	add(models: Iterable<Model<Api>>): void {
+		this.#version++;
 		for (const model of models) {
 			const metrics = catalogMetricsOf(model);
 			if (!metrics) continue;
@@ -122,6 +132,20 @@ export class CatalogMetricsIndex {
 
 	/** Metrics for `model` by exact id, else by dialect-normalized id when the classified identities agree. */
 	resolve(model: Model<Api>): CatalogMetrics | undefined {
+		// Memoized on the row (rows are immutable; a recomposition meets the same rows again).
+		const memo = (model as Model<Api> & ResolvedMetricsTagged)[kResolvedMetrics];
+		if (memo && memo.index === this && memo.version === this.#version) return memo.metrics;
+		const metrics = this.#resolve(model);
+		// Non-enumerable: a row spread from this one must not carry the memo along.
+		Object.defineProperty(model, kResolvedMetrics, {
+			value: { index: this, version: this.#version, metrics },
+			writable: true,
+			configurable: true,
+		});
+		return metrics;
+	}
+
+	#resolve(model: Model<Api>): CatalogMetrics | undefined {
 		const exact = this.#exact.get(model.id.toLowerCase());
 		if (exact) return exact;
 		const identity = model.identity;

@@ -285,3 +285,22 @@ export interface SnapcompactCompactionStats {
 	tokensBefore: number;
 	tokensAfter: number;
 }
+
+/**
+ * Tool approval prompt lifecycle extracted from `tool_approval_requested` and
+ * `tool_approval_resolved` custom journal entries. Request and resolution can
+ * land in different incremental sync passes and are merged by `(sessionFile, toolCallId)`.
+ */
+export interface ToolApprovalStats {
+	sessionFile: string;
+	toolCallId: string;
+	parentToolCallId?: string;
+	folder: string;
+	toolName: string;
+	approvalMode?: string;
+	requestedAt?: number;
+	requestReason?: string;
+	approved?: boolean;
+	resolvedAt?: number;
+	resolveReason?: string;
+}

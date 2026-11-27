@@ -14,9 +14,9 @@ It covers tool behavior, runner lifecycle, environment handling, execution seman
 - Python wrapper / NDJSON server: `src/eval/py/runner.py`
 - Prelude helpers loaded into every kernel: `src/eval/py/prelude.py`
 - Host-side subagent helper bridge: `src/eval/agent-bridge.ts`
-- Tool output renderer and view splitting: `packages/tui/src/tools/eval.ts`
-- Shared output capture: `packages/tui/src/tools/streaming-output.ts`
-- Interactive-mode renderer for user-triggered Python runs: `packages/tui/src/chat/eval-execution.ts`
+- Tool output renderer and view splitting: `packages/coding-agent/src/ui/tools/eval.tsx`
+- Shared output capture: `packages/coding-agent/src/tools/streaming-output.ts`
+- Interactive-mode renderer for user-triggered Python runs: `packages/coding-agent/src/ui/transcript/exec-run.tsx`
 - Runtime/env filtering and Python resolution: `src/eval/py/runtime.ts`
 
 ## What eval's Python backend is
@@ -159,7 +159,7 @@ Session/bridge context is patched before each cell through `PI_SESSION_FILE`, `P
 
 ## Tool availability and mode selection
 
-The backend settings `eval.py` / `eval.js` default to `true`. Optional boolean environment flags `PI_PY` and `PI_JS` override their corresponding setting independently. `eval.tools.enabled` also defaults to `true`; turning it off removes the `tools` spawn fields and kernel-defined-tool guidance.
+The backend settings `eval.py` / `eval.js` default to `true`. Optional boolean environment flags `PI_PY` and `PI_JS` override their corresponding setting independently. `eval.tools.enabled` defaults to `false`; turning it on adds the `tools` spawn fields and kernel-defined-tool guidance.
 
 The tool's session-scoped schema lists only enabled runtimes. If Python preflight fails while another runtime is enabled, `eval` remains available for that runtime and a `py` call reports a Python-backend availability error with enabled alternatives.
 
@@ -185,7 +185,7 @@ On abort/timeout:
 
 - The host sends `kill("SIGINT")` to the runner subprocess.
 - The runner's exec-time signal handler raises `KeyboardInterrupt` inside the user code.
-- Result includes `cancelled=true`; a kernel timeout is annotated as `eval cell timed out after <n>s; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`
+- Result includes `cancelled=true`; a kernel timeout is annotated as `[timed out after <n>s; kernel interrupted, state kept]`, or `[timed out after <n>s; kernel killed, state gone]` when the kernel ignored the interrupt.
 - Between requests the runner installs `SIG_IGN` for SIGINT so a stray cancel does not tear down the kernel.
 
 If the runner does not emit `done` within 5s of the interrupt (`INTERRUPT_ESCALATION_MS` — e.g. stuck in C code holding the GIL), the host shuts the subprocess down (escalating `exit` → `SIGTERM` → `SIGKILL`), the cell is annotated as kernel-killed, and the kernel is recreated on the next call.
@@ -228,11 +228,11 @@ The runner sets `MPLBACKEND=Agg` as an environ default so figures render off-scr
 
 ### Storage and truncation
 
-Output is streamed through `OutputSink` in `packages/tui/src/tools/streaming-output.ts`. The default inline body budget is 50 KiB shared by retained head and tail, with middle elision and a per-line byte cap (`tools.outputMaxColumns`). Full sanitized text can spill to an uncapped artifact. Tool results include truncation metadata and `local://<id>.log` when persistence succeeds; an artifact I/O failure is reported separately and suppresses that ID.
+Output is streamed through `OutputSink` in `packages/coding-agent/src/tools/streaming-output.ts`. The default inline body budget is 50 KiB shared by retained head and tail, with middle elision and a per-line byte cap (`tools.outputMaxColumns`). Full sanitized text can spill to an uncapped artifact. Tool results include truncation metadata and `local://<id>.log` when persistence succeeds; an artifact I/O failure is reported separately and suppresses that ID.
 
 ### Renderer behavior
 
-- Tool renderer (`packages/tui/src/tools/eval.ts`):
+- Tool renderer (`packages/coding-agent/src/ui/tools/eval.tsx`):
    - shows code-cell blocks with per-cell status
    - collapsed preview defaults to 10 lines
    - supports expanded mode for all output retained in the tool result

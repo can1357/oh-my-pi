@@ -1,4 +1,4 @@
-import type { SpotlightRank, SpotlightReason, SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightRank, SpotlightReason, SpotlightRequestParams } from "../tools/details/spotlight";
 import type { SpotlightClient } from "./client";
 
 /**

@@ -1,6 +1,7 @@
 import { describe, expect, it, type Mock, vi } from "bun:test";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Composer } from "../src/ui/composer/composer";
 type Spy = Mock<(...args: unknown[]) => unknown>;
 
 function createLoopContext(options: {
@@ -25,20 +26,8 @@ function createLoopContext(options: {
 	const pauseLoop = vi.fn(() => {
 		loopPrompt = undefined;
 	});
-	const editor = {
-		pendingImages: [],
-		pendingImageLinks: [],
-		imageLinks: undefined,
-		addToHistory: vi.fn(),
-		setText: vi.fn(),
-		getText: () => "",
-		getExpandedText: () => "",
-		clearDraft: vi.fn(),
-		setCollapsedText: vi.fn(),
-	} as unknown as InteractiveModeContext["editor"];
 	const ctx = {
-		editor,
-		ui: { requestRender: vi.fn() },
+		composer: new Composer(),
 		session: {
 			isStreaming: options.isStreaming,
 			isCompacting: options.isCompacting ?? false,
@@ -60,7 +49,7 @@ function createLoopContext(options: {
 		},
 		setLoopPrompt,
 		pauseLoop,
-		flushPendingBashComponents: vi.fn(),
+		flushPendingExecRuns: vi.fn(),
 		startPendingSubmission: vi.fn((input: { text: string }) => ({ ...input, cancelled: false, started: false })),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
 		updatePendingMessagesDisplay: vi.fn(),
@@ -79,7 +68,6 @@ function createLoopContext(options: {
 	} as unknown as InteractiveModeContext;
 	return {
 		ctx,
-		editor,
 		setLoopPrompt,
 		pauseLoop,
 		prompt,
@@ -91,12 +79,25 @@ function createLoopContext(options: {
 }
 
 describe("loop mode interjections", () => {
+	it("submits prose and expands boundary-delimited emoticons even without a trailing space", async () => {
+		const { ctx, getLoopPrompt } = createLoopContext({ isStreaming: false, onInputCallback: () => {} });
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		// A paste or restored draft bypasses inline expansion; submit must still expand it.
+		ctx.composer.setText("report embedded:D and (:D then :-)");
+		ctx.composer.submit();
+		await controller.waitForSubmissionDispatches();
+		expect(getLoopPrompt()).toBe("report embedded:D and (😃 then 🙂");
+	});
+
 	it("keeps the original loop prompt when steering mid-turn", async () => {
 		const { ctx, setLoopPrompt, prompt, getLoopPrompt } = createLoopContext({ isStreaming: true });
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("one-off correction");
+		ctx.composer.onSubmit?.("one-off correction");
+
+		await controller.waitForSubmissionDispatches();
 
 		// One-off steer reaches the session but must not replace the loop body.
 		expect(prompt).toHaveBeenCalledTimes(1);
@@ -110,7 +111,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("new loop body");
+		ctx.composer.onSubmit?.("new loop body");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("new loop body");
 		expect(onInputCallback).toHaveBeenCalledTimes(1);
@@ -124,7 +127,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("/loop 3 inline loop body");
+		ctx.composer.onSubmit?.("/loop 3 inline loop body");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("inline loop body");
 		expect(getLoopPrompt()).toBe("inline loop body");
@@ -142,7 +147,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("/loop 3 compact loop body");
+		ctx.composer.onSubmit?.("/loop 3 compact loop body");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("compact loop body");
 		expect(getLoopPrompt()).toBe("compact loop body");
@@ -157,7 +164,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("/loop 3 !echo hi");
+		ctx.composer.onSubmit?.("/loop 3 !echo hi");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(handleBashCommand).toHaveBeenCalledWith("echo hi", false);
 		expect(setLoopPrompt).not.toHaveBeenCalled();
@@ -176,7 +185,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("/loop 3 /ext-cmd args");
+		ctx.composer.onSubmit?.("/loop 3 /ext-cmd args");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(queueCompactionMessage).toHaveBeenCalledTimes(1);
 		expect(setLoopPrompt).not.toHaveBeenCalled();
@@ -194,7 +205,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("/loop 3 /void-cmd");
+		ctx.composer.onSubmit?.("/loop 3 /void-cmd");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(setLoopPrompt).not.toHaveBeenCalled();
@@ -208,7 +221,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("/void-cmd");
+		ctx.composer.onSubmit?.("/void-cmd");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(setLoopPrompt).toHaveBeenCalledWith("/void-cmd");
@@ -221,7 +236,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("direct body");
+		ctx.composer.onSubmit?.("direct body");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("direct body");
 		expect(getLoopPrompt()).toBe("direct body");
@@ -239,7 +256,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("/loop 3 new body");
+		ctx.composer.onSubmit?.("/loop 3 new body");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(setLoopPrompt).not.toHaveBeenCalled();
 		expect(pauseLoop).not.toHaveBeenCalled();
@@ -255,7 +274,9 @@ describe("loop mode interjections", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("direct body");
+		ctx.composer.onSubmit?.("direct body");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("direct body");
 		expect(pauseLoop).toHaveBeenCalledTimes(1);

@@ -24,6 +24,7 @@ import type {
 	SessionServiceTierChangeEntry,
 	SessionTypedEntry,
 	SnapcompactCompactionStats,
+	ToolApprovalStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -137,6 +138,71 @@ function extractSnapcompactCompaction(
 	const ts = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
 	if (!Number.isFinite(ts)) return null;
 	return { sessionFile, entryId: id, folder, timestamp: ts, tokensBefore, tokensAfter };
+}
+
+function parseApprovalTimestamp(value: unknown, fallbackEntryTimestamp?: string): number | undefined {
+	if (typeof value === "string") {
+		const parsed = Date.parse(value);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	if (typeof fallbackEntryTimestamp === "string") {
+		const parsed = Date.parse(fallbackEntryTimestamp);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return undefined;
+}
+
+/**
+ * Extract a partial or complete tool approval record from `tool_approval_requested`
+ * or `tool_approval_resolved` custom journal entries.
+ */
+function extractToolApproval(sessionFile: string, folder: string, entry: SessionEntry): ToolApprovalStats | null {
+	if (entry.type !== "custom") return null;
+	if (!("customType" in entry) || typeof entry.customType !== "string") return null;
+	if (entry.customType !== "tool_approval_requested" && entry.customType !== "tool_approval_resolved") {
+		return null;
+	}
+	if (!("data" in entry) || !entry.data || typeof entry.data !== "object" || Array.isArray(entry.data)) {
+		return null;
+	}
+	const data = entry.data as Record<string, unknown>;
+	const entryTimestamp = "timestamp" in entry && typeof entry.timestamp === "string" ? entry.timestamp : undefined;
+	const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId.trim() : "";
+	const rawToolName = typeof data.toolName === "string" ? data.toolName : "";
+	const toolName = sanitizeToolName(rawToolName);
+	if (!toolCallId || !toolName) return null;
+
+	if (entry.customType === "tool_approval_requested") {
+		const parentToolCallId =
+			typeof data.parentToolCallId === "string" && data.parentToolCallId.length > 0
+				? data.parentToolCallId
+				: undefined;
+		const approvalMode =
+			typeof data.approvalMode === "string" && data.approvalMode.length > 0 ? data.approvalMode : undefined;
+		const requestReason = typeof data.reason === "string" && data.reason.length > 0 ? data.reason : undefined;
+		return {
+			sessionFile,
+			toolCallId,
+			parentToolCallId,
+			folder,
+			toolName,
+			approvalMode,
+			requestedAt: parseApprovalTimestamp(data.requestedAt, entryTimestamp),
+			requestReason,
+		};
+	}
+
+	if (typeof data.approved !== "boolean") return null;
+	const resolveReason = typeof data.reason === "string" && data.reason.length > 0 ? data.reason : undefined;
+	return {
+		sessionFile,
+		toolCallId,
+		folder,
+		toolName,
+		approved: data.approved,
+		resolvedAt: parseApprovalTimestamp(data.resolvedAt, entryTimestamp),
+		resolveReason,
+	};
 }
 
 /**
@@ -541,7 +607,7 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 
 /**
  * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
- * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as pi-tui's
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as the coding agent's
  * `isUserTurnInitiator` defines them.
  */
 function startsNewRequest(entry: SessionEntry): boolean {
@@ -625,6 +691,7 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	toolApprovals: ToolApprovalStats[];
 	snapcompactCompactions: SnapcompactCompactionStats[];
 	spotlight: SpotlightParseRows;
 	newOffset: number;
@@ -677,6 +744,7 @@ export async function parseSessionFile(
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
+	const approvalsById = new Map<string, ToolApprovalStats>();
 	const snapcompactCompactions: SnapcompactCompactionStats[] = [];
 	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
 	const callsById = new Map<string, ToolCallStats>();
@@ -694,6 +762,22 @@ export async function parseSessionFile(
 		const compaction = extractSnapcompactCompaction(sessionPath, folder, entry);
 		if (compaction) {
 			snapcompactCompactions.push(compaction);
+			return;
+		}
+		const approval = extractToolApproval(sessionPath, folder, entry);
+		if (approval) {
+			const existing = approvalsById.get(approval.toolCallId);
+			if (existing) {
+				if (approval.parentToolCallId !== undefined) existing.parentToolCallId = approval.parentToolCallId;
+				if (approval.approvalMode !== undefined) existing.approvalMode = approval.approvalMode;
+				if (approval.requestedAt !== undefined) existing.requestedAt = approval.requestedAt;
+				if (approval.requestReason !== undefined) existing.requestReason = approval.requestReason;
+				if (approval.approved !== undefined) existing.approved = approval.approved;
+				if (approval.resolvedAt !== undefined) existing.resolvedAt = approval.resolvedAt;
+				if (approval.resolveReason !== undefined) existing.resolveReason = approval.resolveReason;
+			} else {
+				approvalsById.set(approval.toolCallId, approval);
+			}
 			return;
 		}
 		if (isUserMessage(entry)) {
@@ -788,6 +872,7 @@ export async function parseSessionFile(
 				userLinks: [],
 				toolCalls: [],
 				toolResults: [],
+				toolApprovals: [],
 				snapcompactCompactions: [],
 				spotlight: emptySpotlightRows(),
 				newOffset: fromOffset,
@@ -803,6 +888,7 @@ export async function parseSessionFile(
 		userLinks,
 		toolCalls,
 		toolResults,
+		toolApprovals: [...approvalsById.values()],
 		snapcompactCompactions,
 		spotlight: spotlight.rows,
 		newOffset,

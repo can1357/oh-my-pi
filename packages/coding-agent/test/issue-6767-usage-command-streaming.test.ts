@@ -5,14 +5,15 @@ import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Text } from "@oh-my-pi/pi-tui";
+import { jsx } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 const usageReports: UsageReport[] = [
 	{
@@ -67,9 +68,16 @@ describe("issue #6767 /usage output during streaming", () => {
 		});
 		streaming = true;
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		mode.isInitialized = true;
-		mode.ui.requestRender = vi.fn();
 	});
 
 	afterEach(async () => {
@@ -83,8 +91,7 @@ describe("issue #6767 /usage output during streaming", () => {
 	});
 
 	it("opens the usage dashboard overlay without touching the transcript, even mid-stream", async () => {
-		const streamedReply = new Text("agent is streaming", 0, 0);
-		mode.chatContainer.addChild(streamedReply);
+		const streamedReply = mode.present(() => jsx("text", { text: "agent is streaming" }), { live: true });
 		const showDashboard = vi.fn();
 		mode.showUsageDashboard = showDashboard;
 
@@ -95,12 +102,12 @@ describe("issue #6767 /usage output during streaming", () => {
 		// growing live block is what duplicated in native scrollback (#6767).
 		expect(showDashboard).toHaveBeenCalledTimes(1);
 		expect(showDashboard).toHaveBeenCalledWith(usageReports);
-		expect(mode.chatContainer.children).toEqual([streamedReply]);
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 
 		streaming = false;
 		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
 
 		// Turn end must not flush any deferred usage panel either.
-		expect(mode.chatContainer.children).toEqual([streamedReply]);
+		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 	});
 });

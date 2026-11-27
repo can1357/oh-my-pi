@@ -1,6 +1,6 @@
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
 import { resolveReadPath } from "../../../../tools/path-utils";
-import type { TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { TextReviewSource } from "./annotation-types";
 
 /**
  * Read one regular text file without trimming or otherwise rewriting its bytes.

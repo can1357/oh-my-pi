@@ -27,7 +27,7 @@ import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
+import { slashCommandFrontmatterDisplay } from "../extensibility/inventory/inspector-model";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { settings } from "../config/settings";
 
@@ -38,6 +38,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	mergeLoadResults,
 	resolveUserPath,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -384,10 +385,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	}
 
 	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -472,10 +470,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	}
 
 	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================

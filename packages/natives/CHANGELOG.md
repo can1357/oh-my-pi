@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline HTML rendering or `Reader` for URL reads; interactive terminal browsing is no longer available.
+
+### Added
+
+- Added `renderHtml` for rendering HTML as Markdown or plain text, with automatic reader-content selection by default, a `mode: "full"` option for retaining all visible content, and configurable hidden-content handling.
+- Added `Reader` for step-by-step URL reading through host-provided HTTP and browser I/O, with the same reader-content and hidden-content options as `renderHtml`.
+- Added `analyzeBashApproval(command, dialect?)`, a synchronous Bash 5.3 and Zsh 5.9 AST analyzer for approving `bash` tool commands.
+
+### Fixed
+
+- Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
+- Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
+- Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Shell.heldProcesses()` to inspect all live external processes held by a shell session, including background and `nohup` jobs, with their `nohup` status.
+- Added process utilities for finding processes by inherited environment variables, inspecting process details and output files, and terminating process families while preserving `nohup` processes when requested.
+- Added an in-process Perl 5.34 shell builtin with core language and regex support, common command-line options and modules, and shell-integrated file and command I/O, including support for `scheme://` paths and other shell builtins.
+
+### Fixed
+
+- Fixed timed-out, cancelled, or terminated shell and PTY commands leaving descendant processes running, including descendants in separate process groups or sessions.
+- Fixed cancelled filesystem searches continuing in the background and consuming CPU or blocking subsequent filesystem operations when multiple searches ran concurrently.
+
+## [19.2.0] - 2026-11-25
+
+### Breaking Changes
+
+- Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.
+
+### Added
+
+- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)` for detecting file metadata changes, including atomic saves and symlink retargets.
+- Added `truncateToTokens(input, maxTokens)` for safely truncating text to a token budget without splitting UTF-16 surrogate pairs.
+- Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
+- Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
+- Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
+
+### Changed
+
+- OAuth callback handling now polls for callbacks at regular intervals instead of relying on directory watching.
+- Improved `tail -f` reliability for moved files, symlinks, network drives, and file-watcher failures by combining event-driven updates with polling fallback.
+- Persistent shell sessions no longer carry `set -e` into subsequent commands; other shell options continue to persist.
+- `ShellRunResult` now reports whether a command changed the working directory (`movedCwd`) or left errexit enabled (`errexit`).
+
+### Fixed
+
+- Fixed PTY sessions and child-process cleanup consuming native blocking-pool threads, which could prevent new terminals and other blocking operations from starting after enough terminals were open.
+- Fixed the Linux shell `open` command creating an excessive D-Bus thread pool on first use.
+- Fixed Windows Chromium and Electron captures and accessibility trees incorrectly reporting fully covered windows as current when covered by popup, tool, or click-through windows.
+- Fixed standalone binaries failing to start when the natives directory was read-only or owned by another user despite already containing the extracted addon.
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed
