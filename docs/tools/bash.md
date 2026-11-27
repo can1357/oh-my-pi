@@ -15,7 +15,7 @@
   - `packages/coding-agent/src/tools/bash-worktree-rewrite.ts` — optional `git worktree add` clone rewrite.
   - `packages/coding-agent/src/launch/services.ts` — named-service validation and launch-broker calls.
   - `packages/coding-agent/src/exec/bash-executor.ts` — non-PTY shell execution.
-  - `packages/tui/src/tools/streaming-output.ts` — streaming buffer, truncation, artifact spill.
+  - `packages/coding-agent/src/tools/streaming-output.ts` — streaming buffer, truncation, artifact spill.
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — timeout clamp bounds.
   - `packages/coding-agent/src/exec/settings.ts` — default interceptor rules.
   - `docs/bash-tool-runtime.md` — deeper executor/runtime notes; use as the companion doc for shell-session internals.
@@ -33,7 +33,7 @@
 | `name`    | `string`                                                           | No       | Project-unique supervised service name: 1–48 letters, numbers, dots, underscores, or hyphens, starting with a letter or number. Present only when `launch.enabled` and Bash is active. Blank names select finite-command mode. A live name restarts using the new spec. Incompatible with `async: true` or any supplied `timeout`. |
 | `ready`   | `{ log?: string; port?: number; host?: string; timeout?: number }` | No       | Service readiness requires a nonblank log regex and/or integer TCP port `1..65535`; all supplied conditions must pass. Host defaults to `127.0.0.1`, timeout to 30 seconds (clamped to `0.05..3600`). Without `name`, a nonempty spec is ignored with a notice.                                                                    |
 
-There is no `env` input. Every command and named service also gets `PI_SESSION_ID`, `PI_SESSION_FILE` (the transcript's absolute path, empty when the session is not persisted), and `PI_TOOL_CALL_ID` (the id of the running `bash` call), read when the call starts; see [environment variables](../environment-variables.md#set-by-the-bash-tool). Named services otherwise inherit the configured shell environment; put command-specific assignments in `command`.
+There is no `env` input. Every command and named service also gets `PI_SESSION_ID`, `PI_SESSION_FILE` (the transcript's absolute path, empty when the session is not persisted), and `PI_TOOL_CALL_ID` (the id of the running `bash` call), read when the call starts; see [environment variables](../environment-variables.md#set-for-session-commands). Named services otherwise inherit the configured shell environment; put command-specific assignments in `command`.
 
 Without `name`, `pty`, or a client terminal, commands run in the embedded bash engine (bash 5.3 semantics), even when `shellPath` points to PowerShell or another external shell. `shellPath` selects the external shell for named services, supported terminal routes, and interactive `!` commands; a bash path may still supply environment and rc snapshots to the embedded session. To use PowerShell syntax in a plain tool call, invoke `pwsh -Command '...'` explicitly, quoting so the embedded shell preserves PowerShell's `$` variables.
 
@@ -52,9 +52,13 @@ Named service example:
 The embedded shell resolves a command name in order: the engine's own bash 5.3 builtins, then pi's shell tools, then pi's in-process utilities, then mounted tool commands, then `PATH`. A name containing a slash is never a builtin, and `type`/`command -v` report the in-process utilities as shell builtins.
 
 - Engine builtins are bash 5.3's own: `alias`, `cd`, `command`, `coproc`, `declare`/`typeset`, `echo`, `eval`, `exec`, `export`, `fc`, `getopts`, `history`, `jobs`, `kill`, `let`, `local`, `mapfile`/`readarray`, `printf`, `pwd`, `read`, `readonly`, `set`, `shopt`, `source`, `test`, `times`, `trap`, `type`, `ulimit`, `umask`, `unset`, `wait`, and the rest of the builtin table. `suspend` is withheld (`suspend: not available in this shell`, status `1`); `exec` never replaces pi's process, and its fd-only form (`exec 3>&1`, `exec >log`) changes only the shell's own descriptors. `complete`, `compopt`, and `bind` are accepted no-ops.
-- pi's shell tools run their operands in subshells: `timeout`, `nohup`, `git` (when `PI_SMART_GIT`/`PI_GIT_GUARD` layers are on), and the utilities that run command lines (`direnv exec`, `entr`, `env`, `flock`, `ifne`, `watchexec`, `xargs`, `find -exec`).
+- pi's shell tools run their operands in subshells: `time` (with options), `timeout`, `nohup`, `git` (when `PI_SMART_GIT`/`PI_GIT_GUARD` layers are on), and the utilities that run command lines (`direnv exec`, `entr`, `env`, `flock`, `ifne`, `watchexec`, `xargs`, `find -exec`, `fd -x`/`-X`/`-l`).
 - pi's in-process utilities replace the matching external binaries: `ast-grep`/`sg`, `awk`, `b2sum`, `base32`, `base64`, `basename`, `cat`, `chmod`, `cksum`, `cmp`, `column`, `combine`, `comm`, `cp`, `cut`, `date`, `dd`, `df`, `diff`, `dirname`, `du`, `errno`, `fd`, `file`, `find`, `fold`, `fswatch`, `grep`, `head`, `hostname`, `id`, `ifne`, `isutf8`, `jq`, `ln`, `ls`, `md5`, `md5sum`, `mkdir`, `mktemp`, `mv`, `nl`, `nproc`, `od`, `open`, `paste`, `printenv`, `readlink`, `realpath`, `rg`, `rm`, `rmdir`, `rsync`, `say`, `sd`, `sed`, `seq`, `sha1sum`, `sha224sum`, `sha256sum`, `sha384sum`, `sha512sum`, `shasum`, `sort`, `sponge`, `stat`, `strings`, `tac`, `tail`, `tar`, `tee`, `touch`, `tr`, `truncate`, `ts`, `uname`, `uniq`, `uptime`, `wc`, `which`, `whoami`, `xargs`, `xdg-open`, `yes`. `chmod`, `errno`, and `id` are Unix-only; `tar` needs a Unix or Windows target; `ast-grep`, `fd`, `find`, `grep`, `rg` are awaited natively so cancellation stops the work.
 - pi's process builtins are `ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`, and `lsof` (Linux, macOS, Windows); they buffer output and are never gated off.
+
+When `sleep`, `yes` or `timeout` runs on its own with `&`, it uses the executable of the same name on `PATH` if available, so `$!` works with OS tools such as `ps`. The executable uses its own options and cannot invoke shell-local functions; every other in-process utility stays in-process under `&`. With no executable the job stays in-process and keeps a shell-only PID. `nohup cmd &` keeps pi's `nohup`, which detaches `cmd` from cancellation and session teardown; its `$!` is already `cmd`'s pid when `cmd` is an external program. Foreground resolution and background compound commands are unchanged. On Windows, GNU-style invocations are not redirected to incompatible System32 programs such as `timeout.exe`.
+
+`time` followed by an option other than a lone `-p` (`time -l cmd`, `time -v cmd`, `time -p -l cmd`) is pi's `time` utility rather than bash's keyword, where bash would fail running a command named `-l`; `command time` and `env time` reach it too. It runs `cmd`, then writes the report to its own stderr, so `time -l cmd 2>&1 | grep 'maximum resident'` reads it. `-l` adds macOS `/usr/bin/time -l`'s resource lines (maximum resident set size in bytes, page reclaims and faults, block I/O, context switches; on macOS also instructions retired, cycles and peak memory footprint), `-p` prints the POSIX layout, and `-v` prints GNU time's verbose report (sizes in kbytes). The figures are those of the external programs `cmd` waited for, including the stages of its pipelines and nested shells; in-process builtins and functions count toward the real time only. Options it lacks (`-o`, `-f`) go to `PATH`'s `time`. `time` alone and `time -p` stay bash's keyword, which reports a pipeline's real, user and system time on the shell's stderr.
 
 For a checked literal edit, use `sd -F --expect 3 -U 2 'oldName' 'newName' file.ts`. `--expect` checks the number of matches **per input**, before any `-n` limit; a count mismatch exits nonzero without writing any file. `-U 2` prints the applied unified diff with two lines of context. No change prints nothing; binary changes print a filename notice. `-U` requires file operands and cannot be combined with `--preview`.
 
@@ -97,12 +101,13 @@ The tool returns a `text` content block plus optional `details` and image blocks
   - `details.timedOut: true`: present on local, PTY, and client-terminal timeout results.
   - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
   - `details.meta.minimized`: present when the shell minimizer's text replaced the output; `{ filter, inputBytes, outputBytes, artifactId }` names the native filter (`chain` for a minimized `&&`/`;` chain), the raw and minimized byte counts, and the `bash-original` artifact holding the raw capture.
-  - non-zero exits and timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
+  - non-zero exits and timeouts return a tool result marked `isError`; definite non-zero output ends with `[exit code <n>]`.
 - Success, background start (`async: true` or auto-background):
-  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice` in `packages/tui/src/tools/bash.ts`), so the model sees the job's deadline before it waits on the result. The deadline counts from job start, so an auto-backgrounded command has already spent its foreground wait.
+  - `content[0].text`: optional preview tail and notices, followed by `[backgrounded as <id>, killed at <n>s total; …]` — `no deadline` under `timeout: 0`, `(<reason>)` after the id when a steer or approval prompt backgrounded it early — and the no-polling instruction (`formatBackgroundNotice` in `packages/coding-agent/src/tools/details/bash.ts`), so the model sees the job's deadline before it waits on the result. The deadline counts from job start, so an auto-backgrounded command has already spent its foreground wait.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
   - `read proc://` lists owned jobs and project services; `read proc://<id>` inspects status/output without consuming result delivery; `write proc://<id>/kill` with empty `content` cancels the job.
 - Success, named service (`name`): executes `command` through the user's shell under the launch broker, returning readiness, exit, or readiness timeout with state and log tail. A live name is stopped and restarted with the new spec; exit notifications still auto-deliver. `read proc://<name>` inspects status/logs; `write proc://<name>` sends stdin (appends Enter unless content already ends with newline, including empty content); `write proc://<name>/kill` stops it. `write proc://<name>/mode` accepts `persist`, `session`, or `detached`.
+- `o2ctl services` shell command (embedded shell, while services can launch): `o2ctl services add <name> <pid|%job>` keeps a process the command already started (`cmd &`, `nohup cmd &`) as service `<name>` without restarting it; its output is the regular file its stdout (else stderr) writes to, when it has one. `o2ctl services ls` lists the project's services and `o2ctl services stop <name>` stops one. See [bash-tool-runtime](../bash-tool-runtime.md#the-o2ctl-services-shell-command).
 - Background progress / completion:
   - delivered through `onUpdate` / async job manager, not the initial return.
   - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
@@ -117,7 +122,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
 - Failure:
   - cancellation, missing exit status, validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`; timeouts return an error result.
 
-Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
+Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `[exit code <n>]`.
 
 ## Command policy and dedicated-tool routing
 
@@ -173,6 +178,8 @@ bashInterceptor:
 An interceptor rule only applies when its `tool` is available in the current session. If `read` is disabled, a `cat` rule targeting `read` does not block the Bash call. This makes the interceptor a best-effort capability preference rather than an execution-security boundary.
 
 The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list. Project and `--config` overlay `bashInterceptor.patterns` entries are prepended ahead of the global list (or `DEFAULT_BASH_INTERCEPTOR_RULES` when the global config leaves `bashInterceptor.patterns` unset). A global list of only path-scoped entries keeps the built-in rules after its own, so prepending onto it keeps them too.
+
+The Perl rule looks for `-i` in the interpreter's leading switches, including clusters such as `-lpi`. Perl program text, script arguments, and operands after `--` do not count as switches.
 
 For compatibility with existing custom regexes, the interceptor always checks the complete original command first. It then checks raw, flat command fragments separated by unquoted and unescaped `&&`, `||`, `;`, `|`, `&`, or newlines. It also checks fragments after leading environment assignments are removed:
 
@@ -272,6 +279,7 @@ Choose the setting by the desired outcome:
 - Background work / cancellation
   - Async and auto-background jobs continue after the initial tool return, until completion, cancellation, or their deadline (unless `timeout: 0` disabled it).
   - Cancellation aborts the native run; PTY overlay dismissal also kills the PTY.
+  - Every run carries `OMP_BASH_SESSION=<session id>`, inherited by everything it starts, even across reparenting and `setsid`; since macOS hides the environment of Apple-signed binaries, the externals the session's shells still hold (`Shell.heldProcesses()`) count as its processes too. A process is `nohup` when it ignores SIGHUP (the system `nohup`) or the shell's own `nohup` started it (which leaves SIGHUP unmasked; the held process records it). With `bash.reapBackground` on (default; forced off in RPC mode), processes a call leaves running (`cmd &`, `(cmd &)`, `nohup cmd &`) that are neither a running bash call's nor a service's are listed to the main agent in a reminder when it stops (each process once, kind `&` or `nohup`), asking it to register them with `o2ctl services add <name> <pid>` or kill them. At session end the `&` ones are SIGKILLed with their whole process tree; `nohup`'d processes and everything under them are never killed (`src/exec/session-processes.ts`, `src/session/leftover-processes.ts`).
 
 ## Limits & Caps
 
@@ -280,7 +288,7 @@ Choose the setting by the desired outcome:
 - Positive timeout clamp: `tools.maxTimeout` is an optional global ceiling (`0` means no global ceiling), followed by the Bash `1..3600s` range.
 - Auto-background default threshold: `60_000ms` (`cfgBashAutoBackgroundThresholdMs`, `bash.autoBackground.thresholdMs`, in `packages/coding-agent/src/exec/settings.ts`), further capped to `max(0, timeoutMs - 1000)` when a deadline exists; a disabled deadline leaves the threshold uncapped.
 - Non-PTY tool execution passes its positive timeout to the native run, which owns deadline enforcement. A host-side watchdog waits `max(1_000, timeoutMs) + 5_000ms` for native cancellation/output draining; if it wins, the result warns that output may be incomplete and quarantines the persistent session. `timeout: 0` arms neither deadline nor watchdog (`packages/coding-agent/src/exec/bash-executor.ts`).
-- Streaming-update tail cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`). The local executor's result sink defaults to the same byte budget and preserves an initial head window (`tools.artifactHeadBytes`, default 20 KiB) alongside the rolling tail; set that setting to `0` for tail-only retention.
+- Streaming-update tail cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/tools/streaming-output.ts`). The local executor's result sink defaults to the same byte budget and preserves an initial head window (`tools.artifactHeadBytes`, default 20 KiB) alongside the rolling tail; set that setting to `0` for tail-only retention.
 - Result postprocessing uses `tools.artifactSpillThreshold` (default 50 KiB) and head/tail windows (both default 20 KiB). The final Bash boundary also applies the spill threshold plus 2 KiB of notice slack. `tools.outputMaxColumns` defaults to a 768-byte per-line cap for streaming output.
 - Streaming callback throttle in `executeBash()`: `50ms` between `onChunk` calls when streaming is enabled.
 - `notify` (`packages/coding-agent/src/async/notify.ts`): a 200 ms batching window; `50` lines per notice, each cut to 400 characters, further matches only counted; blank lines never match. A job may send `30` notices in quick succession and regains one every 20 s, as its deadline ends it; a service, which has no deadline, gets `30` per start and regains none. The notice that spends the last one is marked `stopped` and no later match is reported, while the process keeps running. Starting a service again re-arms it.
@@ -299,8 +307,8 @@ Choose the setting by the desired outcome:
 - Internal URL filesystem:
   - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable schemes, non-write mutations (`rm`, `mkdir`, …) of handler-owned schemes, and `out://` writes when `out.enabled` is off `EROFS`, appends to replace-only handler URLs and non-UTF-8 handler payloads `EINVAL`, oversize `out://` replies `EFBIG`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
 - Execution:
-  - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
-  - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
+  - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `[exit code <n>]`.
+  - missing exit code -> thrown `ToolError` with `[missing exit status]`.
   - timeout -> local, PTY, and client-terminal execution return an `isError` result with `details.timedOut: true` and a timeout notice. Managed background execution records it as a failed job.
   - user abort -> `ToolAbortError` when the caller signal is aborted.
 - Artifact allocation/save failures in `saveBashOriginalArtifact()` do not fail the command. Sink artifact failures also permit execution to continue, but return `artifactError` metadata and an incomplete-capture notice instead of advertising an incomplete artifact as full output.
@@ -318,7 +326,7 @@ Choose the setting by the desired outcome:
   - `find|fd|locate` with name/type/glob flags -> `glob`
   - `sed -i`, `perl -i`, `awk -i inplace` -> `edit`
   - `echo|printf|cat` whose stdout goes to a file (`echo x > f`, `cat > f`, `cat 2>err > f`, `cat <<EOF > f`) -> `write`; redirects of other fds (`2>err.log`), fd duplication, `/dev` sinks and redirects after `;`, `&&`, `|` or a newline do not count
-- PTY mode is ignored in non-UI contexts and when `PI_NO_PTY=1` (gated by `canUseInteractiveBashPty()`); the tool falls back to non-PTY execution and appends a `pty requested but unavailable in this environment; ran without a terminal` notice.
+- PTY mode is ignored in non-UI contexts and when `PI_NO_PTY=1` (gated by `canUseInteractiveBashPty()`); the tool falls back to non-PTY execution and appends a `[pty unavailable; ran without]` notice.
 - Non-PTY runs layer `NON_INTERACTIVE_ENV` via `buildNonInteractiveEnv()`; PTY runs instead get the shell spawn environment (`getShellConfig().env`) minus `GIT_EDITOR`, `GPG_TTY`, `CI`, and `NO_COLOR`, then `TERM=xterm-256color`, then any direnv-provided values, which win.
 - When the shell minimizer rewrites output inside `executeBash()`, the visible output is replaced with minimized text and a `[raw output: local://<id>.log]` footer may be appended if `onMinimizedSave` persisted the original text.
 - For executor internals that are not tool-specific — shell session reuse keys, snapshots, prefix handling, and native timeout behavior — see `docs/bash-tool-runtime.md`.

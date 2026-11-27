@@ -4,7 +4,6 @@
 use std::{
 	borrow::Cow,
 	collections::{BTreeSet, HashMap},
-	path::Path,
 	sync::Arc,
 };
 
@@ -28,7 +27,7 @@ use super::{
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
-	engine::{FileOp as EngineFileOp, HeaderKind, Resolved, StagedFile},
+	engine::{FileOp as EngineFileOp, HeaderKind, Location, Resolved, StagedFile},
 	error::{EditError, Rejection},
 	files::FileSource,
 	store::{Clipboard, EditStore, Snapshot, file_hash, payload_hash},
@@ -100,7 +99,7 @@ fn has_anchor_scoped_edit(edits: &[Edit]) -> bool {
 
 pub(crate) fn mismatch(
 	section: &PatchSection,
-	canonical: &Path,
+	canonical: &Location,
 	normalized: &str,
 	expected: &str,
 	store: &EditStore,
@@ -132,12 +131,12 @@ pub(crate) fn mismatch(
 
 /// Paths other than `canonical` this session issued `tag` for, sorted and
 /// deduplicated (the store lists one entry per retained version).
-fn tag_origin_paths(store: &EditStore, canonical: &Path, tag: &str) -> Vec<String> {
+fn tag_origin_paths(store: &EditStore, canonical: &Location, tag: &str) -> Vec<String> {
 	let mut paths: Vec<String> = store
 		.paths_with_hash(tag)
 		.into_iter()
 		.filter(|path| path != canonical)
-		.map(|path| path.to_string_lossy().into_owned())
+		.map(|path| path.display().into_owned())
 		.collect();
 	paths.sort();
 	paths.dedup();
@@ -359,7 +358,7 @@ fn body_targets(body: &[String], current_lines: &[&str], first: u32, last: u32) 
 fn rescue_shifted_anchors(
 	section: &PatchSection,
 	store: &EditStore,
-	canonical: &Path,
+	canonical: &Location,
 	current_text: &str,
 	unseen: &[u32],
 ) -> Result<Vec<u32>, EditError> {
@@ -436,7 +435,7 @@ fn assert_seen_lines(
 	section: &PatchSection,
 	blocks: &[BlockResolution],
 	expected: &str,
-	canonical: &Path,
+	canonical: &Location,
 	store: &EditStore,
 	text: &str,
 	current: Option<&str>,
@@ -553,7 +552,7 @@ fn stale_unseen_rejection(
 	unseen: &[u32],
 	guarded: &[u32],
 	expected: &str,
-	canonical: &Path,
+	canonical: &Location,
 	store: &EditStore,
 	text: &str,
 	current: &str,
@@ -592,7 +591,7 @@ fn stale_unseen_rejection(
 /// records) stays so.
 fn record_reply_provenance(
 	store: &EditStore,
-	canonical: &Path,
+	canonical: &Location,
 	text: &str,
 	displayed: impl FnOnce() -> Vec<u32>,
 ) -> String {
@@ -611,7 +610,7 @@ fn record_reply_provenance(
 /// (see [`crate::session::SessionConfig::max_columns`]); `None` disables it.
 pub(crate) fn apply_with_recovery(
 	section: &PatchSection,
-	canonical: &Path,
+	canonical: &Location,
 	normalized: &str,
 	edits: &[Edit],
 	clipboard: &mut Clipboard,
@@ -629,7 +628,7 @@ pub(crate) fn apply_with_recovery(
 		if !origins.is_empty() {
 			return Err(tag_from_other_file_error(
 				&section.path,
-				&canonical.to_string_lossy(),
+				&canonical.display(),
 				expected,
 				&origins,
 			));
@@ -673,7 +672,7 @@ pub(crate) fn apply_with_recovery(
 		}
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),
-			path:           Some(canonical.to_string_lossy().as_ref()),
+			path:           Some(canonical.display().as_ref()),
 			on_empty_paste: EmptyPaste::Throw,
 		})?;
 		result.block_resolutions = block_resolutions;
@@ -689,7 +688,7 @@ pub(crate) fn apply_with_recovery(
 	if !has_anchor_scoped_edit(&resolved) {
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),
-			path:           Some(canonical.to_string_lossy().as_ref()),
+			path:           Some(canonical.display().as_ref()),
 			on_empty_paste: EmptyPaste::Throw,
 		})?;
 		resolve_warnings.push(HEADTAIL_DRIFT_WARNING.to_owned());
@@ -753,29 +752,28 @@ fn format_block_resolution(resolution: &BlockResolution) -> String {
 	format!("{op} → resolved {span} ({lines} line{}){suffix}", if lines == 1 { "" } else { "s" })
 }
 
-/// When the authored path does not exist but exactly one file this session
-/// read has the same name and tag: rebind the section onto it when it lies in
-/// the session's sandbox
-/// ([`crate::path_policy::PathPolicy::allow_tag_path_recovery`]), else reject
-/// with its path, since a same-named working-tree file may be another checkout'
-/// s copy. `Ok(None)` keeps the authored section and target.
+/// Rebind a missing disk path to the unique local snapshot with its tag and
+/// name when the replacement is inside the session's sandbox. Otherwise,
+/// report the other path without rebinding.
 pub(crate) fn recover_target(
 	section: &PatchSection,
 	initial: &Resolved,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Result<Option<(PatchSection, Resolved)>, EditError> {
-	if files.exists(&initial.absolute) {
+	let Location::Disk(initial_path) = &initial.location;
+	if files.exists(&initial.location) {
 		return Ok(None);
 	}
 	let Some(tag) = section.file_hash.as_deref() else {
 		return Ok(None);
 	};
-	let authored_name = initial.absolute.file_name();
+	let authored_name = initial_path.file_name();
 	let mut candidates = store
 		.paths_with_hash(tag)
 		.into_iter()
-		.filter(|path| path.file_name() == authored_name && *path != initial.absolute)
+		.map(|Location::Disk(path)| path)
+		.filter(|path| path.file_name() == authored_name && path != initial_path)
 		.collect::<Vec<_>>();
 	candidates.sort();
 	candidates.dedup();
@@ -786,7 +784,10 @@ pub(crate) fn recover_target(
 	if !files.policy().allow_tag_path_recovery(&section.path, path) {
 		return Err(tag_path_missing_error(&section.path, &display, tag));
 	}
-	Ok(Some((section.with_path(&display), Resolved { absolute: path.clone(), display })))
+	Ok(Some((section.with_path(&display), Resolved {
+		location: Location::Disk(path.clone()),
+		display,
+	})))
 }
 /// Stage a whole-file delete for a target whose bytes cannot be decoded:
 /// existence is proven, but there is no content to diff or snapshot.
@@ -800,14 +801,14 @@ fn undecodable_delete_staged(
 	original_path: &str,
 	tag: &str,
 	mut warnings: Vec<String>,
-	canonical_paths: &mut HashMap<std::path::PathBuf, String>,
+	canonical_paths: &mut HashMap<Location, String>,
 	clipboard: &Clipboard,
 ) -> Result<StagedFile, EditError> {
 	if section.path != original_path {
 		warnings.push(path_recovered_from_tag_message(original_path, &section.path, tag));
 	}
-	if let Some(previous) = canonical_paths
-		.insert(crate::path_policy::canonical_key(&resolved.absolute), original_path.to_owned())
+	if let Some(previous) =
+		canonical_paths.insert(resolved.location.canonical_key(), original_path.to_owned())
 	{
 		return Err(EditError::apply(format!(
 			"Multiple hashline sections resolve to the same file ({previous} and {original_path}). \
@@ -815,7 +816,7 @@ fn undecodable_delete_staged(
 		)));
 	}
 	let mut item =
-		StagedFile::new(section.path.clone(), resolved.absolute.clone(), EngineFileOp::Delete);
+		StagedFile::new(section.path.clone(), resolved.location.clone(), EngineFileOp::Delete);
 	item.header = HeaderKind::HashlineTag;
 	item.warnings = warnings;
 	item.record_snapshot = true;
@@ -843,7 +844,7 @@ pub fn stage_patch(
 	let seen_line_guard = enforce_seen_lines.then_some(max_columns);
 	let mut clipboard = store.start_clipboard_batch();
 	let mut staged = Vec::with_capacity(patch.sections.len());
-	let mut canonical_paths = HashMap::<std::path::PathBuf, String>::new();
+	let mut canonical_paths = HashMap::<Location, String>::new();
 	let mut replies = Vec::new();
 	for original in &patch.sections {
 		match stage_section(
@@ -871,7 +872,7 @@ pub fn stage_patch(
 		return Err(EditError::rejected(Rejection::UnseenLines, replies.join("\n\n")));
 	}
 	if let Some(item) = staged.iter_mut().find(|item| item.op == EngineFileOp::Noop) {
-		let canonical = crate::path_policy::canonical_key(&item.absolute);
+		let canonical = item.location.canonical_key();
 		let (count, escalate) = store.record_noop(&canonical, payload_hash(raw_input));
 		let [only] = patch.sections.as_slice() else {
 			return Err(EditError::rejected(
@@ -901,7 +902,7 @@ fn stage_section(
 	files: &mut dyn FileSource,
 	store: &EditStore,
 	clipboard: &mut Clipboard,
-	canonical_paths: &mut HashMap<std::path::PathBuf, String>,
+	canonical_paths: &mut HashMap<Location, String>,
 ) -> Result<StagedFile, EditError> {
 	let parsed = parse_with_range_diagnostics(original, files)?;
 	let tag = original.file_hash.as_deref();
@@ -920,7 +921,7 @@ fn stage_section(
 	};
 	let Some(read) = read else {
 		if let Some(tag) = undecodable_delete
-			&& files.exists(&resolved.absolute)
+			&& files.exists(&resolved.location)
 		{
 			return undecodable_delete_staged(
 				section,
@@ -951,7 +952,7 @@ fn stage_section(
 	}
 	if let Some(FileOp::Move { dest }) = &parsed.file_op {
 		let destination = files.resolve(dest, false)?;
-		if crate::path_policy::canonical_key(&destination.absolute) == read.canonical {
+		if destination.location.canonical_key() == read.canonical {
 			return Err(EditError::apply(format!("MV destination is the same as {}.", section.path)));
 		}
 	}
@@ -995,7 +996,7 @@ fn stage_section(
 	} else {
 		Some(read.persist(&apply.text)?)
 	};
-	let mut item = StagedFile::new(section.path.clone(), read.resolved.absolute.clone(), engine_op);
+	let mut item = StagedFile::new(section.path.clone(), read.resolved.location.clone(), engine_op);
 	item.move_to = move_to;
 	item.before_raw = Some(read.raw.clone());
 	item.before.clone_from(&read.text);
@@ -1075,7 +1076,7 @@ mod lifecycle {
 	use tempfile::TempDir;
 
 	use crate::{
-		EditMode, EditResult, EditWriter, WriteRequest, WriteResponse,
+		EditMode, EditResult, EditWriter, Location, WriteRequest, WriteResponse,
 		path_policy::{PathPolicy, canonical_key},
 		session::{ApplyRequest, Session, SessionConfig},
 		store::EditStore,
@@ -1144,11 +1145,15 @@ mod lifecycle {
 		fn read(&self, file: &str, seen: &[u32]) -> String {
 			self
 				.store
-				.record(&self.canonical(file), &self.text(file), Some(seen))
+				.record(&Location::Disk(self.canonical(file)), &self.text(file), Some(seen))
 		}
 
 		fn head_tag(&self, file: &str) -> String {
-			self.store.head(&self.canonical(file)).unwrap().hash
+			self
+				.store
+				.head(&Location::Disk(self.canonical(file)))
+				.unwrap()
+				.hash
 		}
 
 		/// A resumed process: the on-disk tag still matches, read provenance is
@@ -1451,7 +1456,7 @@ mod lifecycle {
 			assert_eq!(ctx.text("wide.txt"), original);
 		}
 		ctx.store
-			.record_seen_lines(&ctx.canonical("wide.txt"), &tag, &[1]);
+			.record_seen_lines(&Location::Disk(ctx.canonical("wide.txt")), &tag, &[1]);
 		let full = original.replace("note:", "NOTE:");
 		ctx.edit(&format!("[wide.txt#{tag}]\nPUT 1.=1:\n+{wide}\n").replace("note:", "NOTE:"))
 			.await

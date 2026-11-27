@@ -175,8 +175,12 @@ behavior {
 	exclude-models provider="xiaomi-token-plan-cn" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
 	// Text-chat transports cannot serve StepFun's audio-only and image-editing
-	// SKUs, which its /v1/models roster interleaves with the chat models.
-	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
+	// SKUs, which its /v1/models roster interleaves with the chat models, nor
+	// `dr-search-api`, the roster entry for its standalone web search service
+	// (`POST /v1/search`, platform.stepfun.com/docs/zh/api-reference/search/search),
+	// which is not a chat model.
+	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large" \
+		exact="dr-search-api"
 	// Helmcode's /v1/models roster lists embedding, rerank, TTS, and STT models
 	// beside the chat models (helmcode.com/docs/models).
 	exclude-models provider="helmcode" exact="qwen3-embedding" exact="rerank" exact="kokoro" exact="whisper"
@@ -487,6 +491,8 @@ behavior {
 		model "kimi-k3"
 		model "moonshotai/kimi-k3"
 		model "k3"
+		model "zai/glm-5.4"
+		model "glm-5.4"
 		model "zai/glm-5.3"
 		model "glm-5.3"
 		model "anthropic/claude-opus-5-5"
@@ -537,12 +543,16 @@ behavior {
 		model "xai-oauth/grok-tts"
 	}
 	role-defaults "dictation" {
-		model "local/parakeet-tdt-0.6b-v3"
+		model "local/fluid-speech-pro"
 	}
 	// Pinned: TypeSafe's `jev-latest` alias moves only after a release ships (jev-1.14.0 shipped 2026-10-14; the alias moved 2026-10-22).
 	role-defaults "judge" {
 		model "typesafe/jev-1.14.0"
+		// OpenCode's limited-time free Jev, for Go and Zen logins.
+		model "opencode-go/jev-1.13-free"
+		model "opencode-zen/jev-1.13-free"
 		model "openrouter/typesafe/jev-1.14"
+		model "opencode-zen/jev-1.14"
 		model "@tiny"
 		model "@smol"
 		model "@default"

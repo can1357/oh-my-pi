@@ -58,9 +58,9 @@ import * as path from "node:path";
 import type { ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { getAuthBrokerTokenFilePath } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { getAgentDbPath, getAuthBrokerSnapshotCachePath, getConfigRootDir } from "@oh-my-pi/pi-utils";
-import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "./path-utils";
+import { isReadableUrlPath, splitPathAndSel } from "./details/read";
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import {
 	append,

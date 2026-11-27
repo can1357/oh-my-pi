@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed unused public configuration exports from @oh-my-pi/pi-mnemopi/config.
+
 ## [19.1.0] - 2026-11-21
 
 ### Fixed

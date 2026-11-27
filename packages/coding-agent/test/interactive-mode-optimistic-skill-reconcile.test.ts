@@ -12,17 +12,16 @@ import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
-import { PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { isSettled } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
-
-const WIDTH = 80;
+import type { TranscriptBlock } from "../src/ui/shell";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 function skillMessage(timestamp: number): AgentMessage {
 	return {
@@ -36,17 +35,14 @@ function skillMessage(timestamp: number): AgentMessage {
 	} as AgentMessage;
 }
 
-/** The transcript's skill blocks (each wraps its card for extension presenters). */
-function skillCards(mode: InteractiveMode): PresentedBlock<SkillMessageComponent>[] {
-	return mode.chatContainer.children.filter((child): child is PresentedBlock<SkillMessageComponent> => {
-		return child instanceof PresentedBlock && child.inner instanceof SkillMessageComponent;
+/** The transcript's skill blocks. */
+function skillCards(mode: InteractiveMode): TranscriptBlock[] {
+	return mode.shell.transcript.blocks().filter(block => {
+		const entry = mode.transcriptEntry(block);
+		return entry?.kind === "message" && "customType" in entry.message
+			? entry.message.customType === SKILL_PROMPT_MESSAGE_TYPE
+			: false;
 	});
-}
-
-/** Force every settled block to commit into immutable scrollback. */
-function retireToScrollback(mode: InteractiveMode): void {
-	const batch = mode.chatContainer.peekFlushBatch(WIDTH);
-	if (batch) mode.chatContainer.acknowledgeFinalizedBatch(batch.id);
 }
 
 describe("InteractiveMode optimistic skill reconcile (#11217)", () => {
@@ -70,22 +66,24 @@ describe("InteractiveMode optimistic skill reconcile (#11217)", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
-		// The test drives reconcile directly and never starts the mode; keep the
-		// git branch watcher off so it does not leak an fs.watch into sibling files.
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	beforeEach(() => {
-		mode.chatContainer.clear();
-		vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
+		mode.shell.transcript.clear();
+		vi.spyOn(mode, "ensureWorkingRow").mockImplementation(() => {});
 	});
 
 	afterAll(async () => {
-		// No mode.stop(): the mode was never started, and stop() persists the
-		// composer status through the native VCS status line — unrelated to the
-		// reconcile contract under test.
+		mode.stop();
 		await session.dispose();
 		authStorage.close();
 		tempDir.removeSync();
@@ -95,48 +93,43 @@ describe("InteractiveMode optimistic skill reconcile (#11217)", () => {
 	it("keeps the optimistic row live so a retirement pass cannot commit it before reconcile", () => {
 		mode.renderOptimisticSkillMessage(skillMessage(1));
 		const [card] = skillCards(mode);
-		expect(card?.inner).toBeInstanceOf(SkillMessageComponent);
-		// Unfinalized while pending: the transcript keeps it removable.
-		expect(card!.isTranscriptBlockFinalized()).toBe(false);
-
-		// A retirement pass at submit time offers nothing (nothing settled), so
-		// the row stays removable and reconcile can swap it out cleanly.
-		retireToScrollback(mode);
-		expect(mode.chatContainer.canRemoveBlock(card!)).toBe(true);
+		expect(card).toBeDefined();
+		// Unsettled while pending: only settled blocks retire into scrollback, so it stays removable.
+		expect(isSettled(card!.node)).toBe(false);
 
 		mode.reconcileOptimisticSkillMessage(skillMessage(2));
-		expect(skillCards(mode)).toHaveLength(1);
+		const cards = skillCards(mode);
+		expect(cards).toHaveLength(1);
+		expect(cards[0]).not.toBe(card);
 	});
 
 	it("adopts the optimistic row in place instead of duplicating it when it already retired", () => {
 		mode.renderOptimisticSkillMessage(skillMessage(1));
 		const [card] = skillCards(mode);
-		expect(card?.inner).toBeInstanceOf(SkillMessageComponent);
+		expect(card).toBeDefined();
 
-		// Residual race: the row finalized and retired into immutable scrollback
-		// before the canonical message_start arrived.
-		card!.inner.markTranscriptBlockFinalized();
-		retireToScrollback(mode);
-		expect(mode.chatContainer.canRemoveBlock(card!)).toBe(false);
+		// Residual race: the row reached immutable scrollback before the canonical message_start arrived.
+		vi.spyOn(mode.shell.transcript, "retired").mockImplementation(block => block === card);
 
-		mode.reconcileOptimisticSkillMessage(skillMessage(2));
+		const canonical = skillMessage(2);
+		mode.reconcileOptimisticSkillMessage(canonical);
 
 		const cards = skillCards(mode);
 		expect(cards).toHaveLength(1);
 		expect(cards[0]).toBe(card);
-		// Presenters key it by the canonical message, the id a resumed transcript gives it.
-		expect(cards[0]!.block.id).toBe("2");
+		expect(isSettled(card!.node)).toBe(true);
+		// The adopted row stands for the canonical message (rewind, presenters and link lookups find it).
+		expect(mode.transcriptBlocks.get(canonical)).toBe(card);
 	});
 
 	it("appends the canonical card when a transcript rebuild detached the optimistic row", () => {
 		mode.renderOptimisticSkillMessage(skillMessage(1));
 		expect(skillCards(mode)).toHaveLength(1);
 
-		// A mid-preflight transcript rebuild (e.g. a display-setting toggle) clears
-		// the container; the UI-only optimistic row is not replayed, so it is
-		// detached while still tracked for reconcile. canRemoveBlock reports false
-		// for the absent component, but the canonical card must still be appended.
-		mode.chatContainer.clear();
+		// A mid-preflight transcript rebuild (e.g. a display-setting toggle) clears the transcript;
+		// the UI-only optimistic row is not replayed, so it is detached while still tracked for
+		// reconcile. The canonical card must still be appended.
+		mode.shell.transcript.clear();
 
 		mode.reconcileOptimisticSkillMessage(skillMessage(2));
 		expect(skillCards(mode)).toHaveLength(1);

@@ -39,6 +39,8 @@
  * The semantic heuristics (2, 3) judge prose only: code-shaped lines are dropped
  * before analysis because legitimate code repeats one keyword skeleton with
  * different literals, and numeric tokens are stripped during normalization.
+ * Scripts written without word spaces (CJK, Thai, …) are tokenized as character
+ * bigrams so reasoning in those languages is measured like space-delimited prose.
  * Segments that are recognisably structured rows (pipe-delimited table rows and
  * JSON key/value records, including fragments the chunker cut from them) are
  * skipped too; see {@link isStructuredSegment}.
@@ -650,8 +652,18 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
 	if (n < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
-	const last = n - 1;
 	const maxUnit = Math.min(EXACT_MAX_UNIT, Math.floor(n / 3));
+	// Every match requires `z[len] >= min(EXACT_SHORT_MIN_REPEATED_CHARS - EXACT_SHORT_MAX_UNIT,
+	// 2 * (EXACT_SHORT_MAX_UNIT + 1))` = 120, so the last 32 chars must recur at `n - 32 - len`
+	// for some `len` in `[2, maxUnit]`. Forward `indexOf` from `needleEnd - maxUnit` scans at
+	// most `maxUnit` chars in native SIMD and rejects non-repeating tails while preserving the
+	// O(n) Z-array fallback for repeating/whitespace tails.
+	const needleLen = 32;
+	const needleEnd = n - needleLen;
+	const hit = text.indexOf(text.slice(needleEnd), needleEnd - maxUnit);
+	if (hit === -1 || hit > needleEnd - 2) return null;
+
+	const last = n - 1;
 	const z = exactZ;
 	let left = 0;
 	let right = 0;
@@ -659,7 +671,7 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		let zi = i <= right ? Math.min(right - i + 1, z[i - left]) : 0;
 		while (i + zi < n && text.charCodeAt(last - zi) === text.charCodeAt(last - i - zi)) zi++;
 		z[i] = zi;
-		if (i + zi - 1 > right) {
+		if (zi > 0 && i + zi - 1 > right) {
 			left = i;
 			right = i + zi - 1;
 		}
@@ -709,16 +721,34 @@ function isStructuredSegment(segment: string): boolean {
 	return tableRows >= lines.length * TABLE_ROW_MIN_SHARE;
 }
 
-/** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers. */
+/** One segment token: group 1 is a run of a script written without spaces
+ *  between words (Han, kana, Thai, Lao, Khmer, Myanmar, plus the katakana
+ *  prolonged-sound mark); otherwise a letter/mark/digit run in any other
+ *  script. The second branch excludes the first's scripts so `tool调用` splits
+ *  in two. */
+const SEGMENT_TOKEN =
+	/([\p{sc=Han}\p{sc=Hira}\p{sc=Kana}\p{sc=Thai}\p{sc=Laoo}\p{sc=Khmr}\p{sc=Mymr}\u30FC]+)|[[\p{L}\p{M}\p{N}]--[\p{sc=Han}\p{sc=Hira}\p{sc=Kana}\p{sc=Thai}\p{sc=Laoo}\p{sc=Khmr}\p{sc=Mymr}\u30FC]]+/gv;
+
+/**
+ * Lowercase and tokenize prose plus code/path payloads into space-joined
+ * words, dropping pure numbers. Space-delimited scripts split on word
+ * boundaries; runs of unspaced scripts (CJK, Thai, …) become overlapping
+ * character bigrams, the word-sized unit the novelty and trigram signals
+ * compare, so text in those scripts is measured rather than discarded
+ * (issue #20096).
+ */
 function normalizeSegment(segment: string): string {
-	return segment
-		.toLowerCase()
-		.replace(/`([^`]*)`/g, " $1 ")
-		.replace(/[^a-z0-9]+/g, " ")
-		.split(/\s+/)
-		.filter(token => /[a-z]/.test(token))
-		.join(" ")
-		.trim();
+	const tokens: string[] = [];
+	for (const [token, unspaced] of segment.toLowerCase().matchAll(SEGMENT_TOKEN)) {
+		if (unspaced) {
+			const chars = Array.from(unspaced);
+			if (chars.length === 1) tokens.push(unspaced);
+			for (let i = 1; i < chars.length; i++) tokens.push(chars[i - 1] + chars[i]);
+		} else if (/\p{L}/u.test(token)) {
+			tokens.push(token);
+		}
+	}
+	return tokens.join(" ");
 }
 
 /** Word-trigram shingle set of a normalized segment. */

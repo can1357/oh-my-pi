@@ -19,6 +19,8 @@ export interface ShakeResult {
 	imagesDropped?: number;
 	/** Thinking blocks dropped (thinking mode only). */
 	thinkingBlocksDropped?: number;
+	/** Separate interrupted-thinking continuity notes cleared (thinking mode only). */
+	interruptedThinkingNotesDropped?: number;
 	/** Thinking blocks the provider replays from its payload, left in place (thinking mode only). */
 	thinkingBlocksKept?: number;
 	/** Estimated context tokens reclaimed. */
@@ -38,12 +40,16 @@ export function formatShakeSummary(result: ShakeResult): string {
 	if (result.mode === "thinking") {
 		const dropped = result.thinkingBlocksDropped ?? 0;
 		const kept = result.thinkingBlocksKept ?? 0;
-		if (dropped === 0 && kept === 0) return "No thinking blocks found in this session.";
+		const notes = result.interruptedThinkingNotesDropped ?? 0;
+		if (dropped === 0 && kept === 0 && notes === 0) return "No thinking blocks found in this session.";
 		const keptText = `${kept} thinking block${kept === 1 ? "" : "s"} ${kept === 1 ? "was" : "were"} kept because removing ${
 			kept === 1 ? "it" : "them"
 		} would not change what the model receives`;
-		if (dropped === 0) return `${keptText}.`;
-		const droppedText = `Dropped ${dropped} thinking block${dropped === 1 ? "" : "s"} from this session${result.tokensFreed > 0 ? ` (~${result.tokensFreed} tokens freed)` : ""}`;
+		if (dropped === 0 && notes === 0) return `${keptText}.`;
+		const parts = [];
+		if (dropped > 0) parts.push(`${dropped} thinking block${dropped === 1 ? "" : "s"}`);
+		if (notes > 0) parts.push(`${notes} interrupted-thinking note${notes === 1 ? "" : "s"}`);
+		const droppedText = `Dropped ${parts.join(" and ")} from this session${result.tokensFreed > 0 ? ` (~${result.tokensFreed} tokens freed)` : ""}`;
 		return kept === 0 ? `${droppedText}.` : `${droppedText}; ${keptText}.`;
 	}
 	const parts: string[] = [];

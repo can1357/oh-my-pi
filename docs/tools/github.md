@@ -7,8 +7,8 @@
 - Entry: `packages/coding-agent/src/tools/gh.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/github.md`
 - Key collaborators:
-   - `packages/tui/src/tools/gh-format.ts` — shorten commit SHAs and format summary fields.
-   - `packages/tui/src/tools/github.ts` — result types and TUI rendering, especially `run_watch` live/result views.
+   - `packages/coding-agent/src/tools/gh-format.ts` — shorten commit SHAs and format summary fields.
+   - `packages/coding-agent/src/tools/details/github.ts` / `packages/coding-agent/src/ui/tools/github.tsx` — result types and TUI rendering, especially `run_watch` live/result views.
    - `packages/coding-agent/src/tools/gh-view.ts` — repository summaries and cached issue/PR view fetchers.
    - `packages/coding-agent/src/tools/gh-search.ts` — date qualifiers, search validation, and search operations.
    - `packages/coding-agent/src/tools/gh-pr-checkout.ts` — PR create/checkout/push operations.
@@ -65,7 +65,7 @@ Most operations return a text result built by `buildTextResult()` in `packages/c
 - `details`: optional structured metadata used by the TUI renderer.
    - Common fields: `artifactId`, `repo`, `branch`, `worktreePath`, `remote`, `remoteBranch`, `headSha`, `runId`, `runIds`, `status`, `conclusion`, `failedJobs`.
    - `pr_checkout` adds `checkouts: GhPrCheckoutSummary[]`, including `reused` and optional `clonedWith`.
-   - `run_watch` adds `watch: GhRunWatchViewDetails`, which drives the custom live/result renderer in `packages/tui/src/tools/github.ts`.
+   - `run_watch` adds `watch: GhRunWatchViewDetails`, which drives the custom live/result renderer in `packages/coding-agent/src/ui/tools/github.tsx`.
 - Artifact trailer: when `artifactId` is present, the text body gets an appended line like `Full failed-job logs: local://<id>.log`.
    - `run_watch` uses `Full failed-job logs` only when every failed job has a complete log capture, `Partial failed-job logs` when some logs are missing or a capture is truncated, and `Failed-job log diagnostics` when none have content. Unavailable entries name the failed job and explain the fetch failure.
    - Artifacts are allocated with `session.allocateOutputArtifact("github")`; captured logs and diagnostics are saved as the spill file `<id>.log` (`local://<id>.log`) in the session's `local://` root; sessions without a session file spill under `$TMPDIR/omp-local/<sessionId>`.
@@ -258,7 +258,7 @@ Watch flow:
 - Failed-job logs are fetched with `gh api /repos/<repo>/actions/jobs/<jobId>/logs --allow-escape-sequences` via `github.run()`, not `json()`; when an older `gh` rejects that flag as unknown, the fetch is retried once without it. Captured logs pass through `sanitizeText()`, stripping ANSI escapes and control characters. Non-zero exit or empty sanitized output leaves `available: false` instead of failing the whole watch. Each unavailable entry retains a reason capped at 512 UTF-8 bytes, including exit status and stderr for failed commands.
 - Inline result includes only the last `tail` captured lines per failed job. The saved artifact contains the captured logs (`mode: "full"`) and identifies any jobs without logs, with the same failure reasons. The subprocess capture's structured truncation flag marks logs exceeding 8 MiB as partial in both the artifact label and its contents.
 - In commit mode, success is intentionally double-checked: once all known runs are successful, the tool waits one more poll interval and succeeds only if the set of run IDs is unchanged. This avoids returning before late workflow runs appear for the same commit.
-- `details.watch` drives a specialized renderer in `packages/tui/src/tools/github.ts`; unavailable-log reasons are sanitized and flattened to one display row. Non-watch results use the fallback summary renderer.
+- `details.watch` drives a specialized renderer in `packages/coding-agent/src/ui/tools/github.tsx`; unavailable-log reasons are sanitized and flattened to one display row. Non-watch results use the fallback summary renderer.
 - Job snapshots retain the ordered steps returned by the same jobs API call (number, name, status, conclusion, timestamps); no extra step requests are made. GitHub's zero-date timestamps on steps that have not run are dropped at ingestion. `details.watch` projects step durations for both live and completed run/commit watches. The text result names only each failed job's failed step.
 - Collapsed job views show current-step progress or the failed step. **Ctrl+O** expands the card to show every reported step with its state and duration. Tern Surface Protocol views use native keyed job disclosures and step lists; native disclosure clicks and the existing tool-card expansion state remain available. Results without step data retain the job-only view.
 
@@ -279,7 +279,7 @@ Watch flow:
    - Returned `details` objects carry run/checkouts metadata for the renderer/UI.
 - User-visible prompts / interactive UI
    - `gh` interactive editor fallback is suppressed for `pr_create` by forcing either `--body-file` or `--body ""`.
-   - `githubToolRenderer` in `packages/tui/src/tools/github.ts` provides compact headers and a custom live watch view.
+   - `githubPresenter` in `packages/coding-agent/src/ui/tools/github.tsx` provides compact headers and a custom live watch view.
 - Background work / cancellation
    - `run_watch` loops until success/failure and uses `scheduler.wait()` between polls.
    - `GithubTool.execute()` is wrapped in `untilAborted()`; `github.run()` forwards the abort signal into `Bun.spawn()`.

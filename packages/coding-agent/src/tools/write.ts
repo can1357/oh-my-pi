@@ -1,4 +1,4 @@
-import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
+import type { WriteToolDetails } from "./details/write";
 import { Database } from "bun:sqlite";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import * as fs from "node:fs/promises";
@@ -50,17 +50,17 @@ import { truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
-import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { isReadTruncationNotice } from "./hashline-format";
+import { hasColumnTruncationClause, isColumnTruncationNotice } from "./output-meta-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { unwrapHashlineHeaderPath } from "./hashline-header-path";
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, resolveToCwd, specialFileKind } from "./path-utils";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { splitPathAndSel } from "./details/read";
 import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "../utils/render-utils";
 
 import {
 	deleteRowByKey,
@@ -72,7 +72,7 @@ import {
 	updateRowByKey,
 	updateRowByRowId,
 } from "./sqlite-reader";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 import { docTopicsReadable } from "./doc-topics";

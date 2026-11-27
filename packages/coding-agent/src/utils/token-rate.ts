@@ -129,6 +129,9 @@ class DecayedSums {
 	}
 }
 
+/** Streamed delta kinds the meter tokenizes; only `thinking_delta` can hide billed tokens. */
+export type TokenRateDelta = "text_delta" | "thinking_delta" | "toolcall_delta";
+
 /**
  * Live generation throughput for the working row: a kernel-weighted rate over
  * recent stream time, `Σ_scales tokens / Σ_scales time` with the sums decayed
@@ -139,13 +142,16 @@ class DecayedSums {
  * Streamed deltas are tokenized locally per bucket for the in-flight message
  * and kept in a separate set of sums. What the provider bills but never
  * streams — hidden or summarized reasoning, the tool-call envelope — is
- * modelled as a *hidden-token rate*: tokens accruing per ms of message span
- * on top of the visible deltas, estimated from recent messages as
- * `Σ(billed − local) / Σ span`. The in-flight message credits that rate
- * live, including through its silent lead-in; once `usage.output` lands the
- * residual is spread uniformly over the span and the message merges into
- * history. Additive, not multiplicative: a fast burst of visible tokens is
- * never amplified by what earlier messages hid.
+ * modelled as a *hidden-token rate*: tokens accruing per ms of the message's
+ * hidden phase (its silent lead-in and any stretch streaming thinking), on
+ * top of the visible deltas, estimated from recent messages as
+ * `Σ(billed − local) / Σ hidden-phase span`. The in-flight message credits
+ * that rate live only while it is in its hidden phase: text and tool-call
+ * deltas are streamed in full, so a long write after heavy thinking turns
+ * reads its own rate. Once `usage.output` lands the residual is spread
+ * uniformly over the span and the message merges into history. Additive, not
+ * multiplicative: a fast burst of visible tokens is never amplified by what
+ * earlier messages hid.
  *
  * Stream time runs from {@link begin} to {@link end}; callers pass the
  * message's own request-start timestamp and `timestamp + duration` (epoch ms,
@@ -167,13 +173,17 @@ export class TokenRateMeter {
 	#advancedTo = 0;
 	/** Local (visible) tokens of the in-flight message. */
 	#inflightLocal = 0;
-	/** Hidden-token rate (tokens/ms) credited to the in-flight message; fixed at {@link begin}. */
+	/** Hidden-token rate (tokens/ms of hidden phase) for the in-flight message; fixed at {@link begin}. */
 	#inflightHiddenRate = 0;
+	/** Whether the in-flight message is in its hidden phase (lead-in or thinking) and accrues the hidden rate. */
+	#hiding = true;
+	/** Hidden-phase time of the in-flight message, in ms. */
+	#inflightHiddenMs = 0;
 	#pendingIndex = -1;
 	#pending = "";
 	/** Token count of {@link #pending}, or -1 when it changed since last counted. */
 	#pendingTokens = -1;
-	/** Decayed sums behind the hidden-token rate estimate. */
+	/** Decayed sums behind the hidden-token rate estimate: unstreamed tokens over hidden-phase time. */
 	#hiddenTokens = 0;
 	#hiddenSpanMs = 0;
 
@@ -189,10 +199,19 @@ export class TokenRateMeter {
 		this.#inflightHiddenRate = Math.max(0, this.#hiddenTokens / (this.#hiddenSpanMs + METER_HIDDEN_PRIOR_MS));
 	}
 
-	/** Record streamed text at wall time `nowMs`; opens the message if {@link begin} was not called. */
-	push(text: string, nowMs: number = Date.now()): void {
+	/**
+	 * Record streamed text of `kind` at wall time `nowMs`; opens the message
+	 * if {@link begin} was not called. Thinking enters the hidden phase, text
+	 * and tool-call deltas leave it.
+	 */
+	push(text: string, kind: TokenRateDelta, nowMs: number = Date.now()): void {
 		if (text.length === 0) return;
 		if (this.#startedAt === null) this.begin(nowMs);
+		const hiding = kind === "thinking_delta";
+		if (hiding !== this.#hiding) {
+			this.#advance(nowMs);
+			this.#hiding = hiding;
+		}
 		const index = Math.floor((nowMs - (this.#startedAt ?? nowMs)) / METER_BUCKET_MS);
 		if (index !== this.#pendingIndex) {
 			this.#flushPending(true, nowMs);
@@ -217,8 +236,8 @@ export class TokenRateMeter {
 		if (billed) {
 			const hidden = outputTokens - this.#inflightLocal;
 			this.#hiddenTokens = this.#hiddenTokens * METER_HIDDEN_DECAY + hidden;
-			this.#hiddenSpanMs = this.#hiddenSpanMs * METER_HIDDEN_DECAY + spanMs;
-			extra = hidden - this.#inflightHiddenRate * spanMs;
+			this.#hiddenSpanMs = this.#hiddenSpanMs * METER_HIDDEN_DECAY + this.#inflightHiddenMs;
+			extra = hidden - this.#inflightHiddenRate * this.#inflightHiddenMs;
 		}
 		for (let k = 0; k < this.#history.length; k++) {
 			const live = this.#inflight[k];
@@ -257,6 +276,7 @@ export class TokenRateMeter {
 	/** Tokens per second over the decayed window, or null until enough tokens have accumulated. */
 	rate(nowMs: number = Date.now()): number | null {
 		const dtMs = this.#startedAt === null ? 0 : nowMs - this.#advancedTo;
+		const hiddenRate = this.#hiding ? this.#inflightHiddenRate : 0;
 		const pendingTokens = this.#countPending();
 		let tokens = 0;
 		let time = 0;
@@ -266,9 +286,7 @@ export class TokenRateMeter {
 			const f = 2 ** (-dtMs / METER_HALF_LIVES_MS[k]);
 			const integral = (METER_HALF_LIVES_MS[k] / LN2) * (1 - f);
 			evidenceTokens =
-				(this.#history[k].tokens + this.#inflight[k].tokens) * f +
-				this.#inflightHiddenRate * integral +
-				pendingTokens;
+				(this.#history[k].tokens + this.#inflight[k].tokens) * f + hiddenRate * integral + pendingTokens;
 			evidenceTime = (this.#history[k].time + this.#inflight[k].time) * f + integral;
 			tokens += evidenceTokens;
 			time += evidenceTime;
@@ -282,9 +300,11 @@ export class TokenRateMeter {
 		const dtMs = nowMs - this.#advancedTo;
 		if (dtMs <= 0) return;
 		this.#advancedTo = nowMs;
+		const hiddenRate = this.#hiding ? this.#inflightHiddenRate : 0;
+		if (this.#hiding) this.#inflightHiddenMs += dtMs;
 		for (let k = 0; k < this.#history.length; k++) {
 			this.#history[k].advance(dtMs, false, 0);
-			this.#inflight[k].advance(dtMs, true, this.#inflightHiddenRate);
+			this.#inflight[k].advance(dtMs, true, hiddenRate);
 		}
 	}
 
@@ -293,6 +313,8 @@ export class TokenRateMeter {
 		this.#startedAt = null;
 		this.#inflightLocal = 0;
 		this.#inflightHiddenRate = 0;
+		this.#hiding = true;
+		this.#inflightHiddenMs = 0;
 		this.#pendingIndex = -1;
 		this.#pending = "";
 		this.#pendingTokens = -1;

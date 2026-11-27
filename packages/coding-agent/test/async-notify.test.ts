@@ -23,15 +23,16 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type AsyncNotifyEntry, buildAsyncNotifyBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-notify";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { AsyncNotifyDetails } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
-import type { AsyncNotifyDetails } from "@oh-my-pi/pi-tui/chat/messages";
-import { buildAsyncNotifyBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import "../src/ui/styles/messages";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { printRows } from "../src/ui/print-rows";
+import { AsyncNotify } from "../src/ui/transcript/messages/async-cards";
 import { until } from "./helpers/fake-clock";
 
 /** The `async-notify` notices among `messages`, oldest first. */
@@ -69,11 +70,21 @@ describe("OutputNotifier", () => {
 		feed("second ERROR\n");
 		expect(batches).toEqual([]);
 		vi.advanceTimersByTime(50);
-		expect(batches).toEqual([{ lines: ["first ERROR here", "second ERROR"], omitted: 0, stopped: false }]);
+		expect(batches).toEqual([
+			{
+				lines: ["first ERROR here", "second ERROR"],
+				omitted: 0,
+				stopped: false,
+			},
+		]);
 
 		feed("third ERROR\n");
 		vi.advanceTimersByTime(200);
-		expect(batches[1]).toEqual({ lines: ["third ERROR"], omitted: 0, stopped: false });
+		expect(batches[1]).toEqual({
+			lines: ["third ERROR"],
+			omitted: 0,
+			stopped: false,
+		});
 	});
 
 	it("counts the matches of a burst past the line cap instead of reporting them", () => {
@@ -131,7 +142,11 @@ describe("OutputNotifier", () => {
 		feed("ERROR in the window\nERROR fatal: no newline");
 		notifier.finish();
 		expect(batches).toEqual([
-			{ lines: ["ERROR in the window", "ERROR fatal: no newline"], omitted: 0, stopped: false },
+			{
+				lines: ["ERROR in the window", "ERROR fatal: no newline"],
+				omitted: 0,
+				stopped: false,
+			},
 		]);
 		feed("ERROR after exit\n");
 		vi.advanceTimersByTime(1_000);
@@ -185,17 +200,39 @@ describe("async-notify notice", () => {
 			Array.from({ length: count }, (_, index) => `ERR ${from + index}`);
 		const message = buildAsyncNotifyBatchMessage([
 			entry("bg_1", numbered(0, NOTIFY_MAX_LINES - 10)),
-			entry("bg_2", ["ERR in the other job"], { stopped: true, running: () => false }),
-			entry("web", ["ERR in the service"], { type: "service", command: undefined }),
+			entry("bg_2", ["ERR in the other job"], {
+				stopped: true,
+				running: () => false,
+			}),
+			entry("web", ["ERR in the service"], {
+				type: "service",
+				command: undefined,
+			}),
 			entry("bg_1", numbered(NOTIFY_MAX_LINES - 10, 30), { omitted: 2 }),
 		]);
 		if (!message || typeof message.content !== "string") throw new Error("Expected a text notice");
 
 		const [first, second, third] = message.details?.reports ?? [];
-		expect(first).toMatchObject({ id: "bg_1", type: "bash", omitted: 22, running: true, stopped: false });
+		expect(first).toMatchObject({
+			id: "bg_1",
+			type: "bash",
+			omitted: 22,
+			running: true,
+			stopped: false,
+		});
 		expect(first.lines).toEqual(numbered(0, NOTIFY_MAX_LINES));
-		expect(second).toMatchObject({ id: "bg_2", lines: ["ERR in the other job"], running: false, stopped: true });
-		expect(third).toMatchObject({ id: "web", type: "service", lines: ["ERR in the service"], running: true });
+		expect(second).toMatchObject({
+			id: "bg_2",
+			lines: ["ERR in the other job"],
+			running: false,
+			stopped: true,
+		});
+		expect(third).toMatchObject({
+			id: "web",
+			type: "service",
+			lines: ["ERR in the service"],
+			running: true,
+		});
 
 		// The model reads the text: the last line kept, none past the cap, how many were left out,
 		// and what each block reports on.
@@ -214,8 +251,7 @@ describe("async-notify notice", () => {
 		expect(message.content.match(/<\/?system-/g)).toEqual(["<system-", "</system-"]);
 	});
 
-	it("draws matched lines without tabs or rows wider than the line limit", async () => {
-		await initTheme(false, undefined, undefined, "dark", "light");
+	it("draws matched lines without tabs or rows wider than the line limit", () => {
 		const message: CustomMessage<AsyncNotifyDetails> = {
 			role: "custom",
 			customType: "async-notify",
@@ -237,9 +273,9 @@ describe("async-notify notice", () => {
 			},
 		};
 		// Rows come padded to the render width; the text they hold is what must stay short.
-		const rows = buildAsyncNotifyBlock(message)
-			.render(400)
-			.map(row => Bun.stripANSI(row).trimEnd());
+		const rows = printRows(() => AsyncNotify({ details: message.details, visible: true }), 400).map(row =>
+			Bun.stripANSI(row).trimEnd(),
+		);
 		const text = rows.join("\n");
 		expect(text).toContain("bg_1");
 		expect(text).toContain("5 lines");
@@ -279,7 +315,12 @@ describe("notify delivery", () => {
 
 	/** A session owning its jobs as `Main`, whose model plays `responses` and then answers "Done". */
 	function createSession(responses: MockHandler[] = []): AgentSession {
-		mock = createMockModel({ provider: "openai", id: "gpt-test", responses, handler: () => ({ content: ["Done"] }) });
+		mock = createMockModel({
+			provider: "openai",
+			id: "gpt-test",
+			responses,
+			handler: () => ({ content: ["Done"] }),
+		});
 		const wait = new WaitTool({
 			cwd: tempDir.path(),
 			settings: Settings.isolated({ "launch.enabled": false }),
@@ -289,11 +330,19 @@ describe("notify delivery", () => {
 		} as unknown as ToolSession);
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [wait], messages: [] },
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [wait],
+				messages: [],
+			},
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+		});
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
 			agent,
@@ -413,7 +462,11 @@ describe("notify delivery", () => {
 		});
 
 		expect(await active.newSession()).toBe(true);
-		notify({ lines: ["ERROR from the old session"], omitted: 0, stopped: false });
+		notify({
+			lines: ["ERROR from the old session"],
+			omitted: 0,
+			stopped: false,
+		});
 
 		expect(active.yieldQueue.has("async-notify")).toBe(false);
 	});
@@ -489,7 +542,13 @@ describe("notify delivery", () => {
 				outputBytes: 0,
 				owner,
 				leases: 0,
-				policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "none" },
+				policy: {
+					hold: "leases",
+					idleMs: 0,
+					onIdle: "stop",
+					restart: "no",
+					survive: "none",
+				},
 				supervised: true,
 			},
 		});
@@ -511,9 +570,12 @@ describe("notify delivery", () => {
 
 	it("refuses notify where no session can take the notices", async () => {
 		const tool = bashFor(createSession(), false);
-		await expect(tool.execute("no-channel", { command: "echo ran > ran.txt", notify: "ERROR" })).rejects.toThrow(
-			/notify is unavailable/,
-		);
+		await expect(
+			tool.execute("no-channel", {
+				command: "echo ran > ran.txt",
+				notify: "ERROR",
+			}),
+		).rejects.toThrow(/notify is unavailable/);
 		expect(manager.getAllJobs()).toEqual([]);
 	});
 });

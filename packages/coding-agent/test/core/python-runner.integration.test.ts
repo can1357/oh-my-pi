@@ -175,13 +175,13 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("before crash");
-		expect(result.output).toContain("completion is uncertain");
+		expect(result.output).toContain("completion uncertain");
 
 		const next = await executePython("print(21 * 2)", options);
 		expect(next.exitCode).toBe(0);
 		// The crash ended the kernel, so the next cell runs on a new one and says its state is gone.
 		const [notice, value] = next.output.trim().split("\n");
-		expect(notice).toStartWith("Kernel restarted: the previous Python kernel is dead; state is unavailable.");
+		expect(notice).toBe("[Python kernel restarted; earlier state gone]");
 		expect(value).toBe("42");
 		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
 	}, 30_000);

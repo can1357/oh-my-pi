@@ -23,10 +23,11 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { Composer } from "../src/ui/composer/composer";
+import { initTheme } from "../src/ui/theme/service";
 
 beforeAll(() => {
 	initTheme();
@@ -58,33 +59,11 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 		}),
 	};
 
-	let editorText = "";
-
 	const ctx = {
 		session,
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
-		editor: {
-			addToHistory: () => {},
-			clearDraft: (_historyText?: string) => {
-				editorText = "";
-				ctx.editor.pendingImages = [];
-				ctx.editor.pendingImageLinks = [];
-				ctx.editor.imageLinks = undefined;
-			},
-			setText: (text: string) => {
-				editorText = text;
-			},
-			// The stub skips chip collapsing so assertions read the wire-format text.
-			setCollapsedText: (text: string) => {
-				editorText = text;
-			},
-			getText: () => editorText,
-			imageLinks: undefined as (string | undefined)[] | undefined,
-			pendingImages: [] as ImageContent[],
-			pendingImageLinks: [] as (string | undefined)[],
-		},
-		keybindings: { getKeys: () => ["alt+up"] },
+		composer: new Composer(),
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures: new Set<string>(),
 		isKnownSlashCommand: (text: string) => text.startsWith("/"),
@@ -106,9 +85,8 @@ describe("compaction queue image forwarding", () => {
 	test("queueCompactionMessage stores images and consumes pending-image state", () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
-		ctx.editor.pendingImages = [image];
-		ctx.editor.pendingImageLinks = ["clipboard"];
-		ctx.editor.imageLinks = ["clipboard"];
+		ctx.composer.pendingImages.push(image);
+		ctx.composer.pendingImageLinks.push("clipboard");
 
 		new UiHelpers(ctx).queueCompactionMessage("look at this screenshot", "steer", [image]);
 
@@ -116,9 +94,8 @@ describe("compaction queue image forwarding", () => {
 			{ text: "look at this screenshot", mode: "steer", images: [image] },
 		]);
 		// Pending state is consumed so the next message does not resend the image.
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
-		expect(ctx.editor.imageLinks).toBeUndefined();
+		expect(ctx.composer.pendingImages).toEqual([]);
+		expect(ctx.composer.pendingImageLinks).toEqual([]);
 	});
 
 	test("empty image list is normalized to undefined on the queued entry", () => {
@@ -155,7 +132,7 @@ describe("compaction queue Alt+Up restore", () => {
 		const { ctx } = makeCtx([{ text: "/skill:foo bar", mode: "followUp", images: undefined }]);
 		const restored = new InputController(ctx).restoreQueuedMessagesToEditor();
 		expect(restored).toBe(1);
-		expect(ctx.editor.getText()).toBe("/skill:foo bar");
+		expect(ctx.composer.expandedText()).toBe("/skill:foo bar");
 		expect(ctx.compactionQueuedMessages).toEqual([]);
 	});
 
@@ -164,7 +141,7 @@ describe("compaction queue Alt+Up restore", () => {
 		const { ctx } = makeCtx([{ text: "look", mode: "steer", images: [image] }]);
 		const restored = new InputController(ctx).restoreQueuedMessagesToEditor();
 		expect(restored).toBe(1);
-		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.composer.pendingImages).toEqual([image]);
 	});
 
 	test("session and compaction queues restore in pending-bar order", () => {
@@ -178,7 +155,9 @@ describe("compaction queue Alt+Up restore", () => {
 		});
 		const restored = new InputController(ctx).restoreQueuedMessagesToEditor();
 		expect(restored).toBe(4);
-		expect(ctx.editor.getText()).toBe("session steer\n\ncompaction steer\n\nsession followup\n\ncompaction followup");
+		expect(ctx.composer.expandedText()).toBe(
+			"session steer\n\ncompaction steer\n\nsession followup\n\ncompaction followup",
+		);
 	});
 });
 
@@ -196,34 +175,16 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		draftImages?: ImageContent[];
 		queued?: { text: string; images?: ImageContent[] }[];
 	}) {
-		let editorText = opts.draftText ?? "";
-		const editor = {
-			setText: (text: string) => {
-				editorText = text;
-			},
-			// The stub skips chip collapsing so assertions read the wire-format text.
-			setCollapsedText: (text: string) => {
-				editorText = text;
-			},
-			getText: () => editorText,
-			addToHistory: () => {},
-			clearDraft: (_historyText?: string) => {
-				editorText = "";
-				editor.pendingImages = [];
-				editor.pendingImageLinks = [];
-				editor.imageLinks = undefined;
-			},
-			imageLinks: undefined as (string | undefined)[] | undefined,
-			pendingImages: opts.draftImages ? [...opts.draftImages] : ([] as ImageContent[]),
-			pendingImageLinks: opts.draftImages ? opts.draftImages.map(() => undefined) : ([] as (string | undefined)[]),
-		};
+		const editor = new Composer({ text: opts.draftText ?? "" });
+		editor.pendingImages.push(...(opts.draftImages ?? []));
+		editor.pendingImageLinks.push(...(opts.draftImages ?? []).map(() => undefined));
 		const session = {
 			clearQueue: mock(() => ({ steering: opts.queued ?? [], followUp: [] })),
 			abort: mock(async () => {}),
 		};
 		const ctx = {
 			session,
-			editor,
+			composer: editor,
 			compactionQueuedMessages: [],
 			locallySubmittedUserSignatures: new Set<string>(),
 			updatePendingMessagesDisplay: () => {},
@@ -245,11 +206,11 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		// The draft marker stays at #1 (its image kept slot 0); the queued
 		// marker is bumped to #2 because the queued image is appended at slot 1.
 		expect(restored).toBe(1);
-		expect(editor.getText()).toBe("[Image #2] queued text\n\n[Image #1] draft text");
-		expect(ctx.editor.pendingImages).toEqual([draftImg, queuedImg]);
+		expect(editor.expandedText()).toBe("[Image #2] queued text\n\n[Image #1] draft text");
+		expect(ctx.composer.pendingImages).toEqual([draftImg, queuedImg]);
 		// Marker → image positional mapping after restore.
-		expect(ctx.editor.pendingImages[0]).toBe(draftImg); // matches [Image #1]
-		expect(ctx.editor.pendingImages[1]).toBe(queuedImg); // matches [Image #2]
+		expect(ctx.composer.pendingImages[0]).toBe(draftImg); // matches [Image #1]
+		expect(ctx.composer.pendingImages[1]).toBe(queuedImg); // matches [Image #2]
 	});
 
 	test("preserves the WxH metadata tail when renumbering", () => {
@@ -263,7 +224,7 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 
 		new InputController(ctx).restoreQueuedMessagesToEditor();
 
-		expect(editor.getText()).toBe("look [Image #2, 800x600] now\n\n[Image #1, 100x100]");
+		expect(editor.expandedText()).toBe("look [Image #2, 800x600] now\n\n[Image #1, 100x100]");
 	});
 
 	test("accumulates the offset across multiple queued image-messages", () => {
@@ -283,8 +244,8 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		new InputController(ctx).restoreQueuedMessagesToEditor();
 
 		// msg1 markers shift by 1 (draft images), msg2 markers shift by 1+1=2.
-		expect(editor.getText()).toBe("first [Image #2]\n\nsecond [Image #3] and [Image #4]\n\nsee [Image #1]");
-		expect(ctx.editor.pendingImages).toEqual([draftImg, queued1, queued2a, queued2b]);
+		expect(editor.expandedText()).toBe("first [Image #2]\n\nsecond [Image #3] and [Image #4]\n\nsee [Image #1]");
+		expect(ctx.composer.pendingImages).toEqual([draftImg, queued1, queued2a, queued2b]);
 	});
 
 	test("leaves the queued text untouched when the draft has no pending images", () => {
@@ -295,7 +256,7 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 
 		new InputController(ctx).restoreQueuedMessagesToEditor();
 
-		expect(editor.getText()).toBe("[Image #1] queued");
-		expect(ctx.editor.pendingImages).toEqual([queuedImg]);
+		expect(editor.expandedText()).toBe("[Image #1] queued");
+		expect(ctx.composer.pendingImages).toEqual([queuedImg]);
 	});
 });

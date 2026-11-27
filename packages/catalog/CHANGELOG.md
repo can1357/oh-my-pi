@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the ArkaneCloud provider, including `/login arkanecloud`, `ARKANECLOUD_API_KEY` authentication, and live model and pricing discovery per API key.
+- Added xAI SuperGrok speech-to-text support through `xai-oauth/grok-voice-transcribe-2.0`.
+- Added the Refuseless provider with `/login refuseless`, `REFUSELESS_API_KEY` authentication, live model discovery, and support for abliterated and standard open-weight models.
+- Added OpenAI's `gpt-transcribe` speech-to-text model, the replacement for `whisper-1`, `gpt-4o-transcribe`, and `gpt-4o-mini-transcribe`, which OpenAI shuts down on 2027-02-26.
+- Added OpenRouter speech-to-text models `openai/gpt-transcribe`, `openai/whisper-large-v3-turbo`, `nvidia/nemotron-3.5-transcribe`, `elevenlabs/scribe-v2`, `assemblyai/universal-3-6-pro`, `deepgram/nova-3`, `qwen/qwen3-asr-1.7b`, and `x-ai/grok-stt-2.0`.
+- Added DeepInfra text-to-speech models `Qwen/Qwen3-TTS` and `sesame/csm-1b`.
+
+### Changed
+
+- Seeded models now remain available even when their provider applies model exclusions.
+- Replaced the local `parakeet-tdt-0.6b-v3` dictation seed with `fluid-speech-pro`, now the default dictation model, and added `parakeet-tdt-0.6b-v2` (English).
+- Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.
+
+### Fixed
+
+- Fixed Antigravity model display and pricing: models now appear as included with the Google AI plan, can serve as the cheapest configured vision fallback, and report zero cost in OTLP telemetry.
+
+### Removed
+
+- Removed unused public compatibility, model-ID, host, and utility exports.
+- Removed Devin Fusion lead/sidekick model pairings from the model list; omp now lists the lead models directly without redundant entries.
+
+## [19.2.1] - 2026-11-25
+
+### Fixed
+
+- Fixed Codex service tiers, such as Ultrafast, being hidden for accounts that support them when the first logged-in account has a plan that does not.
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added Otari credential helpers and endpoint-aware model discovery, supporting stored `{ token, baseUrl }` credentials and US/EU endpoints.
+- Added GLM-5.4 to the Zhipu Coding Plan with image input, a 1M-token context window, and low/high/max thinking levels; it is preferred for the `slow` role over GLM-5.3.
+- Added OpenRouter chat-model discovery for tool-capable models through the OpenAI-compatible provider-models API.
+- Added Gemini-compatible tool schema conversion for OpenAI-compatible providers; GitHub Copilot Gemini models now use the appropriate schema format.
+
+### Changed
+
+- Updated the `judge` role for OpenCode Go and Zen to prefer OpenCode's free `jev-1.13-free` model, with Zen's `jev-1.14` as a fallback.
+- Changed ai&'s default model to `moonshotai/kimi-k3`, replacing the unavailable `moonshotai/kimi-k2.7-code`.
+- Classified OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models as judge models rather than chat models.
+- Removed StepFun's `dr-search-api` web-search SKU from chat-model listings.
+- Updated Devin and Cursor pricing and usage accounting for image tokens and long-context GPT-5.6 models to match their published rates and limits.
+- Repeated provider resolution reuses bundled model fingerprints instead of serializing the same catalog rows again.
+
+### Fixed
+
+- Improved QwenCloud Token Plan discovery errors by reporting the endpoint host and underlying failure reason when the models endpoint cannot be loaded.
+- Fixed Bedrock Kimi K3.1 requests failing because of unsupported temperature settings, and fixed Kimi K3.1 Pro Highspeed requests failing due to invalid output-token and reasoning-effort settings.
+- Fixed Claude models on Google Vertex failing after the active tool set changed during a session.
+- Fixed Claude models on OpenRouter preserving thinking and reasoning context across follow-up requests and tool calls.
+- Fixed Llama 3.x models served through vLLM-based hosts failing after multiple tool calls in one turn.
+- Fixed Devin accounts belonging to separate organizations under the same email address being merged.
+- Fixed GPT-6.1 Terra sending an unsupported reasoning level when thinking was disabled.
+- Fixed GPT-6.2 and later OpenAI Responses models losing reasoning context after session pruning.
+- Fixed GitHub Copilot model listings to respect the account's available and enabled model roster, including after restarts.
+- Fixed Codex models discovered before their bundled definitions were available displaying slug-style names instead of their normal display names.
+
 ## [19.1.1] - 2026-11-23
 
 ### Added

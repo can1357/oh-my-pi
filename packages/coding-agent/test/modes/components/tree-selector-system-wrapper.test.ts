@@ -1,7 +1,10 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { mountTreeSelector, renderTreeSelector } from "../../helpers/tree-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function customMessageTree(customType: string, content: string): SessionTreeNode[] {
 	return [
@@ -38,33 +41,20 @@ function arrayCustomMessageTree(customType: string, blocks: string[]): SessionTr
 }
 
 function searchResult(tree: SessionTreeNode[], query: string): string {
-	const selector = new TreeSelectorComponent(
-		tree,
-		tree[0]?.entry.id ?? null,
-		60,
-		() => {},
-		() => {},
-	);
-	for (const ch of query) selector.handleInput(ch);
-	return Bun.stripANSI(selector.render(120).join("\n"));
+	const term = mountTreeSelector({ roots: tree, currentLeafId: tree[0]?.entry.id ?? null }, { rows: 60 });
+	try {
+		term.type(query);
+		return term.screen().join("\n");
+	} finally {
+		term.dispose();
+	}
 }
 
 function render(tree: SessionTreeNode[]): string {
-	const selector = new TreeSelectorComponent(
-		tree,
-		tree[0]?.entry.id ?? null,
-		60,
-		() => {},
-		() => {},
-	);
-	return Bun.stripANSI(selector.render(120).join("\n"));
+	return renderTreeSelector({ roots: tree, currentLeafId: tree[0]?.entry.id ?? null }, { rows: 60 });
 }
 
 describe("TreeSelectorComponent system-wrapper message rendering", () => {
-	beforeAll(async () => {
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
 	it("strips the <system-reminder> wrapper from a mid-run-todo-nudge row", () => {
 		const rendered = render(
 			customMessageTree(

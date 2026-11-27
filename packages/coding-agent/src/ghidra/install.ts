@@ -16,7 +16,7 @@ import { DisasmUnavailableError } from "../disasm/backend";
 import { type DownloadTracker, trackDownload, withDownload } from "../downloads/activity";
 import { ensureManagedVenv } from "../eval/py/venv";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { downloadFile } from "../utils/tools-manager";
+import { downloadFile } from "../downloads/file";
 import { ghidraHostSupported, ghidraNativesPlatform } from "./platform";
 
 /** Pinned release whose PyGhidra and Java APIs are supported by the worker. */

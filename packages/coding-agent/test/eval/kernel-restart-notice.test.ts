@@ -9,8 +9,8 @@ import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 type Language = "py" | "js";
 
 const NOTICE: Record<Language, string> = {
-	py: "Kernel restarted: the previous Python kernel is dead; state is unavailable. Re-run needed setup",
-	js: "Kernel restarted: the previous JS worker is dead; state is unavailable. Re-run needed setup",
+	py: "[Python kernel restarted; earlier state gone]",
+	js: "[JS worker restarted; earlier state gone]",
 };
 
 function makeSession(evalSessionId: string): ToolSession {
@@ -83,11 +83,10 @@ async function killRuntime(session: ToolSession, language: Language, pid: number
 
 function expectNotice(cell: Cell, language: Language): void {
 	expect(cell.text.trimStart().startsWith(NOTICE[language])).toBe(true);
-	expect(cell.text).toContain("variables, imports and definitions from earlier cells are gone");
 }
 
 function expectNoNotice(cell: Cell): void {
-	expect(cell.text).not.toContain("Kernel restarted:");
+	expect(cell.text).not.toContain("restarted; earlier state gone");
 }
 
 const SET_VALUE: Record<Language, string> = {

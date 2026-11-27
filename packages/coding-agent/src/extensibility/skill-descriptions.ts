@@ -13,7 +13,9 @@ import {
 	postmortem,
 	prompt,
 	toError,
+	withFileLockSync,
 } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	resolveConfiguredModelPatterns,
@@ -55,8 +57,10 @@ class SkillDescriptionLengthError extends Error {}
 /**
  * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
- * Never uses the session's foreground model. `getCostGate` returns the session tree's gate per request,
- * following it across new sessions and switches; each provider attempt is admitted and metered there.
+ * Never uses the session's foreground model. Offline mode (`models.offline`) keeps every request on
+ * `getSessionProvider`'s provider and sends none without one. `getCostGate` returns the session tree's
+ * gate per request, following it across new sessions and switches; each provider attempt is admitted
+ * and metered there.
  * `usageLedger` is the session whose prompt asked for the compression; each attempt is journaled there,
  * under `purpose` (default `skill-description`); `oneshotKind` (default `skill_description`) tags telemetry.
  */
@@ -67,33 +71,42 @@ export function createSkillDescriptionCompressor(
 		sessionId?: string;
 		getTelemetry?: () => AgentTelemetry | undefined;
 		getCostGate?: () => CostGateApi | undefined;
+		getSessionProvider?: () => string | undefined;
 		usageLedger?: Partial<ModelUsageLedger>;
 		purpose?: string;
 		oneshotKind?: string;
 	} = {},
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
-		// The first exact provider/id match wins before every other matching phase.
-		// Resolve only that provider when possible: rendering uncached skill hints
-		// must not expand unrelated account catalogs for every background request.
-		// On a miss, use the complete pool below. A slash can instead belong to a
-		// raw aggregator id, and suffixes, aliases and fallbacks still need the
-		// ordinary resolver's full precedence rules.
-		const firstPattern = resolveConfiguredModelPatterns(
-			settings.getModelRole("smol")?.trim() || "@smol",
-			settings,
-		)[0];
-		const slash = firstPattern?.indexOf("/") ?? -1;
-		if (firstPattern && slash > 0) {
-			const provider = firstPattern.slice(0, slash).trim();
-			const id = firstPattern.slice(slash + 1).trim();
-			if (provider && id) {
-				const scoped = registry.getAvailableForProviders(new Set([provider]));
-				const exact = resolveProviderModelReference(provider, id, scoped);
-				if (exact) return exact;
+		let available: Model<Api>[];
+		if (cfgOffline.get(settings)) {
+			// Offline mode reads only the session provider's catalog.
+			const provider = options.getSessionProvider?.();
+			if (!provider) return undefined;
+			available = registry.getAvailableForProviders(new Set([provider]));
+		} else {
+			// The first exact provider/id match wins before every other matching phase.
+			// Resolve only that provider when possible: rendering uncached skill hints
+			// must not expand unrelated account catalogs for every background request.
+			// On a miss, use the complete pool below. A slash can instead belong to a
+			// raw aggregator id, and suffixes, aliases and fallbacks still need the
+			// ordinary resolver's full precedence rules.
+			const firstPattern = resolveConfiguredModelPatterns(
+				settings.getModelRole("smol")?.trim() || "@smol",
+				settings,
+			)[0];
+			const slash = firstPattern?.indexOf("/") ?? -1;
+			if (firstPattern && slash > 0) {
+				const provider = firstPattern.slice(0, slash).trim();
+				const id = firstPattern.slice(slash + 1).trim();
+				if (provider && id) {
+					const scoped = registry.getAvailableForProviders(new Set([provider]));
+					const exact = resolveProviderModelReference(provider, id, scoped);
+					if (exact) return exact;
+				}
 			}
+			available = registry.getAvailable();
 		}
-		const available = registry.getAvailable();
 		return (
 			resolveRoleChain("smol", settings, available)[0]?.model ??
 			resolveRoleSelection(["tiny"], settings, available)?.model
@@ -321,19 +334,22 @@ export class SkillDescriptionStore {
 	 */
 	static open(dbPath: string = resolveSkillDescriptionsDbPath()): SkillDescriptionStore {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
-		const db = new Database(dbPath, { create: true });
-		try {
-			// Install before any lock-taking statement (SQLite cache contention, #2421).
-			db.run("PRAGMA busy_timeout = 100");
-			db.run("PRAGMA journal_mode=WAL");
-			db.run("PRAGMA synchronous=NORMAL");
-			db.run("CREATE TABLE IF NOT EXISTS skill_descriptions (key TEXT PRIMARY KEY, description TEXT NOT NULL)");
-			if (process.platform !== "win32") fs.chmodSync(dbPath, 0o600);
-			return new SkillDescriptionStore(dbPath, db);
-		} catch (error) {
-			db.close();
-			throw error;
-		}
+		// Two connections switching a fresh database to WAL can get SQLITE_BUSY without
+		// invoking the busy handler. Serialize initialization, not subsequent reads/writes.
+		return withFileLockSync(dbPath, () => {
+			const db = new Database(dbPath, { create: true });
+			try {
+				db.run("PRAGMA busy_timeout = 100");
+				db.run("PRAGMA journal_mode=WAL");
+				db.run("PRAGMA synchronous=NORMAL");
+				db.run("CREATE TABLE IF NOT EXISTS skill_descriptions (key TEXT PRIMARY KEY, description TEXT NOT NULL)");
+				if (process.platform !== "win32") fs.chmodSync(dbPath, 0o600);
+				return new SkillDescriptionStore(dbPath, db);
+			} catch (error) {
+				db.close();
+				throw error;
+			}
+		});
 	}
 
 	/** @throws on SQLite errors. */

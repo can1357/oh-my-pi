@@ -1,8 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TUI } from "@oh-my-pi/pi-tui";
-import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { corpusEnvironment, describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -10,10 +8,18 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
+import type { TranscriptBlock } from "../../src/ui/shell";
 import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(() => initTheme());
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
+
+/** A block's native tree, as JSON. */
+function nativeJson(block: TranscriptBlock | undefined): string {
+	if (!block) throw new Error("no transcript block");
+	return JSON.stringify(describeTree(block.node, corpusEnvironment("dark"), 120));
+}
 function makeBridge() {
 	const woken: AgentMessage[][] = [];
 	const host = {
@@ -87,14 +93,28 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		return { bridge: new IrcBridge(host), steered, observed };
 	}
 
-	it("never steers a parent's broadcast leg; only a direct parent message is a parent request", async () => {
+	it("interrupts the child with a parent's broadcast leg but never steers it into the run", async () => {
 		const { bridge, steered } = makeStreamingChild();
 		await bridge.deliver({ id: "b1", from: "Main", to: "Child", body: "everyone: status", ts: 1, broadcast: true });
 		await bridge.deliver({ id: "d1", from: "Main", to: "Child", body: "you: status", ts: 2 });
 
+		// Only the direct message is a parent request; the broadcast still ends a wait.
 		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([true]);
+		expect(bridge.hasInterrupts()).toBe(true);
+		expect(bridge.drainPending({ keepPeerMessages: true })).toHaveLength(0);
 		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
 			{ id: "b1", broadcast: true },
+		]);
+	});
+
+	it("keeps a peer's broadcast leg queued without interrupting the recipient", async () => {
+		const { bridge, steered } = makeStreamingChild();
+		await bridge.deliver({ id: "b2", from: "Peer", to: "Child", body: "everyone: status", ts: 1, broadcast: true });
+
+		expect(steered).toHaveLength(0);
+		expect(bridge.hasInterrupts()).toBe(false);
+		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
+			{ id: "b2", broadcast: true },
 		]);
 	});
 
@@ -111,24 +131,16 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		const controller = new EventController(ctx);
 		try {
 			await controller.handleEvent(observation);
-			expect(ctx.chatContainer.children).toHaveLength(0);
+			expect(ctx.shell.transcript.blocks()).toHaveLength(0);
 			await controller.handleEvent({ type: "message_start", message: steer });
-			expect(ctx.chatContainer.children).toHaveLength(1);
-			const card = ctx.chatContainer.children[0]?.describe?.({
-				cols: 120,
-				reduceMotion: false,
-				dark: true,
-				supports: () => true,
-				feature: () => false,
-			});
-			expect(card).toMatchObject({
-				k: "card",
-				p: { role: "omp.irc.incoming", head: [{ t: expect.stringContaining("Main") }] },
-			});
-			expect(card?.c).toContainEqual(expect.objectContaining({ k: "md", p: { text: "Review the parser" } }));
+			const blocks = ctx.shell.transcript.blocks();
+			expect(blocks).toHaveLength(1);
+			const card = nativeJson(blocks[0]);
+			expect(card).toContain('"role":"omp.irc.incoming"');
+			expect(card).toContain("Main");
+			expect(card).toContain("Review the parser");
 		} finally {
 			controller.dispose();
-			ctx.chatContainer.dispose();
 		}
 	});
 
@@ -142,39 +154,18 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		expect(steer.content).toContain("[Wait interrupted by message]");
 		expect(steer.content).toContain("&lt;irc");
 
-		const builder = new ChatTranscriptBuilder({
-			ui: new TUI(new VirtualTerminal()),
-			cwd: process.cwd(),
-			requestRender: () => {},
-		});
-		try {
-			builder.rebuild([
-				{
-					type: "message",
-					id: "d2",
-					parentId: null,
-					timestamp: new Date(steer.timestamp).toISOString(),
-					message: steer,
-				},
-			]);
-			const card = builder.container.children[0]?.describe?.({
-				cols: 120,
-				reduceMotion: false,
-				dark: true,
-				supports: () => true,
-				feature: () => false,
-			});
-			expect(card).toMatchObject({
-				k: "card",
-				p: { role: "omp.irc.incoming", head: [{ t: expect.stringContaining("Main") }] },
-			});
-			expect(card?.c).toContainEqual(expect.objectContaining({ k: "md", p: { text: body } }));
-		} finally {
-			builder.dispose();
-		}
+		// A rebuilt transcript replays the stored steer through the same message path.
+		const ctx = createInteractiveModeContext();
+		const helpers = new UiHelpers(ctx);
+		const [block] = helpers.addMessageToChat(steer);
+		const card = nativeJson(block);
+		expect(card).toContain('"role":"omp.irc.incoming"');
+		expect(card).toContain("Main");
+		expect(card).toContain(JSON.stringify(body).slice(1, -1));
+		expect(card).not.toContain("[Wait interrupted by message]");
 	});
 
-	it("leaves non-parent messages queued at a stop boundary and drains them after work", async () => {
+	it("leaves peer messages and broadcasts queued at a stop boundary and drains them after work", async () => {
 		const { bridge } = makeStreamingChild();
 		await bridge.deliver({ id: "p1", from: "Peer", to: "Child", body: "question?", ts: 3 });
 		await bridge.deliver({ id: "b3", from: "Main", to: "Child", body: "everyone: status", ts: 4, broadcast: true });
