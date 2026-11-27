@@ -138,10 +138,11 @@ impl Spawn {
 		}
 	}
 
-	/// obash invoked as `name` (`zsh`, `bash`, `sh`).
+	/// obash invoked as `name` (`zsh`, `bash`, `sh`), without pi's extras:
+	/// its commands come from `PATH`, as the real shell's do.
 	#[must_use]
 	pub fn obash_as(name: &str) -> Self {
-		Self::new(obash()).argv0(name)
+		Self::new(obash()).argv0(name).arg("--no-extras")
 	}
 
 	/// obash invoked as `zsh`.
