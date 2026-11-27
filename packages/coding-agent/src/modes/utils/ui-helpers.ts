@@ -84,7 +84,7 @@ export type ReplayTarget = Pick<
 	| "statusLine"
 	| "updateEditorBorderColor"
 	| "settings"
-	| "hideToolActivity"
+	| "toolActivity"
 	| "transcriptBlocks"
 	| "present"
 	| "presentAssistant"
@@ -608,7 +608,7 @@ export class UiHelpers {
 					if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 						if (errorMessage) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							group.updateResult(
 								{ content: [{ type: "text", text: errorMessage }], isError: true },
 								false,
@@ -616,7 +616,7 @@ export class UiHelpers {
 							);
 						} else if (afterToolSegment) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							ctx.pendingTools.set(content.id, group);
 							readToolCallAssistants.set(content.id, assistant);
 							if (ctx.viewSession.isStreaming)
@@ -650,6 +650,7 @@ export class UiHelpers {
 						tool,
 						id: content.id,
 						cwd: ctx.viewSession.sessionManager.getCwd(),
+						timestamp: message.timestamp,
 					});
 					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
 					if (!partialJson && pending.reply) pending.setArgsComplete(content.id);
@@ -671,7 +672,7 @@ export class UiHelpers {
 				const strippedToolCalls = (message as AgentMessage & StrippedToolCallsMarker).strippedToolCalls ?? 0;
 				if (strippedToolCalls > 0) {
 					ctx.present(() =>
-						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => !ctx.hideToolActivity }),
+						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => ctx.toolActivity !== "hidden" }),
 					);
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
@@ -723,7 +724,8 @@ export class UiHelpers {
 					if (!pending) {
 						const group = ensureReadGroup();
 						const args = readToolCallArgs.get(message.toolCallId);
-						if (args) group.updateArgs(args, message.toolCallId);
+						// The read joins the group with its result: dated by the result.
+						if (args) group.updateArgs(args, message.toolCallId, message.timestamp);
 						pending = group;
 					}
 					pending.updateResult(message, false, message.toolCallId);
@@ -1099,7 +1101,7 @@ export class UiHelpers {
 		const line = () => jsx(NoticeLine, { tone: "warning", message: warningMessage });
 		this.#presentNotice(
 			options?.hideWithToolActivity
-				? () => jsx(ToolActivity, { visible: () => !this.ctx.hideToolActivity, children: line() })
+				? () => jsx(ToolActivity, { visible: () => this.ctx.toolActivity !== "hidden", children: line() })
 				: line,
 		);
 	}

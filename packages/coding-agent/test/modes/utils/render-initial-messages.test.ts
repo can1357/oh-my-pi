@@ -15,6 +15,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ToolActivityMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -96,7 +97,7 @@ interface RenderHarness {
 /** A context over `transcript` whose replay methods run through one real {@link UiHelpers}. */
 function makeRenderCtx(
 	transcript: SessionContext,
-	{ showImages = true, hideToolActivity = false }: { showImages?: boolean; hideToolActivity?: boolean } = {},
+	{ showImages = true, toolActivity = "detailed" }: { showImages?: boolean; toolActivity?: ToolActivityMode } = {},
 ): RenderHarness {
 	const transcriptSpy = vi.fn((_options?: { collapseCompactedHistory?: boolean }) => transcript);
 	const ctx = createInteractiveModeContext({
@@ -106,7 +107,7 @@ function makeRenderCtx(
 			getQueuedMessages: () => ({ steering: [], followUp: [], liveSteered: 0 }),
 		},
 	});
-	contextDisplay(ctx).hideToolActivity.set(hideToolActivity);
+	contextDisplay(ctx).toolActivity.set(toolActivity);
 	const helpers = new UiHelpers(ctx);
 	Object.assign(ctx, {
 		addMessageToChat: helpers.addMessageToChat.bind(helpers),
@@ -406,13 +407,13 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 					timestamp: 2,
 				},
 			]),
-			{ hideToolActivity: true },
+			{ toolActivity: "hidden" },
 		);
 
 		await harness.helpers.renderInitialMessages();
 
 		expect(harness.text()).not.toContain(IMAGE_LABEL);
-		contextDisplay(harness.ctx).hideToolActivity.set(false);
+		contextDisplay(harness.ctx).toolActivity.set("detailed");
 		expect(harness.text()).toContain(IMAGE_LABEL);
 	});
 
@@ -491,7 +492,7 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 			},
 		]);
 
-		const hidden = makeRenderCtx(transcript, { hideToolActivity: true });
+		const hidden = makeRenderCtx(transcript, { toolActivity: "hidden" });
 		await hidden.helpers.renderInitialMessages();
 		const hiddenRender = hidden.text();
 		expect(hiddenRender).toContain(narrationMarker);
@@ -542,14 +543,14 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 			},
 		]);
 
-		const harness = makeRenderCtx(transcript, { hideToolActivity: true });
+		const harness = makeRenderCtx(transcript, { toolActivity: "hidden" });
 		await harness.helpers.renderInitialMessages();
 		const hiddenRender = harness.text();
 		expect(hiddenRender).not.toContain("ASYNC_JOB_MARKER");
 		expect(hiddenRender).not.toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(hiddenRender).not.toContain("LAUNCH_COMPLETION_MARKER");
 
-		contextDisplay(harness.ctx).hideToolActivity.set(false);
+		contextDisplay(harness.ctx).toolActivity.set("detailed");
 		const visibleRender = harness.text();
 		expect(visibleRender).toContain("ASYNC_JOB_MARKER");
 		expect(visibleRender).toContain("LATE_DIAGNOSTIC_MARKER");
@@ -557,14 +558,14 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 	});
 
 	it("keeps normal warnings visible and hides warnings tied to tool activity", () => {
-		const hidden = makeRenderCtx(makeEmptyContext(), { hideToolActivity: true });
+		const hidden = makeRenderCtx(makeEmptyContext(), { toolActivity: "hidden" });
 		hidden.helpers.showWarning("NORMAL_WARNING_MARKER");
 		hidden.helpers.showWarning("TODO_WARNING_MARKER", { hideWithToolActivity: true });
 		const hiddenRender = hidden.text();
 		expect(hiddenRender).toContain("NORMAL_WARNING_MARKER");
 		expect(hiddenRender).not.toContain("TODO_WARNING_MARKER");
 
-		contextDisplay(hidden.ctx).hideToolActivity.set(false);
+		contextDisplay(hidden.ctx).toolActivity.set("detailed");
 		expect(hidden.text()).toContain("TODO_WARNING_MARKER");
 	});
 
@@ -580,12 +581,12 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 			timestamp: 1,
 			strippedToolCalls: 2,
 		};
-		const harness = makeRenderCtx(transcriptWith([strippedAssistant]), { hideToolActivity: true });
+		const harness = makeRenderCtx(transcriptWith([strippedAssistant]), { toolActivity: "hidden" });
 		await harness.helpers.renderInitialMessages();
 		expect(harness.text()).not.toContain("elided — no result on this branch");
 
 		// A live reveal must restore the placeholder without a transcript rebuild.
-		contextDisplay(harness.ctx).hideToolActivity.set(false);
+		contextDisplay(harness.ctx).toolActivity.set("detailed");
 		expect(harness.text()).toContain("2 tool calls elided — no result on this branch");
 	});
 });

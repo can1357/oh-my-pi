@@ -28,6 +28,7 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 import {
 	cfgSymbolPreset,
 	cfgDisplayShowTokenUsage,
+	cfgDisplayToolActivity,
 	cfgAskTimeout,
 	cfgThemeDark,
 	cfgTerminalShowProgress,
@@ -2421,6 +2422,31 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("smart");
+		});
+
+		it.each([
+			[true, "hidden"],
+			[false, "detailed"],
+		] as const)("migrates legacy display.hideToolActivity=%p to display.toolActivity %p", async (hide, mode) => {
+			await writeSettings({ display: { hideToolActivity: hide } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe(mode);
+			// The legacy key leaves config.yml on the next save.
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			const display = (await readSettings()).display as Record<string, unknown>;
+			expect("hideToolActivity" in display).toBe(false);
+			expect(display.toolActivity).toBe(mode);
+		});
+
+		it("keeps an explicit display.toolActivity over a quoted-dotted legacy hideToolActivity", async () => {
+			await Bun.write(getConfigPath(), '"display.hideToolActivity": true\ndisplay:\n  toolActivity: concise\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe("concise");
 		});
 
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {

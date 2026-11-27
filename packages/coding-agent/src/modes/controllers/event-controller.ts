@@ -2882,7 +2882,7 @@ export class EventController {
 			ttsrBlock(
 				rules,
 				() => this.ctx.toolOutputExpanded,
-				() => !this.ctx.hideToolActivity,
+				() => this.ctx.toolActivity !== "hidden",
 			),
 		);
 		this.#lastTtsrNotification = { block, rules };
@@ -2890,7 +2890,7 @@ export class EventController {
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
 		const { todos, attempt, maxAttempts } = event;
-		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => !this.ctx.hideToolActivity));
+		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => this.ctx.toolActivity !== "hidden"));
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();

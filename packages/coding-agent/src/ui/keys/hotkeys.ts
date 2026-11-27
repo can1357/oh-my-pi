@@ -95,7 +95,7 @@ export function hotkeyGroups(keybindings: KeybindingsManager): HotkeyGroup[] {
 				{ keys: [act("app.plan.toggle")], action: "Toggle plan mode" },
 				{ keys: [act("app.history.search")], action: "Search prompt history" },
 				{ keys: [act("app.tools.expand")], action: "Toggle tool output expansion" },
-				{ keys: [act("app.tools.toggleVisibility")], action: "Toggle tool activity visibility" },
+				{ keys: [act("app.tools.toggleVisibility")], action: "Cycle tool activity (detailed, concise, hidden)" },
 				{
 					keys: [act("app.links.hint")],
 					action: "Pick an extension link on screen by its tag; press again to browse the whole transcript",

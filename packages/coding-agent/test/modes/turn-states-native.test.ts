@@ -156,13 +156,18 @@ describe("turn states", () => {
 
 	it("sends the todo reminder as a checklist of its own in main, hidden with tool activity", async () => {
 		mode.present(() =>
-			todoReminderBlock([{ content: "Add tests", status: "in_progress" }], 1, 3, () => !mode.hideToolActivity),
+			todoReminderBlock(
+				[{ content: "Add tests", status: "in_progress" }],
+				1,
+				3,
+				() => mode.toolActivity !== "hidden",
+			),
 		);
 		await using ui = await nativeShell(mode.shell);
 		const checklist = ui.node("checklist");
 		expect(parentOf(checklist).endsWith("main")).toBe(true);
 		expect(checklist.p).toMatchObject({ mode: "reminder", note: "reminder 1/3", role: "omp.notice.todo" });
-		mode.hideToolActivity = true;
+		mode.toolActivity = "hidden";
 		expect(ui.node("checklist").p.hidden).toBe(true);
 	});
 
