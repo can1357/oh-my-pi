@@ -703,6 +703,22 @@ async fn uutils_head_streams_stdin_and_reads_files() {
 	assert_eq!(exit_code(&o), 0, "head -1 should succeed");
 	assert_eq!(std::fs::read_to_string(tmp.join("out_obs.txt")).unwrap(), "1\n");
 
+	// Redirected (seekable) stdin: head leaves the shared offset just past
+	// what it printed, so the next reader continues there. It read through a
+	// 64 KiB buffer and kept the excess, leaving `cat` nothing.
+	for (script, expected) in [
+		("{ head -n2; cat; } < data.txt > out_seek.txt", "l1\nl2\nl3\nl4\nl5\n"),
+		("{ head -c4; echo '|'; cat; } < data.txt > out_seek.txt", "l1\nl|\n2\nl3\nl4\nl5\n"),
+		("{ head -n -3; echo '|'; cat; } < data.txt > out_seek.txt", "l1\nl2\n|\nl3\nl4\nl5\n"),
+	] {
+		let s = session
+			.run_test(script, &params)
+			.await
+			.expect("run seekable");
+		assert_eq!(exit_code(&s), 0, "{script}");
+		assert_eq!(std::fs::read_to_string(tmp.join("out_seek.txt")).unwrap(), expected, "{script}");
+	}
+
 	let _ = std::fs::remove_dir_all(&tmp);
 }
 

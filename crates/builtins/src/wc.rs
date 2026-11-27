@@ -582,7 +582,7 @@ use self::{
 	countable::WordCountable,
 	word_count::WordCount,
 };
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno};
 
 /// The minimum character width for formatting counts when reading from stdin.
 const MINIMUM_WIDTH: usize = 7;
@@ -826,7 +826,7 @@ enum WcError {
 	ZeroLengthFileName,
 	#[error("{path}:{idx}: invalid zero-length file name")]
 	ZeroLengthFileNameCtx { path: Cow<'static, str>, idx: usize },
-	#[error("{context}: {source}")]
+	#[error("{context}: {}", strip_errno(.source))]
 	Io {
 		context: String,
 		#[source]
