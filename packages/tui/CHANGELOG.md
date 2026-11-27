@@ -28,6 +28,7 @@
 - Reduced idle CPU usage on Windows after `/restart`.
 - Improved recovery from lost Tern surfaces and malformed TSP responses.
 - Typing in a Tern composer now remains responsive while an agent is streaming, even when Tern is slow to acknowledge frames.
+- Clicks in Tern now show their effect while Tern is slow to acknowledge frames: an ask form you submit leaves the screen at once instead of staying with a Submit button that no longer responds.
 - Fixed inverse video styling leaking into padding and borders at wrapped line endings.
 - Fixed win32 input-mode key records being inserted as literal composer text in certain timing conditions.
 
