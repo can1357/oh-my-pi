@@ -98,7 +98,13 @@ export type ReplayTarget = Pick<
 };
 
 /** What a history replay reads of a session context. */
-export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained">;
+export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained"> & {
+	/**
+	 * The messages are a later part of the session (a branch's tail, a sibling branch below its
+	 * fork): the run they open in may have started above them.
+	 */
+	readonly clipped?: boolean;
+};
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -455,6 +461,9 @@ export class UiHelpers {
 		// a run gets the turn's totals, and with them the native footer under its
 		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
 		const turnUsage = new TurnUsageTally();
+		// A clipped replay can open partway through a run: until a run starts in view, the tally would
+		// cover only the replayed part, so that run gets no totals.
+		let runStartUnseen = sessionContext.clipped === true;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usage = pendingUsage;
@@ -512,7 +521,10 @@ export class UiHelpers {
 			if (nextToolName === "todo") {
 				todoSnapshot = null;
 				previous.seal();
-				transcript.remove(previous.block);
+				// One a live update found in scrollback stayed there as history: the rebuild keeps it too.
+				const kept =
+					previous.call !== undefined && ctx.eventController?.keptTodoSnapshot(previous.call.id) === true;
+				if (!kept) transcript.remove(previous.block);
 				return;
 			}
 			if (nextToolName !== undefined) return;
@@ -648,7 +660,10 @@ export class UiHelpers {
 					);
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
-				if (turnSummary) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				if (turnSummary && !runStartUnseen) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				// The tally starts over after a run's last reply, so the next run counts whole even when nothing
+				// marks its start (an agent-attributed custom message resets nothing below).
+				if (message.stopReason !== "toolUse") runStartUnseen = false;
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(ctx.settings) && assistantUsageIsBilled(message.usage)
 						? message.usage
@@ -726,6 +741,8 @@ export class UiHelpers {
 					}
 					if (isBackground && !settled) {
 						pending.parkAsBackground();
+						// The call has returned; only the job is still running.
+						transcript.settle(pending.block);
 						backgroundCallIds.add(message.toolCallId);
 					} else {
 						ctx.pendingTools.delete(message.toolCallId);
@@ -754,6 +771,7 @@ export class UiHelpers {
 				if (message.role === "user" && message.attribution !== "agent") {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				// A synthetic developer message initiates a fresh run (auto-continue,
 				// /goal, approved plan): replay must not inherit the preceding user
@@ -765,10 +783,12 @@ export class UiHelpers {
 					// turn's own prompt: anchor the delta to it instead of clearing.
 					turnStartedAt = message.userInitiated ? message.timestamp : undefined;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				this.addMessageToChat(message, undefined, ctx);
 			}
@@ -780,10 +800,10 @@ export class UiHelpers {
 		sealReadGroup();
 		// A trailing waiting poll is final history on rebuild.
 		resolveWaitingPoll();
-		// A trailing todo snapshot is live state, not history: when the rebuild
-		// runs mid-turn, hand it back to the controller so a follow-up `todo`
-		// update keeps displacing instead of stacking. Idle rebuilds (resume /
-		// compaction) seal it so it retires as history.
+		// A trailing todo snapshot may still be replaced: when the rebuild runs
+		// mid-turn, hand it back to the controller so a follow-up `todo` update
+		// keeps displacing instead of stacking. Idle rebuilds (resume /
+		// compaction) seal it as final.
 		if (todoSnapshot && ctx.viewSession.isStreaming) {
 			ctx.eventController?.inheritDisplaceableTodo(todoSnapshot);
 			todoSnapshot = null;

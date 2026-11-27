@@ -81,6 +81,15 @@ export function firstOfKind(root: UiNode, ...kinds: string[]): UiNode {
 	return root;
 }
 
+/**
+ * What an Agent Hub transcript viewer overlay focuses: its draft editor, else (read-only advisors
+ * render none) the card under the overlay root, whose `onKey` drives Esc, scrolling and hub keys.
+ */
+export function transcriptFocus(root: UiNode): UiNode {
+	const editor = firstOfKind(root, "editor");
+	return editor === root ? layerContent(root) : editor;
+}
+
 /** Tern's rewind page: the replayed turns are its `main`, the bar (the last child) docks under them. */
 export const REWIND_PAGE: PageProps = { role: "omp.rewind", dock: 1 };
 
