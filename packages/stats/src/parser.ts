@@ -833,6 +833,8 @@ export async function parseSessionFile(
 		}
 		const approval = extractToolApproval(sessionPath, folder, entry);
 		if (approval) {
+			// Approvals of copied calls are the parent's, like the calls they gate.
+			if (inheritedCall) return;
 			const existing = approvalsById.get(approval.toolCallId);
 			if (existing) {
 				if (approval.parentToolCallId !== undefined) existing.parentToolCallId = approval.parentToolCallId;

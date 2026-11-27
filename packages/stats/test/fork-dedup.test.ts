@@ -311,11 +311,19 @@ describe("stats sync deduplicates forked-session entries", () => {
 			...plainEntry,
 			message: { ...plainEntry.message, content: [...plainEntry.message.content, toolCall] },
 		};
+		const approvalEntry = {
+			type: "custom",
+			id: "appr01ab",
+			parentId: "asst01ab",
+			timestamp: ts,
+			customType: "tool_approval_requested",
+			data: { toolCallId: "call01ab", toolName: "read", requestedAt: ts },
+		};
 		const parentFile = await writeSessionFile(
 			"--tmp--fork-dedup",
 			"01_parent.jsonl",
 			{ id: "parent00", cwd: "/tmp/project" },
-			[userEntry, assistantEntry],
+			[userEntry, assistantEntry, approvalEntry],
 		);
 		// `forkFrom` with `resetInheritedCost` (a `/tan` clone) zeroes the copy's cost and marks the
 		// copied prefix; the clone then makes a call of its own.
@@ -325,8 +333,13 @@ describe("stats sync deduplicates forked-session entries", () => {
 		const forkFile = await writeSessionFile(
 			"--tmp--fork-dedup",
 			"02_fork.jsonl",
-			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile, inheritedThroughEntryId: "asst01ab" },
-			[userEntry, copied, buildAssistantEntry({ entryId: "asst02cd", parentId: "asst01ab", timestamp: ownTs })],
+			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile, inheritedThroughEntryId: "appr01ab" },
+			[
+				userEntry,
+				copied,
+				approvalEntry,
+				buildAssistantEntry({ entryId: "asst02cd", parentId: "appr01ab", timestamp: ownTs }),
+			],
 		);
 
 		// The fork lands first, as a from-scratch sync of a fork newer than an idle parent does.
@@ -352,6 +365,11 @@ describe("stats sync deduplicates forked-session entries", () => {
 			)
 			.all("user01ab");
 		expect(prompts).toEqual([{ session_file: parentFile, model: "gpt-5.4" }]);
+		// The copied approval stays with the call it gates.
+		const approvals = db
+			.query<{ session_file: string }, [string]>("SELECT session_file FROM tool_approvals WHERE tool_call_id = ?")
+			.all("call01ab");
+		expect(approvals.map(approval => approval.session_file)).toEqual([parentFile]);
 	});
 
 	it.each([
