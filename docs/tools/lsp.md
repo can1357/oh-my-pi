@@ -346,7 +346,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - Failed initialization backoff: `3 * 60 * 1000ms` — `INIT_FAILURE_BACKOFF_MS`; a matching single-file or workspace `reload` clears this negative cache so retry is immediate.
 - Single-file diagnostics wait: `3_000ms` normally (`SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS` in `diagnostics.ts`); for project-aware servers the `lsp.requestTimeout` setting (default `10` seconds) or the call's `timeout`. Both are bounded by the tool timeout.
 - Late post-edit diagnostics (edit/write writethrough, delivered after the tool result): per-server wait `max(12_000ms, lsp.requestTimeout)` — `deferredDiagnosticsWaitMs()` in `diagnostics.ts`.
-- Batch/glob diagnostics wait per file: `400ms` — `BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS`.
+- Batch/glob diagnostics use the same per-file wait as single files; the tool timeout bounds the whole batch.
 - Glob diagnostic target cap: first `20` matches — `MAX_GLOB_DIAGNOSTIC_TARGETS`.
 - Workspace symbol cap: first `200` entries — `WORKSPACE_SYMBOL_LIMIT`.
 - Reference context cap: first `50` references include source context — `REFERENCE_CONTEXT_LIMIT`.
