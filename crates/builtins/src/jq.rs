@@ -1351,7 +1351,7 @@ mod output {
 	//! Values written as jq's `jv_dump_term` writes them.
 	use std::io::{self, Write};
 
-	use jaq_json::{Num, Val, write::write_str};
+	use jaq_json::{Map, Num, Val, write::write_str};
 
 	use super::cli::{Cli, Indent};
 
@@ -1486,9 +1486,13 @@ mod output {
 		/// `jaq_json::write::MAX_DEPTH`, so recursing once per level here would
 		/// overflow a normal thread.
 		fn dump<W: Write + ?Sized>(&self, w: &mut W, v: &Val, level: usize) -> Result<(), WriteError> {
+			enum Entries<'a> {
+				Insertion(&'a Map),
+				Sorted(Vec<(&'a Val, &'a Val)>),
+			}
 			enum Frame<'a> {
 				Items { items: &'a [Val], next: usize, level: usize, color: Option<&'a [u8]> },
-				Entries { entries: Vec<(&'a Val, &'a Val)>, next: usize, level: usize, color: Option<&'a [u8]> },
+				Entries { entries: Entries<'a>, next: usize, level: usize, color: Option<&'a [u8]> },
 			}
 			macro_rules! reset {
 				($color:expr) => {
@@ -1569,10 +1573,13 @@ mod output {
 									_ => &[],
 								}
 							}
-							let mut entries: Vec<(&Val, &Val)> = o.iter().collect();
-							if self.sort_keys {
-								entries.sort_by(|(a, _), (b, _)| bytes(a).cmp(bytes(b)));
-							}
+							let entries = if self.sort_keys && o.len() > 1 {
+								let mut sorted: Vec<_> = o.iter().collect();
+								sorted.sort_by(|(a, _), (b, _)| bytes(a).cmp(bytes(b)));
+								Entries::Sorted(sorted)
+							} else {
+								Entries::Insertion(o)
+							};
 							stack.push(Frame::Entries { entries, next: 0, level, color });
 						},
 					}
@@ -1599,10 +1606,13 @@ mod output {
 						}
 					},
 					Frame::Entries { entries, next, level, color } => {
-						if *next < entries.len() {
+						let entry = match entries {
+							Entries::Insertion(obj) => obj.get_index(*next),
+							Entries::Sorted(sorted) => sorted.get(*next).copied(),
+						};
+						if let Some((k, x)) = entry {
 							let i = *next;
 							*next += 1;
-							let (k, x) = entries[i];
 							let (Val::TStr(k) | Val::BStr(k)) = k else {
 								return Err(WriteError::Key(k.clone()));
 							};

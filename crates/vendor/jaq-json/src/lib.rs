@@ -124,7 +124,7 @@ impl Hash for ArrData {
 impl ArrData {
     /// Consume `self` and return the vector, cloning it first if it is shared.
     fn into_vec(mut self) -> Vec<Val> {
-        Rc::try_unwrap(core::mem::take(&mut self.0)).unwrap_or_else(|a| (*a).clone())
+        take_contents(&mut self.0)
     }
 }
 
@@ -164,7 +164,7 @@ impl From<Map<Val, Val>> for ObjData {
 impl ObjData {
     /// Consume `self` and return the map, cloning it first if it is shared.
     fn into_map(mut self) -> Map<Val, Val> {
-        Rc::try_unwrap(core::mem::take(&mut self.0)).unwrap_or_else(|a| (*a).clone())
+        take_contents(&mut self.0)
     }
 }
 
@@ -178,6 +178,18 @@ impl Drop for ObjData {
     }
 }
 
+/// Moves uniquely owned contents out without allocating a replacement `Rc`.
+fn take_contents<T: Clone + Default>(storage: &mut Rc<T>) -> T {
+    if let Some(contents) = Rc::get_mut(storage) {
+        core::mem::take(contents)
+    } else if Rc::strong_count(storage) == 1 {
+        // Weak references prevent get_mut but need not force a full copy.
+        Rc::unwrap_or_clone(core::mem::take(storage))
+    } else {
+        (**storage).clone()
+    }
+}
+
 /// A container whose children still need to be dropped (see [`Val`]'s drop).
 enum Work {
     Arr(Vec<Val>),
@@ -185,10 +197,9 @@ enum Work {
 }
 
 /// Free `w` and every container nested in it without recursing on the stack.
-fn drop_values(w: Work) {
+fn drop_values(mut w: Work) {
     let mut stack = Vec::new();
-    stack.push(w);
-    while let Some(w) = stack.pop() {
+    loop {
         match w {
             Work::Arr(vs) => {
                 for v in vs {
@@ -202,6 +213,8 @@ fn drop_values(w: Work) {
                 }
             }
         }
+        let Some(next) = stack.pop() else { return };
+        w = next;
     }
 }
 

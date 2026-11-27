@@ -314,9 +314,6 @@ fn command_outcome(
 	match status {
 		Ok(CommandStatus::Exited(0)) => Ok(CommandResult::Success),
 		Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed),
-		Ok(CommandStatus::Exited(code)) if i32::from(code) == crate::host::SIGPIPE_EXIT_CODE => {
-			Err(CommandExecutionError::Killed { name: name.to_owned(), signal: 13 })
-		},
 		Ok(CommandStatus::Exited(_)) => Ok(CommandResult::Failure),
 		Ok(CommandStatus::Signaled(signal)) => {
 			Err(CommandExecutionError::Killed { name: name.to_owned(), signal })
