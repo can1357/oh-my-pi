@@ -27,6 +27,7 @@
 - Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` / `KIMI_CODE_GLOBAL_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 - Logging in again to an MCP OAuth server now clears the disabled credential left by its earlier refresh failure ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
 - Fixed GitHub Copilot Claude text replies arriving as a `msg_blocked` placeholder prefixed with "cached data for request … not found": Copilot Anthropic Messages requests now send the conversation id as `X-Client-Session-Id` ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
+- Fixed a `/session pin` made while an account selection was still running (such as the Codex connection prewarm at session start) being replaced by the account that selection picked ([#20634](https://github.com/can1357/oh-my-pi/issues/20634), [#20638](https://github.com/can1357/oh-my-pi/pull/20638) by [@roboomp](https://github.com/roboomp))
 
 ### Changed
 
