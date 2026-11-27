@@ -179,7 +179,7 @@ await runRpcMode(session, {
 	}, 30_000);
 
 	/** Spawns an RPC runtime whose extension awaits a form in `session_start` and has a `/probe` command. */
-	async function spawnStartupDialogRuntime(temp: TempDir) {
+	async function spawnStartupDialogRuntime(temp: TempDir, timeout?: number) {
 		const fixturePath = temp.join("runtime.ts");
 		const sourceDir = path.resolve(import.meta.dir, "../src");
 		await Bun.write(
@@ -201,7 +201,11 @@ const { session } = await createAgentSession({
       handler: async (_args, ctx) => ctx.ui.notify("askDialog:" + typeof ctx.ui.askDialog),
     });
     pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.notify(JSON.stringify((await ctx.ui.formDialog("<form><input name='trust'></form>"))?.data));
+      const result = await ctx.ui.formDialog("<form><input name='trust'></form>", {
+        timeout: ${JSON.stringify(timeout)},
+        onTimeoutReset: () => ctx.ui.notify("timeout reset"),
+      });
+      ctx.ui.notify(JSON.stringify(result?.data));
     });
   }],
 });
@@ -265,6 +269,46 @@ await runRpcMode(session);
 			await stderr,
 		).toEqual(["ask", '{"trust":"yes"}', "s1:true", "s2:true", "s3:true"]);
 		expect(seen).toContain("askDialog:function");
+	}, 30_000);
+
+	it("accepts activity during startup and times out with the latest draft after the extended deadline", async () => {
+		await using temp = await TempDir.create("@rpc-startup-activity-");
+		const child = await spawnStartupDialogRuntime(temp, 1500);
+		const stderr = new Response(child.stderr).text();
+		let originalDeadline = 0,
+			extendedDeadline = 0,
+			resetNotifications = 0,
+			notified: unknown,
+			finishedAt = 0;
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "extension_ui_request" && frame.method === "form") {
+				expect(frame.supportsActivity).toBe(true);
+				originalDeadline = Number(frame.expiresAt);
+				child.stdin.write(`${JSON.stringify({ id: "state", type: "get_state" })}\n`);
+				await Bun.sleep(500);
+				child.stdin.write(
+					`${JSON.stringify({ type: "extension_ui_activity", id: frame.id, data: { trust: "latest draft" } })}\n`,
+				);
+				await child.stdin.flush();
+			} else if (frame.type === "extension_ui_state") {
+				extendedDeadline = Number(frame.expiresAt);
+			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+				if (frame.message === "timeout reset") {
+					resetNotifications++;
+				} else {
+					notified = frame.message;
+					finishedAt = Date.now();
+				}
+			} else if (frame.type === "response" && frame.id === "state") {
+				child.stdin.end();
+			}
+		}
+		expect(await child.exited, await stderr).toBe(0);
+		expect(extendedDeadline).toBeGreaterThan(originalDeadline + 250);
+		expect(resetNotifications).toBe(1);
+		expect(finishedAt).toBeGreaterThanOrEqual(extendedDeadline - 25);
+		expect(notified).toBe('{"trust":"latest draft"}');
 	}, 30_000);
 
 	it("rejects a dialog session_start awaits when stdin closes, so the process still exits", async () => {
@@ -714,6 +758,8 @@ describe("RPC form dialog", () => {
 			type: "extension_ui_request",
 			id: request.id,
 			method: "form",
+			supportsActivity: true,
+			expiresAt: expect.any(Number),
 			html: DEPLOY_FORM,
 			timeout: 60_000,
 		});

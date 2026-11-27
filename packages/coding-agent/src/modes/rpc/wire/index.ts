@@ -67,6 +67,8 @@ const notificationDefs = {
 			"SessionSettledEvent",
 			"ExtensionError",
 			"ExtensionUiRequest",
+			"ExtensionUiState",
+			"ExtensionUiActivityError",
 			"AvailableCommandsUpdateEvent",
 			"SubagentLifecycleEvent",
 			"SubagentProgressEvent",

@@ -465,6 +465,15 @@ if request.method == "form":
     client.send_ui_data(request.id, {"store": "sqlite", "ttl_days": 30})
 ```
 
+For a timed request with `supports_activity is True`, call
+`client.send_ui_activity(request.id)` on user interaction. For a form, optional
+`data={...}` is a whole draft, not a patch. Use `reset=False` when restoring a
+draft without user input; normal activity resets the original timeout. Subscribe
+with `client.on_extension_ui_state(...)` for the authoritative `expires_at`, and
+`client.on_extension_ui_activity_error(...)` for validation errors. On inactivity
+timeout the server submits the last valid data draft. This API does not send
+option-note/image drafts and does not replace `send_ui_data` for final answers.
+
 For non-interactive scripts, you can install a default headless policy instead of
 handling every request manually:
 

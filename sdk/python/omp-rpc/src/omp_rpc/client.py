@@ -71,6 +71,34 @@ _RPC_MESSAGES_PAGE_STALE_ERROR = "RPC message cursor is stale"
 _RPC_MESSAGES_PAGE_FALLBACK_CODES = frozenset({"session_busy", "stale_cursor"})
 
 
+def _form_data(data: Mapping[str, str | int | float | Sequence[str]]) -> JsonObject:
+    wire_data: JsonObject = {}
+    for name, value in data.items():
+        if isinstance(value, bool):
+            raise TypeError(
+                f"form field {name!r} must be a string, a number or a list of strings, not a bool"
+            )
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(
+                f"form field {name!r} must be a finite number, not {value!r}"
+            )
+        if isinstance(value, (str, int, float)):
+            wire_data[name] = value
+            continue
+        if not isinstance(value, Sequence):
+            raise TypeError(
+                f"form field {name!r} must be a string, a number or a list of strings, not {type(value).__name__}"
+            )
+        # Members are checked too: a NaN inside a list would write invalid JSON the server cannot parse.
+        members = list(value)
+        if not all(isinstance(member, str) for member in members):
+            raise TypeError(
+                f"form field {name!r} must be a list of strings, not {members!r}"
+            )
+        wire_data[name] = members
+    return wire_data
+
+
 @dataclass(slots=True)
 class _PendingRpcChunks:
     chunk_id: str
@@ -962,27 +990,34 @@ class RpcClient(WireClient):
         a mapping, a set), or a list member that is not a string, and `ValueError` for
         a non-finite float, which JSON cannot carry.
         """
-        wire_data: JsonObject = {}
-        for name, value in data.items():
-            if isinstance(value, bool):
-                raise TypeError(f"form field {name!r} must be a string, a number or a list of strings, not a bool")
-            if isinstance(value, float) and not math.isfinite(value):
-                raise ValueError(f"form field {name!r} must be a finite number, not {value!r}")
-            if isinstance(value, (str, int, float)):
-                wire_data[name] = value
-                continue
-            if not isinstance(value, Sequence):
-                raise TypeError(
-                    f"form field {name!r} must be a string, a number or a list of strings, not {type(value).__name__}"
-                )
-            # Members are checked too: a NaN inside a list would write invalid JSON the server cannot parse.
-            members = list(value)
-            if not all(isinstance(member, str) for member in members):
-                raise TypeError(f"form field {name!r} must be a list of strings, not {members!r}")
-            wire_data[name] = members
+        wire_data = _form_data(data)
         self._send_notification(
             {"type": "extension_ui_response", "id": request_id, "data": wire_data}
         )
+
+    def send_ui_activity(
+        self,
+        request_id: str,
+        *,
+        data: Mapping[str, str | int | float | Sequence[str]] | None = None,
+        reset: bool = True,
+    ) -> None:
+        """Report user interaction on a request with `supports_activity is True`.
+
+        `data` is a whole form draft, not a patch. Use `reset=False` when
+        restoring it without user input so reconnecting does not extend time.
+        The server returns the authoritative deadline via `extension_ui_state`.
+        """
+        if not isinstance(reset, bool):
+            raise TypeError("dialog activity reset must be a bool")
+        payload: JsonObject = {
+            "type": "extension_ui_activity",
+            "id": request_id,
+            "reset": reset,
+        }
+        if data is not None:
+            payload["data"] = _form_data(data)
+        self._send_notification(payload)
 
     def cancel_ui_request(self, request_id: str, *, timed_out: bool = False) -> None:
         payload: JsonObject = {

@@ -8,3 +8,11 @@ describe("RPC wire artifacts", () => {
 		}
 	});
 });
+
+test("activity schema closes only the frame, leaving draft field names open", async () => {
+	const bundle = await Bun.file(new URL("../../src/modes/rpc/wire/rpc-wire.schema.json", import.meta.url)).json();
+	const activity = bundle.$defs.ExtensionUiActivity;
+	expect(activity.additionalProperties).toBe(false);
+	expect(activity.properties.data.additionalProperties).toEqual({});
+	expect(activity.required).toEqual(["type", "id"]);
+});

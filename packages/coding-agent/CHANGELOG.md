@@ -9,6 +9,7 @@
 
 ### Added
 
+- Timed RPC dialogs accept user activity to refresh their inactivity deadline, and form timeouts retain the latest valid data draft ([#20471](https://github.com/can1357/oh-my-pi/pull/20471) by [@tingQian](https://github.com/tingQian)).
 - Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
 - Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
 - Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.

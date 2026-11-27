@@ -107,6 +107,7 @@ import type {
 	RpcAbortAndRestoreQueueResult,
 	RpcCommand,
 	RpcExtensionUIRequest,
+	RpcExtensionUIActivity,
 	RpcExtensionUIResponse,
 	RpcExtensionUISelectOptionDetail,
 	RpcHostToolCallRequest,
@@ -212,6 +213,7 @@ export type * from "./rpc-types";
 export type PendingExtensionRequest = {
 	resolve: (response: RpcExtensionUIResponse) => void;
 	reject: (error: Error) => void;
+	activity?: (frame: RpcExtensionUIActivity) => void;
 };
 
 /** Pending extension UI request map that can fail closed when the RPC client disconnects. */
@@ -410,8 +412,16 @@ function isRpcExtensionUIResponse(value: unknown): value is RpcExtensionUIRespon
 	return value.type === "extension_ui_response" && typeof value.id === "string";
 }
 
+function isRpcExtensionUIActivity(value: unknown): value is RpcExtensionUIActivity {
+	return isRecord(value) && value.type === "extension_ui_activity" && typeof value.id === "string";
+}
+
 /** Dispatch side-channel frames that must overtake the serialized command queue. */
 export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps): boolean {
+	if (isRpcExtensionUIActivity(parsed)) {
+		deps.pendingExtensionRequests.get(parsed.id)?.activity?.(parsed);
+		return true;
+	}
 	if (isRpcExtensionUIResponse(parsed)) {
 		const pending = deps.pendingExtensionRequests.get(parsed.id);
 		if (pending) pending.resolve(parsed);
@@ -1343,7 +1353,7 @@ function parseFormDialogResponse(
 }
 
 /**
- * Sends an `ask` tool's HTML form as one RPC `form` dialog; a timeout submits the form's defaults.
+ * Sends an `ask` tool's HTML form as one RPC `form` dialog; a timeout submits the last accepted host draft, or defaults if none was sent.
  * Fails without sending when the frame exceeds `maxFrameBytes`, the largest frame the negotiated protocol delivers intact.
  */
 export async function requestRpcFormDialog(
@@ -1355,7 +1365,8 @@ export async function requestRpcFormDialog(
 ): Promise<ExtensionFormDialogResult | undefined> {
 	// Protocol v1 shrinks an oversized frame and cuts the HTML, so the host could not answer the controls past the cut.
 	const request = { method: "form", html, timeout: dialogOptions?.timeout };
-	// A throwaway id measures the frame: Snowflake ids are always 16 characters, so it encodes to the real id's length.
+	// Preflight before parsing. The sender also checks the final frame including activity/deadline metadata.
+	// Snowflake ids are always 16 characters, so this throwaway id encodes to the real id's length.
 	const bytes = encodedBytes({ type: "extension_ui_request", id: Snowflake.next(), ...request });
 	if (bytes > maxFrameBytes) {
 		throw new Error(
@@ -1364,6 +1375,7 @@ export async function requestRpcFormDialog(
 	}
 
 	const form = parseHtmlForm(html);
+	let latest = defaultFormData(form);
 	let timedOut = false;
 	const opts: ExtensionUIDialogOptions = {
 		...dialogOptions,
@@ -1372,10 +1384,26 @@ export async function requestRpcFormDialog(
 			dialogOptions?.onTimeout?.();
 		},
 	};
-	const result = await requestRpcDialog(pendingRequests, output, opts, undefined, request, response =>
-		parseFormDialogResponse(response, form, opts),
+	const result = await requestRpcDialog(
+		pendingRequests,
+		output,
+		opts,
+		undefined,
+		request,
+		response => parseFormDialogResponse(response, form, opts),
+		frame => {
+			if (frame.data !== undefined) {
+				// Activity is not a response: never forward cancellation/timeout fields from the input frame.
+				latest = parseFormDialogResponse(
+					{ type: "extension_ui_response", id: frame.id, data: frame.data },
+					form,
+					opts,
+				)!.data;
+			}
+		},
+		maxFrameBytes,
 	);
-	return timedOut ? { data: defaultFormData(form), timedOut: true } : result;
+	return timedOut ? { data: latest, timedOut: true } : result;
 }
 
 export function requestRpcEditor(
@@ -1450,20 +1478,37 @@ export function requestRpcDialog<T>(
 	defaultValue: T,
 	request: Record<string, unknown>,
 	parseResponse: (response: RpcExtensionUIResponse) => T,
+	onActivity?: (frame: RpcExtensionUIActivity) => void,
+	maxFrameBytes?: number,
 ): Promise<T> {
 	if (opts?.signal?.aborted) return Promise.resolve(defaultValue);
 
 	const id = Snowflake.next() as string;
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
 	let timeoutId: NodeJS.Timeout | undefined;
-
+	let expiresAt: number | undefined;
+	let settled = false;
+	const timeout = opts?.timeout;
 	const cleanup = () => {
 		clearTimeout(timeoutId);
 		opts?.signal?.removeEventListener("abort", onAbort);
 		pendingRequests.delete(id);
 	};
-	// Tells the host to close a dialog omp has already settled, so a late answer
-	// cannot look actionable after abort or timeout.
+	const claim = () => {
+		if (settled) return false;
+		settled = true;
+		cleanup();
+		return true;
+	};
+	const finish = (value: T) => {
+		if (claim()) resolve(value);
+	};
+	const fail = (cause: Error) => {
+		if (settled) return;
+		settled = true;
+		cleanup();
+		reject(cause);
+	};
 	const cancelHostDialog = () =>
 		output({
 			type: "extension_ui_request",
@@ -1472,33 +1517,83 @@ export function requestRpcDialog<T>(
 			targetId: id,
 		} as RpcExtensionUIRequest);
 	const onAbort = () => {
+		if (settled) return;
 		cancelHostDialog();
-		cleanup();
-		resolve(defaultValue);
+		finish(defaultValue);
+	};
+	const expire = () => {
+		if (!claim()) return;
+		try {
+			opts?.onTimeout?.();
+			resolve(defaultValue);
+		} catch (cause) {
+			reject(toError(cause));
+		} finally {
+			cancelHostDialog();
+		}
+	};
+	const armTimeout = (announce: boolean) => {
+		if (settled || timeout === undefined) return;
+		clearTimeout(timeoutId);
+		expiresAt = Date.now() + timeout;
+		timeoutId = setTimeout(expire, timeout);
+		if (announce) {
+			output({ type: "extension_ui_state", id, expiresAt });
+			if (!settled) opts?.onTimeoutReset?.();
+		}
+	};
+	const activity = (frame: RpcExtensionUIActivity) => {
+		if (settled) return;
+		// The deadline is authoritative even if the event loop has not run its timer yet.
+		if (expiresAt !== undefined && Date.now() >= expiresAt) {
+			expire();
+			return;
+		}
+		try {
+			if (
+				Object.keys(frame).some(key => !["type", "id", "reset", "data"].includes(key)) ||
+				(frame.reset !== undefined && typeof frame.reset !== "boolean")
+			)
+				throw new Error("Invalid dialog activity");
+			if (frame.data !== undefined && !onActivity) throw new Error("Only form activity can carry a data draft");
+			onActivity?.(frame);
+			if (frame.reset !== false) armTimeout(true);
+		} catch (cause) {
+			output({ type: "extension_ui_activity_error", id, error: toError(cause).message });
+		}
 	};
 	opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-	if (opts?.timeout !== undefined) {
-		timeoutId = setTimeout(() => {
-			opts.onTimeout?.();
-			cancelHostDialog();
-			cleanup();
-			resolve(defaultValue);
-		}, opts.timeout);
-	}
-
 	pendingRequests.set(id, {
 		resolve: response => {
-			cleanup();
+			// Parsing can call extension code (onTimeout), which may synchronously abort.
+			if (!claim()) return;
 			try {
 				resolve(parseResponse(response));
-			} catch (err) {
-				reject(err);
+			} catch (cause) {
+				reject(toError(cause));
 			}
 		},
-		reject,
+		activity: timeout === undefined ? undefined : activity,
+		reject: fail,
 	});
-	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
+	// A disconnected pending map can reject synchronously during set(). Do not revive its timer or UI.
+	if (!settled) {
+		armTimeout(false);
+		const frame = {
+			type: "extension_ui_request",
+			id,
+			...request,
+			...(expiresAt === undefined ? {} : { supportsActivity: true, expiresAt }),
+		} as RpcExtensionUIRequest;
+		const bytes = maxFrameBytes === undefined ? undefined : encodedBytes(frame);
+		if (bytes !== undefined && maxFrameBytes !== undefined && bytes > maxFrameBytes) {
+			fail(
+				new Error(
+					`Form is too large for the RPC host (${bytes} bytes, limit ${maxFrameBytes}); use fewer or smaller images, or split the form`,
+				),
+			);
+		} else output(frame);
+	}
 	return promise;
 }
 /**
@@ -1928,6 +2023,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const receiveFrame = (parsed: unknown): void => {
 		if (!heldFrames) {
 			inputDispatcher.dispatch(parsed);
+		} else if (isRpcExtensionUIActivity(parsed)) {
+			pendingExtensionRequests.get(parsed.id)?.activity?.(parsed);
 		} else if (isRpcExtensionUIResponse(parsed)) {
 			pendingExtensionRequests.get(parsed.id)?.resolve(parsed);
 		} else if (isRecord(parsed) && parsed.type === "set_ask_dialog") {

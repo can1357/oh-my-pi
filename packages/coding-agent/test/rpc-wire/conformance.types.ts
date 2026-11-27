@@ -34,6 +34,9 @@ import type {
 	RpcDictationTranscriptFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcExtensionUIActivity,
+	RpcExtensionUIState,
+	RpcExtensionUIActivityError,
 	RpcHostToolCallRequest,
 	RpcHostToolCancelRequest,
 	RpcHostToolDefinition,
@@ -237,6 +240,9 @@ export type Frames = Assert<
 		uiConfirm: Inbound<Wire.ConfirmUiResponse, Extract<RpcExtensionUIResponse, { confirmed: unknown }>>;
 		uiCancel: Inbound<Wire.CancelUiResponse, Extract<RpcExtensionUIResponse, { cancelled: unknown }>>;
 		uiAnswers: Inbound<Wire.AnswersUiResponse, Extract<RpcExtensionUIResponse, { answers: unknown }>>;
+		uiActivity: Inbound<Wire.ExtensionUiActivity, RpcExtensionUIActivity>;
+		uiState: Outbound<RpcExtensionUIState, Wire.ExtensionUiState>;
+		uiActivityError: Outbound<RpcExtensionUIActivityError, Wire.ExtensionUiActivityError>;
 		uiData: Inbound<Wire.DataUiResponse, Extract<RpcExtensionUIResponse, { data: unknown }>>;
 		responseFailure: Outbound<Extract<RpcResponse, { success: false }>, Wire.RpcResponse>;
 	}>
@@ -245,7 +251,11 @@ export type Frames = Assert<
 export type InboundSet = Assert<
 	Same<
 		Wire.RpcInbound["type"],
-		RpcExtensionUIResponse["type"] | RpcHostToolUpdate["type"] | RpcHostToolResult["type"] | RpcHostUriResult["type"]
+		| RpcExtensionUIResponse["type"]
+		| RpcExtensionUIActivity["type"]
+		| RpcHostToolUpdate["type"]
+		| RpcHostToolResult["type"]
+		| RpcHostUriResult["type"]
 	>
 >;
 

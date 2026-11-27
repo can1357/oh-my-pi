@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { requestRpcFormDialog, RpcPendingExtensionRequests } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type {
 	ExtensionFormDialogResult,
 	ExtensionUIDialogOptions,
@@ -209,6 +210,31 @@ describe("AskTool form dialog", () => {
 		);
 		expect(text(result)).toContain("no answer was given");
 		expect(result.details).toEqual({ answers: [], timedOut: true });
+	});
+
+	it("keeps an incomplete RPC timeout draft at the form boundary while ask retains no-answer semantics", async () => {
+		const pending = new RpcPendingExtensionRequests();
+		let draft: ExtensionFormDialogResult | undefined;
+		const result = new AskTool(createSession()).execute(
+			"call-rpc-draft-timeout",
+			{
+				html: '<form><label>First<input name="first" required></label><label>Second<input name="second" required></label></form>',
+			},
+			undefined,
+			undefined,
+			createContext({
+				formDialog: async (html, options) => {
+					const response = requestRpcFormDialog(pending, () => {}, 1048575, html, { ...options, timeout: 20 });
+					const id = [...pending.keys()][0]!;
+					pending.get(id)!.activity!({ type: "extension_ui_activity", id, data: { first: "draft" } });
+					draft = await response;
+					return draft;
+				},
+			}),
+		);
+		expect((await result).details).toEqual({ answers: [], timedOut: true });
+		expect(draft).toEqual({ data: { first: "draft", second: "" }, timedOut: true });
+		expect(pending.size).toBe(0);
 	});
 
 	it("aborts the turn when the user cancels the form", async () => {
