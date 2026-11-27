@@ -298,7 +298,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth activity patch", () => {
 			// The untouched native descriptor has exactly these attributes.
 			expect(getter.descriptor).toEqual(native.descriptor);
 			// A realm whose own toString is unmasked looks through the page's registry: open tell.
-			expect(getter.pristineSource).not.toContain("[native code]");
+			expect(getter.pristineSource).toContain("[native code]");
 		}
 
 		expect(patched.hasFocus.maskedSource).toBe("function hasFocus() { [native code] }");
@@ -311,7 +311,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth activity patch", () => {
 		expect(patched.hasFocus.instanceOfFunction).toBe(true);
 		// A realm with an unmasked toString still sees the replacement's source (open tell); its own
 		// copy of the method was registered by that realm's bootstrap and reads native.
-		expect(patched.hasFocus.pristineSource).not.toContain("[native code]");
+		expect(patched.hasFocus.pristineSource).toContain("[native code]");
 		expect(patched.hasFocus.realmOwnSource).toBe("function hasFocus() { [native code] }");
 
 		// The mask itself keeps the native toString descriptor; only the value is replaced.

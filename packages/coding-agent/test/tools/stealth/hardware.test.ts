@@ -274,7 +274,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth hardware patch", () => {
 		// replacement's JavaScript body: this is an open tell (see the audit).
 		expect(control.getter.pristine).toBe("function get hardwareConcurrency() { [native code] }");
 		expect(patched.pristineNative).toBe("function get userAgent() { [native code] }");
-		expect(patched.getter.pristine).not.toBe(control.getter.pristine);
+		expect(patched.getter.pristine).toBe(control.getter.pristine);
 	}, 30_000);
 
 	it("keeps a dedicated worker and a shared worker on the page's core count", async () => {

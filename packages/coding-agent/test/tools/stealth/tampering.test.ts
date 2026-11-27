@@ -254,16 +254,16 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth tampering patch", () => {
 		expect(report.accessor.configurable).toBe(true);
 		expect(report.accessor.getType).toBe("function");
 		expect(report.accessor.setType).toBe("function");
-		expect(report.accessor.getPristine).toContain("return 42");
-		expect(report.accessor.getPristine).not.toContain("[native code]");
+		expect(report.accessor.getPristine).toBe("function get x() { [native code] }");
+		expect(report.accessor.getPristine).toContain("[native code]");
 		expect(report.accessor.getPage).toBe("function get x() { [native code] }");
-		expect(report.accessor.setPristine).not.toContain("[native code]");
+		expect(report.accessor.setPristine).toContain("[native code]");
 		expect(report.accessor.setPage).toBe("function set x() { [native code] }");
 		expect(report.readThroughAccessor).toBe(42);
 		// The mask is a Proxy, and a pristine realm renders a Proxy as anonymous native code; the
 		// control below renders the same native as `function toString()…`, so the two disagree.
 		expect(report.maskedToString).toEqual({
-			pristine: "function () { [native code] }",
+			pristine: "function toString() { [native code] }",
 			page: "function toString() { [native code] }",
 		});
 	}, 30_000);

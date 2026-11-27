@@ -476,7 +476,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth webgl patch", () => {
 			expect({ ...label, methods: spoofed.methods.getParameter }).toEqual({
 				...label,
 				methods: {
-					pristine: "function () { [native code] }",
+					pristine: NATIVE_METHOD("getParameter"),
 					page: NATIVE_METHOD("getParameter"),
 					name: "getParameter",
 					length: 1,
@@ -535,7 +535,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth webgl patch", () => {
 			length: 0,
 		});
 		expect(patched.functionToString.page).toBe(NATIVE_METHOD("toString"));
-		expect(patched.functionToString.pristine).toBe("function () { [native code] }");
+		expect(patched.functionToString.pristine).toBe("function toString() { [native code] }");
 		expect(control.functionToString.page).toBe(NATIVE_METHOD("toString"));
 		expect(control.functionToString.pristine).toBe(NATIVE_METHOD("toString"));
 	}, 30_000);
@@ -620,7 +620,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth webgl patch", () => {
 				...label,
 				precisionMethod: {
 					...native.methods.getShaderPrecisionFormat,
-					pristine: "function () { [native code] }",
+					pristine: NATIVE_METHOD("getShaderPrecisionFormat"),
 					page: NATIVE_METHOD("getShaderPrecisionFormat"),
 				},
 			});

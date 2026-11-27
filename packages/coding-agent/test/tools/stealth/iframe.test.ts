@@ -519,15 +519,15 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth iframe patch", () => {
 
 		// Open tell: a pristine realm's own toString bypasses the registry, so the JS replacements
 		// read as source there. Proxy-wrapping them (as the hairline patch does) hides the body.
-		expect(patched.accessors.contentWindow.pristine).toStartWith("get contentWindow()");
-		expect(patched.accessors.srcdocGetter.pristine).toStartWith("get srcdoc()");
-		expect(patched.accessors.srcdocSetter.pristine).toStartWith("set srcdoc(newValue)");
+		expect(patched.accessors.contentWindow.pristine).toBe("function get contentWindow() { [native code] }");
+		expect(patched.accessors.srcdocGetter.pristine).toBe("function get srcdoc() { [native code] }");
+		expect(patched.accessors.srcdocSetter.pristine).toBe("function set srcdoc() { [native code] }");
 		for (const accessor of [
 			patched.accessors.contentWindow,
 			patched.accessors.srcdocGetter,
 			patched.accessors.srcdocSetter,
 		]) {
-			expect(accessor.pristine).not.toContain("[native code]");
+			expect(accessor.pristine).toContain("[native code]");
 		}
 
 		// Without the patch the same probe sees the native accessors in both realms.

@@ -1357,6 +1357,7 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 				const Page_Function_toString = Function.prototype.toString;
 				const Page_FunctionToStringDescriptor = Object.getOwnPropertyDescriptor(Function.prototype, "toString");
 				const Page_Proxy = Proxy;
+				const Page_registryKey = Symbol.for("omp.stealth.registry");
 				const Page_WeakMap = WeakMap;
 				const Page_WeakMap_get = Page_WeakMap.prototype.get;
 				const Page_WeakMap_set = Page_WeakMap.prototype.set;
@@ -1416,7 +1417,22 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 					const Intl_DateTimeFormat = nativeWindow.Intl.DateTimeFormat;
 					const Date_constructor = nativeWindow.Date;
 
-					const nativeFunctionSources = new Page_WeakMap();
+					// Same-origin frames get this bootstrap too, so a detector's throwaway iframe is a
+					// patched realm, not a pristine one: share one source registry between them and a
+					// parent-registered function keeps its native name there instead of leaking its body.
+					const nativeFunctionSources = (() => {
+						try {
+							const top = window.top;
+							if (!top) return new Page_WeakMap();
+							const shared = top[Page_registryKey];
+							if (shared) return shared;
+							const created = new Page_WeakMap();
+							Object_defineProperty(top, Page_registryKey, { value: created, configurable: true });
+							return created;
+						} catch (e) {
+							return new Page_WeakMap();
+						}
+					})();
 					let patchedNatives = 0;
 					const makeNativeString = (name) => "function " + (name || "") + "() { [native code] }";
 					const registerNativeSource = (fn, source) => {

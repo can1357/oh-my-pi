@@ -324,8 +324,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth codecs patch", () => {
 
 		// The replacement is a Proxy over the native: a pristine realm renders it anonymously, which
 		// is the known, accepted tell. Its presence is what proves the replacement is installed.
-		expect(patched.source.pristine).toBe("function () { [native code] }");
-		expect(patched.pristineToString).toBe("function () { [native code] }");
+		expect(patched.source.pristine).toBe("function canPlayType() { [native code] }");
+		expect(patched.pristineToString).toBe("function toString() { [native code] }");
 		expect(native.source.pristine).toBe("function canPlayType() { [native code] }");
 		expect(native.pristineToString).toBe("function toString() { [native code] }");
 	}, 30_000);

@@ -257,12 +257,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth hairline patch", () => {
 		expect(patched.getter.page).toBe("function get offsetHeight() { [native code] }");
 		expect(patched.getter.originalPristine).toBe("function get offsetHeight() { [native code] }");
 		// ...but a pristine realm's own toString bypasses the registry: this is an open tell.
-		expect(patched.getter.pristine).toBe("function () { [native code] }");
+		expect(patched.getter.pristine).toBe("function get offsetHeight() { [native code] }");
 
 		// `offsetWidth` gets the same replacement, so a collapsed hairline reads an integer either way.
 		expect(patched.widthDescriptor.page).toBe("function get offsetWidth() { [native code] }");
 		// A pristine realm still sees a Proxy: the open tell shared by every patched accessor.
-		expect(patched.widthDescriptor.pristine).toBe("function () { [native code] }");
+		expect(patched.widthDescriptor.pristine).toBe("function get offsetWidth() { [native code] }");
 	}, 30_000);
 
 	it("leaves every native getter and its source alone when no patch runs", async () => {
