@@ -249,6 +249,8 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 				rows.push(...figure.rows);
 				rendered = true;
 				afterFigure = true;
+			} else if (role === "omp.figure.chart") {
+				afterFigure = rendered;
 			}
 		} else if (child.kind === "md") {
 			const frame = markdownRows(child, cx, false);

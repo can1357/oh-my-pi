@@ -3,7 +3,7 @@
  * Charts follow chartable tables in Tern and graphics-capable terminals.
  * A table still being written is not charted.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { isSettled, signal } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
@@ -19,7 +19,7 @@ import {
 	splitTableCharts,
 } from "../../../../src/session/transcript/table-chart";
 import { Transcript } from "../../../../src/ui/shell/transcript";
-import { DEFAULT_FIGURE_CELL, figureWorkSettled } from "../../../../src/ui/transcript/figures/svg";
+import * as figure from "../../../../src/ui/transcript/figures/svg";
 import { AssistantMessageBlock } from "../../../../src/ui/transcript/messages/assistant-message";
 import { nativeShell } from "../../../helpers/native-shell";
 import { KITTY } from "../figures/harness";
@@ -137,17 +137,20 @@ describe("a reply's table charts in Tern", () => {
 
 type ImageProtocol = NonNullable<TerminalCapabilities["images"]>;
 
-function terminalReply(protocol: ImageProtocol, { live = false, text = REPLY } = {}) {
+function terminalReply(
+	protocol: ImageProtocol,
+	{ live = false, text = REPLY, figureRows }: { live?: boolean; text?: string; figureRows?: number } = {},
+) {
 	const capabilities = () => ({ ...KITTY, images: protocol });
 	const images = new TerminalImages({ capabilities });
 	const theme = loadThemeSync("dark");
 	const env = staticEnvironment(theme, { images: driverImages(images, capabilities) });
 	const transcript = new Transcript();
 	const finalized = signal(!live);
-	const figureCell = signal<typeof DEFAULT_FIGURE_CELL | undefined>(DEFAULT_FIGURE_CELL);
+	const figureCell = signal<typeof figure.DEFAULT_FIGURE_CELL | undefined>(figure.DEFAULT_FIGURE_CELL);
 	const block = transcript.append(() => (
 		<AssistantMessageBlock
-			model={{ message: reply(text), finalized, transient: live, tableCharts: true, figureCell }}
+			model={{ message: reply(text), finalized, transient: live, tableCharts: true, figureCell, figureRows }}
 		/>
 	));
 	return { block, finalized, figureCell, images, paint: () => paintNode(env, block.node, 80), transcript };
@@ -164,7 +167,7 @@ test.each(protocols)("paints a table's chart before following prose on %s", asyn
 	const { block, images, paint, transcript } = terminalReply(protocol);
 	try {
 		transcript.settle(block);
-		await figureWorkSettled();
+		await figure.figureWorkSettled();
 		paint();
 		await images.whenEncoded();
 		const output = paint().rows.join("\n");
@@ -178,12 +181,31 @@ test.each(protocols)("paints a table's chart before following prose on %s", asyn
 	}
 });
 
+test.each(["viewport is too short", "rasterization fails"])("keeps table spacing when %s", async reason => {
+	setTableCharts("always");
+	const fail = reason === "rasterization fails";
+	const raster = fail
+		? spyOn(figure, "rasterizeFigure").mockRejectedValueOnce(new Error("rasterization failed"))
+		: undefined;
+	const { block, paint, transcript } = terminalReply("kitty", { figureRows: fail ? undefined : 2 });
+	try {
+		transcript.settle(block);
+		await figure.figureWorkSettled();
+		const rows = paint().rows;
+		expect(rows.join("\n")).not.toContain("\x1b_Ga=p");
+		expect(rows.map(row => stripEscapes(row).trim()).join("\n")).toMatch(/└[─┴]+┘\n\nDelta is the slowest\./);
+	} finally {
+		transcript.clear();
+		raster?.mockRestore();
+	}
+});
+
 test("terminal prose before a chart resolves a reference defined after it", async () => {
 	setTableCharts("always");
 	const { block, paint, transcript } = terminalReply("kitty", { text: REFERENCED });
 	try {
 		transcript.settle(block);
-		await figureWorkSettled();
+		await figure.figureWorkSettled();
 		const output = stripEscapes(paint().rows.join("\n"));
 		expect(output).toContain("See details");
 		expect(output).not.toContain("[details][d]");
@@ -208,7 +230,7 @@ test("keeps prose after a waiting smart chart out of terminal scrollback", async
 		judge.resolve();
 		await lookupTableChart(chart.table);
 		paint();
-		await figureWorkSettled();
+		await figure.figureWorkSettled();
 		expect(isSettled(block.node)).toBe(true);
 		expect(paint().rows.join("\n")).toMatch(/epsilon[\s\S]*\x1b_Ga=p[\s\S]*Delta is the slowest/);
 

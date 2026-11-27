@@ -78,12 +78,16 @@ export function ChartFigure(
 	const term: ChartTerm = { inline: props.inline === true };
 	return () => {
 		const svg = source();
-		if (svg === undefined) return undefined;
 		if (pending()) return props.inline ? <text key={props.nodeKey} role="omp.figure.chart.pending" /> : undefined;
 		const state = raster.state();
-		if (typeof svg !== "string" || state.status !== "ready") return undefined;
-		return untrack(() => (
-			<RasterImage raster={state.raster} role="omp.figure.chart" nodeKey={props.nodeKey} term={term} />
-		));
+		if (typeof svg === "string" && state.status === "ready") {
+			return untrack(() => (
+				<RasterImage raster={state.raster} role="omp.figure.chart" nodeKey={props.nodeKey} term={term} />
+			));
+		}
+		// The surrounding prose is still split even if this chart cannot draw.
+		return props.inline && read(props.source) !== undefined ? (
+			<col key={props.nodeKey} role="omp.figure.chart" />
+		) : undefined;
 	};
 }
