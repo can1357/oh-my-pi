@@ -783,6 +783,8 @@ export interface SessionParserState {
 	mtimeMs: number;
 	checkpoint: string;
 	serviceTier: ServiceTierByFamily | null;
+	/** This cursor was unreadable during reconciliation; retry from byte zero even if the file is unchanged. */
+	replayPending?: true;
 	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
 	spotlight?: SpotlightParserState;
 	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */

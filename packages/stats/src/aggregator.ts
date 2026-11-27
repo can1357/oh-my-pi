@@ -16,6 +16,7 @@ import {
 	type ParsedSession,
 	prepareSessionSync,
 	replayInheritedPrefixes,
+	setFileOffset,
 } from "./db";
 import {
 	getSessionEntry,
@@ -355,6 +356,14 @@ async function syncAllSessionsLocked(
 	};
 	if (files.length === 0) return finish();
 
+	// Set the obligation before finish() clears the global replay marker. The next successful
+	// parse writes a fresh cursor, leaving other unchanged transcripts on the fast path.
+	const deferReplay = (file: string, stored: FileOffset | undefined) => {
+		if (replay && stored?.parserState && !stored.parserState.replayPending) {
+			setFileOffset(file, stored.offset, stored.lastModified, { ...stored.parserState, replayPending: true });
+		}
+	};
+
 	const prepareFile = async (
 		index: number,
 		parse: (
@@ -375,6 +384,7 @@ async function syncAllSessionsLocked(
 					try {
 						return { fileStats: await fs.promises.stat(sessionFile), stored };
 					} catch {
+						deferReplay(sessionFile, stored);
 						return {};
 					}
 				}),
@@ -384,8 +394,9 @@ async function syncAllSessionsLocked(
 		const metadataIndex = index - metadataStart;
 		const { fileStats, stored } = (await metadata)[metadataIndex];
 		if (failed || !fileStats) return null;
+		const replayFile = replay || stored?.parserState?.replayPending === true;
 		if (
-			!replay &&
+			!replayFile &&
 			stored?.parserState &&
 			stored.lastModified === fileStats.mtimeMs &&
 			stored.parserState.size === fileStats.size &&
@@ -399,10 +410,11 @@ async function syncAllSessionsLocked(
 		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
 		let result: ParseSessionResult;
 		try {
-			result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
+			result = await parse(sessionFile, fromOffset, stored?.parserState, replayFile);
 		} catch (error) {
 			// One transcript the OS refuses to read (antivirus lock, permissions) must not fail the whole history.
 			if (!(error instanceof Error && "code" in error && typeof error.code === "string")) throw error;
+			deferReplay(sessionFile, stored);
 			logger.warn("Skipping unreadable session file in stats sync", {
 				sessionFile,
 				code: error.code,
@@ -410,6 +422,7 @@ async function syncAllSessionsLocked(
 			});
 			return null;
 		}
+		if (!result.parserState) deferReplay(sessionFile, stored);
 		if (unknownIdentity && result.parserState) result.reset = true;
 		return {
 			sessionFile,
@@ -417,10 +430,10 @@ async function syncAllSessionsLocked(
 			// During a full replay, a changed file can be a rewrite even if its old tail checkpoint matches.
 			rebuild:
 				!stored?.parserState ||
-				(replay &&
+				(replayFile &&
 					(result.parserState?.size !== stored.parserState.size ||
 						result.parserState?.mtimeMs !== stored.parserState.mtimeMs)),
-			replay,
+			replay: replayFile,
 		};
 	};
 
