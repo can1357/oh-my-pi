@@ -41,6 +41,7 @@
 
 ### Fixed
 
+- Fixed the tool-call loop guard never stopping a model that keeps calling nonexistent tools (`wri`, `ed`, `ba`) with varying names or arguments; it now redirects after `model.toolCallLoopGuard.threshold` such turns in a row, while a single typo followed by a valid call is unaffected ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
 - Fixed eval `sh()` running commands the bash interceptor (`bashInterceptor.patterns`) redirects to dedicated tools; it now fails with the same guidance as the bash tool ([#20033](https://github.com/can1357/oh-my-pi/issues/20033))
 - `hideThinkingBlock: true` now hides thinking blocks from the moment the TUI starts, instead of showing them until the first streamed reasoning arrives ([#17369](https://github.com/can1357/oh-my-pi/issues/17369))
 - A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"

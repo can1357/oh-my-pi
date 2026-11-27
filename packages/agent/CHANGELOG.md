@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
 - Corrected OpenTelemetry chat spans to report the model that actually served the response.
 
