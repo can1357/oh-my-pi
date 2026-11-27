@@ -89,10 +89,10 @@ Run one agent synchronously.
 {{/if}}
 
 Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
-Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
+Tasks NEVER run full builds or whole test suites mid-flight; you run those once at the join. A check scoped to the task's own files that finishes in seconds is fine.
 
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.
 {{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it.
-{{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (read-only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
+{{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (read-only, no edits){{/if}}{{#if tools.length}} (tools: {{#list tools join=", "}}{{this}}{{/list}}){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
 {{/list}}{{/if}}

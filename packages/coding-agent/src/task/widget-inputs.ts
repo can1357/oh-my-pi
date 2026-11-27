@@ -17,11 +17,11 @@ import {
 import type { SubagentToolResult } from "./executor";
 
 /** Label of the `tools` source (`TOOLS_SOURCE_ID` in `job-widgets/types`), for the widget author. */
-export const TOOLS_SOURCE_LABEL = `subagent tool calls: \`${TOOL_CALL_MARK}<tool> <intent>\` (omp's marker) then the result text`;
+export const TOOLS_SOURCE_LABEL = `subagent tool calls: \`${TOOL_CALL_MARK}<tool-name> <intent>\` (omp's marker) then the result text`;
 /** Most of one tool result kept in the tap: its last 64 Ki characters. */
 const MAX_TOOL_RESULT_CHARS = 64 * 1024;
 
-/** Append one finished subagent tool call to a task job's `tools` tap: `\n» <tool> <intent>\n<result>\n`. */
+/** Append one finished subagent tool call to a task job's `tools` tap: `\n» <tool-name> <intent>\n<result>\n`. */
 export function appendToolResult(tap: TextTap, result: SubagentToolResult): void {
 	const head = result.intent ? `${result.tool} ${result.intent}` : result.tool;
 	const text = result.text.length > MAX_TOOL_RESULT_CHARS ? result.text.slice(-MAX_TOOL_RESULT_CHARS) : result.text;

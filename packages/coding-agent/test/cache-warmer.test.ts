@@ -442,6 +442,43 @@ describe("cache warmer lifecycle", () => {
 		expect(status.decision?.continuationProbability).toBe(0.15);
 	});
 
+	test.each([
+		{ elapsed: 600_000, requests: 0 },
+		{ elapsed: 290_001, requests: 0 },
+		{ elapsed: 290_000, requests: 1 },
+	])("makes $requests idle refresh requests when the timer wakes at $elapsed ms", async ({ elapsed, requests }) => {
+		const h = harness();
+		const model = makeModel();
+		// Price a 100k-token prompt high enough to clear the idle savings floor.
+		model.cost = { ...model.cost, cacheRead: 0.5, cacheWrite: 7.5 };
+		const touchedAt = Date.now();
+		start(h, { cacheRetention: "short" }, model);
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: PROMPT_TOKENS })));
+		h.warmer.onAgentSettled();
+		// Suspend advances the wall clock without advancing the pending timer.
+		vi.spyOn(Date, "now").mockReturnValue(touchedAt + elapsed);
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(requests);
+		if (requests === 0) {
+			expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache expiry safety margin reached" });
+		}
+	});
+
+	test("does not refresh when an extension decision resumes inside the expiry margin", async () => {
+		const override = Promise.withResolvers<"warm">();
+		const decide = vi.fn(() => override.promise);
+		const h = harness({ decide });
+		start(h, { cacheRetention: "short" });
+		await advance(SHORT_DELAY_MS);
+		expect(decide).toHaveBeenCalledTimes(1);
+
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 21_000);
+		override.resolve("warm");
+		await drain();
+		expect(h.replays).toHaveLength(0);
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache expiry safety margin reached" });
+	});
+
 	test("idle warming stops at the 30-minute safety limit", async () => {
 		const forced = harness({ decide: () => Promise.resolve("warm") });
 		start(forced);

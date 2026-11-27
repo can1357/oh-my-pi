@@ -20,6 +20,8 @@ import {
 } from "./uploader-runtime";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+/** Default bound on one FTP/FTPS curl upload; a stalled server must not block publication forever. */
+const FTP_UPLOAD_TIMEOUT_MS = 120_000;
 
 interface OwnCloudShare {
 	statusCode: unknown;
@@ -224,6 +226,7 @@ function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
 	}
 	const password = credentialString(config, "password") ?? "";
 	const port = optionNumber(config, "port", 21) ?? 21;
+	const timeoutMs = Math.max(1, optionNumber(config, "timeoutMs", FTP_UPLOAD_TIMEOUT_MS) ?? FTP_UPLOAD_TIMEOUT_MS);
 	return {
 		destination: "ftp",
 		async upload(request) {
@@ -251,8 +254,22 @@ function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
 					env: { ...spawn.env },
 					cwd: spawn.cwd,
 				});
-				const stderr = await new Response(process.stderr as ReadableStream<Uint8Array>).text();
-				const exitCode = await process.exited;
+				let timedOut = false;
+				const timer = setTimeout(() => {
+					timedOut = true;
+					process.kill("SIGKILL");
+				}, timeoutMs);
+				let stderr: string;
+				let exitCode: number;
+				try {
+					stderr = await new Response(process.stderr as ReadableStream<Uint8Array>).text();
+					exitCode = await process.exited;
+				} finally {
+					clearTimeout(timer);
+				}
+				if (timedOut) {
+					throw new Error(`${protocol.toUpperCase()} upload command timed out after ${timeoutMs}ms`);
+				}
 				if (exitCode !== 0) {
 					throw new Error(
 						`${protocol.toUpperCase()} upload command exited with code ${exitCode}: ${stderr.trim().slice(-300)}`,

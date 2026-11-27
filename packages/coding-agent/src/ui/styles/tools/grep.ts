@@ -12,6 +12,7 @@ import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { type GrepGroup, type GrepTerm, parseGrepOutput } from "../../tools/grep";
 import type { GroupedLinks } from "../../tools/grouped-output";
+import { hangingWrap } from "./frame";
 import { groupedLink } from "./grouped-output";
 import { defineToolLook, toolProps } from "./look";
 import { moreItem, pathText, type SearchHead, searchHeadRows, type TreeItem, treeRows } from "./search";
@@ -94,7 +95,7 @@ function paintGrep(node: UiNode, cx: PaintContext): Block {
 	};
 	const rows = searchHeadRows(cx, head);
 	if (term.error !== undefined) {
-		rows.push(...wrap(`  ${theme.fg("error", term.error)}`, cx.width));
+		rows.push(...hangingWrap("  ", "  ", theme.fg("error", term.error), cx.width));
 		return { rows };
 	}
 	const notes = term.notes ?? [];

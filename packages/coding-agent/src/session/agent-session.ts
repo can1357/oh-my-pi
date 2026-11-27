@@ -87,7 +87,6 @@ import { type Effort, SERVICE_TIER_UNAVAILABLE_FEATURE, serviceTierFamily, strea
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAnthropicFastModeFallback } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
-import { isPromptPerturbationEnabled, perturbPromptText } from "@oh-my-pi/pi-ai/prompts/perturbation";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -377,6 +376,7 @@ import {
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
+	buildTanResultMessages,
 } from "./async-job-delivery";
 import { type AsyncNotifyEntry, type AsyncNotifySource, buildAsyncNotifyBatchMessage } from "./async-notify";
 import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
@@ -458,6 +458,7 @@ import {
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
+	markDuringLiveCall,
 	normalizeCustomMessagePayload,
 	operatorTitleText,
 	type PythonExecutionMessage,
@@ -543,6 +544,11 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
+import { type AiuTotals, sessionAiu } from "./aiu-billing";
+import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
+import type { AgentCostSnapshot, AgentTreeSpend } from "../modes/view-model/overlays/agent-hub-projection";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
+import type { SessionObserverRegistry } from "../task/session-observer-registry";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -588,7 +594,6 @@ import {
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
-	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
@@ -1091,6 +1096,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** False for a subagent, whose gate belongs to its session tree's root. */
 	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
+	/** Identity of the connected voice call that delegated work here, cleared synchronously on disconnect. */
+	activeVoiceCall?: symbol;
 	/** Entries of tools mounted as bash commands; empty when none are mounted. */
 	getToolCommandEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -1227,6 +1234,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
+	/** Per-subagent spend reads the tree roll-up reuses between calls; see {@link getSubagentTreeSpend}. */
+	readonly #subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	/** The current root's persisted-subagent registration; see {@link hydratePersistedSubagents}. */
+	#subagentHydration: { root: string; promise: Promise<void> } | undefined;
+	/** Live subagent observers of the host; see {@link attachSubagentObservers}. */
+	#subagentObservers: SessionObserverRegistry | undefined;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -2584,7 +2597,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
-			sessionId: () => this.sessionId,
 		};
 		this.#stats = new SessionStatsTracker(statsHost);
 		const memoryHost: SessionMemoryHost = {
@@ -4081,6 +4093,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * (spilling oversized output to an artifact), enqueue it as an async-result
 	 * follow-up, and settle only after the yield queue injects or discards it.
 	 * This keeps the job body recoverable through `proc://` while injection is pending.
+	 * A `/tan` job's completion takes {@link #deliverTanResult} instead.
 	 */
 	async #deliverAsyncJobResult(
 		manager: AsyncJobManagerApi,
@@ -4090,6 +4103,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<void> {
 		if (this.#isDisposed) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
+		const tanRequest = job?.request;
+		if (job && tanRequest !== undefined) {
+			await this.#deliverTanResult(jobId, job, tanRequest);
+			return;
+		}
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
 		// must not enqueue — the suppression marker alone is unreliable because
@@ -4107,6 +4125,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			durationMs,
 			epoch,
 		});
+	}
+
+	/**
+	 * A finished `/tan` never starts or extends a turn: the tangent was the user's
+	 * work, not this agent's. The user sees its breadcrumb now; the model gets a
+	 * hidden record linking the clone's output, appended now when idle, else with
+	 * the next prompt (see {@link buildTanResultMessages}).
+	 */
+	async #deliverTanResult(jobId: string, job: AsyncJob, request: string): Promise<void> {
+		const { breadcrumb, record } = buildTanResultMessages(jobId, job, request);
+		await this.sendCustomMessage(breadcrumb);
+		await this.sendCustomMessage(record, { deliverAs: "nextTurn" });
 	}
 
 	/**
@@ -9513,6 +9543,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
+		if (this.activeVoiceCall) markDuringLiveCall(message);
+
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
 			if (eagerTodoPrelude.toolChoice) {
@@ -9719,6 +9751,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(customMessage);
 		const hasSkillImages =
 			isUserInvokedSkillPrompt(customMessage) &&
 			Array.isArray(customMessage.content) &&
@@ -10338,8 +10371,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!command) return undefined;
 		onRouted?.();
 
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this.#extensionRunner.createCommandContext();
+		const ctx = this.#extensionRunner.createCommandContext(command.extensionPath);
 
 		try {
 			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
@@ -10391,6 +10423,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			openPlanReview: async () => false,
 			getContextUsage: () => this.getContextUsage(),
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
+			cancelAsyncJob: id => this.cancelAsyncJob(id),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });
@@ -10812,6 +10845,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
+			if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
@@ -10861,6 +10895,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			mode === "followUp"
 				? { role: "user", content, attribution, timestamp }
 				: { role: "user", content, steering: true, attribution, timestamp };
+		if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 		this.#queuedMessageRawText.set(userMessage, rawText);
 		const group = [...companions, userMessage];
 		if (mode === "followUp") {
@@ -11362,6 +11397,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const preprocessed = options?.preprocessed;
 		const prependMessages = options?.prependMessages ?? [];
 		const onPromptAdmitted = options?.onPromptAdmitted;
@@ -11512,6 +11548,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			excludeFromContext: normalizedPayload.excludeFromContext,
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (normalizedAppMessage.excludeFromContext) {
 			// The model never sees this row, so it must not start or extend a turn: a steer or aside would
@@ -14130,7 +14167,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Whether the last turn ended aborted/failed on a tool call, so {@link retry} would re-attempt it. */
 	get hasAbortedToolCallTail(): boolean {
-		return this.#recovery.hasAbortedToolCallTail;
+		return this.#recovery.hasAbortedToolCallTail(this.#prunedTerminalFailure);
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
@@ -15954,7 +15991,65 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Get session statistics.
 	 */
 	getSessionStats(): SessionStats {
-		return this.#stats.getSessionStats();
+		const stats = this.#stats.getSessionStats();
+		const aiu = this.getSessionAiu();
+		return aiu ? { ...stats, aiu } : stats;
+	}
+
+	/**
+	 * The session's server-reported AI credits: its own recorded calls (assistant messages and
+	 * `model_usage`, from the usage index) plus its subagent tree's (see {@link getSubagentTreeSpend}).
+	 * Advisors bill apart, as their dollars do. Undefined until a call reported a charge or missed its frame.
+	 */
+	getSessionAiu(): AiuTotals | undefined {
+		const usage = this.sessionManager.getUsageStatistics();
+		return sessionAiu({ nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls }, this.getSubagentTreeSpend().aiu);
+	}
+
+	/**
+	 * Spend (dollars and AI credits) of this session's subagent tree, descendants included and its own
+	 * advisors excluded: the one sum the status line, `/session`, ACP and RPC report. Reads the registry
+	 * only; a host that needs subagents persisted by an earlier process awaits
+	 * {@link hydratePersistedSubagents} first. File-less subagents count while the observers attached by
+	 * {@link attachSubagentObservers} track them.
+	 */
+	getSubagentTreeSpend(): AgentTreeSpend {
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			observers: this.#subagentObservers,
+			rootSessionFile: this.sessionFile,
+			sessionCosts: this.#subagentSpend,
+		});
+	}
+
+	/** Count the file-less subagents `observers` tracks live (a `--no-session` root's) in the tree spend. */
+	attachSubagentObservers(observers: SessionObserverRegistry): void {
+		this.#subagentObservers = observers;
+	}
+
+	/**
+	 * Register the subagent and advisor transcripts persisted under this session's file (with their usage
+	 * history) as parked registry refs, so a resumed tree's spend counts before anything opens the Agent
+	 * Hub. Scans once per stay on a root: switching away and back scans again (another root's scan may have
+	 * re-targeted shared ids), and a scan cut short by the switch is not kept as done. Never rejects.
+	 */
+	hydratePersistedSubagents(): Promise<void> {
+		const root = this.sessionFile;
+		if (!root || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		if (this.#subagentHydration?.root === root) return this.#subagentHydration.promise;
+		const promise: Promise<void> = registerPersistedSubagents(AgentRegistry.global(), root, {
+			shouldContinue: () => this.sessionFile === root,
+		})
+			.catch(error => {
+				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile: root, error: String(error) });
+			})
+			.then(() => {
+				if (this.sessionFile !== root && this.#subagentHydration?.promise === promise) {
+					this.#subagentHydration = undefined;
+				}
+			});
+		this.#subagentHydration = { root, promise };
+		return promise;
 	}
 
 	#goalUsage(): GoalTokenUsage {
@@ -15991,17 +16086,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const authStorage = this.#modelRegistry.authStorage;
 		if (!authStorage.usage.reports) return null;
 		const reports = await authStorage.usage.reports({
-			baseUrlResolver: provider => {
-				if (provider === "google-antigravity") {
-					const mode = cfgProvidersAntigravityEndpoint.get(this.settings);
-					if (mode === "sandbox") {
-						return "https://daily-cloudcode-pa.sandbox.googleapis.com";
-					} else if (mode === "production") {
-						return "https://daily-cloudcode-pa.googleapis.com";
-					}
-				}
-				return this.#modelRegistry.getProviderBaseUrl?.(provider);
-			},
+			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 			signal,
 		});
 		// Every fresh usage snapshot doubles as the salvage-sweep heartbeat: the
@@ -16152,15 +16237,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
 		try {
 			const choice = await runner.getUIContext().select(question, [
-				{ label: "Yes", description: `Redeem now and set ${keyList} to yes.` },
-				{ label: "No", description: `Do not redeem, and set ${keyList} to no.` },
+				{ label: "Not now", description: "Do not redeem; ask again next time." },
+				{ label: "Redeem once", description: "Redeem now without changing settings." },
+				{ label: "Always redeem", description: `Redeem now and set ${keyList} to yes.` },
+				{ label: "Never redeem", description: `Do not redeem, and set ${keyList} to no.` },
 			]);
-			if (choice === "Yes" || choice === "No") {
+			if (choice === "Always redeem" || choice === "Never redeem") {
 				for (const key of keys) {
-					if (key.get(this.settings) === "unset") key.set(this.settings, choice === "Yes" ? "yes" : "no");
+					if (key.get(this.settings) === "unset")
+						key.set(this.settings, choice === "Always redeem" ? "yes" : "no");
 				}
-				if (choice === "Yes") return actions;
 			}
+			if (choice === "Redeem once" || choice === "Always redeem") return actions;
 		} catch (error) {
 			logger.warn(`${source} prompt failed`, { error: String(error) });
 		}
@@ -16813,16 +16901,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #formatLlmRequestJson(messages: AgentMessage[]): Promise<string> {
 		const llmMessages = await this.convertMessagesToLlm(messages);
 		const model = this.agent.state.model;
-		// Mirror `streamDispatch`: show the prose the model receives, not the bundled wording.
-		const perturb = model && isPromptPerturbationEnabled(model) ? perturbPromptText : (text: string) => text;
 		const payload = {
 			model: model ?? null,
 			thinkingLevel: this.thinkingLevel ?? null,
 			serviceTier: this.#models.serviceTierEntry(),
-			systemPrompt: this.agent.state.systemPrompt.map(perturb),
+			systemPrompt: this.agent.state.systemPrompt,
 			tools: this.agent.state.tools.map(tool => ({
 				name: tool.name,
-				description: perturb(tool.description),
+				description: tool.description,
 				parameters: toolWireSchema(tool),
 				...(tool.strict !== undefined ? { strict: tool.strict } : {}),
 				...(tool.customWireName ? { customWireName: tool.customWireName } : {}),

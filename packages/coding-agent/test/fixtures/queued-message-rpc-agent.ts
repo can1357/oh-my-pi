@@ -1,7 +1,9 @@
 import * as path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -58,10 +60,14 @@ const agent = new Agent({
 	initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
 	streamFn: mock.stream,
 });
+// A model turn with a pending owned job yields without ending the run.
+const jobs = Bun.env.QUEUED_RPC_SCRIPT === "paused-job" ? new AsyncJobManager({}) : undefined;
 const session = new AgentSession({
 	agent,
 	sessionManager: SessionManager.inMemory(process.cwd()),
 	settings: Settings.isolated({ "compaction.enabled": false }),
 	modelRegistry,
+	...(jobs ? { agentId: "Main", ownedAsyncJobManager: jobs } : {}),
 });
+jobs?.register("bash", "wake the run", ({ signal }) => delay(600_000, "job finished", { signal }), { ownerId: "Main" });
 await runRpcMode(session);
