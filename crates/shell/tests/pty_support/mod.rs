@@ -605,6 +605,13 @@ impl Pty {
 		&self.screen
 	}
 
+	/// The screen as the last wait or [`Self::screen`] left it, without the
+	/// output that came since.
+	#[must_use]
+	pub const fn last_screen(&self) -> &Screen {
+		&self.screen
+	}
+
 	/// Every output byte so far, lossily decoded.
 	#[must_use]
 	pub fn output(&self) -> String {

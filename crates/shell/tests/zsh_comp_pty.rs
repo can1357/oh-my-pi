@@ -5,8 +5,9 @@
 //! Each case sources an rc file (fixture directory `~/fx`, fixture commands
 //! in `~/bin`, and for compsys cases `compinit -u -D` from zsh 5.9's
 //! installed completion functions), clears the screen, then types its
-//! steps; after each step it waits for the output to settle and records the
-//! screen (rows without trailing blanks) and the cursor, and for colour
+//! steps; after each step it waits for the output to settle and for the
+//! step's own screen ([`wait_drawn`]), and records the screen (rows without
+//! trailing blanks) and the cursor, and for colour
 //! cases the text and SGR sequences the step wrote
 //! (`comp_support::sgr_transcript`). The record must equal the snapshot in
 //! `tests/fixtures/zsh_comp_pty/<case>.txt`.
@@ -19,10 +20,16 @@
 mod comp_support;
 mod pty_support;
 
-use std::{fmt::Write as _, fs, io, path::PathBuf, time::Duration};
+use std::{
+	fmt::Write as _,
+	fs, io,
+	path::PathBuf,
+	thread,
+	time::{Duration, Instant},
+};
 
 use comp_support::{bless, compsys_fpath, fpath_words, oracle, quiet, sgr_transcript, shell};
-use pty_support::Pty;
+use pty_support::{Pty, Screen, Spawn, TIMEOUT};
 
 /// The pause between keys.
 const KEY: Duration = Duration::from_millis(60);
@@ -69,9 +76,9 @@ fn step(pty: &mut Pty, keys: &str) -> io::Result<()> {
 }
 
 /// Run the case on the shell under test; the record of its steps, and the
-/// first step whose screen was not drawn in time. With `drawn` (the snapshot's
-/// screens, [`drawn`]), each step also waits for its own screen before it is
-/// recorded.
+/// first step that missed its screen. With `drawn` (the snapshot's screens,
+/// [`drawn`]), each step also waits for its own screen before it is recorded
+/// ([`wait_drawn`]).
 fn record(
 	fpath: &str,
 	setup: Setup,
@@ -79,7 +86,7 @@ fn record(
 	steps: &[&str],
 	what: Record,
 	drawn: Option<&[Drawn]>,
-) -> io::Result<(String, Option<usize>)> {
+) -> io::Result<(String, Option<(usize, Miss)>)> {
 	let mut rcfile = format!("fpath=( {fpath} )\n{FIXTURE}");
 	if setup == Setup::Compsys {
 		rcfile.push_str("autoload -U compinit; compinit -u -D\n");
@@ -101,44 +108,27 @@ fn record(
 	// A clean screen for the case itself.
 	step(&mut pty, "\x0c")?;
 	let mut text = String::new();
-	let mut late = None;
+	let mut missed = None;
 	for (i, keys) in steps.iter().enumerate() {
 		let start = pty.output().len();
 		step(&mut pty, keys)?;
-		// Wait for the step's own screen: the screen and cursor the snapshot
-		// holds for this step. `step` returns when its own wait ends, and that
-		// wait does not look at the screen: under a loaded test run obash drew
-		// a command-name completion after `step` had returned, in one measured
-		// attempt at least 0.97 s after the step's output had been quiet for
-		// 400 ms. This is not a wait for the shell to be ready for the next
-		// key; it waits for what this step draws. A screen that came after a
-		// wait must then hold for [`HOLD`], so a change that follows it is in
-		// the record too. Once one step misses, the later ones do not wait:
-		// the record already differs.
-		if late.is_none()
-			&& let Some(want) = drawn.and_then(|d| d.get(i))
-		{
-			let shows = |s: &pty_support::vt::Screen| {
-				s.contents() == want.contents && s.cursor() == want.cursor
-			};
-			if !shows(pty.screen()) {
-				if pty.wait_screen(DRAWN, shows).is_ok() {
-					// Returns at a change within HOLD; else the screen held.
-					let _ = pty.wait_screen(HOLD, |s| !shows(s));
-				} else {
-					late = Some(i);
-				}
-			}
-		}
-		let screen = pty.screen();
+		// Once one step misses, the later ones do not wait: the case fails.
+		let miss = match drawn.and_then(|d| d.get(i)) {
+			Some(want) if missed.is_none() => wait_drawn(&mut pty, want, DRAWN)?,
+			_ => None,
+		};
+		let screen = recorded(&mut pty, miss);
 		let (row, col) = screen.cursor();
 		let _ = write!(text, "### {keys:?}\n{}\n@ {row},{col}\n", screen.contents());
 		if what == Record::Colours {
 			let out = pty.output();
 			let _ = write!(text, "--- sgr\n{}\n", sgr_transcript(out.get(start..).unwrap_or(&out)));
 		}
+		if let Some(miss) = miss {
+			missed = Some((i, miss));
+		}
 	}
-	Ok((text, late))
+	Ok((text, missed))
 }
 
 /// Record the case and compare it with (or, blessing, write) its snapshot.
@@ -158,40 +148,102 @@ fn check(name: &str, setup: Setup, rc: &str, steps: &[&str], what: Record) {
 		.as_deref()
 		.and_then(drawn)
 		.filter(|d| d.len() == steps.len());
-	let (got, late) = match record(&fpath_words(&fpath), setup, rc, steps, what, screens.as_deref())
-	{
-		Ok(record) => record,
-		Err(e) => panic!("pty session failed: {e}"),
-	};
+	let (got, missed) =
+		match record(&fpath_words(&fpath), setup, rc, steps, what, screens.as_deref()) {
+			Ok(record) => record,
+			Err(e) => panic!("pty session failed: {e}"),
+		};
 	let Some(want) = want else {
 		assert!(oracle(), "PI_COMP_BLESS needs PI_COMP_ORACLE (snapshots come from /bin/zsh)");
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
 		fs::write(&path, &got).unwrap();
 		return;
 	};
-	let late = late.map_or_else(String::new, |i| {
-		format!(
-			"step {} ({:?}) did not draw the snapshot's screen within {DRAWN:?}; the later steps did \
-			 not wait\n",
-			i + 1,
-			steps[i]
-		)
+	let why = missed.map_or_else(String::new, |(i, miss)| {
+		let how = match miss {
+			Miss::Late => format!("did not draw the snapshot's screen within {DRAWN:?}"),
+			Miss::Changed => {
+				format!(
+					"drew the snapshot's screen after its output settled, and it changed within \
+					 {HOLD:?}"
+				)
+			},
+		};
+		format!("step {} ({:?}) {how}; the later steps did not wait\n", i + 1, steps[i])
 	});
 	assert!(
-		got == want,
-		"{name}: the screens differ from zsh 5.9's\n{late}--- zsh 5.9:\n{want}\n--- got:\n{got}"
+		missed.is_none() && got == want,
+		"{name}: the screens differ from zsh 5.9's\n{why}--- zsh 5.9:\n{want}\n--- got:\n{got}"
 	);
 }
 
-/// Bound of a step's wait for its screen ([`record`]). The latest drawing
+/// Bound of a step's wait for its screen ([`wait_drawn`]). The latest drawing
 /// measured under a loaded test run came at least 0.97 s after the step's
 /// quiet window; a screen that never comes costs each failing case this once.
 const DRAWN: Duration = Duration::from_secs(10);
 
-/// How long a screen that came only after [`record`]'s wait must stay as the
-/// snapshot has it before it is recorded. A change in that time is recorded
-/// and fails the case; this can fail a case, never pass one.
+/// How long a step's screen first seen after the step's output settled must
+/// then stay as the snapshot has it ([`wait_drawn`]). A change in that time
+/// fails the case; this can fail a case, never pass one.
 const HOLD: Duration = Duration::from_millis(400);
+
+/// How a step missed its screen ([`wait_drawn`]); a miss fails the case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Miss {
+	/// The screen did not come within the bound.
+	Late,
+	/// The screen came after the step's output settled, and changed within
+	/// [`HOLD`].
+	Changed,
+}
+
+/// Wait for a step's own screen, `want` (the screen and cursor the snapshot
+/// holds for the step), once [`step`] has returned: `None` when the step
+/// shows it, else how the step missed it, [`Pty::last_screen`] being the
+/// screen that missed.
+///
+/// `step` returns when its own wait ends, and that wait does not look at the
+/// screen: under a loaded test run obash drew a command-name completion after
+/// `step` had returned, in one measured attempt at least 0.97 s after the
+/// step's output had been quiet for 400 ms. This is not a wait for the shell
+/// to be ready for the next key; it waits for what this step draws, for at
+/// most `bound`. Only the screen `step` saw counts as drawn at once: a screen
+/// first seen after it must stay for [`HOLD`]. An error of a wait other than
+/// its timeout (a terminal reply that could not be sent) is the session's.
+fn wait_drawn(pty: &mut Pty, want: &Drawn, bound: Duration) -> io::Result<Option<Miss>> {
+	let shows = |s: &Screen| s.contents() == want.contents && s.cursor() == want.cursor;
+	if shows(pty.last_screen()) {
+		return Ok(None);
+	}
+	if timed_out(pty.wait_screen(bound, shows))? {
+		return Ok(Some(Miss::Late));
+	}
+	if timed_out(pty.wait_screen(HOLD, |s| !shows(s)))? {
+		Ok(None)
+	} else {
+		Ok(Some(Miss::Changed))
+	}
+}
+
+/// Whether a wait ([`Pty::wait_screen`]) timed out; its other errors.
+fn timed_out(wait: io::Result<()>) -> io::Result<bool> {
+	match wait {
+		Ok(()) => Ok(false),
+		Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(true),
+		Err(e) => Err(e),
+	}
+}
+
+/// The screen a step records: after a miss the screen that missed
+/// ([`wait_drawn`]), not output that came later; else the screen with all
+/// output so far.
+fn recorded(pty: &mut Pty, miss: Option<Miss>) -> &Screen {
+	if miss.is_some() {
+		pty.last_screen()
+	} else {
+		pty.screen()
+	}
+}
 
 /// What a snapshot says one step leaves on the screen.
 struct Drawn {
@@ -218,9 +270,9 @@ fn drawn(snapshot: &str) -> Option<Vec<Drawn>> {
 	}
 	starts.push(snapshot.len());
 	starts
-		.windows(2)
-		.map(|w| {
-			let (_, body) = snapshot[w[0]..w[1]].split_once('\n')?;
+		.array_windows()
+		.map(|&[start, end]| {
+			let (_, body) = snapshot[start..end].split_once('\n')?;
 			let body = body
 				.split_once("\n--- sgr\n")
 				.map_or(body, |(screen, _)| screen);
@@ -693,4 +745,86 @@ fn listmax_asks_before_listing() {
 		&[": word\x14", "n", "\x18d", "y"],
 		Record::Screen,
 	);
+}
+
+/// `/bin/sh` on a pty for the tests of [`wait_drawn`]: it shows `one`, and a
+/// key typed once its output has settled runs `script` (no echo, no line
+/// editing, so `dd` reads a terminal answer).
+fn scripted(script: &str) -> io::Result<Pty> {
+	let script = format!(
+		"stty -echo -icanon min 1 time 0; printf one; dd bs=1 count=1 of=/dev/null 2>/dev/null; \
+		 {script}; sleep 30"
+	);
+	let mut pty = Spawn::new("/bin/sh").args(["-c", &script]).spawn()?;
+	pty.wait_screen_contains("one", TIMEOUT)?;
+	pty.settle(quiet(), TIMEOUT)?;
+	pty.write("k")?;
+	Ok(pty)
+}
+
+/// In a [`scripted`] script after `ESC [ 6 n`: read the terminal's answer
+/// (`ESC [ 1 ; 4 R` with the cursor after three letters of the first row), so
+/// that what follows comes after the screen had what came before.
+const READ_ANSWER: &str = "dd bs=1 count=6 of=/dev/null 2>/dev/null";
+
+/// The screen the [`scripted`] tests wait for.
+fn two() -> Drawn {
+	Drawn { contents: "two".to_owned(), cursor: (0, 3) }
+}
+
+/// Wait until the output holds `text`, without feeding it to the screen.
+fn until_output(pty: &Pty, text: &str) {
+	let deadline = Instant::now() + TIMEOUT;
+	while !pty.output().contains(text) {
+		assert!(Instant::now() < deadline, "{text:?} is not in the output {:?}", pty.output());
+		thread::sleep(Duration::from_millis(5));
+	}
+}
+
+/// A screen that comes after the step's output settled, and stays, is the
+/// step's.
+#[test]
+fn wait_drawn_takes_a_late_screen_that_stays() -> io::Result<()> {
+	let mut pty = scripted("sleep 0.2; printf '\\rtwo'")?;
+	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
+	assert_eq!((miss, recorded(&mut pty, miss).contents()), (None, "two".to_owned()));
+	Ok(())
+}
+
+/// A screen first seen after `step` returned must stay for [`HOLD`], also when
+/// it came before the step's first look at the screen: here a change follows.
+#[test]
+fn wait_drawn_holds_a_screen_that_came_after_the_settle() -> io::Result<()> {
+	let mut pty =
+		scripted(&format!("printf '\\rtwo\\033[6n'; {READ_ANSWER}; sleep 0.02; printf '\\rbad'"))?;
+	until_output(&pty, "two");
+	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
+	assert_eq!(recorded(&mut pty, miss).contents(), "bad");
+	Ok(())
+}
+
+/// A change within [`HOLD`] fails the step, also when the screen comes back
+/// before the step is recorded.
+#[test]
+fn wait_drawn_fails_a_screen_that_changes_during_the_hold() -> io::Result<()> {
+	let mut pty = scripted(&format!(
+		"sleep 0.2; printf '\\rtwo\\033[6n'; {READ_ANSWER}; sleep 0.02; printf '\\rbad\\033[6n'; \
+		 {READ_ANSWER}; sleep 0.02; printf '\\r\\033[Ktwo'"
+	))?;
+	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
+	until_output(&pty, "\x1b[Ktwo");
+	let screen = recorded(&mut pty, miss).contents();
+	assert_eq!(miss, Some(Miss::Changed), "the step records {screen:?}");
+	Ok(())
+}
+
+/// A step that misses the bound records the screen it had then, also when its
+/// screen comes before the step is recorded.
+#[test]
+fn wait_drawn_records_the_screen_at_the_bound() -> io::Result<()> {
+	let mut pty = scripted("sleep 1; printf '\\rtwo'")?;
+	let miss = wait_drawn(&mut pty, &two(), Duration::from_millis(200))?;
+	until_output(&pty, "two");
+	assert_eq!((miss, recorded(&mut pty, miss).contents()), (Some(Miss::Late), "one".to_owned()));
+	Ok(())
 }
