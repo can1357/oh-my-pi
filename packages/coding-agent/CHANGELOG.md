@@ -251,6 +251,7 @@
 - Fixed hashline edits reusing stale line numbers after a shifting edit being accepted one line high, duplicating a line, when the body echoed the line above the range ([#15035](https://github.com/can1357/oh-my-pi/issues/15035))
 - Defaulted the saved Codex/Claude reset prompt to "Not now" and split redeeming once from enabling auto-redeem, so a stray Enter no longer spends a reset or persists consent ([#13327](https://github.com/can1357/oh-my-pi/issues/13327))
 - Account usage-limit failures (e.g. an exhausted Anthropic subscription window reported as `rate_limit_error`) now show as "account usage limit reached; resets in …" in the error banner and retry row instead of the raw rate-limit body ([#10733](https://github.com/can1357/oh-my-pi/issues/10733))
+- Fixed the status-line session segment showing identical IDs for sessions created within about a minute by rendering 13 characters (the full UUIDv7 timestamp) ([#9572](https://github.com/can1357/oh-my-pi/issues/9572))
 
 ### Removed
 

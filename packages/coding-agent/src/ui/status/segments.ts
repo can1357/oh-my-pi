@@ -748,7 +748,7 @@ export function segmentView(
 			return view(input, [span(text)], [{ icon: "time" }, { t: text }], "time");
 		}
 		case "session": {
-			const text = facts.sessionId?.slice(0, 8) || "new";
+			const text = facts.sessionId?.slice(0, 13) || "new"; // full UUIDv7 timestamp; 8 chars collide for ~65s
 			return view(input, [span(text)], [{ icon: "session" }, { t: text }], "session");
 		}
 		case "hostname": {
