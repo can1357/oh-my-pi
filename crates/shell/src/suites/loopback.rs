@@ -291,6 +291,8 @@ async fn children_inherit_exports_only_and_change_nothing() {
 	let dir = tempfile::tempdir().unwrap();
 	std::fs::create_dir(dir.path().join("sub")).unwrap();
 	let mut s = engine_session(dir.path());
+	// The cases read `x`, `z` and `w` as unset; the host may export them.
+	out(&mut s, "unset x z w").await;
 	let cwd = dir.path().display();
 	for (command, expected) in [
 		("x=1; export y=2; z=3 bash -c 'echo \"${x-unset} $y $z\"'", "unset 2 3\n".to_owned()),
