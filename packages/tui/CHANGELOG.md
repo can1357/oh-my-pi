@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.
