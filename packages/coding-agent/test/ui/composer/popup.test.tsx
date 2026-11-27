@@ -7,14 +7,17 @@ import { mountLayer } from "../../helpers/layer-terminal";
 const WRAPPING = "Re-encode verbose prose into a dense telegraphic register with punctuation as connectives";
 const NAMES = Array.from({ length: 12 }, (_, i) => `skill:entry-${String(i).padStart(2, "0")}`);
 
-/** The `/`-prefix popup (two description rows) over twelve entries, ten rows tall, at 100 columns. */
-function mountPopup(selected: Signal<string>, detail: string) {
+function mountPopup(
+	selected: Signal<string>,
+	detail: string,
+	{ names = NAMES, width }: { names?: string[]; width?: number } = {},
+) {
 	return mountLayer(
 		() => (
-			<overlay key="complete" role="omp.autocomplete" term={{ columns: [12, 32], descriptionRows: 2 }}>
+			<overlay key="complete" role="omp.autocomplete" term={{ columns: [12, 32], descriptionRows: 2, width }}>
 				<col role="omp.select">
 					<list key="list" max={{ lines: 10 }} selected={selected}>
-						{NAMES.map(name => (
+						{names.map(name => (
 							<item key={name} label={name} term={{ label: name, detail }} />
 						))}
 					</list>
@@ -65,6 +68,20 @@ describe("composer completion popup", () => {
 			const rows = popupRows(popup.lines());
 			expect(rows.flatMap(row => row.match(/skill:entry-\d\d/) ?? [])).toEqual(NAMES.slice(1, 11));
 			expect(cursorLabel(rows)).toBe(NAMES[6]!);
+		} finally {
+			popup.dispose();
+		}
+	});
+
+	test("omits the scrollbar when narrowing hides descriptions and all entries fit", () => {
+		const names = NAMES.slice(0, 10);
+		const selected = signal(names.at(-1)!);
+		const popup = mountPopup(selected, WRAPPING, { names, width: 41 });
+		try {
+			const lines = popup.lines();
+			expect(lines.flatMap(row => row.match(/skill:entry-\d\d/) ?? [])).toEqual(names);
+			expect(cursorLabel(lines)).toBe(selected());
+			expect(popupRows(lines)).toEqual([]);
 		} finally {
 			popup.dispose();
 		}

@@ -150,20 +150,18 @@ function paintPopup(node: UiNode, cx: PaintContext): Block {
 		return entries.map((entry, i) => itemRows(cx, entry, i === selected, width, column, iconColumn, cursor, term));
 	};
 
-	// Items paint 1 + `descriptionRows` rows each, so the window is budgeted in rows. Every item
-	// takes at least one, so more items than rows overflow outright; otherwise lay out at full
-	// width first and give up the scrollbar column only when the rows do not fit.
-	let overflow = entries.length > visible;
-	let rowWidth = Math.max(0, cx.width - (overflow ? 1 : 0));
+	// Extra items guarantee overflow. Otherwise try full width first: making room for
+	// the scrollbar can change wrapping or hide descriptions, changing the row count.
+	const itemsOverflow = entries.length > visible;
+	let rowWidth = Math.max(0, cx.width - (itemsOverflow ? 1 : 0));
 	let blocks = layout(rowWidth);
 	let total = blocks.reduce((sum, block) => sum + block.length, 0);
-	if (!overflow && total > visible) {
-		overflow = true;
+	if (!itemsOverflow && total > visible) {
 		rowWidth = Math.max(0, cx.width - 1);
 		blocks = layout(rowWidth);
 		total = blocks.reduce((sum, block) => sum + block.length, 0);
 	}
-	if (!overflow) return { rows: blocks.flat() };
+	if (total <= visible) return { rows: blocks.flat() };
 
 	// First row of each item, and the item the window opens at: the one holding the row that
 	// centres the selection, moved down while the selected item would still be cut off.
