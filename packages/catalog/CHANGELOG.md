@@ -13,6 +13,7 @@
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
 - Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Extended the `session-header` compat axis to Anthropic Messages hosts with the `x-client-session-id` value; GitHub Copilot resolves it ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
+- Extended the `session-header` compat axis to Anthropic Messages hosts with the `x-client-session-id` value; GitHub Copilot resolves it ([#20678](https://github.com/can1357/oh-my-pi/issues/20678), [#20802](https://github.com/can1357/oh-my-pi/pull/20802) by [@wapenshaw](https://github.com/wapenshaw))
 - Added the ArkaneCloud provider, including `/login arkanecloud`, `ARKANECLOUD_API_KEY` authentication, and live model and pricing discovery per API key.
 - Added xAI SuperGrok speech-to-text support through `xai-oauth/grok-voice-transcribe-2.0`.
 - Added the Refuseless provider with `/login refuseless`, `REFUSELESS_API_KEY` authentication, live model discovery, and support for abliterated and standard open-weight models.
