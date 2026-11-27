@@ -1,11 +1,14 @@
 /**
  * Processes a session's bash tool calls left running after the calls returned.
  *
- * Every bash tool run carries {@link BASH_SESSION_ENV}`=<session id>`; descendants inherit it
- * across reparenting and `setsid`, so the environment is the membership test (`cmd &`,
- * `(cmd &)`, `nohup cmd &`), together with the externals the session's shells hold (macOS
- * hides the environment of Apple-signed binaries). Only roots are reported: a member whose
- * parent is not a member. Their descendants belong to them.
+ * Every bash tool run carries {@link BASH_SESSION_ENV}`=`{@link bashSessionTag}: the session
+ * id plus the pid of the omp process that ran the call. Descendants inherit it across
+ * reparenting and `setsid`, so the environment is the membership test (`cmd &`, `(cmd &)`,
+ * `nohup cmd &`), together with the externals the session's shells hold (macOS hides the
+ * environment of Apple-signed binaries). The pid keeps the test to this process: another omp
+ * opening the same session id (`omp render` on a copy of a live session, a second resume)
+ * never sees, reminds about, or reaps the processes of the one running it. Only roots are
+ * reported: a member whose parent is not a member. Their descendants belong to them.
  */
 import {
 	type HeldProcess,
@@ -18,6 +21,14 @@ import {
 /** Environment variable naming the agent session whose bash tool call started a process. */
 export const BASH_SESSION_ENV = "OMP_BASH_SESSION";
 
+/**
+ * {@link BASH_SESSION_ENV} value for the processes this omp process's bash calls start under
+ * `sessionId`; empty when there is no session.
+ */
+export function bashSessionTag(sessionId: string): string {
+	return sessionId ? `${sessionId}@${process.pid}` : "";
+}
+
 /** A leftover root: `nohup` when it ignores SIGHUP, else `&`. */
 export interface LeftoverProcess {
 	pid: number;
@@ -28,7 +39,8 @@ export interface LeftoverProcess {
 }
 
 /**
- * Leftover roots of the processes tagged with `sessionId` plus `held` (externals the session's
+ * Leftover roots of the processes this omp process's bash calls tagged with `sessionId`
+ * ({@link bashSessionTag}) plus `held` (externals the session's
  * shells hold: macOS hides the env of platform binaries, so the tag scan misses
  * `/bin/sleep 9 &`), minus the roots holding one of `excludedPids` (running bash calls,
  * service units) in their tree. A held process the shell's `nohup` started is `nohup` even
@@ -40,7 +52,7 @@ export function listLeftoverProcesses(
 	excludedPids: Iterable<number>,
 ): LeftoverProcess[] {
 	if (!sessionId) return [];
-	const procs = listProcessesWithEnv(BASH_SESSION_ENV, sessionId);
+	const procs = listProcessesWithEnv(BASH_SESSION_ENV, bashSessionTag(sessionId));
 	const seen = new Set(procs.map(proc => proc.pid));
 	const unseen = held.filter(proc => !seen.has(proc.pid)).map(proc => proc.pid);
 	if (unseen.length > 0) procs.push(...processInfo(unseen));
