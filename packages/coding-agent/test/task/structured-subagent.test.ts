@@ -426,7 +426,7 @@ describe("structured subagent primitive", () => {
 				...createSessionDefaults(),
 				state: { messages: [] },
 				agent: { state: { systemPrompt: ["test"] } },
-				sessionManager: { appendSessionInit: () => {} },
+				sessionManager: { appendSessionInit: () => {}, getEntries: () => [] },
 				getActiveToolNames: () => ["read", "yield"],
 				getEnabledToolNames: () => ["read", "yield"],
 				subscribe: (listener: (event: AgentSessionEvent) => void) => {

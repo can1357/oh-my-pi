@@ -619,6 +619,14 @@ export interface ContextUsageBreakdown {
 	messagesTokens: number;
 }
 
+/** Server-reported Copilot AI credits of a session. */
+export interface SessionAiu {
+	/** Reported charge in nano-AIU (1e9 = 1 credit). */
+	nano: number;
+	/** Copilot turns that sent no billing frame; when positive, `nano` is a lower bound. */
+	unreportedTurns: number;
+}
+
 /** Session statistics for the `/session` command. */
 export interface SessionStats {
 	sessionFile: string | undefined;
@@ -643,6 +651,8 @@ export interface SessionStats {
 		committedCost: number;
 		acuCost: number;
 	};
+	/** Server-reported Copilot AI credits; absent until a turn reports one. */
+	aiu?: SessionAiu;
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;
 	/** Failed edits by the engine's `errorKind`. */

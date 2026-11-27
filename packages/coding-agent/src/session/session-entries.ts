@@ -514,6 +514,8 @@ export interface UsageStatistics {
 	orchestrationOutput: number;
 	orchestrationCacheRead: number;
 	premiumRequests: number;
+	/** Server-reported Copilot AI credits in nano-AIU; undefined until a turn reports one (unknown, not zero). */
+	aiuNano?: number;
 	cost: number;
 	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
 	subagentCost: number;

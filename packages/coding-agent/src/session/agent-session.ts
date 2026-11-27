@@ -374,11 +374,11 @@ import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
 	ASYNC_PREVIEW_TAIL_CHARS,
-	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 	buildTanResultMessages,
 } from "./async-job-delivery";
+import { ASYNC_RESULT_MESSAGE_TYPE } from "./async-result";
 import { type AsyncNotifyEntry, type AsyncNotifySource, buildAsyncNotifyBatchMessage } from "./async-notify";
 import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
 import {

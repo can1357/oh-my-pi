@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 
 /** Formats sanitized task identifiers as hierarchy breadcrumbs. */
 export function formatTaskId(id: string): string {
@@ -20,6 +20,32 @@ export function isTaskToolDetails(value: unknown): value is TaskToolDetails {
 		"results" in (value as TaskToolDetails) &&
 		Array.isArray((value as TaskToolDetails).results)
 	);
+}
+
+const PersistedUsageShape = type({
+	input: "number",
+	output: "number",
+	cacheRead: "number",
+	cacheWrite: "number",
+	totalTokens: "number",
+	cost: { total: "number" },
+	"aiu?": { nano: "number" },
+});
+
+/** Tests whether a persisted task result or delivered async-job row carries a usage record billing can sum. */
+export function isPersistedUsage(value: unknown): value is Usage {
+	return PersistedUsageShape.allows(value);
+}
+
+/** Sum of the positive `aiuUnreportedTurns` counts across persisted task results, progress rows or async-job rows. */
+export function sumAiuUnreportedTurns(rows: unknown): number {
+	if (!Array.isArray(rows)) return 0;
+	let turns = 0;
+	for (const row of rows) {
+		const count = isRecord(row) ? row.aiuUnreportedTurns : undefined;
+		if (typeof count === "number" && Number.isFinite(count) && count > 0) turns += count;
+	}
+	return turns;
 }
 
 /** Source of an agent definition */
@@ -241,6 +267,10 @@ export interface AgentProgress {
 	contextWindow?: number;
 	/** Cumulative billing cost in USD, accumulated incrementally from message_end events. */
 	cost: number;
+	/** Final usage kept on the async job row until its completion is delivered. */
+	usage?: Usage;
+	/** Turns whose provider-declared billing frame was missing. */
+	aiuUnreportedTurns?: number;
 	durationMs: number;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
@@ -368,6 +398,8 @@ export interface SingleResult {
 	abortReason?: string;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
+	/** Copilot turns of the subagent whose billing frame never arrived; absent when none. Unknown spend, not zero. */
+	aiuUnreportedTurns?: number;
 	/** Output path for the task result */
 	outputPath?: string;
 	/**

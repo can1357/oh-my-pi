@@ -81,6 +81,7 @@ export const messageDefs = {
 		"cttl?": JSON_OBJECT,
 		"server?": JSON_OBJECT,
 		"credits?": JSON_OBJECT,
+		"aiu?": JSON_OBJECT,
 		cost: "UsageCost",
 	},
 

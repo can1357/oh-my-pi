@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
@@ -197,6 +197,59 @@ describe("AgentSession owner-routed async delivery", () => {
 		// The owner learns where the output lives, never the report's next steps.
 		expect(contexts).toContain("agent://FlakyRetryTest");
 		expect(contexts).not.toContain("run the migration");
+	});
+
+	it("rolls up only the AI credits of background task billing, not its tokens or dollars", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const usage: Usage = {
+			input: 5,
+			output: 7,
+			cacheRead: 2,
+			cacheWrite: 1,
+			totalTokens: 15,
+			cost: { input: 0.25, output: 0.5, cacheRead: 0, cacheWrite: 0, total: 0.75 },
+			aiu: { nano: 33 },
+		};
+		const job: AsyncJob = {
+			id: "detached-child",
+			agentId: "detached-child",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "detached child",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			resultText: "done",
+			latestDetails: { progress: [{ id: "detached-child", usage, aiuUnreportedTurns: 2 }] },
+		};
+		const message = buildAsyncResultBatchMessage([{ jobId: job.id, result: "done", job, durationMs: 1, epoch: 0 }]);
+		if (!message) throw new Error("Expected delivered async-result message");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(message);
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: sessionManager.buildSessionContext().messages,
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		expect(session.getSessionStats().aiu).toEqual({ nano: 33, unreportedTurns: 2 });
+		// Tokens and dollars of delivered background jobs were never session totals; credits are the only roll-up.
+		expect(session.getSessionStats().cost).toBe(0);
+		expect(session.getSessionStats().tokens.total).toBe(0);
+		expect(sessionManager.getUsageStatistics().aiuNano).toBe(33);
+		expect(sessionManager.getUsageStatistics().cost).toBe(0);
+		expect(sessionManager.getUsageStatistics().subagentCost).toBe(0);
 	});
 
 	it("keeps ACP follow-ups visible during final output and folds only completions after end_turn", async () => {

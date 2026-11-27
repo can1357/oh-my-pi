@@ -122,6 +122,7 @@ function addUsageTotals(target: Usage, usage: Partial<Usage>): void {
 	target.cost.cacheRead += cost.cacheRead;
 	target.cost.cacheWrite += cost.cacheWrite;
 	target.cost.total += cost.total;
+	if (usage.aiu) target.aiu = { nano: (target.aiu?.nano ?? 0) + usage.aiu.nano };
 }
 
 // Re-export types and utilities
@@ -1623,6 +1624,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.contextTokens = singleResult?.contextTokens;
 					progress.contextWindow = singleResult?.contextWindow;
 					progress.cost = singleResult?.usage?.cost.total ?? 0;
+					progress.usage = singleResult?.usage;
+					progress.aiuUnreportedTurns = singleResult?.aiuUnreportedTurns;
 					progress.extractedToolData = singleResult?.extractedToolData;
 					progress.retryFailure = singleResult?.retryFailure;
 					progress.retryState = undefined;

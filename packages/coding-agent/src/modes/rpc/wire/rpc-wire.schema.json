@@ -1191,6 +1191,11 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"aiu": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
 				}
 			},
 			"required": [
@@ -3342,6 +3347,21 @@
 				"acuCost"
 			]
 		},
+		"SessionAiu": {
+			"type": "object",
+			"properties": {
+				"nano": {
+					"type": "number"
+				},
+				"unreportedTurns": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"nano",
+				"unreportedTurns"
+			]
+		},
 		"SessionStats": {
 			"type": "object",
 			"properties": {
@@ -3377,6 +3397,9 @@
 				},
 				"credits": {
 					"$ref": "#/$defs/SessionCredits"
+				},
+				"aiu": {
+					"$ref": "#/$defs/SessionAiu"
 				},
 				"routedModels": {
 					"type": "object",

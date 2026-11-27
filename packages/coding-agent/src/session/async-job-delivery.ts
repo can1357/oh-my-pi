@@ -10,10 +10,11 @@
  * every completion — regardless of owner — into the first top-level session.
  */
 import { prompt } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobType } from "../async";
+import type { Usage } from "@oh-my-pi/pi-ai";
+import { type AsyncJob, type AsyncJobType, agentProgress } from "../async/job-manager";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import tanResultTemplate from "../prompts/system/tan-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "../task/task-details";
+import { isPersistedUsage, type StructuredSubagentOutput, sumAiuUnreportedTurns } from "../task/task-details";
 import { escapeHarnessTags } from "./harness-tags";
 import {
 	type CustomMessage,
@@ -22,14 +23,8 @@ import {
 	type TanResultDetails,
 } from "./messages";
 import type { OutputMeta } from "../tools/output-meta-format";
+import { ASYNC_RESULT_MESSAGE_TYPE } from "./async-result";
 import { truncateMiddle } from "../tools/streaming-output";
-
-/**
- * `customType` of the injected async-result follow-up message. The task
- * executor's run monitor matches on it to invalidate a previously recorded
- * yield: a result injected after the yield supersedes that yield's payload.
- */
-export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 
 /** Result payloads longer than this spill to an artifact with an inline preview. */
 export const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
@@ -66,6 +61,10 @@ type AsyncResultJobDetails = {
 	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
+	/** Child model usage, retained for parent-session accounting. */
+	usage?: Usage;
+	/** Child turns whose expected billing frame was missing. */
+	aiuUnreportedTurns?: number;
 };
 
 export type AsyncResultDetails = {
@@ -174,6 +173,17 @@ export function buildTanResultMessages(
 	};
 }
 
+function backgroundTaskBilling(job: AsyncJob | undefined): Pick<AsyncResultJobDetails, "usage" | "aiuUnreportedTurns"> {
+	if (job?.type !== "task") return {};
+	const progress = agentProgress(job.latestDetails, job.agentId ?? job.id);
+	if (!progress) return {};
+	const aiuUnreportedTurns = sumAiuUnreportedTurns([progress]);
+	return {
+		...(isPersistedUsage(progress.usage) ? { usage: progress.usage } : {}),
+		...(aiuUnreportedTurns > 0 ? { aiuUnreportedTurns } : {}),
+	};
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
@@ -208,6 +218,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			label: entry.job?.label,
 			headerLabel: headerLabel ? escapeHarnessTags(headerLabel) : undefined,
 			namedByCommand: command !== undefined,
+			...backgroundTaskBilling(entry.job),
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,
@@ -228,6 +239,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			agentId: job.agentId,
 			label: job.label,
 			durationMs: job.durationMs,
+			...(job.usage ? { usage: job.usage } : {}),
+			...(job.aiuUnreportedTurns !== undefined ? { aiuUnreportedTurns: job.aiuUnreportedTurns } : {}),
 			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
 		})),

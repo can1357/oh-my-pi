@@ -89,6 +89,7 @@ export interface Usage {
 	cttl?: Record<string, unknown>;
 	server?: Record<string, unknown>;
 	credits?: Record<string, unknown>;
+	aiu?: Record<string, unknown>;
 }
 
 /** Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope. */
@@ -716,6 +717,11 @@ export interface SessionCredits {
 	acuCost: number;
 }
 
+export interface SessionAiu {
+	nano: number;
+	unreportedTurns: number;
+}
+
 export interface SessionStats {
 	sessionId: string;
 	userMessages: number;
@@ -728,6 +734,7 @@ export interface SessionStats {
 	cost: number;
 	sessionFile?: string;
 	credits?: SessionCredits;
+	aiu?: SessionAiu;
 	routedModels?: Record<string, number>;
 	/** Failed edits by the engine's `errorKind`. */
 	editRejections?: Record<string, number>;

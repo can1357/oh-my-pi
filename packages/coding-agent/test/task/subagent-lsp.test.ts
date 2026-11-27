@@ -65,6 +65,7 @@ function createYieldingSession(): AgentSession {
 		extensionRunner: undefined,
 		sessionManager: {
 			appendSessionInit: () => {},
+			getEntries: () => [],
 		},
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],

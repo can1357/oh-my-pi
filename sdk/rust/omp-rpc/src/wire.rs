@@ -682,6 +682,7 @@ pub struct Usage {
 	pub cttl: Option<Map<String, Value>>,
 	pub server: Option<Map<String, Value>>,
 	pub credits: Option<Map<String, Value>>,
+	pub aiu: Option<Map<String, Value>>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -728,6 +729,9 @@ impl Serialize for Usage {
 		if let Some(value) = &self.credits {
 			map.serialize_entry("credits", value)?;
 		}
+		if let Some(value) = &self.aiu {
+			map.serialize_entry("aiu", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"input" if self.input.is_some() => continue,
@@ -743,6 +747,7 @@ impl Serialize for Usage {
 				"cttl" if self.cttl.is_some() => continue,
 				"server" if self.server.is_some() => continue,
 				"credits" if self.credits.is_some() => continue,
+				"aiu" if self.aiu.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -768,6 +773,7 @@ impl<'de> Deserialize<'de> for Usage {
 			cttl: take(&mut extra, "cttl"),
 			server: take(&mut extra, "server"),
 			credits: take(&mut extra, "credits"),
+			aiu: take(&mut extra, "aiu"),
 			extra,
 		})
 	}
@@ -3429,6 +3435,13 @@ pub struct SessionCredits {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionAiu {
+	pub nano: f64,
+	#[serde(rename = "unreportedTurns")]
+	pub unreported_turns: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStats {
 	#[serde(rename = "sessionId")]
 	pub session_id: String,
@@ -3450,6 +3463,8 @@ pub struct SessionStats {
 	pub session_file: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub credits: Option<SessionCredits>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub aiu: Option<SessionAiu>,
 	#[serde(rename = "routedModels", default, skip_serializing_if = "Option::is_none")]
 	pub routed_models: Option<BTreeMap<String, f64>>,
 	/// Failed edits by the engine's `errorKind`.

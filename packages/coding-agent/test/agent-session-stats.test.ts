@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model, Usage, UserMessage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -17,6 +18,11 @@ describe("AgentSession session stats", () => {
 	const model = (): Model => {
 		const found = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
 		if (!found) throw new Error("Expected a bundled model");
+		return found;
+	};
+	const getCopilotModel = (): Model => {
+		const found = getBundledModel("github-copilot", "gpt-5.4");
+		if (!found) throw new Error("Expected bundled Copilot model");
 		return found;
 	};
 	const appendUsage = (manager: SessionManager, target: Model, input: number, overrides: Partial<Usage> = {}) =>
@@ -96,8 +102,146 @@ describe("AgentSession session stats", () => {
 		expect(stats.assistantMessages).toBe(0);
 	});
 
+	it("sums reported Copilot AI credits and counts turns that sent no billing frame", () => {
+		const target = getCopilotModel();
+		const sessionManager = SessionManager.inMemory();
+		const turn = (aiu?: Usage["aiu"]): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text: "reply" }],
+			api: target.api,
+			provider: "github-copilot",
+			model: target.id,
+			timestamp: Date.now(),
+			stopReason: "stop",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				...(aiu ? { aiu } : {}),
+			},
+		});
+		sessionManager.appendMessage({ role: "user", content: "go", timestamp: 1 });
+		sessionManager.appendMessage(turn({ nano: 436_590_000 }));
+		sessionManager.appendMessage(turn());
+		appendUsage(sessionManager, target, 1, { aiu: { nano: 6_790_000 } });
+		session = createStatsSession(sessionManager, target);
+
+		expect(session.getSessionStats().aiu).toEqual({ nano: 443_380_000, unreportedTurns: 1 });
+		expect(sessionManager.getUsageStatistics().aiuNano).toBe(443_380_000);
+	});
+
+	it("does not count zero-token errors as missing AIU frames", () => {
+		const target = getCopilotModel();
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [],
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			timestamp: Date.now(),
+			stopReason: "error",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		session = createStatsSession(sessionManager, target);
+
+		expect(session.getSessionStats().aiu).toBeUndefined();
+	});
+
+	it("counts Copilot side requests and subagent turns without a billing frame as unreported", () => {
+		const target = getCopilotModel();
+		const sessionManager = SessionManager.inMemory();
+		const usage: Usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		sessionManager.appendModelUsage(
+			{
+				purpose: "title",
+				api: target.api,
+				provider: "github-copilot",
+				model: target.id,
+				stopReason: "stop",
+				usage,
+			},
+			{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
+		);
+		appendUsage(sessionManager, target, 1, { aiu: { nano: 5_000_000 } });
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "task",
+			content: [{ type: "text", text: "done" }],
+			isError: false,
+			timestamp: 2,
+			details: { usage: { ...usage, aiu: { nano: 7_000_000 } }, results: [{ aiuUnreportedTurns: 2 }] },
+		});
+		session = createStatsSession(sessionManager, target);
+
+		expect(session.getSessionStats().aiu).toEqual({ nano: 12_000_000, unreportedTurns: 3 });
+	});
+
+	it("tells a subagent with only missing frames from one whose frame reported zero", () => {
+		const target = getCopilotModel();
+		const usage: Usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const statsFor = (details: unknown) => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "task",
+				content: [{ type: "text", text: "done" }],
+				isError: false,
+				timestamp: 2,
+				details,
+			});
+			session = createStatsSession(sessionManager, target);
+			const stats = session.getSessionStats();
+			return { aiu: stats.aiu, aiuNano: sessionManager.getUsageStatistics().aiuNano };
+		};
+
+		// No frame ever arrived: spend is unknown, so no credits are reported at all.
+		expect(statsFor({ usage, results: [{ aiuUnreportedTurns: 2 }] })).toEqual({ aiu: undefined, aiuNano: undefined });
+		// A frame that reported zero is a known zero.
+		expect(statsFor({ usage: { ...usage, aiu: { nano: 0 } }, results: [] })).toEqual({
+			aiu: { nano: 0, unreportedTurns: 0 },
+			aiuNano: 0,
+		});
+	});
+
+	it("reports no AI credits when no turn carried a billing frame", () => {
+		const target = model();
+		const sessionManager = SessionManager.inMemory();
+		appendUsage(sessionManager, target, 5);
+		session = createStatsSession(sessionManager, target);
+
+		expect(session.getSessionStats().aiu).toBeUndefined();
+		expect(sessionManager.getUsageStatistics().aiuNano).toBeUndefined();
+	});
+
 	it("keeps mixed peak and off-peak charges in session and footer totals after resume", async () => {
-		const target = modelRegistry.find("deepseek", "deepseek-v4-flash");
+		const target = getBundledModel("deepseek", "deepseek-v4-flash");
 		if (!target) throw new Error("Expected bundled DeepSeek Flash");
 		using tempDir = TempDir.createSync("@omp-session-mixed-cost-");
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());

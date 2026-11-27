@@ -1,4 +1,13 @@
 import type { UsageLimit, UsageReport, UsageResetCreditDetail, UsageResetCredits } from "@oh-my-pi/pi-ai";
+import type { SessionAiu } from "./agent-session-types";
+
+/** nano-AIU per AI credit. */
+export const NANO_AIU_PER_CREDIT = 1e9;
+
+/** Reported session AI credits at 4 decimals; a trailing `+` marks a lower bound (turns without a billing frame). */
+export function formatSessionAiuCredits(aiu: SessionAiu): string {
+	return `${(aiu.nano / NANO_AIU_PER_CREDIT).toFixed(4)}${aiu.unreportedTurns > 0 ? "+" : ""}`;
+}
 
 /** Include the usage tier in a limit title unless its label already names it. */
 export function formatLimitTitle(limit: UsageLimit): string {

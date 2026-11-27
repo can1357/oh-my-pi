@@ -22,5 +22,6 @@ export function createSessionDefaults() {
 		subscribeRunState: () => () => {},
 		addDisposer: () => {},
 		getWorkPoolYieldItems: () => [],
+		sessionManager: { getEntries: () => [] } as unknown as AgentSession["sessionManager"],
 	} satisfies Partial<AgentSession>;
 }

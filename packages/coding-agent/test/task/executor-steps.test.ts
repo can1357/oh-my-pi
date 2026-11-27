@@ -82,6 +82,7 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 		extensionRunner: undefined,
 		sessionManager: {
 			appendSessionInit: () => {},
+			getEntries: () => [],
 			appendCustomEntry: (customType: string, data: unknown) => {
 				entries.push({ type: "custom", customType, data } as FileEntry);
 			},

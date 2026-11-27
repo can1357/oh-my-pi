@@ -89,7 +89,8 @@ import {
 import { isLocalAgentSession } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
 import { type ArtifactManagerApi, writeArtifact } from "../session/artifacts";
-import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
+import { isMissingAiuBillingFrame } from "../session/aiu-billing";
+import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-result";
 import type { AuthStorage } from "../session/auth-storage";
 import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
@@ -149,6 +150,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	sumAiuUnreportedTurns,
 	type TaskToolDetails,
 	type YieldItem,
 } from "./task-details";
@@ -1000,6 +1002,31 @@ function getNumberField(record: Record<string, unknown>, key: string): number | 
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+/** Credits a finished nested `task` call reports, plus the Copilot turns of its subagents that sent no billing frame. */
+function nestedTaskCredits(details: unknown): { nano: number | undefined; unreported: number } {
+	if (!isRecord(details)) return { nano: undefined, unreported: 0 };
+	const nano =
+		isRecord(details.usage) && isRecord(details.usage.aiu) ? getNumberField(details.usage.aiu, "nano") : undefined;
+	return { nano, unreported: sumAiuUnreportedTurns(details.results) };
+}
+
+/** Credits side requests written during one monitored turn, including unknown declared frames. */
+function sideRequestCredits(
+	manager: SessionManager,
+	startEntryIndex: number,
+): { nano: number | undefined; unreported: number } {
+	let nano: number | undefined;
+	let unreported = 0;
+	const entries = manager.getEntries();
+	for (let index = startEntryIndex; index < entries.length; index++) {
+		const entry = entries[index];
+		if (entry.type !== "model_usage") continue;
+		if (entry.usage.aiu !== undefined) nano = (nano ?? 0) + entry.usage.aiu.nano;
+		else if (isMissingAiuBillingFrame(entry, entry.usage)) unreported++;
+	}
+	return { nano, unreported };
+}
+
 function firstNumberField(record: Record<string, unknown>, keys: string[]): number | undefined {
 	for (const key of keys) {
 		const value = getNumberField(record, key);
@@ -1391,6 +1418,10 @@ interface SubagentRunMonitor {
 	readonly abortSignal: AbortSignal;
 	readonly accumulatedUsage: Usage;
 	hasUsage(): boolean;
+	/** Copilot turns of this run whose billing frame never arrived: unknown spend, kept apart from `accumulatedUsage.aiu`. */
+	aiuUnreportedTurns(): number;
+	/** `accumulatedUsage` plus the credits of the run's journaled side requests; valid once the run's sessions were captured. */
+	settledUsage(): Usage;
 	yieldCalled(): boolean;
 	/**
 	 * Latch or clear the reminder ladder's forced final `yield`. While set, the
@@ -1588,6 +1619,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	let hasUsage = false;
+	let aiuUnreportedTurns = 0;
+	/** Credits of each captured session's journaled side requests. Recomputed per capture, so a re-capture never double counts. */
+	const sideCredits = new Map<SessionManager, { nano: number | undefined; unreported: number }>();
+	const sideRequestBoundaries = new Map<SessionManager, number>();
 	let budgetSteerSent = false;
 	let budgetLimitExceeded = false;
 	let budgetStopRequested = false;
@@ -2324,6 +2359,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			case "message_end": {
 				// Extract text from assistant and toolResult messages (not user prompts)
 				const role = event.message?.role;
+				const endedMessage = event.message;
+				if (endedMessage?.role === "toolResult" && endedMessage.toolName === "task") {
+					// A nested task's spend reaches this run only through its result; its turns never pass through here.
+					const nested = nestedTaskCredits(endedMessage.details);
+					if (nested.nano !== undefined) {
+						accumulatedUsage.aiu = { nano: (accumulatedUsage.aiu?.nano ?? 0) + nested.nano };
+					}
+					aiuUnreportedTurns += nested.unreported;
+				}
 				if (role === "assistant") {
 					assistantStreaming = false;
 					// Reasoning and prose end with the response; a call it wrote stays until it runs.
@@ -2386,6 +2430,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						accumulatedUsage.totalTokens += getNumberField(messageUsage, "totalTokens") ?? 0;
 						accumulatedUsage.reasoningTokens =
 							(accumulatedUsage.reasoningTokens ?? 0) + (getNumberField(messageUsage, "reasoningTokens") ?? 0);
+						const reportedAiu = isRecord(messageUsage.aiu) ? getNumberField(messageUsage.aiu, "nano") : undefined;
+						if (reportedAiu !== undefined) {
+							accumulatedUsage.aiu = { nano: (accumulatedUsage.aiu?.nano ?? 0) + reportedAiu };
+						} else if (
+							event.message?.role === "assistant" &&
+							isMissingAiuBillingFrame(event.message, messageUsage)
+						) {
+							aiuUnreportedTurns++;
+						}
 						if (costRecord) {
 							accumulatedUsage.cost.input += getNumberField(costRecord, "input") ?? 0;
 							accumulatedUsage.cost.output += getNumberField(costRecord, "output") ?? 0;
@@ -2457,6 +2510,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const attach = (session: AgentSession): (() => void) => {
+		const manager = session.sessionManager;
+		if (!sideRequestBoundaries.has(manager)) sideRequestBoundaries.set(manager, manager.getEntries().length);
 		// The session owns attribution: it knows which model produced its output
 		// and withholds an armed-but-unproven fallback. Re-deriving that here from
 		// the event stream got it wrong twice over — the stream also carries
@@ -2539,6 +2594,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		// cancelled/aborted children can surface "last activity" instead of
 		// "(no output)".
 		try {
+			sideCredits.set(
+				session.sessionManager,
+				sideRequestCredits(session.sessionManager, sideRequestBoundaries.get(session.sessionManager) ?? 0),
+			);
+		} catch {
+			// Credits are best-effort here; a partial session may not expose its journal.
+		}
+		try {
 			const lastContent = session.getLastAssistantMessage()?.content;
 			if (Array.isArray(lastContent)) {
 				const text = lastContent
@@ -2559,6 +2622,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		abortSignal,
 		accumulatedUsage,
 		hasUsage: () => hasUsage,
+		aiuUnreportedTurns: () => {
+			let total = aiuUnreportedTurns;
+			for (const side of sideCredits.values()) total += side.unreported;
+			return total;
+		},
+		settledUsage: () => {
+			let nano = accumulatedUsage.aiu?.nano;
+			for (const side of sideCredits.values()) {
+				if (side.nano !== undefined) nano = (nano ?? 0) + side.nano;
+			}
+			return nano === undefined ? accumulatedUsage : { ...accumulatedUsage, aiu: { nano } };
+		},
 		yieldCalled: () => yieldCalled,
 		markFinalYieldForced: (forced: boolean) => {
 			finalYieldForced = forced;
@@ -3383,7 +3458,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
-		usage: monitor.hasUsage() ? monitor.accumulatedUsage : undefined,
+		usage: monitor.hasUsage() ? monitor.settledUsage() : undefined,
+		...(monitor.aiuUnreportedTurns() > 0 ? { aiuUnreportedTurns: monitor.aiuUnreportedTurns() } : {}),
 		outputPath,
 		extractedToolData: progress.extractedToolData,
 		retryFailure: progress.retryFailure,

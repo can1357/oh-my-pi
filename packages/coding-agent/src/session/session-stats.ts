@@ -6,7 +6,8 @@ import {
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
-import { type } from "@oh-my-pi/omptype";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { isPersistedUsage, sumAiuUnreportedTurns } from "../task/task-details";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 
@@ -18,8 +19,10 @@ import {
 	type NonMessageTokenSource,
 } from "./context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
+import { isMissingAiuBillingFrame } from "./aiu-billing";
+import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu } from "./async-result";
 import { getLatestCompactionEntry } from "./session-context";
-import type { SessionEntry } from "./session-entries";
+import type { ModelUsageEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 /** Non-message accounting recorded with a provider prompt. */
@@ -68,7 +71,7 @@ function isUsageWindowBoundary(entry: SessionEntry): boolean {
 }
 
 /** Model calls belonging to the same active transcript window as `agent.state.messages`. */
-function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage: Usage) => void): void {
+function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (entry: ModelUsageEntry) => void): void {
 	const latestCompaction = getLatestCompactionEntry(branch);
 	const compactionIndex = latestCompaction ? branch.lastIndexOf(latestCompaction) : -1;
 	let resetIndex = -1;
@@ -88,7 +91,7 @@ function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage:
 	}
 	for (let index = startIndex; index < branch.length; index++) {
 		const entry = branch[index];
-		if (entry.type === "model_usage") visit(entry.usage);
+		if (entry.type === "model_usage") visit(entry);
 	}
 }
 
@@ -174,7 +177,7 @@ export class SessionStatsTracker {
 				if (usage) addUsage(usage);
 			}
 		}
-		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), addUsage);
+		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), entry => addUsage(entry.usage));
 		return tokens;
 	}
 
@@ -197,6 +200,8 @@ export class SessionStatsTracker {
 		let committedCreditCost = 0;
 		let committedAcuCost = 0;
 		let hasCredits = false;
+		let aiuNano: number | undefined;
+		let aiuUnreportedTurns = 0;
 		const routedModels: Record<string, number> = {};
 		const editRejections: Record<string, number> = {};
 		const addUsage = (usage: Usage): void => {
@@ -215,6 +220,7 @@ export class SessionStatsTracker {
 				committedCreditCost += credits.committedCost ?? 0;
 				committedAcuCost += credits.acuCost ?? 0;
 			}
+			if (usage.aiu) aiuNano = (aiuNano ?? 0) + usage.aiu.nano;
 		};
 		for (const message of state.messages) {
 			if (message.role === "user") {
@@ -224,6 +230,9 @@ export class SessionStatsTracker {
 				if (message.toolName === "task") {
 					const usage = taskToolUsage(message.details);
 					if (usage) addUsage(usage);
+					aiuUnreportedTurns += sumAiuUnreportedTurns(
+						isRecord(message.details) ? message.details.results : undefined,
+					);
 				} else if (message.toolName === "edit" && message.isError) {
 					const { details } = message;
 					if (details && typeof details === "object" && "errorKind" in details) {
@@ -238,14 +247,27 @@ export class SessionStatsTracker {
 				}
 				// Persisted and imported transcripts can predate usage metadata despite the current message type.
 				const usage = message.usage;
-				if (!usage) continue;
-				addUsage(usage);
-				if (message.upstreamModel !== undefined) {
-					routedModels[message.upstreamModel] = (routedModels[message.upstreamModel] ?? 0) + 1;
+				if (usage) {
+					// A provider-declared billing frame that did not arrive is unknown spend, not free.
+					if (isMissingAiuBillingFrame(message, usage)) aiuUnreportedTurns++;
+					addUsage(usage);
+					if (message.upstreamModel !== undefined) {
+						routedModels[message.upstreamModel] = (routedModels[message.upstreamModel] ?? 0) + 1;
+					}
 				}
+			} else if (message.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE) {
+				// Only the credits of delivered background jobs roll up; their tokens and dollars never did.
+				forEachAsyncResultAiu(message.details, nano => {
+					aiuNano = (aiuNano ?? 0) + nano;
+				});
+				aiuUnreportedTurns += sumAiuUnreportedTurns(isRecord(message.details) ? message.details.jobs : undefined);
 			}
 		}
-		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), addUsage);
+		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), entry => {
+			// A side request without its declared billing frame is unknown spend too.
+			if (isMissingAiuBillingFrame(entry, entry.usage)) aiuUnreportedTurns++;
+			addUsage(entry.usage);
+		});
 		return {
 			sessionFile: this.#host.sessionManager.getSessionFile(),
 			sessionId: this.#host.sessionId(),
@@ -273,6 +295,7 @@ export class SessionStatsTracker {
 						},
 					}
 				: undefined),
+			...(aiuNano !== undefined ? { aiu: { nano: aiuNano, unreportedTurns: aiuUnreportedTurns } } : undefined),
 			...(Object.keys(routedModels).length > 0 ? { routedModels } : undefined),
 			...(Object.keys(editRejections).length > 0 ? { editRejections } : undefined),
 			contextUsage: this.getContextUsage(),
@@ -519,20 +542,5 @@ export class SessionStatsTracker {
 }
 
 function taskToolUsage(details: unknown): Usage | undefined {
-	if (!details || typeof details !== "object") return undefined;
-	const usage = Reflect.get(details, "usage");
-	return isUsage(usage) ? usage : undefined;
-}
-
-const UsageShape = type({
-	input: "number",
-	output: "number",
-	cacheRead: "number",
-	cacheWrite: "number",
-	totalTokens: "number",
-	cost: { total: "number" },
-});
-
-function isUsage(value: unknown): value is Usage {
-	return UsageShape.allows(value);
+	return isRecord(details) && isPersistedUsage(details.usage) ? details.usage : undefined;
 }

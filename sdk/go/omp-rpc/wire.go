@@ -497,6 +497,7 @@ type Usage struct {
 	Cttl            map[string]json.RawMessage `json:"cttl,omitempty"`
 	Server          map[string]json.RawMessage `json:"server,omitempty"`
 	Credits         map[string]json.RawMessage `json:"credits,omitempty"`
+	Aiu             map[string]json.RawMessage `json:"aiu,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -522,6 +523,7 @@ func (v *Usage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("cttl", &out.Cttl)
 	d.optional("server", &out.Server)
 	d.optional("credits", &out.Credits)
+	d.optional("aiu", &out.Aiu)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -3186,6 +3188,27 @@ func (v *SessionCredits) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+type SessionAiu struct {
+	Nano            float64 `json:"nano"`
+	UnreportedTurns int64   `json:"unreportedTurns"`
+}
+
+func (v *SessionAiu) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SessionAiu", v.decodeFrom)
+}
+
+func (v *SessionAiu) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SessionAiu
+	d := fieldDecoder{raw: raw, owner: "SessionAiu"}
+	d.required("nano", &out.Nano)
+	d.required("unreportedTurns", &out.UnreportedTurns)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type SessionStats struct {
 	SessionID         string             `json:"sessionId"`
 	UserMessages      int64              `json:"userMessages"`
@@ -3198,6 +3221,7 @@ type SessionStats struct {
 	Cost              float64            `json:"cost"`
 	SessionFile       *string            `json:"sessionFile,omitempty"`
 	Credits           *SessionCredits    `json:"credits,omitempty"`
+	Aiu               *SessionAiu        `json:"aiu,omitempty"`
 	RoutedModels      map[string]float64 `json:"routedModels,omitempty"`
 	// Failed edits by the engine's `errorKind`.
 	EditRejections map[string]float64 `json:"editRejections,omitempty"`
@@ -3222,6 +3246,7 @@ func (v *SessionStats) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("cost", &out.Cost)
 	d.optional("sessionFile", &out.SessionFile)
 	d.optional("credits", &out.Credits)
+	d.optional("aiu", &out.Aiu)
 	d.optional("routedModels", &out.RoutedModels)
 	d.optional("editRejections", &out.EditRejections)
 	d.optional("contextUsage", &out.ContextUsage)

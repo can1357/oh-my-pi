@@ -314,6 +314,7 @@ export const stateDefs = {
 		total: "number.integer",
 	},
 	SessionCredits: { cost: "number", committedCost: "number", acuCost: "number" },
+	SessionAiu: { nano: "number", unreportedTurns: "number.integer" },
 	SessionStats: {
 		"sessionFile?": "string",
 		sessionId: "string",
@@ -326,6 +327,7 @@ export const stateDefs = {
 		premiumRequests: "number",
 		cost: "number",
 		"credits?": "SessionCredits",
+		"aiu?": "SessionAiu",
 		"routedModels?": "Record<string, number>",
 		"editRejections?": doc("Record<string, number>", "Failed edits by the engine's `errorKind`."),
 		"contextUsage?": "ContextUsage",

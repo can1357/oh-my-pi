@@ -68,6 +68,7 @@ function createMockSession(
 		extensionRunner: undefined,
 		sessionManager: {
 			appendSessionInit: () => {},
+			getEntries: () => [],
 		},
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],

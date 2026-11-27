@@ -35,7 +35,7 @@ function scriptedSession(script: (emit: (event: AgentSessionEvent) => void) => P
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
+		sessionManager: { appendSessionInit: () => {}, getEntries: () => [] },
 		getActiveToolNames: () => ["bash", "yield"],
 		getEnabledToolNames: () => ["bash", "yield"],
 		getToolByName: () => undefined,

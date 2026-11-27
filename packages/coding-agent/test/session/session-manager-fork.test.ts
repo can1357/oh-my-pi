@@ -18,11 +18,20 @@ import {
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { ASYNC_RESULT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/async-result";
+import { isMissingAiuBillingFrame } from "@oh-my-pi/pi-coding-agent/session/aiu-billing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-coding-agent/utils/ttyid";
 import { isTaskToolDetails, type TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
-import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	getTerminalSessionsDir,
+	isRecord,
+	removeWithRetries,
+	setAgentDir,
+	TempDir,
+} from "@oh-my-pi/pi-utils";
 
 interface JsonlMessageEntry {
 	type: "message";
@@ -303,6 +312,32 @@ describe("SessionManager.forkFrom", () => {
 		const inflightGrandchildDetails = nestedTaskSnapshot("inflight-grandchild", inflightGrandchildUsage, 19);
 		const inflightTaskDetails = nestedTaskSnapshot("inflight", inflightUsage, 9, inflightGrandchildDetails);
 		const progressGrandchildDetails = nestedTaskSnapshot("progress-grandchild", progressGrandchildUsage, 21);
+		const asyncUsage: Usage = {
+			input: 2,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 3,
+			aiu: { nano: 91 },
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const asyncResultEntry: SessionEntry = {
+			type: "message",
+			id: "async-result-1",
+			parentId: "assistant-1",
+			timestamp,
+			message: {
+				role: "custom",
+				customType: ASYNC_RESULT_MESSAGE_TYPE,
+				content: "Background task complete",
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+				details: {
+					jobs: [{ jobId: "child", type: "task", status: "completed", usage: asyncUsage, aiuUnreportedTurns: 1 }],
+				},
+			},
+		};
 		const taskResultEntry = {
 			type: "message",
 			id: "task-result-1",
@@ -332,6 +367,7 @@ describe("SessionManager.forkFrom", () => {
 							tokens: 11,
 							requests: 1,
 							usage: nestedUsage,
+							aiuUnreportedTurns: 2,
 							extractedToolData: { task: [grandchildDetails] },
 						},
 					],
@@ -359,7 +395,7 @@ describe("SessionManager.forkFrom", () => {
 		};
 		await Bun.write(
 			sourceFile,
-			`${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n${JSON.stringify(taskResultEntry)}\n`,
+			`${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n${JSON.stringify(taskResultEntry)}\n${JSON.stringify(asyncResultEntry)}\n`,
 		);
 		const sourceText = await Bun.file(sourceFile).text();
 		const sourceManager = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
@@ -379,6 +415,26 @@ describe("SessionManager.forkFrom", () => {
 			if (!entry || entry.message.role !== "toolResult") throw new Error("expected task tool result");
 			if (!isTaskToolDetails(entry.message.details)) throw new Error("expected task tool details");
 			return entry.message.details;
+		};
+		const findAsyncJob = async (file: string): Promise<Record<string, unknown>> => {
+			const entries = await loadEntriesFromFile(file);
+			const entry = entries.find(
+				(e): e is SessionMessageEntry =>
+					e.type === "message" &&
+					e.message.role === "custom" &&
+					e.message.customType === ASYNC_RESULT_MESSAGE_TYPE,
+			);
+			if (
+				!entry ||
+				entry.message.role !== "custom" ||
+				!isRecord(entry.message.details) ||
+				!Array.isArray(entry.message.details.jobs)
+			) {
+				throw new Error("expected async-result details");
+			}
+			const job = entry.message.details.jobs[0];
+			if (!isRecord(job)) throw new Error("expected async-result job");
+			return job;
 		};
 		const findNestedTaskDetails = (extractedToolData: Record<string, unknown[]> | undefined): TaskToolDetails => {
 			const nested = extractedToolData?.task?.[0];
@@ -417,6 +473,10 @@ describe("SessionManager.forkFrom", () => {
 		expect(preservedMessage.usage.premiumRequests).toBe(2);
 		const preservedTaskDetails = await findTaskDetails(preservedFile);
 		expect(preserved.getUsageStatistics().cost).toBe(16);
+		const preservedAsyncJob = await findAsyncJob(preservedFile);
+		expect((preservedAsyncJob.usage as Usage).aiu).toEqual({ nano: 91 });
+		expect(preservedAsyncJob.aiuUnreportedTurns).toBe(1);
+		expect(preserved.getUsageStatistics().aiuNano).toBe(91);
 		expect(preservedTaskDetails.usage?.cost).toEqual(taskUsage.cost);
 		expect(preservedTaskDetails.usage?.credits).toEqual(taskUsage.credits);
 		expect(preservedTaskDetails.usage?.premiumRequests).toBe(taskUsage.premiumRequests);
@@ -424,6 +484,7 @@ describe("SessionManager.forkFrom", () => {
 		expect(preservedTaskDetails.results[0]?.usage?.credits).toEqual(nestedUsage.credits);
 		expect(preservedTaskDetails.results[0]?.usage?.premiumRequests).toBe(nestedUsage.premiumRequests);
 		expect(preservedTaskDetails.progress?.[0]?.cost).toBe(10);
+		expect(preservedTaskDetails.results[0]?.aiuUnreportedTurns).toBe(2);
 		const preservedTaskResult = preservedTaskDetails.results[0];
 		if (!preservedTaskResult) throw new Error("expected direct task result");
 		const preservedGrandchild = findNestedTaskDetails(preservedTaskResult.extractedToolData);
@@ -456,16 +517,24 @@ describe("SessionManager.forkFrom", () => {
 		expect(resetMessage.usage.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
 		expect(resetMessage.usage.credits).toBeUndefined();
 		expect(resetMessage.usage.premiumRequests).toBeUndefined();
+		// A model that declares no billing frame gets no credit record on reset.
+		expect(resetMessage.usage.aiu).toBeUndefined();
 		// Token counts are context, not spend — compaction anchors depend on them.
 		expect(resetMessage.usage.input).toBe(100);
 		expect(resetMessage.usage.output).toBe(50);
 		expect(resetMessage.usage.totalTokens).toBe(165);
 		const resetTaskDetails = await findTaskDetails(resetFile);
+		const resetAsyncJob = await findAsyncJob(resetFile);
+		if (!isRecord(resetAsyncJob.usage)) throw new Error("expected async-result usage");
+		expect(resetAsyncJob.usage.aiu).toBeUndefined();
+		expect(resetAsyncJob.aiuUnreportedTurns).toBeUndefined();
+		expect(reset.getUsageStatistics().aiuNano).toBeUndefined();
 		expectUsageReset(resetTaskDetails.usage, taskUsage);
 		expect(resetTaskDetails.results[0]?.usage?.cost).toEqual(zeroCost);
 		expect(resetTaskDetails.results[0]?.usage?.credits).toBeUndefined();
 		expect(resetTaskDetails.results[0]?.usage?.premiumRequests).toBeUndefined();
 		expect(resetTaskDetails.progress?.[0]?.cost).toBe(0);
+		expect(resetTaskDetails.results[0]?.aiuUnreportedTurns).toBeUndefined();
 		expect(resetTaskDetails.progress?.[0]?.tokens).toBe(11);
 		const resetTaskResult = resetTaskDetails.results[0];
 		if (!resetTaskResult) throw new Error("expected direct task result");
@@ -508,6 +577,67 @@ describe("SessionManager.forkFrom", () => {
 		expect(sourceMessage.message.usage.premiumRequests).toBe(2);
 		expect(await Bun.file(sourceFile).text()).toBe(sourceText);
 		await sourceManager.close();
+	});
+
+	it("gives reset turns of a billing-frame model an explicit zero charge, not a missing frame", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-aiu-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		await fs.mkdir(sessionDir, { recursive: true });
+		const sourceFile = path.join(sessionDir, "source.jsonl");
+		const timestamp = new Date().toISOString();
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "aiu-source",
+			timestamp,
+			cwd,
+		};
+		const turn = (id: string, parentId: string | null, provider: string, model: string) => ({
+			type: "message",
+			id,
+			parentId,
+			timestamp,
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "reply" }],
+				api: "anthropic-messages",
+				provider,
+				model,
+				stopReason: "stop",
+				timestamp: Date.now(),
+				usage: {
+					input: 10,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 15,
+					cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+				},
+			},
+		});
+		const copilotTurn = turn("copilot-1", null, "github-copilot", "claude-sonnet-5.5");
+		const lines = [header, copilotTurn, turn("direct-1", "copilot-1", "anthropic", "claude")];
+		await Bun.write(sourceFile, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
+
+		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
+			suppressBreadcrumb: true,
+			resetInheritedCost: true,
+		});
+		const resetFile = reset.getSessionFile();
+		if (!resetFile) throw new Error("expected reset fork file");
+		const turns = (await loadEntriesFromFile(resetFile)).filter(
+			(entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "assistant",
+		);
+		const [copilot, direct] = turns.map(entry => (entry.message.role === "assistant" ? entry.message : undefined));
+		if (!copilot || !direct) throw new Error("expected both assistant turns");
+
+		// Before the reset the Copilot turn lacks its declared frame; after it the turn is the parent's zeroed spend.
+		expect(isMissingAiuBillingFrame(copilotTurn.message, copilotTurn.message.usage)).toBe(true);
+		expect(isMissingAiuBillingFrame(copilot, copilot.usage)).toBe(false);
+		expect(copilot.usage.aiu).toEqual({ nano: 0 });
+		expect(direct.usage.aiu).toBeUndefined();
+		expect(reset.getUsageStatistics().aiuNano).toBe(0);
 	});
 
 	for (const { name, createStorage, padding } of [

@@ -21,6 +21,7 @@ import {
 	isEnotdir,
 	isEnotempty,
 	isFsError,
+	isRecord,
 	logger,
 	pathIsWithin,
 	spillIdOfFileName,
@@ -28,6 +29,9 @@ import {
 	toError,
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
+
+import { type AiuBillingRequest, declaresAiuBilling } from "./aiu-billing";
+import { ASYNC_RESULT_MESSAGE_TYPE, forEachAsyncResultAiu } from "./async-result";
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import { isUserRequestEntry } from "./transcript/transcript-entry";
@@ -468,6 +472,7 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.orchestrationOutput += usage.orchestration?.output ?? 0;
 	target.orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
 	target.premiumRequests += usage.premiumRequests ?? 0;
+	if (usage.aiu) target.aiuNano = (target.aiuNano ?? 0) + usage.aiu.nano;
 	target.cost += usage.cost.total;
 }
 
@@ -476,12 +481,24 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
  * counts untouched. Cost, credit meters, and premium-request counts describe
  * billing; forks that must not inherit spend (see {@link SessionManager.forkFrom}
  * `resetInheritedCost`) drop them while keeping the tokens compaction relies on.
+ *
+ * `request` names the model call of a turn or side request: when its model
+ * declares a server-side AI-credit frame, the reset record carries an explicit
+ * zero charge so the fork's totals read the inherited turn as the parent's
+ * spend instead of a billing frame the fork never received.
  */
-function resetUsageCost(usage: Usage | undefined): void {
+function resetUsageCost(usage: Usage | undefined, request?: AiuBillingRequest): void {
 	if (!usage) return;
 	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 	usage.credits = undefined;
+	usage.aiu = request !== undefined && declaresAiuBilling(request) ? { nano: 0 } : undefined;
 	usage.premiumRequests = undefined;
+}
+
+/** The model call behind an entry's usage: an assistant turn or a side request; task results carry none. */
+function resetRequestOf(entry: SessionEntry): AiuBillingRequest | undefined {
+	if (entry.type === "model_usage") return entry;
+	return entry.type === "message" && entry.message.role === "assistant" ? entry.message : undefined;
 }
 
 /** Clear child billing kept in task results without discarding their token counts. */
@@ -491,6 +508,8 @@ function resetTaskResultBilling(details: unknown): void {
 	for (const result of details.results) {
 		if (result === null || typeof result !== "object") continue;
 		resetUsageCost(taskUsageFrom(result));
+		// Missing billing frames describe the inherited spend too; a fork must not show them as its own.
+		result.aiuUnreportedTurns = undefined;
 		resetNestedTaskBilling(result.extractedToolData);
 	}
 	const progress = details.progress;
@@ -501,6 +520,16 @@ function resetTaskResultBilling(details: unknown): void {
 			resetTaskResultBilling(item.inflightTaskDetails);
 			resetNestedTaskBilling(item.extractedToolData);
 		}
+	}
+}
+
+/** Clear billing carried by delivered background jobs on an inherited fork. */
+function resetAsyncResultBilling(details: unknown): void {
+	if (!isRecord(details) || !Array.isArray(details.jobs)) return;
+	for (const job of details.jobs) {
+		if (!isRecord(job)) continue;
+		resetUsageCost(taskUsageFrom(job));
+		job.aiuUnreportedTurns = undefined;
 	}
 }
 
@@ -667,12 +696,23 @@ export class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		const usage = entryUsage(entry);
-		addUsage(this.#usage, usage);
-		// Completed `task` results carry the child's spend; tracked apart so the
-		// status line can split the session's own cost from its subagents'.
-		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
-			this.#usage.subagentCost += usage.cost.total;
+		if (
+			entry.type === "message" &&
+			entry.message.role === "custom" &&
+			entry.message.customType === ASYNC_RESULT_MESSAGE_TYPE
+		) {
+			// Delivered background jobs add their reported credits only; their tokens and dollars were never session totals.
+			forEachAsyncResultAiu(entry.message.details, nano => {
+				this.#usage.aiuNano = (this.#usage.aiuNano ?? 0) + nano;
+			});
+		} else {
+			const usage = entryUsage(entry);
+			addUsage(this.#usage, usage);
+			// Completed `task` results carry the child's spend; tracked apart so the
+			// status line can split the session's own cost from its subagents'.
+			if (usage && entry.type === "message" && entry.message.role === "toolResult") {
+				this.#usage.subagentCost += usage.cost.total;
+			}
 		}
 	}
 
@@ -4476,9 +4516,16 @@ export class SessionManager {
 	 */
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
 		for (const entry of history) {
-			resetUsageCost(entryUsage(entry));
+			resetUsageCost(entryUsage(entry), resetRequestOf(entry));
 			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
 				resetTaskResultBilling(entry.message.details);
+			}
+			if (
+				entry.type === "message" &&
+				entry.message.role === "custom" &&
+				entry.message.customType === ASYNC_RESULT_MESSAGE_TYPE
+			) {
+				resetAsyncResultBilling(entry.message.details);
 			}
 		}
 	}
