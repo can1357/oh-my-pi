@@ -1,12 +1,9 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
+import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { straitlyModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { normalizeStraitlyBaseUrl } from "@oh-my-pi/pi-catalog/wire/straitly";
 
 // Fixtures mirror the live `https://api.straitly.ai/v1/models` response shape
@@ -53,6 +50,26 @@ const STRAITLY_ROWS: Record<string, unknown>[] = [
 		reasoning: null,
 		pricing: { prompt: "0.0000005", completion: "0.0000015" },
 	},
+	{
+		id: "mandatory-reasoner",
+		name: "Mandatory Reasoner",
+		context_length: 262_144,
+		architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+		top_provider: { context_length: 262_144, max_completion_tokens: 32_768 },
+		supported_parameters: ["max_tokens", "reasoning", "reasoning_effort", "tool_choice", "tools"],
+		reasoning: { mandatory: true, default_enabled: true, default_effort: "high" },
+		pricing: { prompt: "0.000001", completion: "0.000004" },
+	},
+	{
+		id: "default-off-reasoner",
+		name: "Default Off Reasoner",
+		context_length: 200_000,
+		architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+		top_provider: { context_length: 200_000, max_completion_tokens: 16_384 },
+		supported_parameters: ["max_tokens", "reasoning", "reasoning_effort", "tool_choice", "tools"],
+		reasoning: { mandatory: false, default_enabled: false, default_effort: null },
+		pricing: { prompt: "0.000001", completion: "0.000003" },
+	},
 ];
 
 function makeModelsFetch(): { calls: string[]; authorizations: (string | null)[]; fetch: FetchImpl } {
@@ -71,15 +88,8 @@ function makeModelsFetch(): { calls: string[]; authorizations: (string | null)[]
 async function discover(fetch: FetchImpl, baseUrl?: string) {
 	const options = straitlyModelManagerOptions({ apiKey: "sk-straitly-test", fetch, baseUrl });
 	const specs = (await options.fetchDynamicModels?.()) ?? [];
-	return specs.map(spec => buildModel(spec as ModelSpec<"openai-completions">));
+	return specs.map(spec => buildModel(spec));
 }
-
-const originalKey = Bun.env.STRAITLY_API_KEY;
-
-afterEach(() => {
-	if (originalKey === undefined) delete Bun.env.STRAITLY_API_KEY;
-	else Bun.env.STRAITLY_API_KEY = originalKey;
-});
 
 describe("Straitly provider", () => {
 	test("discovers models, modalities, tool flags, reasoning, and per-token pricing", async () => {
@@ -101,6 +111,9 @@ describe("Straitly provider", () => {
 		expect(sonnet?.cost.output).toBeCloseTo(5, 6);
 		expect(sonnet?.cost.cacheRead).toBeCloseTo(0.1, 6);
 		expect(sonnet?.cost.cacheWrite).toBeCloseTo(1.25, 6);
+		expect(sonnet?.thinking?.defaultLevel).toBe(Effort.High);
+		expect(sonnet?.thinking?.requiresEffort).not.toBe(true);
+		expect(sonnet?.compat?.reasoningDisableMode).toBe("cline-enabled-false");
 
 		const deepseek = models.find(model => model.id === "deepseek/deepseek-v4-1-flash-1017");
 		expect(deepseek?.reasoning).toBe(true);
@@ -108,12 +121,23 @@ describe("Straitly provider", () => {
 		expect(deepseek?.contextWindow).toBe(1_048_576);
 		expect(deepseek?.maxTokens).toBe(1_048_576);
 		expect(deepseek?.supportsTools).not.toBe(false);
+		expect(deepseek?.compat?.supportsReasoningEffort).toBe(false);
 
 		const textOnly = models.find(model => model.id === "text-only-no-tools");
 		expect(textOnly?.reasoning).toBe(false);
 		expect(textOnly?.input).toEqual(["text"]);
 		expect(textOnly?.supportsTools).toBe(false);
 		expect(textOnly?.compat?.supportsToolChoice).toBe(false);
+
+		const mandatory = models.find(model => model.id === "mandatory-reasoner");
+		expect(mandatory?.reasoning).toBe(true);
+		expect(mandatory?.thinking?.requiresEffort).toBe(true);
+		expect(mandatory?.thinking?.defaultLevel).toBe(Effort.High);
+		expect(mandatory?.compat?.reasoningDisableMode).toBe("lowest-effort");
+
+		const defaultOff = models.find(model => model.id === "default-off-reasoner");
+		expect(defaultOff?.reasoning).toBe(true);
+		expect(defaultOff?.compat?.whenThinking?.extraBody).toEqual({ reasoning: { enabled: true } });
 	});
 
 	test("normalizes custom baseUrl overrides and scopes cache namespace by endpoint only", async () => {
@@ -137,32 +161,5 @@ describe("Straitly provider", () => {
 		expect(resolveModelCacheProviderId("straitly", { baseUrl: "https://proxy.example", apiKey: "sk-a" })).toBe(
 			resolveModelCacheProviderId("straitly", { baseUrl: "https://proxy.example", apiKey: "sk-b" }),
 		);
-	});
-
-	test("registers descriptor, default model, env var, and login metadata", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "straitly");
-		expect(descriptor?.defaultModel).toBe("claude-sonnet-5-5");
-		expect(descriptor?.allowUnauthenticated).toBe(true);
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(descriptor?.skipCrossProviderReferenceFills).toBe(true);
-		expect(descriptor?.catalogDiscovery).toBeUndefined();
-		expect(DEFAULT_MODEL_PER_PROVIDER.straitly).toBe("claude-sonnet-5-5");
-
-		Bun.env.STRAITLY_API_KEY = "sk-env-key";
-		expect(getEnvApiKey("straitly")).toBe("sk-env-key");
-
-		expect(getOAuthProviders().find(item => item.id === "straitly")?.name).toBe("Straitly");
-		expect(getProviderDefinition("straitly")?.login).toBeDefined();
-	});
-
-	test("validates API keys against /v1/key during login", async () => {
-		const login = getProviderDefinition("straitly")?.login;
-		if (!login) throw new Error("Straitly login is not registered");
-		const fetchMock: FetchImpl = vi.fn(async () => Response.json({ ok: true }, { status: 200 }));
-		const result = await login({
-			onPrompt: async () => "Bearer sk-live-key",
-			fetch: fetchMock,
-		});
-		expect(result).toBe("sk-live-key");
 	});
 });

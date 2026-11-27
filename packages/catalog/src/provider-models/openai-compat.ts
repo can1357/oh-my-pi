@@ -9084,6 +9084,38 @@ export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): Mod
 // Straitly
 // ---------------------------------------------------------------------------
 
+function mapStraitlyThinking(
+	entry: OpenAICompatibleModelRecord,
+	spec: ModelSpec<"openai-completions">,
+): ThinkingConfig | undefined {
+	const reasoning = entry.reasoning;
+	if (!isRecord(reasoning)) return undefined;
+	const requiresEffort = reasoning.mandatory === true;
+	const supportedEfforts = reasoning.supported_efforts;
+	const defaultLevel =
+		typeof reasoning.default_effort === "string"
+			? THINKING_EFFORTS.find(effort => effort === reasoning.default_effort)
+			: undefined;
+	if (Array.isArray(supportedEfforts)) {
+		const efforts = THINKING_EFFORTS.filter(effort => supportedEfforts.includes(effort));
+		if (efforts.length === 0) return undefined;
+		return {
+			mode: "effort",
+			efforts,
+			...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+			...(requiresEffort ? { requiresEffort: true } : {}),
+		};
+	}
+	if (!requiresEffort && defaultLevel === undefined) return undefined;
+	const ladder = spec.thinking ?? resolveModelPolicy({ ...spec, reasoning: true, thinking: undefined }).thinking;
+	if (!ladder) return undefined;
+	return {
+		...ladder,
+		...(defaultLevel !== undefined && ladder.efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+		...(requiresEffort ? { requiresEffort: true } : {}),
+	};
+}
+
 function mapStraitlyModel(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
@@ -9091,24 +9123,36 @@ function mapStraitlyModel(
 	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const catalogMeta = isRecord(entry.catalog) ? entry.catalog : undefined;
+	const reasoningMeta = isRecord(entry.reasoning) ? entry.reasoning : undefined;
 	const params = Array.isArray(entry.supported_parameters)
 		? entry.supported_parameters.filter((item): item is string => typeof item === "string")
 		: undefined;
-	const input = Array.isArray(architecture?.input_modalities)
+	const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
 		? toInputCapabilities(architecture.input_modalities)
 		: catalogMeta?.vision === true
-			? (["text", "image"] as ("text" | "image")[])
-			: (["text"] as ("text" | "image")[]);
-	const reasoning =
-		(params !== undefined && (params.includes("reasoning") || params.includes("reasoning_effort"))) ||
-		isRecord(entry.reasoning) ||
-		catalogMeta?.reasoning === true;
+			? ["text", "image"]
+			: ["text"];
+	const advertisesEffortParam =
+		params !== undefined && (params.includes("reasoning") || params.includes("reasoning_effort"));
+	const reasoning = advertisesEffortParam || reasoningMeta !== undefined || catalogMeta?.reasoning === true;
+	const thinking = mapStraitlyThinking(entry, defaults);
 	const supportsTools = params !== undefined ? params.includes("tools") : undefined;
 	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
+	const compatPatch: OpenAICompat = {
+		...defaults.compat,
+		...(!supportsToolChoice && { supportsToolChoice: false }),
+		...(reasoning && params !== undefined && !advertisesEffortParam && { supportsReasoningEffort: false }),
+		...(reasoningMeta?.mandatory === true && { reasoningDisableMode: "lowest-effort" }),
+		...(reasoningMeta?.default_enabled === false && {
+			whenThinking: { extraBody: { reasoning: { enabled: true } } },
+		}),
+	};
+	const hasCompatPatch = Object.keys(compatPatch).length > Object.keys(defaults.compat ?? {}).length;
 	return {
 		...defaults,
 		name: toModelName(entry.name, defaults.name),
 		reasoning,
+		...(thinking && { thinking }),
 		input,
 		cost: perTokenPricingCost(entry.pricing),
 		contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
@@ -9117,9 +9161,7 @@ function mapStraitlyModel(
 			toPositiveNumber(catalogMeta?.max_output_tokens, defaults.maxTokens),
 		),
 		...(supportsTools === false && { supportsTools: false }),
-		...(!supportsToolChoice && {
-			compat: { ...defaults.compat, supportsToolChoice: false },
-		}),
+		...(hasCompatPatch && { compat: compatPatch }),
 	};
 }
 
