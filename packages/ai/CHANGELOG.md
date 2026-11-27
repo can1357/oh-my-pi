@@ -10,6 +10,8 @@
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
 - `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added Kimi Code global-region support: `kimi-code-global` models stream with Kimi client headers and report quota from `api.kimi.ai` ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
+- GitHub Copilot Claude (Messages) and GPT (Responses) replies now record the server-reported AI-credit charge (`copilot_usage.total_nano_aiu` with its per-token-type split) on `usage.aiu`; a reply that finished without a billing frame sets `usage.aiuMissing` instead of reporting 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
+- Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed; attempts with no tokens and no charge are skipped ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Removed
 
@@ -28,8 +30,6 @@
 - Logging in again to an MCP OAuth server now clears the disabled credential left by its earlier refresh failure ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
 - Fixed GitHub Copilot Claude text replies arriving as a `msg_blocked` placeholder prefixed with "cached data for request … not found": Copilot Anthropic Messages requests now send the conversation id as `X-Client-Session-Id` ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
 - Fixed a `/session pin` made while an account selection was still running (such as the Codex connection prewarm at session start) being replaced by the account that selection picked ([#20634](https://github.com/can1357/oh-my-pi/issues/20634), [#20638](https://github.com/can1357/oh-my-pi/pull/20638) by [@roboomp](https://github.com/roboomp))
-- GitHub Copilot Claude (Messages) and GPT (Responses) replies now record the server-reported AI-credit charge (`copilot_usage.total_nano_aiu` with its per-token-type split) on `usage.aiu`; a reply that finished without a billing frame sets `usage.aiuMissing` instead of reporting 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
-- Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed; attempts with no tokens and no charge are skipped ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Changed
 
