@@ -329,12 +329,12 @@ describe("exactly-once in-order ledger (ECH, Lemma 4.6, Corollary 4.14)", () => 
 			backend.renderNow();
 			expect(driver.history).toEqual(["Earlier", ""]);
 			expect(driver.viewport).toEqual(lines("card", 6));
-			expect(backend.retired(card!, "content")).toBe(false);
+			expect(backend.contentInHistory(card!)).toBe(false);
 
 			driver.resize(20, 5);
 			backend.renderNow();
 			expect(driver.history).toEqual(["Earlier", "", ...lines("card", 6)]);
-			expect(backend.retired(card!, "content")).toBe(true);
+			expect(backend.contentInHistory(card!)).toBe(true);
 		} finally {
 			backend.stop();
 			surface.dispose();
@@ -356,13 +356,13 @@ describe("exactly-once in-order ledger (ECH, Lemma 4.6, Corollary 4.14)", () => 
 			settle(card);
 			backend.renderNow();
 			expect(driver.history).toEqual([]);
-			expect(backend.retired(card, "content")).toBe(false);
+			expect(backend.contentInHistory(card)).toBe(false);
 
 			output.set("final");
 			driver.ack = true;
 			backend.renderNow();
 			expect(driver.transcript).toEqual([...lines("final", 3), ...lines("later", laterRows).slice(-6)]);
-			expect(backend.retired(card, "content")).toBe(true);
+			expect(backend.contentInHistory(card)).toBe(true);
 		} finally {
 			backend.stop();
 			surface.dispose();

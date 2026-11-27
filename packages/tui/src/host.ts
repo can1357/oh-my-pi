@@ -127,10 +127,15 @@ export interface Host {
 	onChange(listener: () => void): () => void;
 	readonly driver: ProcessTerminalDriver;
 	/**
-	 * Whether `node` has rows in terminal history or an upcoming write (always false natively).
-	 * `"content"` counts only acknowledged retirement, not a separator-only write.
+	 * Whether `node` has rows in terminal history a plain terminal cannot
+	 * repaint (always false natively, where nothing retires).
 	 */
-	retired(node: UiNode, part?: "content"): boolean;
+	retired(node: UiNode): boolean;
+	/**
+	 * Whether the terminal acknowledged rows of `node`'s own content in history, not only the
+	 * separator above it (always false natively).
+	 */
+	contentInHistory(node: UiNode): boolean;
 	/** Redraw terminal history from the current main region (its retired rows changed or went away). */
 	replayHistory(): void;
 	/**
@@ -250,6 +255,7 @@ type Renderer = Pick<
 	| "native"
 	| "hour12"
 	| "retired"
+	| "contentInHistory"
 	| "replayHistory"
 	| "redescribe"
 	| "dispatch"
@@ -388,6 +394,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 				return connection.hello.hour12;
 			},
 			retired: () => false,
+			contentInHistory: () => false,
 			replayHistory: () => {},
 			redescribe: node => backend.redescribe(node),
 			dispatch: event => backend.dispatch(event),
@@ -459,7 +466,8 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		return {
 			native: false,
 			hour12: undefined,
-			retired: (node, part) => backend.retired(node, part),
+			retired: node => backend.retired(node),
+			contentInHistory: node => backend.contentInHistory(node),
 			replayHistory: () => driver.resetDisplay(),
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
@@ -513,7 +521,8 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			return renderer.hour12;
 		},
 		driver,
-		retired: (node, part) => renderer.retired(node, part),
+		retired: node => renderer.retired(node),
+		contentInHistory: node => renderer.contentInHistory(node),
 		replayHistory: () => renderer.replayHistory(),
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),

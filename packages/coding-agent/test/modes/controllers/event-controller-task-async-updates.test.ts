@@ -290,7 +290,8 @@ describe("EventController async update finalization", () => {
 		const transcript = ctx.shell.transcript;
 		const term = createTestTerminal(() => ({ main: transcript.nodes }), { columns, rows: 40 });
 		transcript.attach({
-			retired: (node, part) => term.backend.retired(node, part),
+			retired: node => term.backend.retired(node),
+			contentInHistory: node => term.backend.contentInHistory(node),
 			replayHistory: () => {},
 			redescribe: () => {},
 		});
@@ -362,38 +363,6 @@ describe("EventController async update finalization", () => {
 
 		await controller.handleEvent(jobFrame(bashResult("Final sample", "completed", 0)));
 		expect(lastPartial("Final sample")).toBe(false);
-	});
-
-	it("shows backgrounded Bash completion in place after rebuilding the visible transcript", async () => {
-		const { controller, ctx } = createFixture();
-		ctx.eventController = controller;
-		const helpers = new UiHelpers(ctx);
-		ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
-		const call: AssistantMessage = {
-			...createAssistantMessage(""),
-			stopReason: "toolUse",
-			content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "run benchmark" } }],
-		};
-		const result: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: "tc-bash",
-			toolName: "bash",
-			...bashResult(formatBackgroundNotice("bash-1", 300)),
-			isError: false,
-			timestamp: call.timestamp + 1,
-		};
-		ctx.viewSession.activeToolExecutionUpdates = () => [jobFrame(bashResult("Sample before rebuild"))];
-		helpers.renderSessionContext({ messages: [call, result] } as SessionContext);
-		const term = createTestTerminal(() => ({ main: ctx.shell.transcript.nodes }), { columns: 100, rows: 40 });
-		try {
-			expect(term.screen().join("\n")).toContain("Sample before rebuild");
-			await controller.handleEvent(jobFrame(bashResult("Final sample", "completed", 0)));
-			term.render();
-			expect(term.screen().join("\n")).toContain("Final sample");
-			expect(term.screen().join("\n")).not.toContain("Sample before rebuild");
-		} finally {
-			term.dispose();
-		}
 	});
 
 	describe("native rendering", () => {

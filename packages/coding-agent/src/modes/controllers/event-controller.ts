@@ -2275,7 +2275,7 @@ export class EventController {
 		if (component) {
 			const parked = this.#backgroundCallIds.has(event.toolCallId);
 			const viewportOnly = parked && followsViewportOnly(event.toolName, this.ctx.shell.native());
-			if (viewportOnly && this.ctx.shell.transcript.retired(component.block, "content")) {
+			if (viewportOnly && this.ctx.shell.transcript.contentInHistory(component.block)) {
 				this.#releasePendingTool(event.toolCallId, component);
 				this.#backgroundCallIds.delete(event.toolCallId);
 				return;
@@ -2361,12 +2361,14 @@ export class EventController {
 			this.#releasePendingTool(event.toolCallId, component);
 			return;
 		}
-		// A viewport-only card stays retirable and draws its frames as static results.
+		// A viewport-only card draws its frames as static results, so its rows can retire as shown.
 		const partial = parks && !followsViewportOnly(event.toolName, native);
 		component.updateResult({ ...event.result, isError: event.isError }, partial, event.toolCallId);
 		if (parks) {
 			component.parkAsBackground();
-			if (partial) this.ctx.shell.transcript.settle(component.block);
+			// The call returned: its card is final for the transcript (a native terminal still
+			// repaints it with the job's frames; a plain one retires it as it stands).
+			this.ctx.shell.transcript.settle(component.block);
 			this.#backgroundCallIds.add(event.toolCallId);
 		} else {
 			this.#releasePendingTool(event.toolCallId, component);

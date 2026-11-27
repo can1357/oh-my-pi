@@ -4097,9 +4097,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
 		});
 		const preservedLiveToolCallIds = new Set<string>();
-		// Replay persisted results instead of moving their cards below newer replies. Keep
-		// live handles for other running jobs and read groups that still share a pending call.
-		// A viewport-only card is rebuilt at its original position from the latest job frame.
+		// A preserved call whose result already landed in the replayed transcript is drawn by the
+		// replay itself (#6516); keeping its live block too would draw the call twice. A background
+		// job's `running` result keeps its live block (later frames still fill it), unless the card
+		// follows the viewport only: the replay redraws it in place from the job's latest frame, so
+		// it stays above later replies. A read group another pending read still shares stays as one block.
 		const native = this.shell.native();
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
