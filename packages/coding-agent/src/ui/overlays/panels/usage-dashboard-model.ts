@@ -429,12 +429,15 @@ export function resetLabel(nowMs: number, resetMs: number): { text: string; titl
 
 export type UsageView = "overview" | "detail";
 
-export interface UsageDashboardOptions {
+export interface UsageDashboardData {
 	readonly reports: UsageReport[];
 	readonly sessionAiu?: AiuTotals;
 	readonly unavailableAccounts?: readonly UnavailableUsageAccount[];
+}
+
+export interface UsageDashboardOptions extends UsageDashboardData {
 	/** The full `/usage` report of `reports` for Details, per content width. */
-	readonly renderDetail: (width: number, reports: UsageReport[]) => string;
+	readonly renderDetail: (width: number, data: UsageDashboardData) => string;
 	/**
 	 * Stream daily activity: push stored rows at once, again after a sync.
 	 * Rejecting before any push shows the history as unavailable; after one,
@@ -442,7 +445,7 @@ export interface UsageDashboardOptions {
 	 */
 	readonly loadActivity: (push: (points: DailyActivityPoint[]) => void, signal: AbortSignal) => Promise<void>;
 	/** Re-fetch the reports (`r`); null when nothing came back. */
-	readonly refresh?: () => Promise<UsageReport[] | null>;
+	readonly refresh?: () => Promise<UsageDashboardData | null>;
 	readonly onClose: () => void;
 	/** Terminal rows (the sheet fills them). */
 	readonly terminalRows: () => number;
@@ -453,7 +456,7 @@ export interface UsageDashboardOptions {
 export class UsageDashboardModel {
 	/** Bumped on every change either face shows. */
 	readonly rev = signal(0);
-	reports: UsageReport[];
+	data: UsageDashboardData;
 	cards: ProviderCard[];
 	nowMs: number;
 	view: UsageView = "overview";
@@ -475,9 +478,9 @@ export class UsageDashboardModel {
 	readonly loaded: Promise<void>;
 
 	constructor(readonly options: UsageDashboardOptions) {
-		this.reports = options.reports;
+		this.data = { reports: options.reports, unavailableAccounts: options.unavailableAccounts };
 		this.nowMs = this.now();
-		this.cards = buildProviderCards(this.reports, this.nowMs, options.unavailableAccounts);
+		this.cards = buildProviderCards(this.data.reports, this.nowMs, this.data.unavailableAccounts);
 		this.loaded = this.#load();
 	}
 
@@ -514,12 +517,12 @@ export class UsageDashboardModel {
 
 	/** Newest report time (0 without reports). */
 	fetchedAt(): number {
-		return Math.max(0, ...this.reports.map(report => report.fetchedAt ?? 0));
+		return Math.max(0, ...this.data.reports.map(report => report.fetchedAt ?? 0));
 	}
 
 	detailLines(width: number): string[] {
 		if (this.#detail?.width !== width) {
-			this.#detail = { width, lines: this.options.renderDetail(width, this.reports).split("\n") };
+			this.#detail = { width, lines: this.options.renderDetail(width, this.data).split("\n") };
 		}
 		return this.#detail.lines;
 	}
@@ -542,12 +545,12 @@ export class UsageDashboardModel {
 		this.refreshError = null;
 		this.touch();
 		try {
-			const reports = await refresh();
+			const data = await refresh();
 			if (this.#closed) return;
-			if (reports) {
-				this.reports = reports;
+			if (data) {
+				this.data = data;
 				this.nowMs = this.now();
-				this.cards = buildProviderCards(reports, this.nowMs, this.options.unavailableAccounts);
+				this.cards = buildProviderCards(data.reports, this.nowMs, data.unavailableAccounts);
 				this.#detail = null;
 			}
 		} catch (error) {

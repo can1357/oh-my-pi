@@ -150,8 +150,8 @@ export class UsageService implements UsageApi {
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	/** Background Copilot billing-mode probes, one per token hash for the life of the process. */
 	#billingModeProbes: Map<string, Promise<void>> = new Map();
-	/** HTTP status of the latest usage fetch the provider rejected as unauthorized, by `provider:usageCacheIdentity`. */
-	#usageAuthRejections: Map<string, number> = new Map();
+	/** Resolved failure-cache key for each stored row in the latest poll, including cache hits. */
+	#rowFailureKeys = new Map<string, string>();
 	readonly fetch: typeof fetch;
 	readonly logger: UsageLogger;
 	readonly requestTimeoutMs: number;
@@ -163,9 +163,13 @@ export class UsageService implements UsageApi {
 		this.requestTimeoutMs = deps.requestTimeoutMs;
 	}
 
-	authRejection(provider: Provider, credential: AuthCredential): number | undefined {
-		if (this.#usageAuthRejections.size === 0) return undefined;
-		return this.#usageAuthRejections.get(`${provider}:${usageCacheIdentity(buildUsageCredential(credential))}`);
+	authRejection(provider: Provider, credentialId: number): number | undefined {
+		const key = this.#rowFailureKeys.get(`${provider}:${credentialId}`);
+		if (!key) return undefined;
+		const failure = this.#deps.cache.get<number | null>(key);
+		return failure && failure.expiresAt > Date.now() && (failure.value === 401 || failure.value === 403)
+			? failure.value
+			: undefined;
 	}
 
 	/** Whether OAuth usage can be fetched via a provider or the store hook. */
@@ -339,7 +343,10 @@ export class UsageService implements UsageApi {
 	}
 
 	/** Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. */
-	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
+	async #fetchUsageUncached(
+		request: UsageRequestDescriptor,
+		timeoutMs?: number,
+	): Promise<UsageReport | 401 | 403 | null> {
 		const providerImpl = this.providerFor(request.provider);
 		if (!providerImpl) return null;
 
@@ -438,14 +445,13 @@ export class UsageService implements UsageApi {
 				}
 			}
 			if (report) this.#recordBillingMode(request.provider, params.credential, report);
-			this.#usageAuthRejections.delete(`${request.provider}:${usageCacheIdentity(request.credential)}`);
 			return report;
 		} catch (error) {
+			logger.debug("AuthStorage usage fetch failed", {
+				provider: request.provider,
+				error: String(error),
+			});
 			if (error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403)) {
-				this.#usageAuthRejections.set(
-					`${request.provider}:${usageCacheIdentity(request.credential)}`,
-					error.status,
-				);
 				// Definitive auth failure (revoked key, lapsed subscription): purge
 				// the last-good report so #fetchUsageCached's failure branch can't
 				// keep rendering and ranking from stale quota the way it does for
@@ -454,11 +460,8 @@ export class UsageService implements UsageApi {
 					value: null,
 					expiresAt: 0,
 				});
+				return error.status;
 			}
-			logger.debug("AuthStorage usage fetch failed", {
-				provider: request.provider,
-				error: String(error),
-			});
 			return null;
 		}
 	}
@@ -471,6 +474,9 @@ export class UsageService implements UsageApi {
 		const timeoutMs = options.timeoutMs;
 		const cacheKey = this.#deps.cache.reportKey(request);
 		const failureKey = this.#deps.cache.failureKey(cacheKey);
+		if (request.credentialId !== undefined) {
+			this.#rowFailureKeys.set(`${request.provider}:${request.credentialId}`, failureKey);
+		}
 		const now = Date.now();
 		const cached = this.#deps.cache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
@@ -478,7 +484,7 @@ export class UsageService implements UsageApi {
 			return cached.value;
 		}
 
-		const failure = this.#deps.cache.get<null>(failureKey);
+		const failure = this.#deps.cache.get<number | null>(failureKey);
 		if (failure && failure.expiresAt > now) {
 			return this.#deps.cache.lastGood(cacheKey);
 		}
@@ -497,12 +503,13 @@ export class UsageService implements UsageApi {
 		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
 		const promise = (async () => {
-			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			const result = await this.#fetchUsageUncached(request, timeoutMs);
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
 			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch;
-			if (report !== null) {
+			if (result !== null && typeof result !== "number") {
+				const report = result;
 				if (invalidated) return report;
 				this.#deps.blocks.reconcileRequest(request, report);
 				const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
@@ -533,7 +540,9 @@ export class UsageService implements UsageApi {
 			// A confirmed reset is the exception: the old failure cannot suppress
 			// the first post-reset probe.
 			if (recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
-				this.#deps.cache.set(failureKey, { value: null, expiresAt: coolDown });
+				// The cooldown owns its reason. A subsequent process can explain a cached
+				// rejection without resolving the stored reference again for display.
+				this.#deps.cache.set(failureKey, { value: result, expiresAt: coolDown });
 			}
 			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
@@ -807,6 +816,15 @@ export class UsageService implements UsageApi {
 				// closed instead of exposing an ambient env key.
 				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
 				const configKey = this.#deps.overrides.configKey(providerId);
+				// A models.yml key belongs to its gateway, not necessarily to the public
+				// provider sharing its id. Only use it with an explicitly registered usage
+				// adapter. Built-in adapters can ignore baseUrl and call a fixed public host.
+				if (
+					configKey !== undefined &&
+					!this.#runtimeUsageProviderOverrides.has(provider) &&
+					!this.#configuredUsageProviders.has(provider)
+				)
+					continue;
 				let apiKey: string | undefined;
 				if (runtimeKey) {
 					apiKey = runtimeKey;

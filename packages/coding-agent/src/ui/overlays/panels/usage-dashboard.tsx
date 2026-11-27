@@ -601,8 +601,8 @@ const LIMIT_COLUMNS: TspTableColumn[] = [
 function DetailReport(props: { readonly model: UsageDashboardModel; readonly card: ProviderCard }): JSXNode {
 	const { model, card } = props;
 	const nowMs = model.nowMs;
-	const reports = collapseSharedUsageReports(model.reports).filter(report => report.provider === card.provider);
-	const unavailable = (model.options.unavailableAccounts ?? []).filter(account => account.provider === card.provider);
+	const reports = collapseSharedUsageReports(model.data.reports).filter(report => report.provider === card.provider);
+	const unavailable = card.unavailableAccounts;
 	const facts: { k: TspText; v: TspText }[] = [];
 	const notes = [...new Set(reports.flatMap(report => report.notes ?? []))];
 	if (notes.length > 0) facts.push({ k: [{ s: "muted", t: "Notes" }], v: sanitizeDisplayLine(notes.join(" • ")) });
@@ -685,8 +685,8 @@ function DetailReport(props: { readonly model: UsageDashboardModel; readonly car
 				<text role="omp.usage.provider.name" spans={[{ t: card.name }]} truncate="end" />
 				{card.accounts > 1 && <text role="omp.usage.provider.meta" spans={dim(`${card.accounts} accounts`)} />}
 			</row>
-			{unavailable.map(account => (
-				<text spans={[{ s: "muted", t: `${sanitizeDisplayLine(account.label)}: no usage data` }]} wrap="word" />
+			{unavailable.map(label => (
+				<text spans={[{ s: "muted", t: `${sanitizeDisplayLine(label)}: no usage data` }]} wrap="word" />
 			))}
 			{facts.length > 0 && <kv key="facts" items={facts} layout="grid" role="omp.usage.facts" />}
 			{buckets.size > 0

@@ -490,18 +490,22 @@ export class SelectorController {
 		const kind = "usage-dashboard";
 		if (this.#focusOpenMenu(kind)) return;
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
-		const accounts = selectReportableAccounts(
-			collectStoredAccounts(authStorage),
-			provider => authStorage.usage.providerFor(provider) !== undefined,
-		);
-		if (reports.length === 0 && accounts.length === 0 && sessionAiu === undefined) {
+		const dashboardData = (reports: UsageReport[]) => {
+			const accounts = selectReportableAccounts(
+				collectStoredAccounts(authStorage),
+				provider => authStorage.usage.providerFor(provider) !== undefined,
+			);
+			const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
+				provider: account.provider,
+				label: [accountIdentityLabel(account), usageAuthRejectedHint(account)].filter(Boolean).join(" — "),
+			}));
+			return { reports, unavailableAccounts };
+		};
+		const data = dashboardData(reports);
+		if (reports.length === 0 && data.unavailableAccounts.length === 0 && sessionAiu === undefined) {
 			this.ctx.showWarning("No usage data available.");
 			return;
 		}
-		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
-			provider: account.provider,
-			label: [accountIdentityLabel(account), usageAuthRejectedHint(account)].filter(Boolean).join(" — "),
-		}));
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
@@ -510,10 +514,9 @@ export class SelectorController {
 		const menu = this.#claimMenu(kind);
 		const size = this.ctx.shell.size;
 		const dashboard = new UsageDashboardModel({
-			reports,
-			unavailableAccounts,
+			...data,
 			sessionAiu,
-			renderDetail: (width, current) =>
+			renderDetail: (width, { reports: current, unavailableAccounts }) =>
 				renderUsageReports(
 					current,
 					currentTheme(),
@@ -534,7 +537,10 @@ export class SelectorController {
 					throw error;
 				}
 			},
-			refresh: () => this.ctx.session.fetchUsageReports(),
+			refresh: async () => {
+				const refreshed = await this.ctx.session.fetchUsageReports();
+				return refreshed && dashboardData(refreshed);
+			},
 			terminalRows: () => size().rows,
 			onClose: () => this.#closeMenu(menu),
 		});

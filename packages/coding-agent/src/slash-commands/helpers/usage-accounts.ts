@@ -29,38 +29,25 @@ export function usageAuthRejectedHint(account: UsageAccountIdentity): string | u
 
 /** Flatten every stored credential (OAuth and API key) into identity rows for unreported-account detection. */
 export function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	const accounts: UsageAccountIdentity[] = [];
-	const all = authStorage.credentials.all();
-	for (const provider in all) {
-		const entry = all[provider];
-		const credentials = Array.isArray(entry) ? entry : [entry];
-		for (const credential of credentials) {
-			const usageAuthRejected = authStorage.usage.authRejection(provider, credential);
-			if (credential.type === "oauth") {
-				accounts.push({
-					provider,
-					type: "oauth",
-					email: credential.email,
-					accountId: credential.accountId,
-					projectId: credential.projectId,
-					enterpriseUrl: credential.enterpriseUrl,
-					orgId: credential.orgId,
-					orgName: credential.orgName,
-					authorizedAt: credential.authorizedAt,
-					refreshExpires: credential.refreshExpires,
-					expires: credential.expires,
-					...(usageAuthRejected !== undefined ? { usageAuthRejected } : {}),
-				});
-			} else {
-				accounts.push({
-					provider,
-					type: "api_key",
-					...(usageAuthRejected !== undefined ? { usageAuthRejected } : {}),
-				});
-			}
-		}
-	}
-	return accounts;
+	return authStorage.credentials.snapshot().credentials.map(({ provider, id, credential }) => {
+		const usageAuthRejected = authStorage.usage.authRejection(provider, id);
+		return {
+			provider,
+			type: credential.type,
+			...(credential.type === "oauth" && {
+				email: credential.email,
+				accountId: credential.accountId,
+				projectId: credential.projectId,
+				enterpriseUrl: credential.enterpriseUrl,
+				orgId: credential.orgId,
+				orgName: credential.orgName,
+				authorizedAt: credential.authorizedAt,
+				refreshExpires: credential.refreshExpires,
+				expires: credential.expires,
+			}),
+			...(usageAuthRejected !== undefined && { usageAuthRejected }),
+		};
+	});
 }
 
 /**
@@ -111,8 +98,7 @@ function reportIdentifiers(report: UsageReport): Set<string> {
  * no identity at all (or the credential is an API key alongside existing
  * reports), we can't attribute, so we don't claim the account is missing.
  * The tradeoff: once a provider returns any report, its identity-less rows
- * are never flagged, so a failed fetch for one of several identity-less
- * logins of the same provider (e.g. two Devin browser logins) goes unshown.
+ * need an explicit per-credential rejection to establish that their probe failed.
  */
 export function collectUnreportedAccounts(
 	reports: UsageReport[],
@@ -126,7 +112,7 @@ export function collectUnreportedAccounts(
 	}
 	return accounts.filter(account => {
 		const providerReports = byProvider.get(account.provider) ?? [];
-		if (providerReports.length === 0) return true;
+		if (account.usageAuthRejected !== undefined || providerReports.length === 0) return true;
 		if (account.type === "api_key") return false;
 		// Org-decisive attribution when EITHER side carries an org (Anthropic
 		// multi-subscription): two orgs share every other identifier, so an

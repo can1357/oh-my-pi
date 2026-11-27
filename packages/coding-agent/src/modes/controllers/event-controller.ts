@@ -2,9 +2,10 @@ import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { batch, isSettled, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
-import { extractRetryHint, formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
@@ -249,9 +250,9 @@ function mergeRules(rules: readonly NotificationRule[], added: readonly Notifica
  * these as generic `rate_limit_error` bodies, which read like a transient
  * throttle; the raw text stays in the transcript message and logs.
  */
-function usageLimitLabel(errorMessage: string, provider?: string): string {
+function usageLimitLabel(errorMessage: string, provider?: string, baseUrl?: string): string {
 	const subject = provider ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)} account` : "Account";
-	const resetMs = extractRetryHint(undefined, errorMessage);
+	const resetMs = extractProviderRetryHint(provider, errorMessage, baseUrl);
 	const reset = resetMs !== undefined && resetMs > 0 ? `; resets in ${formatDuration(resetMs)}` : "";
 	return `${subject} usage limit reached${reset}`;
 }
@@ -2175,9 +2176,14 @@ export class EventController {
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
 				if (!recoverableEmptyOutput) {
 					const usageLimit = AIError.is(AIError.classifyMessage(event.message), AIError.Flag.UsageLimit);
+					const model = this.ctx.viewSession.model;
 					this.ctx.showPinnedError(
 						usageLimit
-							? usageLimitLabel(event.message.errorMessage, event.message.provider)
+							? usageLimitLabel(
+									event.message.errorMessage,
+									event.message.provider,
+									model?.provider === event.message.provider ? model.baseUrl : undefined,
+								)
 							: event.message.errorMessage,
 					);
 				}
@@ -2796,6 +2802,8 @@ export class EventController {
 		// leaves no error in the transcript. The retry row names the reason;
 		// `auto_retry_end` marks the attempt recovered or superseded, or restores
 		// its error when the saga fails without accounting for it.
+		const model = this.ctx.viewSession.model;
+		const provider = this.#pinnedErrorMessage?.provider ?? model?.provider;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
@@ -2805,7 +2813,15 @@ export class EventController {
 				? AIError.is(event.errorId, AIError.Flag.UsageLimit)
 				: AIError.isUsageLimit(event.errorMessage);
 		const reason = previewLine(
-			sanitizeText(usageLimit ? usageLimitLabel(event.errorMessage) : event.errorMessage),
+			sanitizeText(
+				usageLimit
+					? usageLimitLabel(
+							event.errorMessage,
+							provider,
+							model?.provider === provider ? model?.baseUrl : undefined,
+						)
+					: event.errorMessage,
+			),
 			TRUNCATE_LENGTHS.CONTENT,
 		);
 		// Replaces the turn's row with the countdown.
