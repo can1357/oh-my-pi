@@ -1,4 +1,5 @@
-//! UTF-8 decoding as jq does it (src/jv_unicode.c).
+//! UTF-8 decoding as jq does it (`src/jv_unicode.c`). Valid runs are measured
+//! with xutf's SIMD validator; only the bytes it rejects follow jq's rules.
 use alloc::vec::Vec;
 
 /// Marks a continuation byte in [`CODING_LENGTH`].
@@ -17,67 +18,51 @@ const fn coding_length(b: u8) -> u8 {
     }
 }
 
-/// Smallest codepoint a sequence of the given length may encode (`utf8_first_codepoint`).
-const FIRST_CODEPOINT: [u32; 5] = [0, 0, 0x80, 0x800, 0x10000];
-
-/// Decode the codepoint starting `bytes`, as jq's `jvp_utf8_next`:
-/// return it (`None` if invalid) and how many bytes it takes.
-fn next(bytes: &[u8]) -> (Option<u32>, usize) {
-    let first = bytes[0];
-    if first < 0x80 {
-        return (Some(first.into()), 1);
-    }
-    let length = coding_length(first);
+/// How many bytes jq's `jvp_utf8_next` replaces by one U+FFFD at the start of
+/// `bytes`, which start an ill-formed sequence: one for a byte no sequence
+/// starts with, all of them for a sequence they cut short, the bytes before
+/// one that is no continuation, else the whole sequence (an overlong form,
+/// surrogate or codepoint past U+10FFFF). Not the maximal subpart
+/// `String::from_utf8_lossy` replaces.
+fn invalid_len(bytes: &[u8]) -> usize {
+    let length = coding_length(bytes[0]);
     if length == 0 || length == CONTINUATION {
-        return (None, 1);
+        return 1;
     }
     let length = usize::from(length);
     if length > bytes.len() {
-        return (None, bytes.len());
+        return bytes.len();
     }
-    let mask = match length {
-        2 => 0x1f,
-        3 => 0x0f,
-        _ => 0x07,
-    };
-    let mut codepoint = u32::from(first & mask);
-    for (i, &b) in bytes[1..length].iter().enumerate() {
-        if coding_length(b) != CONTINUATION {
-            return (None, i + 1);
-        }
-        codepoint = (codepoint << 6) | u32::from(b & 0x3f);
-    }
-    let valid = codepoint >= FIRST_CODEPOINT[length]
-        && !(0xd800..=0xdfff).contains(&codepoint)
-        && codepoint <= 0x10ffff;
-    (valid.then_some(codepoint), length)
+    bytes[1..length]
+        .iter()
+        .position(|&b| coding_length(b) != CONTINUATION)
+        .map_or(length, |i| i + 1)
 }
 
 /// Append `bytes` to `out`, replacing every invalid sequence by U+FFFD
 /// the way jq's `jvp_string_copy_replace_bad` does.
-pub fn push_lossy(out: &mut Vec<u8>, bytes: &[u8]) {
-    if core::str::from_utf8(bytes).is_ok() {
-        out.extend_from_slice(bytes);
-        return;
-    }
-    let mut rest = bytes;
-    while !rest.is_empty() {
-        let (c, len) = next(rest);
-        match c {
-            Some(_) => out.extend_from_slice(&rest[..len]),
-            None => out.extend_from_slice("\u{fffd}".as_bytes()),
+pub fn push_lossy(out: &mut Vec<u8>, mut bytes: &[u8]) {
+    loop {
+        let valid = xutf::valid_prefix(bytes);
+        out.extend_from_slice(valid.as_bytes());
+        bytes = &bytes[valid.len()..];
+        if bytes.is_empty() {
+            return;
         }
-        rest = &rest[len..];
+        out.extend_from_slice("\u{fffd}".as_bytes());
+        bytes = &bytes[invalid_len(bytes)..];
     }
 }
 
 /// `bytes` with invalid sequences replaced, as jq's `jv_string_sized`.
 pub fn lossy(bytes: Vec<u8>) -> Vec<u8> {
-    if core::str::from_utf8(&bytes).is_ok() {
+    let valid = xutf::valid_prefix(&bytes).len();
+    if valid == bytes.len() {
         return bytes;
     }
     let mut out = Vec::with_capacity(bytes.len() + 8);
-    push_lossy(&mut out, &bytes);
+    out.extend_from_slice(&bytes[..valid]);
+    push_lossy(&mut out, &bytes[valid..]);
     out
 }
 

@@ -302,10 +302,11 @@ pub(in crate::perl) struct Interp<'h> {
 	/// A `SIGPIPE` handler runs: the signal is blocked, so its own failed
 	/// writes are plain errors ([`Interp::broken_pipe`]).
 	in_sigpipe: bool,
-	/// A signal's default action ended the program ([`Interp::raise_signal`]):
-	/// as for a process the kernel kills, no END block, destructor or exit
-	/// hook runs, and buffered output is lost.
-	killed: bool,
+	/// The program ended as a process vanishes ([`Interp::vanish`]): killed
+	/// by a signal's default action, replaced by `exec` or cancelled by the
+	/// shell, so no END block, destructor or exit hook runs and buffered
+	/// output is lost.
+	vanished: bool,
 	overloads: FxHashMap<Rc<str>, FxHashMap<Rc<str>, Value>>,
 	objects: indexmap::IndexMap<usize, Ref, rustc_hash::FxBuildHasher>,
 	destroying: FxHashSet<usize>,

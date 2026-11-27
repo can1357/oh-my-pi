@@ -198,6 +198,8 @@ impl Interp<'_> {
 		self.loc = program.body.location.clone();
 		let main = init.and_then(|()| self.run_statements(&program.body, Cx::Void).map(|_| ()));
 		self.pop_scope();
+		// A run the shell cancelled ends as a killed process does.
+		if self.is_cancelled() { self.vanish(); }
 		let cleanup = self.drain_destructors(false);
 		let finish = func::sys::finish_argv(self);
 		let status = main.and(cleanup).and(finish).err().map_or(0, |flow| self.flow_status(flow));
@@ -206,10 +208,11 @@ impl Interp<'_> {
 
 	fn finish_main(&mut self, status: i32) -> i32 {
 		self.sv("main::?").replace(Value::Int(i64::from(status)));
-		// A program a signal killed (`killed`) stops here: no END block,
-		// destructor or exit hook runs, and nothing more is flushed.
+		// A program that vanished (`vanish`: a signal, `exec`, cancellation)
+		// stops here: no END block, destructor or exit hook runs, and nothing
+		// more is flushed.
 		self.phase = "END";
-		while !self.killed && let Some(end) = self.ends.pop() {
+		while !self.vanished && let Some(end) = self.ends.pop() {
 			if let Err(flow) = self.run_phase_block(end) {
 				let status = self.flow_status(flow);
 				self.sv("main::?").replace(Value::Int(i64::from(status)));
@@ -220,12 +223,12 @@ impl Interp<'_> {
 			let status = self.flow_status(flow);
 			self.sv("main::?").replace(Value::Int(i64::from(status)));
 		}
-		while !self.killed && !self.exit_hooks.is_empty() {
+		while !self.vanished && !self.exit_hooks.is_empty() {
 			for hook in std::mem::take(&mut self.exit_hooks) { hook(self); }
 		}
 		// Output still buffered goes out now; with no reader left, SIGPIPE's
 		// default action ends the program, as it ends perl's own exit flush.
-		if !self.killed && self.flush_outputs()
+		if !self.vanished && self.flush_outputs()
 			&& let Err(Flow::Exit(status)) = self.raise_signal("PIPE", super::runtime::SIGPIPE)
 		{
 			self.sv("main::?").replace(Value::Int(i64::from(status)));

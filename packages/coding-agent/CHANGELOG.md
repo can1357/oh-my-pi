@@ -125,7 +125,11 @@
 ### Fixed
 
 - Restored automatic discovery of the Windows Chrome relay from WSL2 with mirrored networking ([#20809](https://github.com/can1357/oh-my-pi/pull/20809) by [@taibenvenuti](https://github.com/taibenvenuti)).
-- Managed Chromium browser tabs no longer look automated to bot detectors: no patched native functions on machines whose GPU matches the presented platform, the same user agent and hardware in every kind of worker, and no DevTools console serialization on public pages
+- Managed Chromium tabs now use the browser's own hardware concurrency in pages and workers rather than overriding it in pages alone.
+- Emulating a larger viewport on an attached Chromium tab no longer resizes the browser window shared with the user's other tabs.
+- The bash tool's builtin `grep` prints invalid-regex errors as one GNU-style line (`grep: Unmatched ( or \(`), treats an unclosed `-E` interval such as `a{1` as literal text, prints `--` between groups for `-A0`/`-B0`/`-C0`, and no longer ends file errors with `(os error N)`
+- The bash tool's builtin `sed` reports script errors in GNU form (``sed: -e expression #1, char 3: unterminated `s' command``), reports an unreadable input file as `can't read FILE` and continues with the rest, and supports GNU's `e`, `R` and `s///Ng`
+- The bash tool's builtin `awk` leaves redirected input just after the last record it read when it exits early, so `{ awk 'NR==1{print; exit}'; cat; } < file` prints the whole file
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))

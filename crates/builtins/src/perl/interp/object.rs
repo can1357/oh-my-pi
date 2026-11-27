@@ -280,7 +280,8 @@ impl Interp<'_> {
 	}
 
 	pub(super) fn drain_destructors(&mut self, global: bool) -> PResult<()> {
-		if self.destroy_draining || self.killed { return Ok(()); }
+		// A cancelled run unwinds to `vanish` without running destructors.
+		if self.destroy_draining || self.vanished || self.is_cancelled() { return Ok(()); }
 		if !self.tied_handles.is_empty() { self.tied_handles.retain(|_, (io, _)| io.strong_count() > 0); }
 		if self.objects.is_empty() { return Ok(()); }
 		self.destroy_draining = true;

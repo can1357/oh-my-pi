@@ -1034,28 +1034,6 @@ export async function applyViewport(page: Page, viewport?: Viewport): Promise<vo
 			}
 		: DEFAULT_VIEWPORT;
 	await page.setViewport(applied);
-	await fitWindowToViewport(page, applied);
-}
-
-/**
- * Grow the page's window to hold an emulated viewport plus browser chrome, so `outerWidth` and
- * `outerHeight` never read below the viewport. Never shrinks: tabs share their window.
- */
-async function fitWindowToViewport(page: Page, viewport: { width: number; height: number }): Promise<void> {
-	try {
-		const session = await page.createCDPSession();
-		try {
-			const { windowId, bounds } = await session.send("Browser.getWindowForTarget");
-			const width = Math.max(bounds.width ?? 0, viewport.width);
-			const height = Math.max(bounds.height ?? 0, viewport.height + BROWSER_CHROME_HEIGHT);
-			if (width === bounds.width && height === bounds.height) return;
-			await session.send("Browser.setWindowBounds", { windowId, bounds: { width, height } });
-		} finally {
-			await session.detach().catch(() => undefined);
-		}
-	} catch (error) {
-		logger.debug("Failed to fit browser window to viewport", { error: toError(error).message });
-	}
 }
 
 /**
