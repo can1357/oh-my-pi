@@ -548,6 +548,80 @@ describe("clock-only progress", () => {
 		// The clock still advances across emitted snapshots, the final one included.
 		for (let i = 1; i < durations.length; i++) expect(durations[i]).toBeGreaterThanOrEqual(durations[i - 1]);
 	});
+
+	it("re-reads a streamed call's arguments at most once per coalescing window while its snapshots are dropped", async () => {
+		let clock = 10_000;
+		vi.spyOn(Date, "now").mockImplementation(() => clock);
+		// The streamed call's arguments count their reads: each preview refresh parses them.
+		let argumentReads = 0;
+		const input = { path: "src/a.ts", content: "x" };
+		const call = {
+			type: "toolCall",
+			id: "write-1",
+			name: "write",
+			get arguments() {
+				argumentReads++;
+				return input;
+			},
+		} as unknown as ToolCall;
+		const partial = { role: "assistant", content: [call] } as unknown as AssistantMessage;
+		const update = (type: "toolcall_start" | "toolcall_delta"): AgentSessionEvent =>
+			({
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent:
+					type === "toolcall_start"
+						? { type, contentIndex: 0, partial }
+						: { type, contentIndex: 0, delta: "x", partial },
+			}) as AgentSessionEvent;
+		// The preview never changes, so every snapshot after the first is clock-only and dropped.
+		const steps: Array<{ label: string; advance: number; event: AgentSessionEvent }> = [
+			{ label: "call starts", advance: 200, event: update("toolcall_start") },
+			{ label: "next window", advance: 200, event: update("toolcall_delta") },
+			{ label: "same window", advance: 10, event: update("toolcall_delta") },
+			{ label: "same window", advance: 10, event: update("toolcall_delta") },
+			{ label: "same window", advance: 10, event: update("toolcall_delta") },
+			{ label: "next window", advance: 200, event: update("toolcall_delta") },
+		];
+		let emits = 0;
+		const seen: Array<{ label: string; refreshed: boolean; emitted: boolean }> = [];
+		const { session } = createScriptedSession(async emit => {
+			for (const step of steps) {
+				clock += step.advance;
+				const reads = argumentReads;
+				const before = emits;
+				emit(step.event);
+				seen.push({ label: step.label, refreshed: argumentReads > reads, emitted: emits > before });
+			}
+			for (const event of yieldEvents()) emit(event);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as CreateAgentSessionResult);
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "streamed call scenario",
+			description: "streamed call coalescing",
+			index: 0,
+			id: `streamed-call-${Math.random().toString(36).slice(2)}`,
+			settings: Settings.isolated(),
+			modelRegistry: { refresh: async () => {} } as ModelRegistry,
+			enableLsp: false,
+			eventBus: new EventBus(),
+			onProgress: () => {
+				emits++;
+			},
+		});
+
+		expect(seen).toEqual([
+			{ label: "call starts", refreshed: true, emitted: true },
+			{ label: "next window", refreshed: true, emitted: false },
+			{ label: "same window", refreshed: false, emitted: false },
+			{ label: "same window", refreshed: false, emitted: false },
+			{ label: "same window", refreshed: false, emitted: false },
+			{ label: "next window", refreshed: true, emitted: false },
+		]);
+	});
 });
 
 describe("recentOutput event-sequence equivalence (deferred reconstruction)", () => {

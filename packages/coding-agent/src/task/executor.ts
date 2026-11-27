@@ -1764,6 +1764,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// displays that draw elapsed time straight from `durationMs` keep advancing.
 	const PROGRESS_HEARTBEAT_MS = 5_000;
 	let lastProgressEmitMs = 0;
+	// When a snapshot was last built, emitted or dropped: coalescing counts from here, so a dropped
+	// clock-only snapshot still holds the next one back a full window instead of re-running every event.
+	let lastProgressCheckMs = 0;
 	let progressTimeoutId: NodeJS.Timeout | null = null;
 	// Shallow copy of the last emitted progress: a snapshot that differs from it only in `durationMs` is dropped.
 	let lastEmittedProgress: AgentProgress | undefined;
@@ -1787,8 +1790,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	/**
-	 * The tool call the model is writing, by its newest stream snapshot. Its preview is taken at the
-	 * emit boundary, as recentOutput is: a large edit's patch parses at most once per emit, not per delta.
+	 * The tool call the model is writing, by its newest stream snapshot. Its preview is taken at the emit
+	 * boundary, as recentOutput is: a large edit's patch parses at most once per coalescing window, not per delta.
 	 */
 	let streamingCall: ToolCall | undefined;
 	let streamingCallDirty = false;
@@ -1861,6 +1864,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		refreshRecentOutput();
 		refreshStreamingCall();
 		const now = Date.now();
+		lastProgressCheckMs = now;
 		if (!force && now - lastProgressEmitMs < PROGRESS_HEARTBEAT_MS && !progressChangedSinceEmit()) return;
 		progress.durationMs = now - startTime;
 		lastEmittedProgress = { ...progress };
@@ -1881,6 +1885,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		};
 		emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload);
 		lastProgressEmitMs = Date.now();
+		lastProgressCheckMs = lastProgressEmitMs;
 	};
 
 	const scheduleProgress = (flush = false) => {
@@ -1893,8 +1898,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			return;
 		}
 		const now = Date.now();
-		const elapsed = now - lastProgressEmitMs;
-		if (lastProgressEmitMs === 0 || elapsed >= PROGRESS_COALESCE_MS) {
+		const elapsed = now - lastProgressCheckMs;
+		if (lastProgressCheckMs === 0 || elapsed >= PROGRESS_COALESCE_MS) {
 			if (progressTimeoutId) {
 				clearTimeout(progressTimeoutId);
 				progressTimeoutId = null;
