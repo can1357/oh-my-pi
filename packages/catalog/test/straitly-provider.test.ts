@@ -15,7 +15,17 @@ const STRAITLY_ROWS: Record<string, unknown>[] = [
 		context_length: 1_000_000,
 		architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
 		top_provider: { context_length: 1_000_000, max_completion_tokens: 32_768 },
-		supported_parameters: ["max_tokens", "reasoning", "reasoning_effort", "tool_choice", "tools"],
+		supported_parameters: [
+			"max_tokens",
+			"reasoning",
+			"reasoning_effort",
+			"stop",
+			"temperature",
+			"tool_choice",
+			"tools",
+			"top_k",
+			"top_p",
+		],
 		reasoning: { mandatory: false, default_enabled: true, default_effort: "high" },
 		pricing: {
 			prompt: "0.000001",
@@ -31,7 +41,7 @@ const STRAITLY_ROWS: Record<string, unknown>[] = [
 		architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
 		top_provider: { context_length: 1_048_576, max_completion_tokens: 1_048_576 },
 		catalog: { max_output_tokens: 1_048_576, vision: true, reasoning: true },
-		supported_parameters: ["max_tokens", "tool_choice", "tools"],
+		supported_parameters: ["max_tokens", "stop", "temperature", "tool_choice", "tools", "top_p"],
 		reasoning: null,
 		pricing: {
 			prompt: "0.0000002",
@@ -144,6 +154,8 @@ describe("Straitly provider", () => {
 		expect(sonnet?.thinking?.defaultLevel).toBe(Effort.High);
 		expect(sonnet?.thinking?.requiresEffort).not.toBe(true);
 		expect(sonnet?.compat?.reasoningDisableMode).toBe("cline-enabled-false");
+		expect(sonnet?.compat?.supportsSamplingParams).toBe(false);
+		expect(sonnet?.compat?.supportsPenaltyAndStopParams).toBe(true);
 
 		const deepseek = models.find(model => model.id === "deepseek/deepseek-v4-1-flash-1017");
 		expect(deepseek?.reasoning).toBe(true);
@@ -152,18 +164,24 @@ describe("Straitly provider", () => {
 		expect(deepseek?.maxTokens).toBe(1_048_576);
 		expect(deepseek?.supportsTools).not.toBe(false);
 		expect(deepseek?.compat?.supportsReasoningEffort).toBe(false);
+		expect(deepseek?.compat?.supportsSamplingParams).toBe(true);
+		expect(deepseek?.compat?.supportsPenaltyAndStopParams).toBe(true);
 
 		const textOnly = models.find(model => model.id === "text-only-no-tools");
 		expect(textOnly?.reasoning).toBe(false);
 		expect(textOnly?.input).toEqual(["text"]);
 		expect(textOnly?.supportsTools).toBe(false);
 		expect(textOnly?.compat?.supportsToolChoice).toBe(false);
+		expect(textOnly?.compat?.supportsSamplingParams).toBe(true);
+		expect(textOnly?.compat?.supportsPenaltyAndStopParams).toBe(false);
 
 		const mandatory = models.find(model => model.id === "mandatory-reasoner");
 		expect(mandatory?.reasoning).toBe(true);
 		expect(mandatory?.thinking?.requiresEffort).toBe(true);
 		expect(mandatory?.thinking?.defaultLevel).toBe(Effort.High);
 		expect(mandatory?.compat?.reasoningDisableMode).toBe("lowest-effort");
+		expect(mandatory?.compat?.supportsSamplingParams).toBe(false);
+		expect(mandatory?.compat?.supportsPenaltyAndStopParams).toBe(false);
 
 		const defaultOff = models.find(model => model.id === "default-off-reasoner");
 		expect(defaultOff?.reasoning).toBe(true);

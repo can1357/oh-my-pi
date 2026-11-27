@@ -9142,9 +9142,25 @@ function mapStraitlyModel(
 	const thinking = mapStraitlyThinking(entry, defaults);
 	const supportsTools = params !== undefined ? params.includes("tools") : undefined;
 	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
+	const supportsSamplingParams =
+		params !== undefined
+			? params.includes("temperature") ||
+				params.includes("top_p") ||
+				params.includes("top_k") ||
+				params.includes("min_p")
+			: true;
+	const supportsPenaltyAndStopParams =
+		params !== undefined
+			? params.includes("presence_penalty") ||
+				params.includes("repetition_penalty") ||
+				params.includes("frequency_penalty") ||
+				params.includes("stop")
+			: true;
 	const compatPatch: OpenAICompat = {
 		...defaults.compat,
 		...(!supportsToolChoice && { supportsToolChoice: false }),
+		...(!supportsSamplingParams && { supportsSamplingParams: false }),
+		...(!supportsPenaltyAndStopParams && { supportsPenaltyAndStopParams: false }),
 		...(reasoning && params !== undefined && !advertisesReasoningEffort && { supportsReasoningEffort: false }),
 		...(reasoningMeta?.mandatory === true && { reasoningDisableMode: "lowest-effort" }),
 		...(reasoningMeta?.default_enabled === false && {
