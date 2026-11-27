@@ -6964,7 +6964,8 @@ function isCopilotSelectableModel(entry: OpenAICompatibleModelRecord): boolean {
  * derives from: the bundled Copilot row, else the cross-provider bare-id reference for the same
  * id, the same source the cache-write leg and unbilled rows always took their prices from.
  * `scaleCacheWithInput` (the `tier-cache-follows-input` KDL axis) scales the
- * carried legs by the tier's input-price ratio; a reported `cache_price` always wins.
+ * carried legs by the tier's input-price ratio. A reported `cache_price` wins here, though the
+ * bundled-model merge still replaces a reported zero on a bundled id.
  */
 function copilotTierCost(
 	tier: CopilotTokenPriceTier | undefined,
