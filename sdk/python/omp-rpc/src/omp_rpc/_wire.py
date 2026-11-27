@@ -1785,6 +1785,11 @@ class AbortAndDeliverQueueResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class ClearContextResult:
+    dropped_count: float
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LiveConnectResult:
     voice: str
     sdp_answer: str
@@ -3375,6 +3380,13 @@ def parse_abort_and_deliver_queue_result(value: object, path: str = "AbortAndDel
     )
 
 
+def parse_clear_context_result(value: object, path: str = "ClearContextResult") -> ClearContextResult:
+    payload = expect_object(value, path)
+    return ClearContextResult(
+        dropped_count=required(payload, "droppedCount", decode_float, path),
+    )
+
+
 def parse_live_connect_result(value: object, path: str = "LiveConnectResult") -> LiveConnectResult:
     payload = expect_object(value, path)
     return LiveConnectResult(
@@ -3584,6 +3596,11 @@ class WireClient:
         if parent_session is not None:
             params["parentSession"] = parent_session
         return parse_cancellation_result(self._command("new_session", params), "new_session")
+
+    def clear_context(self) -> ClearContextResult:
+        """Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs."""
+        params: dict[str, object] = {}
+        return parse_clear_context_result(self._command("clear_context", params), "clear_context")
 
     def open_session(self, session_dir: str | Path, *, provider: str | None = None, model_id: str | None = None) -> OpenSessionResult:
         """Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request."""
@@ -4272,6 +4289,7 @@ __all__ = [
     "CacheWarmingStartEvent",
     "CancelUiRequest",
     "CancellationResult",
+    "ClearContextResult",
     "CommandOutputEvent",
     "CompactionResult",
     "CompactionSummaryMessage",
@@ -4473,6 +4491,7 @@ __all__ = [
     "parse_cache_warming_start_event",
     "parse_cancel_ui_request",
     "parse_cancellation_result",
+    "parse_clear_context_result",
     "parse_command_output_event",
     "parse_compaction_result",
     "parse_compaction_summary_message",

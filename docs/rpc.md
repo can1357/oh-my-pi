@@ -140,6 +140,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "abort_and_deliver_queue" }`
 - `{ id?, type: "resume" }`
 - `{ id?, type: "new_session", parentSession?: string }`
+- `{ id?, type: "clear_context" }` — clears the conversation in place like the TUI's `/clear`: session id, title, model, settings and transcript file are kept, a reset boundary is appended, and extensions receive `session_clear`. Returns `{ droppedCount }`; fails with `session_busy` while a response streams or a foreground bash/eval runs.
 - `{ id?, type: "open_session", sessionDir: string, provider?: string, modelId?: string }`
 
 ### Protocol

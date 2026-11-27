@@ -66,6 +66,7 @@
 - Added the `git.childRepoDiscovery` setting: set it to `false` to stop a session started outside a repository from scanning its direct child directories and adopting a single child checkout for the status line, git/PR lookup, and prompt context ([#18232](https://github.com/can1357/oh-my-pi/issues/18232))
 - `omp models --json` now reports each model's compat overrides under `compat` (`extraBody` values redacted) ([#17092](https://github.com/can1357/oh-my-pi/issues/17092))
 - Added an "Insert as editable text" choice to the large-paste menu that inserts the pasted text into the editor uncollapsed, so text pasted through a remote terminal can be edited without the host-clipboard raw-paste shortcut ([#17037](https://github.com/can1357/oh-my-pi/issues/17037))
+- Added the `clear_context` RPC command (and `RpcClient.clearContext()`), which clears the conversation in place like the TUI's `/clear`, keeping the session id and transcript file ([#16686](https://github.com/can1357/oh-my-pi/issues/16686))
 
 ### Changed
 

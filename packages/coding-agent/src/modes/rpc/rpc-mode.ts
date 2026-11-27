@@ -2346,6 +2346,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return success(id, "abort_and_prompt");
 			}
 
+			case "clear_context": {
+				if (session.isCompacting) {
+					session.abortCompaction();
+					while (session.isCompacting) await Bun.sleep(10);
+				}
+				const result = await session.resetSessionContext();
+				if (!result) {
+					return error(id, "clear_context", new SessionBusyError("clear the context").message, "session_busy");
+				}
+				return success(id, "clear_context", { droppedCount: result.droppedCount });
+			}
+
 			case "new_session":
 			case "switch_session":
 			case "branch":

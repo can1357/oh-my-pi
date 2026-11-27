@@ -5436,6 +5436,12 @@ pub struct NewSessionParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClearContextResult {
+	#[serde(rename = "droppedCount")]
+	pub dropped_count: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenSessionParams {
 	#[serde(rename = "sessionDir")]
 	pub session_dir: String,
@@ -6566,6 +6572,20 @@ impl Command for NewSessionCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<CancellationResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ClearContextCommand {}
+
+impl Command for ClearContextCommand {
+	const NAME: &'static str = "clear_context";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ClearContextResult;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<ClearContextResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
 	}
 }
 

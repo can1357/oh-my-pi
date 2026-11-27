@@ -1687,6 +1687,10 @@ export interface NewSessionParams {
 	parentSession?: string;
 }
 
+export interface ClearContextResult {
+	droppedCount: number;
+}
+
 export interface OpenSessionParams {
 	sessionDir: string;
 	provider?: string;
@@ -2044,6 +2048,7 @@ export interface RpcWireCommands {
 	abort_and_deliver_queue: { params: undefined; result: AbortAndDeliverQueueResult };
 	resume: { params: undefined; result: undefined };
 	new_session: { params: NewSessionParams; result: CancellationResult };
+	clear_context: { params: undefined; result: ClearContextResult };
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };

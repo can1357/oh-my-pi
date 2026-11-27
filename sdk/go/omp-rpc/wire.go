@@ -7477,6 +7477,25 @@ func (v *AbortAndDeliverQueueResult) decodeFrom(raw map[string]json.RawMessage) 
 	return nil
 }
 
+type ClearContextResult struct {
+	DroppedCount float64 `json:"droppedCount"`
+}
+
+func (v *ClearContextResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ClearContextResult", v.decodeFrom)
+}
+
+func (v *ClearContextResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ClearContextResult
+	d := fieldDecoder{raw: raw, owner: "ClearContextResult"}
+	d.required("droppedCount", &out.DroppedCount)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type SetSlowModeResult struct {
 	Enabled bool `json:"enabled"`
 }
@@ -8178,6 +8197,13 @@ type NewSessionCommand struct {
 func (c Commands) NewSession(ctx context.Context, p NewSessionCommand) (CancellationResult, error) {
 	var out CancellationResult
 	err := c.call(ctx, "new_session", p, 0, &out)
+	return out, err
+}
+
+// ClearContext sends "clear_context": Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs.
+func (c Commands) ClearContext(ctx context.Context) (ClearContextResult, error) {
+	var out ClearContextResult
+	err := c.call(ctx, "clear_context", nil, 0, &out)
 	return out, err
 }
 
