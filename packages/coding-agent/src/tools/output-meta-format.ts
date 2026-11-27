@@ -198,9 +198,12 @@ const RAW_OUTPUT_PREFIX = "[raw output: ";
 
 const RAW_OUTPUT_SUFFIX = "]";
 
-/** The footer naming the spill that holds the raw output a tool result was cut from. */
+/** The `:raw` read selector: bare spill reads are paged and column-capped like any read. */
+export const RAW_SELECTOR = ":raw";
+
+/** The footer naming the spill that holds the raw output a tool result was cut from, with the `:raw` selector for verbatim reads. */
 export function formatRawOutputNotice(artifactId: string): string {
-	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_OUTPUT_SUFFIX}`;
+	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_SELECTOR}${RAW_OUTPUT_SUFFIX}`;
 }
 
 /** The column-cap clause {@link formatOutputNotice} puts in a notice, alone or after other parts. */

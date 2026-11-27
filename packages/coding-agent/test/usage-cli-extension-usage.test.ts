@@ -1,9 +1,6 @@
 /**
- * Regression test for issue #13579.
- *
- * `omp usage` never loaded extensions, so a usage provider registered via
- * `pi.registerProvider(name, { usage })` was never consulted and the account
- * landed in `accountsWithoutUsage` instead of producing a report.
+ * Regression coverage for extension usage in `omp usage` (#13579) and
+ * `models.yml`-only provider credentials (#16081).
  */
 import { Database } from "bun:sqlite";
 import * as path from "node:path";
@@ -81,6 +78,48 @@ test("omp usage reports accounts through an extension-registered usage provider 
 		["ext-usage", ["credits"]],
 	]);
 	expect(output.accountsWithoutUsage).toEqual([]);
+});
+
+test("omp usage fetches extension quota for a models.yml-only credential", async () => {
+	const previousAgentDir = utils.getAgentDir();
+	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+	try {
+		utils.setAgentDir(tmp.path());
+		await Bun.write(
+			tmp.join("models.yml"),
+			Bun.YAML.stringify({
+				providers: {
+					"ext-usage": {
+						baseUrl: "https://example.test/v1",
+						api: "openai-completions",
+						apiKey: "sk-configured",
+						models: [
+							{
+								id: "example",
+								name: "Example",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 8192,
+								maxTokens: 1024,
+							},
+						],
+					},
+				},
+			}),
+		);
+		await authStorage.credentials.set("ext-usage", []);
+
+		const output = await usageJson({ extensions: [extPath], noExtensions: true });
+		expect(output.reports.map(report => [report.provider, report.limits.map(limit => limit.id)])).toEqual([
+			["ext-usage", ["credits"]],
+		]);
+		expect(output.accountsWithoutUsage).toEqual([]);
+	} finally {
+		utils.setAgentDir(previousAgentDir);
+		if (previousAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDirEnv;
+	}
 });
 
 test("omp usage fetches extension usage without discovering the extension's model catalog", async () => {

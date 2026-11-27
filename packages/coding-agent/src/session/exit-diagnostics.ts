@@ -344,7 +344,7 @@ export function createInterruptedToolResults(
 					type: "text",
 					text:
 						context === "fork"
-							? "The parent session may still be running this tool; its outcome is unknown."
+							? "Owned by the parent session, which may still be running this tool; its outcome is unknown."
 							: "Previous OMP process exited before this tool returned; its outcome is unknown.",
 				},
 			],

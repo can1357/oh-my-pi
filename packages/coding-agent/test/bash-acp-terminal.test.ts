@@ -207,7 +207,7 @@ describe("BashTool ACP terminal routing", () => {
 		const tool = new BashTool(makeSession(bridge));
 
 		await expect(tool.execute("call-pre-abort", { command: "echo hi" }, controller.signal)).rejects.toThrow(
-			/Command aborted/,
+			/\[aborted\]/,
 		);
 
 		expect(createSpy).toHaveBeenCalledTimes(0);
@@ -299,7 +299,7 @@ describe("BashTool ACP terminal routing", () => {
 
 		const executePromise = tool.execute("call-abort", { command: "sleep 60" }, controller.signal);
 
-		await expect(executePromise).rejects.toThrow(/Command aborted/);
+		await expect(executePromise).rejects.toThrow(/\[aborted\]/);
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	});
@@ -336,7 +336,7 @@ describe("BashTool ACP terminal routing", () => {
 
 		expect(result.isError).toBe(true);
 		expect(result.details?.timedOut).toBe(true);
-		expect(result.content.find(block => block.type === "text")?.text).toContain("Command timed out after 1 seconds");
+		expect(result.content.find(block => block.type === "text")?.text).toContain("[timed out after 1s]");
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 		expect(currentOutputAfterKill).toBeGreaterThan(0);
@@ -368,7 +368,7 @@ describe("BashTool ACP terminal routing", () => {
 
 		expect(result.isError).toBe(true);
 		expect(result.details?.timedOut).toBe(true);
-		expect(result.content.find(block => block.type === "text")?.text).toContain("Command timed out after 1 seconds");
+		expect(result.content.find(block => block.type === "text")?.text).toContain("[timed out after 1s]");
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	}, 8000);

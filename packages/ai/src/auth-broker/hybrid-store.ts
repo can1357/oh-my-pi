@@ -6,8 +6,9 @@
  * pauses the provider; the login would vanish on the next snapshot. When an
  * upload comes back unserved, {@link HybridAuthCredentialStore} saves the login
  * in the local SQLite store (`agent.db`) instead and records the provider there,
- * so it keeps resolving locally across restarts. Every other provider goes to
- * the broker.
+ * so it keeps resolving locally across restarts. Providers whose logins hinge
+ * on a key only this machine holds (`device-bound #true` in their auth rule)
+ * always stay local. Every other provider goes to the broker.
  *
  * ```ts
  * const store = new HybridAuthCredentialStore({
@@ -16,6 +17,7 @@
  * });
  * ```
  */
+import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { CredentialRefreshLeaseFence, AuthCredentialStore } from "../auth/store";
 import type { SqliteAuthCredentialStore } from "../auth/sqlite-credential-store";
@@ -32,6 +34,11 @@ import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
 import { AuthBrokerUnservedProviderError, type RemoteAuthCredentialStore } from "./remote-store";
+
+/** Providers whose logins never reach the broker: their refresh token is bound to a key that stays on this machine. */
+const DEVICE_BOUND_PROVIDERS: readonly string[] = authProviders()
+	.filter(policy => policy.deviceBound)
+	.map(policy => policy.id);
 
 /** The two stores {@link HybridAuthCredentialStore} splits providers between. */
 export interface HybridAuthCredentialStoreOptions {
@@ -65,7 +72,11 @@ export class HybridAuthCredentialStore implements AuthCredentialStore {
 	constructor(opts: HybridAuthCredentialStoreOptions) {
 		this.#broker = opts.broker;
 		this.#local = opts.local;
-		this.#localProviders = new Set(opts.local.listBrokerLocalProviders());
+		this.#localProviders = this.#readLocalProviders();
+	}
+
+	#readLocalProviders(): Set<string> {
+		return new Set([...DEVICE_BOUND_PROVIDERS, ...this.#local.listBrokerLocalProviders()]);
 	}
 
 	close(): void {
@@ -78,7 +89,7 @@ export class HybridAuthCredentialStore implements AuthCredentialStore {
 		const broker = this.#broker.pollExternalChanges();
 		const local = this.#local.pollExternalChanges();
 		// Another process may have kept a login locally; it records the provider before saving the row.
-		if (local) this.#localProviders = new Set(this.#local.listBrokerLocalProviders());
+		if (local) this.#localProviders = this.#readLocalProviders();
 		return broker || local;
 	}
 
@@ -193,6 +204,7 @@ export class HybridAuthCredentialStore implements AuthCredentialStore {
 
 	/** After a logout, send `provider`'s next login to the broker once no local login is left. */
 	#returnToBrokerIfEmpty(provider: string): void {
+		if (DEVICE_BOUND_PROVIDERS.includes(provider)) return;
 		if (this.#local.listAuthCredentials(provider).length > 0) return;
 		this.#local.unmarkBrokerLocalProvider(provider);
 		this.#localProviders.delete(provider);

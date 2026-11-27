@@ -1,5 +1,5 @@
 /**
- * @-import expansion for context files (AGENTS.md / CLAUDE.md / GEMINI.md / …).
+ * @-import expansion for context files (AGENTS.md / CLAUDE.md / …).
  *
  * Other coding agents (Claude Code, Goose, Cline, …) treat `@path/to/file`
  * references inside their markdown memory files as inline includes. omp

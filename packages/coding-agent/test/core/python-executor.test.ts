@@ -17,7 +17,7 @@ describe("executePythonWithKernel", () => {
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stdinRequested).toBe(true);
-		expect(result.output).toContain("Kernel requested stdin; interactive input is not supported.");
+		expect(result.output).toContain("[stdin unsupported]");
 	});
 
 	it("maps error status to exit code 1", async () => {
@@ -60,7 +60,7 @@ describe("executePythonWithKernel", () => {
 
 		expect(result.exitCode).toBeUndefined();
 		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("eval cell timed out after 4s");
+		expect(result.output).toContain("[timed out after 4s; kernel interrupted, state kept]");
 	});
 
 	it("returns cancelled result without timeout annotation", async () => {
@@ -76,7 +76,7 @@ describe("executePythonWithKernel", () => {
 		expect(result.exitCode).toBeUndefined();
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("cancelled output");
-		expect(result.output).not.toContain("Command timed out");
+		expect(result.output).not.toContain("timed out");
 	});
 
 	it("truncates large output and stores full output artifact", async () => {

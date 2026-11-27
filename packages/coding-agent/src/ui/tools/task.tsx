@@ -13,7 +13,7 @@
  */
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
+import { ThemeSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, formatNumber, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspAgentProps, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
@@ -428,8 +428,11 @@ export const taskPresenter: ToolPresenter<Partial<TaskParams>, TaskToolDetails> 
 
 registerToolPresenter("task", taskPresenter);
 
-/** Glyphs of nested rows sent natively (the terminal look draws its theme's). */
-const UNICODE_SYMBOLS = presetSymbols("unicode");
+/**
+ * Glyphs of nested rows sent natively (the terminal look draws its theme's). Tern lays
+ * them out with its own fonts, kitty-style: U+FE0F icons are wide and bare marks fit a cell.
+ */
+const NATIVE_SYMBOLS = new ThemeSymbols({ preset: "unicode", emoji: { vs16Wide: true, bareFits: true } });
 
 /**
  * Settled child task snapshots as a tree of agent rows (the task card's
@@ -442,7 +445,7 @@ export function NestedTaskResults(props: {
 	readonly expanded: boolean;
 }): JSXNode {
 	const cx: RowContext = {
-		glyph: key => UNICODE_SYMBOLS[key] ?? "",
+		glyph: key => NATIVE_SYMBOLS.symbol(key),
 		expandKey: () => expandKeyLabel(currentTheme()),
 		expanded: props.expanded,
 		nowMs: Date.now(),

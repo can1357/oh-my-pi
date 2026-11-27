@@ -60,6 +60,25 @@ test("the rewind screen's title uses the ASCII rewind icon", () => {
 		}
 	});
 });
+
+test("the terminal look opens a long branch on its recent turns", () => {
+	// One prompt, then 700 replies: the look once drew all 701 turns at open, freezing on long sessions.
+	const entries = [e("u", null, user("run the sweep"))];
+	for (let i = 0; i < 700; i++) entries.push(e(`a${i}`, entries.at(-1)!.id, asst(`step ${i}`)));
+	createRoot(dispose => {
+		try {
+			const [node] = resolveChildren(
+				<RewindSelector entries={entries} terminalRows={() => 30} onSelect={noop} onCancel={noop} />,
+			)();
+			const screen = stripEscapes(paintNode(staticEnvironment(loadThemeSync("dark")), node!, 160).rows.join("\n"));
+			expect(screen).toContain("600/600");
+			expect(screen).toContain("a earlier turns");
+		} finally {
+			dispose();
+		}
+	});
+});
+
 pickerSuite({
 	dir: "overlays/rewind-selector",
 	mount(caseName) {

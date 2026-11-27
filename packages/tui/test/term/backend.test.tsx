@@ -23,6 +23,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: { vs16Wide: false, bareFits: false },
 };
 
 /** Records frames; acknowledges every history batch; history is the concatenation of acknowledged batches. */

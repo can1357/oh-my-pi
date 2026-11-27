@@ -9,8 +9,9 @@ import * as registry from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthPrompt } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { removeWithRetries } from "../../utils/src/temp";
 
-// The real auth rules give google-antigravity a `login-warning`; it is also paused, so the pause is lifted here.
-const PROVIDER = "google-antigravity";
+// No bundled auth rule declares a `login-warning`, so the test declares one for a built-in login.
+const PROVIDER = "openai-codex";
+const WARNING = "This login may put the account at risk.";
 
 describe("a provider whose login carries an account risk", () => {
 	let tempDir = "";
@@ -23,7 +24,7 @@ describe("a provider whose login carries an account risk", () => {
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		auth = new AuthStorage(store);
 		providerLogin = vi.fn(async () => ({ access: "acc", refresh: "ref", expires: Date.now() + 3_600_000 }));
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
+		vi.spyOn(compatAuth, "providerLoginWarning").mockImplementation(id => (id === PROVIDER ? WARNING : undefined));
 		const original = registry.getProviderDefinition;
 		vi.spyOn(registry, "getProviderDefinition").mockImplementation(id => {
 			const def = original(id);
@@ -54,7 +55,7 @@ describe("a provider whose login carries an account risk", () => {
 		const { prompts, result } = login("y");
 		await expect(result).rejects.toBeInstanceOf(AIError.LoginCancelledError);
 		expect(prompts).toHaveLength(1);
-		expect(prompts[0]?.message).toContain("own risk");
+		expect(prompts[0]?.message).toContain(WARNING);
 		expect(providerLogin).not.toHaveBeenCalled();
 		expect(auth.credentials.list(PROVIDER)).toEqual([]);
 	});

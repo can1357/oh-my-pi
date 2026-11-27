@@ -130,7 +130,7 @@ function createContext() {
 		isBashMode: false,
 		isPythonMode: false,
 		isBtwMode: false,
-		hideToolActivity: false,
+		toolActivity: "detailed",
 		toolOutputExpanded: false,
 		settings: Settings.isolated(),
 		handleHotkeysCommand: vi.fn(),
@@ -1421,7 +1421,7 @@ describe("InputController global editor actions", () => {
 		expect(context.press("ctrl+g")).toBe("global");
 		expect(openExternalEditor).toHaveBeenCalledTimes(1);
 		expect(context.press("ctrl+shift+o")).toBe("global");
-		expect(context.ctx.hideToolActivity).toBe(true);
+		expect(context.ctx.toolActivity).toBe("concise");
 		expect(context.press("alt+l")).toBe("global");
 		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
@@ -1459,7 +1459,7 @@ describe("InputController global editor actions", () => {
 		expect(context.press("alt+l")).toBe("focused");
 		expect(context.press("ctrl+shift+o")).toBe("focused");
 		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
-		expect(context.ctx.hideToolActivity).toBe(false);
+		expect(context.ctx.toolActivity).toBe("detailed");
 
 		// A remapped display reset reaches the app again.
 		context.setKeybinding("app.display.reset", ["ctrl+l"]);

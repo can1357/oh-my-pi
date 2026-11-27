@@ -20,6 +20,8 @@ import {
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
+	TAN_RESULT_MESSAGE_TYPE,
+	type TanResultDetails,
 } from "../../session/messages";
 import type { LateDiagnosticsFile } from "../../session/transcript/late-diagnostics-message";
 import {
@@ -47,7 +49,7 @@ import { FileMentions } from "../../ui/transcript/messages/file-mention";
 import { CustomMessageBlock, type FrameRenderer, HookMessageBlock } from "../../ui/transcript/messages/frame";
 import { LateDiagnostics } from "../../ui/transcript/messages/late-diagnostics";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
-import { TangentDispatch } from "../../ui/transcript/messages/notices";
+import { TangentDispatch, TangentResult } from "../../ui/transcript/messages/notices";
 import { SkillMessage } from "../../ui/transcript/messages/skill-message";
 import {
 	BranchSummaryBlock,
@@ -62,7 +64,7 @@ export type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hook
 export interface MessageFaceEnv {
 	/** The transcript-wide expansion (`ctrl+o`). */
 	readonly expanded: Accessor<boolean>;
-	/** Tool activity shown (`display.hideToolActivity` off). */
+	/** Tool activity shown (`display.toolActivity` other than `hidden`). */
 	readonly activityVisible: Accessor<boolean>;
 	/** Most note rows a collapsed advisor card shows (`display.advisorCollapsedLines`; 0: no cap). */
 	readonly advisorCollapsedLines: Accessor<number>;
@@ -214,6 +216,10 @@ function customFace(message: CustomOrHookMessage, env: MessageFaceEnv): MessageF
 		const details = (message as CustomMessage<Record<string, unknown>>).details;
 		return { face: () => <TangentDispatch details={details} /> };
 	}
+	if (customType === TAN_RESULT_MESSAGE_TYPE) {
+		const details = (message as CustomMessage<Partial<TanResultDetails>>).details;
+		return { face: () => <TangentResult details={details} /> };
+	}
 	if (customType === "handoff") {
 		return { face: () => <HandoffSummaryBlock content={message.content} expanded={env.expanded} /> };
 	}
@@ -295,6 +301,7 @@ function promptFace(
 					reaction,
 					actions: env.actions,
 					promptZones: env.promptZones,
+					promptZoneKey: message,
 					magicKeywords: env.magicKeywords,
 					onAction: act => env.onUserAction(act, text, message.timestamp),
 				}}

@@ -425,6 +425,7 @@ function apiKeyLogin(node: KdlNodeView): CompiledApiKeyLogin {
 function callback(node: KdlNodeView): CompiledCallback {
 	validateProps(node, [
 		"port",
+		"port-env",
 		"path",
 		"hostname",
 		"redirect-uri",
@@ -444,6 +445,11 @@ function callback(node: KdlNodeView): CompiledCallback {
 		manualOnly: propBool(node, "manual-only") ?? false,
 		nativeScheme: propBool(node, "native-scheme") ?? false,
 	};
+	const portEnv = propString(node, "port-env");
+	if (portEnv !== undefined) {
+		if (!portEnv) malformed(node);
+		result.portEnv = portEnv;
+	}
 	const redirectUri = propString(node, "redirect-uri");
 	const redirectUriEnv = propString(node, "redirect-uri-env");
 	if (redirectUri !== undefined || redirectUriEnv !== undefined) {
@@ -667,8 +673,16 @@ function refreshNode(node: KdlNodeView, login: CompiledLogin | undefined): Compi
 	}
 	if (node.args.length > 0) malformed(node);
 	if (propString(node, "hook") !== undefined) {
-		leaf(node, ["hook"]);
-		return { kind: "hook", hook: hookName(node, "hook") };
+		const refresh: Extract<CompiledRefresh, { kind: "hook" }> = { kind: "hook", hook: hookName(node, "hook") };
+		if (!node.children) {
+			leaf(node, ["hook"]);
+			return refresh;
+		}
+		for (const child of children(node, ["hook"])) {
+			if (child.name !== "window-ms" || refresh.windowMs !== undefined) unexpected(child, "refresh");
+			refresh.windowMs = singleInt(child);
+		}
+		return refresh;
 	}
 	const grant = login && (login.kind === "oauth-code" || login.kind === "device-code") ? login : undefined;
 	const refresh: Partial<Extract<CompiledRefresh, { kind: "request" }>> = { kind: "request", require: [] };
@@ -800,6 +814,31 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				result.loginWarning = singleString(child);
 				if (!result.loginWarning.trim()) malformed(child);
 				break;
+			case "connected-name":
+				leaf(child, []);
+				result.connectedName = singleString(child);
+				if (!result.connectedName.trim()) malformed(child);
+				break;
+			case "active-notice":
+				leaf(child, []);
+				result.activeNotice = singleString(child);
+				if (!result.activeNotice.trim()) malformed(child);
+				break;
+			case "login-notice":
+				leaf(child, []);
+				result.loginNotice = singleString(child);
+				if (!result.loginNotice.trim()) malformed(child);
+				break;
+			case "manage-url":
+				leaf(child, []);
+				result.manageUrl = singleString(child);
+				if (!URL.canParse(result.manageUrl)) malformed(child);
+				break;
+			case "required-scope":
+				leaf(child, []);
+				result.requiredScope = singleString(child);
+				if (!result.requiredScope.trim() || /\s/.test(result.requiredScope)) malformed(child);
+				break;
 			case "store-as":
 				leaf(child, []);
 				result.storeAs = singleString(child);
@@ -810,6 +849,14 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "paste-code":
 				result.pasteCode = singleBool(child);
 				break;
+			case "device-bound":
+				result.deviceBound = singleBool(child);
+				break;
+			case "sign-out": {
+				leaf(child, ["hook"]);
+				result.signOut = { hook: hookName(child, "hook") };
+				break;
+			}
 			case "api-key-format": {
 				leaf(child, []);
 				const format = singleString(child);

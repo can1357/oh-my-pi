@@ -42,8 +42,9 @@ export interface SttDownloadProgress {
  * transformers.js Whisper tiers a complete download leaves `config.json` plus
  * matching `encoder*.onnx` and `decoder*.onnx` shards under `onnx/` (a partial
  * fetch with only one shard, or a bare `config.json`, reads as not-cached); for
- * sherpa-onnx tiers every model file (encoder/decoder/joiner + tokens) must be
- * present (`.part` sidecars from an interrupted fetch are ignored).
+ * sherpa-onnx tiers every model file (encoder/decoder/joiner + tokens, plus any
+ * external-data weights) must be present (`.part` sidecars from an interrupted
+ * fetch are ignored).
  */
 export async function isSttModelCached(key: string): Promise<boolean> {
 	const spec = resolveSttModelSpec(key);
@@ -54,7 +55,7 @@ export async function isSttModelCached(key: string): Promise<boolean> {
 			for (const role in spec.files) {
 				if (!root.has(spec.files[role as keyof typeof spec.files])) return false;
 			}
-			return true;
+			return spec.externalData.every(file => root.has(file));
 		} catch {
 			return false;
 		}
