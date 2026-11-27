@@ -268,7 +268,7 @@ const probe: AgentsProbe = {
 				jobs: new AsyncJobManager({}),
 				ownerId: "W-owner",
 				emitFrame: () => {},
-				resultMaxBytes: resolveInlineByteCapBudget(undefined),
+				resultCap: { maxBytes: resolveInlineByteCapBudget(undefined) },
 			},
 			{
 				label: "remote run",

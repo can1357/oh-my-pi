@@ -19,6 +19,7 @@ import {
 import { sanitizeDisplayLine } from "../extensibility/inventory/display-text";
 import { parseSessionEntries } from "../session/session-loader";
 import { generateTaskName } from "../task/name-generator";
+import type { InlineByteCapOptions } from "../tools/streaming-output";
 import {
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -68,8 +69,8 @@ export interface ExternalAgentHost {
 	ownerId: string;
 	/** Publish a `task:subagent:*` frame on the session's buses. */
 	emitFrame(channel: string, payload: unknown): void;
-	/** Byte cap on the result or failure text `complete()` hands the owner, as on an extension job's. */
-	resultMaxBytes: number;
+	/** Cap on the result or failure text `complete()` hands the owner, as on an extension job's. */
+	resultCap: InlineByteCapOptions;
 }
 
 function displayLine(text: string): string {
@@ -82,7 +83,7 @@ function modelSelector(model: string | undefined, thinking: string | undefined):
 
 /** Register `spec` as an external agent of `host.ownerId`; throws when the running-job limit is reached. */
 export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAgentSpec): ExternalAgentHandle {
-	const { registry, jobs, ownerId, emitFrame, resultMaxBytes } = host;
+	const { registry, jobs, ownerId, emitFrame, resultCap } = host;
 	const label = displayLine(spec.label);
 	const execution: ExternalAgentExecution = {
 		backend: displayLine(spec.execution.backend),
@@ -201,7 +202,7 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 				};
 				if (signal.aborted) onAbort();
 				else signal.addEventListener("abort", onAbort, { once: true });
-				return capAsyncJobOutcome(() => outcome.promise, resultMaxBytes);
+				return capAsyncJobOutcome(() => outcome.promise, resultCap);
 			},
 			{ id, ownerId, agentId: id },
 		);

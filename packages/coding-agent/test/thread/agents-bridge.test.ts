@@ -386,7 +386,7 @@ describe("agent bridging across subagent workers", () => {
 				jobs: new AsyncJobManager({}),
 				ownerId: "Main",
 				emitFrame: () => {},
-				resultMaxBytes: resolveInlineByteCapBudget(undefined),
+				resultCap: { maxBytes: resolveInlineByteCapBudget(undefined) },
 			},
 			{
 				label: "remote run",
