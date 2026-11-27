@@ -582,6 +582,66 @@ describe("SessionManager.forkFrom", () => {
 		await Promise.all([plain.close(), reset.close(), copy.close()]);
 	});
 
+	it("turns a pre-marker /tan clone's fork boundary into the header marker of sessions derived from it", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-legacy-tan-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		await fs.mkdir(sessionDir, { recursive: true });
+		const sourceFile = path.join(sessionDir, "legacy-tan.jsonl");
+		const timestamp = new Date().toISOString();
+		const message = (id: string, parentId: string | null, role: "user" | "assistant") => ({
+			type: "message",
+			id,
+			parentId,
+			timestamp,
+			message:
+				role === "user"
+					? { role, content: "hi", timestamp: 1 }
+					: {
+							role,
+							content: [{ type: "text", text: "ok" }],
+							api: "anthropic-messages",
+							provider: "anthropic",
+							model: "claude",
+							stopReason: "stop",
+							timestamp: 2,
+							usage: {
+								input: 1,
+								output: 1,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 2,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+						},
+		});
+		// Written before `inheritedThroughEntryId`: the copied `u1`/`a1`, the boundary, then the clone's own turn.
+		const lines = [
+			{ type: "session", version: CURRENT_SESSION_VERSION, id: "legacy-tan", timestamp, cwd },
+			message("u1", null, "user"),
+			message("a1", "u1", "assistant"),
+			{ type: "custom", id: "b1", parentId: "a1", timestamp, customType: "tan-fork-boundary", data: "legacy-tan" },
+			message("u2", "b1", "user"),
+		];
+		await Bun.write(sourceFile, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
+		const headerOf = async (file: string | undefined) => {
+			if (!file) throw new Error("expected a session file");
+			const [header] = await loadEntriesFromFile(file);
+			return header?.type === "session" ? header : undefined;
+		};
+
+		const copy = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "copy"), undefined, {
+			suppressBreadcrumb: true,
+		});
+		expect((await headerOf(copy.getSessionFile()))?.inheritedThroughEntryId).toBe("a1");
+
+		// A branch ending before the boundary drops it; the header marker must carry the prefix instead.
+		const source = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
+		const branchedFile = source.createBranchedSession("u1");
+		expect((await headerOf(branchedFile))?.inheritedThroughEntryId).toBe("u1");
+		await Promise.all([copy.close(), source.close()]);
+	});
+
 	for (const { name, createStorage, padding } of [
 		{ name: "buffered file", createStorage: () => new FileSessionStorage(), padding: "" },
 		{ name: "streamed file", createStorage: () => new FileSessionStorage(), padding: "x".repeat(8 * 1024 * 1024) },

@@ -88,6 +88,7 @@ import {
 	type SessionOrigin,
 	type SessionTitleSource,
 	type SessionTreeNode,
+	TAN_FORK_BOUNDARY_CUSTOM_TYPE,
 	type ThinkingLevelChangeEntry,
 	TITLE_CHANGE_ENTRY_TYPE,
 	type TitleChangeEntry,
@@ -530,6 +531,26 @@ function inheritedMarkerWithin(
 		if (at !== undefined && at <= markerAt) inherited = entry.id;
 	}
 	return inherited;
+}
+
+/**
+ * End of `entries`' inherited prefix: the header's `inheritedThroughEntryId`, else, for a `/tan` clone
+ * written before that marker, the entry before its last `tan-fork-boundary` (the boundary follows the
+ * copied entries). Derived sessions carry the result as their header marker, so the prefix survives a
+ * branch that drops the boundary itself.
+ */
+function inheritedPrefixEnd(marker: string | undefined, entries: readonly SessionEntry[]): string | undefined {
+	if (marker !== undefined) return marker;
+	let previous: string | undefined;
+	let end: string | undefined;
+	for (const entry of entries) {
+		if (entry.type === "custom" && entry.customType === TAN_FORK_BOUNDARY_CUSTOM_TYPE) {
+			end = previous;
+			continue;
+		}
+		previous = entry.id;
+	}
+	return end;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -2934,7 +2955,7 @@ export class SessionManager {
 		manager.#additionalDirectories = [...this.#additionalDirectories];
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
-		manager.#header.inheritedThroughEntryId = this.#header.inheritedThroughEntryId;
+		manager.#header.inheritedThroughEntryId = inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries);
 		manager.#entries = structuredClone(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
@@ -4321,7 +4342,7 @@ export class SessionManager {
 			inheritedThroughEntryId: inheritedMarkerWithin(
 				entriesToKeep,
 				this.#entries,
-				this.#header.inheritedThroughEntryId,
+				inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries),
 			),
 		};
 
@@ -4472,7 +4493,7 @@ export class SessionManager {
 		// A reset makes everything copied the parent's; a plain copy keeps the source's own inherited prefix.
 		manager.#header.inheritedThroughEntryId = options?.resetInheritedCost
 			? history.at(-1)?.id
-			: sourceHeader?.inheritedThroughEntryId;
+			: inheritedPrefixEnd(sourceHeader?.inheritedThroughEntryId, history);
 		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
