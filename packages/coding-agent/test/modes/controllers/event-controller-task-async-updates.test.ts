@@ -20,6 +20,7 @@ import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-ag
 import { isSettled } from "@oh-my-pi/pi-tui";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { TranscriptPresenter } from "../../../src/modes/interactive/transcript";
 import { initTheme } from "../../../src/ui/theme/service";
 import { blockText, transcriptText } from "../../helpers/transcript-text";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -334,6 +335,33 @@ describe("EventController async update finalization", () => {
 			transcript.attach(undefined);
 			term.dispose();
 		}
+	});
+
+	it("reports backgrounded Bash frames to transcript presenters as partial until the job settles", async () => {
+		const { controller } = createFixture();
+		const asked = vi.spyOn(TranscriptPresenter.prototype, "presentationOf");
+		const lastPartial = (text: string) =>
+			asked.mock.calls
+				.flatMap(([block]) => (block.type === "toolCall" ? [block] : []))
+				.findLast(block => JSON.stringify(block.result?.content).includes(text))?.isPartial;
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			args: { command: "run benchmark" },
+		});
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			result: bashResult(formatBackgroundNotice("bash-1", 300)),
+			isError: false,
+		});
+		await controller.handleEvent(jobFrame(bashResult("Running sample")));
+		expect(lastPartial("Running sample")).toBe(true);
+
+		await controller.handleEvent(jobFrame(bashResult("Final sample", "completed", 0)));
+		expect(lastPartial("Final sample")).toBe(false);
 	});
 
 	it("shows backgrounded Bash completion in place after rebuilding the visible transcript", async () => {

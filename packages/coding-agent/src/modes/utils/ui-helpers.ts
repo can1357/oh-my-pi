@@ -22,6 +22,7 @@ import { groupedReadUsageCallIds, readArgsCollapseIntoGroup } from "../../sessio
 import { replyDisplayMessage, toolResultReplies } from "../../session/transcript/reply-write";
 import { ServedModelTracker } from "../../session/transcript/served-model-marker";
 import {
+	followsViewportOnly,
 	isSettledJobFrame,
 	parksAsBackground,
 	readMediaPath,
@@ -745,7 +746,7 @@ export class UiHelpers {
 						parksAsBackground(message.toolName, message.details, native) &&
 						(frame !== undefined || runningAsyncJobs.some(job => job.id === jobId));
 					const settled = isBackground && frame !== undefined && isSettledJobFrame(frame.details);
-					const partial = isBackground && (message.toolName !== "bash" || native);
+					const partial = isBackground && !followsViewportOnly(message.toolName, native);
 					// The persisted result is the job's first snapshot; restore its latest frame
 					// and keep routing updates if the job is still running.
 					if (settled) {

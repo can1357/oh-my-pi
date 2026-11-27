@@ -172,14 +172,15 @@ interface PendingBatch {
 	readonly marked?: ReadonlyMap<object, HistoryRowMark>;
 	/** Live main nodes the batch writes whole (committed on acknowledgement). */
 	readonly nodes: readonly UiNode[];
-	/** Paint snapshots of the whole nodes at the start of the batch, indexed like `nodes`. */
-	readonly painted: readonly (Block | undefined)[];
+	/** The blocks `nodes` were painted as when the batch was prepared: a repaint prepares it again. */
+	readonly painted: readonly Block[];
 	/** A streaming node's stable head moved into history: its emitted rows after this batch. */
 	readonly head?: { readonly node: UiNode; readonly rows: readonly string[]; readonly count: number };
 	/** The last non-empty block whose rows this batch writes. */
 	readonly last: UiNode | undefined;
 	/** Columns the rows were painted at: a batch still unwritten at another width is prepared again. */
 	readonly width: number;
+	/** Rows the live tail had: a dock or screen height change prepares the batch again. */
 	readonly capacity: number;
 }
 
@@ -1115,6 +1116,7 @@ export class TermBackend {
 			history = pending.history;
 		} else if (boundary >= 0 || ledger) {
 			const retired: UiNode[] = [];
+			const painted: Block[] = [];
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
 			let marked: Map<object, HistoryRowMark> | undefined;
@@ -1135,6 +1137,7 @@ export class TermBackend {
 				const block = blockAt(live);
 				const skip = skipAt(live);
 				retired.push(node);
+				painted.push(block);
 				if (block.rows.length > skip) {
 					// The separator may depend on whether the block above retires (it just did, in this batch).
 					leads[live] = undefined;
@@ -1190,7 +1193,7 @@ export class TermBackend {
 				this.#pending = {
 					history,
 					nodes: retired,
-					painted: blocks,
+					painted,
 					...(marked ? { marked } : {}),
 					...(head ? { head } : {}),
 					last,

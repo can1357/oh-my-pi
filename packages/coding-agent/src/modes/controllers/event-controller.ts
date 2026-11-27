@@ -32,6 +32,7 @@ import { isReplyWrite, replyDisplayMessage, toolResultReplies } from "../../sess
 import { canonicalizeMessage } from "../../session/transcript/thinking-display";
 import {
 	asyncJobState,
+	followsViewportOnly,
 	isSettledJobFrame,
 	parksAsBackground,
 	readMediaPath,
@@ -2273,7 +2274,7 @@ export class EventController {
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
 			const parked = this.#backgroundCallIds.has(event.toolCallId);
-			const viewportOnly = parked && event.toolName === "bash" && !this.ctx.shell.native();
+			const viewportOnly = parked && followsViewportOnly(event.toolName, this.ctx.shell.native());
 			if (viewportOnly && this.ctx.shell.transcript.retired(component.block, "content")) {
 				this.#releasePendingTool(event.toolCallId, component);
 				this.#backgroundCallIds.delete(event.toolCallId);
@@ -2360,9 +2361,8 @@ export class EventController {
 			this.#releasePendingTool(event.toolCallId, component);
 			return;
 		}
-		// Plain-terminal Bash stays eligible for retirement and draws a static background badge,
-		// but its output still refreshes until the first card row goes into scrollback.
-		const partial = parks && (event.toolName !== "bash" || native);
+		// A viewport-only card stays retirable and draws its frames as static results.
+		const partial = parks && !followsViewportOnly(event.toolName, native);
 		component.updateResult({ ...event.result, isError: event.isError }, partial, event.toolCallId);
 		if (parks) {
 			component.parkAsBackground();

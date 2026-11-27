@@ -341,7 +341,10 @@ describe("exactly-once in-order ledger (ECH, Lemma 4.6, Corollary 4.14)", () => 
 		}
 	});
 
-	it.each([5, 7])("writes the latest card output when a batch with %i later rows was deferred", laterRows => {
+	it.each([
+		["head", 5],
+		["whole card", 7],
+	] as const)("writes the latest card output when a deferred batch held its %s", (_, laterRows) => {
 		const output = signal("sample");
 		const { driver, backend, surface } = setup(() => [
 			<rows lines={() => lines(output(), 3)} />,

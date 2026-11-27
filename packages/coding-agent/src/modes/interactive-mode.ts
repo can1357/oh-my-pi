@@ -415,6 +415,7 @@ import { appInterruptKeys } from "../config/keybindings/matchers";
 import { setExtensionLinkClicksProvider } from "../extensibility/extensions/link-clicks";
 import { getAssistantMessageLinkTargets } from "../session/transcript/link-targets";
 import { onTranscriptPresentersChanged } from "../session/transcript/transcript-presentation";
+import { followsViewportOnly } from "../session/transcript/tool-execution";
 import type { TurnAct } from "../session/transcript/transcript-actions";
 import type { Composer } from "../ui/composer";
 import type { DialogVim } from "../ui/composer/vim-editor";
@@ -4098,14 +4099,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		const preservedLiveToolCallIds = new Set<string>();
 		// Replay persisted results instead of moving their cards below newer replies. Keep
 		// live handles for other running jobs and read groups that still share a pending call.
-		// Plain-terminal Bash can be rebuilt at its original position from the latest job frame.
+		// A viewport-only card is rebuilt at its original position from the latest job frame.
 		const native = this.shell.native();
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
 			const resolved = livePendingTools.get(message.toolCallId);
 			if (!resolved) continue;
 			const details = message.details as { async?: { state?: string } } | undefined;
-			if (details?.async?.state === "running" && (native || message.toolName !== "bash")) {
+			if (details?.async?.state === "running" && !followsViewportOnly(message.toolName, native)) {
 				preservedLiveToolCallIds.add(message.toolCallId);
 				continue;
 			}

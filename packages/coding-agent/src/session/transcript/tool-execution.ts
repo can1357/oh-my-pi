@@ -18,18 +18,34 @@ export function isSettledJobFrame(details: unknown): boolean {
 	return state === "completed" || state === "failed" || state === "cancelled";
 }
 
-/** Tools whose returned call hands its card to the background job it started (see {@link parksAsBackground}). */
-const JOB_CARD_TOOLS: Record<string, "always" | "native"> = { task: "always", bash: "always", eval: "native" };
+/**
+ * How a returned call's card follows the background job it started: `always` on every surface,
+ * `native` only on Tern, `viewport` on Tern and, on a plain terminal, until the card's first content
+ * row enters scrollback (see {@link followsViewportOnly}).
+ */
+const JOB_CARD_TOOLS: Record<string, "always" | "native" | "viewport"> = {
+	task: "always",
+	bash: "viewport",
+	eval: "native",
+};
 
 /**
  * Whether a call that returned with `details.async.state === "running"` keeps its card subscribed
- * to job frames. Detached `task` spawns and backgrounded `bash` jobs do on both surfaces; `eval`
- * only does on Tern. On a plain terminal, Bash stops updating once its card enters scrollback.
+ * to job frames. Shared by the live event path and the rebuild.
  */
 export function parksAsBackground(toolName: string, details: unknown, native: boolean): boolean {
 	const mode = JOB_CARD_TOOLS[toolName];
 	if (mode === undefined || (mode === "native" && !native)) return false;
 	return asyncJobState(details) === "running";
+}
+
+/**
+ * Whether a parked card of `toolName` takes job frames only while none of its content is in plain
+ * terminal scrollback. Such a card stays settled (its rows may retire) and draws each frame as a
+ * static result, so the rows it leaves in history match what it showed.
+ */
+export function followsViewportOnly(toolName: string, native: boolean): boolean {
+	return !native && JOB_CARD_TOOLS[toolName] === "viewport";
 }
 
 /** A tool result frame as the session reports it. */

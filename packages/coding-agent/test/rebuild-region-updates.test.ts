@@ -389,10 +389,13 @@ describe("in-place transcript rebuild", () => {
 
 			Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
 			mode.rebuildChatFromMessages();
-			expect(transcriptText(mode.shell)).toMatch(/First benchmark sample[\s\S]*Later committed reply/);
+			const shown = () => transcriptText(mode.shell);
+			expect(shown()).toMatch(/First benchmark sample[\s\S]*Later committed reply/);
+			expect(shown().match(/run benchmark/g)).toHaveLength(1);
 
 			await mode.eventController.handleEvent(update("Final benchmark sample", "completed"));
-			expect(transcriptText(mode.shell)).toMatch(/Final benchmark sample[\s\S]*Later committed reply/);
+			expect(shown()).toMatch(/Final benchmark sample[\s\S]*Later committed reply/);
+			expect(shown()).not.toContain("First benchmark sample");
 		});
 
 		it("uses the rendered view session when preserving a focused subagent stream", () => {
