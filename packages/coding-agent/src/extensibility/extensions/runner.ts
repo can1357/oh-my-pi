@@ -2679,8 +2679,8 @@ export class ExtensionRunner {
 					| InputEventResult
 					| undefined;
 				if (result?.handled) return result;
-				if (result?.text !== undefined) currentText = result.text;
-				if (result?.images !== undefined) currentImages = result.images;
+				if (typeof result?.text === "string") currentText = result.text;
+				if (Array.isArray(result?.images)) currentImages = result.images;
 			}
 		}
 		const transformed: InputEventResult = {};
