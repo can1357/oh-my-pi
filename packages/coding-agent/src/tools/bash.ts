@@ -897,11 +897,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (interception) {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
+		// A line made only of tool commands runs no program: its text is tool arguments, so
+		// `bash.patterns` and critical patterns would only match data. Each tool command passes
+		// its own approval when it runs; the line itself only reads.
+		if (isToolCommandLine(command, toolCommands)) return "read";
 		const { session: policy, authority } = this.#patternPolicies();
 		// Without `bash.patterns` rules the native analysis only feeds critical-command prompts,
 		// which a caller that cannot prompt (yolo, tier-only reads) never shows.
 		if (query?.prompts === false && policy.rules.length === 0 && authority.rules.length === 0) {
-			return isToolCommandLine(command, toolCommands) ? "read" : "exec";
+			return "exec";
 		}
 		const allowCompound = cfgBashAllowCompoundCommands.get(this.session.settings);
 		const shell = this.session.settings.getShellConfig().shell;
@@ -973,8 +977,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
-		// Each tool command passes its own approval when it runs; the line itself only reads.
-		if (isToolCommandLine(command, toolCommands)) return "read";
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
 	};
