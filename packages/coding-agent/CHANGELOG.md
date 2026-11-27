@@ -138,6 +138,7 @@
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
 - Declining a provider's consent screen during `/login` or `omp login` now reports the sign-in as canceled, in the terminal and on the browser page, instead of as a failed login
 - Fixed headless browser automation on Windows sometimes showing a blank white Chrome window by launching its hidden native window off-screen ([#5397](https://github.com/can1357/oh-my-pi/issues/5397), [#5524](https://github.com/can1357/oh-my-pi/pull/5524) by [@dragonbaba](https://github.com/dragonbaba))
+- Fixed agents writing implementation details and session notes into README and other docs after every fix: the system prompt now asks for docs/changelog updates only when documented or user-visible behavior changes, in user terms and following the repository's own conventions ([#16155](https://github.com/can1357/oh-my-pi/issues/16155))
 
 ### Removed
 
