@@ -1,22 +1,21 @@
 /**
- * Issue #8860 — the exit banner advertises `--resume <id>` for sessions that
- * were never written to disk. Persistence is lazy: `getSessionFile()` returns
+ * Persistence is lazy: `getSessionFile()` returns
  * an allocated path from the start, but the JSONL is only materialized once the
  * history crosses the persistence gate (first assistant message / explicit
  * `ensureOnDisk()`). Consumers advertising a resume command must gate on
  * `isSessionOnDisk()` instead of just the allocated path.
  */
 import { describe, expect, it } from "bun:test";
-import { join } from "node:path";
+import * as path from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 function freshSession(): SessionManager {
-	const cwd = join("/tmp", `omp-on-disk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	return SessionManager.create(cwd, join(cwd, "sessions"), new MemorySessionStorage());
+	const cwd = path.join("/tmp", `omp-on-disk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	return SessionManager.create(cwd, path.join(cwd, "sessions"), new MemorySessionStorage());
 }
 
-describe("SessionManager.isSessionOnDisk (issue #8860)", () => {
+describe("SessionManager.isSessionOnDisk", () => {
 	it("returns false for a fresh lazy session whose JSONL was never materialized", () => {
 		const session = freshSession();
 		expect(session.getSessionId()).not.toBe("");

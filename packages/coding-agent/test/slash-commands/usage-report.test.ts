@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
 
-describe("PR 3318 repro", () => {
+describe("buildUsageReportText", () => {
 	it("falls back to scoped account when metadata identities are empty strings", async () => {
 		const report: UsageReport = {
 			provider: "test-provider",

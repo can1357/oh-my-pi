@@ -8,7 +8,7 @@ import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
 
-// Issue #8821 — a terminal that delivers Shift+Enter as a bare LF (iTerm2
+// A terminal that delivers Shift+Enter as a bare LF (iTerm2
 // legacy mapping, e.g. Claude Code's /terminal-setup) must not have the key
 // reinterpreted as plain Enter inside the /tree selector. The composer already
 // treats `\n` as Shift+Enter; the selector must match so summarize-and-switch
@@ -70,7 +70,7 @@ function selectionsAfter(entries: SessionEntry[], raw: string): SelectRecord[] {
 	return records;
 }
 
-describe("tree selector Shift+Enter fallback (issue #8821)", () => {
+describe("tree selector Shift+Enter fallback", () => {
 	it("treats a bare LF as Shift+Enter (summarize-and-switch)", () => {
 		expect(selectionsAfter([userEntry, responseEntry], "\n")).toEqual([
 			{ entryId: responseEntry.id, options: { summarize: true } },
