@@ -10,7 +10,7 @@
  * Adding a mode is a single entry here: the command surface (autocomplete +
  * ACP hint), the parser, and the engine override all read this table.
  */
-import type { CompactionMethod } from "./compaction-methods";
+import type { CompactionMethod } from "./compaction-method-ids";
 
 /** Subcommand selecting a one-off compaction mode for manual `/compact`. */
 export type CompactMode = "soft" | "remote" | "snapcompact" | "handoff";

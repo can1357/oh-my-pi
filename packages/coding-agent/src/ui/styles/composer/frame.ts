@@ -129,7 +129,12 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 	if (bottom !== undefined) rows.push(bottom);
 
 	// The popup covers the transcript above the composer rather than taking room from it.
-	const popup = node.children().find(child => child.kind === "overlay");
+	const popup = node.children().find(child => {
+		if (child.kind === "overlay") return true;
+		if (child.kind !== "picker") return false;
+		const childProps = child.props();
+		return "modal" in childProps && childProps.modal === false;
+	});
 	const covering = popup ? cx.paint(popup, cx.width).rows : [];
 	rows.push(...covering);
 	return {

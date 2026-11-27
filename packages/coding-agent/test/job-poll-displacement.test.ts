@@ -7,7 +7,9 @@
  *  - displaceableBy: a waiting-poll result (and a successful todo snapshot) is
  *    displaceable until sealed; anything else is not.
  *  - EventController: a follow-up `wait` call removes the tracked waiting
- *    poll from the transcript; any other tool seals it in place.
+ *    poll from the transcript; any other tool seals it in place. A todo
+ *    snapshot holds no later output out of scrollback, and one whose rows
+ *    reached scrollback stays there when the next update lands.
  *  - UiHelpers.renderSessionContext: replay collapses the same runs.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -18,8 +20,13 @@ import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settin
 import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { displaceableBy } from "@oh-my-pi/pi-coding-agent/modes/utils/displaceable";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { isSettled } from "@oh-my-pi/pi-tui";
+import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 
 type JobStatus = "running" | "completed" | "failed" | "cancelled";
@@ -42,7 +49,8 @@ function pollResult(statuses: JobStatus[], extra: { cancelled?: boolean; isError
 	};
 }
 
-function todoResult(items = ["investigate", "fix"]) {
+/** A one-phase todo snapshot; `completed` tasks are done by this update (its card strikes them through). */
+function todoResult(items = ["investigate", "fix"], completed: readonly string[] = []) {
 	return {
 		content: [{ type: "text" as const, text: "" }],
 		details: {
@@ -51,11 +59,18 @@ function todoResult(items = ["investigate", "fix"]) {
 					name: "Workflow",
 					tasks: items.map((content, index) => ({
 						content,
-						status: index === 0 ? ("in_progress" as const) : ("pending" as const),
+						status: completed.includes(content)
+							? ("completed" as const)
+							: index === 0
+								? ("in_progress" as const)
+								: ("pending" as const),
 					})),
 				},
 			],
 			storage: "memory" as const,
+			...(completed.length > 0
+				? { completedTasks: completed.map(content => ({ phase: "Workflow", content })) }
+				: {}),
 		},
 	};
 }
@@ -120,6 +135,43 @@ async function run(
 }
 
 const shown = (fixture: Fixture, tool: PendingTool) => fixture.ctx.shell.transcript.blocks().includes(tool.block);
+
+/** The plain theme with struck text marked `~text~` (the plain one draws it unstyled). */
+const STRIKE_THEME: Theme = {
+	...PLAIN_THEME,
+	style: (tokens, text) => (tokens?.split(" ").includes("strike") ? `~${text}~` : PLAIN_THEME.style(tokens, text)),
+};
+
+/** A 12-row terminal drawing the fixture's transcript; `replays` counts scrollback rewrites. */
+function attachTerminal(fixture: Fixture): { readonly term: TestTerminal; readonly replays: () => number } {
+	const transcript = fixture.ctx.shell.transcript;
+	const term = createTestTerminal(() => ({ main: transcript.nodes }), {
+		columns: 80,
+		rows: 12,
+		theme: STRIKE_THEME,
+		separator: transcript.separator,
+	});
+	let replays = 0;
+	transcript.attach({
+		retired: node => term.backend.retired(node),
+		replayHistory: () => replays++,
+		redescribe: () => {},
+	});
+	return { term, replays: () => replays };
+}
+
+/** Run `count` bash calls printing `out-<i>`: more than the 12-row terminal holds. */
+async function runOutputs(fixture: Fixture, count: number): Promise<void> {
+	for (let i = 0; i < count; i++) {
+		await run(
+			fixture,
+			`bash-${i}`,
+			"bash",
+			{ command: `echo ${i}` },
+			{ content: [{ type: "text", text: `out-${i}` }] },
+		);
+	}
+}
 
 describe("wait and todo displacement", () => {
 	let fixture: Fixture;
@@ -279,6 +331,164 @@ describe("wait and todo displacement", () => {
 		expect(shown(fixture, first)).toBe(true);
 		expect(shown(fixture, errored)).toBe(true);
 		expect(displaceableBy(first)).toBe("todo");
+	});
+
+	it("lets the output after a todo snapshot reach scrollback", async () => {
+		const { term } = attachTerminal(fixture);
+		try {
+			await run(fixture, "todo-1", "todo", { op: "view" }, todoResult(["plan", "read"]));
+			// More output than the screen holds: a live snapshot held it all off scrollback, and the
+			// screen squeezed it to the todo's row, a clipped card and the newest output.
+			await runOutputs(fixture, 8);
+			term.render();
+
+			const rows = [...term.history().map(stripEscapes), ...term.screen()].join("\n");
+			for (let i = 0; i < 8; i++) expect(rows).toContain(`out-${i}`);
+		} finally {
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("keeps a todo snapshot already in scrollback when a later todo update lands", async () => {
+		const { term, replays } = attachTerminal(fixture);
+		try {
+			const first = await run(fixture, "todo-1", "todo", { op: "view" }, todoResult(["plan", "read"]));
+			await runOutputs(fixture, 8);
+			term.render();
+			const second = await run(fixture, "todo-2", "todo", { op: "view" }, todoResult(["fix", "test"]));
+			term.render();
+
+			// Removing it would rewrite all of scrollback; it stays as history instead.
+			expect(shown(fixture, first)).toBe(true);
+			expect(shown(fixture, second)).toBe(true);
+			expect(replays()).toBe(0);
+			expect(term.history().map(stripEscapes).join("\n")).toContain("plan");
+		} finally {
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("plays a live todo card's strike on screen and keeps it out of scrollback until it is over", async () => {
+		vi.useFakeTimers();
+		const { term } = attachTerminal(fixture);
+		try {
+			const todo = await run(fixture, "todo-1", "todo", { op: "done" }, todoResult(["plan", "read"], ["plan"]));
+			term.render();
+			// The completed task starts unstruck and the strike sweeps across it while the card is live.
+			expect(term.screen().find(line => line.includes("plan"))).not.toContain("~");
+			term.tick(2_000);
+			expect(term.screen().find(line => line.includes("plan"))).toContain("~plan~");
+			expect(isSettled(todo.block.node)).toBe(false);
+
+			await runOutputs(fixture, 8);
+			term.render();
+			// In scrollback the card could not have played it.
+			expect(term.backend.retired(todo.block.node)).toBe(false);
+			vi.advanceTimersByTime(2_000);
+			term.render();
+			expect(term.history().join("\n")).toContain("~plan~");
+		} finally {
+			vi.useRealTimers();
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("lets replies after a todo card hidden with tool activity reach scrollback at once", async () => {
+		vi.useFakeTimers();
+		fixture.ctx.toolActivity = "hidden";
+		const { term } = attachTerminal(fixture);
+		try {
+			await run(fixture, "todo-1", "todo", { op: "done" }, todoResult(["plan", "read"], ["plan"]));
+			// The hidden card draws no strike: holding it live would keep every reply off scrollback.
+			for (let i = 0; i < 12; i++) {
+				const message = { ...assistantCalls([]), content: [{ type: "text", text: `reply-${i}` }] } as AgentMessage;
+				await fixture.controller.handleEvent({ type: "message_start", message });
+				await fixture.controller.handleEvent({ type: "message_end", message });
+			}
+			term.render();
+			expect(term.history().join("\n")).toContain("reply-0");
+		} finally {
+			vi.useRealTimers();
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("keeps a todo snapshot a later update left in scrollback across a transcript rebuild", async () => {
+		const { term } = attachTerminal(fixture);
+		const helpers = new UiHelpers(fixture.ctx);
+		fixture.ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+		fixture.ctx.eventController = fixture.controller;
+		try {
+			// Displaced while still on screen: gone live, and gone after the rebuild.
+			await run(fixture, "todo-0", "todo", { op: "view" }, todoResult(["draft"]));
+			// Streamed before its id (the provider fills it in later): the card keeps the placeholder
+			// id it was created with, while the call completes, and persists, as `todo-1`.
+			const todoCall = (id: string) => assistantCalls([{ id, name: "todo", arguments: { op: "view" } }]);
+			await fixture.controller.handleEvent({ type: "message_start", message: assistantCalls([]) });
+			await fixture.controller.handleEvent({
+				type: "message_update",
+				message: todoCall(""),
+				assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial: todoCall("") },
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+			await fixture.controller.handleEvent({
+				type: "message_update",
+				message: todoCall("todo-1"),
+				assistantMessageEvent: {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: "{}",
+					partial: todoCall("todo-1"),
+				},
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+			await run(fixture, "todo-1", "todo", { op: "view" }, todoResult(["plan", "read"]));
+			await runOutputs(fixture, 8);
+			term.render();
+			// In scrollback when the next update lands: it stays there.
+			await run(fixture, "todo-2", "todo", { op: "view" }, todoResult(["fix", "test"]));
+
+			// An in-place rebuild (`/shake`, a display setting) replays the session's messages.
+			fixture.ctx.shell.transcript.retain(new Set());
+			helpers.renderSessionContext({
+				messages: [
+					assistantCalls([{ id: "todo-0", name: "todo", arguments: { op: "view" } }]),
+					toolResult("todo-0", "todo", todoResult(["draft"])),
+					assistantCalls([{ id: "todo-1", name: "todo", arguments: { op: "view" } }]),
+					toolResult("todo-1", "todo", todoResult(["plan", "read"])),
+					assistantCalls([{ id: "todo-2", name: "todo", arguments: { op: "view" } }]),
+					toolResult("todo-2", "todo", todoResult(["fix", "test"])),
+				],
+			} as SessionContext);
+
+			const rows = renderTranscript(fixture.ctx).join("\n");
+			expect(rows).not.toContain("draft");
+			expect(rows).toContain("plan");
+			expect(rows).toContain("fix");
+		} finally {
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("writes a todo card whose strike never played to scrollback with the tasks struck through", async () => {
+		vi.useFakeTimers();
+		const { term } = attachTerminal(fixture);
+		try {
+			await run(fixture, "todo-1", "todo", { op: "done" }, todoResult(["plan", "read"], ["plan"]));
+			await runOutputs(fixture, 8);
+			// The hold ends with the terminal clock where it was: the strike never advanced (a fullscreen
+			// layer covering the transcript, say). Scrollback must still get the finished strike.
+			vi.advanceTimersByTime(2_000);
+			term.render();
+			expect(term.history().join("\n")).toContain("~plan~");
+		} finally {
+			vi.useRealTimers();
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
 	});
 
 	it("does not displace a poll that observed completions", async () => {

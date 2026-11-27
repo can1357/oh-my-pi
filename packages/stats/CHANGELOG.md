@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added queryable tracking of tool approval requests and outcomes across sessions in the stats database.
+- `omp stats` shows server-reported GitHub Copilot AI credits in the overview, models, providers, request details and `--summary` output; a range where no request reported any shows a dash rather than 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
+
 ### Fixed
 
-- Fixed the `omp stats` dashboard missing live updates when a sessions directory is unreadable or agents write continuously, and running full syncs back to back while idle. ([#20682](https://github.com/can1357/oh-my-pi/pull/20682) by [@Xytronix](https://github.com/Xytronix))
+- Fixed live updates and synchronization in the `omp stats` dashboard when session directories are inaccessible or agents are continuously writing.
+- Fixed `omp stats` dropping a session's cost when a `/tan` clone of it was synced first: the clone's copied requests, prompts, tool calls, approvals and Spotlight rows now count toward the original session, and stats databases that already credited them to the clone are repaired on the next sync ([#20805](https://github.com/can1357/oh-my-pi/pull/20805) by [@wapenshaw](https://github.com/wapenshaw))
+- Fixed forked requests disappearing from stats when a transcript was temporarily unreadable during reconciliation.
+- Fixed usage history failing entirely when one session file cannot be read (e.g. blocked by antivirus); unreadable transcripts are now skipped and logged ([#18566](https://github.com/can1357/oh-my-pi/issues/18566))
 
 ## [19.1.1] - 2026-11-23
 

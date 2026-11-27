@@ -11,7 +11,7 @@ import {
 /**
  * Per-provider fallback overrides on the stream-watchdog helpers.
  *
- * These are the gear that lets `google-gemini-cli` widen its first-event floor
+ * These are the gear that lets a slow provider widen its first-event floor
  * beyond the 900s global default without forcing every other provider to wait
  * just as long. Tests pin the precedence contract callers depend on:
  * caller option > env var > per-provider fallback > base default.
@@ -279,6 +279,78 @@ describe("iterateWithIdleTimeout", () => {
 		// instead of being left suspended.
 		await Bun.sleep(5);
 		expect(upstreamClosed).toBe(true);
+	});
+});
+
+describe("iterateWithIdleTimeout pending local work", () => {
+	// A provider waiting on OUR local tool result legitimately sends nothing; the
+	// watchdog slides its deadline while local work is pending instead of
+	// aborting. The simulated work completes only once the watchdog has reached
+	// an expired deadline and consulted the local-work probe, so these stay
+	// causal on a loaded machine.
+	it("still aborts a silent stream once local work has finished", async () => {
+		const workDone = Promise.withResolvers<void>();
+		let busy = true;
+		async function* source() {
+			yield "first";
+			await workDone.promise;
+			busy = false;
+			// The provider genuinely stalls after the local work completed.
+			await new Promise<never>(() => {});
+			yield "never";
+		}
+		const items: string[] = [];
+		let error: Error | undefined;
+		try {
+			for await (const item of iterateWithIdleTimeout(source(), {
+				idleTimeoutMs: 50,
+				errorMessage: "stalled",
+				localWork: {
+					get hasPendingLocalWork() {
+						workDone.resolve();
+						return busy;
+					},
+					localWorkSettledAt: 0,
+				},
+			})) {
+				items.push(item);
+			}
+		} catch (err) {
+			error = err as Error;
+		}
+		expect(items).toEqual(["first"]);
+		expect(error?.message).toBe("stalled");
+	});
+
+	it("slides the first-event deadline while local work is pending", async () => {
+		const workDone = Promise.withResolvers<void>();
+		let probeCalls = 0;
+		let busy = true;
+		async function* source() {
+			// Local bridge work before the model has produced any event.
+			await workDone.promise;
+			yield "first";
+		}
+		const items: string[] = [];
+		for await (const item of iterateWithIdleTimeout(source(), {
+			idleTimeoutMs: 50,
+			firstItemTimeoutMs: 50,
+			errorMessage: "stalled",
+			firstItemErrorMessage: "first event timed out",
+			localWork: {
+				get hasPendingLocalWork() {
+					probeCalls++;
+					if (probeCalls >= 2) workDone.resolve();
+					return busy;
+				},
+				localWorkSettledAt: 0,
+			},
+		})) {
+			items.push(item);
+			busy = false;
+		}
+		expect(items).toEqual(["first"]);
+		expect(probeCalls).toBeGreaterThanOrEqual(2);
 	});
 });
 

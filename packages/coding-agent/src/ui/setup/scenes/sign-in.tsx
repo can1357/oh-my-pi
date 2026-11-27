@@ -12,6 +12,7 @@ import { batch, computed, type JSXNode, signal, type UiNode, untrack } from "@oh
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import { LoginDialog, LoginDialogState } from "../../overlays/panels/login-dialog";
 import { OAuthSelector, type OAuthSelectorSheet } from "../../overlays/pickers/oauth-selector";
 import "../../styles/setup";
@@ -19,9 +20,21 @@ import type { SignInLine, SignInTerm } from "../../styles/setup/sign-in";
 import type { SetupScene } from "../types";
 import { keyLabel } from "./choice";
 import { actionKeyId } from "../../keys/hints";
+import { formatKey } from "../../keys/format";
 
 const SCENE_TITLE = "Sign in to your providers";
 const SHEET_ROLE = "omp.setup.sheet";
+
+/**
+ * The key that leaves the scene, glyph plus spelled-out name (`⎋ (Esc)`): sign-in
+ * runs before the glyph picker, so a bare keycap glyph may be unreadable.
+ */
+function doneKeyLabel(): string {
+	const key = actionKeyId("tui.select.cancel", "escape");
+	const glyph = keyLabel(key);
+	const name = formatKey(key, { preset: "ascii", platform: process.platform });
+	return glyph === name ? name : `${glyph} (${name})`;
+}
 
 /** How the last sign-in ended (`provider` is the display name). */
 type Outcome =
@@ -43,7 +56,7 @@ function outcomeLines(outcome: Outcome | undefined): SignInLine[] {
 	return [
 		{ text: `Login failed: ${outcome.message}`, color: "error" },
 		{
-			text: `Choose another provider or press ${keyLabel(actionKeyId("tui.select.cancel", "escape"))} to continue.`,
+			text: `Choose another provider or press ${doneKeyLabel()} to continue.`,
 			color: "dim",
 		},
 	];
@@ -53,7 +66,7 @@ export const signInScene: SetupScene = {
 	id: "providers",
 	title: SCENE_TITLE,
 	get subtitle() {
-		return `Sign in to one or more providers. Press ${keyLabel(actionKeyId("tui.select.cancel", "escape"))} when you're done.`;
+		return `Sign in to one or more providers. Press ${doneKeyLabel()} when you're done.`;
 	},
 	step: "Sign in",
 	minVersion: 1,
@@ -133,7 +146,7 @@ export const signInScene: SetupScene = {
 				batch(() => {
 					authRevision.set(untrack(authRevision) + 1);
 					signedIn.set(true);
-					outcome.set({ kind: "success", provider: name });
+					outcome.set({ kind: "success", provider: connectedProviderName(providerId, name) });
 				});
 			} catch (error) {
 				if (lifetime.signal.aborted || state.signal.aborted) return;

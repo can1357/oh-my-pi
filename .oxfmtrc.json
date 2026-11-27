@@ -11,6 +11,7 @@
 	"bracketSameLine": false,
 	"bracketSpacing": true,
 	"ignorePatterns": [
+		"packages/coding-agent/src/**/prompts/**/*.md",
 		"packages/natives/native/**/*",
 		"packages/metaharness/adapters/**/*",
 		"packages/browser-relay/extension/**/*",

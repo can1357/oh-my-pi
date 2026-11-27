@@ -22,6 +22,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { readerIncludesThinking, textWithoutThinking } from "@oh-my-pi/snapcompact";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -209,7 +210,12 @@ function appendTextContent(lines: string[], content: string | readonly { type: s
 	}
 }
 
-function appendRawMessage(lines: string[], message: AgentMessage): void {
+/** A summary as the reader may see it: snapcompact `¶think:` sections go when it excludes reasoning. */
+function summaryText(text: string, includeThinking: boolean): string {
+	return includeThinking ? text : textWithoutThinking(text);
+}
+
+function appendRawMessage(lines: string[], message: AgentMessage, includeThinking: boolean): void {
 	switch (message.role) {
 		case "user":
 		case "developer":
@@ -221,8 +227,9 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 			lines.push("### assistant");
 			for (const block of assistantMessage.content) {
 				if (block.type === "text") lines.push(block.text);
-				else if (block.type === "thinking") lines.push("<thinking>", block.thinking, "</thinking>");
-				else if (block.type === "toolCall") {
+				else if (block.type === "thinking") {
+					if (includeThinking) lines.push("<thinking>", block.thinking, "</thinking>");
+				} else if (block.type === "toolCall") {
 					lines.push(`#### tool call: ${block.name} (${block.id})`);
 					lines.push(jsonFence(JSON.stringify(block.arguments, null, 2) ?? "null"));
 				} else if (block.type === "redactedThinking") {
@@ -300,14 +307,17 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 		}
 		case "branchSummary": {
 			const branchSummary = message as BranchSummaryMessage;
-			lines.push(`### branch summary (from ${branchSummary.fromId})`, branchSummary.summary);
+			lines.push(
+				`### branch summary (from ${branchSummary.fromId})`,
+				summaryText(branchSummary.summary, includeThinking),
+			);
 			return;
 		}
 		case "compactionSummary": {
 			const compactionSummary = message as CompactionSummaryMessage;
 			lines.push(
 				`### compaction summary (${compactionSummary.tokensBefore} tokens before)`,
-				compactionSummary.summary,
+				summaryText(compactionSummary.summary, includeThinking),
 			);
 			return;
 		}
@@ -328,7 +338,7 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 	}
 }
 
-function renderRawEntry(lines: string[], entry: SessionEntry): void {
+function renderRawEntry(lines: string[], entry: SessionEntry, includeThinking: boolean): void {
 	lines.push(
 		`## Entry ${entry.id} · ${entry.type}`,
 		"",
@@ -337,7 +347,7 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
 		"",
 	);
 	if (entry.type === "message") {
-		appendRawMessage(lines, entry.message);
+		appendRawMessage(lines, entry.message, includeThinking);
 		return;
 	}
 	if (entry.type === "compaction") {
@@ -347,7 +357,7 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
 			`First kept entry: ${entry.firstKeptEntryId}`,
 			`Tokens before: ${entry.tokensBefore}`,
 			"",
-			entry.summary,
+			summaryText(entry.summary, includeThinking),
 		);
 		return;
 	}
@@ -356,7 +366,7 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
 		return;
 	}
 	if (entry.type === "branch_summary") {
-		lines.push(`From entry: ${entry.fromId}`, "", entry.summary);
+		lines.push(`From entry: ${entry.fromId}`, "", summaryText(entry.summary, includeThinking));
 		return;
 	}
 	lines.push(jsonFence(JSON.stringify(entry, null, 2) ?? "null"));
@@ -366,9 +376,14 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
  * Render every persisted entry on the caller's live branch without the
  * compaction filters that shape model context. Each block begins with the
  * durable session-entry id, making references unambiguous across compactions
- * and branch rewinds.
+ * and branch rewinds. `includeThinking: false` leaves assistant reasoning out,
+ * for a reader whose classifier refuses its own reasoning quoted back as text
+ * (`classifier-cot-extraction`, Claude's `reasoning_extraction`).
  */
-export function formatCurrentBranchFullHistory(entries: readonly SessionEntry[]): string {
+export function formatCurrentBranchFullHistory(
+	entries: readonly SessionEntry[],
+	options: { includeThinking: boolean } = { includeThinking: true },
+): string {
 	const lines = [
 		"# Current branch — full history",
 		"",
@@ -376,7 +391,7 @@ export function formatCurrentBranchFullHistory(entries: readonly SessionEntry[])
 		"",
 	];
 	for (const entry of entries) {
-		renderRawEntry(lines, entry);
+		renderRawEntry(lines, entry, options.includeThinking);
 		lines.push("");
 	}
 	return `${lines.join("\n").trim()}\n`;
@@ -465,7 +480,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (!branch) {
 			throw new Error("history://current/full requires a bound live session branch");
 		}
-		const content = formatCurrentBranchFullHistory(branch);
+		// The caller reads its own branch: reasoning goes back to the model that wrote it.
+		const reader = context.session?.getActiveModel?.();
+		const content = formatCurrentBranchFullHistory(branch, {
+			includeThinking: reader !== undefined && readerIncludesThinking(reader),
+		});
 		return {
 			url: url.href,
 			content,

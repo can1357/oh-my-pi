@@ -60,6 +60,7 @@ const compat: ResolvedOpenAICompat = {
 	isVercelGatewayHost: false,
 	wireModelIdMode: "raw",
 	stripDeepseekSpecialTokens: false,
+	neutralizeDeepseekSpecialTokens: false,
 	reasoningDeltasMayBeCumulative: false,
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,
@@ -547,7 +548,18 @@ describe("openai-completions convertMessages", () => {
 		}
 	});
 	it("preserves image_url for the multimodal DeepSeek OCR model", () => {
-		const model = getBundledModel("novita", "deepseek/deepseek-ocr-2") as Model<"openai-completions">;
+		const model = buildModel({
+			id: "deepseek/deepseek-ocr-2",
+			name: "DeepSeek OCR 2",
+			api: "openai-completions",
+			provider: "novita",
+			baseUrl: "https://api.novita.ai/openai/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0.03, output: 0.03, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8_192,
+			maxTokens: 8_192,
+		});
 		const context: Context = {
 			messages: [
 				{

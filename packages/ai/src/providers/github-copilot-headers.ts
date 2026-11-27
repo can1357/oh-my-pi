@@ -17,7 +17,8 @@ export type CopilotPremiumRequests = number;
 export type CopilotDynamicHeaders = {
 	headers: Record<string, string>;
 	initiator: CopilotInitiator;
-	premiumRequests: CopilotPremiumRequests;
+	/** Absent on a token-billed account: it pays AI credits, not premium requests. */
+	premiumRequests: CopilotPremiumRequests | undefined;
 };
 export function resolveGitHubCopilotBaseUrl(
 	baseUrl: string | undefined,
@@ -358,6 +359,11 @@ export function buildCopilotDynamicHeaders(params: {
 	integrationId?: unknown;
 	/** Learned working identity for this credential; explicit still wins, then this, then the defaults. */
 	cachedIntegrationId?: unknown;
+	/**
+	 * The account meters usage in AI credits (`token_based_billing`). True drops
+	 * the premium-request estimate; false or unknown keeps it.
+	 */
+	tokenBasedBilling?: boolean;
 }): CopilotDynamicHeaders {
 	const initiator =
 		params.initiatorOverride ?? getCopilotInitiatorOverride(params.headers) ?? inferCopilotInitiator(params.messages);
@@ -378,10 +384,13 @@ export function buildCopilotDynamicHeaders(params: {
 	return {
 		headers,
 		initiator,
-		premiumRequests: getCopilotPremiumRequests({
-			initiator,
-			premiumMultiplier: params.premiumMultiplier,
-			planTier: params.planTier,
-		}),
+		premiumRequests:
+			params.tokenBasedBilling === true
+				? undefined
+				: getCopilotPremiumRequests({
+						initiator,
+						premiumMultiplier: params.premiumMultiplier,
+						planTier: params.planTier,
+					}),
 	};
 }

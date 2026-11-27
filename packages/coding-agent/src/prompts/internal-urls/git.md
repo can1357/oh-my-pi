@@ -1,0 +1,1 @@
+git://commit/<sha> / git://branch/<name> / git://tag/<name>: commit details + patch, branch summary, or tag target. git://diff (uncommitted), git://diff/staged, git://diff/unstaged, git://diff/<base> (HEAD since merge base): stats + patch. Bare git:// lists HEAD, branches, and recent commits.

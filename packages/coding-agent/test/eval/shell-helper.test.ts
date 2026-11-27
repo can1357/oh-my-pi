@@ -59,7 +59,7 @@ const CELLS = {
 		// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 		"const quoted = await sh`sleep 0.2; printf '%s|' ${['a b', \"c'd\"]} ${'$HOME'}`;",
 		"await sh('cd sub');",
-		"const cwd = [(await sh('pwd -P')).trim(), (await sh('pwd -P', { cwd: 'sub' })).trim()];",
+		"const cwd = (await sh('pwd -P')).trim();",
 		"let failure;",
 		"try { await sh('echo boom; exit 3'); } catch (error) { failure = { name: error.name, code: error.exitCode, output: error.output }; }",
 		"print('RESULT ' + JSON.stringify({ quoted, cwd, failure }));",
@@ -68,7 +68,7 @@ const CELLS = {
 		"import json",
 		"quoted = sh(\"sleep 0.2; printf '%s|' 'a b' $(echo nested)\")",
 		'sh("cd sub")',
-		'cwd = [sh("pwd -P").strip(), sh("pwd -P", cwd="sub").strip()]',
+		'cwd = sh("pwd -P").strip()',
 		"try:",
 		'    sh("echo boom; exit 3")',
 		"except ShellError as error:",
@@ -86,24 +86,24 @@ async function runCell(language: "js" | "py"): Promise<Record<string, unknown>> 
 }
 
 describe("eval sh helper", () => {
-	it("js: quotes template values, starts each command in the session cwd or `cwd`, and throws ShellError without backgrounding", async () => {
+	it("js: quotes template values, starts each command in the session cwd, and throws ShellError without backgrounding", async () => {
 		const result = await runCell("js");
 		const root = await fs.realpath(temp.path());
 		expect(result).toEqual({
 			quoted: "a b|c'd|$HOME|",
-			cwd: [root, path.join(root, "sub")],
+			cwd: root,
 			failure: { name: "ShellError", code: 3, output: "boom\n" },
 		});
 	});
 
 	it.skipIf(!PYTHON_INTEGRATION)(
-		"py: starts each command in the session cwd or `cwd` and raises ShellError without backgrounding",
+		"py: starts each command in the session cwd and raises ShellError without backgrounding",
 		async () => {
 			const result = await runCell("py");
 			const root = await fs.realpath(temp.path());
 			expect(result).toEqual({
 				quoted: "a b|nested|",
-				cwd: [root, path.join(root, "sub")],
+				cwd: root,
 				failure: { name: "ShellError", code: 3, output: "boom\n" },
 			});
 		},

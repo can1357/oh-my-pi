@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -2059,5 +2059,98 @@ describe("AgentSession prewalk", () => {
 		// The hand-off clears automatic thinking.
 		expect(session.isAutoThinking).toBe(false);
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(false);
+	});
+	// With `todo.eager=always`, an armed prewalk's plan flow owns todo creation, so
+	// the forced eager-todo prelude ("call todo first this turn") must yield to the
+	// prewalk plan nudge ("write a complete plan first, then todo") instead of
+	// sending both contradictory hidden messages.
+	describe("eager-todo prelude", () => {
+		function messageText(message: AgentMessage): string {
+			if (!("content" in message)) return "";
+			const content = message.content;
+			if (typeof content === "string") return content;
+			if (!Array.isArray(content)) return "";
+			const parts: string[] = [];
+			for (const block of content) {
+				if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block) {
+					if (typeof block.text === "string") parts.push(block.text);
+				}
+			}
+			return parts.join("\n");
+		}
+
+		/** Runs a first-turn prompt and returns every hidden/visible text sent to the model. */
+		async function collectInjectedText(options: { prewalk: "handoff" | "noop" | "off" }): Promise<string> {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const handoffTarget = modelOrThrow("claude-sonnet-4-6");
+			const prewalkTarget =
+				options.prewalk === "handoff" ? handoffTarget : options.prewalk === "noop" ? primary : undefined;
+			const eagerRegistry = new Map<string, AgentTool>([
+				[recordTool.name, recordTool as AgentTool],
+				[writeTool.name, writeTool as AgentTool],
+				[todoTool.name, todoTool as AgentTool],
+			]);
+			const mock = createMockModel({
+				responses: [
+					toolCall("t1", "todo"),
+					toolCall("t2", "record"),
+					toolCall("t3", "write"),
+					{ content: ["done"] },
+				],
+			});
+
+			const injected: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [...eagerRegistry.values()],
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+				convertToLlm,
+				getToolChoice: () => eagerSession.nextToolChoiceDirective(),
+				streamFn: (model, context, streamOptions) => {
+					for (const message of context.messages) injected.push(messageText(message));
+					return mock.stream(model, context, streamOptions);
+				},
+			});
+			const eagerSession = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"todo.enabled": true,
+					"todo.eager": "always",
+					"todo.reminders": false,
+				}),
+				modelRegistry,
+				toolRegistry: eagerRegistry,
+				...(prewalkTarget ? { prewalk: { target: prewalkTarget } } : {}),
+			});
+
+			await eagerSession.prompt("do the task");
+			await eagerSession.dispose();
+			return injected.join("\n---\n");
+		}
+
+		it("suppresses the forced eager-todo prelude while prewalk is armed", async () => {
+			const text = await collectInjectedText({ prewalk: "handoff" });
+			expect(text.includes("write complete plan")).toBe(true);
+			expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(false);
+		});
+
+		it("still injects the forced eager-todo prelude when prewalk is not armed", async () => {
+			const text = await collectInjectedText({ prewalk: "off" });
+			expect(text.includes("write complete plan")).toBe(false);
+			expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
+		});
+
+		it("keeps the forced eager-todo prelude when the armed prewalk is a no-op", async () => {
+			const text = await collectInjectedText({ prewalk: "noop" });
+			expect(text.includes("write complete plan")).toBe(false);
+			expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
+		});
 	});
 });

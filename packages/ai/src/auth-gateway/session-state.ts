@@ -268,8 +268,8 @@ export class AuthGatewaySessionStateStore {
 	 * Keyed by provider + model + conversation (see {@link sessionKeys}). A
 	 * client is free to reuse one session id across models, and the coarsest
 	 * provider entries do not separate models themselves (`openai-responses`
-	 * keys its strict-tools / history-replay record by provider alone,
-	 * Antigravity by a single constant), so the model belongs in the key here.
+	 * keys its strict-tools / history-replay record by provider alone), so the
+	 * model belongs in the key here.
 	 * Endpoint is deliberately absent: every provider whose learning is
 	 * endpoint-specific already sub-keys it internally
 	 * (`anthropic-messages:${baseUrl}\0${modelId}`,

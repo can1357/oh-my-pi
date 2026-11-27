@@ -4,21 +4,22 @@
 
 ### Breaking Changes
 
-- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline rendering or `Reader` for URL reads; interactive terminal browsing is no longer provided.
+- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline HTML rendering or `Reader` for URL reads; interactive terminal browsing is no longer available.
 
 ### Added
 
-- Added `renderHtml` for Markdown and plain-text rendering. Both `renderHtml` and `Reader` default to reader content selection (`mode: "auto"`), support `mode: "full"` to keep all visible content, and share hidden-content options.
-- Added `Reader` for step-by-step URL reading with host-provided HTTP and browser I/O.
+- Added `renderHtml` for rendering HTML as Markdown or plain text, with automatic reader-content selection by default, a `mode: "full"` option for retaining all visible content, and configurable hidden-content handling.
+- Added `Reader` for step-by-step URL reading through host-provided HTTP and browser I/O, with the same reader-content and hidden-content options as `renderHtml`.
+- Added `analyzeBashApproval(command, dialect?)`, a synchronous Bash 5.3 and Zsh 5.9 AST analyzer for approving `bash` tool commands.
+- Added `spawnBreakaway(options)`, which starts a detached Windows process outside the caller's job objects when they allow breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
 
 ### Fixed
 
-- `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave ([#20597](https://github.com/can1357/oh-my-pi/pull/20597) by [@daandden](https://github.com/daandden))
-- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
-- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
-- Preserved source-code indentation and linked content cards in URL reads.
-
-- The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+- Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
+- Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
+- Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
+- Fixed Wayland capture crashing on unreadable portal frame buffers while preserving capture from readable shared-memory frames on older PipeWire versions ([#19647](https://github.com/can1357/oh-my-pi/issues/19647))
+- Fixed `Shell.abort()` sometimes doing nothing to a `Shell.run` that was queued behind another run on the same shell, leaving the command and its child processes running ([#17105](https://github.com/can1357/oh-my-pi/issues/17105))
 
 ## [19.2.1] - 2026-11-25
 

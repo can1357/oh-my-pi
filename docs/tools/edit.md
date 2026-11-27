@@ -62,6 +62,8 @@ PUT 4.=4:
 
 Use `write` to create or wholly overwrite a file. Hashline rejects untagged anchored edits at application time.
 
+When an edit lands in another Git worktree of the same repository, the result names the edited branch and the session branch separately. This does not switch the session checkout or change how relative paths resolve.
+
 ## Canonical patch language
 
 All line numbers refer to the original tagged snapshot, not to earlier hunks in the same call.
