@@ -26,7 +26,6 @@ import {
 	$env,
 	formatDuration,
 	formatNumber,
-	getActiveProfile,
 	getProjectDir,
 	isEnoent,
 	logger,
@@ -37,7 +36,6 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 
-import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
@@ -140,7 +138,6 @@ import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "./view-model/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "../config/keybindings/space-hold";
-import { resolveRestartCmd } from "../subprocess/worker-client";
 
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
@@ -187,6 +184,14 @@ import {
 	setProgramStatusSupported,
 	settleStartupRun,
 } from "../utils/run-status";
+import {
+	buildResumeArgv,
+	clearProgramResume,
+	disposeProgramResume,
+	getProgramResumeToken,
+	initProgramResume,
+	OSC_7577_TOKEN_ENV,
+} from "../utils/program-resume";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
@@ -2169,6 +2174,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		this.#probeProgramStatus();
+		initProgramResume({
+			sessionFile: () => (this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined),
+			cwd: () => this.sessionManager.getCwd(),
+		});
 		setTerminalSessionSource({
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
@@ -6978,7 +6987,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return;
 		const worktreePlan = await this.#planOwnedWorktreeExit(signal);
 		try {
-			await this.#teardown();
+			await this.#teardown({ clearResume: true });
 		} catch (error) {
 			this.#handleTeardownError("close", error);
 			return;
@@ -7050,7 +7059,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
 	 * launch argv (session-source flags and positional prompts stripped, see
-	 * {@link restartArgv}), restoring this session (`--restore`) when it exists on
+	 * {@link buildResumeArgv}), restoring this session (`--restore`) when it exists on
 	 * disk: subagents the teardown cut off mid-turn go on in the new process.
 	 *
 	 * Refuses to close the session if its working directory has been removed.
@@ -7084,17 +7093,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
-		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
-		const activeProfile = getActiveProfile();
-		const cmd = [
-			...resolveRestartCmd(),
-			...restartArgv(
-				process.argv.slice(2),
-				sessionFile ? path.resolve(sessionFile) : undefined,
-				activeProfile ? { "--profile": true } : undefined,
-			),
-		];
-		if (activeProfile) cmd.push("--profile", activeProfile);
+		const cmd = buildResumeArgv(sessionFile);
+		const resumeToken = getProgramResumeToken();
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
@@ -7104,6 +7104,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					const value = process.env[key];
 					if (value !== undefined) env[key] = value;
 				}
+				// Restore the captured OSC 7577 token only for the replacement omp on this PTY.
+				if (resumeToken) env[OSC_7577_TOKEN_ENV] = resumeToken;
 				execReplace(cmd[0], cmd, env, []); // never returns on success
 			} catch (err) {
 				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
@@ -7114,6 +7116,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				stdin: "inherit",
 				stdout: "inherit",
 				stderr: "inherit",
+				...(resumeToken ? { env: { ...process.env, [OSC_7577_TOKEN_ENV]: resumeToken } } : {}),
 			});
 			await postmortem.quit(await child.exited);
 		} catch (err) {
@@ -7149,7 +7152,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
-	async #teardown(): Promise<void> {
+	async #teardown(options?: { clearResume?: boolean }): Promise<void> {
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -7202,6 +7205,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
 		disposeProgramStatus();
+		if (options?.clearResume) clearProgramResume();
+		else disposeProgramResume();
 		popTerminalTitle();
 		this.stop();
 		// The driver drains in-flight key releases and restores the terminal before the shell gets it.
