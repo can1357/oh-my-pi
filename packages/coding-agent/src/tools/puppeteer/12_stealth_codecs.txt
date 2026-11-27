@@ -1,0 +1,42 @@
+const parseInput = (arg) => {
+	const [mime, codecStr] = arg.trim().split(";");
+	let codecs = [];
+	if (codecStr && codecStr.includes('codecs="')) {
+		codecs = codecStr
+			.trim()
+			.replace('codecs="', "")
+			.replace('"', "")
+			.trim()
+			.split(",")
+			.filter(Boolean)
+			.map(item => item.trim());
+	}
+	return { mime, codecStr, codecs };
+};
+
+const originalCanPlayType = HTMLMediaElement.prototype.canPlayType;
+const proxiedCanPlayType = new Window_Proxy(originalCanPlayType, {
+	apply(target, ctx, args) {
+		if (!args || !args.length) {
+			return Reflect_apply(target, ctx, args);
+		}
+		const { mime, codecs } = parseInput(args[0]);
+		if (mime === "video/mp4" && codecs.includes("avc1.42E01E")) {
+			return "probably";
+		}
+		if (mime === "audio/x-m4a" && !codecs.length) {
+			return "maybe";
+		}
+		if (mime === "audio/aac" && !codecs.length) {
+			return "probably";
+		}
+		return Reflect_apply(target, ctx, args);
+	},
+});
+patchToString(proxiedCanPlayType, "canPlayType");
+Object_defineProperty(HTMLMediaElement.prototype, "canPlayType", {
+	value: proxiedCanPlayType,
+	writable: true,
+	configurable: true,
+	enumerable: true,
+});
