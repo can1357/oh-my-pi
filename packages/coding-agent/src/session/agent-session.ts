@@ -90,6 +90,7 @@ import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-pre
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
@@ -437,6 +438,7 @@ import {
 	type LaunchCompletionEntry,
 } from "./launch-completion";
 import {
+	assistantTurnDelivered,
 	type BashExecutionMessage,
 	buildReplanTitleContext,
 	buildTitleDriftTurns,
@@ -5289,7 +5291,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#settleServiceTier(assistantMsg);
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
-				if (speculativeHandoff) {
+				// Empty and thinking-only stops still need recovery while the handoff runs.
+				// Preserve the existing settle path for completed server-tool output.
+				if (
+					speculativeHandoff &&
+					(assistantMsg.stopReason !== "stop" ||
+						assistantTurnDelivered(presentNarrationAsAnswer(assistantMsg)) ||
+						assistantMsg.content.some(content => content.type === "anthropicServerTool"))
+				) {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#skippedPostTurnSpeculationCompletion = speculativeHandoff;
 				}
