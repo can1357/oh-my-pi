@@ -131,7 +131,7 @@ describe("TermBackend animation", () => {
 		}
 	});
 
-	it("ticks spinners at the spinner interval, re-read when it changes; a 0 interval stills them", () => {
+	it("picks spinner frames at the spinner interval, re-read when it changes; a 0 interval stills them", () => {
 		vi.useFakeTimers({ now: 0 });
 		const driver = new FakeDriver();
 		const surface = createSurface(() => ({ dock: <spinner /> }));
@@ -142,9 +142,10 @@ describe("TermBackend animation", () => {
 			backend.start();
 			backend.renderNow();
 			expect(driver.viewport).toEqual([frames[0]]);
-			vi.advanceTimersByTime(80);
+			// Ticks land at 80, 160, 240: still inside the first 250 ms frame.
+			vi.advanceTimersByTime(240);
 			expect(driver.viewport).toEqual([frames[0]]);
-			vi.advanceTimersByTime(170);
+			vi.advanceTimersByTime(80);
 			expect(driver.viewport).toEqual([frames[1]]);
 			interval.set(0);
 			backend.renderNow();
@@ -152,6 +153,24 @@ describe("TermBackend animation", () => {
 			const presented = driver.frames.length;
 			vi.advanceTimersByTime(1_000);
 			expect(driver.frames.length).toBe(presented);
+		} finally {
+			backend.stop();
+			surface.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps other clock readers at the default tick under a slow spinner interval", () => {
+		vi.useFakeTimers({ now: 0 });
+		defineRolePainter("rows", "test.slow-spinner-clock", (_node, cx) => ({ rows: [String(cx.now())] }));
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({ dock: <rows role="test.slow-spinner-clock" lines={[]} /> }));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 1_000 });
+		try {
+			backend.start();
+			backend.renderNow();
+			vi.advanceTimersByTime(80);
+			expect(driver.viewport).toEqual(["80"]);
 		} finally {
 			backend.stop();
 			surface.dispose();

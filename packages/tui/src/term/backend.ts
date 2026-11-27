@@ -134,9 +134,10 @@ export interface TermBackendOptions {
 	 */
 	readonly clock?: Accessor<number>;
 	/**
-	 * Milliseconds per spinner frame (may change at runtime), also the animation tick of
-	 * terminal-clocked kinds; 0 draws spinners still while other clock readers keep the default tick.
-	 * Default {@link DEFAULT_SPINNER_INTERVAL_MS}.
+	 * Milliseconds per spinner frame (may change at runtime); 0 draws spinners still. The animation
+	 * tick of terminal-clocked kinds runs at this interval when it is faster than
+	 * {@link DEFAULT_SPINNER_INTERVAL_MS}, else at the default, so a slow or still spinner never slows
+	 * other clock readers (pulses, strikes, progress slides). Default {@link DEFAULT_SPINNER_INTERVAL_MS}.
 	 */
 	readonly spinnerInterval?: Reactive<number>;
 	/** Decorative motion off (blink, fade, pulse, sweeps): such kinds draw their still frame. Default false. */
@@ -742,7 +743,9 @@ export class TermBackend {
 
 	#scheduleTick(smooth: boolean): void {
 		if (!this.#running || this.#options.clock) return;
-		const delay = smooth ? SMOOTH_TICK_MS : untrack(this.#env.spinnerInterval) || DEFAULT_SPINNER_INTERVAL_MS;
+		const delay = smooth
+			? SMOOTH_TICK_MS
+			: Math.min(untrack(this.#env.spinnerInterval) || DEFAULT_SPINNER_INTERVAL_MS, DEFAULT_SPINNER_INTERVAL_MS);
 		if (this.#tick !== undefined) {
 			if (this.#tickDelay <= delay) return;
 			clearTimeout(this.#tick);

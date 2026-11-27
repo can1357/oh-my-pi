@@ -443,6 +443,21 @@ describe("startup prepaint frame", () => {
 		}
 	});
 
+	it("applies tui.motion to an adopted prepaint frame's renderer", async () => {
+		const lease = await prepaint();
+		const testSession = await createTestSession({ inMemory: true, settingsOverrides: { "tui.motion": "none" } });
+		const mode = adopt(lease, testSession.session);
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(lease.frame.spinnerInterval.peek()).toBe(0);
+			expect(lease.frame.reduceMotion.peek()).toBe(true);
+		} finally {
+			mode.stop();
+			await mode.shell.stop();
+			await testSession.cleanup();
+		}
+	});
+
 	it("accepts input while the initial CLI prompt's first turn is still running", async () => {
 		const lease = await prepaint();
 		const testSession = await createTestSession({ inMemory: true });

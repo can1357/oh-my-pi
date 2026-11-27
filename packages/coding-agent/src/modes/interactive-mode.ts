@@ -1785,9 +1785,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Start the shell (unless a prepaint already did) on the process terminal. */
+	/** Start the shell on the process terminal (a prepaint may already have). */
 	async #startShell(clearHistory: boolean): Promise<void> {
-		this.#syncFrameSettings();
 		await this.#frame.start({
 			clearHistory,
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
@@ -2185,7 +2184,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Load initial todos
 		await logger.time("InteractiveMode.init:todos", () => this.#loadTodoList());
 
-		// A prepaint frame may already own the terminal.
+		// A prepaint frame may already own the terminal: settings reach its renderer either way.
+		this.#syncFrameSettings();
 		if (!this.#ownsStartedUi) {
 			await this.#startShell(options.clearInitialTerminalHistory === true);
 			this.#ownsStartedUi = true;
