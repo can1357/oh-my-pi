@@ -170,7 +170,8 @@ pub(super) fn call(interp: &mut Interp<'_>, b: Builtin, call: &Call, cx: Cx) -> 
 					if b == B::Exec {
 						// The command replaced the process: nothing of the program runs after it.
 						let signal = status & 127;
-						return Err(interp.vanish(if signal == 0 { status >> 8 } else { 128 + signal }));
+						interp.vanish();
+						return Err(Flow::Exit(if signal == 0 { status >> 8 } else { 128 + signal }));
 					}
 					Ok(one(Value::Int(i64::from(status))))
 				},

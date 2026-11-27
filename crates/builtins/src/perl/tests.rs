@@ -21,7 +21,9 @@
 
 use std::{fmt::Write as _, fs, path::Path};
 
-use crate::host::run_extra_bytes;
+use tokio_util::sync::CancellationToken;
+
+use crate::host::{run_extra_bytes, run_extra_cancellable};
 
 /// One corpus line.
 struct Case {
@@ -181,6 +183,27 @@ async fn signal_default_action_ends_the_program() {
 	}
 	let at_exit = "END { print STDERR 'END' } pipe(R, W) or die; close R; print W 'buffered';";
 	assert_eq!(run(at_exit).await, (141, "END".into()));
+}
+
+/// A run the shell cancels ends as perl killed by a signal does: status 130,
+/// and no END block, destructor or buffered output.
+#[tokio::test]
+async fn cancelled_run_skips_end_blocks() {
+	let cwd = tempfile::tempdir().unwrap();
+	let script = "END { open my $e, '>', 'end' } sub DESTROY { open my $d, '>', 'destroy' } my $o = bless {}; \
+	              open F, '>', 'out' or die; print F 'buffered'; sleep 30;";
+	let cancel = CancellationToken::new();
+	let trigger = cancel.clone();
+	std::thread::spawn(move || {
+		std::thread::sleep(std::time::Duration::from_secs(1));
+		trigger.cancel();
+	});
+	let env = [("OMP_PERL_FALLBACK", "0")];
+	let (status, ..) = run_extra_cancellable(&["perl", "-e", script], b"", cwd.path(), &env, Some(cancel)).await;
+	assert_eq!(status, 130);
+	assert!(!cwd.path().join("end").exists(), "END ran");
+	assert!(!cwd.path().join("destroy").exists(), "DESTROY ran");
+	assert_eq!(fs::read(cwd.path().join("out")).unwrap(), b"");
 }
 
 #[tokio::test]

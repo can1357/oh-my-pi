@@ -671,7 +671,8 @@ impl<'h> Interp<'h> {
 				Ok(())
 			} else {
 				if name == "ALRM" { self.put_stderr(&PStr::from_bytes(b"Alarm clock\n")); }
-				Err(self.vanish(128i32.saturating_add(number)))
+				self.vanish();
+				Err(Flow::Exit(128i32.saturating_add(number)))
 			};
 		}
 		// The handler must not clobber the interrupted operation's $! (perl saves errno around it).
@@ -681,16 +682,15 @@ impl<'h> Interp<'h> {
 		result
 	}
 
-	/// End the program with `status` the way a process vanishes, killed by a
-	/// signal or replaced by `exec`: no END block, destructor or exit hook
-	/// runs, and output still buffered is lost before any later close or
-	/// drop can flush it.
-	pub fn vanish(&mut self, status: i32) -> Flow {
+	/// End the program the way a process vanishes (killed by a signal,
+	/// replaced by `exec`, cancelled by the shell); the caller's flow carries
+	/// the status. No END block, destructor or exit hook runs, and output
+	/// still buffered is lost before any later close or drop can flush it.
+	pub fn vanish(&mut self) {
 		self.vanished = true;
 		for io in self.handles.iter().filter_map(std::rc::Weak::upgrade) {
 			if let Ok(mut handle) = io.try_borrow_mut() { handle.discard_output(); }
 		}
-		Flow::Exit(status)
 	}
 
 	fn invoke_handler(&mut self, handler: Value, arg: Value) -> PResult<()> {
