@@ -1827,6 +1827,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		const host = this.shell.host;
 		if (!host) return;
+		host.driver.images.setBudget(cfgTuiMaxInlineImages.get(this.settings));
 		const updateFigureCell = (): void => {
 			const caps = host.driver.capabilities;
 			const next = caps.images ? (caps.cell ?? DEFAULT_FIGURE_CELL) : undefined;
@@ -3636,6 +3637,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			rebuildChat = true;
 		}
 		if (any("terminal.showImages")) resetDisplay = true;
+		// Images in scrollback were committed under the old budget; the replay redraws them under the new one.
+		if (any("tui.maxInlineImages")) {
+			this.shell.host?.driver.images.setBudget(next["tui.maxInlineImages"]);
+			resetDisplay = true;
+		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
 			this.hideThinkingBlock = hideThinkingBlock;
