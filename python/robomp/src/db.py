@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS issues (
   pr_number      INTEGER,
   state          TEXT NOT NULL,
   classification TEXT,         -- bug|enhancement|question|proposal|documentation|wontfix|invalid|duplicate
+  last_reviewed_sha TEXT,      -- PR head SHA the bot's review landed on (PR threads only)
   updated_at     TEXT NOT NULL
 );
 
@@ -209,10 +210,17 @@ class EventRow:
     state: EventState
     attempts: int
     last_error: str | None
+    # Claim timestamp: when this run started. `None` until the row is claimed
+    # (`claim_next_event` sets it); the review-success decision scopes its
+    # audit window to runs starting after this, so a prior run's terminal
+    # audit cannot count for the current one.
+    started_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
 class IssueRow:
+    # last_reviewed_sha: PR head SHA the bot's review last landed on; the
+    # review-pr shortcut must compare against the CURRENT head, not "ever".
     key: str
     repo: str
     number: int
@@ -222,6 +230,7 @@ class IssueRow:
     state: IssueState
     updated_at: str
     classification: str | None = None
+    last_reviewed_sha: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -347,6 +356,8 @@ class Database:
         issue_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(issues)").fetchall()}
         if "classification" not in issue_cols:
             self._conn.execute("ALTER TABLE issues ADD COLUMN classification TEXT")
+        if "last_reviewed_sha" not in issue_cols:
+            self._conn.execute("ALTER TABLE issues ADD COLUMN last_reviewed_sha TEXT")
         event_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
         if "model" not in event_cols:
             self._conn.execute("ALTER TABLE events ADD COLUMN model TEXT")
@@ -448,6 +459,7 @@ class Database:
                 state="running",
                 attempts=int(row["attempts"]) + 1,
                 last_error=row["last_error"],
+                started_at=now,
             )
 
     def mark_event(self, delivery_id: str, state: EventState, *, error: str | None = None) -> None:
@@ -691,7 +703,7 @@ class Database:
             row = self._conn.execute(
                 """
                 SELECT delivery_id, event_type, repo, issue_key, payload_json, received_at,
-                       state, attempts, last_error
+                       state, attempts, last_error, started_at
                 FROM events WHERE delivery_id = ?
                 """,
                 (delivery_id,),
@@ -708,6 +720,7 @@ class Database:
             state=row["state"],
             attempts=int(row["attempts"]),
             last_error=row["last_error"],
+            started_at=row["started_at"],
         )
 
     def has_authorized_impl_event(self, issue_key: str) -> bool:
@@ -890,21 +903,23 @@ class Database:
         branch: str | None = None,
         session_dir: str | None = None,
         pr_number: int | None = None,
+        last_reviewed_sha: str | None = None,
     ) -> IssueRow:
         now = _utcnow()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO issues (key, repo, number, branch, session_dir, pr_number, state, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO issues (key, repo, number, branch, session_dir, pr_number, state, last_reviewed_sha, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET
                   branch = COALESCE(excluded.branch, issues.branch),
                   session_dir = COALESCE(excluded.session_dir, issues.session_dir),
                   pr_number = COALESCE(excluded.pr_number, issues.pr_number),
+                  last_reviewed_sha = COALESCE(excluded.last_reviewed_sha, issues.last_reviewed_sha),
                   state = excluded.state,
                   updated_at = excluded.updated_at
                 """,
-                (key, repo, number, branch, session_dir, pr_number, state, now),
+                (key, repo, number, branch, session_dir, pr_number, state, last_reviewed_sha, now),
             )
         got = self.get_issue(key)
         assert got is not None
@@ -941,7 +956,8 @@ class Database:
     def get_issue(self, key: str) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues WHERE key=?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, "
+                "last_reviewed_sha, updated_at FROM issues WHERE key=?",
                 (key,),
             ).fetchone()
         if row is None:
@@ -956,12 +972,14 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            last_reviewed_sha=row["last_reviewed_sha"],
         )
 
     def find_issue_by_pr(self, repo: str, pr_number: int) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues WHERE repo=? AND pr_number=?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, "
+                "last_reviewed_sha, updated_at FROM issues WHERE repo=? AND pr_number=?",
                 (repo, pr_number),
             ).fetchone()
         if row is None:
@@ -976,13 +994,15 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            last_reviewed_sha=row["last_reviewed_sha"],
         )
 
     def find_issue_by_branch(self, repo: str, branch: str) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at
+                SELECT key, repo, number, branch, session_dir, pr_number, state, classification,
+                last_reviewed_sha, updated_at
                 FROM issues
                 WHERE repo=? AND branch=?
                 ORDER BY updated_at DESC
@@ -1002,12 +1022,14 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            last_reviewed_sha=row["last_reviewed_sha"],
         )
 
     def list_issues(self, limit: int = 100) -> list[IssueRow]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues ORDER BY updated_at DESC LIMIT ?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, "
+                "last_reviewed_sha, updated_at FROM issues ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
@@ -1021,6 +1043,7 @@ class Database:
                 state=r["state"],
                 updated_at=r["updated_at"],
                 classification=r["classification"],
+                last_reviewed_sha=r["last_reviewed_sha"],
             )
             for r in rows
         ]
@@ -1083,6 +1106,31 @@ class Database:
                 LIMIT 1
                 """,
                 (issue_key, tool),
+            ).fetchone()
+        return row is not None
+
+    def has_successful_tool_call_since(self, issue_key: str, tool: str, since: str | None) -> bool:
+        """True if there is a successful audit row for `tool` at/after `since`.
+
+        `since` is the event's `started_at` (the claim timestamp), so the
+        window covers exactly one run — a terminal audit from a PRIOR run on
+        the same issue predates the claim and cannot satisfy it. Inclusive,
+        because the in-run audit is written in the same second as the claim
+        (same-format, 1s-resolution timestamps). `since=None` falls back to
+        the unbounded form.
+        """
+        if since is None:
+            return self.has_successful_tool_call(issue_key, tool)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM tool_calls
+                WHERE issue_key=? AND tool=? AND error IS NULL AND ts >= ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (issue_key, tool, since),
             ).fetchone()
         return row is not None
 

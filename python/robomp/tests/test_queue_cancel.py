@@ -71,6 +71,25 @@ def _row(delivery: str = "d1") -> EventRow:
     )
 
 
+def _pr_row(delivery: str = "pr1") -> EventRow:
+    """A `pull_request` row: the PR-specific cancel branch posts the terminal
+    status at `pull_request.head.sha`, so the payload MUST carry a head."""
+    return EventRow(
+        delivery_id=delivery,
+        event_type="pull_request",
+        repo="octo/widget",
+        issue_key="octo/widget#7",
+        payload={
+            "action": "opened",
+            "pull_request": {"number": 7, "head": {"sha": "cafebabe"}},
+        },
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=1,
+        last_error=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_cancel_fires_hook_armed_by_worker(settings: Settings, db: Database) -> None:
     """A worker that armed a hook gets it invoked when cancel_event runs."""
@@ -167,6 +186,57 @@ async def test_dispatch_marks_cancelled_event_failed_with_marker(
     # State is cleared for future events.
     assert row.delivery_id not in pool._cancelled  # noqa: SLF001
     assert row.delivery_id not in pool._cancel_hooks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pr_dispatch_posts_terminal_failure(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled `pull_request` delivery MUST post a TERMINAL `failure`
+    status on the head SHA (queue.py's PR-specific branch). Operator cancel
+    will not retry, so `retrying` ("will retry") would be a permanent lie on
+    the combined status."""
+    monkeypatch.setattr(settings, "pr_review_status_enabled", True)
+    pool = _make_pool(settings, db)
+    row = _pr_row("d-pr-cancel")
+
+    db.record_event(
+        delivery_id="d-pr-cancel",
+        event_type="pull_request",
+        repo="octo/widget",
+        issue_key="octo/widget#7",
+        payload=row.payload,
+        state="running",
+    )
+
+    async def fake_dispatch(self: WorkerPool, r: EventRow, *, slot_uid: int | None = None) -> None:
+        # Cancellation lands mid-task and the omp subprocess dies.
+        await pool.cancel_event(r.delivery_id)
+        raise RuntimeError("subprocess died")
+
+    monkeypatch.setattr(WorkerPool, "_dispatch", fake_dispatch)
+
+    record: list[tuple] = []
+
+    async def _record_status(repo, sha, *, state, context, description="", target_url=None):
+        record.append((repo, sha, state, context, description))
+
+    pool.github.create_commit_status = _record_status  # type: ignore[attr-defined]
+
+    await pool._run_event(row)  # noqa: SLF001 — testing the dispatcher branch directly
+
+    # Row is terminal-failed with the operator marker.
+    stored = db.get_event("d-pr-cancel")
+    assert stored is not None
+    assert stored.state == "failed"
+    assert stored.last_error == "cancelled by operator"
+    # Exactly ONE status post: terminal `failure` on the HEAD sha — never `retrying`.
+    assert len(record) == 1
+    _repo, sha, state, context, description = record[0]
+    assert sha == "cafebabe"
+    assert state == "failure"
+    assert context == "robomp/pr-review"
+    assert "cancelled by operator" in description
 
 
 @pytest.mark.asyncio
