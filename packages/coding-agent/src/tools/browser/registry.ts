@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { isCompiledBinary, logger, untilAborted, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
-import type { Browser, CDPSession } from "puppeteer-core";
+import type { Browser } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
 import { ToolError } from "../tool-errors";
 import {
@@ -22,7 +22,7 @@ import {
 	launchHeadlessBrowser,
 	loadPuppeteer,
 	removeUserDataDir,
-	type UserAgentOverride,
+	type StealthState,
 } from "./launch";
 import { reapOrphanSharedTargets, type SharedTargetScope } from "./orphan-registry";
 import type { RelayKind } from "./relay/kind";
@@ -70,7 +70,7 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	/** Lease on the shared Chromium daemon unit this handle uses; released on dispose. */
 	daemonLease?: UnitLease;
 	subprocess?: Subprocess;
-	stealth: { browserSession: CDPSession | null; override: UserAgentOverride | null };
+	stealth: StealthState;
 }
 
 export interface CmuxBrowserHandle extends BrowserHandleCommon {
