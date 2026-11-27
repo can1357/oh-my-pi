@@ -211,6 +211,20 @@ enum Miss {
 /// first seen after it must stay for [`HOLD`]. An error of a wait other than
 /// its timeout (a terminal reply that could not be sent) is the session's.
 fn wait_drawn(pty: &mut Pty, want: &Drawn, bound: Duration) -> io::Result<Option<Miss>> {
+	wait_drawn_holding(pty, want, bound, HOLD)
+}
+
+/// [`wait_drawn`] with the hold as an argument. The tests of what the hold
+/// sees hold for [`TIMEOUT`]: their script's change comes only after the
+/// terminal answers the screen before it, which a loaded machine can delay
+/// past [`HOLD`]. [`wait_drawn_holds_a_late_screen_for_200_ms`] tests the
+/// length of the hold a case has.
+fn wait_drawn_holding(
+	pty: &mut Pty,
+	want: &Drawn,
+	bound: Duration,
+	hold: Duration,
+) -> io::Result<Option<Miss>> {
 	let shows = |s: &Screen| s.contents() == want.contents && s.cursor() == want.cursor;
 	if shows(pty.last_screen()) {
 		return Ok(None);
@@ -218,7 +232,7 @@ fn wait_drawn(pty: &mut Pty, want: &Drawn, bound: Duration) -> io::Result<Option
 	if timed_out(pty.wait_screen(bound, shows))? {
 		return Ok(Some(Miss::Late));
 	}
-	if timed_out(pty.wait_screen(HOLD, |s| !shows(s)))? {
+	if timed_out(pty.wait_screen(hold, |s| !shows(s)))? {
 		Ok(None)
 	} else {
 		Ok(Some(Miss::Changed))
@@ -791,19 +805,36 @@ fn wait_drawn_takes_a_late_screen_that_stays() -> io::Result<()> {
 	Ok(())
 }
 
-/// A screen first seen after `step` returned must stay for [`HOLD`], also when
+/// A screen that comes after the step's output settled is held before it
+/// counts, for at least 200 ms. On a loaded machine a program's next drawing
+/// came up to 199.5 ms after the screen before it (beside 64 busy loops on 8
+/// CPUs), so a shorter hold would take a screen that is about to change.
+/// Only a lower bound is timed here, and a slow machine only lengthens it.
+#[test]
+fn wait_drawn_holds_a_late_screen_for_200_ms() -> io::Result<()> {
+	let mut pty = scripted("printf '\\rtwo'")?;
+	until_output(&pty, "two");
+	let start = Instant::now();
+	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
+	let held = start.elapsed();
+	assert_eq!(miss, None);
+	assert!(held >= Duration::from_millis(200), "the step took its screen after {held:?}");
+	Ok(())
+}
+
+/// A screen first seen after `step` returned must stay for the hold, also when
 /// it came before the step's first look at the screen: here a change follows.
 #[test]
 fn wait_drawn_holds_a_screen_that_came_after_the_settle() -> io::Result<()> {
 	let mut pty =
 		scripted(&format!("printf '\\rtwo\\033[6n'; {READ_ANSWER}; sleep 0.02; printf '\\rbad'"))?;
 	until_output(&pty, "two");
-	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
+	let miss = wait_drawn_holding(&mut pty, &two(), DRAWN, TIMEOUT)?;
 	assert_eq!(recorded(&mut pty, miss).contents(), "bad");
 	Ok(())
 }
 
-/// A change within [`HOLD`] fails the step, also when the screen comes back
+/// A change within the hold fails the step, also when the screen comes back
 /// before the step is recorded.
 #[test]
 fn wait_drawn_fails_a_screen_that_changes_during_the_hold() -> io::Result<()> {
@@ -811,7 +842,7 @@ fn wait_drawn_fails_a_screen_that_changes_during_the_hold() -> io::Result<()> {
 		"sleep 0.2; printf '\\rtwo\\033[6n'; {READ_ANSWER}; sleep 0.02; printf '\\rbad\\033[6n'; \
 		 {READ_ANSWER}; sleep 0.02; printf '\\r\\033[Ktwo'"
 	))?;
-	let miss = wait_drawn(&mut pty, &two(), DRAWN)?;
+	let miss = wait_drawn_holding(&mut pty, &two(), DRAWN, TIMEOUT)?;
 	until_output(&pty, "\x1b[Ktwo");
 	let screen = recorded(&mut pty, miss).contents();
 	assert_eq!(miss, Some(Miss::Changed), "the step records {screen:?}");
@@ -819,12 +850,19 @@ fn wait_drawn_fails_a_screen_that_changes_during_the_hold() -> io::Result<()> {
 }
 
 /// A step that misses the bound records the screen it had then, also when its
-/// screen comes before the step is recorded.
+/// screen comes before the step is recorded. The script draws its screen only
+/// after a second key, typed once the step has missed, so the screen comes
+/// after the miss however loaded the machine is. The miss must come at the
+/// bound: a wait of [`DRAWN`] for a 200 ms bound is the bound ignored.
 #[test]
 fn wait_drawn_records_the_screen_at_the_bound() -> io::Result<()> {
-	let mut pty = scripted("sleep 1; printf '\\rtwo'")?;
+	let mut pty = scripted("dd bs=1 count=1 of=/dev/null 2>/dev/null; printf '\\rtwo'")?;
+	let start = Instant::now();
 	let miss = wait_drawn(&mut pty, &two(), Duration::from_millis(200))?;
+	let waited = start.elapsed();
+	pty.write("k")?;
 	until_output(&pty, "two");
 	assert_eq!((miss, recorded(&mut pty, miss).contents()), (Some(Miss::Late), "one".to_owned()));
+	assert!(waited < DRAWN, "a step with a 200 ms bound missed after {waited:?}");
 	Ok(())
 }
