@@ -208,12 +208,13 @@ function looseSpans(theme: Theme, spans: readonly TspSpan[]): string {
 }
 
 /**
- * A message quoted behind a dim rail. A peer message (`width` given) shows
- * whole and wrapped once expanded, its collapsed rows cut to the card; a
- * process input keeps a fixed budget.
+ * A message quoted behind a dim rail: the tree spine the receipt and
+ * cancelled-job branches continue, so the rail and `├─` stay one line. A
+ * peer message (`width` given) shows whole and wrapped once expanded, its
+ * collapsed rows cut to the card; a process input keeps a fixed budget.
  */
 function quoteRows(theme: Theme, body: string, expanded: boolean, width?: number): string[] {
-	const prefix = `  ${theme.fg("dim", theme.symbols.symbol("md.quoteBorder"))} `;
+	const prefix = `  ${theme.fg("dim", theme.symbols.symbol("tree.vertical"))} `;
 	const source = body.split("\n").filter(line => line.trim());
 	const whole = expanded && width !== undefined;
 	const shown = whole ? source : source.slice(0, expanded ? QUOTE_EXPANDED : QUOTE_COLLAPSED);
@@ -251,7 +252,7 @@ function receiptRows(theme: Theme, list: UiNode, expanded: boolean): string[] {
 		const branch = theme.symbols.symbol(
 			index === shown.length - 1 && shown.length === items.length ? "tree.last" : "tree.branch",
 		);
-		let row = `${theme.fg("dim", branch)} ${theme.fg("toolOutput", props.label?.[0]?.t ?? "")} ${theme.fg(outcome?.s ?? "success", bracketed(theme, outcome?.t ?? ""))}`;
+		let row = `  ${theme.fg("dim", branch)} ${theme.fg("toolOutput", props.label?.[0]?.t ?? "")} ${theme.fg(outcome?.s ?? "success", bracketed(theme, outcome?.t ?? ""))}`;
 		const error = props.detail?.[0]?.t;
 		if (error) row += ` ${theme.fg("error", `${theme.symbols.symbol("format.dash")} ${error}`)}`;
 		return row;
@@ -259,12 +260,12 @@ function receiptRows(theme: Theme, list: UiNode, expanded: boolean): string[] {
 	const hidden = items.length - shown.length;
 	if (hidden > 0)
 		rows.push(
-			`${theme.fg("dim", theme.symbols.symbol("tree.last"))} ${theme.fg("muted", `… ${hidden} more recipients`)}`,
+			`  ${theme.fg("dim", theme.symbols.symbol("tree.last"))} ${theme.fg("muted", `… ${hidden} more recipients`)}`,
 		);
 	return rows;
 }
 
-/** Cancelled jobs: `└─ ⏹ ⟦bash⟧ build-42 Build assets 2.0s ⟦cancelled⟧`. */
+/** Cancelled jobs: `  └─ ⏹ ⟦bash⟧ build-42 Build assets 2.0s ⟦cancelled⟧`. */
 function cancelledRows(cx: PaintContext, list: UiNode): string[] {
 	const theme = cx.theme;
 	const items = list.children();
@@ -275,7 +276,7 @@ function cancelledRows(cx: PaintContext, list: UiNode): string[] {
 			detail?: TspSpan[];
 			term?: { status?: string; durationMs?: number };
 		};
-		const branch = theme.fg("dim", theme.symbols.symbol(index === items.length - 1 ? "tree.last" : "tree.branch"));
+		const branch = `  ${theme.fg("dim", theme.symbols.symbol(index === items.length - 1 ? "tree.last" : "tree.branch"))}`;
 		const outcome = props.value?.[0];
 		const badge = theme.fg(outcome?.s ?? "warning", bracketed(theme, outcome?.t ?? ""));
 		const job = props.term;

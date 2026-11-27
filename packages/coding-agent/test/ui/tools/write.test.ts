@@ -45,5 +45,5 @@ test("IRC writes paint the preset's direction arrow, receipt badge and error sep
 	);
 	const rows = plainToolRows(call, env);
 	expect(rows).toContain(" IRC  Reviewer failed");
-	expect(rows).toContain("└─ Reviewer ⟨failed⟩ – not running");
+	expect(rows).toContain("  └─ Reviewer ⟨failed⟩ – not running");
 });
