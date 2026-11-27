@@ -30,6 +30,7 @@
 - Typing in a Tern composer now remains responsive while an agent is streaming, even when Tern is slow to acknowledge frames.
 - Fixed inverse video styling leaking into padding and borders at wrapped line endings.
 - Fixed win32 input-mode key records being inserted as literal composer text in certain timing conditions.
+- Fixed SIXEL and iTerm2 images losing their bottom cell row in terminals that clear image cells on line erase, such as xterm.js ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 
 ## [19.2.1] - 2026-11-25
 
