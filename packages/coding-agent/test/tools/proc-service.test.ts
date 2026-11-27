@@ -810,7 +810,6 @@ describe("bash services via proc://", () => {
 		const result = await bash.execute("plain", {
 			command: "printf 'PLAIN\\n'",
 			timeout: 10,
-			cwd: process.cwd(),
 			pty: false,
 			async: false,
 			name,

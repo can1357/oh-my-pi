@@ -6,7 +6,9 @@ import {
 	is,
 	isAccountPolicyError,
 	isClinePassSurfaceGateMessage,
+	isClientAccessDisabledMessage,
 	isOAuthExpiry,
+	isOpenCodeFreeTierGateMessage,
 	isUsageLimit,
 	status,
 } from "./flags";
@@ -62,6 +64,7 @@ export function isRevokedOAuthBearerError(error: unknown): boolean {
 	return status === 403 && message !== undefined && REVOKED_OAUTH_BEARER_PATTERN.test(message);
 }
 
+/** The bearer is unusable until the user signs in again: an upstream "invalidated oauth token". */
 const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;
 
 /** Whether an upstream response explicitly says the supplied OAuth bearer was invalidated. */
@@ -100,14 +103,19 @@ export function isAnthropicOAuthOrganizationDenial(provider: string, error: unkn
  */
 export function isAuthRetryableError(error: unknown): boolean {
 	if (error instanceof OAuthError && error.kind === "token-refresh") return true;
+	const { status, message } = upstreamFailure(error);
+	// The provider switched off omp's own client: every account and every fresh
+	// token fails identically, so refresh and rotation only burn requests.
+	if (isClientAccessDisabledMessage(message)) return false;
 	if (isUsageLimit(error)) return true;
 	if (isAccountPolicyError(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
-	const { status, message } = upstreamFailure(error);
 	if (isConcurrencyCapExclusion(status, message)) return false;
 	// A Cline surface-gate 403 is per-model client policy, not a credential
 	// problem: sibling keys fail identically, so rotation only burns them.
 	if (isClinePassSurfaceGateMessage(message)) return false;
+	// Zen's free tier is likewise reserved to the OpenCode app (#12306).
+	if (isOpenCodeFreeTierGateMessage(message)) return false;
 	if (status === 401 || status === 403) return true;
 	return isUsageLimitOutcome(status, message);
 }

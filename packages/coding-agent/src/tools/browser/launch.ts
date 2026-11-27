@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$which,
+	compareVersions,
 	getPuppeteerDir,
 	isEnoent,
 	isRecord,
@@ -28,20 +29,7 @@ import type {
 	Target,
 	Viewport,
 } from "puppeteer-core";
-import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
-import stealthActivityScript from "../puppeteer/01_stealth_activity.txt" with { type: "text" };
-import stealthHairlineScript from "../puppeteer/02_stealth_hairline.txt" with { type: "text" };
-import stealthBotdScript from "../puppeteer/03_stealth_botd.txt" with { type: "text" };
-import stealthIframeScript from "../puppeteer/04_stealth_iframe.txt" with { type: "text" };
-import stealthWebglScript from "../puppeteer/05_stealth_webgl.txt" with { type: "text" };
-import stealthScreenScript from "../puppeteer/06_stealth_screen.txt" with { type: "text" };
-import stealthFontsScript from "../puppeteer/07_stealth_fonts.txt" with { type: "text" };
-import stealthAudioScript from "../puppeteer/08_stealth_audio.txt" with { type: "text" };
-import stealthLocaleScript from "../puppeteer/09_stealth_locale.txt" with { type: "text" };
-import stealthPluginsScript from "../puppeteer/10_stealth_plugins.txt" with { type: "text" };
-import stealthHardwareScript from "../puppeteer/11_stealth_hardware.txt" with { type: "text" };
-import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type: "text" };
-import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
+import webglMaskSource from "../puppeteer/webgl-mask.txt" with { type: "text" };
 import { ToolError } from "../tool-errors";
 import { withDownload } from "../../downloads/activity";
 import { TOOL_TIMEOUTS } from "../tool-timeouts";
@@ -118,7 +106,30 @@ export const RENDERER_PRIORITY_ARGS: readonly string[] =
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
 const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
-const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
+// Dedicated workers inherit their page's override; shared and service workers are targets of their own.
+const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page", "shared_worker", "service_worker"]);
+
+/**
+ * Height a stock Chrome window spends on its tab strip and toolbar. Headless draws none, so its
+ * window is this much taller than the emulated viewport, keeping `outerHeight` above `innerHeight`
+ * as in a real browser.
+ */
+const BROWSER_CHROME_HEIGHT = 88;
+
+/**
+ * `--screen-info` value for headless Chromium, which otherwise reports an 800x600 screen smaller
+ * than its own window. Models a common display of the platform the user agent claims (Linux hosts
+ * claim Windows). Its menu bar or taskbar inset shows in `screen.availHeight` only on pages without
+ * viewport emulation, which reports the whole screen as available.
+ */
+function headlessScreenInfo(window: { width: number; height: number }, platform: NodeJS.Platform): string {
+	// MacBook Pro 16" default scaled mode under its menu bar; a 1440p monitor at 125% above the taskbar.
+	const mac = platform === "darwin";
+	const reserved = mac ? 38 : 48;
+	const width = Math.max(mac ? 1728 : 2048, window.width);
+	const height = Math.max(mac ? 1117 : 1152, window.height + reserved);
+	return `--screen-info={0,0 ${width}x${height} ${mac ? "workAreaTop" : "workAreaBottom"}=${reserved}}`;
+}
 /** How long a pipe-launched Chromium may take to publish its DevTools port after launch. */
 const DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS = 10_000;
 /** Upper bound on `browser.close()`, which resolves only once Chromium exits; a wedged one never does (issue #5260). */
@@ -523,6 +534,65 @@ async function isChromiumExecutable(p: string): Promise<boolean> {
 	}
 }
 
+const chromiumMajorVersions = new Map<string, Promise<number | undefined>>();
+
+/**
+ * Major version of a Chromium executable, read from its bundle metadata without opening a window:
+ * the macOS bundle's Info.plist, the version directory beside a Windows `chrome.exe`, and
+ * `--version` on Linux (the same probe {@link isChromiumExecutable} runs). Undefined when unknown.
+ */
+function chromiumMajorVersion(executablePath: string): Promise<number | undefined> {
+	let version = chromiumMajorVersions.get(executablePath);
+	if (!version) {
+		version = readChromiumVersion(executablePath).then(
+			text => Number.parseInt(text?.match(/(\d+)\.\d+\.\d+\.\d+/)?.[1] ?? "", 10) || undefined,
+			() => undefined,
+		);
+		chromiumMajorVersions.set(executablePath, version);
+	}
+	return version;
+}
+
+async function readChromiumVersion(executablePath: string): Promise<string | undefined> {
+	if (process.platform === "darwin") {
+		const contents = executablePath.match(/^(.*\.app\/Contents)\//)?.[1];
+		if (!contents) return undefined;
+		const plist = await Bun.file(path.join(contents, "Info.plist")).text();
+		return plist.match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+	}
+	if (process.platform === "win32") {
+		const entries = await fs.promises.readdir(path.dirname(executablePath));
+		return entries
+			.filter(entry => /^\d+\.\d+\.\d+\.\d+$/.test(entry))
+			.sort(compareVersions)
+			.at(-1);
+	}
+	const proc = Bun.spawn([executablePath, "--version"], {
+		stdout: "pipe",
+		stderr: "ignore",
+		signal: AbortSignal.timeout(3000),
+		killSignal: "SIGKILL",
+	});
+	const stdout = await new Response(proc.stdout).text();
+	return (await proc.exited) === 0 ? stdout : undefined;
+}
+
+/**
+ * `--user-agent` switch carrying the desktop Chrome user agent omp presents (Linux hosts present
+ * Windows, as {@link resolveUserAgentOverride} does). Shared and service workers ignore CDP user
+ * agent overrides and would otherwise report `HeadlessChrome`. Empty for Edge, whose user agent
+ * names Edge, and for executables whose version is unknown.
+ */
+async function userAgentArgs(executablePath: string | undefined): Promise<string[]> {
+	if (!executablePath || isMicrosoftEdgeExecutable(executablePath)) return [];
+	const major = await chromiumMajorVersion(executablePath);
+	if (!major) return [];
+	const system = process.platform === "darwin" ? "Macintosh; Intel Mac OS X 10_15_7" : "Windows NT 10.0; Win64; x64";
+	return [
+		`--user-agent=Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+	];
+}
+
 /** Flatpak application id published by the Ungoogled Chromium project. */
 const UNGOOGLED_CHROMIUM_FLATPAK_ID = "io.github.ungoogled_software.ungoogled_chromium";
 
@@ -654,8 +724,13 @@ export interface LaunchHeadlessResult {
  */
 export function buildHeadlessLaunchArgs(
 	viewport: { width: number; height: number },
-	features: HeadlessLaunchFeatures = {},
+	features: HeadlessLaunchFeatures & { headless?: boolean; platform?: NodeJS.Platform } = {},
 ): string[] {
+	const platform = features.platform ?? process.platform;
+	// The emulated viewport fills a headless window minus the browser chrome it would draw.
+	const window = features.headless
+		? { width: viewport.width, height: viewport.height + BROWSER_CHROME_HEIGHT }
+		: viewport;
 	const launchArgs = [
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
@@ -664,9 +739,16 @@ export function buildHeadlessLaunchArgs(
 		"--hide-scrollbars",
 		// Chromium 157 removed `WebMCPTesting`, which used to imply `WebMCP`.
 		"--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport",
-		`--window-size=${viewport.width},${viewport.height}`,
+		`--window-size=${window.width},${window.height}`,
 		...RENDERER_PRIORITY_ARGS,
 	];
+	if (features.headless) launchArgs.push(headlessScreenInfo(window, platform));
+	// Unified headless Chrome still owns a hidden native window; some Windows
+	// builds compose it as a blank white window (Chromium 359921643). Park it
+	// off the visible desktop.
+	if (features.headless && platform === "win32") {
+		launchArgs.push("--window-position=-10000,-10000");
+	}
 	if (features.insecure) launchArgs.push("--ignore-certificate-errors");
 	const proxy = process.env.PUPPETEER_PROXY;
 	if (proxy) {
@@ -697,6 +779,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	};
 	const puppeteer = await loadPuppeteer();
 	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
+		headless: opts.headless,
 		insecure: opts.insecure,
 	});
 	for (const arg of opts.args ?? []) {
@@ -733,6 +816,9 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		const staleActivePort = pipe ? await readActivePort(activePortFile) : undefined;
 		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
 		const executablePath = await ensureChromiumExecutable();
+		if (!launchArgs.some(arg => arg.startsWith("--user-agent="))) {
+			launchArgs.push(...(await userAgentArgs(executablePath)));
+		}
 		const browser = await puppeteer.launch({
 			headless: opts.headless,
 			defaultViewport: opts.headless ? initialViewport : null,
@@ -909,7 +995,7 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 	const ignored = new Set(stealthIgnoreDefaultArgs(executablePath));
 	const defaults = await puppeteer.defaultArgs({
 		headless: opts.headless,
-		args: buildHeadlessLaunchArgs(vp),
+		args: [...buildHeadlessLaunchArgs(vp, { headless: opts.headless }), ...(await userAgentArgs(executablePath))],
 		userDataDir: opts.userDataDir,
 	});
 	return {
@@ -938,17 +1024,16 @@ export async function removeUserDataDir(dir: string): Promise<void> {
 }
 
 export async function applyViewport(page: Page, viewport?: Viewport): Promise<void> {
-	if (!viewport) {
-		await page.setViewport(DEFAULT_VIEWPORT);
-		return;
-	}
-	await page.setViewport({
-		width: viewport.width,
-		height: viewport.height,
-		deviceScaleFactor: viewport.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
-		isMobile: viewport.isMobile,
-		hasTouch: viewport.hasTouch,
-	});
+	const applied = viewport
+		? {
+				width: viewport.width,
+				height: viewport.height,
+				deviceScaleFactor: viewport.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
+				isMobile: viewport.isMobile,
+				hasTouch: viewport.hasTouch,
+			}
+		: DEFAULT_VIEWPORT;
+	await page.setViewport(applied);
 }
 
 /**
@@ -1114,11 +1199,6 @@ async function sendUserAgentOverride(client: PuppeteerCdpClient, override: UserA
 	}
 }
 
-export interface UserAgentSession {
-	override: UserAgentOverride;
-	browserSession: CDPSession | null;
-}
-
 /** Configure UA override on the browser + auto-attach to new targets. */
 async function configureUserAgentTargets(
 	browser: Browser,
@@ -1127,23 +1207,30 @@ async function configureUserAgentTargets(
 ): Promise<void> {
 	if (!state.browserSession) {
 		state.browserSession = await browser.target().createCDPSession();
+		// New targets hold before their first script until resumed, so a worker never reads the
+		// headless user agent before its override lands.
 		await state.browserSession.send("Target.setAutoAttach", {
 			autoAttach: true,
-			waitForDebuggerOnStart: false,
+			waitForDebuggerOnStart: true,
 			flatten: true,
 		});
 		state.browserSession.on(
 			"Target.attachedToTarget",
-			async (event: { sessionId: string; targetInfo?: { type?: string } }) => {
-				if (!targetInfoSupportsUserAgentOverride(event.targetInfo)) return;
-				const connection = state.browserSession?.connection();
-				const session = connection?.session(event.sessionId);
+			async (event: { sessionId: string; targetInfo?: { type?: string }; waitingForDebugger?: boolean }) => {
+				const session = state.browserSession?.connection()?.session(event.sessionId);
 				if (!session) return;
-				await withSoftTimeout(
-					sendUserAgentOverride(wrapSession(session), state.override),
-					targetTimeoutMs,
-					"new target user-agent override",
-				);
+				try {
+					if (targetInfoSupportsUserAgentOverride(event.targetInfo)) {
+						await withSoftTimeout(
+							sendUserAgentOverride(wrapSession(session), state.override),
+							targetTimeoutMs,
+							"new target user-agent override",
+						);
+					}
+				} finally {
+					if (event.waitingForDebugger)
+						await session.send("Runtime.runIfWaitingForDebugger").catch(() => undefined);
+				}
 			},
 		);
 	}
@@ -1198,34 +1285,13 @@ async function withSoftTimeout<T>(promise: Promise<T>, timeoutMs: number, label:
 	}
 }
 
-const STEALTH_PATCH_SCRIPTS = [
-	stealthTamperingScript,
-	stealthActivityScript,
-	stealthHairlineScript,
-	stealthBotdScript,
-	stealthIframeScript,
-	stealthWebglScript,
-	stealthScreenScript,
-	stealthFontsScript,
-	stealthAudioScript,
-	stealthLocaleScript,
-	stealthPluginsScript,
-	stealthHardwareScript,
-	stealthCodecsScript,
-	stealthWorkerScript,
-];
-
-function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_SCRIPTS): string {
-	const joint = scripts
-		.map(
-			script => `
-		try {
-			${script};
-		} catch (e) {}
-	`,
-		)
-		.join(";\n");
-
+/**
+ * Page bootstrap that masks the WebGL renderer: pristine natives from a throwaway iframe, a
+ * `Function.prototype.toString` proxy reporting patched functions as native, then the mask.
+ * Every native patch is detectable, so it is injected only where the real renderer would give the
+ * browser away (see {@link webglNeedsMask}).
+ */
+function buildWebglMaskScript(): string {
 	return `(() => {
 				const Page_Function_toString = Function.prototype.toString;
 				const Page_FunctionToStringDescriptor = Object.getOwnPropertyDescriptor(Function.prototype, "toString");
@@ -1233,13 +1299,10 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 				const Page_WeakMap = WeakMap;
 				const Page_WeakMap_get = Page_WeakMap.prototype.get;
 				const Page_WeakMap_set = Page_WeakMap.prototype.set;
-				// Native function cache - captured before any tampering.
 				// A same-origin iframe yields natives uncontaminated by page-level
 				// tampering, but at document-start (when this preload runs) there is
-				// no documentElement to attach it to. In that case the page itself
-				// hasn't executed yet, so window's own natives are still pristine —
-				// fall back to window instead of bailing, otherwise none of the
-				// fingerprint patches below would ever run.
+				// no documentElement to attach it to. The page has not run yet then,
+				// so window's own natives are still pristine.
 				let iframe = null;
 				const container = document.head ?? document.documentElement;
 				if (container) {
@@ -1251,43 +1314,15 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 				try {
 					const nativeWindow = iframe ? iframe.contentWindow : window;
 
-					// Cache pristine native functions
-					const Function_toString = nativeWindow.Function.prototype.toString;
 					const Object_getOwnPropertyDescriptor = nativeWindow.Object.getOwnPropertyDescriptor;
-					const Object_getOwnPropertyDescriptors = nativeWindow.Object.getOwnPropertyDescriptors;
 					const Object_getPrototypeOf = nativeWindow.Object.getPrototypeOf;
 					const Object_defineProperty = nativeWindow.Object.defineProperty;
-					const Object_getOwnPropertyDescriptorOriginal = nativeWindow.Object.getOwnPropertyDescriptor;
 					const Object_create = nativeWindow.Object.create;
-					const Object_keys = nativeWindow.Object.keys;
-					const Object_getOwnPropertyNames = nativeWindow.Object.getOwnPropertyNames;
-					const Object_entries = nativeWindow.Object.entries;
-					const Object_setPrototypeOf = nativeWindow.Object.setPrototypeOf;
-					const Object_assign = nativeWindow.Object.assign;
-					const Window_setTimeout = nativeWindow.setTimeout;
-					const Math_random = nativeWindow.Math.random;
-					const Math_floor = nativeWindow.Math.floor;
 					const Math_max = nativeWindow.Math.max;
-					const Math_min = nativeWindow.Math.min;
-					const Window_Event = nativeWindow.Event;
-					const Promise_resolve = nativeWindow.Promise.resolve.bind(nativeWindow.Promise);
-					const Window_Blob = nativeWindow.Blob;
 					const Window_Proxy = nativeWindow.Proxy;
 					const Reflect_get = nativeWindow.Reflect.get;
-					const Reflect_set = nativeWindow.Reflect.set;
 					const Reflect_apply = nativeWindow.Reflect.apply;
-					const Reflect_construct = nativeWindow.Reflect.construct;
-					const Reflect_defineProperty = nativeWindow.Reflect.defineProperty;
-					const Reflect_deleteProperty = nativeWindow.Reflect.deleteProperty;
-					const Reflect_getOwnPropertyDescriptor = nativeWindow.Reflect.getOwnPropertyDescriptor;
-					const Reflect_getPrototypeOf = nativeWindow.Reflect.getPrototypeOf;
-					const Reflect_has = nativeWindow.Reflect.has;
-					const Reflect_isExtensible = nativeWindow.Reflect.isExtensible;
 					const Reflect_ownKeys = nativeWindow.Reflect.ownKeys;
-					const Reflect_preventExtensions = nativeWindow.Reflect.preventExtensions;
-					const Reflect_setPrototypeOf = nativeWindow.Reflect.setPrototypeOf;
-					const Intl_DateTimeFormat = nativeWindow.Intl.DateTimeFormat;
-					const Date_constructor = nativeWindow.Date;
 
 					const nativeFunctionSources = new Page_WeakMap();
 					const makeNativeString = (name) => "function " + (name || "") + "() { [native code] }";
@@ -1296,49 +1331,66 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 						return fn;
 					};
 					const patchToString = (fn, name) => registerNativeSource(fn, makeNativeString(name));
-					if (${scripts.length > 0 ? "true" : "false"}) {
-						const functionToStringProxy = new Page_Proxy(Page_Function_toString, {
-							apply(target, thisArg, args) {
-								const source = Reflect_apply(Page_WeakMap_get, nativeFunctionSources, [thisArg]);
-								if (source) return source;
-								return Reflect_apply(target, thisArg, args || []);
-							},
-							get(target, key, receiver) {
-								return Reflect_get(target, key, receiver);
-							},
-						});
-						registerNativeSource(functionToStringProxy, makeNativeString("toString"));
-						Object_defineProperty(Function.prototype, "toString", {
-							...(Page_FunctionToStringDescriptor || {
-								writable: true,
-								configurable: true,
-								enumerable: false,
-							}),
-							value: functionToStringProxy,
-						});
-					}
+					const functionToStringProxy = new Page_Proxy(Page_Function_toString, {
+						apply(target, thisArg, args) {
+							const source = Reflect_apply(Page_WeakMap_get, nativeFunctionSources, [thisArg]);
+							if (source) return source;
+							return Reflect_apply(target, thisArg, args || []);
+						},
+						get(target, key, receiver) {
+							return Reflect_get(target, key, receiver);
+						},
+					});
+					registerNativeSource(functionToStringProxy, makeNativeString("toString"));
+					Object_defineProperty(Function.prototype, "toString", {
+						...(Page_FunctionToStringDescriptor || {
+							writable: true,
+							configurable: true,
+							enumerable: false,
+						}),
+						value: functionToStringProxy,
+					});
 
-					${joint}
+					try {
+						${webglMaskSource};
+					} catch (e) {}
 				} finally {
 					if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
 				}})();`;
 }
 
-async function injectStealthScripts(page: Page): Promise<void> {
-	await page.evaluateOnNewDocument(buildStealthInjectionScript());
+/** Reads the unmasked WebGL renderer in an isolated world; empty when the page gets no WebGL. */
+const WEBGL_RENDERER_PROBE = `(() => {
+	const gl = document.createElement("canvas").getContext("webgl");
+	const info = gl && gl.getExtension("WEBGL_debug_renderer_info");
+	return info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : "";
+})()`;
+
+/**
+ * Whether the browser's real WebGL renderer would give it away: a software rasterizer, or a GPU
+ * the claimed platform cannot have (Linux hosts claim Windows). A GPU matching the claim needs no
+ * mask, and no WebGL leaves nothing to mask.
+ */
+async function webglNeedsMask(page: Page, platform: string): Promise<boolean> {
+	const probed = await page.evaluate(WEBGL_RENDERER_PROBE).catch(() => "");
+	const renderer = typeof probed === "string" ? probed.toLowerCase() : "";
+	if (!renderer) return false;
+	if (/swiftshader|llvmpipe|lavapipe|software|mesa offscreen/.test(renderer)) return true;
+	if (platform === "Win32") return /apple|mesa|opengl engine/.test(renderer);
+	if (platform === "MacIntel") return /direct3d|d3d|mesa/.test(renderer);
+	return /direct3d|d3d|apple/.test(renderer);
 }
 
-/** Builds the browser-page stealth bootstrap source for regression tests. */
-export function buildStealthInjectionScriptForTest(scripts: readonly string[] = STEALTH_PATCH_SCRIPTS): string {
-	return buildStealthInjectionScript(scripts);
+/** Per-browser stealth state {@link applyStealthPatches} fills in on first use and reuses after. */
+export interface StealthState {
+	browserSession: CDPSession | null;
+	override: UserAgentOverride | null;
+	/** Whether pages need {@link buildWebglMaskScript}; probed once per browser. */
+	webglMask?: boolean;
 }
 
 /** Apply stealth patches + UA override to a headless page. Idempotent within a tab. */
-export async function applyStealthPatches(
-	browser: Browser,
-	page: Page,
-	state: { browserSession: CDPSession | null; override: UserAgentOverride | null },
-): Promise<void> {
+export async function applyStealthPatches(browser: Browser, page: Page, state: StealthState): Promise<void> {
 	if (!state.override) {
 		state.override = await resolveUserAgentOverride(page);
 	}
@@ -1351,7 +1403,8 @@ export async function applyStealthPatches(
 	const targetState = { browserSession: state.browserSession, override: state.override };
 	await configureUserAgentTargets(browser, targetState);
 	state.browserSession = targetState.browserSession;
-	await injectStealthScripts(page);
+	state.webglMask ??= await webglNeedsMask(page, state.override.platform);
+	if (state.webglMask) await page.evaluateOnNewDocument(buildWebglMaskScript());
 }
 
 /** Exposes executable candidates for detection tests. */

@@ -285,6 +285,18 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=1000000 max-tokens=65536
 		}
+		model "gemini-4-neon" name="Gemini 4 Neon" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+		model "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
 		model "gemini-4-carbon" name="Gemini 4 Carbon" {
 			reasoning #true
 			input "text" "image"
@@ -995,6 +1007,41 @@ provider "factory-droid" {
 		thinking-default-level "high"
 		entitlement { feature-flag "garnet_0715" }
 	}
+	// Global-only like Carbon, with no launch promotion. Its list price is the
+	// Gemini API row's in the Gemini class rules (classes/gemini.kdl).
+	models "gemini-4-neon" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates {
+			input 1.2
+			output 5
+			cache-read 0.05
+		}
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "gemini_4_neon" }
+	}
+	// Served like Gemini 3.8 Flash (Global and EU, not US), with Neon's xhigh
+	// ladder and none of the Gemini 4 request policy. Its list price is the
+	// Gemini API row's in the Gemini class rules (classes/gemini.kdl).
+	models "gemini-4-hydrogen" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-eu "google"
+		credit-rates {
+			input 0.6
+			output 5
+			cache-read 0.05
+		}
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "gemini_4_hydrogen" }
+	}
 	// Like Argon: Global-only, and promoted at half its input rate for launch.
 	// Its list price is the Gemini API row's, where the Gemini class rules
 	// (classes/gemini.kdl) carry Google's $2/$10 until 2026-11-30, then $4/$20.
@@ -1666,13 +1713,14 @@ provider "factory-droid" {
 		omit-max-output-tokens #true
 		google-thinking "level"
 	}
-	models "gemini-4-carbon" "gemini-4-argon" "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
+	models "gemini-4-neon" "gemini-4-hydrogen" "gemini-4-carbon" "gemini-4-argon" "gemini-3.1-pro-preview" \
+		"gemini-3.7-flash" "gemini-3.8-flash" {
 		google-thinking "level-medium"
 	}
-	// Argon's and Carbon's request policy: no sampling parameters, the output
-	// cap pinned to the model maximum, and their own model turns replayed as
-	// Gemini sent them.
-	models "gemini-4-carbon" "gemini-4-argon" {
+	// Gemini 4's request policy (Neon, Carbon, Argon): no sampling parameters,
+	// the output cap pinned to the model maximum, and their own model turns
+	// replayed as Gemini sent them.
+	models "gemini-4-neon" "gemini-4-carbon" "gemini-4-argon" {
 		google-omit-sampling #true
 		google-pin-max-output-tokens #true
 		google-native-replay #true

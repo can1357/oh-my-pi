@@ -66,6 +66,8 @@ export class STTController {
 	/** Cancels the start in flight: its model preflight wait and whatever start step follows it. */
 	#startAbort: AbortController | null = null;
 	#disposed = false;
+	/** The accelerated-device fallback warning is shown once per controller. */
+	#deviceFallbackWarned = false;
 	readonly #createCapture: CaptureFactory;
 	readonly #settings: Settings;
 	readonly #registry: SttRegistry | undefined;
@@ -431,6 +433,13 @@ export class STTController {
 			onPartial: text => {
 				if (this.#disposed || this.#state !== "recording") return;
 				this.#streamEditor?.setVolatileText(this.#prefixed(text));
+			},
+			onDeviceFallback: ({ device, fallbackDevice, error }) => {
+				if (this.#disposed || this.#deviceFallbackWarned) return;
+				this.#deviceFallbackWarned = true;
+				options.showWarning(
+					`Dictation model could not load on ${device} (${error.split("\n")[0]}); running on ${fallbackDevice} instead, which may be slower.`,
+				);
 			},
 			onSegment: text => {
 				if (this.#disposed) return;

@@ -20,7 +20,7 @@ import { batch, signal, type Signal } from "../reactive";
 import { createSurface, type Surface, type SurfaceTemplate } from "../surface";
 import { TermBackend, type TermBackendOptions } from "../term/backend";
 import { stripEscapes } from "../text/ansi";
-import type { Theme } from "../theme/contract";
+import { CONSERVATIVE_EMOJI, type Theme } from "../theme/contract";
 import { PLAIN_THEME } from "../theme/plain";
 
 /** Configuration of {@link createTestTerminal}. */
@@ -35,6 +35,13 @@ export interface TestTerminalOptions {
 	readonly onKey?: TermBackendOptions["onKey"];
 	readonly intercept?: TermBackendOptions["intercept"];
 	readonly textSizing?: TermBackendOptions["textSizing"];
+	readonly screen?: TermBackendOptions["screen"];
+	readonly copySelection?: TermBackendOptions["copySelection"];
+	readonly copyOnSelect?: TermBackendOptions["copyOnSelect"];
+	readonly wheelLines?: TermBackendOptions["wheelLines"];
+	readonly scrollbar?: TermBackendOptions["scrollbar"];
+	readonly spinnerInterval?: TermBackendOptions["spinnerInterval"];
+	readonly reduceMotion?: TermBackendOptions["reduceMotion"];
 	/** Drive this surface (an app shell's) instead of one built from the template. */
 	readonly surface?: Surface;
 }
@@ -84,6 +91,7 @@ const BASE_CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: CONSERVATIVE_EMOJI,
 };
 
 /** Printable text of a bare key id (`a`, `space`, `shift+a`), if it produces any. */
@@ -172,6 +180,13 @@ export function createTestTerminal(template: () => SurfaceTemplate, options: Tes
 		...(options.onKey ? { onKey: options.onKey } : {}),
 		...(options.intercept ? { intercept: options.intercept } : {}),
 		...(options.textSizing ? { textSizing: options.textSizing } : {}),
+		...(options.screen ? { screen: options.screen } : {}),
+		...(options.copySelection ? { copySelection: options.copySelection } : {}),
+		...(options.copyOnSelect ? { copyOnSelect: options.copyOnSelect } : {}),
+		...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
+		...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
+		...(options.spinnerInterval === undefined ? {} : { spinnerInterval: options.spinnerInterval }),
+		...(options.reduceMotion ? { reduceMotion: options.reduceMotion } : {}),
 	});
 	backend.start();
 	const input = (event: InputEvent): void => {

@@ -26,7 +26,13 @@ import { encodeHelloQuery, NativeSurfaces, TspConnection } from "./native";
 import { isTernPane } from "./driver/caps/identity";
 import type { UiNode } from "./node";
 import type { Surface } from "./surface";
-import { driverImages, TermBackend } from "./term/backend";
+import {
+	driverImages,
+	type SelectionMotion,
+	TermBackend,
+	type TermBackendOptions,
+	type TranscriptScroll,
+} from "./term/backend";
 import type { Theme } from "./theme/contract";
 import type { FramePlan, InputEvent, TerminalDriver } from "./driver/contract";
 import type { MouseTracking } from "./driver/io";
@@ -36,7 +42,18 @@ import { markExpectedCleanupError } from "@oh-my-pi/pi-utils/postmortem";
 import { type Accessor, type Reactive, signal } from "./reactive";
 
 /** Configuration of {@link startHost}. */
-export interface HostOptions {
+export interface HostOptions extends Pick<
+	TermBackendOptions,
+	| "screen"
+	| "isPrompt"
+	| "copySelection"
+	| "copyOnSelect"
+	| "wheelLines"
+	| "scrollbar"
+	| "exitTranscript"
+	| "spinnerInterval"
+	| "reduceMotion"
+> {
 	readonly surface: Surface;
 	readonly theme: Accessor<Theme>;
 	readonly title?: string;
@@ -153,6 +170,18 @@ export interface Host {
 	 * the hovered hit, whose band no report would clear anymore.
 	 */
 	setMouse(tracking: MouseTracking): void;
+	/**
+	 * Scroll the fullscreen transcript window (a page, a line, its start or end, or a row count);
+	 * the end follows the tail again. False when no such window is on screen (inline mode, a
+	 * fullscreen page up, native rendering), so the caller's key can go elsewhere.
+	 */
+	scroll(by: TranscriptScroll): boolean;
+	/** Open find in the visible terminal transcript. False when unavailable. */
+	openSearch(): boolean;
+	/** Copy its active selection. False when there is none. */
+	copySelection(): boolean;
+	/** Move the active selection endpoint, declining when no transcript range owns the key. */
+	extendSelection(motion: SelectionMotion): boolean;
 	/** Stop rendering, close the native surface, restore the terminal. */
 	stop(): Promise<void>;
 }
@@ -227,6 +256,10 @@ type Renderer = Pick<
 	| "feature"
 	| "checkoutShown"
 	| "setMouse"
+	| "scroll"
+	| "openSearch"
+	| "copySelection"
+	| "extendSelection"
 	| "suspend"
 	| "requestFrame"
 > & {
@@ -255,6 +288,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 	const driver = createTerminalDriver(
 		{
 			isLoopStalled: () => watchdog.isStalled(),
+			deferShellLine: () => options.screen?.() === "fullscreen",
 			...options.driver,
 			...(native ? { hello: encodeHelloQuery(options.version ? { ver: options.version } : {}) } : {}),
 		},
@@ -360,6 +394,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			feature: name => connection.hasFeature(name),
 			checkoutShown: () => connection.checkout(),
 			setMouse: tracking => driver.setMouse(tracking),
+			scroll: () => false,
+			openSearch: () => false,
+			copySelection: () => false,
+			extendSelection: () => false,
 			requestFrame: () => {},
 			async suspend(run) {
 				backend.stop(false);
@@ -378,6 +416,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 	};
 
 	const termRenderer = (): Renderer => {
+		let mouse: MouseTracking = "off";
 		options.beforeTerminalRenderer?.();
 		const presenting = tapFrames(driver, frame => {
 			for (const listener of frameListeners) listener(frame);
@@ -392,6 +431,15 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
+			...(options.spinnerInterval === undefined ? {} : { spinnerInterval: options.spinnerInterval }),
+			...(options.reduceMotion ? { reduceMotion: options.reduceMotion } : {}),
+			...(options.screen ? { screen: options.screen } : {}),
+			...(options.isPrompt ? { isPrompt: options.isPrompt } : {}),
+			...(options.copySelection ? { copySelection: options.copySelection } : {}),
+			...(options.copyOnSelect ? { copyOnSelect: options.copyOnSelect } : {}),
+			...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
+			...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
+			...(options.exitTranscript ? { exitTranscript: options.exitTranscript } : {}),
 			...(options.onKey ? { onKey: options.onKey } : {}),
 			...(options.intercept ? { intercept: options.intercept } : {}),
 		});
@@ -419,9 +467,14 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			checkoutShown: () => false,
 			requestFrame: () => backend.requestRender(),
 			setMouse(tracking) {
-				driver.setMouse(tracking);
+				mouse = tracking;
+				driver.setMouse(tracking, options.screen?.() === "fullscreen");
 				if (tracking === "off") backend.clearHover();
 			},
+			scroll: by => backend.scroll(by),
+			openSearch: () => backend.openSearch(),
+			copySelection: () => backend.copySelection(),
+			extendSelection: motion => backend.extendSelection(motion),
 			async suspend(run) {
 				backend.renderNow();
 				backend.stop();
@@ -430,7 +483,11 @@ export async function startHost(options: HostOptions): Promise<Host> {
 					return await run();
 				} finally {
 					await driver.start();
-					driver.resetDisplay();
+					// A fullscreen session that never wrote history has nothing to redraw on the normal
+					// screen (a reset would clear it at exit): its next frame paints the alternate screen whole.
+					const fullscreen = options.screen?.() === "fullscreen";
+					if (fullscreen) driver.setMouse(mouse, true);
+					if (!fullscreen || backend.wroteHistory) driver.resetDisplay();
 					backend.start();
 				}
 			},
@@ -473,6 +530,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			return () => changeListeners.delete(listener);
 		},
 		setMouse: tracking => renderer.setMouse(tracking),
+		scroll: by => renderer.scroll(by),
+		openSearch: () => renderer.openSearch(),
+		copySelection: () => renderer.copySelection(),
+		extendSelection: motion => renderer.extendSelection(motion),
 		async stop() {
 			if (stopped) return driver.stop();
 			stopped = true;

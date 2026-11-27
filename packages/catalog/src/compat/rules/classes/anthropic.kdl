@@ -42,6 +42,10 @@ class "anthropic" {
 		max-tokens 4784
 	}
 	family "opus" {
+		// The 8×16 grid improved English QA recall on both Opus 5.5 samples.
+		revision "=5.5" {
+			snapcompact-variant "8on16-bw"
+		}
 		revision "<4.7" {
 			image-tokenization {
 				regime "anthropic-patch"
@@ -371,7 +375,7 @@ class "anthropic" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
-		"google-antigravity" "google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
+		"google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
 		family "sonnet" {
 			revision ">=3.7 <4.6" {
 				thinking-mode "budget"
@@ -422,7 +426,7 @@ class "anthropic" {
 			}
 		}
 	}
-	on "amazon-bedrock" "cursor" "google-antigravity" "openrouter" {
+	on "amazon-bedrock" "cursor" "openrouter" {
 		family "sonnet" {
 			revision ">=4.6 <5" {
 				thinking-efforts "minimal" "low" "medium" "high"
@@ -432,7 +436,7 @@ class "anthropic" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
 	}
-	on "amazon-bedrock" "google-antigravity" {
+	on "amazon-bedrock" {
 		family "sonnet" {
 			revision ">=4.6 <5" {
 				thinking-mode "budget"
@@ -792,23 +796,6 @@ class "anthropic" {
 	family "haiku" {
 		revision "=3.5" {
 			inject-claude-code-instruction #false
-		}
-	}
-
-	// Cloud Code Assist exposes Claude through Google's wire envelope.
-	on "google-antigravity" {
-		supports-function-part-id #true
-		cca-legacy-parameters-schema #true
-	}
-	on "google-antigravity" {
-		drop-unsigned-thinking #true
-		antigravity-claude-tool-mode #true
-		antigravity-usage-label "true"
-		// The interleaved-thinking beta gated Claude 4.x thinking here. The
-		// native 2.26.0 client sends no beta for Claude 5.5, whose thinking
-		// streams without it.
-		revision "<5" {
-			claude-thinking-beta-header #true
 		}
 	}
 }

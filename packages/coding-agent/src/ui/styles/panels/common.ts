@@ -4,7 +4,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { padTo, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { TspKbdProps, TspSpan, TspText, TspTextProps } from "@oh-my-pi/pi-wire";
@@ -120,8 +120,7 @@ export function hintText(hints: UiNode, separator = "  "): string {
 export function activityFrame(cx: PaintContext): string {
 	const frames = cx.theme.symbols.activityFrames;
 	if (frames.length === 0) return "";
-	if (cx.reduceMotion) return frames[0]!;
-	return frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!;
+	return frames[spinnerIndex(cx, frames.length)]!;
 }
 
 /**

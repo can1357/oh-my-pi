@@ -35,6 +35,7 @@ import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
 import { attachQueueShorthand } from "../../ui/composer/queue-shorthand";
 import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
+import { mentionChipAtomizer } from "../../ui/composer/mention-chips";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
 import { skillAtomizer } from "../../ui/composer/skill-chips";
 import { getSkillSlashCommandName } from "../../extensibility/skills";
@@ -58,6 +59,7 @@ import { resizeImage } from "../../utils/image-resize";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "../../utils/image-source";
 import { shortenPath, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { resendProgramStatus } from "../../utils/run-status";
+import { resendProgramResume } from "../../utils/program-resume";
 import { truncateToWidth } from "../../utils/text-width";
 import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { buildVideoContactSheetPng, probeVideo, VideoError } from "../../utils/video";
@@ -67,7 +69,7 @@ import { createModelBrowserSource } from "../model-browser-source";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
-	cfgDisplayHideToolActivity,
+	cfgDisplayToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
 	cfgImagesAutoResize,
@@ -75,6 +77,7 @@ import {
 	cfgPasteLargeMenuThreshold,
 	cfgSpellingAutocorrect,
 	cfgSpellingTypoDetection,
+	TOOL_ACTIVITY_MODES,
 } from "../settings";
 import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
@@ -160,6 +163,7 @@ const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 		return !verb || (verb === "full" && !rest);
 	},
 	model: () => true,
+	retry: () => true,
 	switch: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
@@ -436,8 +440,9 @@ export class InputController {
 				modelMentionAtomizer({
 					resolve: selector => this.ctx.session.resolveModelMention(selector),
 					selectorOf: agent => this.ctx.session.modelMentions.find(mention => mention.agent === agent)?.selector,
-					icon: () => currentTheme().symbols.symbol("icon.model"),
+					icon: () => currentTheme().symbols.symbol("mention.model"),
 				}),
+				mentionChipAtomizer(),
 			),
 		);
 		this.#keyHooks.push(() => composer.setAtomizer(undefined));
@@ -515,7 +520,7 @@ export class InputController {
 			void this.cycleRoleModel("forward");
 			return true;
 		}
-		if (km.matches(key, "app.thinking.cycle")) {
+		if (km.matches(key, "app.thinking.cycle") && !this.ctx.composer.completing()) {
 			this.cycleThinkingFromComposer();
 			return true;
 		}
@@ -658,7 +663,7 @@ export class InputController {
 			return true;
 		}
 		if (km.matches(key, "app.tools.toggleVisibility")) {
-			this.toggleToolActivityVisibility();
+			this.cycleToolActivity();
 			return true;
 		}
 		if (km.matches(key, "app.display.reset")) {
@@ -797,6 +802,10 @@ export class InputController {
 			return;
 		}
 		if (this.ctx.dismissCommandReport()) {
+			return;
+		}
+		// Command output queued mid-turn is hidden, not dropped: it still enters the transcript at the settle.
+		if (this.ctx.dismissDeferredCommandOutput()) {
 			return;
 		}
 
@@ -1715,7 +1724,8 @@ export class InputController {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /copy picks
 				// from it, /export writes it (with its own subagents), /jobs lists the focused
 				// agent's jobs without a way to cancel them, /usage reports account-wide limits,
-				// and /model, /switch, /effort change the focused agent's model and thinking.
+				// /model, /switch, /effort change the focused agent's model and thinking, and
+				// /retry retries the focused agent's last failed turn.
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
@@ -1888,6 +1898,7 @@ export class InputController {
 			.then(
 				() => {
 					resendProgramStatus();
+					resendProgramResume();
 				},
 				(err: unknown) => {
 					const reason = err instanceof Error ? err.message : String(err);
@@ -2988,13 +2999,16 @@ export class InputController {
 	/**
 	 * Present the large-paste menu and apply the chosen action: wrap in `<attachment>` tags (a text
 	 * chip that expands to the wrapped block on submit), save the text to a file and reference its
-	 * path so the agent can `read` it on demand, or paste inline (a text chip). Cancelling (Esc)
-	 * falls back to the inline chip, so the pasted content is never lost.
+	 * path so the agent can `read` it on demand, paste inline (a text chip), or insert the raw text
+	 * into the editor as ordinary editable text (useful when the clipboard lives on a remote client
+	 * and the host-clipboard raw-paste shortcut cannot reach it). Cancelling (Esc) falls back to the
+	 * inline chip, so the pasted content is never lost.
 	 */
 	async presentLargePasteMenu(text: string, lineCount: number): Promise<void> {
 		const WRAPPED_BLOCK = "Attach as a wrapped block";
 		const LOCAL_FILE = "Attach as local file";
 		const INLINE = "Paste inline";
+		const EDITABLE_TEXT = "Insert as editable text";
 
 		let choice: string | undefined;
 		try {
@@ -3007,6 +3021,7 @@ export class InputController {
 						description: "Save the text to a local://paste file",
 					},
 					{ label: INLINE, description: "Collapse the text to an inline chip" },
+					{ label: EDITABLE_TEXT, description: "Insert the raw text into the editor, uncollapsed" },
 				],
 				{
 					helpText: `${actionKey("tui.select.cancel", this.ctx.keybindings)} to paste inline`,
@@ -3026,6 +3041,9 @@ export class InputController {
 				break;
 			case INLINE:
 				this.ctx.composer.insertTextAttachment(text);
+				break;
+			case EDITABLE_TEXT:
+				this.ctx.composer.insertText(text);
 				break;
 			default:
 				// Esc / cancel: keep the original behavior — stage as a text-attachment chip.
@@ -3088,16 +3106,18 @@ export class InputController {
 
 	createAutocompleteProvider(commands: SlashCommand[], basePath: string): AutocompleteProvider {
 		void commandUsage.load();
+		const modelHost = {
+			source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+			registry: this.ctx.session.modelRegistry,
+			scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
+		};
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
 			commandUsage: name => commandUsage.get(name),
 			emojiAutocomplete: () => cfgEmojiAutocomplete.get(this.ctx.settings),
-			modelMentions: createModelMentionSource({
-				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
-				registry: this.ctx.session.modelRegistry,
-				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
-			}),
+			modelMentions: createModelMentionSource(modelHost),
+			mentionModels: modelHost,
 			// The interactive host uses the default registry; the receiving session can change with focus.
 			internalUrlCaller: () => {
 				const manager = this.ctx.viewSession.sessionManager;
@@ -3194,7 +3214,7 @@ export class InputController {
 	}
 
 	toggleToolOutputExpansion(): void {
-		if (this.ctx.hideToolActivity) {
+		if (this.ctx.toolActivity === "hidden") {
 			const visibilityKey = actionKey("app.tools.toggleVisibility", this.ctx.keybindings);
 			const visibilityHint = visibilityKey ? `${visibilityKey} or /settings` : "/settings";
 			this.ctx.showStatus(`Tool activity is hidden — show it with ${visibilityHint} before expanding`);
@@ -3204,14 +3224,18 @@ export class InputController {
 		this.ctx.showStatus(`Tool output expansion: ${this.ctx.toolOutputExpanded ? "enabled" : "disabled"}`);
 	}
 
-	toggleToolActivityVisibility(): void {
-		this.ctx.hideToolActivity = !this.ctx.hideToolActivity;
-		cfgDisplayHideToolActivity.set(this.ctx.settings, this.ctx.hideToolActivity);
-		if (!this.ctx.hideToolActivity) this.ctx.toolOutputExpanded = false;
-		// Live blocks follow the flag; tool rows already retired to terminal history change only
+	/** `app.tools.toggleVisibility`: tool activity detailed → concise → hidden → detailed. */
+	cycleToolActivity(): void {
+		const next =
+			TOOL_ACTIVITY_MODES[(TOOL_ACTIVITY_MODES.indexOf(this.ctx.toolActivity) + 1) % TOOL_ACTIVITY_MODES.length]!;
+		this.ctx.toolActivity = next;
+		cfgDisplayToolActivity.set(this.ctx.settings, next);
+		// A new mode starts folded: Ctrl+O left on would draw every concise row as its full card.
+		this.ctx.toolOutputExpanded = false;
+		// Live blocks follow the mode; tool rows already retired to terminal history change only
 		// when the scrollback is rebuilt.
 		this.ctx.shell.host?.replayHistory();
-		this.ctx.showStatus(`Tool activity: ${this.ctx.hideToolActivity ? "hidden" : "visible"}`);
+		this.ctx.showStatus(`Tool activity: ${next}`);
 	}
 
 	setToolsExpanded(expanded: boolean): void {

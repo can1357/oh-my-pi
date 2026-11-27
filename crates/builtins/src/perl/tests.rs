@@ -21,7 +21,9 @@
 
 use std::{fmt::Write as _, fs, path::Path};
 
-use crate::host::run_extra_bytes;
+use tokio_util::sync::CancellationToken;
+
+use crate::host::{run_extra_bytes, run_extra_cancellable};
 
 /// One corpus line.
 struct Case {
@@ -155,6 +157,53 @@ async fn run_case(case: &Case) -> Result<String, Box<dyn std::error::Error>> {
 		}
 	}
 	Ok(differences)
+}
+
+/// A signal's default action ends the program where it stands, as the
+/// kernel kills perl: status 128 + the signal, and no END block, destructor
+/// or buffered output. SIGPIPE stops a print loop into a pipe nobody reads
+/// (it used to spin forever), and output still buffered at exit, after END.
+/// The corpus cannot hold these cases: its oracle dies of the signal itself.
+#[tokio::test]
+async fn signal_default_action_ends_the_program() {
+	const LEFTOVERS: &str = "END { print STDERR 'END' } sub DESTROY { print STDERR 'DESTROY' } my $o = bless {}; \
+	                         open F, '>', 'out' or die; print F 'buffered';";
+	let cwd = tempfile::tempdir().unwrap();
+	let run = async |script: &str| {
+		let (status, _, stderr) =
+			run_extra_bytes(&["perl", "-e", script], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+		(status, String::from_utf8_lossy_owned(stderr))
+	};
+	for (death, status) in [
+		("pipe(R, W) or die; close R; select W; $| = 1; print 1 while 1;", 141),
+		("kill 'TERM', $$; print STDERR 'survived';", 143),
+	] {
+		assert_eq!(run(&format!("{LEFTOVERS} {death}")).await, (status, String::new()), "{death}");
+		assert_eq!(fs::read(cwd.path().join("out")).unwrap(), b"", "{death}");
+	}
+	let at_exit = "END { print STDERR 'END' } pipe(R, W) or die; close R; print W 'buffered';";
+	assert_eq!(run(at_exit).await, (141, "END".into()));
+}
+
+/// A run the shell cancels ends as perl killed by a signal does: status 130,
+/// and no END block, destructor or buffered output.
+#[tokio::test]
+async fn cancelled_run_skips_end_blocks() {
+	let cwd = tempfile::tempdir().unwrap();
+	let script = "END { open my $e, '>', 'end' } sub DESTROY { open my $d, '>', 'destroy' } my $o = bless {}; \
+	              open F, '>', 'out' or die; print F 'buffered'; sleep 30;";
+	let cancel = CancellationToken::new();
+	let trigger = cancel.clone();
+	std::thread::spawn(move || {
+		std::thread::sleep(std::time::Duration::from_secs(1));
+		trigger.cancel();
+	});
+	let env = [("OMP_PERL_FALLBACK", "0")];
+	let (status, ..) = run_extra_cancellable(&["perl", "-e", script], b"", cwd.path(), &env, Some(cancel)).await;
+	assert_eq!(status, 130);
+	assert!(!cwd.path().join("end").exists(), "END ran");
+	assert!(!cwd.path().join("destroy").exists(), "DESTROY ran");
+	assert_eq!(fs::read(cwd.path().join("out")).unwrap(), b"");
 }
 
 #[tokio::test]

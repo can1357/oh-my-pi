@@ -292,10 +292,15 @@ async function executeTabCall(runTab: InProcessRunTab, parsed: ParsedTabCall, si
 export async function callInProcessTab(tab: InProcessRunTab, opts: CallInProcessOptions): Promise<RunResultOk> {
 	const parsed = parseTabCall(opts.chain);
 	if (tab.rendererFailure) throw tab.rendererFailure;
+	// As a worker's timeout does: name the helper, without its arguments (an evaluate's whole source).
+	const stalled =
+		parsed.kind === "handle"
+			? `tab.${parsed.handle.method}(…).${parsed.step.method}()`
+			: `tab.${parsed.step.method}()`;
 	const budget = createInProcessBudget(
 		opts.timeoutMs,
 		opts.signal,
-		() => new ToolError(`Browser code execution timed out after ${opts.timeoutMs}ms`),
+		() => new ToolError(`Browser code execution timed out after ${opts.timeoutMs}ms (stalled on ${stalled})`),
 	);
 	const output = new RunOutput();
 	const screenshots: ScreenshotResult[] = [];

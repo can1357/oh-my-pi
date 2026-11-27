@@ -34,8 +34,12 @@ use omp_xfs::{
 	walk,
 };
 use crate::bre;
-use crate::host::{AsyncUtility, Host, StdoutFile};
+use crate::host::{AsyncUtility, Host, StdoutFile, strip_errno};
+use crate::root_guard;
 use crate::stdio;
+
+/// `grep`'s spelling of the [`root_guard`] escape hatch; it has no depth cap.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "--allow-root", depth: None };
 
 /// Exit status of a `grep` or `rg` run: 0 when a line was selected, 1 when
 /// none was, 2 on any error, except that under `-q` a match outranks errors.
@@ -350,6 +354,10 @@ struct GrepArgs {
 	#[arg(short = 'R', long = "dereference-recursive")]
 	dereference_recursive: bool,
 
+	/// Permit a recursive search of a filesystem root such as /.
+	#[arg(long = "allow-root")]
+	allow_root: bool,
+
 	/// Follow symbolic links named as command-line operands.
 	#[arg(short = 'O')]
 	follow_command_line: bool,
@@ -480,6 +488,9 @@ struct Options {
 	initial_tab:         bool,
 	record:              RecordFormat,
 	group_separator:     Option<Vec<u8>>,
+	/// An explicit `-A0`/`-B0`/`-C0`: GNU still separates non-adjacent
+	/// matches, which the searcher only does for nonzero context.
+	zero_context_groups: bool,
 	line_buffered:       bool,
 	binary_files:        BinaryFiles,
 	/// Whether an input that is the file stdout lands in is refused; see
@@ -590,7 +601,9 @@ fn resolve_file_list_modes(matches: &ArgMatches) -> (bool, bool) {
 	}
 }
 
-fn resolve_context(cli: &GrepArgs, matches: &ArgMatches) -> (usize, usize) {
+/// The last-given before and after context, or `None` when no context option
+/// was given.
+fn resolve_context(cli: &GrepArgs, matches: &ArgMatches) -> Option<(usize, usize)> {
 	let mut events = Vec::with_capacity(3);
 	if let (Some(index), Some(value)) = (last_index(matches, "after_context"), cli.after_context) {
 		events.push((index, false, value));
@@ -601,6 +614,9 @@ fn resolve_context(cli: &GrepArgs, matches: &ArgMatches) -> (usize, usize) {
 	if let (Some(index), Some(value)) = (last_index(matches, "context"), cli.context) {
 		events.push((index, false, value));
 		events.push((index, true, value));
+	}
+	if events.is_empty() {
+		return None;
 	}
 	events.sort_unstable_by_key(|event| event.0);
 
@@ -613,7 +629,7 @@ fn resolve_context(cli: &GrepArgs, matches: &ArgMatches) -> (usize, usize) {
 			after = value;
 		}
 	}
-	(before, after)
+	Some((before, after))
 }
 
 fn resolve_group_separator(cli: &GrepArgs, matches: &ArgMatches) -> Option<Vec<u8>> {
@@ -751,7 +767,23 @@ fn build_default_matcher<P: AsRef<str>, F: AsRef<str>>(
 		.collect();
 	builder
 		.build_many(&sanitized)
-		.map_err(|_| error.to_string())
+		.map_err(|_| engine_error_message(&error))
+}
+
+/// One line for an error the regex engine raised after translation: GNU's
+/// wording where glibc has a counterpart, else the engine's own final line,
+/// never its multi-line excerpt of the internal `(?:…)` wrapper.
+fn engine_error_message(error: &grep_regex::Error) -> String {
+	let text = error.to_string();
+	let line = text.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or_default();
+	let line = line.strip_prefix("error: ").unwrap_or(line);
+	if line.starts_with("invalid character class range") {
+		bre::BreError::InvalidCharacterRange.gnu_message().to_owned()
+	} else if line.contains("size limit") {
+		bre::BreError::IntervalTooBig.gnu_message().to_owned()
+	} else {
+		line.to_owned()
+	}
 }
 
 /// Compile all patterns using the last-selected matcher mode.
@@ -790,7 +822,7 @@ fn build_matcher(
 		return builder
 			.build_many(&escaped)
 			.map(Engine::Rust)
-			.map_err(|error| error.to_string());
+			.map_err(|error| engine_error_message(&error));
 	}
 
 	if mode == MatchMode::Default {
@@ -808,19 +840,19 @@ fn build_matcher(
 			.iter()
 			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported))
 			.collect::<Result<_, _>>()
-			.map_err(|e: bre::BreError| e.message().to_owned())?;
+			.map_err(|error: bre::BreError| error.gnu_message().to_owned())?;
 		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
 	}
 
 	let patterns = patterns
 		.iter()
-		.map(|pattern| bre::ere_to_rust(pattern, true).map_err(|err| format!("{}: {pattern}", err.message())))
+		.map(|pattern| bre::ere_to_rust(pattern, true).map_err(|error| error.gnu_message().to_owned()))
 		.collect::<Result<Vec<_>, _>>()?;
 
 	builder
 		.build_many(&patterns)
 		.map(Engine::Rust)
-		.map_err(|error| error.to_string())
+		.map_err(|error| engine_error_message(&error))
 }
 
 /// A search sink that renders GNU-compatible records and tracks selection.
@@ -832,6 +864,9 @@ struct GrepSink<'a, M: Matcher, W: Write> {
 	match_count: u64,
 	any_match:   bool,
 	binary:      bool,
+	/// Byte offset just past the last match printed, for
+	/// [`Options::zero_context_groups`].
+	last_end:    Option<u64>,
 }
 
 impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
@@ -902,6 +937,15 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 			&& self.opts.binary_files == BinaryFiles::Binary
 			&& !self.normal_output_is_suppressed()
 	}
+
+	fn write_group_separator(&mut self) -> io::Result<()> {
+		if let Some(separator) = &self.opts.group_separator {
+			self.out.write_all(separator)?;
+			self.out.write_all(&[self.opts.record.terminator])?;
+			self.flush_record()?;
+		}
+		Ok(())
+	}
 }
 
 impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
@@ -923,6 +967,13 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 		if self.opts.count {
 			return Ok(true);
 		}
+		if self.opts.zero_context_groups {
+			let start = mat.absolute_byte_offset();
+			if self.last_end.is_some_and(|end| end != start) {
+				self.write_group_separator()?;
+			}
+			self.last_end = Some(start + mat.bytes().len() as u64);
+		}
 		if self.opts.only_matching {
 			self.print_only_matching(mat.bytes(), mat.line_number(), mat.absolute_byte_offset())?;
 		} else {
@@ -942,14 +993,8 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 	}
 
 	fn context_break(&mut self, _searcher: &Searcher) -> Result<bool, io::Error> {
-		if !self.normal_output_is_suppressed()
-			&& !self.opts.only_matching
-			&& !self.binary_summary()
-			&& let Some(separator) = &self.opts.group_separator
-		{
-			self.out.write_all(separator)?;
-			self.out.write_all(&[self.opts.record.terminator])?;
-			self.flush_record()?;
+		if !self.normal_output_is_suppressed() && !self.opts.only_matching && !self.binary_summary() {
+			self.write_group_separator()?;
 		}
 		Ok(true)
 	}
@@ -1154,12 +1199,7 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 			Err(error) => {
 				had_error = true;
 				if !self.opts.no_messages {
-					let _ = writeln!(
-						err,
-						"grep: {}: {}",
-						display_path.display(),
-						describe_search_error(&error)
-					);
+					let _ = writeln!(err, "grep: {}: {}", display_path.display(), strip_errno(&error));
 				}
 				Ok(false)
 			},
@@ -1184,6 +1224,7 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 			match_count: 0,
 			any_match: false,
 			binary: false,
+			last_end: None,
 		};
 		let mut search = searcher.search_push(&self.matcher, &mut sink);
 		let mut run = 0;
@@ -1283,7 +1324,7 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 			Err(error) => {
 				let mut err = Vec::new();
 				if !self.opts.no_messages {
-					let _ = writeln!(err, "grep: {}: {error}", display_path.display());
+					let _ = writeln!(err, "grep: {}: {}", display_path.display(), strip_errno(&error));
 				}
 				FileSearch { out: Vec::new(), err, had_error: true, matched: Ok(false) }
 			},
@@ -1327,7 +1368,7 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 			*had_error = true;
 			if !opts.no_messages {
 				let display_path = display_path_for_operand(operand, resolved, &path);
-				let _ = writeln!(host.stderr, "grep: {}: {error}", display_path.display());
+				let _ = writeln!(host.stderr, "grep: {}: {}", display_path.display(), strip_errno(&error));
 			}
 			return Ok(false);
 		},
@@ -1338,7 +1379,7 @@ async fn search_dir<M: Matcher + Clone + Send + Sync + 'static, W: Write + Send>
 		*had_error = true;
 		if !opts.no_messages {
 			let display_path = display_path_for_operand(operand, resolved, &error.path);
-			let _ = writeln!(host.stderr, "grep: {}: {}", display_path.display(), error.error);
+			let _ = writeln!(host.stderr, "grep: {}: {}", display_path.display(), strip_errno(&error.error));
 		}
 	}
 	let count = files.len();
@@ -1423,7 +1464,7 @@ async fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, S
 	} else {
 		read_pattern_file(&host.vfs(), &host.resolve(path)).await
 	};
-	result.map_err(|error| format!("{}: {error}", path.display()))
+	result.map_err(|error| format!("{}: {}", path.display(), strip_errno(&error)))
 }
 
 fn pattern_file_lines(bytes: &[u8]) -> Vec<String> {
@@ -1578,7 +1619,9 @@ pub(crate) fn check_run(terminator: Option<u8>, run: &mut usize, chunk: &[u8]) -
 }
 
 /// The message for a failed search: [`LineLimitExceeded`] says which bound it
-/// hit, anything else reads as reported.
+/// hit, anything else reads as reported. grep itself prints GNU's
+/// [`strip_errno`] form instead.
+#[cfg_attr(not(feature = "util.rg"), allow(dead_code, reason = "only rg keeps ripgrep's raw error text"))]
 pub(crate) fn describe_search_error(error: &io::Error) -> String {
 	match error.get_ref().and_then(|inner| inner.downcast_ref::<LineLimitExceeded>()) {
 		Some(limit) => limit.to_string(),
@@ -1643,6 +1686,7 @@ async fn search_stdin<M: Matcher + Clone + Send + Sync + 'static>(
 		match_count: 0,
 		any_match: false,
 		binary: false,
+		last_end: None,
 	};
 	let mut search = searcher.search_push(matcher, &mut sink);
 	let mut buf = vec![0u8; READ_CHUNK];
@@ -1716,11 +1760,7 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
-						let _ = writeln!(
-							host.stderr,
-							"grep: (standard input): {}",
-							describe_search_error(&error)
-						);
+						let _ = writeln!(host.stderr, "grep: (standard input): {}", strip_errno(&error));
 					}
 				},
 			}
@@ -1811,8 +1851,7 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 			Err(error) => {
 				had_error = true;
 				if !opts.no_messages {
-					let _ =
-						writeln!(host.stderr, "grep: {}: {error}", operand.display());
+					let _ = writeln!(host.stderr, "grep: {}: {}", operand.display(), strip_errno(&error));
 				}
 			},
 		}
@@ -1857,6 +1896,13 @@ impl AsyncUtility for Grep {
 		} else {
 			"-"
 		}));
+	}
+	if directory_action == DirectoryAction::Recurse
+		&& !cli.allow_root
+		&& let Err(refusal) = root_guard::check(files.iter().map(|file| host.resolve(file)), None, ROOT_FLAGS)
+	{
+		let _ = writeln!(host.stderr, "grep: {refusal}");
+		return 2;
 	}
 
 	let max_count = match resolve_max_count(&cli) {
@@ -1903,11 +1949,11 @@ impl AsyncUtility for Grep {
 	let (files_with_matches, files_without_match) = resolve_file_list_modes(&matches);
 	let suppress_context =
 		cli.count || files_with_matches || files_without_match || cli.quiet || cli.only_matching;
-	let (before, after) = if suppress_context {
-		(0, 0)
-	} else {
-		resolve_context(&cli, &matches)
-	};
+	let context = resolve_context(&cli, &matches);
+	let (before, after) = if suppress_context { (0, 0) } else { context.unwrap_or_default() };
+	// `-o` zeroes the searcher's context, so only a context the user gave as
+	// zero separates its matches.
+	let zero_context_groups = context == Some((0, 0));
 	let prefix_filename = resolve_filename_prefix(&matches)
 		.unwrap_or(directory_action == DirectoryAction::Recurse || files.len() > 1);
 	// GNU grep refuses to search the file its own output lands in: the matches
@@ -1941,6 +1987,7 @@ impl AsyncUtility for Grep {
 			terminator:     if cli.null_data { b'\0' } else { b'\n' },
 		},
 		group_separator: resolve_group_separator(&cli, &matches),
+		zero_context_groups,
 		line_buffered: cli.line_buffered,
 		binary_files: resolve_binary_files(&cli, &matches),
 		refuse_output_file,
@@ -2053,6 +2100,16 @@ mod tests {
 	async fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_async_util::<Grep>(args, stdin, "/").await;
 		(code, capture.out(), capture.err())
+	}
+
+	/// Failure mode: `grep -r x /` walked the whole disk for hours.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recursive_search_refuses_the_filesystem_root() {
+		// `-q` stops a regression at the first match instead of reading the disk.
+		let (code, out, err) = run(&["-rq", "e", "/"], "").await;
+		assert_eq!((code, out.as_str()), (2, ""));
+		assert!(err.starts_with("grep: refusing") && err.contains("--allow-root"), "stderr: {err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -2557,9 +2614,10 @@ mod tests {
 		let (code, out, err) = run(&["-A", "1", "fail)"], "ok\n(1 fail)\nnext\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "(1 fail)\nnext\n");
-		let (code, _, err) = run(&["-E", "fail)"], "fail)\n").await;
-		assert_eq!(code, 2);
-		assert!(err.contains("grep:"));
+		// GNU grep 3.11 reads an ERE `)` that closes no group as a literal;
+		// this was a parse error.
+		let (code, out, err) = run(&["-E", "fail)"], "fail)\n").await;
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "fail)\n", ""));
 		// In a BRE a bare `+` is a LITERAL, so `fo+` does not match `foooo`.
 		// This assertion previously expected `foooo`, which is ERE
 		// behaviour; `/usr/bin/grep -e 'fo+' -e 'bar)' -h` on this input
@@ -2637,7 +2695,7 @@ mod tests {
 		for pattern in [r"^\{2\}", r"^\{1,4\}", r"\{1,4\}", r"\(\{2\}\)", r"a\|\{2\}"] {
 			let (code, out, err) = run(&["-c", pattern], input).await;
 			assert_eq!(code, 2, "{pattern} must be rejected, got {out:?}");
-			assert!(err.contains("repetition-operator operand invalid"), "{pattern}: {err}");
+			assert_eq!(err, "grep: Invalid preceding regular expression\n", "{pattern}");
 		}
 		// With an operand it is an ordinary quantifier and still works.
 		let (code, out, err) = run(&["-c", r"a\{1,2\}"], input).await;
@@ -2781,14 +2839,90 @@ mod tests {
 			assert_eq!(out, want, "-E {pattern}");
 		}
 
-		// The two brace patterns real grep REFUSES must stay refused. A `{`
-		// followed by a digit is an attempted interval: unterminated, it is
-		// "braces not balanced", and with no operand it is "repetition-operator
-		// operand invalid". Escaping those would convert a diagnosed mistake
-		// into a silent literal match.
-		for pattern in ["a{1,2", "{1}"] {
-			let (code, out, _) = run(&["-Ec", pattern], input).await;
-			assert_eq!(code, 2, "-E {pattern} must stay an error, got {out:?}");
+		// A real interval with no operand stays refused rather than repeating
+		// the empty string at every position.
+		let (code, out, _) = run(&["-Ec", "{1}"], input).await;
+		assert_eq!(code, 2, "-E {{1}} must stay an error, got {out:?}");
+	}
+
+	/// Failure: `grep -E 'a{1'` exited 2 where GNU grep 3.11 reads a `{` whose
+	/// interval never closes as a literal, so the search found nothing.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_unterminated_ere_interval_is_literal() {
+		let input = "a{1\na{1,\na{,2\na{1,2\nab\naa\n";
+		for (pattern, want) in [
+			("a{1", "a{1\na{1,\na{1,2\n"),
+			("a{1,", "a{1,\na{1,2\n"),
+			("a{,2", "a{,2\n"),
+			("a{1,2", "a{1,2\n"),
+			// `{,m}` is a real interval: zero to m.
+			("a{,2}", input),
+		] {
+			let (code, out, err) = run(&["-E", pattern], input).await;
+			assert_eq!((code, out.as_str(), err.as_str()), (0, want, ""), "-E {pattern}");
+		}
+	}
+
+	/// Failure: an invalid ERE printed ripgrep's multi-line parse report,
+	/// quoting the internal `(?:…)` wrapper, instead of GNU grep 3.11's line.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn invalid_regex_is_one_gnu_diagnostic_line() {
+		for (args, want) in [
+			(&["-E", "a("][..], r"Unmatched ( or \("),
+			(&["-E", "a["], "Invalid regular expression"),
+			(&["-E", "[a"], "Unmatched [, [^, [:, [., or [="),
+			(&["[[:alpha:"], "Unmatched [, [^, [:, [., or [="),
+			(&["-E", "[[:foo:]]"], "Invalid character class name"),
+			(&["-E", "[[.ab.]]"], "Invalid collation character"),
+			(&["-E", "[z-a]"], "Invalid range end"),
+			(&["[a-[:alpha:]]"], "Invalid range end"),
+			(&["-E", "a{}"], r"Invalid content of \{\}"),
+			(&["-E", "a{2,1}"], r"Invalid content of \{\}"),
+			(&["-E", "a{99999}"], "Regular expression too big"),
+			(&["-E", r"a\"], "Trailing backslash"),
+			(&["-E", r"(a\1)"], "Invalid back reference"),
+		] {
+			let (code, out, err) = run(args, "a\n").await;
+			assert_eq!((code, out.as_str(), err), (2, "", format!("grep: {want}\n")), "{args:?}");
+		}
+
+		// A valid back-reference has no glibc error; the engine's refusal
+		// still comes out as one line without the wrapper.
+		let (code, _, err) = run(&["-E", r"(a)\1"], "a\n").await;
+		assert_eq!(code, 2);
+		assert!(err.starts_with("grep: ") && err.lines().count() == 1 && !err.contains("(?:"), "{err}");
+	}
+
+	/// Failure: `seq 20 | grep -A0 -e 5 -e 15` printed no `--` between the two
+	/// groups, which GNU grep prints for an explicit zero context.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn explicit_zero_context_separates_non_adjacent_matches() {
+		let input: String = (1..=20).map(|n| format!("{n}\n")).collect();
+		for (args, want) in [
+			(&["-A0", "-e", "5", "-e", "15"][..], "5\n--\n15\n"),
+			(&["-A0", "-e", "5", "-e", "6", "-e", "15"], "5\n6\n--\n15\n16\n"),
+			(&["-C0", "--group-separator=XX", "-e", "5", "-e", "15"], "5\nXX\n15\n"),
+			(&["-B0", "--no-group-separator", "-e", "5", "-e", "15"], "5\n15\n"),
+			(&["-e", "5", "-e", "15"], "5\n15\n"),
+			(&["-o", "-A0", "-e", "5", "-e", "15"], "5\n--\n15\n"),
+		] {
+			let (code, out, err) = run(args, &input).await;
+			assert_eq!((code, out.as_str(), err.as_str()), (0, want, ""), "{args:?}");
+		}
+	}
+
+	/// Failure: a missing operand or `-f` file printed Rust's ` (os error 2)`
+	/// after GNU's `strerror` text.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn missing_files_report_plain_strerror() {
+		let tree = tempfile::tempdir().unwrap();
+		for args in [&["x", "missing"][..], &["-f", "missing", "x"]] {
+			let (code, capture) = run_async_util::<Grep>(args, "", tree.path()).await;
+			assert_eq!(
+				(code, capture.err().as_str()),
+				(2, "grep: missing: No such file or directory\n"),
+				"{args:?}"
+			);
 		}
 	}
 }

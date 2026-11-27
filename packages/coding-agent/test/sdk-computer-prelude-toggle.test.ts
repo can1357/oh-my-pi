@@ -124,7 +124,7 @@ describe("AgentSession eval preludes", () => {
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
 	});
 
-	// `/computer on` mid-session used to rebuild the system prompt and eval
+	// Enabling `/computer` mid-session used to rebuild the system prompt and eval
 	// description, busting the provider prompt cache on the next request.
 	it("announces mid-session toggles in a hidden notice without rewriting the cached prefix", async () => {
 		const settings = Settings.isolated({

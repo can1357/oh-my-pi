@@ -664,7 +664,7 @@ export class Reconciler {
 			raw = rest;
 		}
 		if (rec.canvas) {
-			const { paint: _paint, ...common } = raw as Readonly<CanvasProps>;
+			const { paint: _paint, onMouse: _onMouse, ...common } = raw as Readonly<CanvasProps>;
 			return { ...common, cols: this.#env.cols(), lines: rec.canvas() };
 		}
 		if (rec.kind === "md" && "prepared" in raw) {
@@ -677,14 +677,14 @@ export class Reconciler {
 			// A terminal lays out every row it gets: hold the table row being written, close an open link/math span.
 			return { ...raw, text: speculativeStreamingSource(holdPartialTableRow(raw.text)) };
 		}
-		if (rec.kind === "overlay") {
+		if (rec.kind === "overlay" || rec.kind === "picker") {
 			const ref = (raw as TspOverlayProps).anchor;
 			if (ref && typeof ref === "object") {
 				this.#anchors.set(rec, ref);
 				return this.#anchorProps(rec, raw, ref);
 			}
 			this.#anchors.delete(rec);
-			if (this.#filling.has(node) && raw.size !== "full") return { ...raw, size: "full" };
+			if (rec.kind === "overlay" && this.#filling.has(node) && raw.size !== "full") return { ...raw, size: "full" };
 		}
 		if (rec.kind === "list" && typeof raw.selected === "string") {
 			const selected = raw.selected;

@@ -303,7 +303,7 @@ const BEDROCK_INFERENCE_PROFILE_ARN =
 	/^arn:aws(?:-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]*:(?:application-inference-profile|inference-profile)\/[a-z0-9][a-z0-9._:-]*$/i;
 
 function hasBedrockInferenceProfileThinkingSuffix(modelId: string): boolean {
-	const { base, level } = splitThinkingSuffix(modelId);
+	const { base, level } = splitThinkingSuffix(modelId, -1, MAX_THINKING_SUFFIX_OPTIONS);
 	return level !== undefined && BEDROCK_INFERENCE_PROFILE_ARN.test(base.trim());
 }
 
@@ -2536,13 +2536,25 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 }
 
 /**
+ * Provider prefix worth probing before a broad catalog read. A syntactically
+ * qualified selector can still be an aggregator's flat id; a miss must fall back.
+ */
+export function modelSelectorProviderHint(selector: string): string | undefined {
+	const value = selector.trim();
+	if (modelRoleAliasPrefixLength(value) !== undefined || /[,*?[\]{}]/.test(value)) return undefined;
+	const slash = value.indexOf("/");
+	if (slash <= 0 || !value.slice(slash + 1).trim()) return undefined;
+	return value.slice(0, slash).trim().toLowerCase() || undefined;
+}
+
+/**
  * Single-provider fast path for {@link resolveCliModel}. Resolves an exact
  * `provider/id` (with optional `:thinking` suffix) or `--provider P --model id`
  * against only `P`'s chat models so startup avoids composing the full catalog.
  * Returns `undefined` whenever full-catalog semantics (roles, fuzzy match,
  * aggregator flat ids, unknown provider errors) are needed.
  */
-function tryResolveExplicitProviderCliModel(
+export function tryResolveExplicitProviderCliModel(
 	cliProvider: string | undefined,
 	cliModel: string,
 	modelRegistry: CliModelRegistry,

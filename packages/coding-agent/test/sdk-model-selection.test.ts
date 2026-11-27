@@ -39,6 +39,7 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/s
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import {
@@ -46,6 +47,7 @@ import {
 	cfgCompactionModelThresholdsEnabled,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
@@ -1820,7 +1822,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				authStorage,
 				modelRegistry,
 				sessionManager,
-				settings: Settings.isolated(),
+				settings: Settings.isolated({ modelRoles: { default: `${savedModel.provider}/${savedModel.id}:high` } }),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],
@@ -1837,6 +1839,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			try {
 				expect(session.model?.provider).toBe(savedModel.provider);
 				expect(session.model?.id).toBe(savedModel.id);
+				expect(session.configuredThinkingLevel()).toBe(Effort.High);
 				expect(getApiKeySpy).not.toHaveBeenCalled();
 			} finally {
 				await session.dispose();
@@ -1845,6 +1848,60 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			getApiKeySpy.mockRestore();
 		}
 	});
+
+	test.each(["resume", "provider default", "raw default selector"] as const)(
+		"hydrates a cached-only model for %s",
+		async selection => {
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			const provider = "opencode-go";
+			const apiKey = "cached-startup-key";
+			const id = selection === "raw default selector" ? "retired-vendor/cache-only-default" : "cache-only-model";
+			const cachedModel = buildModel({
+				id,
+				name: "Cached Startup Model",
+				api: "openai-responses",
+				provider,
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 16_384,
+			});
+			authStorage.keys.setRuntime(provider, apiKey);
+			writeModelCache(
+				resolveModelCacheProviderId(provider, { apiKey }),
+				Date.now(),
+				[cachedModel],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+			const selector = selection === "raw default selector" ? id : `${provider}/${id}`;
+			const settings = Settings.isolated(selection === "resume" ? {} : { modelRoles: { default: selector } });
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
+			expect(modelRegistry.find(provider, id)).toBeUndefined();
+			const sessionManager = SessionManager.inMemory();
+			if (selection === "resume") sessionManager.appendModelChange(selector);
+
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...buildSessionOptions(""),
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager,
+				extensions: [],
+			});
+			try {
+				expect(session.model?.provider).toBe(provider);
+				expect(session.model?.id).toBe(id);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
 
 	function buildResumeOptions() {
 		const authStorage = createInMemoryAuthStorage();
@@ -2332,6 +2389,62 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("devin");
 			expect(session.model?.id).toBe("swe-1-6");
 			expect(session.thinkingLevel).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps the default-model fallback inside path-scoped enabledModels", async () => {
+		const agentDir = path.join(tempDir, "agent");
+		const privatePath = path.join(tempDir, "private");
+		const cwd = path.join(privatePath, "sub");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.mkdirSync(cwd, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({
+				enabledModels: [{ path: privatePath, models: ["openai-codex"] }],
+				disabledProviders: [{ path: privatePath, providers: ["github-copilot"] }],
+				modelRoles: { default: "github-copilot/gpt-5.5" },
+			}),
+		);
+
+		const settings = await Settings.init({ cwd, agentDir });
+		// Sanity-check the path-scoped values resolved correctly for this cwd.
+		expect(cfgEnabledModels.get(settings)).toEqual(["openai-codex"]);
+		expect(cfgDisabledProviders.get(settings)).toEqual(["github-copilot"]);
+
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		// Only anthropic has credentials. Per `enabledModels` the path allows
+		// only openai-codex, so no anthropic model should be selected.
+		authStorage.keys.setRuntime("anthropic", "test-anthropic-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd,
+			agentDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			workspaceTree: { rootPath: cwd, rendered: ".\n", truncated: false, totalLines: 1, agentsMdFiles: [] },
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		try {
+			expect(session.model?.provider).not.toBe("anthropic");
+			expect(session.model?.provider).not.toBe("github-copilot");
+			// No openai-codex creds set → nothing in the allow-list is
+			// usable. Expect no model and a fallback message.
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBeDefined();
 		} finally {
 			await session.dispose();
 		}

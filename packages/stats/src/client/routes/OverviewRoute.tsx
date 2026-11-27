@@ -4,6 +4,7 @@ import { getOverviewStats, getRecentRequests } from "../api";
 import { Legend, ShareBar, TimeChart } from "../charts";
 import { OTHER_COLOR } from "../data/colors";
 import {
+	formatAiCredits,
 	formatCompact,
 	formatDurationMs,
 	formatErrorRate,
@@ -166,6 +167,7 @@ export function OverviewRoute({ active, range, onRequestClick }: OverviewRoutePr
 								label="Premium requests"
 								value={formatInteger(Math.round(overall.totalPremiumRequests * 100) / 100)}
 							/>
+							<Stat size="sm" label="AI credits" value={formatAiCredits(overall.totalAiuNano)} />
 							<Stat size="sm" label="Tokens/s" value={formatTokensPerSecond(overall.avgTokensPerSecond)} />
 							<Stat size="sm" label="Avg latency" value={formatDurationMs(overall.avgDuration)} />
 							<Stat size="sm" label="Avg TTFT" value={formatDurationMs(overall.avgTtft)} />

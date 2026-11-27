@@ -36,6 +36,8 @@ function makeSession(): ToolSession {
 		settings: Settings.isolated({
 			"browser.enabled": true,
 			"browser.cmux": true,
+			// Relay lease tests substitute cmux at acquisition; never discover a real user's browser.
+			"browser.relayUrl": "http://127.0.0.1:1",
 			// Tern resolves before cmux; keep an ambient Tern pane from capturing the open.
 			"browser.tern": false,
 			"tools.maxTimeout": 0,
