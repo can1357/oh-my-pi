@@ -14,7 +14,7 @@ import { loadWatchdogConfigFile, resolveAdvisorConfigEditPath, saveWatchdogConfi
 import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "../../advisor/advisor-config-types";
 import { showGitOverlay } from "../../cli/git-tui";
-import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { formatLoginIdentity, loginFollowUps } from "../../cli/oauth-terminal";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
@@ -1233,6 +1233,7 @@ export class SelectorController {
 				done();
 				void this.#loginThenReopenModelHub(providerId);
 			},
+			onManageAccess: url => openPath(url),
 			onCatalogRefreshed: async () => {
 				await this.ctx.session.refreshScopedModels();
 				return this.ctx.session.scopedModels;
@@ -2399,6 +2400,11 @@ export class SelectorController {
 							`Successfully logged in to ${connectedProviderName(providerId)}${who ? ` as ${who}` : ""}`,
 						),
 					],
+					...(identity
+						? loginFollowUps(providerId, identity, `/login ${providerId}`).map(
+								({ tone, text }) => [tone, text] as const,
+							)
+						: []),
 					["dim", `Credentials saved to ${destination}`],
 				]),
 			);
