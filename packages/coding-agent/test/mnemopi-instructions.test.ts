@@ -135,6 +135,18 @@ async function promptAndRetain(session: AgentSession, text: string): Promise<voi
 	await Promise.all(retains);
 }
 
+/** The session id of each transcript row auto-retain wrote to the session's bank, oldest first. */
+function transcriptRowSessions(session: AgentSession): string[] {
+	const state = getMnemopiSessionState(session);
+	if (!state) throw new Error("the session has no Mnemopi state");
+	return state.memory.beam.db
+		.prepare<{ sessionId: string }, []>(
+			"SELECT json_extract(metadata_json, '$.session_id') AS sessionId FROM working_memory WHERE source = 'coding-agent-transcript' ORDER BY rowid",
+		)
+		.all()
+		.map(row => row.sessionId);
+}
+
 describe("Mnemopi memory instructions in the system prompt a real session sends", () => {
 	it("say automatic retention is enabled in a top-level session with the default settings", async () => {
 		using dir = TempDir.createSync("@mnemopi-instructions-");
@@ -168,17 +180,20 @@ describe("Mnemopi memory instructions in the system prompt a real session sends"
 		}
 	}, 60_000);
 
-	it("say a subagent's turns are not retained automatically", async () => {
+	it("say a subagent's turns are not retained automatically, and retain none of them", async () => {
 		using dir = TempDir.createSync("@mnemopi-instructions-");
 		const harness = await sdkHarness(dir, {});
 		try {
 			const parent = await harness.open("main");
 			await harness.started(0);
+			// The parent's turn writes a transcript row, so the count below can see one.
+			await promptAndRetain(parent, "Say ok.");
 			const child = await harness.open("child", parent);
 			await harness.started(1);
-			expect(getMnemopiSessionState(child)?.aliasOf).toBe(getMnemopiSessionState(parent));
-			await child.prompt("Say ok.");
-			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["off"]);
+			// Another text than the parent's: Mnemopi folds a transcript identical to a stored one into that row.
+			await promptAndRetain(child, "Say ok as the subagent.");
+			expect(harness.systemPrompts.map(retentionClaim)).toEqual(["enabled", "off"]);
+			expect(transcriptRowSessions(parent)).toEqual([parent.sessionId]);
 		} finally {
 			await harness.close();
 		}
