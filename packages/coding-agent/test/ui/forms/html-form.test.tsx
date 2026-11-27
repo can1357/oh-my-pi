@@ -395,6 +395,56 @@ test("a long question above other dock rows scrolls to its title on the screen, 
 	}
 });
 
+test.each([
+	{ paragraphs: 3, rows: 40, fits: true },
+	{ paragraphs: 12, rows: 16, fits: false },
+])(
+	"context between two questions is readable from its top after Down opens the next ($paragraphs paragraphs, $rows rows)",
+	({ paragraphs, rows, fits }) => {
+		const context = Array.from(
+			{ length: paragraphs },
+			(_, i) => `<p>${i === 0 ? "MID-TOP " : ""}middle ${i + 1}</p>`,
+		).join("");
+		const question = (n: number) => `<fieldset><legend>Question ${n}</legend>
+		<label><input type="radio" name="q${n}" value="a" checked> Q${n} first</label>
+		<label><input type="radio" name="q${n}" value="b"> Q${n} second</label>
+	</fieldset>`;
+		const model = new HtmlFormModel(
+			parseHtmlForm(`<form>${question(1)}${question(2)}${context}${question(3)}</form>`),
+			{
+				onSubmit: () => {},
+				onCancel: () => {},
+			},
+		);
+		const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => rows} /> }), {
+			columns: 60,
+			rows,
+		});
+		const shows = (text: string) =>
+			term
+				.screen()
+				.slice(-rows)
+				.some(row => row.includes(text));
+		try {
+			term.focus(term.surface.dock()[0]!);
+			// Down from the second question's last row onto the third's first option.
+			for (let presses = 0; presses < 20 && model.active() !== 2; presses++) term.press("down");
+			expect(model.active()).toBe(2);
+			expect(shows("Q3 first")).toBe(true);
+			// Context that fits shows from its top at once; taller context scrolls there with Up, the question still open.
+			let ups = 0;
+			for (; ups < 60 && !shows("MID-TOP"); ups++) term.press("up");
+			expect(shows("MID-TOP")).toBe(true);
+			expect(ups === 0).toBe(fits);
+			expect(model.active()).toBe(2);
+			for (let presses = 0; presses < 60 && !shows("Q3 first"); presses++) term.press("down");
+			expect(model.row()).toBe(0);
+		} finally {
+			term.dispose();
+		}
+	},
+);
+
 corpusSuite({
 	dir: "forms/html-form",
 	mount(caseName, corpusCase, env): Mounted {
