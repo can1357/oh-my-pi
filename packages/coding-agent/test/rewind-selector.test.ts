@@ -303,6 +303,39 @@ describe("RewindSelector", () => {
 		expect(selected).toEqual(["tr1"]);
 	});
 
+	it("opens on the cancelled prompt, not the empty reply its interrupt left", () => {
+		const selected: string[] = [];
+		const interrupted = {
+			...assistantWithBashCall("unused"),
+			content: [],
+			stopReason: "aborted",
+			errorMessage: "Interrupted by user",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		} as unknown as AgentMessage;
+		const entries = [...makeEntries(), entry("a2", "u2", interrupted)];
+		const selector = makeSelector(id => selected.push(id), undefined, entries);
+		try {
+			selector.render(80);
+			selector.handleInput(ENTER);
+			// Up from the prompt reaches the reply above it; Down never lands on the empty turn.
+			selector.handleInput(UP);
+			selector.handleInput(DOWN);
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["u2", "u2"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
 	it("jumps between user turns with Left while Down returns in transcript order", () => {
 		const selected: string[] = [];
 		const selector = makeSelector(id => selected.push(id));
