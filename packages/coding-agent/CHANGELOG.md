@@ -237,6 +237,7 @@
 - Fixed `browser.open()` over a connected relay with no eligible tabs waiting 10 seconds and failing with a raw timeout; it now fails at once and says to open a normal web page ([#16100](https://github.com/can1357/oh-my-pi/issues/16100))
 - Fixed `read` JSON queries returning an empty `0B` result when a single output line exceeded the display limit; they now show a byte prefix with a partial-line notice ([#16018](https://github.com/can1357/oh-my-pi/issues/16018))
 - Fixed `/usage` and `omp usage` showing nothing for an extension usage provider on a custom provider whose key is only set in `models.yml`; the quota is now fetched with that key ([#16081](https://github.com/can1357/oh-my-pi/issues/16081), reported by [@feihu-lgtm](https://github.com/feihu-lgtm))
+- Python browser helpers keep an explicit `None` before keyword options, so `tab.ariaSnapshot(None, interactive=True)` and `tab.extract(None, selector="main")` work; a non-string file path or a missing selector now fails with an error naming the expected value ([#16618](https://github.com/can1357/oh-my-pi/issues/16618))
 
 ### Removed
 
