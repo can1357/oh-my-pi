@@ -2119,7 +2119,7 @@ export class ExtensionRunner {
 			RELEASING_SIGNAL_EVENTS[event.type] && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
 				: undefined;
-		const signals = [outerSignal, ownSignal].filter((s): s is AbortSignal => s !== undefined);
+		const signals = [...new Set([outerSignal, ownSignal])].filter((s): s is AbortSignal => s !== undefined);
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
@@ -2249,7 +2249,17 @@ export class ExtensionRunner {
 				ctx ??= this.createContext();
 
 				for (const handler of handlers) {
-					const handlerResult = await this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs);
+					// `signal` was read before any handler ran: one that deletes or replaces `event.signal`
+					// cannot stop later handlers from releasing on the original.
+					const handlerResult = await this.#runHandlerWithTimeout(
+						handler,
+						event,
+						ctx,
+						ext,
+						timeoutMs,
+						undefined,
+						signal,
+					);
 
 					if (this.#isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;

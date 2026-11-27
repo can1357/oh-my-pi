@@ -3537,10 +3537,12 @@ describe("ExtensionRunner", () => {
 				/** Runs in the resolved handler. */
 				onResolved?: () => void;
 				/** Runs first in the requested handler, with the event it received. */
-				mutate?: (event: { prompt: { full: string; session?: string; grants?: unknown[] } }) => void;
+				mutate?: (event: { prompt: { full: string; session?: string; grants?: unknown[] }; signal?: AbortSignal }) => void;
 				/** When set, the handler answers the moment the call's signal aborts, and stores the result. */
 				answerOnAbort?: boolean;
 				abortResult?: boolean;
+				/** A second `tool_approval_requested` handler awaits this, ignoring every signal. */
+				laterHold?: Promise<void>;
 			};
 			const globalState = globalThis as typeof globalThis & { __extApproval?: Seen };
 			/** The approval id a call's request carried (an unknown id when it was never requested). */
@@ -3567,6 +3569,10 @@ describe("ExtensionRunner", () => {
 							});
 							seen.afterHandler?.();
 							if (seen.hold) await seen.hold;
+						});
+						pi.on("tool_approval_requested", async () => {
+							const seen = globalThis.__extApproval;
+							if (seen.laterHold) await seen.laterHold;
 						});
 						pi.on("tool_approval_resolved", event => {
 							globalThis.__extApproval.resolved.push({ approved: event.approved, by: event.by, reason: event.reason });
@@ -3841,6 +3847,23 @@ describe("ExtensionRunner", () => {
 				expect(executed).not.toHaveBeenCalled();
 				expect(seen.resolved[0]).toMatchObject({ approved: false, by: "user" });
 				release.resolve();
+			});
+
+			it("a handler deleting event.signal does not keep a later handler from releasing on abort", async () => {
+				const { seen, executed, run } = await setup();
+				const entered = Promise.withResolvers<void>();
+				seen.mutate = event => {
+					delete event.signal;
+				};
+				seen.afterHandler = () => entered.resolve();
+				seen.laterHold = Promise.withResolvers<void>().promise;
+				const turn = new AbortController();
+				const execution = run("call-stripped", { signal: turn.signal });
+				await entered.promise;
+				turn.abort();
+				// Ends although the later handler never returns and no longer sees a signal on the event.
+				await expect(execution).rejects.toThrow(/Aborted/);
+				expect(executed).not.toHaveBeenCalled();
 			});
 
 			it("a pending listing carries the call's live abort signal", async () => {
