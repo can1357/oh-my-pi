@@ -27,18 +27,25 @@ function isLoopbackHost(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
-/** Rule port, or the `port-env` override when set (`0` binds a random free port). */
-function resolveCallbackPort(callback: CompiledCallback, provider: string): number {
-	const raw = callback.portEnv ? $env[callback.portEnv]?.trim() : undefined;
-	if (!raw) return callback.port;
+/** Set on the remote command by `auth-broker login --via` to pin a configurable listener to its SSH tunnel. */
+export const BROKER_CALLBACK_PORT_ENV = "OMP_AUTH_BROKER_CALLBACK_PORT";
+
+function portFromEnv(name: string | undefined, provider: string, min: number): number | undefined {
+	const raw = name && $env[name]?.trim();
+	if (!raw) return undefined;
 	const port = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
-	if (!(port >= 0 && port <= 65535)) {
-		throw new AIError.OAuthError(`${callback.portEnv} must be a port number between 0 and 65535, got: ${raw}`, {
+	if (!(port >= min && port <= 65535)) {
+		throw new AIError.OAuthError(`${name} must be a port number between ${min} and 65535, got: ${raw}`, {
 			kind: "configuration",
 			provider,
 		});
 	}
 	return port;
+}
+
+/** Rule port, or the `port-env` override when set (`0` binds a random free port for a local login). */
+export function resolveCallbackPort(callback: CompiledCallback, provider: string): number {
+	return portFromEnv(callback.portEnv, provider, 0) ?? callback.port;
 }
 
 /**
@@ -51,11 +58,12 @@ export async function resolveCallbackOptions(
 	provider: string,
 	signal?: AbortSignal,
 ): Promise<OAuthCallbackFlowOptions> {
+	const forwardedPort = callback.portEnv ? portFromEnv(BROKER_CALLBACK_PORT_ENV, provider, 1) : undefined;
 	const base: OAuthCallbackFlowOptions = {
-		preferredPort: resolveCallbackPort(callback, provider),
+		preferredPort: forwardedPort ?? resolveCallbackPort(callback, provider),
 		callbackPath: callback.path,
 		callbackHostname: callback.hostname,
-		allowPortFallback: callback.portFallback,
+		allowPortFallback: forwardedPort === undefined && callback.portFallback,
 		manualInputOnly: callback.manualOnly,
 		nativeScheme: callback.nativeScheme,
 	};

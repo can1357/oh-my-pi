@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { CompiledCallback } from "@oh-my-pi/pi-catalog/compat/types";
-import { resolveCallbackOptions } from "../src/registry/engine/oauth-code";
+import { BROKER_CALLBACK_PORT_ENV, resolveCallbackOptions } from "../src/registry/engine/oauth-code";
 
 const ENV = "PI_ANTHROPIC_OAUTH_CALLBACK_PORT";
 const callback: CompiledCallback = {
@@ -16,6 +16,7 @@ const callback: CompiledCallback = {
 describe("callback port-env override", () => {
 	afterEach(() => {
 		delete process.env[ENV];
+		delete process.env[BROKER_CALLBACK_PORT_ENV];
 	});
 
 	it("uses the rule port when unset", async () => {
@@ -29,6 +30,15 @@ describe("callback port-env override", () => {
 		expect(options.allowPortFallback).toBe(true);
 		process.env[ENV] = "54600";
 		expect((await resolveCallbackOptions(callback, "anthropic")).preferredPort).toBe(54600);
+	});
+
+	it("binds only the forwarded port even when the broker host configures a different port", async () => {
+		process.env[ENV] = "54601";
+		process.env[BROKER_CALLBACK_PORT_ENV] = "54600";
+		expect(await resolveCallbackOptions(callback, "anthropic")).toMatchObject({
+			preferredPort: 54600,
+			allowPortFallback: false,
+		});
 	});
 
 	it("rejects invalid ports", async () => {

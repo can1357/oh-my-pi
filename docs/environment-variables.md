@@ -355,7 +355,7 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 
 | Variable                           | Default / behavior                                                                                                          |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` | Local callback port for Anthropic login. Default `54545`; `0` binds a random free port. Random-port fallback still applies. |
+| `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` | Anthropic callback port (default `54545`). Local login can fall back to a free port or request one with `0`. SSH broker login requires a fixed port and uses it on both ends of the tunnel. |
 
 ### GitLab Duo
 
