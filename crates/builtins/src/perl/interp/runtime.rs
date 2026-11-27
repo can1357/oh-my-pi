@@ -80,7 +80,7 @@ impl<'h> Interp<'h> {
 			perl_calls: Vec::new(), arg_arrays: Vec::new(),
 			tail_args: None, eval_serial: 0, in_given: 0, die_misc_warnings: false, given_value: None, given_cx: Cx::Void, in_when: 0,
 			hole: new_sv(Value::Undef), programs: Vec::new(), pending: None, depth: 0, compile_depth: 0, compile_failure: None, compile_interrupted: false, compile_status: 255,
-			in_die: false, in_warn: false, in_sigpipe: false, killed: false, overloads: FxHashMap::default(), in_overload: 0, in_constant: false,
+			in_die: false, in_warn: false, in_sigpipe: false, vanished: false, overloads: FxHashMap::default(), in_overload: 0, in_constant: false,
 			objects: Default::default(), destroying: Default::default(), destroy_draining: false,
 			loading: FxHashSet::default(), unitchecks: Vec::new(), checks: Vec::new(), inits: Vec::new(), ends: Vec::new(), exit_hooks: Vec::new(),
 		};
@@ -671,12 +671,7 @@ impl<'h> Interp<'h> {
 				Ok(())
 			} else {
 				if name == "ALRM" { self.put_stderr(&PStr::from_bytes(b"Alarm clock\n")); }
-				self.killed = true;
-				// Gone before any later close or drop can flush them.
-				for io in self.handles.iter().filter_map(std::rc::Weak::upgrade) {
-					if let Ok(mut handle) = io.try_borrow_mut() { handle.discard_output(); }
-				}
-				Err(Flow::Exit(128i32.saturating_add(number)))
+				Err(self.vanish(128i32.saturating_add(number)))
 			};
 		}
 		// The handler must not clobber the interrupted operation's $! (perl saves errno around it).
@@ -684,6 +679,18 @@ impl<'h> Interp<'h> {
 		let result = self.invoke_handler(handler, Value::str(name));
 		self.set_errno_code(errno);
 		result
+	}
+
+	/// End the program with `status` the way a process vanishes, killed by a
+	/// signal or replaced by `exec`: no END block, destructor or exit hook
+	/// runs, and output still buffered is lost before any later close or
+	/// drop can flush it.
+	pub fn vanish(&mut self, status: i32) -> Flow {
+		self.vanished = true;
+		for io in self.handles.iter().filter_map(std::rc::Weak::upgrade) {
+			if let Ok(mut handle) = io.try_borrow_mut() { handle.discard_output(); }
+		}
+		Flow::Exit(status)
 	}
 
 	fn invoke_handler(&mut self, handler: Value, arg: Value) -> PResult<()> {

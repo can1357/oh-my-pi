@@ -869,7 +869,7 @@ impl Handle {
 		self.resource.with_mut(|device| device.set_len(len))
 	}
 
-	/// Drop buffered writes undelivered, as a killed process loses its
+	/// Drop buffered writes undelivered, as a vanished process loses its
 	/// PerlIO buffers.
 	pub fn discard_output(&mut self) {
 		self.output.with_mut(Vec::clear);
