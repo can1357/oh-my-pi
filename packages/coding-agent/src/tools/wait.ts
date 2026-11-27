@@ -722,6 +722,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (!streak) return result;
 		const notice = prompt.render(this.#tanFork ? waitIdleForkTemplate : waitIdleTemplate, {
 			waited: formatDuration(waitedMs),
+			endTurn: this.#endTurn,
 		});
 		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}
