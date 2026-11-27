@@ -145,6 +145,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"filter-reasoning-history": wire("filterReasoningHistory", OAI),
 	"include-encrypted-reasoning": wire("includeEncryptedReasoning", OAI),
 	"kimi-api-format": wire("kimiApiFormat", ["openai"], "scalar", ["openai", "anthropic"]),
+	"kimi-code-endpoint": {
+		key: "kimiCodeEndpoint",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"max-tokens-field": wire("maxTokensField", ["openai"], "scalar", ["max_completion_tokens", "max_tokens"]),
 	"mistral-reasoning-content-parts": wire("mistralReasoningContentParts", ["openai"]),
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
@@ -297,12 +303,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
-	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),
-	"antigravity-usage-label": wire("antigravityUsageLabel", ["google"]),
-	"cca-legacy-parameters-schema": wire("ccaLegacyParametersSchema", ["google"]),
-	"claude-thinking-beta-header": wire("claudeThinkingBetaHeader", ["google"]),
-	"drop-unsigned-thinking": wire("dropUnsignedThinking", ["google"]),
-	"flash-stream-leak-workaround": wire("flashStreamLeakWorkaround", ["google"]),
 	"multimodal-function-response": wire("multimodalFunctionResponse", ["google"]),
 	"requires-skip-thought-signature": wire("requiresSkipThoughtSignature", ["google"]),
 	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [
@@ -358,8 +358,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["freeform", "function"],
 	},
-	/** Paraphrase model-visible prompt prose per install (`perturbContext` in pi-ai). */
-	"prompt-perturbation": { key: "promptPerturbation", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
 	"tool-schemas-in-context": { key: "toolSchemasInContext", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-tool-free-history-for-tool-opt-out": {
@@ -455,6 +453,18 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * `cacheWrite` (rebased on the tier's `input`).
 	 */
 	"cache-write-rate": { key: "cacheWriteRate", set: "catalog", shape: "scalar" },
+	/**
+	 * The host's long-context tier bills cache reads and writes at the same
+	 * multiple of the row it derives from as its input price. GitHub Copilot
+	 * discovery applies it to the cache legs `billing.token_prices` omits on a
+	 * synthesized `-1m` row; a reported `cache_price` wins.
+	 */
+	"tier-cache-follows-input": {
+		key: "tierCacheFollowsInput",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	/**
 	 * How the model line bills a replayed signed thinking block as input:
 	 * `output` bills the reasoning its signature carries, at the size the turn
@@ -577,7 +587,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
 	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },
-	/** Most output tokens the host serves: a larger reported `maxTokens` (and Antigravity per-SKU `maxOutputTokens`) is lowered to it; an unknown one stays unknown. */
+	/** Most output tokens the host serves: a larger reported `maxTokens` is lowered to it; an unknown one stays unknown. */
 	"max-tokens-ceiling": { key: "maxTokensCeiling", set: "catalog", shape: "scalar" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
@@ -614,6 +624,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * pre-warm request.
 	 */
 	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
+	/** The provider reports a distinct server-side AI-credit charge on usage (`usage.aiu`); a reply without it is unknown, not free. */
+	"reports-aiu": { key: "reportsAiu", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**
@@ -739,7 +751,6 @@ export const API_COMPAT_RECORDS: Readonly<Record<string, readonly CompatRecordNa
 	"devin-agent": ["devin"],
 	"google-generative-ai": ["google"],
 	"google-vertex": ["google"],
-	"google-gemini-cli": ["google"],
 };
 
 /** Axis assignments of one rule block, split by namespace and keyed by resolved field. */
@@ -813,7 +824,7 @@ function directiveValue(name: string, axis: AxisDef, value: unknown): unknown {
 
 /**
  * Compiles directive → value assignments, the JSON form of a KDL rule block's
- * axis lines (`{ "prompt-perturbation": true }`), into resolved axes with the
+ * axis lines (`{ "requires-native-tools": true }`), into resolved axes with the
  * same validation as the KDL compiler. Object payloads use kebab-case keys.
  *
  * @throws Error naming an unknown directive, a value of the wrong shape, a

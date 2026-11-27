@@ -100,6 +100,8 @@ describe("headless startup resume", () => {
 							USERPROFILE: tempDir.join("home"),
 							TMPDIR: process.env.TMPDIR,
 							NO_COLOR: "1",
+							// Test runtime: keeps the child off the OS keychain.
+							PI_TEST_RUNTIME: "1",
 						},
 						stdin: "pipe",
 						stdout: "pipe",
@@ -128,7 +130,25 @@ describe("headless startup resume", () => {
 					expect(stderr).toContain("Could not restore model local/missing-model");
 					expect(exitCode).toBe(1);
 					expect(requests).toEqual([]);
-					expect(out).toBe("");
+					if (rpc) {
+						// A fail-closed RPC startup exits before `ready`, so the reason is delivered as a stdout notice
+						// frame; the transcript itself must still never reach a provider or the stdout stream.
+						expect(
+							out
+								.split("\n")
+								.filter(Boolean)
+								.map(line => JSON.parse(line) as unknown),
+						).toEqual([
+							{
+								type: "notice",
+								level: "error",
+								message: "Could not restore model local/missing-model",
+								source: "session-model-restore",
+							},
+						]);
+					} else {
+						expect(out).toBe("");
+					}
 				} finally {
 					proc.kill();
 					await proc.exited;
@@ -262,9 +282,10 @@ describe("headless runtime session switch", () => {
 					USERPROFILE: path.join(cwd, "home"),
 					TMPDIR: process.env.TMPDIR,
 					NO_COLOR: "1",
-					// Marks the child as a test runtime, as the CI runner does for inherited envs: its model registry
-					// rejects network fetches, so the background discovery that `open_session` awaits for a model
-					// missing from the catalog settles at once instead of waiting on public provider catalogs.
+					// Marks the child as a test runtime, as the CI runner does for inherited envs: it stays off the OS
+					// keychain, and its model registry rejects network fetches, so the background discovery that
+					// `open_session` awaits for a model missing from the catalog settles at once instead of waiting on
+					// public provider catalogs.
 					PI_TEST_RUNTIME: "1",
 				},
 				stdin: "pipe",

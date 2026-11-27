@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
@@ -346,6 +348,45 @@ describe("history:// protocol", () => {
 		expect(content).toContain("[image: image/png,");
 		expect(content).not.toContain("aGVsbG8=");
 		expect(content).toContain("[provider fallback: claude-primary to claude-backup]");
+	});
+
+	it("leaves own reasoning out of current-branch full history for a reasoning-refusing reader (#19740)", async () => {
+		const entries = [
+			{
+				type: "message",
+				id: "assistant-entry",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "private chain of thought" },
+						{ type: "text", text: "answer text" },
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test-model",
+					usage: {},
+					stopReason: "stop",
+					timestamp: 3,
+				},
+			},
+		] as unknown as SessionEntry[];
+
+		const read = (model: Model) =>
+			InternalUrlRouter.instance().resolve("history://current/full", {
+				experimentalContextManagement: true,
+				getSessionBranch: () => entries,
+				session: { getActiveModel: () => model } as unknown as ToolSession,
+			});
+
+		const claude = await read(getBundledModel("anthropic", "claude-sonnet-4-5"));
+		expect(claude.content).toContain("answer text");
+		expect(claude.content).not.toContain("private chain of thought");
+		expect(claude.content).not.toContain("<thinking>");
+
+		const gpt = await read(getBundledModel("openai", "gpt-4o-mini"));
+		expect(gpt.content).toContain("private chain of thought");
 	});
 
 	it("renders the caller-bound branch's full pre-compaction transcript without a disk source", async () => {

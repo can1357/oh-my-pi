@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the TSP `meter` style `wave`: bars that swing with the value, animated by the host, for a live voice or audio level.
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

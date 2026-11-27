@@ -31,6 +31,7 @@ import type {
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { extensionLinkClicksAvailable } from "../../extensibility/extensions/link-clicks";
+import type { ExtensionHostUIContext } from "../../extensibility/extensions/runner";
 import type { ExtensionUiHost } from "../../extensibility/extensions/render-types";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import type { ComposerOwner, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
@@ -56,7 +57,7 @@ import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/ap
 import { AskDialog, AskDialogModel } from "../../ui/overlays/panels/ask-dialog";
 import { HookEditor, type HookEditorHandle, HookInput } from "../../ui/overlays/panels/hook-dialogs";
 import { HookSelector } from "../../ui/overlays/pickers/hook-selector";
-import type { OverlayHandle, OverlayOptions } from "../../ui/shell";
+import { type OverlayHandle, type OverlayOptions, within } from "../../ui/shell";
 import { findNode } from "../../ui/styles/panels/common";
 import { registerComposerShape } from "../../ui/styles/composer/shapes";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme } from "../../ui/theme/service";
@@ -247,7 +248,7 @@ export class ExtensionUiController {
 	 */
 	async initHooksAndCustomTools(): Promise<void> {
 		// Create and set hook & tool UI context
-		const uiContext: ExtensionUIContext = {
+		const uiContext: ExtensionHostUIContext = {
 			timeoutStartsOnPresentation: true,
 			supportsEditor: true,
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
@@ -264,6 +265,7 @@ export class ExtensionUiController {
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
+			setOwnedWidget: (owner, key, content, options) => this.setHookWidget(key, content, options, owner),
 			setTitle: title => setExtensionTerminalTitle(title),
 			custom: (factory, options) => this.showHookCustom(factory, options),
 			setEditorText: text => this.ctx.composer.setText(text),
@@ -488,10 +490,10 @@ export class ExtensionUiController {
 	 * Set widget `key` above or below the composer: lines as they are; a factory's output (pi-tui
 	 * nodes or a rows object) adapted, repainting rows when the factory's host asks.
 	 */
-	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
+	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions, owner?: string): void {
 		const placement = options?.placement ?? "aboveEditor";
 		if (content === undefined || Array.isArray(content)) {
-			this.ctx.hud.widgets.set(key, content, placement);
+			this.ctx.hud.widgets.set(key, content, placement, owner);
 			return;
 		}
 		const factory = content as Exclude<ExtensionWidgetContent, readonly string[] | undefined>;
@@ -505,6 +507,7 @@ export class ExtensionUiController {
 				});
 			},
 			placement,
+			owner,
 		);
 	}
 
@@ -1654,13 +1657,21 @@ export class ExtensionUiController {
 					handle = this.ctx.shell.overlays.show(
 						() => extensionOverlay((node = view()), options.fullscreen === true, this.ctx.shell.native()),
 						// A view that is its own sheet takes the keys on the screen inside it.
-						{ focus: root => (node && node !== root ? node : (root.children()[0] ?? root)) },
+						{
+							focus: root => (node && node !== root ? node : (root.children()[0] ?? root)),
+							mouse: options.mouse,
+						},
 					);
 					options.onHandle?.({
 						get closed() {
 							return handle?.closed ?? true;
 						},
 						close: () => handle?.close(),
+						isFocused: () => {
+							if (!handle || handle.closed) return false;
+							const holder = this.ctx.shell.focused();
+							return holder !== null && (holder === handle.node || within(holder, handle.node));
+						},
 					});
 					return;
 				}

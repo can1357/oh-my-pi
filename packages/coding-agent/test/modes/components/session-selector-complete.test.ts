@@ -72,4 +72,29 @@ describe("session selector complete listing", () => {
 			picker.term.dispose();
 		}
 	});
+
+	it("swaps the complete all-projects listing in, restoring each session's folder", async () => {
+		const complete = Promise.withResolvers<SessionSelectorEntry[]>();
+		const cwd = "/work/far-project";
+		const scanned = sessionEntry("far", "Far", "2024-01-03T00:00:00Z", { path: "/sessions/far.jsonl", cwd });
+		const picker = mountSessionSelector({
+			sessions: [],
+			// history.db rows carry no cwd until the full scan lands.
+			loadAllSessions: async () => ({ sessions: [{ ...scanned, cwd: "" }], complete: complete.promise }),
+		});
+		try {
+			picker.press("tab");
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+			expect(picker.screen()).not.toContain(cwd);
+
+			complete.resolve([scanned]);
+			await complete.promise;
+
+			expect(picker.screen()).toContain(cwd);
+			picker.press(..."far-project");
+			expect(picker.enter()?.id).toBe("far");
+		} finally {
+			picker.term.dispose();
+		}
+	});
 });

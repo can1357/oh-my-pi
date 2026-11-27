@@ -9,7 +9,7 @@ import type { Api, ModelSpec } from "../types";
  * {@link ModelSpec.serviceTiers} becomes the union of every listing's tiers, so
  * a tier only some accounts hold (Codex Ultrafast) stays selectable; each
  * account's own list survives in its `accountAccess` entry. Used by
- * multi-account discovery for Codex and Antigravity, whose rosters differ per
+ * multi-account discovery for Codex, whose rosters differ per
  * account.
  */
 export function unionAccountCatalogs<TApi extends Api>(

@@ -328,14 +328,31 @@ fn line_carries(body_line: &str, evidence: &str) -> bool {
 /// rejects stale numbers whichever way lines moved: after lines shift down,
 /// a stale range's first line holds content from above the intended range;
 /// after lines shift up, its last line holds content from below it. Either
-/// way that end's content is absent from the payload.
-fn body_targets(body: &[String], current_lines: &[&str], first: u32, last: u32) -> bool {
+/// way that end's content is absent from the payload. A payload that also
+/// carries the line just below the full authored replacement (not the unseen
+/// span, which may end before already-seen rows) defeats this when the head is an
+/// echoed context row (lines shifted down, body restates the line above), so
+/// such payloads never count as evidence.
+fn body_targets(
+	body: &[String],
+	current_lines: &[&str],
+	first: u32,
+	last: u32,
+	replaced_through: u32,
+) -> bool {
 	let Some(head) = unique_evidence(current_lines, first) else {
 		return false;
 	};
 	let Some(head_at) = body.iter().position(|line| line_carries(line, head)) else {
 		return false;
 	};
+	if replaced_through
+		.checked_add(1)
+		.and_then(|line| unique_evidence(current_lines, line))
+		.is_some_and(|next| body.iter().any(|line| line_carries(line, next)))
+	{
+		return false;
+	}
 	if first == last {
 		return true;
 	}
@@ -373,10 +390,12 @@ fn rescue_shifted_anchors(
 			.copied()
 			.filter(|line| pending.contains(line))
 			.collect();
-		let (Some(&first), Some(&last)) = (group_unseen.first(), group_unseen.last()) else {
+		let (Some(&first), Some(&last), Some(&end)) =
+			(group_unseen.first(), group_unseen.last(), group.anchors.last())
+		else {
 			continue;
 		};
-		if body_targets(&group.body, &current_lines, first, last)
+		if body_targets(&group.body, &current_lines, first, last, end)
 			&& group_unseen.iter().all(|line| images_seen(&maps, *line))
 		{
 			rescued.extend(group_unseen);
@@ -1040,31 +1059,36 @@ mod tests {
 	fn body_targets_single_anchor_needs_substantial_unique_token_bounded_content() {
 		let file = ["let v0060 = 60;", "}", "foo(bar);", "dup_line();", "dup_line();"];
 		// Edited line carrying the current content plus an appended comment.
-		assert!(body_targets(&body(&["let v0060 = 60; // replay edit"]), &file, 1, 1));
+		assert!(body_targets(&body(&["let v0060 = 60; // replay edit"]), &file, 1, 1, 1));
 		// Stale anchor: the body carries another line's content.
-		assert!(!body_targets(&body(&["let v0058 = 58; // edit"]), &file, 1, 1));
+		assert!(!body_targets(&body(&["let v0058 = 58; // edit"]), &file, 1, 1, 1));
 		// Prefix of a longer number / identifier is not the same line.
-		assert!(!body_targets(&body(&["let v0060 = 600;"]), &["let v0060 = 60"], 1, 1));
-		assert!(!body_targets(&body(&["process(items);"]), &["process(item"], 1, 1));
-		assert!(body_targets(&body(&["process(item); // edit"]), &["process(item"], 1, 1));
+		assert!(!body_targets(&body(&["let v0060 = 600;"]), &["let v0060 = 60"], 1, 1, 1));
+		assert!(!body_targets(&body(&["process(items);"]), &["process(item"], 1, 1, 1));
+		assert!(body_targets(&body(&["process(item); // edit"]), &["process(item"], 1, 1, 1));
 		// Short closers repeat everywhere and prove nothing.
-		assert!(!body_targets(&body(&["}", "x();"]), &file, 2, 2));
+		assert!(!body_targets(&body(&["}", "x();"]), &file, 2, 2, 2));
 		// Repeated content cannot name which copy is meant.
-		assert!(!body_targets(&body(&["dup_line(); // edit"]), &file, 4, 4));
+		assert!(!body_targets(&body(&["dup_line(); // edit"]), &file, 4, 4, 4));
 	}
 
 	#[test]
 	fn body_targets_range_needs_both_ends_in_order() {
 		let file = ["let v0001 = 1;", "let v0002 = 2;", "let v0003 = 3;", "let v0004 = 4;"];
 		let faithful = body(&["let v0001 = 1;", "let v0002 = 20;", "let v0004 = 4; // edit"]);
-		assert!(body_targets(&faithful, &file, 1, 4));
+		assert!(body_targets(&faithful, &file, 1, 4, 4));
 		// Lines shifted up: a stale range ends one line past what the body
 		// carries.
 		let stale = body(&["let v0001 = 1;", "let v0002 = 2;", "let v0003 = 30;"]);
-		assert!(!body_targets(&stale, &file, 1, 4));
+		assert!(!body_targets(&stale, &file, 1, 4, 4));
 		// Tail carried only before the head is not this range.
 		let reversed = body(&["let v0004 = 4;", "let v0001 = 1;"]);
-		assert!(!body_targets(&reversed, &file, 1, 4));
+		assert!(!body_targets(&reversed, &file, 1, 4, 4));
+		// Lines shifted down with an echoed row above: the stale range's head
+		// is the echo and the intended last line sits just below the range.
+		let echoed = body(&["let v0001 = 1;", "let v0002 = 2; // e", "let v0003 = 3; // e"]);
+		assert!(!body_targets(&echoed, &file, 1, 2, 2));
+		assert!(!body_targets(&body(&["let v0001 = 1;", "let v0002 = 2; // e"]), &file, 1, 1, 1));
 	}
 }
 
@@ -1205,6 +1229,33 @@ mod lifecycle {
 		let text = ctx.text("case-a.ts");
 		assert_eq!(text.lines().count(), 32);
 		assert!(text.lines().nth(19).unwrap().contains("// edited"));
+	}
+
+	#[tokio::test]
+	async fn shifted_range_with_a_seen_tail_checks_the_neighbor_below_the_whole_range() {
+		for (tail, faithful) in [("let v0019 = 19;", true), ("let v0020 = 20;", false)] {
+			let file = "sparse.ts";
+			let ctx = Lifecycle::new(file, 30);
+			ctx.read(file, &[18]);
+			let shifted = format!("// inserted\n{}", ctx.text(file));
+			ctx.write_text(file, &shifted);
+			// Current line 19 was seen only at its old number; line 20 is seen now.
+			let tag = ctx.read(file, &[20]);
+			let result = ctx
+				.edit(&format!("[{file}#{tag}]\nPUT 19.=20:\n+let v0018 = 18; // edited\n+{tail}\n"))
+				.await;
+			if faithful {
+				result.unwrap();
+				assert_eq!(
+					ctx.text(file),
+					shifted.replace("let v0018 = 18;", "let v0018 = 18; // edited")
+				);
+			} else {
+				let err = result.unwrap_err();
+				assert!(err.contains("never displayed"), "{err}");
+				assert_eq!(ctx.text(file), shifted);
+			}
+		}
 	}
 
 	/// Same setup, but the follow-up reuses the stale pre-shift number.

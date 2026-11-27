@@ -8,26 +8,23 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
-import {
-	__physicalTargetSegmentsForTesting,
-	resetSettingsForTest,
-	Settings,
-} from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { physicalTargetSegments } from "@oh-my-pi/pi-coding-agent/config/settings-yaml";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 
-import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
+import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
-import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import {
 	cfgSymbolPreset,
 	cfgDisplayShowTokenUsage,
+	cfgDisplayToolActivity,
 	cfgAskTimeout,
 	cfgThemeDark,
 	cfgTerminalShowProgress,
@@ -318,31 +315,6 @@ describe("Settings", () => {
 			const backupNames = fs.readdirSync(agentDir).filter(name => name.startsWith("config.yml.broken-"));
 			expect(backupNames).toHaveLength(1);
 			expect(await Bun.file(path.join(agentDir, backupNames[0])).text()).toBe(original);
-		});
-
-		it("rejects when another process quarantines malformed config before the lock is acquired", async () => {
-			const configPath = getConfigPath();
-			const backupPath = `${configPath}.broken-other-process`;
-			const original = 'modelRoles:\n  default: "unterminated\n';
-			await Bun.write(configPath, original);
-			const canonicalConfigPath = await fs.promises.realpath(configPath);
-			const withFileLock = fileLock.withFileLock;
-			let movedAside = false;
-			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
-				if (!movedAside && filePath === canonicalConfigPath) {
-					await fs.promises.rename(configPath, backupPath);
-					movedAside = true;
-				}
-				return await withFileLock(filePath, fn, options);
-			});
-
-			await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(
-				"invalid before locking and is now missing",
-			);
-
-			expect(movedAside).toBe(true);
-			expect(await Bun.file(configPath).exists()).toBe(false);
-			expect(await Bun.file(backupPath).text()).toBe(original);
 		});
 
 		it("keeps malformed config in place for read-only loads", async () => {
@@ -973,20 +945,19 @@ describe("Settings", () => {
 			// `C:\C:\managed\final.yml`, so flushing through a dangling absolute link
 			// fails. Drive the splitter with the win32 engine so the bug reproduces
 			// on this POSIX host.
-			const segments = __physicalTargetSegmentsForTesting("C:\\managed\\final.yml", path.win32).filter(
+			const segments = physicalTargetSegments("C:\\managed\\final.yml", path.win32).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(segments).toEqual(["managed", "final.yml"]);
 			// A UNC target seeds at the `\\server\share\` root, which must likewise
 			// be stripped rather than re-walked as `server` / `share` segments.
-			const uncSegments = __physicalTargetSegmentsForTesting(
-				"\\\\server\\share\\managed\\final.yml",
-				path.win32,
-			).filter(segment => segment !== "" && segment !== ".");
+			const uncSegments = physicalTargetSegments("\\\\server\\share\\managed\\final.yml", path.win32).filter(
+				segment => segment !== "" && segment !== ".",
+			);
 			expect(uncSegments).toEqual(["managed", "final.yml"]);
 			// A relative Windows target seeds at the link's real parent, so every
 			// segment is preserved unchanged.
-			expect(__physicalTargetSegmentsForTesting("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
+			expect(physicalTargetSegments("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
 		});
 
 		it("treats a backslash as a filename character on POSIX, not a separator", async () => {
@@ -995,10 +966,10 @@ describe("Settings", () => {
 			// `managed`/`config.yml` makes flush either fail on the missing dir or
 			// write an unrelated file while the real link stays dangling. Drive the
 			// splitter with the posix engine so the bug reproduces on any host.
-			expect(__physicalTargetSegmentsForTesting("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
+			expect(physicalTargetSegments("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
 			// Forward slashes still split, and the leading `/` of an absolute POSIX
 			// target strips to no extra segment (root seeded separately).
-			const absSegments = __physicalTargetSegmentsForTesting("/managed/final.yml", path.posix).filter(
+			const absSegments = physicalTargetSegments("/managed/final.yml", path.posix).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(absSegments).toEqual(["managed", "final.yml"]);
@@ -1009,17 +980,13 @@ describe("Settings", () => {
 			// final.yml without following `alias`; walking the raw `..` pops the
 			// alias's PHYSICAL parent and writes a file the link never reads. Drive
 			// the splitter with each engine so both rules reproduce on any host.
-			expect(__physicalTargetSegmentsForTesting("alias\\..\\final.yml", path.win32)).toEqual(["final.yml"]);
+			expect(physicalTargetSegments("alias\\..\\final.yml", path.win32)).toEqual(["final.yml"]);
 			// A leading `..` still pops the link's real parent, and a trailing
 			// separator survives so the walk still demands a directory there.
-			expect(__physicalTargetSegmentsForTesting("..\\..\\final.yml", path.win32)).toEqual(["..", "..", "final.yml"]);
-			expect(__physicalTargetSegmentsForTesting("missing\\", path.win32)).toEqual(["missing", ""]);
+			expect(physicalTargetSegments("..\\..\\final.yml", path.win32)).toEqual(["..", "..", "final.yml"]);
+			expect(physicalTargetSegments("missing\\", path.win32)).toEqual(["missing", ""]);
 			// POSIX follows `alias` physically, so `..` stays for the walk to pop.
-			expect(__physicalTargetSegmentsForTesting("alias/../final.yml", path.posix)).toEqual([
-				"alias",
-				"..",
-				"final.yml",
-			]);
+			expect(physicalTargetSegments("alias/../final.yml", path.posix)).toEqual(["alias", "..", "final.yml"]);
 		});
 
 		it("falls back to move-aside replacement when Windows reports EPERM", async () => {
@@ -1232,26 +1199,28 @@ describe("Settings", () => {
 			expect(cfgTaskEnableEffort.get(settings)).toBe(false);
 			expect(cfgTaskMaxConcurrency.get(settings)).toBe(7);
 		});
-		it("retries when a persisted setting changes while files are being read", async () => {
+		it("keeps a global write issued while a reload is reading files", async () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			const loadCapability = discovery.loadCapability;
-			const projectLoadStarted = Promise.withResolvers<void>();
-			const releaseProjectLoad = Promise.withResolvers<void>();
-			let pauseProjectLoad = true;
-			vi.spyOn(discovery, "loadCapability").mockImplementation(async (id, options) => {
-				if (pauseProjectLoad) {
-					pauseProjectLoad = false;
-					projectLoadStarted.resolve();
-					await releaseProjectLoad.promise;
+			const configPath = getConfigPath();
+			const configPaths = new Set([configPath, await fs.promises.realpath(configPath)]);
+			const readFile = fs.promises.readFile.bind(fs.promises) as (...args: unknown[]) => Promise<unknown>;
+			const readStarted = Promise.withResolvers<void>();
+			const releaseRead = Promise.withResolvers<void>();
+			let pauseRead = true;
+			vi.spyOn(fs.promises, "readFile").mockImplementation((async (...args: unknown[]) => {
+				if (pauseRead && typeof args[0] === "string" && configPaths.has(args[0])) {
+					pauseRead = false;
+					readStarted.resolve();
+					await releaseRead.promise;
 				}
-				return await loadCapability(id, options);
-			});
+				return await readFile(...args);
+			}) as typeof fs.promises.readFile);
 
 			const reload = settings.reloadFromDisk();
-			await projectLoadStarted.promise;
+			await readStarted.promise;
 			cfgSetupVersion.set(settings, 2);
-			releaseProjectLoad.resolve();
+			releaseRead.resolve();
 			await reload;
 			await settings.flush();
 
@@ -1679,20 +1648,22 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const firstSaveEntered = Promise.withResolvers<void>();
 			const releaseFirstSave = Promise.withResolvers<void>();
-			const firstSaveFinished = Promise.withResolvers<void>();
-			const withFileLock = fileLock.withFileLock;
-			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
-				firstSaveEntered.resolve();
-				const result = await withFileLock(filePath, fn, options);
-				firstSaveFinished.resolve();
-				return result;
+			const writeFileAtomically = atomicFile.writeFileAtomically;
+			let pauseSave = true;
+			vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (filePath, content, mode) => {
+				if (pauseSave) {
+					pauseSave = false;
+					firstSaveEntered.resolve();
+					await releaseFirstSave.promise;
+				}
+				await writeFileAtomically(filePath, content, mode);
 			});
 
 			settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
 			await firstSaveEntered.promise;
 			settings.setModelRole("advisor", "moonshot/kimi-k3:max");
 			releaseFirstSave.resolve();
-			await firstSaveFinished.promise;
+			await settings.flush();
 
 			expect((await readSettings()).modelRoles).toEqual({
 				default: "anthropic/claude-sonnet-4-5",
@@ -1823,7 +1794,6 @@ describe("Settings", () => {
 		const MODEL_PRIO = roleDefaultModels();
 		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
-			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
 			"openai-codex/gpt-6-luna",
@@ -1839,7 +1809,6 @@ describe("Settings", () => {
 		const imageOrderedHead = [
 			"openai/gpt-image-2",
 			"openai-codex/gpt-image-2",
-			"google-antigravity/gemini-3-pro-image",
 			"xai/grok-imagine-image",
 			"openrouter/google/gemini-3-pro-image",
 			"google/gemini-3-pro-image",
@@ -1872,19 +1841,12 @@ describe("Settings", () => {
 			[
 				"image order",
 				"providers.imageOrder",
-				["openai", "openai-codex", "antigravity", "xai", "openrouter", "gemini", "deepinfra"],
+				["openai", "openai-codex", "xai", "openrouter", "gemini", "deepinfra"],
 				{ image: imageOrderedCandidates[0] },
 				{ image: imageOrderedCandidates.slice(1) },
 			],
 			["local speech provider", "providers.tts", "local", { speech: "local/phonon-31m" }, { speech: [] }],
 			["xAI speech provider", "providers.tts", "xai", { speech: "xai/grok-tts" }, { speech: [] }],
-			[
-				"DeepInfra speech provider",
-				"providers.tts",
-				"deepinfra",
-				{ speech: "deepinfra/hexgrad/Kokoro-82M" },
-				{ speech: [] },
-			],
 			[
 				"judgment provider",
 				"providers.judgmentProvider",
@@ -2002,10 +1964,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 1)]).toEqual([
-				"google-antigravity/gemini-3.8-flash-high",
-				"google/gemini-3.8-flash-high",
-			]);
+			expect(settings.getModelRole("web")).toBe("google/gemini-3.8-flash-high");
 		});
 
 		it("drops legacy defaults without materializing kind roles", async () => {
@@ -2334,11 +2293,12 @@ describe("Settings", () => {
 			expect(cfgMnemopiScoping.get(settings)).toBe("global");
 		});
 
-		it("migrates legacy Kokoro voices and speech role to Phonon", async () => {
+		it("migrates retired local speech models: Kokoro to Phonon, Parakeet v3 to Fluid Speech Pro", async () => {
 			await writeSettings({
 				tts: { localVoice: "bm_george" },
 				speech: { voice: "af_bella" },
-				modelRoles: { speech: "local/kokoro" },
+				modelRoles: { speech: "local/kokoro", dictation: "local/parakeet-tdt-0.6b-v3" },
+				retry: { fallbackChains: { dictation: ["local/parakeet-tdt-0.6b-v3", "openai/gpt-transcribe"] } },
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -2346,6 +2306,11 @@ describe("Settings", () => {
 			expect(cfgTtsLocalVoice.get(settings)).toBe("edwin");
 			expect(cfgSpeechVoice.get(settings)).toBe("harper");
 			expect(settings.getModelRole("speech")).toBe("local/phonon-31m");
+			expect(settings.getModelRole("dictation")).toBe("local/fluid-speech-pro");
+			expect(cfgRetryFallbackChains.get(settings).dictation).toEqual([
+				"local/fluid-speech-pro",
+				"openai/gpt-transcribe",
+			]);
 		});
 
 		it("does not clobber an explicit mnemopi block when the legacy mnemosyne block is also present", async () => {
@@ -2420,6 +2385,31 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("smart");
+		});
+
+		it.each([
+			[true, "hidden"],
+			[false, "detailed"],
+		] as const)("migrates legacy display.hideToolActivity=%p to display.toolActivity %p", async (hide, mode) => {
+			await writeSettings({ display: { hideToolActivity: hide } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe(mode);
+			// The legacy key leaves config.yml on the next save.
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			const display = (await readSettings()).display as Record<string, unknown>;
+			expect("hideToolActivity" in display).toBe(false);
+			expect(display.toolActivity).toBe(mode);
+		});
+
+		it("keeps an explicit display.toolActivity over a quoted-dotted legacy hideToolActivity", async () => {
+			await Bun.write(getConfigPath(), '"display.hideToolActivity": true\ndisplay:\n  toolActivity: concise\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe("concise");
 		});
 
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {
@@ -2860,13 +2850,13 @@ describe("Settings", () => {
 	});
 
 	describe("extensionsSourceLevel", () => {
-		it("reports project when a foreign project provider (.claude/settings.json) supplies extensions", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			fs.mkdirSync(path.dirname(claudeSettings), { recursive: true });
-			fs.writeFileSync(claudeSettings, JSON.stringify({ extensions: ["../claude-ext"] }));
+		it("reports project when the project settings.json supplies extensions", async () => {
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+			fs.writeFileSync(projectSettings, JSON.stringify({ extensions: ["../project-ext"] }));
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(cfgExtensions.get(settings)).toContain("../claude-ext");
+			expect(cfgExtensions.get(settings)).toContain("../project-ext");
 			expect(settings.extensionsSourceLevel()).toBe("project");
 		});
 
@@ -2880,82 +2870,47 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("project .claude/settings.json parse warnings", () => {
+	describe("project settings.json parse warnings", () => {
 		it("logs capability warnings when project settings.json fails to parse", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
 			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringMatching(/Settings: \[Claude Code\] Failed to parse JSON in .*settings\.json/),
+				expect.stringMatching(/Settings: \[OMP\] Failed to parse .*settings\.json/),
 			);
 
 			warnSpy.mockRestore();
 		});
 
-		it("drops user-level warnings that #readProjectSettings does not merge", async () => {
-			const projectSettingsJson = path.join(projectDir, ".claude", "settings.json");
-			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
-				items: [],
-				all: [],
-				warnings: [
-					`[Claude Code] Failed to parse JSON in ${path.join(tempDir.path(), "home", ".claude", "settings.json")}`,
-					"[Claude Code] Failed to load: boom",
-					`[Claude Code] Failed to parse JSON in ${projectSettingsJson}`,
-				],
-				providers: [],
-			});
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-
-			await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettingsJson));
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("home"))).toEqual([]);
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to load"))).toEqual([]);
-		});
-
-		it("logs project warnings when the cwd is a filesystem root", async () => {
-			const root = path.parse(projectDir).root;
-			const rootSettingsJson = path.join(root, ".claude", "settings.json");
-			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
-				items: [],
-				all: [],
-				warnings: [`[Claude Code] Failed to parse JSON in ${rootSettingsJson}`],
-				providers: [],
-			});
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-
-			await Settings.init({ cwd: root, agentDir, inMemory: true });
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(rootSettingsJson));
-		});
-
 		it("logs a persistently malformed project file once across reloads", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 
 			await settings.reloadFromDisk();
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 		});
 
 		it("surfaces a project file that becomes malformed after startup", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(0);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(0);
 
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 			await settings.reloadFromDisk();
 
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(claudeSettings));
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettings));
 		});
 	});
 });

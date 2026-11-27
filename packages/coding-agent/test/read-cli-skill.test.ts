@@ -89,22 +89,6 @@ describe("omp read skill resources", () => {
 		expect(await Bun.file(marker).exists()).toBe(true);
 	}, 60_000);
 
-	it("honors the codex opt-in when reading a user skill through the standalone CLI", async () => {
-		const skillDir = path.join(root, ".codex", "skills", "codex-user-skill");
-		await fs.mkdir(skillDir, { recursive: true });
-		await Bun.write(
-			path.join(skillDir, "SKILL.md"),
-			"---\nname: codex-user-skill\ndescription: Opted-in user skill.\n---\n\n# Codex User Skill\n",
-		);
-		await Bun.write(path.join(agentDir, "config.yml"), "enabledProviders:\n  - codex\n");
-
-		const { exitCode, output, error } = await runReadProbe("skill://codex-user-skill");
-
-		expect(exitCode).toBe(0);
-		expect(output).toContain("# Codex User Skill");
-		expect(error).toBe("");
-	}, 60_000);
-
 	it("reads an extension skill configured outside .omp through the standalone CLI", async () => {
 		const skillDir = path.join(projectDir, "ext-pkg", "skills", "ext-skill");
 		await fs.mkdir(skillDir, { recursive: true });
@@ -112,8 +96,7 @@ describe("omp read skill resources", () => {
 			path.join(skillDir, "SKILL.md"),
 			"---\nname: ext-skill\ndescription: Extension skill.\n---\n\n# Extension Skill\n",
 		);
-		await fs.mkdir(path.join(projectDir, ".claude"), { recursive: true });
-		await Bun.write(path.join(projectDir, ".claude", "settings.json"), JSON.stringify({ extensions: ["./ext-pkg"] }));
+		await Bun.write(path.join(projectDir, ".omp", "settings.json"), JSON.stringify({ extensions: ["./ext-pkg"] }));
 
 		const { exitCode, output, error } = await runReadProbe("skill://ext-skill");
 

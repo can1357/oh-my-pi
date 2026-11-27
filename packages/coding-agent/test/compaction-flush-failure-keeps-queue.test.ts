@@ -5,14 +5,14 @@
  * arrived before the flush, while it was delivering, or after it finished; they are never
  * discarded with the failed batch.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { afterAll, afterEach, beforeAll, describe, expect, it, mock, vi } from "bun:test";
+import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import type { CompactionQueuedMessage } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -20,6 +20,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { initTheme } from "../src/ui/theme/service";
 
 describe("flushCompactionQueue failure", () => {
 	let tempDir: TempDir;
@@ -371,5 +372,190 @@ describe("flushCompactionQueue failure", () => {
 
 		await live.abort();
 		await running.catch(() => {});
+	});
+});
+
+// While the agent streams, a flush must deliver through the session steer/follow-up
+// queues (which Alt+Up and the post-stream drain consult) instead of stranding a
+// busy-rejected message in compactionQueuedMessages, and its local-submission
+// bookkeeping must be undone whenever delivery rejects.
+describe("flushCompactionQueue delivery against a streaming session", () => {
+	beforeAll(() => {
+		initTheme();
+	});
+
+	type PromptOpts = { streamingBehavior?: "steer" | "followUp" } | undefined;
+
+	function makeFakeSession() {
+		const steering: { text: string }[] = [];
+		const followUp: { text: string }[] = [];
+		const promptCalls: Array<{ text: string; opts: PromptOpts }> = [];
+
+		const prompt = mock(async (text: string, opts?: PromptOpts): Promise<void> => {
+			promptCalls.push({ text, opts });
+			// Mirror real agent-session behaviour: when the session is busy and the
+			// caller did not supply streamingBehavior, throw AgentBusyError.
+			if (!opts?.streamingBehavior) {
+				throw new AgentBusyError();
+			}
+			if (opts.streamingBehavior === "followUp") {
+				followUp.push({ text });
+			} else {
+				steering.push({ text });
+			}
+		});
+
+		const steer = mock(async (text: string): Promise<void> => {
+			steering.push({ text });
+		});
+
+		const followUpFn = mock(async (text: string): Promise<void> => {
+			followUp.push({ text });
+		});
+
+		const session = {
+			isStreaming: true,
+			isCompacting: false,
+			extensionRunner: undefined,
+			customCommands: [] as Array<{ command: { name: string } }>,
+			getQueuedMessages: () => ({ steering: steering.map(e => e.text), followUp: followUp.map(e => e.text) }),
+			// Faithful stub of AgentSession.dropQueuedMessages: removes exactly the given entries.
+			dropQueuedMessages: (messages: Iterable<object>) => {
+				const dropped = new Set(messages);
+				const s = steering.filter(entry => !dropped.has(entry));
+				const f = followUp.filter(entry => !dropped.has(entry));
+				steering.splice(0, steering.length, ...s);
+				followUp.splice(0, followUp.length, ...f);
+			},
+			prompt,
+			steer,
+			followUp: followUpFn,
+		};
+
+		return { session, steering, followUp, promptCalls };
+	}
+
+	function makeFakeFlushContext(initialQueue: CompactionQueuedMessage[]) {
+		const fake = makeFakeSession();
+		const showError = mock((_msg: string) => {});
+		const showStatus = mock((_msg: string) => {});
+		const updatePendingMessagesDisplay = mock(() => {});
+
+		const locallySubmittedUserSignatures = new Set<string>();
+		const isKnownSlashCommand = (text: string) => text.startsWith("/");
+		const ctx = {
+			session: fake.session,
+			compactionQueuedMessages: [...initialQueue],
+			pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
+			editor: { addToHistory: () => {}, setText: () => {}, getText: () => "" },
+			keybindings: { getKeys: () => ["alt+up"] },
+			fileSlashCommands: new Set<string>(),
+			locallySubmittedUserSignatures,
+			isKnownSlashCommand,
+			recordLocalSubmission(text: string, imageCount = 0) {
+				if (isKnownSlashCommand(text)) return () => {};
+				const sig = `${text}\u0000${imageCount}`;
+				locallySubmittedUserSignatures.add(sig);
+				let disposed = false;
+				return () => {
+					if (disposed) return;
+					disposed = true;
+					locallySubmittedUserSignatures.delete(sig);
+				};
+			},
+			async withLocalSubmission<T>(
+				text: string,
+				fn: () => Promise<T>,
+				options?: { imageCount?: number },
+			): Promise<T> {
+				const dispose = ctx.recordLocalSubmission(text, options?.imageCount ?? 0);
+				try {
+					return await fn();
+				} catch (err) {
+					dispose();
+					throw err;
+				}
+			},
+			updatePendingMessagesDisplay,
+			showError,
+			showStatus,
+		} as unknown as InteractiveModeContext;
+
+		return { ctx, fake, showError, showStatus, updatePendingMessagesDisplay };
+	}
+
+	it("AgentBusyError on flush leaves the steer message in the session queue (submittable on next turn)", async () => {
+		const queued: CompactionQueuedMessage[] = [{ text: "address review feedback", mode: "steer" }];
+		const { ctx, fake } = makeFakeFlushContext(queued);
+
+		const helpers = new UiHelpers(ctx);
+		await helpers.flushCompactionQueue({ willRetry: false });
+		// Drain microtasks so the .catch on the fire-and-forget prompt resolves.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		// Contract: the message must end up in the session steering queue —
+		// that is what `restoreQueuedMessagesToEditor` (Alt+Up) and the
+		// post-stream drain consult. Otherwise it is stranded in
+		// compactionQueuedMessages with no consumer.
+		expect(fake.steering).toContainEqual({ text: "address review feedback" });
+
+		// And it must not also remain duplicated in compactionQueuedMessages.
+		const remaining = (ctx as unknown as { compactionQueuedMessages: CompactionQueuedMessage[] })
+			.compactionQueuedMessages;
+		expect(remaining.find(m => m.text === "address review feedback")).toBeUndefined();
+	});
+
+	it("marks flushed compaction messages as local submissions before delivery", async () => {
+		const queued: CompactionQueuedMessage[] = [{ text: "draft-safe queued message", mode: "steer" }];
+		const { ctx, fake } = makeFakeFlushContext(queued);
+		fake.session.isStreaming = false;
+		fake.session.prompt = mock(async (text: string, opts?: PromptOpts): Promise<void> => {
+			fake.promptCalls.push({ text, opts });
+		});
+
+		const helpers = new UiHelpers(ctx);
+		await helpers.flushCompactionQueue({ willRetry: false });
+
+		expect(ctx.locallySubmittedUserSignatures.has("draft-safe queued message\u00000")).toBe(true);
+	});
+
+	it("removes the local-submission signature when willRetry delivery rejects", async () => {
+		const queued: CompactionQueuedMessage[] = [{ text: "willRetry boom", mode: "followUp" }];
+		const { ctx, fake } = makeFakeFlushContext(queued);
+		fake.session.followUp = mock(async () => {
+			throw new Error("delivery failed");
+		});
+
+		const helpers = new UiHelpers(ctx);
+		// flushCompactionQueue funnels rejections through restoreQueue, so it
+		// resolves rather than rethrowing — but the signature must still be
+		// cleared so the restored queue can be re-flushed without stale state.
+		await helpers.flushCompactionQueue({ willRetry: true });
+
+		expect(ctx.locallySubmittedUserSignatures.has("willRetry boom\u00000")).toBe(false);
+		// And the message is restored to compactionQueuedMessages for retry.
+		const remaining = (ctx as unknown as { compactionQueuedMessages: CompactionQueuedMessage[] })
+			.compactionQueuedMessages;
+		expect(remaining.find(m => m.text === "willRetry boom")).toBeDefined();
+	});
+
+	it("removes the local-submission signature when the fire-and-forget firstPrompt rejects", async () => {
+		const queued: CompactionQueuedMessage[] = [{ text: "fire and forget", mode: "steer" }];
+		const { ctx, fake } = makeFakeFlushContext(queued);
+		// Force the firstPrompt path (not willRetry, no slash commands) to reject.
+		fake.session.prompt = mock(async () => {
+			throw new Error("queue closed");
+		});
+
+		const helpers = new UiHelpers(ctx);
+		await helpers.flushCompactionQueue({ willRetry: false });
+		// Drain microtasks so the .catch on the fire-and-forget prompt resolves.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(ctx.locallySubmittedUserSignatures.has("fire and forget\u00000")).toBe(false);
 	});
 });

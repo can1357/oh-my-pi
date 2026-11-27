@@ -12,6 +12,7 @@ import { getBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { Composer, ComposerChips } from "../../../src/ui/composer";
 
@@ -80,6 +81,7 @@ describe("attachment band pictures", () => {
 				multiplexer: null,
 				textSizing: false,
 				tsp: false,
+				emoji: CONSERVATIVE_EMOJI,
 			});
 			const placeholders = signal(false);
 			const images = new TerminalImages({ capabilities: caps, placeholders });

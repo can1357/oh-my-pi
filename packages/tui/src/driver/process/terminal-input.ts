@@ -147,6 +147,16 @@ const SCHEME_DEBOUNCE_MS = 100;
 const WINDOWS_APPEARANCE_POLL_MS = 30_000;
 const CPR_TIMEOUT_MS = 500;
 /**
+ * WezTerm sizes emoji presentation selectors only from Unicode 14 on: save its
+ * version under our label, switch to 14, and pop back to the label on stop.
+ */
+const WEZTERM_UNICODE_PUSH = "\x1b]1337;UnicodeVersion=push omp\x1b\\\x1b]1337;UnicodeVersion=14\x1b\\";
+const WEZTERM_UNICODE_POP = "\x1b]1337;UnicodeVersion=pop omp\x1b\\";
+/** A text-default emoji with its presentation selector: two cells by our width table. */
+const EMOJI_WIDTH_SAMPLE = "\u2714\uFE0F";
+/** Cursor positions the emoji width probe reads (before and after printing the sample). */
+const EMOJI_PROBE_REPORTS = 2;
+/**
  * How long, in a Herdr desktop terminal, an applied DEC 2048 report that
  * disagrees with the pty size waits for the SIGWINCH that makes them agree.
  */
@@ -218,6 +228,7 @@ export class ProcessTerminalInput implements TerminalInput {
 	#colorSchemeReports = false;
 	#restoreModes: number[] = [];
 	#mouse: MouseTracking = "off";
+	#reportFocus = false;
 	#titlePushed = false;
 	/** Re-assert bracketed paste before input and output: some hosts reset it (iTerm2's state toggle, tmux panes). */
 	#rearmPaste = false;
@@ -249,6 +260,17 @@ export class ProcessTerminalInput implements TerminalInput {
 	#cpr: PromiseWithResolvers<{ row: number; col: number } | null> | null = null;
 	/** Herdr only: drops an applied in-band report the pty size has not come to match. */
 	#cancelHerdrSettle: (() => void) | null = null;
+	// Emoji presentation.
+	/** DEC 2027 (grapheme clustering) was reset and we set it (cleared on stop). */
+	#graphemeClustering = false;
+	/** WezTerm's Unicode version was pushed and set to 14 (popped on stop). */
+	#unicodeVersionPushed = false;
+	/** The DECRPM status for 2027, once reported. */
+	#graphemeStatus: number | null = null;
+	/** `start()` has not resolved yet: the emoji width probe may still print. */
+	#startup = false;
+	/** Cursor reports the emoji width probe collected; null when no probe is pending. */
+	#emojiProbe: { row: number; col: number }[] | null = null;
 
 	constructor(port: TerminalPort, options: ProcessInputOptions = {}) {
 		this.#port = port;
@@ -353,8 +375,16 @@ export class ProcessTerminalInput implements TerminalInput {
 		if (this.#nativeConsole) this.#savedConsoleMode = this.#consoleMode.enable();
 		// tmux forwards paste markers only while the pane's own 2004 flag is set, and may not answer DECRQM 2004.
 		this.#rearmPaste = this.#multiplexer === "tmux";
+		this.#startup = true;
+		let unicode = "";
+		if (this.#identity.id === "wezterm" && !insideMultiplexer(this.#env)) {
+			unicode = WEZTERM_UNICODE_PUSH;
+			this.#unicodeVersionPushed = true;
+		}
 
-		this.#port.write(`\x1b[?2004h${NORMAL_KEYS}${PROBE_GUARD_BEGIN}`);
+		this.#port.write(`\x1b[?2004h${NORMAL_KEYS}${unicode}${PROBE_GUARD_BEGIN}`);
+		// Unicode 14 widths advance U+FE0F two cells.
+		if (unicode) this.#setVs16Wide(true);
 		const keyboard = this.#probe("\x1b[?u", () => {
 			if (this.#kittyFlags === null) this.#enableKeyboardFallback();
 		});
@@ -369,6 +399,7 @@ export class ProcessTerminalInput implements TerminalInput {
 		const cancel = this.#schedule(this.#probeTimeoutMs, resolve);
 		await Promise.race([Promise.all([keyboard, background, modes]), timeout]);
 		cancel();
+		this.#startup = false;
 	}
 
 	/**
@@ -428,11 +459,13 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#unansweredDa1 = 0;
 		this.#backgroundQuery = null;
 		this.#backgroundQueued = false;
+		this.#startup = false;
+		this.#emojiProbe = null;
 		if (this.#cpr) {
 			this.#cpr.resolve(null);
 			this.#cpr = null;
-			this.#decoder.cprPending = false;
 		}
+		this.#syncCprPending();
 
 		this.#port.write(this.#restoreSequence());
 		this.#cursorShape = undefined;
@@ -480,12 +513,16 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#colorSchemeReports = false;
 		this.#restoreModes = [];
 		this.#mouse = "off";
+		this.#reportFocus = false;
 		this.#titlePushed = false;
 		this.#sixelAdvertised = false;
 		this.#sixelGeometry = false;
 		this.#notifyProbe = null;
 		this.#glyphPhase = "idle";
 		this.#helloSent = false;
+		this.#graphemeClustering = false;
+		this.#unicodeVersionPushed = false;
+		this.#graphemeStatus = null;
 		this.#identity = { ...this.#identity, richNotifications: false, glyphs: false };
 		// A later start probes afresh; nothing learned from this session's terminal carries over.
 		this.#update(this.#baseline);
@@ -503,8 +540,13 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#port.write(`${out}\x1b]0;${clean}\x07`);
 	}
 
-	setMouse(tracking: MouseTracking): void {
-		if (!this.#started || tracking === this.#mouse) return;
+	setMouse(tracking: MouseTracking, reportFocus = false): void {
+		if (!this.#started) return;
+		if (this.#reportFocus !== reportFocus) {
+			this.#reportFocus = reportFocus;
+			this.#port.write(reportFocus ? "\x1b[?1004h" : "\x1b[?1004l");
+		}
+		if (tracking === this.#mouse) return;
 		let out = this.#mouse === "off" ? "" : `\x1b[?${MOUSE_MODES[this.#mouse]}l`;
 		out += tracking === "off" ? "\x1b[?1006l" : `\x1b[?${MOUSE_MODES[tracking]}h\x1b[?1006h`;
 		this.#mouse = tracking;
@@ -556,7 +598,7 @@ export class ProcessTerminalInput implements TerminalInput {
 		if (this.#cpr) return this.#cpr.promise;
 		const request = Promise.withResolvers<{ row: number; col: number } | null>();
 		this.#cpr = request;
-		this.#decoder.cprPending = true;
+		this.#syncCprPending();
 		const cancel = this.#schedule(CPR_TIMEOUT_MS, () => this.#settleCursor(null));
 		void request.promise.then(cancel);
 		this.#port.write("\x1b[6n");
@@ -609,6 +651,7 @@ export class ProcessTerminalInput implements TerminalInput {
 
 	#restoreSequence(): string {
 		let out = this.#progress ? PROGRESS_CLEAR : "";
+		if (this.#reportFocus) out += "\x1b[?1004l";
 		if (this.#mouse !== "off") out += `\x1b[?${MOUSE_MODES[this.#mouse]}l\x1b[?1006l`;
 		if (this.#kittyFlags !== null) out += "\x1b[<u";
 		if (this.#modifyOtherKeys) out += "\x1b[>4;0m";
@@ -623,6 +666,8 @@ export class ProcessTerminalInput implements TerminalInput {
 		// Mouse reporting off whoever turned it on: a program that shared the terminal may have left it set.
 		out += `\x1b[?1006l\x1b[?1003l\x1b[?1000l${NORMAL_KEYS}`;
 		if (this.#titlePushed) out += "\x1b[23;0t";
+		if (this.#graphemeClustering) out += "\x1b[?2027l";
+		if (this.#unicodeVersionPushed) out += WEZTERM_UNICODE_POP;
 		return out;
 	}
 
@@ -759,6 +804,8 @@ export class ProcessTerminalInput implements TerminalInput {
 		// DECRQM: synchronized output, in-band resize, color-scheme reports, bracketed paste,
 		// xterm scroll-to-bottom on output/keypress.
 		let out = "\x1b[?2026$p\x1b[?2048$p\x1b[?2031$p\x1b[?2004$p\x1b[?1010$p\x1b[?1011$p";
+		// Grapheme clustering (emoji presentation widths); a multiplexer's grid decides those itself.
+		if (!insideMultiplexer(this.#env)) out += "\x1b[?2027$p";
 		// XTVERSION and the cell size in pixels.
 		out += "\x1b[>0q\x1b[16t";
 		// XTSMGRAPHICS (SIXEL geometry), when no protocol is known: the one image upgrade a probe makes.
@@ -845,6 +892,46 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#decideSixel();
 		const pollable = this.#platform === "win32" && Boolean(this.#env.WT_SESSION);
 		if (pollable && !this.#colorSchemeReports) this.#pollAppearance();
+		if (this.#emojiProbeNeeded()) this.#probeEmojiWidth();
+	}
+
+	/** Whether to measure the U+FE0F advance: an unknown profile that 2027 did not settle, still in startup. */
+	#emojiProbeNeeded(): boolean {
+		if (!this.#startup || insideMultiplexer(this.#env)) return false;
+		if (TERMINAL_PROFILES[this.#identity.id].emojiVs16 !== "probe") return false;
+		return this.#graphemeStatus === null || this.#graphemeStatus === 0;
+	}
+
+	/**
+	 * Print the sample between two cursor reports, then put the cursor back and
+	 * erase the sample's cells. The reports come back ahead of any later CPR
+	 * (the viewport anchor's), and `#onReply` routes them here in that order.
+	 * Sent only before `start()` resolves, so it never lands inside a frame.
+	 */
+	#probeEmojiWidth(): void {
+		const reports: { row: number; col: number }[] = [];
+		this.#emojiProbe = reports;
+		this.#syncCprPending();
+		const sample = `${PROBE_GUARD_BEGIN}\x1b[6n${EMOJI_WIDTH_SAMPLE}\x1b[6n${PROBE_GUARD_END}\x1b[2X`;
+		void this.#probe(sample, () => {
+			if (this.#emojiProbe === reports) this.#emojiProbe = null;
+			this.#syncCprPending();
+			const [before, after] = reports;
+			// Autowrap is off while it prints: too close to the right edge the advance is clamped.
+			if (!before || !after || before.row !== after.row || before.col + 2 >= this.#size.columns) return;
+			const advance = after.col - before.col;
+			if (advance === 1 || advance === 2) this.#setVs16Wide(advance === 2);
+		});
+	}
+
+	#setVs16Wide(wide: boolean): void {
+		this.#update({ emoji: { ...this.#capabilities.emoji, vs16Wide: wide } });
+	}
+
+	/** CPR replies are only told apart from F3 with modifiers while one is awaited. */
+	#syncCprPending(): void {
+		const probing = this.#emojiProbe !== null && this.#emojiProbe.length < EMOJI_PROBE_REPORTS;
+		this.#decoder.cprPending = this.#cpr !== null || probing;
 	}
 
 	#pollAppearance(): void {
@@ -928,7 +1015,7 @@ export class ProcessTerminalInput implements TerminalInput {
 		const request = this.#cpr;
 		if (!request) return;
 		this.#cpr = null;
-		this.#decoder.cprPending = false;
+		this.#syncCprPending();
 		request.resolve(position);
 	}
 
@@ -1005,9 +1092,17 @@ export class ProcessTerminalInput implements TerminalInput {
 				this.#identity = { ...this.#identity, richNotifications: payloads.includes("title") };
 				return;
 			}
-			case "cpr":
-				this.#settleCursor({ row: reply.row - 1, col: reply.col - 1 });
+			case "cpr": {
+				const position = { row: reply.row - 1, col: reply.col - 1 };
+				const probe = this.#emojiProbe;
+				if (probe && probe.length < EMOJI_PROBE_REPORTS) {
+					probe.push(position);
+					this.#syncCprPending();
+					return;
+				}
+				this.#settleCursor(position);
 				return;
+			}
 			case "da2":
 			case "dsr":
 				return;
@@ -1046,6 +1141,17 @@ export class ProcessTerminalInput implements TerminalInput {
 			case 2004:
 				this.#update({ bracketedPaste: on });
 				if (on) this.#rearmPaste = true;
+				return;
+			case 2027:
+				if (insideMultiplexer(this.#env)) return;
+				this.#graphemeStatus = status;
+				// Reset but settable: turn it on for the session.
+				if (status === 2 && !this.#graphemeClustering) {
+					this.#graphemeClustering = true;
+					this.#port.write("\x1b[?2027h");
+				}
+				if (on || this.#graphemeClustering) this.#setVs16Wide(true);
+				else if (status === 4) this.#setVs16Wide(false);
 				return;
 			case 1010:
 			case 1011:

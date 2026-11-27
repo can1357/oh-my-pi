@@ -243,9 +243,12 @@ describe("BtwController", () => {
 		expect(note.text()).toContain("Because streaming.");
 
 		expect(controller.hasActiveRequest()).toBe(false);
+		// Only the head takes the click: one in the answer (reading, selecting) leaves the composer alone.
+		expect(note.clicks("btw-focus")).toEqual(["omp.btw.note.head"]);
 		note.press("btw-focus");
 		expect(controller.isFocused()).toBe(true);
 		expect(note.role).toBe("omp.btw.note.active");
+		expect(note.clicks("btw-focus")).toEqual(["omp.btw.note.head"]);
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
 		expect(controller.isFocused()).toBe(false);

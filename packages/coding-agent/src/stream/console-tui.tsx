@@ -237,7 +237,7 @@ function ConsoleView(props: {
 		return [
 			url ? { s: "link", t: safeInline(url), href: safeInline(url) } : { s: "dim", t: "waiting for stream server" },
 			{ s: "dim", t: " · " },
-			{ t: `👁 ${c.viewers()} watching` },
+			{ t: `👁️ ${c.viewers()} watching` },
 			{ s: "dim", t: " · " },
 			{
 				t: `panes: ${panes.length === 0 ? "none" : panes.map(pane => `${pane.id}:${safeInline(pane.title)}`).join(" ")}`,

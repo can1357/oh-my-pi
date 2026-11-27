@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { ValidationError } from "@oh-my-pi/pi-ai/error";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
-import { generateAntigravityImage } from "../src/images/google-antigravity";
 import { generateGoogleImage } from "../src/images/google-generative-ai";
 import { generateOpenAIImage } from "../src/images/openai-images";
 import { generateHostedImage } from "../src/images/openai-hosted";
@@ -14,7 +13,6 @@ const PADDED_IMAGE_DATA = IMAGE_BYTES.toString("base64");
 const UNPADDED_IMAGE_DATA = PADDED_IMAGE_DATA.replace(/=+$/, "");
 const DATA_URL_PREFIX = "data:image/png;base64,";
 const API_KEY = "image-input-validation-test-key";
-const ANTIGRAVITY_KEY = JSON.stringify({ token: "image-token", projectId: "test-project" });
 
 function imageModel(provider: string, id: string, api: Api, baseUrl: string): Model<Api> {
 	return buildModel({
@@ -47,12 +45,6 @@ const geminiModel = imageModel(
 	"gemini-3.1-flash-lite-image",
 	"google-generative-ai",
 	"https://google.test/v1beta",
-);
-const antigravityModel = imageModel(
-	"google-antigravity",
-	"gemini-3-pro-image",
-	"google-gemini-cli",
-	"https://antigravity.test",
 );
 
 interface FetchCall {
@@ -159,35 +151,12 @@ const clients: ImageClientCase[] = [
 			expect(body.contents?.[0]?.parts?.[0]?.inlineData).toEqual(input);
 		},
 	},
-	{
-		name: "Antigravity inlineData",
-		dataUrl: false,
-		invoke: (input, fetch) =>
-			generateAntigravityImage(
-				antigravityModel,
-				{ prompt: "edit the image", inputImages: [input] },
-				{ apiKey: ANTIGRAVITY_KEY, fetch },
-			),
-		imageRequest: calls => calls.find(call => call.url.includes(":streamGenerateContent")),
-		assertPayload: (call, input) => {
-			const body = jsonBody(call) as {
-				request?: { contents?: Array<{ parts?: Array<{ inlineData?: ImageInput }> }> };
-			};
-			expect(body.request?.contents?.[0]?.parts?.[0]?.inlineData).toEqual(input);
-		},
-	},
 ];
 
 function createFetch(calls: FetchCall[]): FetchImpl {
 	return async (input, init) => {
 		const url = String(input);
 		calls.push({ url, init });
-		if (url.includes("fetchAvailableModels")) return new Response("{}", { status: 404 });
-		if (url.includes(":streamGenerateContent")) {
-			return new Response('data: {"response":{"candidates":[]}}\n\n', {
-				headers: { "content-type": "text/event-stream" },
-			});
-		}
 		if (url.endsWith("/responses")) {
 			return new Response(JSON.stringify({ output: [] }), { headers: { "content-type": "application/json" } });
 		}
@@ -280,17 +249,4 @@ it("delivers legal MIME punctuation and image bytes intact through hosted provid
 	const consumed = await fetch(new URL(imageUrl));
 	expect(consumed.headers.get("content-type")).toBe(input.mimeType);
 	expect(Buffer.from(await consumed.arrayBuffer())).toEqual(IMAGE_BYTES);
-});
-
-it("does not tag Antigravity image requests with the requestType that draws false 429 quota errors", async () => {
-	const calls: FetchCall[] = [];
-	await generateAntigravityImage(
-		antigravityModel,
-		{ prompt: "draw a cat" },
-		{ apiKey: ANTIGRAVITY_KEY, fetch: createFetch(calls) },
-	);
-	const call = calls.find(item => item.url.includes(":streamGenerateContent"));
-	if (!call) throw new Error("Expected the Antigravity image request");
-	const body = jsonBody(call);
-	expect(body !== null && typeof body === "object" && "requestType" in body).toBe(false);
 });

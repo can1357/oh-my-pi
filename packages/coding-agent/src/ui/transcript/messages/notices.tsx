@@ -17,8 +17,9 @@
 import { type JSXNode, nativeRendering, type Reactive, read } from "@oh-my-pi/pi-tui";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { TspChecklistItem, TspPreview, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
-import type { BackgroundTanDispatchDetails } from "../../../session/transcript/messages";
+import type { BackgroundTanDispatchDetails, TanResultDetails } from "../../../session/transcript/messages";
 import type { NotificationRule } from "../../../session/transcript/ttsr-notification";
 import { expandKeyLabel } from "../../keys/hints";
 import { cardExpansion } from "../expansion";
@@ -213,7 +214,7 @@ function previewWork(work: string): string {
 	return line.length <= TAN_WORK_PREVIEW ? line : `${line.slice(0, TAN_WORK_PREVIEW - 1)}…`;
 }
 
-/** A `/tan` background dispatch breadcrumb: one compact line (the full notice is for the model). */
+/** A `/tan` background dispatch breadcrumb: one compact line, never shown to the model. */
 export function TangentDispatch(props: { details?: Partial<BackgroundTanDispatchDetails> }): JSXNode {
 	const jobId = props.details?.jobId ?? "unknown";
 	const work = props.details?.work ? previewWork(props.details.work) : undefined;
@@ -234,6 +235,39 @@ export function TangentDispatch(props: { details?: Partial<BackgroundTanDispatch
 						work ? { text: `${symbols.symbol("format.dash")} ${work}`, color: "dim" } : undefined,
 					],
 					native: { tone: "info", icon: "output", message },
+				},
+			]}
+		/>
+	);
+}
+
+/** A finished `/tan` breadcrumb: one compact line, never shown to the model; its output lives in the Agent Hub. */
+export function TangentResult(props: { details?: Partial<TanResultDetails> }): JSXNode {
+	const jobId = props.details?.jobId ?? "unknown";
+	const work = props.details?.work ? previewWork(props.details.work) : undefined;
+	const duration =
+		typeof props.details?.durationMs === "number" ? formatDuration(props.details.durationMs) : undefined;
+	const failed = props.details?.failed === true;
+	const title = failed ? "Tangent failed" : "Tangent finished";
+	const symbols = currentTheme().symbols;
+	const message: TspSpan[] = [{ t: title }, { t: " · ", s: "dim" }, { t: `task ${jobId}`, s: "dim" }];
+	if (work) message.push({ t: " · ", s: "dim" }, { t: work, s: "dim" });
+	if (duration) message.push({ t: " · ", s: "dim" }, { t: duration, s: "dim" });
+	return (
+		<StatusBlock
+			rows={[
+				{
+					parts: [
+						{
+							text: `${symbols.symbol(failed ? "status.error" : "status.success")} ${title}`,
+							color: failed ? "error" : "success",
+						},
+						{ text: "[task]", color: "dim" },
+						{ text: jobId, color: "accent" },
+						work ? { text: `${symbols.symbol("format.dash")} ${work}`, color: "dim" } : undefined,
+						duration ? { text: `(${duration})`, color: "dim" } : undefined,
+					],
+					native: { tone: failed ? "error" : "success", message },
 				},
 			]}
 		/>

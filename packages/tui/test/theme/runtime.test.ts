@@ -6,6 +6,7 @@ import { __resetDirsFromEnvForTests, getCustomThemesDir, removeWithRetries, setA
 import { createRoot, effect } from "@oh-my-pi/pi-tui";
 import {
 	builtinThemes,
+	CONSERVATIVE_EMOJI,
 	currentTheme,
 	loadThemeSync,
 	type ResolvedTheme,
@@ -13,9 +14,9 @@ import {
 	ThemeController,
 } from "@oh-my-pi/pi-tui/theme/index";
 
-const TRUECOLOR_DARK = { truecolor: true, colors: 16_777_216, dark: true } as const;
-const TRUECOLOR_LIGHT = { truecolor: true, colors: 16_777_216, dark: false } as const;
-const PALETTE_DARK = { truecolor: false, colors: 256, dark: true } as const;
+const TRUECOLOR_DARK = { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
+const TRUECOLOR_LIGHT = { truecolor: true, colors: 16_777_216, dark: false, emoji: CONSERVATIVE_EMOJI } as const;
+const PALETTE_DARK = { truecolor: false, colors: 256, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 let tempAgentDir: string;
@@ -79,6 +80,18 @@ describe("ThemeController", () => {
 		expect(published.at(-1)!.fg("accent", "x")).toStartWith("\x1b[38;5;");
 		// Unchanged capabilities publish nothing.
 		await themes.applyCapabilities(PALETTE_DARK);
+		expect(published).toHaveLength(2);
+	});
+
+	it("re-resolves symbols when the terminal's emoji support changes", async () => {
+		const themes = controller();
+		themes.initSync(TRUECOLOR_DARK);
+		expect(published.at(-1)!.symbols.symbol("status.warning")).toBe("▲");
+		await themes.applyCapabilities({ ...TRUECOLOR_DARK, emoji: { vs16Wide: true, bareFits: true } });
+		expect(published.at(-1)!.symbols.symbol("status.warning")).toBe("⚠");
+		expect(published.at(-1)!.symbols.symbol("tool.irc")).toBe("✉\uFE0F");
+		// An equal support value publishes nothing.
+		await themes.applyCapabilities({ ...TRUECOLOR_DARK, emoji: { vs16Wide: true, bareFits: true } });
 		expect(published).toHaveLength(2);
 	});
 
