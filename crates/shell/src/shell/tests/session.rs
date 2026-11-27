@@ -527,6 +527,24 @@ async fn cancel_stops_an_endless_read() {
 	assert!(start.elapsed() < Duration::from_millis(1500), "returned after {:?}", start.elapsed());
 }
 
+/// A cancel stops `read -n 1` on `/dev/zero` too, whose parts end at once
+/// and never wait.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_stops_a_read_whose_parts_never_wait() {
+	// The clock starts once this run holds the shell test lock.
+	let _guard = shell_test_lock().lock().await;
+	let start = std::time::Instant::now();
+	let (result, output) = time::timeout(
+		Duration::from_secs(10),
+		capture_unlocked("read -n 1 x < /dev/zero", None, None, CancelToken::new(Some(300))),
+	)
+	.await
+	.expect("the cancelled run must return");
+	assert!(result.timed_out, "{result:?} output {output:?}");
+	assert!(start.elapsed() < Duration::from_millis(1500), "returned after {:?}", start.elapsed());
+}
+
 /// `read` does not keep what it takes from an endless NUL source: bash
 /// skips NUL bytes and the delimiter never comes. While the read runs,
 /// resident memory must not grow with the bytes read. Both counters are
