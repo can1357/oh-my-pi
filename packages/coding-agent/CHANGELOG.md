@@ -19,6 +19,7 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- Added the `copy-notice.ts` extension example: on Hyprland it shows "copied N chars to clipboard" above the editor when the terminal copies text, such as with kitty's `copy_on_select` ([#20782](https://github.com/can1357/oh-my-pi/pull/20782) by [@clariantb](https://github.com/clariantb))
 
 ### Changed
 
