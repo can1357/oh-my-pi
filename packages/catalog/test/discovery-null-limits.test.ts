@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
 import { fetchOpenAICompatibleModels } from "../src/discovery/openai-compatible";
+import type { FetchImpl } from "../src/types";
 
 describe("discovery null limits", () => {
 	it("emits null for contextWindow and maxTokens when limits are unknown", async () => {
@@ -104,5 +105,52 @@ describe("discovery extra-CA fallback fetch", () => {
 		expect(models).not.toBeNull();
 		expect(inits).toHaveLength(1);
 		expect(inits[0].tls).toBeUndefined();
+	});
+});
+
+// Built-in OpenAI-compatible provider managers call `fetchOpenAICompatibleModels`
+// with neither a `signal` nor a `timeoutMs`; a stalled `/models` endpoint must
+// not block the awaited discovery pass forever.
+describe("OpenAI-compatible discovery deadline", () => {
+	it("arms an abort deadline when the caller supplies neither signal nor timeoutMs", async () => {
+		let received: AbortSignal | null | undefined = null;
+		const capturingFetch: FetchImpl = async (_url, init) => {
+			received = init?.signal;
+			return new Response(JSON.stringify({ data: [{ id: "m1" }] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+
+		const models = await fetchOpenAICompatibleModels({
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://stall.example/v1",
+			fetch: capturingFetch,
+		});
+
+		expect(received).toBeInstanceOf(AbortSignal);
+		expect(models).not.toBeNull();
+		expect(models?.map(model => model.id)).toEqual(["m1"]);
+	});
+
+	it("resolves to null instead of hanging when the endpoint never responds", async () => {
+		// Honors the deadline signal by rejecting on abort; never resolves otherwise.
+		const stallingFetch: FetchImpl = (_url, init) => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const signal = init?.signal;
+			signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")));
+			return promise;
+		};
+
+		const models = await fetchOpenAICompatibleModels({
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://stall.example/v1",
+			fetch: stallingFetch,
+			timeoutMs: 50,
+		});
+
+		expect(models).toBeNull();
 	});
 });

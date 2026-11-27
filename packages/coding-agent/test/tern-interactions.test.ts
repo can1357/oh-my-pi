@@ -117,6 +117,8 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 					"TERM=xterm-256color",
 					"TERM_PROGRAM=tern",
 					"OMP_SKIP_SETUP=1",
+					// Test runtime: keeps omp off the OS keychain.
+					"PI_TEST_RUNTIME=1",
 					process.execPath,
 					path.resolve(import.meta.dir, "../src/cli.ts"),
 					"--no-extensions",
@@ -153,7 +155,14 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			await click(await visible(".pk-row.sel", n => n.text?.includes("beta") === true, "selected beta result"));
 			await chip("beta");
 			await draft(kept);
-			expect((await ctl("tree", ".sf-layer > .sf-picker")).nodes).toEqual([]);
+			// The chip update and closing the native picker are separate frames.
+			const closeDeadline = performance.now() + 10_000;
+			let pickers = (await ctl("tree", ".sf-layer > .sf-picker")).nodes;
+			while (pickers?.length && performance.now() < closeDeadline && server.exitCode === null) {
+				await Bun.sleep(25);
+				pickers = (await ctl("tree", ".sf-layer > .sf-picker")).nodes;
+			}
+			expect(pickers).toEqual([]);
 		} catch (error) {
 			if (await log.exists()) console.error((await log.text()).slice(-1600));
 			throw error;

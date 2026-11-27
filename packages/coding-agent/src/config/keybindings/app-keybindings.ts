@@ -11,6 +11,7 @@ interface AppKeybindings {
 	"app.exit": true;
 	"app.suspend": true;
 	"app.display.reset": true;
+	"app.display.hold": true;
 	"app.thinking.cycle": true;
 	"app.thinking.toggle": true;
 	"app.model.cycleForward": true;
@@ -32,6 +33,25 @@ interface AppKeybindings {
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.transcript.pageUp": true;
+	"app.transcript.pageDown": true;
+	"app.transcript.halfPageUp": true;
+	"app.transcript.halfPageDown": true;
+	"app.transcript.previousPrompt": true;
+	"app.transcript.nextPrompt": true;
+	"app.transcript.search": true;
+	"app.transcript.selectLeft": true;
+	"app.transcript.selectRight": true;
+	"app.transcript.selectUp": true;
+	"app.transcript.selectDown": true;
+	"app.transcript.selectLineStart": true;
+	"app.transcript.selectLineEnd": true;
+	"app.transcript.clearSelection": true;
+	"app.transcript.copySelection": true;
+	"app.transcript.lineUp": true;
+	"app.transcript.lineDown": true;
+	"app.transcript.top": true;
+	"app.transcript.bottom": true;
 	"app.agents.hub": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -92,6 +112,12 @@ export const KEYBINDINGS = {
 		defaultKeys: "alt+l",
 		description: "Reset terminal display",
 	},
+	"app.display.hold": {
+		// Holds the screen still while a turn streams, for reading native
+		// scrollback without the terminal following new rows. Any key resumes.
+		defaultKeys: "alt+s",
+		description: "Hold output (stop following new rows)",
+	},
 	"app.thinking.cycle": {
 		defaultKeys: "shift+tab",
 		description: "Cycle thinking level",
@@ -122,7 +148,7 @@ export const KEYBINDINGS = {
 	},
 	"app.tools.toggleVisibility": {
 		defaultKeys: "ctrl+shift+o",
-		description: "Show or hide tool activity",
+		description: "Cycle tool activity: detailed, concise, hidden",
 	},
 	"app.ask.hide": {
 		defaultKeys: "alt+h",
@@ -186,6 +212,83 @@ export const KEYBINDINGS = {
 	"app.clipboard.copyPrompt": {
 		defaultKeys: "alt+shift+c",
 		description: "Copy prompt",
+	},
+	// Fullscreen screen mode only (`tui.screen`); inline, these keys reach the editor.
+	"app.transcript.pageUp": {
+		defaultKeys: "pageUp",
+		description: "Scroll the fullscreen transcript up a page",
+	},
+	"app.transcript.pageDown": {
+		defaultKeys: "pageDown",
+		description: "Scroll the fullscreen transcript down a page",
+	},
+	"app.transcript.halfPageUp": {
+		defaultKeys: [],
+		description: "Scroll the fullscreen transcript up half a page",
+	},
+	"app.transcript.halfPageDown": {
+		defaultKeys: [],
+		description: "Scroll the fullscreen transcript down half a page",
+	},
+	"app.transcript.previousPrompt": {
+		defaultKeys: "alt+pageUp",
+		description: "Scroll to the previous user prompt",
+	},
+	"app.transcript.nextPrompt": {
+		defaultKeys: "alt+pageDown",
+		description: "Scroll to the next user prompt",
+	},
+	"app.transcript.search": {
+		defaultKeys: "alt+/",
+		description: "Find text in the fullscreen transcript",
+	},
+	"app.transcript.selectLeft": {
+		defaultKeys: [],
+		description: "Extend the fullscreen selection left",
+	},
+	"app.transcript.selectRight": {
+		defaultKeys: [],
+		description: "Extend the fullscreen selection right",
+	},
+	"app.transcript.selectUp": {
+		defaultKeys: [],
+		description: "Extend the fullscreen selection up",
+	},
+	"app.transcript.selectDown": {
+		defaultKeys: [],
+		description: "Extend the fullscreen selection down",
+	},
+	"app.transcript.selectLineStart": {
+		defaultKeys: [],
+		description: "Extend the fullscreen selection to line start",
+	},
+	"app.transcript.selectLineEnd": {
+		defaultKeys: [],
+		description: "Extend the fullscreen selection to line end",
+	},
+	"app.transcript.clearSelection": {
+		defaultKeys: [],
+		description: "Clear the fullscreen selection",
+	},
+	"app.transcript.copySelection": {
+		defaultKeys: ["alt+c", "ctrl+shift+c", "super+c"],
+		description: "Copy selected fullscreen transcript text",
+	},
+	"app.transcript.lineUp": {
+		defaultKeys: [],
+		description: "Scroll the fullscreen transcript up one line",
+	},
+	"app.transcript.lineDown": {
+		defaultKeys: [],
+		description: "Scroll the fullscreen transcript down one line",
+	},
+	"app.transcript.top": {
+		defaultKeys: "ctrl+home",
+		description: "Scroll the fullscreen transcript to its start",
+	},
+	"app.transcript.bottom": {
+		defaultKeys: "ctrl+end",
+		description: "Scroll the fullscreen transcript to its end and follow new output",
 	},
 	"app.session.new": {
 		defaultKeys: [],

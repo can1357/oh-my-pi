@@ -16,7 +16,8 @@ from importlib import resources
 from typing import TYPE_CHECKING, Any
 
 from robomp.git_ops import DirtyState
-from robomp.github_client import CommentInfo, IssueInfo, PullRequestInfo, RepoInfo
+from robomp.github_client import CommentInfo, IssueIndexEntry, IssueInfo, PullRequestInfo, RepoInfo
+from robomp.issue_index import entry_state
 from robomp.sandbox import Workspace
 
 if TYPE_CHECKING:
@@ -180,8 +181,23 @@ def followup_release(*, repo: RepoInfo, release: ReleaseTaskContext, workspace: 
     )
 
 
-def kickoff(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace) -> str:
-    return render(_load("kickoff_issue.md"), {"repo": repo, "issue": issue, "workspace": workspace})
+def _render_candidates(candidates: list[IssueIndexEntry] | None) -> str:
+    """Render `issue_index.duplicate_candidates` output as a markdown list for the kickoff."""
+    if candidates is None:
+        return "(local issue index not built yet; rely on `gh_search_issues`)"
+    if not candidates:
+        return "(no similar issues or PRs in the local index)"
+    return "\n".join(
+        f"- #{c.number} ({'PR' if c.is_pull_request else 'issue'}, {entry_state(c)}) {c.title}" for c in candidates
+    )
+
+
+def kickoff(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace, candidates: list[IssueIndexEntry] | None) -> str:
+    """First-triage prompt; `candidates` are the local index's closest text matches to `issue`."""
+    return render(
+        _load("kickoff_issue.md"),
+        {"repo": repo, "issue": issue, "workspace": workspace, "candidates": _render_candidates(candidates)},
+    )
 
 
 def kickoff_pr_review(*, repo: RepoInfo, pr: PullRequestInfo, workspace: Workspace) -> str:
@@ -397,6 +413,11 @@ def unable_to_reproduce_comment(*, diagnosis: str, info_needed: str) -> str:
     )
 
 
+def duplicate_close_comment(*, header: str, body: str) -> str:
+    """Comment `gh_close_duplicate` posts: `header` (`Duplicate of #N` / `Fixed in <sha>`) leads so GitHub links it."""
+    return render(_load("duplicate_close_comment.md").rstrip(), {"header": header, "body": body})
+
+
 def finalized_issue_comment() -> str:
     return _load("finalized_issue_comment.md").strip()
 
@@ -425,6 +446,7 @@ def question_autoclose_suffix(hours: float) -> str:
 __all__ = [
     "classify_next_step",
     "directive",
+    "duplicate_close_comment",
     "finalized_issue_comment",
     "finalized_pr_comment",
     "followup_comment",

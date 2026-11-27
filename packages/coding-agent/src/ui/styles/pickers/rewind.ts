@@ -37,6 +37,8 @@ export type RewindLookTerm = {
 	readonly filter?: { readonly text: string; readonly cursor: number };
 	/** What ←/→ move between: user turns, or a fork's branches. */
 	readonly sideLabel: string;
+	/** Older turns are not drawn yet (`a` draws them). */
+	readonly truncated: boolean;
 	/** Screen rows when the layer allots no height. */
 	readonly rows?: number;
 };
@@ -74,9 +76,10 @@ function paintRewind(node: UiNode, cx: PaintContext): Block {
 	const steps = `${selectNavGlyphs(theme)} step  ${keyLabel(theme, "left")}/${keyLabel(theme, "right")} ${term.sideLabel}`;
 	const rewind = `${keyLabel(theme, "enter")} rewind`;
 	const cancel = bindingGlyph("tui.select.cancel", "escape", theme);
+	const earlier = term.truncated ? `  ${keyLabel(theme, "a")} earlier turns` : "";
 	const hints = term.filter
 		? `${steps}  ${rewind}  ${cancel} show all`
-		: `${steps}  ${keyLabel(theme, "f")} filter  ${rewind}  ${expandKeyLabel(theme)} expand  ${cancel} cancel`;
+		: `${steps}  ${keyLabel(theme, "f")} filter  ${rewind}${earlier}  ${expandKeyLabel(theme)} expand  ${cancel} cancel`;
 	const status = `${counter}  ${theme.style("dim", hints)}`;
 	const footer = term.filter
 		? `${caretField(theme, ` ${theme.style("accent", "filter:")} `, term.filter.text, term.filter.cursor, width)}  ${status}`

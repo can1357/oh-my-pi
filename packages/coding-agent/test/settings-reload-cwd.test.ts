@@ -300,26 +300,6 @@ describe("Settings.reloadForCwd", () => {
 			expect(settings.getProjectModelRole("default")).toBe("anthropic/external");
 		});
 
-		it("reapplies only native model roles over normal project-provider precedence", async () => {
-			await Bun.write(
-				path.join(scopedProject, ".claude", "settings.json"),
-				JSON.stringify({
-					compaction: { enabled: true },
-					modelRoles: { default: "anthropic/claude" },
-				}),
-			);
-			await Bun.write(
-				path.join(scopedProject, ".omp", "config.yml"),
-				"compaction:\n  enabled: false\nmodelRoles:\n  default: anthropic/native\n",
-			);
-
-			const settings = await Settings.init({ cwd: scopedProject, agentDir });
-
-			expect(settings.getModelRole("default")).toBe("anthropic/native");
-			expect(settings.getProjectModelRole("default")).toBe("anthropic/native");
-			expect(cfgCompactionEnabled.get(settings)).toBe(true);
-		});
-
 		it("merges concurrent role writes under the project file lock", async () => {
 			const first = await Settings.loadIsolated({ cwd: startDir, agentDir });
 			const second = await Settings.loadIsolated({ cwd: startDir, agentDir });

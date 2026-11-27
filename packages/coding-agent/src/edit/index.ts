@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,6 +18,7 @@ import {
 	editGrammar,
 	editInspect,
 	type EditFileOutcome,
+	type EditFilePreview,
 	type EditInspection,
 	type EditPolicy,
 	type EditPreviewBatch,
@@ -24,16 +26,23 @@ import {
 	type EditWriteRequest,
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import {
 	extractUriScheme,
 	InternalUrlRouter,
+	posixCksum,
+	RemoteEditConflictError,
+	RemoteEditMissingError,
+	type RemoteEditSource,
+	type RemoteEditTarget,
 	type ResolveContext,
 	sessionResolveContext,
 	sessionWriteContext,
 } from "../internal-urls";
-import { isRemoteTextWritable, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
+import { unwrapHashlineHeaderPath } from "../tools/hashline-header-path";
+import { isRemoteTextWritable, remoteMirrorPath, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "../tools/details/lsp";
 import { notifyWorkspaceWatchedFiles } from "../lsp/client";
@@ -61,7 +70,12 @@ import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
 import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
 import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
-import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "../tools/details/edit";
+import {
+	type EditToolDetails,
+	type EditToolPerFileResult,
+	type Operation,
+	type PerFileDiffPreview,
+} from "../tools/details/edit";
 import {
 	type ApplyPatchParams,
 	applyPatchSchema,
@@ -251,7 +265,7 @@ function mergeDiagnosticsWithWarnings(
 	};
 }
 
-function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFileResult {
+function toPerFileResult(file: EditFileOutcome, mode: EditMode, checkoutNotice?: string): EditToolPerFileResult {
 	let diagnostics = parseDiagnostics(file.diagnosticsJson);
 	if (mode === "patch" || mode === "apply_patch") {
 		diagnostics = mergeDiagnosticsWithWarnings(diagnostics, file.warnings);
@@ -259,6 +273,7 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 	const resultPath = file.moveTo ?? file.path;
 	return {
 		path: resultPath,
+		checkoutNotice,
 		diff: file.diff,
 		firstChangedLine: file.firstChangedLine,
 		diagnostics,
@@ -274,9 +289,58 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 	};
 }
 
-function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): EditToolDetails | undefined {
+function createCheckoutNotice(cwd: string): ((target: string) => string | undefined) | undefined {
+	try {
+		const sessionRepo = vcs.git(cwd);
+		if (!sessionRepo) return undefined;
+		const session = sessionRepo.info();
+		// Git may record a linked worktree's gitdir through a resolved symlink (macOS `/var` → `/private/var`).
+		const sessionCommonDir = realpathSync(session.commonDir);
+		const sessionGitDir = realpathSync(session.gitDir);
+		const byDirectory = new Map<string, string | undefined>();
+		let sessionBranch: string | undefined;
+		return target => {
+			if (!path.isAbsolute(target)) return undefined;
+			const dir = path.dirname(target);
+			if (byDirectory.has(dir)) return byDirectory.get(dir);
+			let note: string | undefined;
+			try {
+				const targetRepo = vcs.git(dir);
+				const checkout = targetRepo?.info();
+				if (
+					targetRepo &&
+					checkout &&
+					realpathSync(checkout.commonDir) === sessionCommonDir &&
+					realpathSync(checkout.gitDir) !== sessionGitDir
+				) {
+					if (sessionBranch === undefined) {
+						const sessionHead = sessionRepo.headSync();
+						sessionBranch = sessionHead.branch ?? sessionHead.commit?.slice(0, 8);
+					}
+					const targetHead = targetRepo.headSync();
+					const targetBranch = targetHead.branch ?? targetHead.commit?.slice(0, 8);
+					if (sessionBranch && targetBranch) note = `Edited worktree: ${targetBranch} (session: ${sessionBranch})`;
+				}
+			} catch (error) {
+				logger.debug("Could not resolve edited worktree", { error: String(error) });
+			}
+			byDirectory.set(dir, note);
+			return note;
+		};
+	} catch (error) {
+		logger.debug("Could not resolve session checkout for edit", { error: String(error) });
+		return undefined;
+	}
+}
+
+function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode, cwd: string): EditToolDetails | undefined {
 	if (files.length === 0) return undefined;
-	const perFileResults = files.map(file => toPerFileResult(file, mode));
+	const checkoutNotice = createCheckoutNotice(cwd);
+	const perFileResults = files.map(file => {
+		const notice =
+			checkoutNotice?.(file.moveTo ?? file.path) ?? (file.moveTo ? checkoutNotice?.(file.path) : undefined);
+		return toPerFileResult(file, mode, notice);
+	});
 	if (perFileResults.length === 1) {
 		const [file] = perFileResults;
 		return {
@@ -287,6 +351,7 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
 			move: file.move,
 			sourcePath: file.sourcePath,
 			path: file.path,
+			checkoutNotice: file.checkoutNotice,
 			oldText: file.oldText,
 			newText: file.newText,
 			snapshotsPruned: file.snapshotsPruned,
@@ -373,6 +438,118 @@ interface InspectedArgs {
 interface OpenEditSession {
 	native: EditSession;
 	resolveContext: ResolveContext;
+	/** The arguments as far as they are known (partial while streaming), as JSON for {@link editInspect}. */
+	argsJson: () => string;
+	/** Bumped whenever {@link argsJson} would return something new; keys {@link argsView}. */
+	argsVersion: number;
+	/** {@link argsJson} inspected and parsed once per {@link argsVersion} (`#callArgs`). */
+	argsView?: CallArgsView;
+	/** Set once the call runs (after approval): URL targets resolve from then on, never before. */
+	applying: boolean;
+	/** Remote mirrors this call fetched, by mirror path: the canonical URL and the checksum its write must match. */
+	fetched: Map<string, { url: string; checksum: string }>;
+	/** Remote URLs whose previews were deferred: no mirror existed before the call ran. */
+	deferred: Set<string>;
+}
+
+/** One version of an edit call's arguments, inspected and parsed. */
+interface CallArgsView {
+	version: number;
+	inspection: EditInspection;
+	args: Record<string, unknown> | undefined;
+}
+
+/** An edit call's state that URL resolution and writes consult. */
+type EditCall = Omit<OpenEditSession, "native">;
+
+/**
+ * Longest wait for a throwaway preview pass (`#previewOnce`). It only reads local
+ * files, so this bounds a pass that never reports rather than a slow one.
+ */
+const PREVIEW_PASS_TIMEOUT_MS = 5_000;
+
+/** The refusal that stands in for a remote file's deferred preview; `#settlePreview` turns it into a placeholder. */
+function deferredPreview(url: string): string {
+	return `Preview deferred: ${url} is fetched from the remote host when the edit runs`;
+}
+
+/** What a deferred remote file's preview entry says instead of a diff. */
+const DEFERRED_PREVIEW_NOTICE = "Preview deferred: fetched when the edit runs";
+
+/** A preview entry as emitted: the engine's, or a deferred remote file's notice. */
+type SettledPreviewFile = EditFilePreview | PerFileDiffPreview;
+
+/** A preview batch as emitted, deferred remote files shown as notices. */
+interface SettledPreviewBatch extends Omit<EditPreviewBatch, "files"> {
+	files: SettledPreviewFile[];
+}
+
+/**
+ * The preview entry shown for a deferred remote file. It carries a `notice`, not an
+ * `error`: renderers show it muted and `edit.streamingAbort` never counts it as failed.
+ */
+function deferredPlaceholder(path: string): PerFileDiffPreview {
+	return { path, notice: DEFERRED_PREVIEW_NOTICE };
+}
+
+/** Whether the authored edit target `authored` names the internal URL `url` as the native engine keys it. */
+function namesUrl(authored: string, url: string): boolean {
+	const normalized = InternalUrlRouter.instance().normalize(
+		unwrapHashlineHeaderPath(authored.trim()).replace(/^@/, ""),
+	);
+	const authority = (value: string) => value.indexOf("://") + 3;
+	return (
+		normalized.slice(0, authority(normalized)).toLowerCase() === url.slice(0, authority(url)).toLowerCase() &&
+		normalized.slice(authority(normalized)) === url.slice(authority(url))
+	);
+}
+
+/** Tool arguments as an object, or `undefined` while their JSON is still incomplete. */
+function parsePartialArgs(argsJson: string): Record<string, unknown> | undefined {
+	try {
+		const args: unknown = JSON.parse(argsJson);
+		return args !== null && typeof args === "object" ? (args as Record<string, unknown>) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+// TODO(native): `PATCH_FILE_HEADER`, `patchFileHeaders` and `stripPatchSections` duplicate
+// the native `*** Begin Patch` parser. `editInspect` already reports deletes and moves as
+// `EditFileOpIntent` (crates/natives/src/edit.rs); once a Rust change reports `create` there
+// too, read creates from `inspection.fileOps` and drop this TS copy.
+const PATCH_FILE_HEADER = /^\*\*\* (Add|Update|Delete) File: (.*)$/;
+
+/** The file headers of a `*** Begin Patch` payload (apply_patch, sloppy's patch form). */
+function patchFileHeaders(input: string): Array<{ kind: string; path: string }> {
+	const headers: Array<{ kind: string; path: string }> = [];
+	for (const line of input.split("\n")) {
+		const match = PATCH_FILE_HEADER.exec(line.replace(/\r$/, ""));
+		if (match) headers.push({ kind: match[1], path: match[2] });
+	}
+	return headers;
+}
+
+/** `input` without the file sections whose header path `drop` selects. */
+function stripPatchSections(input: string, drop: (path: string) => boolean): string {
+	const kept: string[] = [];
+	let skipping = false;
+	for (const line of input.split("\n")) {
+		const bare = line.replace(/\r$/, "");
+		const header = PATCH_FILE_HEADER.exec(bare);
+		if (header) skipping = drop(header[2]);
+		else if (bare.startsWith("*** End Patch")) skipping = false;
+		if (!skipping) kept.push(line);
+	}
+	return kept.join("\n");
+}
+
+/** Model-facing refusal of an edit operation other than an in-place update on a remote text URL. */
+function updateOnlyRefusal(scheme: string, operation: string, url: string): string {
+	if (operation === "create") {
+		return `${url} does not exist, and ${scheme}:// files can only be updated in place, so edit cannot create it; use \`write\` to create it.`;
+	}
+	return `${scheme}:// files can only be updated in place, so edit cannot ${operation} ${url}; use \`bash\` with a remote command to ${operation} it.`;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -515,14 +692,33 @@ export class EditTool implements AgentTool<TInput> {
 		// A call that arrived through the custom-tool wire streams the payload
 		// verbatim; JSON function calls stream JSON text.
 		const rawInput = init.customWireName !== undefined;
+		let settled: Promise<void> = Promise.resolve();
 		const open = this.#openSession(rawInput, undefined, (error, batch) => {
 			if (error) {
 				logger.debug("Native edit preview failed", { error: error.message, toolCallId: init.toolCallId });
 				return;
 			}
-			init.emit(batch);
+			// Batches arrive in generation order; settling keeps that order. A batch is
+			// always emitted: one whose settling fails goes out as the engine produced it
+			// (deferred entries still shown as placeholders), so the approval it gates
+			// never waits on a lost preview.
+			settled = settled
+				.then(async () => {
+					let settledBatch: SettledPreviewBatch = batch;
+					try {
+						settledBatch = await this.#settlePreview(batch, open);
+					} catch (settleError) {
+						logger.debug("Edit preview settling failed", { error: String(settleError) });
+						settledBatch = { ...batch, files: this.#markDeferred(batch.files, open) };
+					}
+					init.emit(settledBatch);
+				})
+				.catch(emitError => logger.debug("Edit preview emit failed", { error: String(emitError) }));
 		});
 		const editSession = open.native;
+		let streamed = "";
+		open.argsJson = () => (rawInput ? JSON.stringify({ input: streamed }) : streamed);
+		open.argsVersion++;
 		this.#sessions.delete(init.toolCallId);
 		this.#sessions.set(init.toolCallId, open);
 		while (this.#sessions.size > 32) {
@@ -533,7 +729,11 @@ export class EditTool implements AgentTool<TInput> {
 			this.#streamedArgs.delete(oldestId);
 		}
 		return {
-			push: delta => editSession.push(delta),
+			push: delta => {
+				streamed += delta;
+				open.argsVersion++;
+				editSession.push(delta);
+			},
 			end: args => {
 				editSession.finish();
 				this.#streamedArgs.set(init.toolCallId, JSON.stringify(args));
@@ -592,6 +792,10 @@ export class EditTool implements AgentTool<TInput> {
 			open.native.setArgsJson(argsJson);
 			open.native.finish();
 		}
+		open.argsJson = () => argsJson;
+		open.argsVersion++;
+		open.applying = true;
+		const current = open;
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
 		let outcome;
@@ -604,7 +808,7 @@ export class EditTool implements AgentTool<TInput> {
 							path: request.path,
 						});
 					}
-					return this.#write(request, signal);
+					return this.#write(request, current, signal);
 				},
 			);
 			if (outcome.isError && batch?.flush) {
@@ -627,13 +831,17 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode);
+		const details = aggregateDetails(outcome.files, this.mode, this.session.cwd);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),
 		};
 		const record = createEditBlackboxRecorder(this.session, this.mode, params);
 		const notes: string[] = [];
+		if (details?.checkoutNotice) notes.push(details.checkoutNotice);
+		for (const file of details?.perFileResults ?? []) {
+			if (file.checkoutNotice) notes.push(`${file.checkoutNotice} — ${path.relative(this.session.cwd, file.path)}`);
+		}
 		for (const file of outcome.files) {
 			if (!file.parseRegressed || file.oldText === undefined || file.newText === undefined) continue;
 			const snapshot: AppliedEditSnapshot = {
@@ -720,13 +928,21 @@ export class EditTool implements AgentTool<TInput> {
 		onPreview?: (error: Error | null, batch: EditPreviewBatch) => void,
 	): OpenEditSession {
 		const resolveContext = sessionResolveContext(this.session, { signal });
+		const call: EditCall = {
+			resolveContext,
+			argsJson: () => "{}",
+			argsVersion: 0,
+			applying: false,
+			fetched: new Map(),
+			deferred: new Set(),
+		};
 		const native = new EditSession(
 			getEditStore(this.session),
 			this.#policy(rawInput, resolveContext),
 			onPreview,
-			(_error, url) => this.#resolveUrl(url, resolveContext),
+			(_error, url) => this.#resolveUrl(url, call),
 		);
-		return { native, resolveContext };
+		return Object.assign(call, { native });
 	}
 
 	#policy(rawInput: boolean, context: ResolveContext): EditPolicy {
@@ -758,20 +974,16 @@ export class EditTool implements AgentTool<TInput> {
 	 * A line/partial selector is refused ({@link InternalUrlRouter.peelWriteSelector}): edits
 	 * address whole files.
 	 */
-	async #resolveUrl(url: string, context: ResolveContext): Promise<EditUrlResolution> {
+	async #resolveUrl(url: string, call: EditCall): Promise<EditUrlResolution> {
 		const router = InternalUrlRouter.instance();
+		const context = call.resolveContext;
 		try {
 			const target = router.peelWriteSelector(url, "edit");
 			const scheme = extractUriScheme(target);
 			const spec = scheme === undefined ? undefined : router.spec(scheme);
 			if (!spec) return { error: `Unknown internal URL: ${url}`, planWritable: false };
-			if (isRemoteTextWritable(spec)) {
-				// Patched through a local mirror of the live remote text; `#write` sends it back.
-				const resource = await router.resolve(target, context);
-				if (resource.isDirectory) return { error: `${url} is a directory`, planWritable: false };
-				if (typeof resource.content !== "string") return { error: `${url} is binary`, planWritable: false };
-				return { path: await writeRemoteMirror(target, resource.content), planWritable: false };
-			}
+			const remote = isRemoteTextWritable(spec) ? router.remoteEdit(target) : undefined;
+			if (remote) return await this.#resolveRemote(url, remote, call);
 			if (!router.fileWritable(target)) {
 				const reason = spec.write?.via === "handler" ? "is written through `write`, not edited" : "is read-only";
 				return { error: `${url} ${reason}`, planWritable: false };
@@ -783,21 +995,214 @@ export class EditTool implements AgentTool<TInput> {
 		}
 	}
 
-	/** Send a patched remote mirror back through its scheme's handler; the mirror tracks what was written. */
-	async #writeRemote(url: string, request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
-		if (request.op !== "update" || request.content === undefined) {
-			throw new ToolError(`${url} can only be patched in place; use \`bash\` to delete or move it`, {
-				path: request.path,
-			});
+	/**
+	 * A remote text target (`spec.write.edits`) is patched through a local
+	 * mirror. Before approval (previews) nothing touches the remote host: the mirror an
+	 * earlier `read` wrote serves the preview, and a target without one is deferred.
+	 * Once the call runs, the file is fetched fresh with a checksum `#writeRemote`
+	 * must still match. Operations other than in-place updates are refused in both
+	 * phases, so a batch never writes anything around a refused remote target.
+	 */
+	async #resolveRemote(url: string, remote: RemoteEditTarget, call: EditCall): Promise<EditUrlResolution> {
+		const operation = this.#remoteOperation(url, call);
+		if (operation) return { error: updateOnlyRefusal(remote.scheme, operation, url), planWritable: false };
+		if (!call.applying) {
+			const location = await remote.hooks.locate(remote.url, call.resolveContext, { localOnly: true });
+			const mirror = location === undefined ? undefined : remoteMirrorPath(location);
+			if (mirror === undefined) {
+				// The engine only knows files and refusals: refuse here, and `#settlePreview`
+				// shows the refusal as a notice, so only this file's diff waits for the fetch.
+				call.deferred.add(url);
+				return { error: deferredPreview(url), planWritable: false };
+			}
+			return { path: mirror, planWritable: false };
 		}
-		await InternalUrlRouter.instance().write(url, request.content, sessionWriteContext(this.session, { signal }));
+		let source: RemoteEditSource;
+		try {
+			source = await remote.hooks.fetch(remote.url, call.resolveContext);
+		} catch (error) {
+			if (error instanceof RemoteEditMissingError) {
+				return { error: updateOnlyRefusal(remote.scheme, "create", url), planWritable: false };
+			}
+			throw error;
+		}
+		const mirror = await writeRemoteMirror(source, source.content);
+		call.fetched.set(mirror, { url: source.url, checksum: source.checksum });
+		return { path: mirror, planWritable: false };
+	}
+
+	/** The call's current arguments, inspected and parsed once per version (not once per URL resolution). */
+	#callArgs(call: EditCall): CallArgsView {
+		if (call.argsView?.version === call.argsVersion) return call.argsView;
+		const argsJson = call.argsJson();
+		let inspection: EditInspection;
+		try {
+			inspection = editInspect(this.mode, argsJson);
+		} catch {
+			inspection = { paths: [], entries: [], fileOps: [], sections: [] };
+		}
+		call.argsView = { version: call.argsVersion, inspection, args: parsePartialArgs(argsJson) };
+		return call.argsView;
+	}
+
+	/**
+	 * The operation other than an in-place update that the call's arguments
+	 * (partial while streaming) name for `url`: a delete or move, or an explicit
+	 * create (`*** Add File:`, a patch entry with `op: "create"`).
+	 */
+	#remoteOperation(url: string, call: EditCall): "create" | "delete" | "move" | undefined {
+		const { inspection, args } = this.#callArgs(call);
+		const names = (authored: string) => namesUrl(authored, url);
+		for (const op of inspection.fileOps) {
+			if (op.kind === "delete" && names(op.path)) return "delete";
+			if (op.kind === "move" && (names(op.path) || (op.to !== undefined && names(op.to)))) return "move";
+		}
+		if (typeof args?.input === "string") {
+			for (const header of patchFileHeaders(args.input)) {
+				if (header.kind === "Add" && names(header.path)) return "create";
+			}
+		}
+		if (
+			typeof args?.path === "string" &&
+			names(args.path) &&
+			Array.isArray(args.edits) &&
+			args.edits.some(entry => (entry as { op?: unknown } | null)?.op === "create")
+		) {
+			return "create";
+		}
+		return undefined;
+	}
+
+	/** Whether `error` is the refusal that stands in for one of the call's deferred previews. */
+	#isDeferral(error: string | undefined, call: EditCall): boolean {
+		return error !== undefined && [...call.deferred].some(url => error.includes(deferredPreview(url)));
+	}
+
+	/** `files` with every deferral refusal replaced by its placeholder entry. */
+	#markDeferred(files: readonly EditFilePreview[], call: EditCall): SettledPreviewFile[] {
+		return files.map(file => (this.#isDeferral(file.error, call) ? deferredPlaceholder(file.path) : file));
+	}
+
+	/**
+	 * Show the refusals that stand in for deferred previews (`#resolveRemote`) as
+	 * placeholder entries, so each deferred file stays visible in the approval
+	 * preview without reading as a failed preview under `edit.streamingAbort`.
+	 * `*** Begin Patch` payloads stage atomically, so one deferred section fails the
+	 * whole preview: the final one is computed again without the deferred files'
+	 * sections, and those files get placeholders.
+	 */
+	async #settlePreview(batch: EditPreviewBatch, call: EditCall): Promise<SettledPreviewBatch> {
+		if (call.deferred.size === 0) return batch;
+		const atomic = batch.files.length === 1 && !batch.files[0]?.diff && this.#isDeferral(batch.files[0]?.error, call);
+		const input = this.#callArgs(call).args?.input;
+		if (!atomic || batch.streaming || typeof input !== "string" || patchFileHeaders(input).length === 0) {
+			return { ...batch, files: this.#markDeferred(batch.files, call) };
+		}
+		// Every pass that fails again has deferred one more URL; one that defers nothing new ends.
+		for (;;) {
+			const deferred = new Set(call.deferred);
+			const drop = (path: string) => [...deferred].some(url => namesUrl(path, url));
+			const placeholders = [
+				...new Set(
+					patchFileHeaders(input)
+						.filter(header => drop(header.path))
+						.map(header => header.path),
+				),
+			].map(deferredPlaceholder);
+			const stripped = stripPatchSections(input, drop);
+			if (patchFileHeaders(stripped).length === 0) return { ...batch, files: placeholders };
+			const files = await this.#previewOnce(stripped, call);
+			// The pass failed or never reported: keep the engine's batch, deferrals as placeholders.
+			if (files === undefined) return { ...batch, files: this.#markDeferred(batch.files, call) };
+			const failed = files.length === 1 && !files[0]?.diff && this.#isDeferral(files[0]?.error, call);
+			if (!failed || call.deferred.size === deferred.size) {
+				return { ...batch, files: [...this.#markDeferred(files, call), ...placeholders] };
+			}
+		}
+	}
+
+	/**
+	 * The final preview of `input` alone, in a throwaway session that never contacts a
+	 * remote host; `undefined` when the pass fails or reports nothing within
+	 * {@link PREVIEW_PASS_TIMEOUT_MS}, so a stuck pass never stalls the previews
+	 * chained after it.
+	 */
+	async #previewOnce(input: string, call: EditCall): Promise<EditPreviewBatch["files"] | undefined> {
+		const final = Promise.withResolvers<EditPreviewBatch["files"] | undefined>();
+		const argsJson = JSON.stringify({ input });
+		// Its own arguments: the copied version cache would answer for the outer call's.
+		const previewCall: EditCall = {
+			...call,
+			applying: false,
+			argsJson: () => argsJson,
+			argsVersion: 0,
+			argsView: undefined,
+		};
+		const native = new EditSession(
+			getEditStore(this.session),
+			// The pass is fed JSON (`setArgsJson`), never the raw custom-wire payload.
+			this.#policy(false, call.resolveContext),
+			(error, batch) => {
+				if (error) final.resolve(undefined);
+				else if (!batch.streaming) final.resolve(batch.files);
+			},
+			(_error, url) => this.#resolveUrl(url, previewCall),
+		);
+		const timeout = setTimeout(() => {
+			logger.debug("Edit preview pass timed out", { timeoutMs: PREVIEW_PASS_TIMEOUT_MS });
+			final.resolve(undefined);
+		}, PREVIEW_PASS_TIMEOUT_MS);
+		try {
+			native.setArgsJson(argsJson);
+			native.finish();
+			return await final.promise;
+		} finally {
+			clearTimeout(timeout);
+			native.close();
+		}
+	}
+
+	/**
+	 * Write a patched remote mirror back through its scheme's hooks, only while the
+	 * remote bytes still match what this call fetched.
+	 */
+	async #writeRemote(
+		fetched: { url: string; checksum: string },
+		request: EditWriteRequest,
+		signal?: AbortSignal,
+	): Promise<EditWriteResponse> {
+		const remote = InternalUrlRouter.instance().remoteEdit(fetched.url);
+		if (!remote) throw new ToolError(`${fetched.url} is no longer editable`, { path: request.path });
+		if (request.op !== "update" || request.content === undefined) {
+			throw new ToolError(updateOnlyRefusal(remote.scheme, request.op, fetched.url), { path: request.path });
+		}
+		try {
+			await remote.hooks.update(
+				remote.url,
+				request.content,
+				fetched.checksum,
+				sessionWriteContext(this.session, { signal }),
+			);
+		} catch (error) {
+			if (error instanceof RemoteEditConflictError) {
+				throw new ToolError(`${error.message} Re-read ${fetched.url} and retry the edit.`, { path: request.path });
+			}
+			throw error;
+		}
 		await Bun.write(request.path, request.content);
+		fetched.checksum = posixCksum(new TextEncoder().encode(request.content));
 		return { written: request.content };
 	}
 
-	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
-		const remote = remoteMirrorUrl(request.path);
-		if (remote !== undefined) return this.#writeRemote(remote, request, signal);
+	async #write(request: EditWriteRequest, call: EditCall, signal?: AbortSignal): Promise<EditWriteResponse> {
+		const fetched = call.fetched.get(request.path);
+		if (fetched) return this.#writeRemote(fetched, request, signal);
+		const unfetched = remoteMirrorUrl(request.path);
+		if (unfetched !== undefined) {
+			throw new ToolError(`${unfetched} was not fetched for this edit; re-read it and retry the edit.`, {
+				path: request.path,
+			});
+		}
 		const journaled = this.session.recordFileChange !== undefined;
 		const before = journaled ? await readSnapshot(request.path) : undefined;
 		const journal = (file: string, after: string | null, snapshot: FileSnapshot | undefined = before) => {

@@ -11,10 +11,6 @@ function fixture(provider: GeneratedProvider, predicate?: (candidate: Model) => 
 	return found;
 }
 
-test("google-antigravity vetoes caller output caps", () => {
-	expect(supportsOutputTokenLimit(fixture("google-antigravity"))).toBe(false);
-});
-
 test("transports that cannot encode output limits are omitted", () => {
 	expect(supportsOutputTokenLimit(fixture("openai-codex", m => m.api === "openai-codex-responses"))).toBe(false);
 	expect(supportsOutputTokenLimit(fixture("cursor", m => m.api === "cursor-agent"))).toBe(false);

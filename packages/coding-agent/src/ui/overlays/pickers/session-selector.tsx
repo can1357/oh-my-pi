@@ -213,12 +213,19 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 	onCleanup(() => {
 		alive = false;
 	});
-	void props.completeSessions?.then(
-		sessions => {
-			if (alive) folderSessions.set(sessions);
-		},
-		() => {},
-	);
+	/** Swaps a listing's full scan into `target` when it settles, unless the picker closed first. */
+	const adoptComplete = (
+		complete: Promise<readonly SessionSelectorEntry[]> | undefined,
+		target: (sessions: readonly SessionSelectorEntry[]) => void,
+	): void => {
+		void complete?.then(
+			sessions => {
+				if (alive) target(sessions);
+			},
+			() => {},
+		);
+	};
+	adoptComplete(props.completeSessions, sessions => folderSessions.set(sessions));
 
 	const withEdits = (list: readonly SessionSelectorEntry[]): SessionSelectorEntry[] =>
 		list
@@ -395,6 +402,7 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 			try {
 				const listing = await props.loadAllSessions();
 				global.set(listing.sessions);
+				adoptComplete(listing.complete, sessions => global.set(sessions));
 				message.set(undefined);
 			} catch (err) {
 				toggling = false;

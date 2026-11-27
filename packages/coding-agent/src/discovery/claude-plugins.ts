@@ -1,13 +1,15 @@
 /**
  * Claude Code Marketplace Plugin Provider
  *
- * Loads configuration from ~/.claude/plugins/cache/ based on installed_plugins.json registry.
- * Priority: 70 (below claude.ts at 80, so user overrides in .claude/ take precedence)
+ * Loads Claude Code-format plugins (`.claude-plugin/` layout) installed through OMP's
+ * marketplace registries (`~/.omp/plugins/installed_plugins.json`, the project registry)
+ * or passed via `--plugin-dir`.
+ * Priority: 70 (below claude.ts at 80, so project overrides in .claude/ take precedence)
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isRecord, logger, pathIsWithinLexical } from "@oh-my-pi/pi-utils";
-import { isUserSourceEnabled, registerProvider } from "../capability";
+import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
@@ -31,7 +33,7 @@ import { resolvePluginStdioPaths, substitutePluginRoot } from "./substitute-plug
 
 const PROVIDER_ID = "claude-plugins";
 const DISPLAY_NAME = "Claude Code Marketplace";
-const PRIORITY = 70; // Below claude.ts (80) so user .claude/ overrides win
+const PRIORITY = 70; // Below claude.ts (80) so project .claude/ overrides win
 
 /**
  * Plugin roots this legacy provider may process for a given surface. Roots
@@ -44,10 +46,8 @@ async function allowedRoots(
 	surface: "skills" | "mcp" | "other",
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
-	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
-	const scopedRoots = userEnabled ? roots : roots.filter(root => root.scope === "project" || root.origin !== "claude");
-	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));
-	return { roots: scopedRoots.filter((_, i) => flags[i]), warnings };
+	const flags = await Promise.all(roots.map(root => legacyProviderAllowed(root.path, surface)));
+	return { roots: roots.filter((_, i) => flags[i]), warnings };
 }
 
 interface ClaudePluginManifest {
@@ -719,7 +719,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 registerProvider<Skill>(skillCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load skills from Claude Code marketplace plugins (~/.claude/plugins/cache/)",
+	description: "Load skills from Claude Code marketplace plugins",
 	priority: PRIORITY,
 	load: loadSkills,
 });

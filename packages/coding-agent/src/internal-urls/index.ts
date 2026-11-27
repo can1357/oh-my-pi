@@ -23,6 +23,7 @@ export * from "./omp-protocol";
 export * from "./omp-scope";
 export * from "./out-protocol";
 export * from "./parse";
+export * from "./remote-edit";
 export * from "./router";
 export * from "./rule-protocol";
 export * from "./security-protocol";

@@ -372,6 +372,8 @@ export class Composer {
 	readonly #linksRevision = signal(0);
 	/** The terminal's hint in an empty draft (the app's live composer hint). */
 	readonly #placeholder = signal<TspText | undefined>(undefined);
+	/** A passing state the terminal shows in the hint's place, over a prediction too (the history loading). */
+	readonly #notice = signal<TspText | undefined>(undefined);
 	/** What Tern shows in an empty draft (the session's title, who the draft goes to); undefined: the default. */
 	readonly #nativePlaceholder = signal<TspText | undefined>(undefined);
 
@@ -841,6 +843,11 @@ export class Composer {
 	/** The hint an empty draft shows in the terminal (`undefined`: none). */
 	setPlaceholder(placeholder: TspText | undefined): void {
 		this.#placeholder.set(placeholder);
+	}
+
+	/** Show `notice` in an empty draft's hint place, a prediction's included, until cleared with `undefined`. */
+	setNotice(notice: TspText | undefined): void {
+		this.#notice.set(notice);
 	}
 
 	/** What Tern shows in an empty draft (`undefined`: the default question). */
@@ -1877,8 +1884,10 @@ export class Composer {
 				decor: termDecor(),
 				caret: terminal ? "none" : m === "insert" || m === "replace" ? "underline" : "block",
 				caretEnd: terminal ? "none" : m === null || m === "insert" || m === "replace" ? "bar" : "block",
-				// Its keys away under the terminal's own cursor, the field draws no hint.
-				placeholder: this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null),
+				// Its keys away under the terminal's own cursor, the field draws no hint; a notice still shows.
+				placeholder:
+					this.#notice() ??
+					(this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null)),
 				...(sel ? { selection: { from: sel.from, to: sel.to } } : {}),
 				caretOverflow: caretOverflow(shape(), paddingX),
 				...(this.#caretGlyph() ? { caretGlyph: this.#caretGlyph() } : {}),

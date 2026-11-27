@@ -23,6 +23,8 @@ import type {
 	OAuthLoginController,
 	OAuthLoginIdentity,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	StoredOAuthRefreshOptions,
 	StoredOAuthRefreshResult,
 } from "./types";
@@ -147,6 +149,26 @@ export class OAuthAccounts implements OAuthApi {
 	 * Rejects with {@link AIError.OAuthRefreshUnavailableError} (transient,
 	 * retryable) when a retryable refresh failure left no usable credential.
 	 */
+	async signOut(
+		provider: string,
+		credentialId: number,
+		options: OAuthSignOutOptions = {},
+	): Promise<OAuthSignOutResult> {
+		const credential = this.#deps.pool.entries(provider).find(entry => entry.id === credentialId)?.credential;
+		if (!credential) return { removed: false };
+		const signOut = getProviderDefinition(provider)?.signOut;
+		let signOutError: string | undefined;
+		if (signOut && credential.type === "oauth") {
+			try {
+				await signOut(credential, { signal: options.signal });
+			} catch (error) {
+				signOutError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const removed = await this.#deps.pool.removeById(provider, credentialId);
+		return signOutError === undefined ? { removed } : { removed, signOutError };
+	}
+
 	async access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined> {
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be
